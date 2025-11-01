@@ -1,0 +1,80 @@
+# Cryostat Real Hardware Configuration
+# ======================================
+#
+# This configuration uses real hardware drivers. Ensure all devices
+# are properly connected and powered before loading this configuration.
+#
+# To use: Cryostat('cryostat/config/cryostat_real.yaml')
+#
+# WARNING: This configuration requires actual hardware!
+
+cryostat:
+  devices:
+    # Temperature Controllers
+    vti_temp_controller:
+      type: temperature
+      driver: itc503  # Real Oxford ITC503 driver
+      resource: "GPIB0::24::INSTR"  # GPIB address
+      actions: TemperatureActions
+      description: "VTI (Variable Temperature Insert) Temperature Controller"
+      # Optional driver-specific settings:
+      # clear_buffer: true
+      # min_temperature: 0
+      # max_temperature: 400
+
+    sample_temp_controller:
+      type: temperature
+      driver: itc503  # Real Oxford ITC503 driver
+      resource: "GPIB0::25::INSTR"  # Different GPIB address
+      actions: TemperatureActions
+      description: "Sample Space Temperature Controller"
+
+    # Magnet Power Supplies
+    magnet1:
+      type: magnet
+      driver: ips120_10  # Real Oxford IPS120-10 driver
+      resource: "GPIB0::26::INSTR"
+      actions: MagnetActions
+      description: "Main Magnet (Z-axis)"
+      field_range: [-7, 7]  # Tesla
+      # Optional driver-specific settings:
+      # switch_heater_heating_delay: 20  # seconds
+      # switch_heater_cooling_delay: 20  # seconds
+
+    magnet2:
+      type: magnet
+      driver: ips120_10  # Real Oxford IPS120-10 driver
+      resource: "GPIB0::27::INSTR"
+      actions: MagnetActions
+      description: "Vector Magnet X-axis"
+      field_range: [-2, 2]  # Tesla
+
+    magnet3:
+      type: magnet
+      driver: ips120_10  # Real Oxford IPS120-10 driver
+      resource: "GPIB0::28::INSTR"
+      actions: MagnetActions
+      description: "Vector Magnet Y-axis"
+      field_range: [-2, 2]  # Tesla
+
+    # Level Meters
+    helium_level_meter:
+      type: level_meter
+      driver: ilm211  # Real Oxford ILM driver (when implemented)
+      resource: "GPIB0::29::INSTR"
+      actions: LevelMeterActions
+      description: "Helium and Nitrogen Level Meter"
+      num_channels: 2
+
+# Logging Configuration
+logging:
+  level: INFO  # Options: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  format: "%(asctime)s [%(levelname)8s] %(name)s - %(message)s"
+  file: "cryostat.log"
+  console: true
+
+# System Settings
+system:
+  lock_timeout: 1.0  # seconds
+  default_sweep_rate_magnet: 0.05  # T/min (slower for real hardware)
+  default_ramp_rate_temperature: 0.5  # K/min (slower for real hardware)

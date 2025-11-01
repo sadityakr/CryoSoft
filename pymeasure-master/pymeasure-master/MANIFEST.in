@@ -1,0 +1,5 @@
+# Files get pulled from Git repo by setuptools_scm, we only have to exclude what we don't want
+prune docs/_build
+prune .github
+exclude .gitignore
+exclude .readthedocs.yml

@@ -1,0 +1,21 @@
+# Core measurement and instrument control
+pymeasure>=0.13.0
+
+# GUI framework
+PyQt5>=5.15.0
+
+# Scientific computing and data handling
+numpy>=1.24.0
+scipy>=1.10.0
+pandas>=2.0.0
+
+# Plotting and visualization
+matplotlib>=3.7.0
+
+# Instrument communication
+pyvisa>=1.13.0
+pyvisa-py>=0.7.0
+pyserial>=3.5
+
+# Utilities
+python-dotenv>=1.0.0
