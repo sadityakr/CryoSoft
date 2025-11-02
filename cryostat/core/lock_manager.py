@@ -42,11 +42,11 @@ class ThreadSafeLock:
         ...         lock.release()
     """
 
-    def __init__(self, timeout: float = 1.0):
+    def __init__(self, timeout: float = 0.2):
         """Initialize thread-safe lock.
 
         Args:
-            timeout: Lock acquisition timeout in seconds (default: 1.0)
+            timeout: Lock acquisition timeout in seconds (default: 0.2)
         """
         self._lock = threading.RLock()  # Reentrant lock for same-thread re-entry
         self.timeout = timeout

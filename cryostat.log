@@ -1,0 +1,69 @@
+2025-11-02 11:35:56,077 [    INFO] cryostat.config.loader - Configuration loaded successfully
+2025-11-02 11:35:56,077 [    INFO] cryostat.core.cryostat - Global I/O lock created (timeout=1.0s)
+2025-11-02 11:35:56,077 [    INFO] cryostat.core.cryostat - Initializing 6 device(s)...
+2025-11-02 11:35:56,078 [    INFO] cryostat.core.cryostat - Initializing device: vti_temp_controller
+2025-11-02 11:35:56,078 [    INFO] cryostat.config.factory - Creating driver: mock_itc503
+2025-11-02 11:35:56,091 [    INFO] pymeasure.instruments.instrument - Initializing Mock ITC503.
+2025-11-02 11:35:56,091 [    INFO] cryostat.drivers.mock.mock_itc503 - Mock ITC503 initialized at 300.0K
+2025-11-02 11:35:56,092 [    INFO] cryostat.config.factory - Driver created successfully: Mock ITC503
+2025-11-02 11:35:56,092 [    INFO] cryostat.core.cryostat - Device 'vti_temp_controller' registered successfully
+2025-11-02 11:35:56,093 [    INFO] cryostat.core.cryostat - Initializing device: sample_temp_controller
+2025-11-02 11:35:56,093 [    INFO] cryostat.config.factory - Creating driver: mock_itc503
+2025-11-02 11:35:56,093 [    INFO] pymeasure.instruments.instrument - Initializing Mock ITC503.
+2025-11-02 11:35:56,094 [    INFO] cryostat.drivers.mock.mock_itc503 - Mock ITC503 initialized at 300.0K
+2025-11-02 11:35:56,094 [    INFO] cryostat.config.factory - Driver created successfully: Mock ITC503
+2025-11-02 11:35:56,094 [    INFO] cryostat.core.cryostat - Device 'sample_temp_controller' registered successfully
+2025-11-02 11:35:56,094 [    INFO] cryostat.core.cryostat - Initializing device: magnet1
+2025-11-02 11:35:56,094 [    INFO] cryostat.config.factory - Creating driver: mock_ips120
+2025-11-02 11:35:56,095 [    INFO] pymeasure.instruments.instrument - Initializing Mock IPS120.
+2025-11-02 11:35:56,095 [    INFO] cryostat.drivers.mock.mock_ips120 - Mock IPS120 initialized (range: -7 to 7T)
+2025-11-02 11:35:56,095 [    INFO] cryostat.config.factory - Driver created successfully: Mock IPS120
+2025-11-02 11:35:56,095 [    INFO] cryostat.core.cryostat - Device 'magnet1' registered successfully
+2025-11-02 11:35:56,096 [    INFO] cryostat.core.cryostat - Initializing device: magnet2
+2025-11-02 11:35:56,096 [    INFO] cryostat.config.factory - Creating driver: mock_ips120
+2025-11-02 11:35:56,096 [    INFO] pymeasure.instruments.instrument - Initializing Mock IPS120.
+2025-11-02 11:35:56,097 [    INFO] cryostat.drivers.mock.mock_ips120 - Mock IPS120 initialized (range: -2 to 2T)
+2025-11-02 11:35:56,097 [    INFO] cryostat.config.factory - Driver created successfully: Mock IPS120
+2025-11-02 11:35:56,097 [    INFO] cryostat.core.cryostat - Device 'magnet2' registered successfully
+2025-11-02 11:35:56,097 [    INFO] cryostat.core.cryostat - Initializing device: magnet3
+2025-11-02 11:35:56,098 [    INFO] cryostat.config.factory - Creating driver: mock_ips120
+2025-11-02 11:35:56,098 [    INFO] pymeasure.instruments.instrument - Initializing Mock IPS120.
+2025-11-02 11:35:56,099 [    INFO] cryostat.drivers.mock.mock_ips120 - Mock IPS120 initialized (range: -2 to 2T)
+2025-11-02 11:35:56,099 [    INFO] cryostat.config.factory - Driver created successfully: Mock IPS120
+2025-11-02 11:35:56,099 [    INFO] cryostat.core.cryostat - Device 'magnet3' registered successfully
+2025-11-02 11:35:56,099 [    INFO] cryostat.core.cryostat - Initializing device: helium_level_meter
+2025-11-02 11:35:56,100 [    INFO] cryostat.config.factory - Creating driver: mock_ilm
+2025-11-02 11:35:56,100 [    INFO] pymeasure.instruments.instrument - Initializing Mock ILM.
+2025-11-02 11:35:56,101 [    INFO] cryostat.drivers.mock.mock_ilm - Mock ILM initialized (2 channel(s))
+2025-11-02 11:35:56,101 [    INFO] cryostat.drivers.mock.mock_ilm - Initial levels: He=75.0%, N2=50.0%
+2025-11-02 11:35:56,101 [    INFO] cryostat.config.factory - Driver created successfully: Mock ILM
+2025-11-02 11:35:56,101 [    INFO] cryostat.core.cryostat - Device 'helium_level_meter' registered successfully
+2025-11-02 11:35:56,101 [    INFO] cryostat.core.cryostat - ============================================================
+2025-11-02 11:35:56,102 [    INFO] cryostat.core.cryostat - Cryostat initialized successfully (6 devices)
+2025-11-02 11:35:56,102 [    INFO] cryostat.core.cryostat - ============================================================
+2025-11-02 11:35:56,103 [    INFO] cryostat.actions.temperature_actions.Mock ITC503 - Initiating temperature controller
+2025-11-02 11:35:56,103 [    INFO] cryostat.actions.temperature_actions.Mock ITC503 - Temperature controller ready (current: 300.00K)
+2025-11-02 11:35:56,104 [    INFO] cryostat.actions.temperature_actions.Mock ITC503 - Ramping to 4.20K at 1.00K/min
+2025-11-02 11:35:56,128 [    INFO] cryostat.actions.temperature_actions.Mock ITC503 - Waiting for temperature stabilization...
+2025-11-02 11:35:56,128 [    INFO] cryostat.drivers.mock.mock_itc503 - Waiting for temperature: target=4.20K, error=0.1K
+2025-11-02 11:35:58,630 [    INFO] cryostat.drivers.mock.mock_itc503 - Temperature stabilized at 4.20K (elapsed: 2.5s)
+2025-11-02 11:35:58,630 [    INFO] cryostat.actions.temperature_actions.Mock ITC503 - Ramp complete: 4.20K (target: 4.20K, error: 0.000K)
+2025-11-02 11:35:58,631 [    INFO] cryostat.actions.magnet_actions.Mock IPS120 - Initiating magnet power supply
+2025-11-02 11:35:58,631 [    INFO] cryostat.drivers.mock.mock_ips120 - Enabling control
+2025-11-02 11:35:58,632 [    INFO] cryostat.drivers.mock.mock_ips120 - Switch heater ON (warming 0.5s)
+2025-11-02 11:35:59,132 [    INFO] cryostat.drivers.mock.mock_ips120 - Control enabled
+2025-11-02 11:35:59,133 [    INFO] cryostat.actions.magnet_actions.Mock IPS120 - Magnet ready: field=0.000T, status=at rest, heater=ON
+2025-11-02 11:35:59,134 [    INFO] cryostat.actions.magnet_actions.Mock IPS120 - Ramping to 0.500T at 0.100T/min
+2025-11-02 11:35:59,134 [    INFO] cryostat.drivers.mock.mock_ips120 - Setting field to 0.500T (rate=0.1T/min)
+2025-11-02 11:36:14,394 [    INFO] cryostat.drivers.mock.mock_ips120 - Switch heater OFF (cooling 0.5s)
+2025-11-02 11:36:30,056 [    INFO] cryostat.drivers.mock.mock_ips120 - Persistent mode enabled
+2025-11-02 11:36:30,057 [    INFO] cryostat.drivers.mock.mock_ips120 - Field set complete: 0.500T
+2025-11-02 11:36:30,057 [    INFO] cryostat.actions.magnet_actions.Mock IPS120 - Ramp complete: 0.500T (target: 0.500T)
+2025-11-02 11:36:30,058 [    INFO] cryostat.actions.magnet_actions.Mock IPS120 - Ramping field to zero at 0.200T/min
+2025-11-02 11:36:30,058 [    INFO] cryostat.drivers.mock.mock_ips120 - Setting field to 0.000T (rate=0.2T/min)
+2025-11-02 11:36:45,226 [    INFO] cryostat.drivers.mock.mock_ips120 - Switch heater ON (warming 0.5s)
+2025-11-02 11:36:45,727 [    INFO] cryostat.drivers.mock.mock_ips120 - Persistent mode disabled (matched field: 0.500T)
+2025-11-02 11:36:53,465 [    INFO] cryostat.drivers.mock.mock_ips120 - Field set complete: 0.000T
+2025-11-02 11:36:53,465 [    INFO] cryostat.actions.magnet_actions.Mock IPS120 - Successfully reached zero field
+2025-11-02 11:36:53,468 [    INFO] cryostat.actions.level_meter_actions.Mock ILM - Initiating level meter
+2025-11-02 11:36:53,468 [    INFO] cryostat.actions.level_meter_actions.Mock ILM - Level meter ready: 2 channel(s) active
