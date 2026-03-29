@@ -1,7 +1,0 @@
-######################################
-Delta Elektronica SM7045D Power source
-######################################
-
-.. autoclass:: pymeasure.instruments.deltaelektronika.SM7045D
-    :members:
-    :show-inheritance:

@@ -1,7 +1,0 @@
-######################################
-HP 3478A Multimeter
-######################################
-
-.. autoclass:: pymeasure.instruments.hp.HP3478A
-    :members:
-    :show-inheritance:

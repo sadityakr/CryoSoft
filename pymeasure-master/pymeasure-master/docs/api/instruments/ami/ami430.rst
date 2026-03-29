@@ -1,7 +1,0 @@
-####################
-AMI 430 Power Supply
-####################
-
-.. autoclass:: pymeasure.instruments.ami.AMI430
-    :members:
-    :show-inheritance:
