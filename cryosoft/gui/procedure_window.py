@@ -1,0 +1,623 @@
+# ---
+# description: |
+#   ProcedureWindow: PyQt6 window for building, queuing, and running measurement
+#   procedures. Auto-generates parameter forms from BaseProcedure.parameters dicts.
+#   Includes sample-info fields, a queue list with reorder/remove buttons, a live
+#   pyqtgraph plot driven by Orchestrator.measurement_ready, and a progress bar.
+# entry_point: Not run directly. Instantiated in main.py.
+# dependencies:
+#   - PyQt6 >= 6.5
+#   - pyqtgraph >= 0.13
+#   - cryosoft.core.station (Station)
+#   - cryosoft.core.orchestrator (Orchestrator)
+#   - cryosoft.core.procedure (BaseProcedure)
+#   - cryosoft.procedures.* (auto-discovered subclasses)
+# input: |
+#   Station instance and Orchestrator instance.
+# process: |
+#   _discover_procedures() imports all modules in cryosoft/procedures/ and collects
+#   BaseProcedure subclasses. The selected procedure's parameters dict drives form
+#   generation. Queued procedures are stored as (cls, params) tuples. Execution
+#   goes through orchestrator.run_procedure().
+# output: |
+#   A QMainWindow. Live plot updates via orchestrator.measurement_ready.
+# last_updated: 2026-04-06
+# ---
+
+"""ProcedureWindow — procedure builder, queue, and live-data monitor."""
+
+from __future__ import annotations
+
+import importlib
+import logging
+import pkgutil
+from pathlib import Path
+from typing import Any
+
+import pyqtgraph as pg
+from PyQt6.QtWidgets import (
+    QComboBox,
+    QFileDialog,
+    QFormLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QProgressBar,
+    QScrollArea,
+    QSizePolicy,
+    QSplitter,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
+from PyQt6.QtCore import Qt
+
+from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
+from cryosoft.core.procedure import BaseProcedure
+from cryosoft.core.station import Station
+
+logger = logging.getLogger(__name__)
+
+
+def _discover_procedures() -> list[type[BaseProcedure]]:
+    """Import all modules in cryosoft.procedures and return BaseProcedure subclasses.
+
+    Returns:
+        List of concrete BaseProcedure subclasses (not the base class itself).
+    """
+    import cryosoft.procedures as _pkg
+
+    pkg_path = Path(_pkg.__file__).parent
+    for _, module_name, _ in pkgutil.iter_modules([str(pkg_path)]):
+        try:
+            importlib.import_module(f"cryosoft.procedures.{module_name}")
+        except Exception:
+            logger.exception("ProcedureWindow: failed to import cryosoft.procedures.%s", module_name)
+
+    subclasses: list[type[BaseProcedure]] = []
+    for cls in BaseProcedure.__subclasses__():
+        if cls is not BaseProcedure and getattr(cls, "name", ""):
+            subclasses.append(cls)
+    return subclasses
+
+
+class ProcedureWindow(QMainWindow):
+    """Procedure builder, queue manager, and live-data window.
+
+    Layout (top to bottom):
+    1. Procedure selector dropdown.
+    2. Sample info section (name, ID, comments, data directory).
+    3. Auto-generated parameter form.
+    4. Add-to-queue / Run-now buttons.
+    5. Queue list with reorder and remove buttons.
+    6. Live pyqtgraph plot + progress bar.
+    7. Pause / Resume / Abort / Emergency-Acknowledge buttons.
+
+    Args:
+        station: The active Station instance.
+        orchestrator: The active Orchestrator instance.
+        parent: Optional Qt parent widget.
+    """
+
+    def __init__(
+        self,
+        station: Station,
+        orchestrator: Orchestrator,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._station = station
+        self._orchestrator = orchestrator
+
+        self._procedures: list[type[BaseProcedure]] = _discover_procedures()
+        # Queue items: list of (procedure_class, params_dict, sample_info_dict, data_dir)
+        self._queue: list[tuple[type[BaseProcedure], dict, dict, str]] = []
+        # Widgets for the parameter form (rebuilt on procedure selection)
+        self._param_inputs: dict[str, QLineEdit] = {}
+        # Active procedure reference for live plot (set on run)
+        self._active_procedure: BaseProcedure | None = None
+        # Live plot buffers
+        self._plot_x: list[float] = []
+        self._plot_y: list[float] = []
+
+        self.setWindowTitle("CryoSoft — Procedure")
+        self.resize(800, 900)
+
+        self._build_ui()
+        self._connect_signals()
+
+        # Populate selector now that UI exists
+        if self._procedures:
+            self._on_procedure_selected(0)
+
+    # ------------------------------------------------------------------
+    # UI construction
+    # ------------------------------------------------------------------
+
+    def _build_ui(self) -> None:
+        central = QWidget()
+        self.setCentralWidget(central)
+        root = QVBoxLayout(central)
+        root.setSpacing(8)
+        root.setContentsMargins(10, 10, 10, 10)
+
+        # ── Procedure selector ────────────────────────────────────────
+        sel_row = QHBoxLayout()
+        sel_row.addWidget(QLabel("Procedure:"))
+        self._proc_selector = QComboBox()
+        self._proc_selector.setObjectName("procedure_selector")
+        for cls in self._procedures:
+            self._proc_selector.addItem(getattr(cls, "name", cls.__name__))
+        self._proc_selector.currentIndexChanged.connect(self._on_procedure_selected)
+        sel_row.addWidget(self._proc_selector)
+        sel_row.addStretch()
+        root.addLayout(sel_row)
+
+        # ── Sample info ───────────────────────────────────────────────
+        root.addWidget(self._build_sample_info_section())
+
+        # ── Parameters (scroll area; rebuilt on selector change) ──────
+        self._param_scroll = QScrollArea()
+        self._param_scroll.setWidgetResizable(True)
+        self._param_scroll.setMaximumHeight(250)
+        root.addWidget(self._param_scroll)
+
+        # ── Add / Run buttons ─────────────────────────────────────────
+        action_row = QHBoxLayout()
+        add_btn = QPushButton("Add to Queue")
+        add_btn.setObjectName("add_to_queue_btn")
+        add_btn.clicked.connect(self._on_add_to_queue)
+        run_now_btn = QPushButton("Run Now")
+        run_now_btn.setObjectName("run_now_btn")
+        run_now_btn.clicked.connect(self._on_run_now)
+        action_row.addWidget(add_btn)
+        action_row.addWidget(run_now_btn)
+        action_row.addStretch()
+        root.addLayout(action_row)
+
+        # ── Queue ─────────────────────────────────────────────────────
+        root.addWidget(self._build_queue_section())
+
+        # ── Live plot + progress ──────────────────────────────────────
+        root.addWidget(self._build_plot_section())
+
+        # ── Control buttons ───────────────────────────────────────────
+        root.addLayout(self._build_control_buttons())
+
+    def _build_sample_info_section(self) -> QGroupBox:
+        """Build the fixed sample-info group box.
+
+        Returns:
+            A QGroupBox with name, ID, comments, and data-dir fields.
+        """
+        box = QGroupBox("Sample Info")
+        form = QFormLayout(box)
+
+        self._sample_name_input = QLineEdit()
+        self._sample_name_input.setObjectName("sample_name_input")
+        self._sample_name_input.setPlaceholderText("e.g. Si_001")
+        form.addRow("Name:", self._sample_name_input)
+
+        self._sample_id_input = QLineEdit()
+        self._sample_id_input.setObjectName("sample_id_input")
+        self._sample_id_input.setPlaceholderText("e.g. S2024-01")
+        form.addRow("ID:", self._sample_id_input)
+
+        self._comments_input = QTextEdit()
+        self._comments_input.setObjectName("comments_input")
+        self._comments_input.setMaximumHeight(60)
+        form.addRow("Comments:", self._comments_input)
+
+        # Data directory row with Browse button
+        dir_row = QHBoxLayout()
+        self._data_dir_input = QLineEdit("C:/CryoData")
+        self._data_dir_input.setObjectName("data_dir_input")
+        browse_btn = QPushButton("Browse…")
+        browse_btn.setObjectName("browse_btn")
+        browse_btn.clicked.connect(self._on_browse_dir)
+        dir_row.addWidget(self._data_dir_input)
+        dir_row.addWidget(browse_btn)
+        form.addRow("Data Dir:", dir_row)
+
+        return box
+
+    def _build_param_form(self, cls: type[BaseProcedure]) -> QWidget:
+        """Auto-generate a parameter form from the procedure's parameters dict.
+
+        Args:
+            cls: The BaseProcedure subclass to introspect.
+
+        Returns:
+            A QWidget containing the assembled form.
+        """
+        container = QWidget()
+        form = QFormLayout(container)
+        self._param_inputs.clear()
+
+        for param_name, spec in cls.parameters.items():
+            unit = spec.get("unit", "")
+            desc = spec.get("description", param_name)
+            label_text = f"{desc} ({unit}):" if unit else f"{desc}:"
+            field = QLineEdit(str(spec.get("default", "")))
+            field.setObjectName(f"param_{param_name}_input")
+            self._param_inputs[param_name] = field
+            form.addRow(label_text, field)
+
+        return container
+
+    def _build_queue_section(self) -> QGroupBox:
+        """Build the queue group with list + reorder/remove buttons.
+
+        Returns:
+            A QGroupBox containing the queue list and management buttons.
+        """
+        box = QGroupBox("Queue")
+        vlay = QVBoxLayout(box)
+
+        self._queue_list = QListWidget()
+        self._queue_list.setObjectName("queue_list")
+        self._queue_list.setMaximumHeight(120)
+        vlay.addWidget(self._queue_list)
+
+        btn_row = QHBoxLayout()
+        up_btn = QPushButton("↑")
+        up_btn.setObjectName("queue_up_btn")
+        up_btn.setMaximumWidth(40)
+        up_btn.clicked.connect(self._queue_move_up)
+        down_btn = QPushButton("↓")
+        down_btn.setObjectName("queue_down_btn")
+        down_btn.setMaximumWidth(40)
+        down_btn.clicked.connect(self._queue_move_down)
+        remove_btn = QPushButton("✕ Remove")
+        remove_btn.setObjectName("queue_remove_btn")
+        remove_btn.clicked.connect(self._queue_remove)
+        run_queue_btn = QPushButton("Run Queue")
+        run_queue_btn.setObjectName("run_queue_btn")
+        run_queue_btn.clicked.connect(self._orchestrator.run_queue)
+        btn_row.addWidget(up_btn)
+        btn_row.addWidget(down_btn)
+        btn_row.addWidget(remove_btn)
+        btn_row.addStretch()
+        btn_row.addWidget(run_queue_btn)
+        vlay.addLayout(btn_row)
+
+        return box
+
+    def _build_plot_section(self) -> QGroupBox:
+        """Build the live-plot + Y-axis selector + progress bar section.
+
+        Returns:
+            A QGroupBox containing the pyqtgraph PlotWidget and controls.
+        """
+        box = QGroupBox("Live Plot")
+        vlay = QVBoxLayout(box)
+
+        # Y-axis selector
+        y_row = QHBoxLayout()
+        y_row.addWidget(QLabel("Y axis:"))
+        self._y_axis_selector = QComboBox()
+        self._y_axis_selector.setObjectName("y_axis_selector")
+        self._y_axis_selector.currentTextChanged.connect(self._redraw_plot)
+        y_row.addWidget(self._y_axis_selector)
+        y_row.addStretch()
+        vlay.addLayout(y_row)
+
+        # pyqtgraph plot
+        self._plot_widget = pg.PlotWidget()
+        self._plot_widget.setObjectName("live_plot")
+        self._plot_widget.setMinimumHeight(200)
+        self._plot_widget.setLabel("bottom", "Field (T)")
+        self._plot_widget.setLabel("left", "Value")
+        self._plot_curve = self._plot_widget.plot([], [], pen="c", symbol="o", symbolSize=4)
+        vlay.addWidget(self._plot_widget)
+
+        # Progress bar
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setObjectName("progress_bar")
+        self._progress_bar.setRange(0, 100)
+        self._progress_bar.setValue(0)
+        vlay.addWidget(self._progress_bar)
+
+        return box
+
+    def _build_control_buttons(self) -> QHBoxLayout:
+        """Build Pause / Resume / Abort / Emergency-Acknowledge buttons.
+
+        Returns:
+            A QHBoxLayout containing the control buttons.
+        """
+        row = QHBoxLayout()
+
+        pause_btn = QPushButton("Pause")
+        pause_btn.setObjectName("pause_btn")
+        pause_btn.clicked.connect(self._orchestrator.pause_procedure)
+
+        resume_btn = QPushButton("Resume")
+        resume_btn.setObjectName("resume_btn")
+        resume_btn.clicked.connect(self._orchestrator.resume_procedure)
+
+        abort_btn = QPushButton("Abort")
+        abort_btn.setObjectName("abort_btn")
+        abort_btn.clicked.connect(self._on_abort)
+
+        self._ack_btn = QPushButton("ACKNOWLEDGE EMERGENCY")
+        self._ack_btn.setObjectName("ack_emergency_btn")
+        self._ack_btn.setStyleSheet("background-color: red; color: white; font-weight: bold;")
+        self._ack_btn.setVisible(False)
+        self._ack_btn.clicked.connect(self._orchestrator.acknowledge_emergency)
+
+        row.addWidget(pause_btn)
+        row.addWidget(resume_btn)
+        row.addWidget(abort_btn)
+        row.addStretch()
+        row.addWidget(self._ack_btn)
+        return row
+
+    # ------------------------------------------------------------------
+    # Signal connections
+    # ------------------------------------------------------------------
+
+    def _connect_signals(self) -> None:
+        self._orchestrator.procedure_progress.connect(self._on_progress)
+        self._orchestrator.measurement_ready.connect(self._on_measurement_ready)
+        self._orchestrator.procedure_finished.connect(self._on_procedure_finished)
+        self._orchestrator.state_changed.connect(self._on_state_changed)
+
+    # ------------------------------------------------------------------
+    # Slot handlers
+    # ------------------------------------------------------------------
+
+    def _on_procedure_selected(self, index: int) -> None:
+        """Rebuild the parameter form when the user selects a procedure.
+
+        Args:
+            index: Index of the selected procedure in the dropdown.
+        """
+        if index < 0 or index >= len(self._procedures):
+            return
+        cls = self._procedures[index]
+        param_widget = self._build_param_form(cls)
+        self._param_scroll.setWidget(param_widget)
+
+    def _on_browse_dir(self) -> None:
+        """Open a directory browser and fill the data-dir field."""
+        selected = QFileDialog.getExistingDirectory(
+            self, "Select Data Directory", self._data_dir_input.text()
+        )
+        if selected:
+            self._data_dir_input.setText(selected)
+
+    def _collect_params(self) -> tuple[dict, dict, str] | None:
+        """Read and validate all form inputs.
+
+        Returns:
+            ``(param_values, sample_info, data_dir)`` on success, or ``None``
+            if a field cannot be parsed.
+        """
+        index = self._proc_selector.currentIndex()
+        if index < 0 or index >= len(self._procedures):
+            return None
+        cls = self._procedures[index]
+
+        param_values: dict[str, Any] = {}
+        for param_name, spec in cls.parameters.items():
+            raw = self._param_inputs[param_name].text().strip()
+            param_type = spec.get("type", str)
+            try:
+                param_values[param_name] = param_type(raw)
+            except (ValueError, TypeError):
+                QMessageBox.warning(
+                    self,
+                    "Invalid Parameter",
+                    f"Cannot parse '{raw}' as {param_type.__name__} for parameter '{param_name}'.",
+                )
+                return None
+
+        sample_info = {
+            "sample_name": self._sample_name_input.text().strip(),
+            "sample_id": self._sample_id_input.text().strip(),
+            "comments": self._comments_input.toPlainText().strip(),
+        }
+        data_dir = self._data_dir_input.text().strip() or "C:/CryoData"
+        return param_values, sample_info, data_dir
+
+    def _build_procedure_instance(self) -> BaseProcedure | None:
+        """Build a procedure instance from current form values.
+
+        Returns:
+            A ready ``BaseProcedure`` instance, or ``None`` on validation error.
+        """
+        result = self._collect_params()
+        if result is None:
+            return None
+        param_values, sample_info, data_dir = result
+        index = self._proc_selector.currentIndex()
+        cls = self._procedures[index]
+
+        return cls(
+            station=self._station,
+            sample_info=sample_info,
+            data_directory=data_dir,
+            **param_values,
+        )
+
+    def _on_add_to_queue(self) -> None:
+        """Freeze current form values and add a procedure entry to the queue."""
+        result = self._collect_params()
+        if result is None:
+            return
+        param_values, sample_info, data_dir = result
+        index = self._proc_selector.currentIndex()
+        cls = self._procedures[index]
+
+        self._queue.append((cls, param_values, sample_info, data_dir))
+
+        # Build summary for the list widget
+        sweep_keys = list(cls.parameters.keys())
+        summary_parts = [f"{k}={param_values[k]}" for k in sweep_keys[:3]]
+        summary = f"{cls.name} ({', '.join(summary_parts)})"
+        item = QListWidgetItem(f"{len(self._queue)}. {summary}")
+        self._queue_list.addItem(item)
+
+        # Also enqueue in Orchestrator
+        proc = cls(
+            station=self._station,
+            sample_info=sample_info,
+            data_directory=data_dir,
+            **param_values,
+        )
+        self._orchestrator.queue_procedure(proc)
+
+    def _on_run_now(self) -> None:
+        """Build and immediately run the current procedure via the Orchestrator."""
+        proc = self._build_procedure_instance()
+        if proc is None:
+            return
+        self._active_procedure = proc
+        self._reset_plot(proc)
+        self._orchestrator.run_procedure(proc)
+
+    def _on_abort(self) -> None:
+        """Ask for confirmation, then abort the running procedure."""
+        answer = QMessageBox.question(
+            self,
+            "Abort Procedure",
+            "Abort the running procedure? The data file will be saved as-is.",
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._orchestrator.abort_procedure()
+
+    def _on_progress(self, fraction: float) -> None:
+        """Update the progress bar.
+
+        Args:
+            fraction: 0.0–1.0 progress from the Orchestrator.
+        """
+        self._progress_bar.setValue(int(fraction * 100))
+
+    def _on_measurement_ready(self, datapoint: dict) -> None:
+        """Append the new datapoint to the live plot buffers and redraw.
+
+        Args:
+            datapoint: Latest ``measured_data`` dict from the procedure.
+        """
+        x_keys = self._x_key
+        y_key = self._y_axis_selector.currentText()
+
+        x_val = datapoint.get(x_keys)
+        y_raw = datapoint.get(y_key)
+
+        if x_val is None or y_raw is None:
+            return
+
+        # measurement_arrays are lists/arrays; take the mean for the plot
+        if hasattr(y_raw, "__len__"):
+            import numpy as np
+            y_val = float(np.mean(y_raw))
+        else:
+            y_val = float(y_raw)
+
+        self._plot_x.append(float(x_val))
+        self._plot_y.append(y_val)
+        self._plot_curve.setData(self._plot_x, self._plot_y)
+
+    def _on_procedure_finished(self) -> None:
+        """Reset progress bar and clear the active procedure reference."""
+        self._progress_bar.setValue(100)
+        self._active_procedure = None
+
+    def _on_state_changed(self, state_name: str) -> None:
+        """Show/hide the emergency-acknowledge button based on state.
+
+        Args:
+            state_name: New Orchestrator state string.
+        """
+        is_emergency = state_name == OrchestratorState.EMERGENCY.value
+        self._ack_btn.setVisible(is_emergency)
+
+    # ------------------------------------------------------------------
+    # Plot helpers
+    # ------------------------------------------------------------------
+
+    def _reset_plot(self, proc: BaseProcedure) -> None:
+        """Clear plot buffers and rebuild the Y-axis selector for a new run.
+
+        Args:
+            proc: The procedure about to run, used to read parameter metadata.
+        """
+        self._plot_x.clear()
+        self._plot_y.clear()
+        self._plot_curve.setData([], [])
+        self._progress_bar.setValue(0)
+
+        cls = type(proc)
+        # X axis: first sweep column (defined by the procedure's data_config)
+        # We use the first key of cls.parameters as a reasonable default.
+        all_keys = list(cls.parameters.keys())
+        # For FieldSweepIV the sweep variable is field_T (first param is field_start)
+        # Use "field_T" if present in the procedure's data_config, else first param.
+        self._x_key = "field_T" if "field_start" in cls.parameters else (all_keys[0] if all_keys else "x")
+
+        # Y axis options: keys that might be measurement_arrays or scalars
+        self._y_axis_selector.blockSignals(True)
+        self._y_axis_selector.clear()
+        # Populate with known measurement array names from the procedure's params
+        # We can't know the data_config at this point without constructing the DM,
+        # so we offer common known keys and any non-sweep param names.
+        y_options = ["voltage_V", "current_A"]
+        for opt in y_options:
+            self._y_axis_selector.addItem(opt)
+        self._y_axis_selector.blockSignals(False)
+
+        self._plot_widget.setLabel("bottom", self._x_key.replace("_", " "))
+
+    def _redraw_plot(self) -> None:
+        """Redraw the plot curve when the Y-axis selection changes."""
+        self._plot_curve.setData(self._plot_x, self._plot_y)
+
+    # ------------------------------------------------------------------
+    # Queue management helpers
+    # ------------------------------------------------------------------
+
+    def _queue_move_up(self) -> None:
+        """Move the selected queue item up by one position."""
+        row = self._queue_list.currentRow()
+        if row <= 0:
+            return
+        self._queue[row - 1], self._queue[row] = self._queue[row], self._queue[row - 1]
+        self._refresh_queue_list()
+        self._queue_list.setCurrentRow(row - 1)
+
+    def _queue_move_down(self) -> None:
+        """Move the selected queue item down by one position."""
+        row = self._queue_list.currentRow()
+        if row < 0 or row >= len(self._queue) - 1:
+            return
+        self._queue[row], self._queue[row + 1] = self._queue[row + 1], self._queue[row]
+        self._refresh_queue_list()
+        self._queue_list.setCurrentRow(row + 1)
+
+    def _queue_remove(self) -> None:
+        """Remove the selected item from the queue."""
+        row = self._queue_list.currentRow()
+        if row < 0 or row >= len(self._queue):
+            return
+        self._queue.pop(row)
+        # Sync the Orchestrator queue too
+        self._orchestrator._procedure_queue.pop(row)
+        self._refresh_queue_list()
+
+    def _refresh_queue_list(self) -> None:
+        """Rebuild the QListWidget from self._queue."""
+        self._queue_list.clear()
+        for idx, (cls, params, _sample, _dir) in enumerate(self._queue):
+            sweep_keys = list(cls.parameters.keys())
+            summary_parts = [f"{k}={params[k]}" for k in sweep_keys[:3]]
+            summary = f"{cls.name} ({', '.join(summary_parts)})"
+            self._queue_list.addItem(f"{idx + 1}. {summary}")

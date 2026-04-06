@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_l3_orchestrator.py -v --tb=short)",
+      "Bash(.venv/Scripts/python.exe -c \"from PyQt6.QtCore import QCoreApplication; print\\('OK'\\)\")",
+      "Bash(.venv/Scripts/python.exe -c \"import h5py; import numpy; print\\(f'h5py={h5py.__version__}, numpy={numpy.__version__}'\\)\")",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_l5_data_manager.py -v --tb=short)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_l4_procedure.py -v --tb=short)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/ -v --tb=short)",
+      "Skill(update-config)",
+      "Skill(update-config:*)"
+    ]
+  }
+}

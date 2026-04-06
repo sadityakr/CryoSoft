@@ -1,0 +1,17 @@
+# ── Whitelist approach: ignore everything, then carve out tracked items ──
+
+# Ignore all files and folders at the root
+/*
+/.*
+
+# Always track this file and core project config
+!/.gitignore
+!/pyproject.toml
+!/requirements.txt
+!/STATUS.md
+
+# Tracked folders
+!/cryosoft/
+!/.claude/
+!/data/
+!/tests/

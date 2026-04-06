@@ -1,0 +1,75 @@
+# Default data directory (outside CryoSoft folder)
+data_directory: "C:/CryoData"
+
+real_drivers:
+  ips_x:
+    class: cryosoft.drivers.sim_oxford_ips120.SimOxfordIPS120
+    address: "SIM::IPS_X"
+  ips_y:
+    class: cryosoft.drivers.sim_oxford_ips120.SimOxfordIPS120
+    address: "SIM::IPS_Y"
+  itc_vti:
+    class: cryosoft.drivers.sim_oxford_itc503.SimOxfordITC503
+    address: "SIM::ITC_VTI"
+  itc_sample:
+    class: cryosoft.drivers.sim_oxford_itc503.SimOxfordITC503
+    address: "SIM::ITC_SAMPLE"
+  ilm:
+    class: cryosoft.drivers.sim_oxford_ilm200.SimOxfordILM200
+    address: "SIM::ILM"
+  keithley_6221:
+    class: cryosoft.drivers.sim_keithley_6221.SimKeithley6221
+    address: "SIM::K6221"
+  keithley_2182a:
+    class: cryosoft.drivers.sim_keithley_2182a.SimKeithley2182A
+    address: "SIM::K2182A"
+
+virtual_instruments:
+  magnet_x:
+    class: cryosoft.virtual_instruments.magnet_ips120.IPS120MagnetVI
+    drivers: {main: ips_x}
+    vi_type: system
+    init_params:
+      amperes_per_tesla: 10.0
+      max_current: 90.0
+      min_current: -90.0
+      default_ramp_rate: 5.0
+      ramp_segments:
+        - {max_current_A: 40.0, rate_A_per_min: 5.0}
+        - {max_current_A: 70.0, rate_A_per_min: 3.0}
+        - {max_current_A: 90.0, rate_A_per_min: 1.0}
+  magnet_y:
+    class: cryosoft.virtual_instruments.magnet_ips120.IPS120MagnetVI
+    drivers: {main: ips_y}
+    vi_type: system
+    init_params:
+      amperes_per_tesla: 5.0
+      max_current: 20.0
+      min_current: -20.0
+      default_ramp_rate: 2.0
+  temperature_vti:
+    class: cryosoft.virtual_instruments.temperature_itc503.ITC503TemperatureVI
+    drivers: {main: itc_vti}
+    vi_type: system
+    init_params:
+      default_ramp_rate: 2.0
+      tolerance: 0.5
+  temperature_sample:
+    class: cryosoft.virtual_instruments.temperature_itc503.ITC503TemperatureVI
+    drivers: {main: itc_sample}
+    vi_type: system
+    init_params:
+      default_ramp_rate: 1.0
+      tolerance: 0.3
+  level_meter:
+    class: cryosoft.virtual_instruments.level_ilm200.ILM200LevelVI
+    drivers: {main: ilm}
+    vi_type: level
+    init_params:
+      helium_low_threshold: 20.0
+      buffer_size: 5
+  iv_measurement:
+    class: cryosoft.virtual_instruments.measurement_delta_mode.DeltaModeMeasurementVI
+    drivers: {source: keithley_6221, meter: keithley_2182a}
+    vi_type: measurement
+    init_params: {}

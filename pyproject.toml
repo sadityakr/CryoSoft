@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cryosoft"
+version = "0.1.0"
+description = "Instrument-agnostic cryostat operating system"
+requires-python = ">=3.11"
+dependencies = [
+    "PyQt6>=6.5",
+    "pyqtgraph>=0.13",
+    "ruamel.yaml>=0.18",
+    "h5py>=3.9",
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-qt>=4.2",
+    "mypy>=1.5",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "hardware: marks tests that require physical instruments (deselect with '-m \"not hardware\"')",
+]
+
+[tool.setuptools.packages.find]
+include = ["cryosoft*"]

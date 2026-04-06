@@ -1,0 +1,11 @@
+# Runtime dependencies
+PyQt6>=6.5
+pyqtgraph>=0.13
+ruamel.yaml>=0.18
+h5py>=3.9
+numpy>=1.24
+
+# Dev / test dependencies
+pytest>=7.4
+pytest-qt>=4.2
+mypy>=1.5
