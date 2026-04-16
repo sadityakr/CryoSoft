@@ -2,9 +2,9 @@
 # description: |
 #   ProcedureWindow: PyQt6 window for building, queuing, and running measurement
 #   procedures. Auto-generates parameter forms from BaseProcedure.parameters dicts.
-#   Includes sample-info fields, a queue list with reorder/remove buttons, a live
-#   pyqtgraph plot driven by Orchestrator.measurement_ready, and a progress bar.
-# entry_point: Not run directly. Instantiated in main.py.
+#   Sample info is read from MonitorWindow via injected callables. Includes a queue
+#   list with reorder/remove buttons, a live pyqtgraph plot, and a progress bar.
+# entry_point: Not run directly. Opened via MonitorWindow Procedures menu.
 # dependencies:
 #   - PyQt6 >= 6.5
 #   - pyqtgraph >= 0.13
@@ -13,7 +13,8 @@
 #   - cryosoft.core.procedure (BaseProcedure)
 #   - cryosoft.procedures.* (auto-discovered subclasses)
 # input: |
-#   Station instance and Orchestrator instance.
+#   Station instance, Orchestrator instance, and two callables (get_sample_info,
+#   get_data_dir) provided by MonitorWindow.
 # process: |
 #   _discover_procedures() imports all modules in cryosoft/procedures/ and collects
 #   BaseProcedure subclasses. The selected procedure's parameters dict drives form
@@ -21,7 +22,7 @@
 #   goes through orchestrator.run_procedure().
 # output: |
 #   A QMainWindow. Live plot updates via orchestrator.measurement_ready.
-# last_updated: 2026-04-06
+# last_updated: 2026-04-16
 # ---
 
 """ProcedureWindow — procedure builder, queue, and live-data monitor."""
@@ -31,13 +32,13 @@ from __future__ import annotations
 import importlib
 import logging
 import pkgutil
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import pyqtgraph as pg
 from PyQt6.QtWidgets import (
     QComboBox,
-    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -50,13 +51,9 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QProgressBar,
     QScrollArea,
-    QSizePolicy,
-    QSplitter,
-    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
-from PyQt6.QtCore import Qt
 
 from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 from cryosoft.core.procedure import BaseProcedure
@@ -92,16 +89,20 @@ class ProcedureWindow(QMainWindow):
 
     Layout (top to bottom):
     1. Procedure selector dropdown.
-    2. Sample info section (name, ID, comments, data directory).
-    3. Auto-generated parameter form.
-    4. Add-to-queue / Run-now buttons.
-    5. Queue list with reorder and remove buttons.
-    6. Live pyqtgraph plot + progress bar.
-    7. Pause / Resume / Abort / Emergency-Acknowledge buttons.
+    2. Auto-generated parameter form.
+    3. Add-to-queue / Run-now buttons.
+    4. Queue list with reorder and remove buttons.
+    5. Live pyqtgraph plot + progress bar.
+    6. Pause / Resume / Abort / Emergency-Acknowledge buttons.
+
+    Sample info and data directory are read from MonitorWindow via
+    ``get_sample_info`` and ``get_data_dir`` callables injected at construction.
 
     Args:
         station: The active Station instance.
         orchestrator: The active Orchestrator instance.
+        get_sample_info: Callable returning ``{sample_name, sample_id, comments}``.
+        get_data_dir: Callable returning the data directory path string.
         parent: Optional Qt parent widget.
     """
 
@@ -109,11 +110,15 @@ class ProcedureWindow(QMainWindow):
         self,
         station: Station,
         orchestrator: Orchestrator,
+        get_sample_info: Callable[[], dict[str, str]],
+        get_data_dir: Callable[[], str],
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._station = station
         self._orchestrator = orchestrator
+        self._get_sample_info = get_sample_info
+        self._get_data_dir = get_data_dir
 
         self._procedures: list[type[BaseProcedure]] = _discover_procedures()
         # Queue items: list of (procedure_class, params_dict, sample_info_dict, data_dir)
@@ -159,9 +164,6 @@ class ProcedureWindow(QMainWindow):
         sel_row.addStretch()
         root.addLayout(sel_row)
 
-        # ── Sample info ───────────────────────────────────────────────
-        root.addWidget(self._build_sample_info_section())
-
         # ── Parameters (scroll area; rebuilt on selector change) ──────
         self._param_scroll = QScrollArea()
         self._param_scroll.setWidgetResizable(True)
@@ -189,43 +191,6 @@ class ProcedureWindow(QMainWindow):
 
         # ── Control buttons ───────────────────────────────────────────
         root.addLayout(self._build_control_buttons())
-
-    def _build_sample_info_section(self) -> QGroupBox:
-        """Build the fixed sample-info group box.
-
-        Returns:
-            A QGroupBox with name, ID, comments, and data-dir fields.
-        """
-        box = QGroupBox("Sample Info")
-        form = QFormLayout(box)
-
-        self._sample_name_input = QLineEdit()
-        self._sample_name_input.setObjectName("sample_name_input")
-        self._sample_name_input.setPlaceholderText("e.g. Si_001")
-        form.addRow("Name:", self._sample_name_input)
-
-        self._sample_id_input = QLineEdit()
-        self._sample_id_input.setObjectName("sample_id_input")
-        self._sample_id_input.setPlaceholderText("e.g. S2024-01")
-        form.addRow("ID:", self._sample_id_input)
-
-        self._comments_input = QTextEdit()
-        self._comments_input.setObjectName("comments_input")
-        self._comments_input.setMaximumHeight(60)
-        form.addRow("Comments:", self._comments_input)
-
-        # Data directory row with Browse button
-        dir_row = QHBoxLayout()
-        self._data_dir_input = QLineEdit("C:/CryoData")
-        self._data_dir_input.setObjectName("data_dir_input")
-        browse_btn = QPushButton("Browse…")
-        browse_btn.setObjectName("browse_btn")
-        browse_btn.clicked.connect(self._on_browse_dir)
-        dir_row.addWidget(self._data_dir_input)
-        dir_row.addWidget(browse_btn)
-        form.addRow("Data Dir:", dir_row)
-
-        return box
 
     def _build_param_form(self, cls: type[BaseProcedure]) -> QWidget:
         """Auto-generate a parameter form from the procedure's parameters dict.
@@ -385,14 +350,6 @@ class ProcedureWindow(QMainWindow):
         param_widget = self._build_param_form(cls)
         self._param_scroll.setWidget(param_widget)
 
-    def _on_browse_dir(self) -> None:
-        """Open a directory browser and fill the data-dir field."""
-        selected = QFileDialog.getExistingDirectory(
-            self, "Select Data Directory", self._data_dir_input.text()
-        )
-        if selected:
-            self._data_dir_input.setText(selected)
-
     def _collect_params(self) -> tuple[dict, dict, str] | None:
         """Read and validate all form inputs.
 
@@ -419,12 +376,8 @@ class ProcedureWindow(QMainWindow):
                 )
                 return None
 
-        sample_info = {
-            "sample_name": self._sample_name_input.text().strip(),
-            "sample_id": self._sample_id_input.text().strip(),
-            "comments": self._comments_input.toPlainText().strip(),
-        }
-        data_dir = self._data_dir_input.text().strip() or "C:/CryoData"
+        sample_info = self._get_sample_info()
+        data_dir = self._get_data_dir()
         return param_values, sample_info, data_dir
 
     def _build_procedure_instance(self) -> BaseProcedure | None:

@@ -5,7 +5,7 @@
 #   that InstrumentPanel widgets are auto-generated for all registered VIs,
 #   and that Orchestrator signals (state_changed, procedure_progress,
 #   measurement_ready) update the GUI correctly.
-# last_updated: 2026-04-06
+# last_updated: 2026-04-16
 # ---
 
 """GUI smoke tests — Layer 6.
@@ -54,8 +54,18 @@ def monitor_win(station, orchestrator, qtbot):
 
 @pytest.fixture
 def procedure_win(station, orchestrator, qtbot):
-    """ProcedureWindow shown via qtbot."""
-    win = ProcedureWindow(station, orchestrator)
+    """ProcedureWindow shown via qtbot with stub sample-info callables."""
+    def _sample_info():
+        return {"sample_name": "test", "sample_id": "T001", "comments": ""}
+
+    def _data_dir():
+        return "C:/CryoData"
+
+    win = ProcedureWindow(
+        station, orchestrator,
+        get_sample_info=_sample_info,
+        get_data_dir=_data_dir,
+    )
     qtbot.addWidget(win)
     win.show()
     return win
@@ -210,17 +220,30 @@ def test_procedure_param_inputs_exist(procedure_win):
         assert field is not None, f"Missing input for parameter '{param_name}'"
 
 
-def test_procedure_sample_info_inputs_exist(procedure_win):
-    """Sample name, ID, and comments fields are present."""
-    assert procedure_win._sample_name_input is not None
-    assert procedure_win._sample_id_input is not None
-    assert procedure_win._comments_input is not None
+def test_monitor_sample_info_inputs_exist(monitor_win):
+    """Sample name, ID, and comments fields are present in MonitorWindow."""
+    assert monitor_win._sample_name_input is not None
+    assert monitor_win._sample_id_input is not None
+    assert monitor_win._comments_input is not None
 
 
-def test_procedure_data_dir_input_exists(procedure_win):
-    """Data directory input is present and has a default value."""
-    assert procedure_win._data_dir_input is not None
-    assert procedure_win._data_dir_input.text() != ""
+def test_monitor_data_dir_input_exists(monitor_win):
+    """Data directory input is in MonitorWindow and has a default value."""
+    assert monitor_win._data_dir_input is not None
+    assert monitor_win._data_dir_input.text() != ""
+
+
+def test_monitor_get_sample_info(monitor_win):
+    """get_sample_info() returns a dict with the correct keys."""
+    info = monitor_win.get_sample_info()
+    assert "sample_name" in info
+    assert "sample_id" in info
+    assert "comments" in info
+
+
+def test_monitor_get_data_dir(monitor_win):
+    """get_data_dir() returns a non-empty string."""
+    assert monitor_win.get_data_dir() != ""
 
 
 def test_procedure_control_buttons_exist(procedure_win, qtbot):

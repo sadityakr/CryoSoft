@@ -9,7 +9,6 @@
 #   - cryosoft.core.orchestrator (Orchestrator)
 #   - cryosoft.core.logging_config (setup_logging)
 #   - cryosoft.gui.monitor_window (MonitorWindow)
-#   - cryosoft.gui.procedure_window (ProcedureWindow)
 # input: |
 #   No CLI arguments. Config path is hardcoded to cryosoft/configs/sim_cryostat.
 # process: |
@@ -17,7 +16,7 @@
 #   opens both windows, starts the Orchestrator timer, and enters the Qt event loop.
 # output: |
 #   The running CryoSoft desktop application. Exits when all windows are closed.
-# last_updated: 2026-04-06
+# last_updated: 2026-04-16
 # ---
 
 """CryoSoft application entry point."""
@@ -32,7 +31,6 @@ from cryosoft.core.logging_config import setup_logging
 from cryosoft.core.orchestrator import Orchestrator
 from cryosoft.core.station import build_station
 from cryosoft.gui.monitor_window import MonitorWindow
-from cryosoft.gui.procedure_window import ProcedureWindow
 
 
 def main() -> None:
@@ -47,10 +45,7 @@ def main() -> None:
     orchestrator = Orchestrator(station, tick_interval_ms=3000)
 
     monitor = MonitorWindow(station, orchestrator)
-    procedure = ProcedureWindow(station, orchestrator)
-
     monitor.show()
-    procedure.show()
 
     # The Orchestrator timer starts automatically in __init__.
     sys.exit(app.exec())
