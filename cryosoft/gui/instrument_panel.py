@@ -229,9 +229,23 @@ class InstrumentPanel(QGroupBox):
         kwargs: dict[str, Any] = {}
         for param_name, field in inputs.items():
             raw = field.text().strip()
-            param_type = params_meta.get(param_name, {}).get("type", str)
+            meta = params_meta.get(param_name, {})
+            param_type = meta.get("type", str)
+            has_default = "default" in meta
+
+            if not raw:
+                if not has_default:
+                    from PyQt6.QtWidgets import QMessageBox
+                    QMessageBox.warning(
+                        self,
+                        "Missing Parameter",
+                        f"'{param_name}' is required for {method_name}.",
+                    )
+                    return
+                continue  # omit; let the method use its own default
+
             try:
-                kwargs[param_name] = param_type(raw) if raw else None
+                kwargs[param_name] = param_type(raw)
             except (ValueError, TypeError):
                 logger.warning(
                     "InstrumentPanel: could not coerce '%s' to %s for param '%s'",
