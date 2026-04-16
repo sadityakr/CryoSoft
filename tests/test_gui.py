@@ -15,9 +15,7 @@ config with no hardware. All 121 prior tests must pass before this file is run.
 """
 
 import pytest
-from unittest.mock import MagicMock, patch
-
-from PyQt6.QtWidgets import QGroupBox, QLabel, QPushButton, QProgressBar
+from PyQt6.QtWidgets import QLabel, QPushButton
 
 from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 from cryosoft.core.station import build_station
@@ -78,21 +76,21 @@ def test_monitor_window_opens(monitor_win):
     assert monitor_win.isVisible()
 
 
-def test_monitor_window_has_panels_for_all_vis(monitor_win, station):
-    """One InstrumentPanel exists per registered VI."""
+def test_monitor_window_has_panels_for_system_vis(monitor_win, station):
+    """One InstrumentPanel exists per system/level VI (measurement VIs use status cards)."""
     panels = monitor_win.findChildren(InstrumentPanel)
-    vi_names = station.get_vi_names()
-    assert len(panels) == len(vi_names), (
-        f"Expected {len(vi_names)} panels, found {len(panels)}"
+    system_vis = [n for n in station.get_vi_names() if station.get_vi_type(n) in {"system", "level"}]
+    assert len(panels) == len(system_vis), (
+        f"Expected {len(system_vis)} panels, found {len(panels)}"
     )
 
 
-def test_monitor_window_panel_titles_match_vi_names(monitor_win, station):
-    """Each InstrumentPanel title matches a VI name."""
+def test_monitor_window_panel_titles_match_system_vi_names(monitor_win, station):
+    """Each InstrumentPanel title matches a system/level VI name."""
     panels = monitor_win.findChildren(InstrumentPanel)
     panel_titles = {p._vi_name for p in panels}
-    vi_names = set(station.get_vi_names())
-    assert panel_titles == vi_names
+    system_vis = {n for n in station.get_vi_names() if station.get_vi_type(n) in {"system", "level"}}
+    assert panel_titles == system_vis
 
 
 def test_monitor_window_has_global_buttons(monitor_win):

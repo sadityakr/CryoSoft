@@ -19,7 +19,7 @@
 #   and opens it lazily via the Procedures menu.
 # output: |
 #   A QMainWindow that stays open for the lifetime of the application.
-# last_updated: 2026-04-16
+# last_updated: 2026-04-16 (2)
 # ---
 
 """MonitorWindow — main CryoSoft monitor window."""
@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction
@@ -41,6 +42,7 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSplitter,
     QStatusBar,
@@ -212,17 +214,27 @@ class MonitorWindow(QMainWindow):
 
         root.addWidget(grid_container, stretch=4)
 
-        # ── Other Devices (measurement VIs) ───────────────────────────
-        if measurement_vis:
-            root.addWidget(self._build_other_devices_section(measurement_vis), stretch=1)
+        # ── Scrollable lower section ───────────────────────────────────
+        lower_widget = QWidget()
+        lower_widget.setMinimumHeight(300)
+        lower_layout = QVBoxLayout(lower_widget)
+        lower_layout.setSpacing(6)
+        lower_layout.setContentsMargins(0, 0, 0, 0)
 
-        # ── Bottom: Log (left) | Sample Info (right) ──────────────────
+        if measurement_vis:
+            lower_layout.addWidget(self._build_other_devices_section(measurement_vis))
+
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self._build_log_section())
         splitter.addWidget(self._build_sample_info_section())
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 1)
-        root.addWidget(splitter, stretch=2)
+        lower_layout.addWidget(splitter)
+
+        lower_scroll = QScrollArea()
+        lower_scroll.setWidgetResizable(True)
+        lower_scroll.setWidget(lower_widget)
+        root.addWidget(lower_scroll, stretch=2)
 
         # ── Status bar ────────────────────────────────────────────────
         self._status_bar = QStatusBar()
@@ -295,25 +307,65 @@ class MonitorWindow(QMainWindow):
         return box
 
     def _build_other_devices_section(self, vi_names: list[str]) -> QGroupBox:
-        """Build the Other Devices section for measurement VIs.
+        """Build the Other Devices section — connection status cards for measurement VIs.
+
+        Shows only what is connected and lifecycle (Initiate/Standby).
+        Configuration is always handled by procedures, not the monitor.
 
         Args:
             vi_names: Names of measurement VIs to display.
 
         Returns:
-            A QGroupBox containing one InstrumentPanel per measurement VI.
+            A QGroupBox with one compact status card per measurement VI.
         """
         box = QGroupBox("Other Devices")
         h_layout = QHBoxLayout(box)
         h_layout.setSpacing(8)
 
         for vi_name in vi_names:
-            vi = self._station._virtual_instruments[vi_name]
-            panel = InstrumentPanel(vi_name, vi, self._orchestrator, parent=self)
-            panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-            h_layout.addWidget(panel)
+            h_layout.addWidget(self._build_device_status_card(vi_name))
 
         h_layout.addStretch()
+        return box
+
+    def _build_device_status_card(self, vi_name: str) -> QGroupBox:
+        """Build a minimal status card for a measurement VI.
+
+        Shows the human-readable class name and Initiate/Standby buttons only.
+
+        Args:
+            vi_name: Registered VI name (e.g. ``"iv_measurement"``).
+
+        Returns:
+            A compact QGroupBox with type label and lifecycle buttons.
+        """
+        box = QGroupBox(vi_name)
+        vlay = QVBoxLayout(box)
+
+        vi = self._station._virtual_instruments[vi_name]
+        # "DeltaModeMeasurementVI" → "Delta Mode Measurement"
+        raw = type(vi).__name__.replace("VI", "").strip()
+        readable = re.sub(r"([A-Z])", r" \1", raw).strip()
+        type_lbl = QLabel(readable)
+        type_lbl.setStyleSheet("color: #888; font-size: 11px;")
+        vlay.addWidget(type_lbl)
+
+        btn_row = QHBoxLayout()
+        initiate_btn = QPushButton("Initiate")
+        initiate_btn.setObjectName(f"{vi_name}_initiate_btn")
+        initiate_btn.clicked.connect(
+            lambda checked=False, n=vi_name: self._orchestrator.submit_vi_action(n, "initiate")
+        )
+        standby_btn = QPushButton("Standby")
+        standby_btn.setObjectName(f"{vi_name}_standby_btn")
+        standby_btn.clicked.connect(
+            lambda checked=False, n=vi_name: self._orchestrator.submit_vi_action(n, "standby")
+        )
+        btn_row.addWidget(initiate_btn)
+        btn_row.addWidget(standby_btn)
+        btn_row.addStretch()
+        vlay.addLayout(btn_row)
+
         return box
 
     def _build_log_section(self) -> QGroupBox:
