@@ -1,7 +1,7 @@
 # CryoSoft — Implementation Status
 
 > **This is a live document.** The agent reads it before every session and updates it after every task.
-> Last updated: 2026-04-06 (GUI layer complete)
+> Last updated: 2026-04-16 (GUI refactor session)
 
 ---
 
@@ -24,7 +24,7 @@
 | L3W   | Monitor / watchdog  | N/A         | N/A   | Merged into L3 (Orchestrator tick + Station.check_safety) in architecture v4.0 |
 | L4    | Procedures          | Done        | Pass  | 19/19 tests pass |
 | L5    | Data manager        | Done        | Pass  | 17/17 tests pass |
-| GUI   | Monitor window      | Done        | Pass  | 22/22 GUI tests pass |
+| GUI   | Monitor window      | Done        | Pass  | 145/145 tests pass (refactored 2026-04-16) |
 | GUI   | Procedure window    | Done        | Pass  | Included in test_gui.py |
 
 ---
@@ -39,6 +39,15 @@
 - [2026-04-06] L4: BaseProcedure (`core/procedure.py`) + FieldSweepIV (`procedures/field_sweep_iv.py`). Complete. Tests pass 19/19 (`tests/test_l4_procedure.py`). Includes full Orchestrator end-to-end loop test.
 - [2026-04-06] Architecture clarification: L3W Monitor/Watchdog does not exist in v4.0. Safety monitoring is integrated into Orchestrator._tick() + Station.check_safety().
 - [2026-04-06] GUI: MonitorWindow, InstrumentPanel, ProcedureWindow, main.py implemented. 22/22 tests pass. Total suite: 143/143. Added DataManager.last_datapoint and Orchestrator.measurement_ready signal for live plot data pipeline.
+- [2026-04-16] GUI refactor — MonitorWindow and ProcedureWindow restructured. Changes (all tests pass, 145/145):
+  - Sample Info panel moved from ProcedureWindow → MonitorWindow (session-level metadata belongs on the monitor)
+  - ProcedureWindow now opens via Procedures menu (Ctrl+P) from MonitorWindow; lazily created; not shown at startup
+  - Real-time Log panel added to MonitorWindow (QTextEdit + _QtLogHandler, colour-coded by level)
+  - System/level VI grid pinned always-visible at top of MonitorWindow (no scroll)
+  - Other Devices section: measurement VIs shown as status-only cards (Initiate/Standby only; Configure removed — configuration is handled exclusively by procedures)
+  - Lower section (Other Devices + Log/Sample Info splitter) wrapped in QScrollArea for small-screen access
+  - Log and Sample Info shown side-by-side in a QSplitter (50/50) in the scrollable lower section
+  - InstrumentPanel._submit_control: required fields now validated before submission; empty required params show a warning dialog instead of passing None to the VI
 
 <!-- Example format:
 - [2026-04-01] L0: `core/real_driver.py` — RealDriver base class. Unit tests pass (8/8). `tests/test_core/test_real_driver.py`
@@ -269,9 +278,9 @@ cryosoft/
     README.md                          — NOT CREATED
   gui/
     __init__.py                        — DONE
-    instrument_panel.py                — DONE (auto-generated per-VI panel)
-    monitor_window.py                  — DONE (main monitor window)
-    procedure_window.py                — DONE (procedure builder + live plot)
+    instrument_panel.py                — DONE (auto-generated per-VI panel; required-field validation added)
+    monitor_window.py                  — DONE (monitor + sample info + log + other devices + procedures menu)
+    procedure_window.py                — DONE (procedure builder + live plot; sample info injected via callables)
     README.md                          — NOT CREATED
   main.py                              — DONE (application entry point)
   data/                                — Created at runtime
@@ -309,7 +318,7 @@ tests/
     test_level_vi.py                   — NOT CREATED
   test_procedures/
     test_field_sweep_iv.py             — NOT CREATED
-  test_gui.py                          — DONE (22 tests, all pass)
+  test_gui.py                          — DONE (145 tests total, all pass)
   fixtures/
     example_devices.yaml               — NOT CREATED
     example_variables.yaml             — NOT CREATED
