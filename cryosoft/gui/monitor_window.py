@@ -1,9 +1,9 @@
 # ---
 # description: |
 #   MonitorWindow: the main CryoSoft window showing live instrument state.
-#   Auto-generates InstrumentPanels for system/level VIs in a scrollable grid
-#   and measurement VIs in a separate "Other Devices" section. Hosts global
-#   controls, sample info, a real-time log panel, and a menu to open ProcedureWindow.
+#   System/level VI panels are always visible (no scroll). Measurement VIs sit
+#   in a compact "Other Devices" section. The bottom row is a 50/50 splitter:
+#   Log (left) and Sample Info (right). A Procedures menu opens ProcedureWindow.
 # entry_point: Not run directly. Instantiated in main.py.
 # dependencies:
 #   - PyQt6 >= 6.5
@@ -27,6 +27,8 @@
 from __future__ import annotations
 
 import logging
+
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
     QFileDialog,
@@ -39,8 +41,8 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
-    QScrollArea,
     QSizePolicy,
+    QSplitter,
     QStatusBar,
     QTextEdit,
     QVBoxLayout,
@@ -179,13 +181,6 @@ class MonitorWindow(QMainWindow):
         root.setSpacing(6)
         root.setContentsMargins(8, 8, 8, 8)
 
-        # ── Header: global state + control buttons ────────────────────
-        root.addLayout(self._build_header())
-
-        # ── Sample info ───────────────────────────────────────────────
-        root.addWidget(self._build_sample_info_section())
-
-        # ── System / level VI instrument grid ─────────────────────────
         system_vis = [
             n for n in self._station.get_vi_names()
             if self._station.get_vi_type(n) in {"system", "level"}
@@ -195,28 +190,39 @@ class MonitorWindow(QMainWindow):
             if self._station.get_vi_type(n) == "measurement"
         ]
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
+        # ── Header ────────────────────────────────────────────────────
+        root.addLayout(self._build_header())
+
+        # ── System / level VI grid — always visible, no scroll ────────
         grid_container = QWidget()
         self._grid = QGridLayout(grid_container)
         self._grid.setSpacing(8)
+        n_rows = (len(system_vis) + _COLUMNS - 1) // _COLUMNS
+        for c in range(_COLUMNS):
+            self._grid.setColumnStretch(c, 1)
+        for r in range(n_rows):
+            self._grid.setRowStretch(r, 1)
 
         for idx, vi_name in enumerate(system_vis):
             vi = self._station._virtual_instruments[vi_name]
             panel = InstrumentPanel(vi_name, vi, self._orchestrator, parent=self)
-            panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             row, col = divmod(idx, _COLUMNS)
             self._grid.addWidget(panel, row, col)
 
-        scroll.setWidget(grid_container)
-        root.addWidget(scroll)
+        root.addWidget(grid_container, stretch=4)
 
         # ── Other Devices (measurement VIs) ───────────────────────────
         if measurement_vis:
-            root.addWidget(self._build_other_devices_section(measurement_vis))
+            root.addWidget(self._build_other_devices_section(measurement_vis), stretch=1)
 
-        # ── Log panel ─────────────────────────────────────────────────
-        root.addWidget(self._build_log_section())
+        # ── Bottom: Log (left) | Sample Info (right) ──────────────────
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.addWidget(self._build_log_section())
+        splitter.addWidget(self._build_sample_info_section())
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
+        root.addWidget(splitter, stretch=2)
 
         # ── Status bar ────────────────────────────────────────────────
         self._status_bar = QStatusBar()
@@ -273,7 +279,7 @@ class MonitorWindow(QMainWindow):
 
         self._comments_input = QTextEdit()
         self._comments_input.setObjectName("comments_input")
-        self._comments_input.setMaximumHeight(50)
+        self._comments_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         form.addRow("Comments:", self._comments_input)
 
         dir_row = QHBoxLayout()
@@ -321,7 +327,7 @@ class MonitorWindow(QMainWindow):
         self._log_widget = QTextEdit()
         self._log_widget.setObjectName("log_panel")
         self._log_widget.setReadOnly(True)
-        self._log_widget.setMaximumHeight(160)
+        self._log_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._log_widget.setStyleSheet(
             "QTextEdit { background-color: #1e1e1e; font-family: monospace; font-size: 11px; }"
         )
