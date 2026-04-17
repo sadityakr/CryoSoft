@@ -2,8 +2,8 @@
 # description: |
 #   ProcedureWindow: PyQt6 window for building, queuing, and running measurement
 #   procedures. Auto-generates parameter forms from BaseProcedure.parameters dicts.
-#   Sample info is read from MonitorWindow via injected callables. Includes a queue
-#   list with reorder/remove buttons, a live pyqtgraph plot, and a progress bar.
+#   Two-column top layout (params left, queue right) with two live pyqtgraph plots
+#   spanning full-width below. Sample info is read from MonitorWindow via callables.
 # entry_point: Not run directly. Opened via MonitorWindow Procedures menu.
 # dependencies:
 #   - PyQt6 >= 6.5
@@ -21,8 +21,8 @@
 #   generation. Queued procedures are stored as (cls, params) tuples. Execution
 #   goes through orchestrator.run_procedure().
 # output: |
-#   A QMainWindow. Live plot updates via orchestrator.measurement_ready.
-# last_updated: 2026-04-16
+#   A QMainWindow. Two live plots update via orchestrator.measurement_ready.
+# last_updated: 2026-04-17
 # ---
 
 """ProcedureWindow — procedure builder, queue, and live-data monitor."""
@@ -36,7 +36,9 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pyqtgraph as pg
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QComboBox,
     QFormLayout,
@@ -51,6 +53,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QProgressBar,
     QScrollArea,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
@@ -58,6 +61,7 @@ from PyQt6.QtWidgets import (
 from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 from cryosoft.core.procedure import BaseProcedure
 from cryosoft.core.station import Station
+from cryosoft.gui.theme import BTN_CLASS_DANGER, BTN_CLASS_PRIMARY, BTN_CLASS_SECONDARY
 
 logger = logging.getLogger(__name__)
 
@@ -87,13 +91,11 @@ def _discover_procedures() -> list[type[BaseProcedure]]:
 class ProcedureWindow(QMainWindow):
     """Procedure builder, queue manager, and live-data window.
 
-    Layout (top to bottom):
-    1. Procedure selector dropdown.
-    2. Auto-generated parameter form.
-    3. Add-to-queue / Run-now buttons.
-    4. Queue list with reorder and remove buttons.
-    5. Live pyqtgraph plot + progress bar.
-    6. Pause / Resume / Abort / Emergency-Acknowledge buttons.
+    Layout:
+    - Top: QSplitter(Horizontal) — left pane (selector + params + buttons),
+      right pane (queue).
+    - Bottom: QSplitter(Horizontal) — Plot 1 and Plot 2 side-by-side.
+    - Full-width progress bar and control buttons below plots.
 
     Sample info and data directory are read from MonitorWindow via
     ``get_sample_info`` and ``get_data_dir`` callables injected at construction.
@@ -125,19 +127,19 @@ class ProcedureWindow(QMainWindow):
         self._queue: list[tuple[type[BaseProcedure], dict, dict, str]] = []
         # Widgets for the parameter form (rebuilt on procedure selection)
         self._param_inputs: dict[str, QLineEdit] = {}
-        # Active procedure reference for live plot (set on run)
+        # Active procedure reference (set on run)
         self._active_procedure: BaseProcedure | None = None
         # Live plot buffers
         self._plot_x: list[float] = []
-        self._plot_y: list[float] = []
+        self._plot_y1: list[float] = []
+        self._plot_y2: list[float] = []
 
         self.setWindowTitle("CryoSoft — Procedure")
-        self.resize(800, 900)
+        self.resize(1200, 820)
 
         self._build_ui()
         self._connect_signals()
 
-        # Populate selector now that UI exists
         if self._procedures:
             self._on_procedure_selected(0)
 
@@ -152,6 +154,47 @@ class ProcedureWindow(QMainWindow):
         root.setSpacing(8)
         root.setContentsMargins(10, 10, 10, 10)
 
+        # ── Top: params (left) | queue (right) ───────────────────────
+        root.addWidget(self._build_top_splitter(), stretch=2)
+
+        # ── Bottom: Plot 1 | Plot 2 ───────────────────────────────────
+        root.addWidget(self._build_plot_section_dual(), stretch=3)
+
+        # ── Progress bar (full-width) ─────────────────────────────────
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setObjectName("progress_bar")
+        self._progress_bar.setRange(0, 100)
+        self._progress_bar.setValue(0)
+        root.addWidget(self._progress_bar)
+
+        # ── Control buttons ───────────────────────────────────────────
+        root.addLayout(self._build_control_buttons())
+
+    def _build_top_splitter(self) -> QSplitter:
+        """Build the horizontal splitter that separates params (left) and queue (right).
+
+        Returns:
+            QSplitter with left widget (selector + form + buttons) and
+            right widget (queue).
+        """
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+
+        splitter.addWidget(self._build_left_column())
+        splitter.addWidget(self._build_right_column())
+        splitter.setSizes([720, 480])
+        return splitter
+
+    def _build_left_column(self) -> QWidget:
+        """Build the left pane: procedure selector, parameter form, Add/Run buttons.
+
+        Returns:
+            QWidget containing the left-column layout.
+        """
+        widget = QWidget()
+        col = QVBoxLayout(widget)
+        col.setSpacing(8)
+        col.setContentsMargins(0, 0, 4, 0)
+
         # ── Procedure selector ────────────────────────────────────────
         sel_row = QHBoxLayout()
         sel_row.addWidget(QLabel("Procedure:"))
@@ -162,35 +205,44 @@ class ProcedureWindow(QMainWindow):
         self._proc_selector.currentIndexChanged.connect(self._on_procedure_selected)
         sel_row.addWidget(self._proc_selector)
         sel_row.addStretch()
-        root.addLayout(sel_row)
+        col.addLayout(sel_row)
 
         # ── Parameters (scroll area; rebuilt on selector change) ──────
         self._param_scroll = QScrollArea()
         self._param_scroll.setWidgetResizable(True)
         self._param_scroll.setMaximumHeight(250)
-        root.addWidget(self._param_scroll)
+        col.addWidget(self._param_scroll)
 
         # ── Add / Run buttons ─────────────────────────────────────────
         action_row = QHBoxLayout()
         add_btn = QPushButton("Add to Queue")
         add_btn.setObjectName("add_to_queue_btn")
+        add_btn.setProperty("class", BTN_CLASS_SECONDARY)
         add_btn.clicked.connect(self._on_add_to_queue)
         run_now_btn = QPushButton("Run Now")
         run_now_btn.setObjectName("run_now_btn")
+        run_now_btn.setProperty("class", BTN_CLASS_PRIMARY)
         run_now_btn.clicked.connect(self._on_run_now)
         action_row.addWidget(add_btn)
         action_row.addWidget(run_now_btn)
         action_row.addStretch()
-        root.addLayout(action_row)
+        col.addLayout(action_row)
 
-        # ── Queue ─────────────────────────────────────────────────────
-        root.addWidget(self._build_queue_section())
+        col.addStretch()
+        return widget
 
-        # ── Live plot + progress ──────────────────────────────────────
-        root.addWidget(self._build_plot_section())
+    def _build_right_column(self) -> QWidget:
+        """Build the right pane: queue list with management buttons.
 
-        # ── Control buttons ───────────────────────────────────────────
-        root.addLayout(self._build_control_buttons())
+        Returns:
+            QWidget containing the right-column layout.
+        """
+        widget = QWidget()
+        col = QVBoxLayout(widget)
+        col.setSpacing(0)
+        col.setContentsMargins(4, 0, 0, 0)
+        col.addWidget(self._build_queue_section())
+        return widget
 
     def _build_param_form(self, cls: type[BaseProcedure]) -> QWidget:
         """Auto-generate a parameter form from the procedure's parameters dict.
@@ -227,7 +279,6 @@ class ProcedureWindow(QMainWindow):
 
         self._queue_list = QListWidget()
         self._queue_list.setObjectName("queue_list")
-        self._queue_list.setMaximumHeight(120)
         vlay.addWidget(self._queue_list)
 
         btn_row = QHBoxLayout()
@@ -244,6 +295,7 @@ class ProcedureWindow(QMainWindow):
         remove_btn.clicked.connect(self._queue_remove)
         run_queue_btn = QPushButton("Run Queue")
         run_queue_btn.setObjectName("run_queue_btn")
+        run_queue_btn.setProperty("class", BTN_CLASS_PRIMARY)
         run_queue_btn.clicked.connect(self._orchestrator.run_queue)
         btn_row.addWidget(up_btn)
         btn_row.addWidget(down_btn)
@@ -254,16 +306,26 @@ class ProcedureWindow(QMainWindow):
 
         return box
 
-    def _build_plot_section(self) -> QGroupBox:
-        """Build the live-plot + Y-axis selector + progress bar section.
+    def _build_plot_section_dual(self) -> QSplitter:
+        """Build two side-by-side live-plot panels in a horizontal splitter.
 
         Returns:
-            A QGroupBox containing the pyqtgraph PlotWidget and controls.
+            QSplitter containing Plot 1 (left) and Plot 2 (right).
         """
-        box = QGroupBox("Live Plot")
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.addWidget(self._build_plot1())
+        splitter.addWidget(self._build_plot2())
+        return splitter
+
+    def _build_plot1(self) -> QGroupBox:
+        """Build the first live-plot panel (Y1 selector + PlotWidget).
+
+        Returns:
+            QGroupBox for Plot 1.
+        """
+        box = QGroupBox("Plot 1")
         vlay = QVBoxLayout(box)
 
-        # Y-axis selector
         y_row = QHBoxLayout()
         y_row.addWidget(QLabel("Y axis:"))
         self._y_axis_selector = QComboBox()
@@ -273,21 +335,41 @@ class ProcedureWindow(QMainWindow):
         y_row.addStretch()
         vlay.addLayout(y_row)
 
-        # pyqtgraph plot
         self._plot_widget = pg.PlotWidget()
         self._plot_widget.setObjectName("live_plot")
-        self._plot_widget.setMinimumHeight(200)
+        self._plot_widget.setMinimumHeight(150)
         self._plot_widget.setLabel("bottom", "Field (T)")
         self._plot_widget.setLabel("left", "Value")
-        self._plot_curve = self._plot_widget.plot([], [], pen="c", symbol="o", symbolSize=4)
+        self._plot_curve1 = self._plot_widget.plot([], [], pen="c", symbol="o", symbolSize=4)
         vlay.addWidget(self._plot_widget)
 
-        # Progress bar
-        self._progress_bar = QProgressBar()
-        self._progress_bar.setObjectName("progress_bar")
-        self._progress_bar.setRange(0, 100)
-        self._progress_bar.setValue(0)
-        vlay.addWidget(self._progress_bar)
+        return box
+
+    def _build_plot2(self) -> QGroupBox:
+        """Build the second live-plot panel (Y2 selector + PlotWidget).
+
+        Returns:
+            QGroupBox for Plot 2.
+        """
+        box = QGroupBox("Plot 2")
+        vlay = QVBoxLayout(box)
+
+        y_row = QHBoxLayout()
+        y_row.addWidget(QLabel("Y axis:"))
+        self._y2_axis_selector = QComboBox()
+        self._y2_axis_selector.setObjectName("y2_axis_selector")
+        self._y2_axis_selector.currentTextChanged.connect(self._redraw_plot2)
+        y_row.addWidget(self._y2_axis_selector)
+        y_row.addStretch()
+        vlay.addLayout(y_row)
+
+        self._plot_widget2 = pg.PlotWidget()
+        self._plot_widget2.setObjectName("live_plot_2")
+        self._plot_widget2.setMinimumHeight(150)
+        self._plot_widget2.setLabel("bottom", "Field (T)")
+        self._plot_widget2.setLabel("left", "Value")
+        self._plot_curve2 = self._plot_widget2.plot([], [], pen="m", symbol="o", symbolSize=4)
+        vlay.addWidget(self._plot_widget2)
 
         return box
 
@@ -301,19 +383,21 @@ class ProcedureWindow(QMainWindow):
 
         pause_btn = QPushButton("Pause")
         pause_btn.setObjectName("pause_btn")
+        pause_btn.setProperty("class", BTN_CLASS_SECONDARY)
         pause_btn.clicked.connect(self._orchestrator.pause_procedure)
 
         resume_btn = QPushButton("Resume")
         resume_btn.setObjectName("resume_btn")
+        resume_btn.setProperty("class", BTN_CLASS_SECONDARY)
         resume_btn.clicked.connect(self._orchestrator.resume_procedure)
 
         abort_btn = QPushButton("Abort")
         abort_btn.setObjectName("abort_btn")
+        abort_btn.setProperty("class", BTN_CLASS_DANGER)
         abort_btn.clicked.connect(self._on_abort)
 
         self._ack_btn = QPushButton("ACKNOWLEDGE EMERGENCY")
         self._ack_btn.setObjectName("ack_emergency_btn")
-        self._ack_btn.setStyleSheet("background-color: red; color: white; font-weight: bold;")
         self._ack_btn.setVisible(False)
         self._ack_btn.clicked.connect(self._orchestrator.acknowledge_emergency)
 
@@ -411,14 +495,12 @@ class ProcedureWindow(QMainWindow):
 
         self._queue.append((cls, param_values, sample_info, data_dir))
 
-        # Build summary for the list widget
         sweep_keys = list(cls.parameters.keys())
         summary_parts = [f"{k}={param_values[k]}" for k in sweep_keys[:3]]
         summary = f"{cls.name} ({', '.join(summary_parts)})"
         item = QListWidgetItem(f"{len(self._queue)}. {summary}")
         self._queue_list.addItem(item)
 
-        # Also enqueue in Orchestrator
         proc = cls(
             station=self._station,
             sample_info=sample_info,
@@ -455,30 +537,31 @@ class ProcedureWindow(QMainWindow):
         self._progress_bar.setValue(int(fraction * 100))
 
     def _on_measurement_ready(self, datapoint: dict) -> None:
-        """Append the new datapoint to the live plot buffers and redraw.
+        """Append the new datapoint to both live plot buffers and redraw.
+
+        Both plots share the same X axis. Missing Y keys produce NaN entries
+        (rendered as gaps by pyqtgraph) so buffers stay aligned.
 
         Args:
             datapoint: Latest ``measured_data`` dict from the procedure.
         """
-        x_keys = self._x_key
-        y_key = self._y_axis_selector.currentText()
-
-        x_val = datapoint.get(x_keys)
-        y_raw = datapoint.get(y_key)
-
-        if x_val is None or y_raw is None:
+        x_val = datapoint.get(self._x_key)
+        if x_val is None:
             return
-
-        # measurement_arrays are lists/arrays; take the mean for the plot
-        if hasattr(y_raw, "__len__"):
-            import numpy as np
-            y_val = float(np.mean(y_raw))
-        else:
-            y_val = float(y_raw)
-
         self._plot_x.append(float(x_val))
-        self._plot_y.append(y_val)
-        self._plot_curve.setData(self._plot_x, self._plot_y)
+
+        def _extract(raw: Any) -> float:
+            if raw is None:
+                return float("nan")
+            return float(np.mean(raw)) if hasattr(raw, "__len__") else float(raw)
+
+        y1 = _extract(datapoint.get(self._y_axis_selector.currentText()))
+        self._plot_y1.append(y1)
+        self._plot_curve1.setData(self._plot_x, self._plot_y1)
+
+        y2 = _extract(datapoint.get(self._y2_axis_selector.currentText()))
+        self._plot_y2.append(y2)
+        self._plot_curve2.setData(self._plot_x, self._plot_y2)
 
     def _on_procedure_finished(self) -> None:
         """Reset progress bar and clear the active procedure reference."""
@@ -499,40 +582,42 @@ class ProcedureWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _reset_plot(self, proc: BaseProcedure) -> None:
-        """Clear plot buffers and rebuild the Y-axis selector for a new run.
+        """Clear both plot buffers and rebuild both Y-axis selectors for a new run.
 
         Args:
             proc: The procedure about to run, used to read parameter metadata.
         """
         self._plot_x.clear()
-        self._plot_y.clear()
-        self._plot_curve.setData([], [])
+        self._plot_y1.clear()
+        self._plot_y2.clear()
+        self._plot_curve1.setData([], [])
+        self._plot_curve2.setData([], [])
         self._progress_bar.setValue(0)
 
         cls = type(proc)
-        # X axis: first sweep column (defined by the procedure's data_config)
-        # We use the first key of cls.parameters as a reasonable default.
         all_keys = list(cls.parameters.keys())
-        # For FieldSweepIV the sweep variable is field_T (first param is field_start)
-        # Use "field_T" if present in the procedure's data_config, else first param.
         self._x_key = "field_T" if "field_start" in cls.parameters else (all_keys[0] if all_keys else "x")
 
-        # Y axis options: keys that might be measurement_arrays or scalars
-        self._y_axis_selector.blockSignals(True)
-        self._y_axis_selector.clear()
-        # Populate with known measurement array names from the procedure's params
-        # We can't know the data_config at this point without constructing the DM,
-        # so we offer common known keys and any non-sweep param names.
         y_options = ["voltage_V", "current_A"]
-        for opt in y_options:
-            self._y_axis_selector.addItem(opt)
-        self._y_axis_selector.blockSignals(False)
+        for sel in (self._y_axis_selector, self._y2_axis_selector):
+            sel.blockSignals(True)
+            sel.clear()
+            for opt in y_options:
+                sel.addItem(opt)
+            sel.blockSignals(False)
+        self._y2_axis_selector.setCurrentIndex(1)
 
-        self._plot_widget.setLabel("bottom", self._x_key.replace("_", " "))
+        x_label = self._x_key.replace("_", " ")
+        self._plot_widget.setLabel("bottom", x_label)
+        self._plot_widget2.setLabel("bottom", x_label)
 
     def _redraw_plot(self) -> None:
-        """Redraw the plot curve when the Y-axis selection changes."""
-        self._plot_curve.setData(self._plot_x, self._plot_y)
+        """Redraw Plot 1 when the Y1-axis selection changes."""
+        self._plot_curve1.setData(self._plot_x, self._plot_y1)
+
+    def _redraw_plot2(self) -> None:
+        """Redraw Plot 2 when the Y2-axis selection changes."""
+        self._plot_curve2.setData(self._plot_x, self._plot_y2)
 
     # ------------------------------------------------------------------
     # Queue management helpers
@@ -562,7 +647,6 @@ class ProcedureWindow(QMainWindow):
         if row < 0 or row >= len(self._queue):
             return
         self._queue.pop(row)
-        # Sync the Orchestrator queue too
         self._orchestrator._procedure_queue.pop(row)
         self._refresh_queue_list()
 

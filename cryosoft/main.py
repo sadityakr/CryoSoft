@@ -16,7 +16,7 @@
 #   opens both windows, starts the Orchestrator timer, and enters the Qt event loop.
 # output: |
 #   The running CryoSoft desktop application. Exits when all windows are closed.
-# last_updated: 2026-04-16
+# last_updated: 2026-04-17
 # ---
 
 """CryoSoft application entry point."""
@@ -25,12 +25,14 @@ from __future__ import annotations
 
 import sys
 
+import pyqtgraph as pg
 from PyQt6.QtWidgets import QApplication
 
 from cryosoft.core.logging_config import setup_logging
 from cryosoft.core.orchestrator import Orchestrator
 from cryosoft.core.station import build_station
 from cryosoft.gui.monitor_window import MonitorWindow
+from cryosoft.gui.theme import build_stylesheet
 
 
 def main() -> None:
@@ -40,6 +42,8 @@ def main() -> None:
     app = QApplication(sys.argv)
     app.setApplicationName("CryoSoft")
     app.setApplicationVersion("0.1.0")
+    app.setStyleSheet(build_stylesheet())
+    pg.setConfigOptions(background="#121212", foreground="#D4D4D4")
 
     station = build_station("cryosoft/configs/sim_cryostat")
     orchestrator = Orchestrator(station, tick_interval_ms=3000)

@@ -1,7 +1,7 @@
 # CryoSoft — Implementation Status
 
 > **This is a live document.** The agent reads it before every session and updates it after every task.
-> Last updated: 2026-04-16 (GUI refactor session)
+> Last updated: 2026-04-17 (GUI redesign session)
 
 ---
 
@@ -24,8 +24,8 @@
 | L3W   | Monitor / watchdog  | N/A         | N/A   | Merged into L3 (Orchestrator tick + Station.check_safety) in architecture v4.0 |
 | L4    | Procedures          | Done        | Pass  | 19/19 tests pass |
 | L5    | Data manager        | Done        | Pass  | 17/17 tests pass |
-| GUI   | Monitor window      | Done        | Pass  | 145/145 tests pass (refactored 2026-04-16) |
-| GUI   | Procedure window    | Done        | Pass  | Included in test_gui.py |
+| GUI   | Monitor window      | Done        | Pass  | 24/24 tests pass (redesigned 2026-04-17) |
+| GUI   | Procedure window    | Done        | Pass  | Included in test_gui.py (redesigned 2026-04-17) |
 
 ---
 
@@ -48,6 +48,14 @@
   - Lower section (Other Devices + Log/Sample Info splitter) wrapped in QScrollArea for small-screen access
   - Log and Sample Info shown side-by-side in a QSplitter (50/50) in the scrollable lower section
   - InstrumentPanel._submit_control: required fields now validated before submission; empty required params show a warning dialog instead of passing None to the VI
+- [2026-04-17] GUI redesign — global dark theme, resizable panels, ProcedureWindow restructured. All 24 tests pass:
+  - NEW: `cryosoft/gui/theme.py` — central color palette (Material Dark) + `build_stylesheet()` returning full application QSS
+  - Global QSS applied in `main.py` (pyqtgraph background/foreground also set via `pg.setConfigOptions`)
+  - All panels resizable by dragging: MonitorWindow has QSplitter(Vertical) between VI grid and lower section; ProcedureWindow top section uses QSplitter(Horizontal) for params/queue split; plot section uses QSplitter(Horizontal)
+  - ProcedureWindow layout restructured: two-column top (params left ~60%, queue right ~40%); two live plots side-by-side below (Plot 1 cyan, Plot 2 magenta), each with its own Y-axis selector; progress bar full-width below plots
+  - Dual plot buffers (_plot_y1, _plot_y2) sharing a common X axis; missing Y keys produce NaN (rendered as plot gaps)
+  - Button hierarchy via dynamic `class` properties: primary (accent blue fill), secondary (outline), danger (red fill)
+  - InstrumentPanel value readout labels styled 17pt bold via QSS; log handler colors from theme constants
 
 <!-- Example format:
 - [2026-04-01] L0: `core/real_driver.py` — RealDriver base class. Unit tests pass (8/8). `tests/test_core/test_real_driver.py`
@@ -278,9 +286,10 @@ cryosoft/
     README.md                          — NOT CREATED
   gui/
     __init__.py                        — DONE
-    instrument_panel.py                — DONE (auto-generated per-VI panel; required-field validation added)
-    monitor_window.py                  — DONE (monitor + sample info + log + other devices + procedures menu)
-    procedure_window.py                — DONE (procedure builder + live plot; sample info injected via callables)
+    theme.py                           — DONE (central color palette + build_stylesheet(); applied in main.py)
+    instrument_panel.py                — DONE (auto-generated per-VI panel; required-field validation; theme-aware)
+    monitor_window.py                  — DONE (monitor + sample info + log + other devices + procedures menu; resizable splitter)
+    procedure_window.py                — DONE (two-column layout + dual live plots + draggable splitters; theme-aware)
     README.md                          — NOT CREATED
   main.py                              — DONE (application entry point)
   data/                                — Created at runtime

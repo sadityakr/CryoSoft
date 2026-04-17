@@ -19,7 +19,7 @@
 #   and opens it lazily via the Procedures menu.
 # output: |
 #   A QMainWindow that stays open for the lifetime of the application.
-# last_updated: 2026-04-16 (2)
+# last_updated: 2026-04-17
 # ---
 
 """MonitorWindow — main CryoSoft monitor window."""
@@ -54,6 +54,15 @@ from PyQt6.QtWidgets import (
 from cryosoft.core.orchestrator import Orchestrator
 from cryosoft.core.station import Station
 from cryosoft.gui.instrument_panel import InstrumentPanel
+from cryosoft.gui.theme import (
+    BTN_CLASS_PRIMARY,
+    BTN_CLASS_SECONDARY,
+    LOG_CRITICAL,
+    LOG_DEBUG,
+    LOG_ERROR,
+    LOG_INFO,
+    LOG_WARNING,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -69,11 +78,11 @@ class _QtLogHandler(logging.Handler):
     """
 
     _LEVEL_COLOURS: dict[int, str] = {
-        logging.DEBUG: "#808080",
-        logging.INFO: "#d4d4d4",
-        logging.WARNING: "#ce9178",
-        logging.ERROR: "#f44747",
-        logging.CRITICAL: "#ff0000",
+        logging.DEBUG: LOG_DEBUG,
+        logging.INFO: LOG_INFO,
+        logging.WARNING: LOG_WARNING,
+        logging.ERROR: LOG_ERROR,
+        logging.CRITICAL: LOG_CRITICAL,
     }
 
     def __init__(self, widget: QTextEdit) -> None:
@@ -195,7 +204,7 @@ class MonitorWindow(QMainWindow):
         # ── Header ────────────────────────────────────────────────────
         root.addLayout(self._build_header())
 
-        # ── System / level VI grid — always visible, no scroll ────────
+        # ── System / level VI grid ─────────────────────────────────────
         grid_container = QWidget()
         self._grid = QGridLayout(grid_container)
         self._grid.setSpacing(8)
@@ -212,11 +221,9 @@ class MonitorWindow(QMainWindow):
             row, col = divmod(idx, _COLUMNS)
             self._grid.addWidget(panel, row, col)
 
-        root.addWidget(grid_container, stretch=4)
-
-        # ── Scrollable lower section ───────────────────────────────────
+        # ── Lower section ──────────────────────────────────────────────
         lower_widget = QWidget()
-        lower_widget.setMinimumHeight(300)
+        lower_widget.setMinimumHeight(280)
         lower_layout = QVBoxLayout(lower_widget)
         lower_layout.setSpacing(6)
         lower_layout.setContentsMargins(0, 0, 0, 0)
@@ -224,17 +231,23 @@ class MonitorWindow(QMainWindow):
         if measurement_vis:
             lower_layout.addWidget(self._build_other_devices_section(measurement_vis))
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(self._build_log_section())
-        splitter.addWidget(self._build_sample_info_section())
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 1)
-        lower_layout.addWidget(splitter)
+        log_info_splitter = QSplitter(Qt.Orientation.Horizontal)
+        log_info_splitter.addWidget(self._build_log_section())
+        log_info_splitter.addWidget(self._build_sample_info_section())
+        log_info_splitter.setStretchFactor(0, 1)
+        log_info_splitter.setStretchFactor(1, 1)
+        lower_layout.addWidget(log_info_splitter)
 
         lower_scroll = QScrollArea()
         lower_scroll.setWidgetResizable(True)
         lower_scroll.setWidget(lower_widget)
-        root.addWidget(lower_scroll, stretch=2)
+
+        # ── Vertical splitter between VI grid and lower section ────────
+        main_splitter = QSplitter(Qt.Orientation.Vertical)
+        main_splitter.addWidget(grid_container)
+        main_splitter.addWidget(lower_scroll)
+        main_splitter.setSizes([500, 360])
+        root.addWidget(main_splitter)
 
         # ── Status bar ────────────────────────────────────────────────
         self._status_bar = QStatusBar()
@@ -256,12 +269,14 @@ class MonitorWindow(QMainWindow):
 
         initiate_all_btn = QPushButton("Initiate All")
         initiate_all_btn.setObjectName("initiate_all_btn")
+        initiate_all_btn.setProperty("class", BTN_CLASS_PRIMARY)
         initiate_all_btn.clicked.connect(
             lambda: self._orchestrator.submit_global_action("initiate_all")
         )
 
         standby_all_btn = QPushButton("Standby All")
         standby_all_btn.setObjectName("standby_all_btn")
+        standby_all_btn.setProperty("class", BTN_CLASS_SECONDARY)
         standby_all_btn.clicked.connect(
             lambda: self._orchestrator.submit_global_action("standby_all")
         )
@@ -347,7 +362,7 @@ class MonitorWindow(QMainWindow):
         raw = type(vi).__name__.replace("VI", "").strip()
         readable = re.sub(r"([A-Z])", r" \1", raw).strip()
         type_lbl = QLabel(readable)
-        type_lbl.setStyleSheet("color: #888; font-size: 11px;")
+        type_lbl.setProperty("class", "secondary_label")
         vlay.addWidget(type_lbl)
 
         btn_row = QHBoxLayout()
@@ -380,9 +395,6 @@ class MonitorWindow(QMainWindow):
         self._log_widget.setObjectName("log_panel")
         self._log_widget.setReadOnly(True)
         self._log_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self._log_widget.setStyleSheet(
-            "QTextEdit { background-color: #1e1e1e; font-family: monospace; font-size: 11px; }"
-        )
         vlay.addWidget(self._log_widget)
         return box
 

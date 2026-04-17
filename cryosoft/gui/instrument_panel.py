@@ -17,7 +17,7 @@
 #   the layout. _on_states_updated() updates values and border styling each tick.
 # output: |
 #   A QGroupBox with live values and control buttons embedded in MonitorWindow.
-# last_updated: 2026-04-06
+# last_updated: 2026-04-17
 # ---
 
 """InstrumentPanel — auto-generated per-VI monitor panel."""
@@ -39,6 +39,7 @@ from PyQt6.QtWidgets import (
 
 from cryosoft.core.decorators import get_control_methods, get_monitored_methods
 from cryosoft.core.orchestrator import Orchestrator
+from cryosoft.gui.theme import BTN_CLASS_PRIMARY, BTN_CLASS_SECONDARY
 from cryosoft.virtual_instruments.base import BaseVirtualInstrument
 
 logger = logging.getLogger(__name__)
@@ -100,6 +101,7 @@ class InstrumentPanel(QGroupBox):
             lbl.setMinimumWidth(130)
             val = QLabel("—")
             val.setObjectName(f"{self._vi_name}_{method_name}_value")
+            val.setProperty("class", "value_readout")
             self._value_labels[method_name] = val
             row.addWidget(lbl)
             row.addWidget(val)
@@ -114,9 +116,11 @@ class InstrumentPanel(QGroupBox):
         btn_row = QHBoxLayout()
         initiate_btn = QPushButton("Initiate")
         initiate_btn.setObjectName(f"{self._vi_name}_initiate_btn")
+        initiate_btn.setProperty("class", BTN_CLASS_PRIMARY)
         initiate_btn.clicked.connect(lambda: self._submit_lifecycle("initiate"))
         standby_btn = QPushButton("Standby")
         standby_btn.setObjectName(f"{self._vi_name}_standby_btn")
+        standby_btn.setProperty("class", BTN_CLASS_SECONDARY)
         standby_btn.clicked.connect(lambda: self._submit_lifecycle("standby"))
         btn_row.addWidget(initiate_btn)
         btn_row.addWidget(standby_btn)
