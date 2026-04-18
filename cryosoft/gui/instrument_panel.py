@@ -33,6 +33,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -127,6 +128,10 @@ class InstrumentPanel(QGroupBox):
         btn_row.addStretch()
         outer.addLayout(btn_row)
 
+        # Absorb any extra vertical space so control rows never expand beyond
+        # their natural height when the panel is stretched by the grid.
+        outer.addStretch()
+
         self.setLayout(outer)
 
     def _build_control_row(self, method_name: str, params: dict) -> QWidget:
@@ -140,6 +145,9 @@ class InstrumentPanel(QGroupBox):
             A QWidget containing the assembled row.
         """
         container = QWidget()
+        # Fixed vertical policy prevents the container from expanding when the
+        # parent panel is given extra height, which would make the button thin.
+        container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         row = QHBoxLayout(container)
         row.setContentsMargins(0, 2, 0, 2)
 

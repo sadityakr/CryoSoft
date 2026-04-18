@@ -189,4 +189,17 @@ class LevelMeterBase(BaseVirtualInstrument):
 
 class MeasurementInstrumentBase(BaseVirtualInstrument):
     """Base class for all measurement-instrument VIs."""
+
     vi_type: str = "measurement"
+
+    def ping(self) -> bool:
+        """Send IDN queries to all drivers and return True if all respond.
+
+        Override in subclasses to call ``get_idn()`` on each driver.
+        The base implementation always returns False (unknown).
+
+        Returns:
+            True if all drivers respond; False on any exception or if not
+            overridden.
+        """
+        return False

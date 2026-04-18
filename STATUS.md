@@ -1,7 +1,7 @@
 # CryoSoft — Implementation Status
 
 > **This is a live document.** The agent reads it before every session and updates it after every task.
-> Last updated: 2026-04-17 (GUI redesign session)
+> Last updated: 2026-04-18 (MonitorWindow scrollability + connection check + log filtering)
 
 ---
 
@@ -48,6 +48,14 @@
   - Lower section (Other Devices + Log/Sample Info splitter) wrapped in QScrollArea for small-screen access
   - Log and Sample Info shown side-by-side in a QSplitter (50/50) in the scrollable lower section
   - InstrumentPanel._submit_control: required fields now validated before submission; empty required params show a warning dialog instead of passing None to the VI
+- [2026-04-18] GUI improvements — whole-window scrollability, connection check for measurement VIs, log filtering. All 145 tests pass:
+  - MonitorWindow: entire content wrapped in outer QScrollArea (central widget); redundant inner lower_scroll removed. Window is now vertically scrollable on small screens while the splitter still works for large screens.
+  - Other Devices panel: removed misleading class-name type label ("Delta Mode Measurement" was derived from class name, not live data). Replaced with a coloured dot (●) + "Unknown/Connected/Not reachable" label and a "Check" button.
+  - `MeasurementInstrumentBase.ping() -> bool` added to `base.py` (returns False by default).
+  - `DeltaModeMeasurementVI.ping()` overrides base: calls `get_idn()` on both source and meter drivers; returns True only if both respond.
+  - `SimKeithley6221.get_idn()` and `SimKeithley2182A.get_idn()` added to sim drivers.
+  - Qt log widget: `_QtLogHandler` now suppresses `cryosoft.vi.*` DEBUG records (per-method call/return noise). Warnings and errors from VIs still appear.
+  - `Orchestrator._tick()`: after `states_updated.emit()`, logs one compact DEBUG summary line per tick (e.g. "Monitor: magnet_x: field=1.234, ... | temperature_vti: ..."). File log unchanged.
 - [2026-04-17] GUI redesign — global dark theme, resizable panels, ProcedureWindow restructured. All 24 tests pass:
   - NEW: `cryosoft/gui/theme.py` — central color palette (Material Dark) + `build_stylesheet()` returning full application QSS
   - Global QSS applied in `main.py` (pyqtgraph background/foreground also set via `pg.setConfigOptions`)
@@ -288,7 +296,7 @@ cryosoft/
     __init__.py                        — DONE
     theme.py                           — DONE (central color palette + build_stylesheet(); applied in main.py)
     instrument_panel.py                — DONE (auto-generated per-VI panel; required-field validation; theme-aware)
-    monitor_window.py                  — DONE (monitor + sample info + log + other devices + procedures menu; resizable splitter)
+    monitor_window.py                  — DONE (outer QScrollArea central widget; Other Devices connection-check dot + Check button; VI DEBUG log filter; per-tick monitor summary)
     procedure_window.py                — DONE (two-column layout + dual live plots + draggable splitters; theme-aware)
     README.md                          — NOT CREATED
   main.py                              — DONE (application entry point)

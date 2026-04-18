@@ -166,6 +166,19 @@ class DeltaModeMeasurementVI(MeasurementInstrumentBase):
     # Lifecycle
     # ------------------------------------------------------------------
 
+    def ping(self) -> bool:
+        """Query IDN from both drivers to verify they are reachable.
+
+        Returns:
+            True if both source and meter respond to ``get_idn()``.
+        """
+        try:
+            self._source.get_idn()   # type: ignore[attr-defined]
+            self._meter.get_idn()    # type: ignore[attr-defined]
+            return True
+        except Exception:
+            return False
+
     def initiate(self) -> None:
         """Initialise both instruments to a known safe state."""
         self._source.set_current(0.0)   # type: ignore[attr-defined]

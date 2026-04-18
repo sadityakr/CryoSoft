@@ -208,6 +208,18 @@ class Orchestrator(QObject):
         state = self._station.get_state()
         self.states_updated.emit(state)
 
+        # One-line summary per tick (full per-method detail stays in the file log)
+        parts = []
+        for vi_name, vi_state in state.items():
+            readable = {k: v for k, v in vi_state.items() if not k.startswith("_")}
+            if readable:
+                kv = ", ".join(
+                    f"{k}={v:.4g}" if isinstance(v, float) else f"{k}={v}"
+                    for k, v in readable.items()
+                )
+                parts.append(f"{vi_name}: {kv}")
+        logger.debug("Monitor: %s", " | ".join(parts))
+
         # Safety check
         safety = self._station.check_safety()
         if safety.get("helium_low") and self._state != OrchestratorState.EMERGENCY:

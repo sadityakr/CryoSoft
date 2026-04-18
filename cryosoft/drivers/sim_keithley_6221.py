@@ -138,6 +138,11 @@ class SimKeithley6221:
         self._check_error()
         return list(self._delta_readings)
 
+    def get_idn(self) -> str:
+        """Return simulated *IDN? response string."""
+        self._check_error()
+        return "KEITHLEY,6221,SIM,1.0"
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------

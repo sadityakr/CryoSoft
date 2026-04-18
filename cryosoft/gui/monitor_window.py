@@ -19,7 +19,7 @@
 #   and opens it lazily via the Procedures menu.
 # output: |
 #   A QMainWindow that stays open for the lifetime of the application.
-# last_updated: 2026-04-17
+# last_updated: 2026-04-18
 # ---
 
 """MonitorWindow — main CryoSoft monitor window."""
@@ -27,7 +27,6 @@
 from __future__ import annotations
 
 import logging
-import re
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction
@@ -94,6 +93,9 @@ class _QtLogHandler(logging.Handler):
         )
 
     def emit(self, record: logging.LogRecord) -> None:
+        # Per-method VI polling noise is written to the file log only.
+        if record.name.startswith("cryosoft.vi.") and record.levelno < logging.WARNING:
+            return
         try:
             widget = self._widget
             if not widget or not widget.isVisible():
@@ -186,9 +188,8 @@ class MonitorWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _build_ui(self) -> None:
-        central = QWidget()
-        self.setCentralWidget(central)
-        root = QVBoxLayout(central)
+        content_widget = QWidget()
+        root = QVBoxLayout(content_widget)
         root.setSpacing(6)
         root.setContentsMargins(8, 8, 8, 8)
 
@@ -223,7 +224,7 @@ class MonitorWindow(QMainWindow):
 
         # ── Lower section ──────────────────────────────────────────────
         lower_widget = QWidget()
-        lower_widget.setMinimumHeight(280)
+        lower_widget.setMinimumHeight(380)
         lower_layout = QVBoxLayout(lower_widget)
         lower_layout.setSpacing(6)
         lower_layout.setContentsMargins(0, 0, 0, 0)
@@ -238,16 +239,22 @@ class MonitorWindow(QMainWindow):
         log_info_splitter.setStretchFactor(1, 1)
         lower_layout.addWidget(log_info_splitter)
 
-        lower_scroll = QScrollArea()
-        lower_scroll.setWidgetResizable(True)
-        lower_scroll.setWidget(lower_widget)
-
         # ── Vertical splitter between VI grid and lower section ────────
         main_splitter = QSplitter(Qt.Orientation.Vertical)
         main_splitter.addWidget(grid_container)
-        main_splitter.addWidget(lower_scroll)
-        main_splitter.setSizes([500, 360])
+        main_splitter.addWidget(lower_widget)
+        main_splitter.setSizes([500, 400])
         root.addWidget(main_splitter)
+
+        # ── Outer scroll area — makes the whole window scrollable ──────
+        # setWidgetResizable(True) lets content_widget expand to fill the viewport,
+        # but minimumHeight ensures the scroll area activates when the window is small.
+        # Without it, content_widget shrinks to viewport height and nothing scrolls.
+        content_widget.setMinimumHeight(960)
+        outer_scroll = QScrollArea()
+        outer_scroll.setWidgetResizable(True)
+        outer_scroll.setWidget(content_widget)
+        self.setCentralWidget(outer_scroll)
 
         # ── Status bar ────────────────────────────────────────────────
         self._status_bar = QStatusBar()
@@ -344,27 +351,54 @@ class MonitorWindow(QMainWindow):
         return box
 
     def _build_device_status_card(self, vi_name: str) -> QGroupBox:
-        """Build a minimal status card for a measurement VI.
+        """Build a connection-check status card for a measurement VI.
 
-        Shows the human-readable class name and Initiate/Standby buttons only.
+        Shows a coloured dot + status text, a "Check" button that sends an
+        IDN query, and Initiate/Standby lifecycle buttons.
 
         Args:
             vi_name: Registered VI name (e.g. ``"iv_measurement"``).
 
         Returns:
-            A compact QGroupBox with type label and lifecycle buttons.
+            A compact QGroupBox with connection indicator and lifecycle buttons.
         """
         box = QGroupBox(vi_name)
         vlay = QVBoxLayout(box)
 
-        vi = self._station._virtual_instruments[vi_name]
-        # "DeltaModeMeasurementVI" → "Delta Mode Measurement"
-        raw = type(vi).__name__.replace("VI", "").strip()
-        readable = re.sub(r"([A-Z])", r" \1", raw).strip()
-        type_lbl = QLabel(readable)
-        type_lbl.setProperty("class", "secondary_label")
-        vlay.addWidget(type_lbl)
+        # ── Connection indicator row ───────────────────────────────────
+        conn_row = QHBoxLayout()
+        dot = QLabel("●")
+        dot.setStyleSheet("color: gray; font-size: 16px;")
+        dot.setObjectName(f"{vi_name}_conn_dot")
+        status_lbl = QLabel("Unknown")
+        status_lbl.setObjectName(f"{vi_name}_conn_status")
+        status_lbl.setProperty("class", "secondary_label")
+        check_btn = QPushButton("Check")
+        check_btn.setObjectName(f"{vi_name}_check_btn")
+        check_btn.setMaximumWidth(60)
 
+        vi = self._station._virtual_instruments[vi_name]
+
+        def _on_check(checked: bool = False, _vi=vi, _dot=dot, _lbl=status_lbl) -> None:
+            try:
+                ok = _vi.ping()
+            except Exception:
+                ok = False
+            if ok:
+                _dot.setStyleSheet("color: #4ec94e; font-size: 16px;")
+                _lbl.setText("Connected")
+            else:
+                _dot.setStyleSheet("color: #e74c3c; font-size: 16px;")
+                _lbl.setText("Not reachable")
+
+        check_btn.clicked.connect(_on_check)
+        conn_row.addWidget(dot)
+        conn_row.addWidget(status_lbl)
+        conn_row.addStretch()
+        conn_row.addWidget(check_btn)
+        vlay.addLayout(conn_row)
+
+        # ── Lifecycle buttons ──────────────────────────────────────────
         btn_row = QHBoxLayout()
         initiate_btn = QPushButton("Initiate")
         initiate_btn.setObjectName(f"{vi_name}_initiate_btn")

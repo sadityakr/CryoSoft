@@ -77,6 +77,11 @@ class SimKeithley2182A:
         self._check_error()
         return self._range
 
+    def get_idn(self) -> str:
+        """Return simulated *IDN? response string."""
+        self._check_error()
+        return "KEITHLEY,2182A,SIM,1.0"
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------

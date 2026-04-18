@@ -5,7 +5,11 @@
       "Bash(.venv/Scripts/python.exe -c \"from PyQt6.QtCore import QCoreApplication\")",
       "Bash(.venv/Scripts/python.exe -c ':*)",
       "Read(//c/Users/sadit/anaconda3/Library/bin//**)",
-      "Bash(.venv/Scripts/pip.exe install:*)"
+      "Bash(.venv/Scripts/pip.exe install:*)",
+      "Read(//c/Users/sadit/.claude/**)"
+    ],
+    "additionalDirectories": [
+      "C:\\Users\\sadit\\.claude"
     ]
   }
 }
