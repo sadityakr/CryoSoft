@@ -129,10 +129,8 @@ class ProcedureWindow(QMainWindow):
         self._param_inputs: dict[str, QLineEdit] = {}
         # Active procedure reference (set on run)
         self._active_procedure: BaseProcedure | None = None
-        # Live plot buffers
-        self._plot_x: list[float] = []
-        self._plot_y1: list[float] = []
-        self._plot_y2: list[float] = []
+        # Live plot: full datapoint history (each entry is the enriched dict from measurement_ready)
+        self._datapoints: list[dict] = []
 
         self.setWindowTitle("CryoSoft — Procedure")
         self.resize(1200, 820)
@@ -326,6 +324,15 @@ class ProcedureWindow(QMainWindow):
         box = QGroupBox("Plot 1")
         vlay = QVBoxLayout(box)
 
+        x_row = QHBoxLayout()
+        x_row.addWidget(QLabel("X axis:"))
+        self._x1_axis_selector = QComboBox()
+        self._x1_axis_selector.setObjectName("x1_axis_selector")
+        self._x1_axis_selector.currentTextChanged.connect(self._redraw_plot)
+        x_row.addWidget(self._x1_axis_selector)
+        x_row.addStretch()
+        vlay.addLayout(x_row)
+
         y_row = QHBoxLayout()
         y_row.addWidget(QLabel("Y axis:"))
         self._y_axis_selector = QComboBox()
@@ -353,6 +360,15 @@ class ProcedureWindow(QMainWindow):
         """
         box = QGroupBox("Plot 2")
         vlay = QVBoxLayout(box)
+
+        x_row = QHBoxLayout()
+        x_row.addWidget(QLabel("X axis:"))
+        self._x2_axis_selector = QComboBox()
+        self._x2_axis_selector.setObjectName("x2_axis_selector")
+        self._x2_axis_selector.currentTextChanged.connect(self._redraw_plot2)
+        x_row.addWidget(self._x2_axis_selector)
+        x_row.addStretch()
+        vlay.addLayout(x_row)
 
         y_row = QHBoxLayout()
         y_row.addWidget(QLabel("Y axis:"))
@@ -537,31 +553,14 @@ class ProcedureWindow(QMainWindow):
         self._progress_bar.setValue(int(fraction * 100))
 
     def _on_measurement_ready(self, datapoint: dict) -> None:
-        """Append the new datapoint to both live plot buffers and redraw.
-
-        Both plots share the same X axis. Missing Y keys produce NaN entries
-        (rendered as gaps by pyqtgraph) so buffers stay aligned.
+        """Store the new datapoint and redraw both plots.
 
         Args:
-            datapoint: Latest ``measured_data`` dict from the procedure.
+            datapoint: Latest enriched data dict emitted by the Orchestrator.
         """
-        x_val = datapoint.get(self._x_key)
-        if x_val is None:
-            return
-        self._plot_x.append(float(x_val))
-
-        def _extract(raw: Any) -> float:
-            if raw is None:
-                return float("nan")
-            return float(np.mean(raw)) if hasattr(raw, "__len__") else float(raw)
-
-        y1 = _extract(datapoint.get(self._y_axis_selector.currentText()))
-        self._plot_y1.append(y1)
-        self._plot_curve1.setData(self._plot_x, self._plot_y1)
-
-        y2 = _extract(datapoint.get(self._y2_axis_selector.currentText()))
-        self._plot_y2.append(y2)
-        self._plot_curve2.setData(self._plot_x, self._plot_y2)
+        self._datapoints.append(datapoint)
+        self._redraw_plot()
+        self._redraw_plot2()
 
     def _on_procedure_finished(self) -> None:
         """Reset progress bar and clear the active procedure reference."""
@@ -582,42 +581,60 @@ class ProcedureWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _reset_plot(self, proc: BaseProcedure) -> None:
-        """Clear both plot buffers and rebuild both Y-axis selectors for a new run.
+        """Clear datapoints, rebuild all axis selectors from proc.get_data_keys().
 
         Args:
-            proc: The procedure about to run, used to read parameter metadata.
+            proc: The procedure about to run.
         """
-        self._plot_x.clear()
-        self._plot_y1.clear()
-        self._plot_y2.clear()
+        self._datapoints.clear()
         self._plot_curve1.setData([], [])
         self._plot_curve2.setData([], [])
         self._progress_bar.setValue(0)
 
+        keys = proc.get_data_keys()
         cls = type(proc)
-        all_keys = list(cls.parameters.keys())
-        self._x_key = "field_T" if "field_start" in cls.parameters else (all_keys[0] if all_keys else "x")
 
-        y_options = ["voltage_V", "current_A"]
-        for sel in (self._y_axis_selector, self._y2_axis_selector):
+        for sel in (self._x1_axis_selector, self._x2_axis_selector,
+                    self._y_axis_selector, self._y2_axis_selector):
             sel.blockSignals(True)
             sel.clear()
-            for opt in y_options:
-                sel.addItem(opt)
+            sel.addItems(keys)
             sel.blockSignals(False)
-        self._y2_axis_selector.setCurrentIndex(1)
 
-        x_label = self._x_key.replace("_", " ")
-        self._plot_widget.setLabel("bottom", x_label)
-        self._plot_widget2.setLabel("bottom", x_label)
+        default_x = cls.default_x_key if cls.default_x_key in keys else (keys[0] if keys else "")
+        self._x1_axis_selector.setCurrentText(default_x)
+        self._x2_axis_selector.setCurrentText(default_x)
+        if "voltage_V" in keys:
+            self._y_axis_selector.setCurrentText("voltage_V")
+        if "current_A" in keys:
+            self._y2_axis_selector.setCurrentText("current_A")
+
+    @staticmethod
+    def _extract_scalar(raw: Any) -> float:
+        """Convert a datapoint value to a plottable float."""
+        if raw is None:
+            return float("nan")
+        return float(np.mean(raw)) if hasattr(raw, "__len__") else float(raw)
 
     def _redraw_plot(self) -> None:
-        """Redraw Plot 1 when the Y1-axis selection changes."""
-        self._plot_curve1.setData(self._plot_x, self._plot_y1)
+        """Redraw Plot 1 from the stored datapoint history."""
+        x_key = self._x1_axis_selector.currentText()
+        y_key = self._y_axis_selector.currentText()
+        xs = [self._extract_scalar(dp.get(x_key)) for dp in self._datapoints]
+        ys = [self._extract_scalar(dp.get(y_key)) for dp in self._datapoints]
+        self._plot_curve1.setData(xs, ys)
+        self._plot_widget.setLabel("bottom", x_key.replace("_", " "))
+        self._plot_widget.setLabel("left", y_key.replace("_", " "))
 
     def _redraw_plot2(self) -> None:
-        """Redraw Plot 2 when the Y2-axis selection changes."""
-        self._plot_curve2.setData(self._plot_x, self._plot_y2)
+        """Redraw Plot 2 from the stored datapoint history."""
+        x_key = self._x2_axis_selector.currentText()
+        y_key = self._y2_axis_selector.currentText()
+        xs = [self._extract_scalar(dp.get(x_key)) for dp in self._datapoints]
+        ys = [self._extract_scalar(dp.get(y_key)) for dp in self._datapoints]
+        self._plot_curve2.setData(xs, ys)
+        self._plot_widget2.setLabel("bottom", x_key.replace("_", " "))
+        self._plot_widget2.setLabel("left", y_key.replace("_", " "))
 
     # ------------------------------------------------------------------
     # Queue management helpers

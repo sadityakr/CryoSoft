@@ -131,6 +131,39 @@ class Station:
     # State polling
     # ------------------------------------------------------------------
 
+    @property
+    def cached_state(self) -> dict[str, dict]:
+        """Return the last known state from the most recent monitor tick.
+
+        No hardware poll. Safe to call from within a procedure's measure().
+
+        Returns:
+            ``{vi_name: {field: value, ...}}`` — same structure as get_state().
+        """
+        return dict(self._last_known_state)
+
+    def last_state_flat(self) -> dict[str, float]:
+        """Return cached system VI state as a flat ``{vi_name_field: value}`` dict.
+
+        Reads from the monitor-tick cache — no hardware poll. Only numeric scalar
+        values from system VIs are included. Metadata keys (``_stale``,
+        ``_disconnected``) and string values (e.g. ``ramp_status``) are excluded.
+
+        Returns:
+            Flat dict keyed ``{vi_name}_{monitored_field}`` for all numeric fields.
+        """
+        result: dict[str, float] = {}
+        for vi_name, state in self._last_known_state.items():
+            if self._vi_registry.get(vi_name) == "measurement":
+                continue
+            for key, value in state.items():
+                if key.startswith("_"):
+                    continue
+                if not isinstance(value, (int, float)):
+                    continue
+                result[f"{vi_name}_{key}"] = float(value)
+        return result
+
     def get_state(self) -> dict[str, dict]:
         """Poll all VIs and return a full state snapshot.
 
@@ -201,8 +234,12 @@ class Station:
                     f"process_system_targets: VI '{vi_name}' does not implement RampableVI"
                 )
             target = float(params["target"])
+            rate = params.get("rate")
             logger.info("Starting ramp on '%s' to target=%s", vi_name, target)
-            vi.start_ramp(target)
+            if rate is not None:
+                vi.start_ramp(target, rate=float(rate))  # type: ignore[call-arg]
+            else:
+                vi.start_ramp(target)
 
     def check_ramps(self) -> bool:
         """Advance all active system VI ramps and report completion.

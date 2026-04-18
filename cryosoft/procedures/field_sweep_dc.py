@@ -1,30 +1,31 @@
 # ---
 # description: |
-#   FieldSweepIV procedure: sweeps the magnetic field from field_start to
-#   field_end in field_steps steps, measuring IV (delta-mode) at each point.
-#   Stores data and station snapshots in an HDF5 file via DataManager.
+#   FieldSweepDC procedure: sweeps the magnetic field from field_start to
+#   field_end in field_steps steps, measuring DC resistance at each point via
+#   DCMeasurementVI (Keithley 6221 + 2182A in simple DC mode).
 # entry_point: Not run directly. Instantiated via GUI or tests.
 # dependencies:
 #   - numpy
 #   - cryosoft.core.procedure (BaseProcedure)
 #   - cryosoft.core.data_manager (DataManager)
 #   - Station must have: magnet_x (system VI), temperature_vti (system VI),
-#     keithley_delta_mode (measurement VI with configure() and read_datapoint()).
+#     dc_measurement (measurement VI with initiate() and take_reading()).
 # input: |
 #   station, sample_info, data_directory, and keyword params matching the
 #   parameters dict: field_start, field_end, field_steps, temperature,
-#   current, n_readings, init_wait, step_wait.
+#   current_A, compliance_A, voltmeter_range_V, readings_per_point,
+#   init_wait, step_wait.
 # process: |
-#   initiate() ramps to first field point + target temperature, configures
-#   delta-mode. change_sweep_step() steps through fields. measure() reads
-#   IV data and snapshots state. standby() parks magnet at 0 T.
+#   initiate() ramps to first field and target temperature, arms dc_measurement.
+#   change_sweep_step() steps through fields. measure() calls take_reading()
+#   and saves via DataManager. standby() parks magnet at 0 T.
 # output: |
 #   HDF5 file with /data/field_T[N], /data/voltage_V[N,M],
 #   /data/current_A[N,M], /data/timestamp[N], /snapshots/ and /metadata/.
-# last_updated: 2026-04-06
+# last_updated: 2026-04-18
 # ---
 
-"""FieldSweepIV — magnetic field sweep with IV delta-mode measurement."""
+"""FieldSweepDC — magnetic field sweep with DC resistance measurement."""
 
 from __future__ import annotations
 
@@ -38,24 +39,24 @@ from cryosoft.core.procedure import BaseProcedure
 logger = logging.getLogger(__name__)
 
 
-class FieldSweepIV(BaseProcedure):
-    """Sweep magnetic field and measure IV at each point.
+class FieldSweepDC(BaseProcedure):
+    """Sweep magnetic field and measure DC resistance at each point.
 
     Procedure flow:
     1. ``initiate()``: ramp magnet_x to first field, temperature_vti to target T,
-       configure delta-mode on keithley_delta_mode. Create DataManager.
-    2. ``measure()``: read IV data from keithley_delta_mode, snapshot station state,
-       save via DataManager.
+       arm dc_measurement. Create DataManager.
+    2. ``measure()``: call take_reading() on dc_measurement, snapshot station
+       state, save via DataManager.
     3. ``change_sweep_step()``: step to next field. Return None when done.
-    4. ``standby()``: close data file, park magnet at 0 T.
+    4. ``standby()``: close data file, park magnet at 0 T, disarm dc_measurement.
 
     Required VIs in Station:
         ``magnet_x`` (system), ``temperature_vti`` (system),
-        ``keithley_delta_mode`` (measurement).
+        ``dc_measurement`` (measurement).
     """
 
-    name = "Field Sweep IV"
-    description = "Sweep magnetic field, measure IV at each point"
+    name = "Field Sweep DC"
+    description = "Sweep magnetic field, measure DC resistance at each point"
     sweep_data_keys = ["field_T"]
     measurement_data_keys = ["voltage_V", "current_A"]
     default_x_key = "field_T"
@@ -85,17 +86,29 @@ class FieldSweepIV(BaseProcedure):
             "unit": "K",
             "description": "Sample temperature",
         },
-        "current": {
+        "current_A": {
             "type": float,
             "default": 1e-6,
             "unit": "A",
-            "description": "Measurement current",
+            "description": "DC source current",
         },
-        "n_readings": {
+        "compliance_A": {
+            "type": float,
+            "default": 1e-3,
+            "unit": "A",
+            "description": "Current compliance on voltmeter",
+        },
+        "voltmeter_range_V": {
+            "type": float,
+            "default": 0.1,
+            "unit": "V",
+            "description": "Voltmeter full-scale range",
+        },
+        "readings_per_point": {
             "type": int,
-            "default": 100,
+            "default": 10,
             "min": 1,
-            "description": "Readings per point (delta mode)",
+            "description": "DC voltage readings averaged per field point",
         },
         "init_wait": {
             "type": float,
@@ -107,20 +120,11 @@ class FieldSweepIV(BaseProcedure):
             "type": float,
             "default": 5.0,
             "unit": "s",
-            "description": "Wait between sweep points",
+            "description": "Wait between field steps",
         },
     }
 
-    # ------------------------------------------------------------------
-    # Sweep array
-    # ------------------------------------------------------------------
-
     def _build_sweep_array(self) -> list:
-        """Build field sweep array from field_start, field_end, field_steps.
-
-        Returns:
-            List of field values in tesla.
-        """
         return np.linspace(
             self._params["field_start"],
             self._params["field_end"],
@@ -132,35 +136,32 @@ class FieldSweepIV(BaseProcedure):
     # ------------------------------------------------------------------
 
     def initiate(self) -> tuple[dict, dict, float]:
-        """Set initial field + temperature targets, configure measurement VI.
-
-        Creates the DataManager and HDF5 file for this run.
+        """Ramp to initial field and temperature, arm dc_measurement.
 
         Returns:
             ``(system_targets, measurement_commands, init_wait)``
         """
-        n_readings = int(self._params["n_readings"])
-
         system_targets = {
             "magnet_x": {"target": self._sweep[0]},
             "temperature_vti": {"target": self._params["temperature"]},
         }
 
         measurement_commands = {
-            "keithley_delta_mode": {
-                "configure": {
-                    "method": "delta_mode",
-                    "current": self._params["current"],
-                    "n_readings": n_readings,
+            "dc_measurement": {
+                "initiate": {
+                    "current_A": self._params["current_A"],
+                    "compliance_A": self._params["compliance_A"],
+                    "voltmeter_range_V": self._params["voltmeter_range_V"],
                 }
             }
         }
 
+        n = int(self._params["readings_per_point"])
         base_config: dict = {
             "sweep_columns": {"field_T": "float"},
             "measurement_arrays": {
-                "voltage_V": n_readings,
-                "current_A": n_readings,
+                "voltage_V": n,
+                "current_A": n,
             },
         }
 
@@ -177,7 +178,7 @@ class FieldSweepIV(BaseProcedure):
         )
 
         logger.info(
-            "FieldSweepIV.initiate(): %d steps from %.3f T to %.3f T, T=%.1f K",
+            "FieldSweepDC.initiate(): %d steps from %.3f T to %.3f T, T=%.1f K",
             len(self._sweep),
             self._params["field_start"],
             self._params["field_end"],
@@ -197,33 +198,31 @@ class FieldSweepIV(BaseProcedure):
         if self._index >= len(self._sweep):
             return None
 
-        system_targets = {
-            "magnet_x": {"target": self._sweep[self._index]},
-        }
+        system_targets = {"magnet_x": {"target": self._sweep[self._index]}}
         return system_targets, float(self._params["step_wait"])
 
     def measure(self) -> None:
-        """Read IV data, snapshot station state, save to HDF5.
+        """Take a DC reading, snapshot station state, save to HDF5.
 
-        Reads from ``keithley_delta_mode.read_datapoint()`` (must have been
-        configured via ``initiate()``). Also reads the current field from
-        ``magnet_x.get_field()`` and saves it as the sweep column.
+        Raises:
+            RuntimeError: If called before ``initiate()``.
         """
         if self._data_manager is None:
             raise RuntimeError("measure() called before initiate()")
 
-        measured_data: dict = self._station.keithley_delta_mode.read_datapoint()
+        n = int(self._params["readings_per_point"])
+        measured_data: dict = self._station.dc_measurement.take_reading(n_points=n)
         measured_data["field_T"] = self._station.magnet_x.get_field()
         self._save_datapoint(measured_data)
 
         logger.debug(
-            "FieldSweepIV.measure(): index=%d, field=%.4f T",
+            "FieldSweepDC.measure(): index=%d, field=%.4f T",
             self._index,
             measured_data["field_T"],
         )
 
     def standby(self) -> tuple[dict, dict, float]:
-        """Close data file and park magnet at 0 T.
+        """Close data file, park magnet at 0 T, disarm dc_measurement.
 
         Returns:
             ``(system_targets, measurement_commands, 0.0)``
@@ -232,10 +231,6 @@ class FieldSweepIV(BaseProcedure):
             self._data_manager.close()
             self._data_manager = None
 
-        system_targets = {
-            "magnet_x": {"target": 0.0},
-        }
-        measurement_commands = {
-            "keithley_delta_mode": {"standby": {}},
-        }
+        system_targets = {"magnet_x": {"target": 0.0}}
+        measurement_commands = {"dc_measurement": {"standby": {}}}
         return system_targets, measurement_commands, 0.0

@@ -284,13 +284,9 @@ def test_add_to_queue_appends_item(procedure_win, qtbot):
 
 
 def test_measurement_ready_updates_plot(procedure_win, orchestrator):
-    """measurement_ready signal appends data to the live plot."""
-    procedure_win._x_key = "field_T"
-    procedure_win._y_axis_selector.addItem("voltage_V")
-    procedure_win._y_axis_selector.setCurrentText("voltage_V")
-
+    """measurement_ready signal appends the datapoint to _datapoints."""
     datapoint = {"field_T": 0.5, "voltage_V": [1.23e-6] * 10}
     orchestrator.measurement_ready.emit(datapoint)
 
-    assert len(procedure_win._plot_x) == 1
-    assert abs(procedure_win._plot_x[0] - 0.5) < 1e-9
+    assert len(procedure_win._datapoints) == 1
+    assert abs(procedure_win._datapoints[0]["field_T"] - 0.5) < 1e-9

@@ -1,7 +1,7 @@
 # CryoSoft — Implementation Status
 
 > **This is a live document.** The agent reads it before every session and updates it after every task.
-> Last updated: 2026-04-18 (MonitorWindow scrollability + connection check + log filtering)
+> Last updated: 2026-04-19 (live-plot axis redesign: dynamic X/Y selectors, full system-state logging, unix_time per datapoint)
 
 ---
 
@@ -22,7 +22,7 @@
 | L2    | Station Config      | Done        | Pass  | Ready for Orchestrator |
 | L3    | Orchestrator        | Done        | Pass  | 9/9 tests pass |
 | L3W   | Monitor / watchdog  | N/A         | N/A   | Merged into L3 (Orchestrator tick + Station.check_safety) in architecture v4.0 |
-| L4    | Procedures          | Done        | Pass  | 19/19 tests pass |
+| L4    | Procedures          | Done        | Pass  | 3 procedures: FieldSweepIV, FieldSweepDC, TemperatureSweepDC. 41/41 tests pass |
 | L5    | Data manager        | Done        | Pass  | 17/17 tests pass |
 | GUI   | Monitor window      | Done        | Pass  | 24/24 tests pass (redesigned 2026-04-17) |
 | GUI   | Procedure window    | Done        | Pass  | Included in test_gui.py (redesigned 2026-04-17) |
@@ -48,6 +48,25 @@
   - Lower section (Other Devices + Log/Sample Info splitter) wrapped in QScrollArea for small-screen access
   - Log and Sample Info shown side-by-side in a QSplitter (50/50) in the scrollable lower section
   - InstrumentPanel._submit_control: required fields now validated before submission; empty required params show a warning dialog instead of passing None to the VI
+- [2026-04-18] L1: DCMeasurementVI (`virtual_instruments/measurement_dc.py`). DC resistance measurement using 6221 + 2182A. `initiate(current_A, compliance_A, voltmeter_range_V)` arms both instruments; `take_reading(n_points)` collects N voltage samples. 14/14 tests pass (`tests/test_measurement_dc_vi.py`). Added `set_compliance()`/`get_compliance()` to `sim_keithley_6221.py`. Total suite: 159/159.
+- [2026-04-18] VI rename: `iv_measurement` → `keithley_delta_mode` in `devices.yaml`, `field_sweep_iv.py`, `test_l2_station.py`, `test_l4_procedure.py`, `test_l5_data_manager.py`, `monitor_window.py`. Added `dc_measurement` (DCMeasurementVI) to `devices.yaml`.
+- [2026-04-18] L1: `ITC503TemperatureVI.set_ramp_rate(rate_K_per_min)` added as `@control` — appears in GUI panel and can be called per-sweep by procedures. `start_ramp(target, rate=None)` now accepts an optional rate so callers can override `_default_ramp_rate` without mutating it.
+- [2026-04-18] L2: `Station.process_system_targets` now reads optional `rate` key from target dict and forwards it to `vi.start_ramp(rate=...)`. Backwards-compatible: existing calls without a rate key are unchanged.
+- [2026-04-18] L4: `FieldSweepDC` (`procedures/field_sweep_dc.py`) — field sweep using `dc_measurement` VI. Parameters: field_start, field_end, field_steps, temperature, current_A, compliance_A, voltmeter_range_V, readings_per_point, init_wait, step_wait. Full Orchestrator loop tested.
+- [2026-04-18] L4: `TemperatureSweepDC` (`procedures/temperature_sweep_dc.py`) — temperature sweep using `dc_measurement` VI. Parameters: temp_start, temp_end, n_points, ramp_rate_K_per_min, current_A, compliance_A, voltmeter_range_V, readings_per_point, point_wait. Ramp rate passed per-step via system_targets so it takes effect without editing YAML. Full Orchestrator loop tested.
+- [2026-04-18] 22 new tests in `tests/test_new_procedures.py` covering both new procedures, ramp-rate forwarding, and set_ramp_rate control. Total suite: 181/181.
+- [2026-04-19] Orchestrator: procedure preempts a manual ramp. run_procedure() now recognises RAMPING+procedure=None as a preemptable state: it cancels all system VI ramp generators (_ramp_gen=None, _ramp_exhausted=True) and starts the procedure immediately instead of queuing it. Any other busy state still queues. 9/9 orchestrator tests pass.
+- [2026-04-19] Orchestrator: manual ramps now enter RAMPING state. When GUI actions (set_temperature, set_field, etc.) call start_ramp(), the orchestrator detects an active ramp via check_ramps() after draining the queue and transitions to RAMPING. In RAMPING with procedure=None, advance_ramp() runs each tick; orchestrator returns to IDLE when all ramps are done (no wait, no measuring). Previously set_temperature/set_field were fire-and-forget: advance_ramp() was never called, so the generator froze after the first step.
+- [2026-04-19] Orchestrator: GUI actions no longer blocked during a manual ramp (RAMPING + procedure=None). submit_vi_action() and the GUI action queue now allow actions in this state, so multiple instruments can be commanded while one is already ramping (e.g. ramp VTI while sample temperature is still settling). Procedure ramps continue to block GUI actions.
+- [2026-04-19] @control decorator: fixed type resolution for `from __future__ import annotations`. Previously param.annotation returned the string 'float' instead of the float type, causing InstrumentPanel to log "could not coerce '10' to float" and pass the raw string to the VI. Fix: use typing.get_type_hints(func) which resolves lazy string annotations to actual types before building _control_params. All existing tests pass (181/181).
+- [2026-04-19] Live-plot axis redesign + full system-state logging per datapoint. 181/181 tests pass:
+  - `Station.cached_state` property: returns `_last_known_state` without any hardware poll (safe to call from procedure `measure()`).
+  - `Station.last_state_flat()`: flattens cached system VI state to `{vi_name_field: float}`, skipping strings (e.g. ramp_status) and measurement VIs.
+  - `BaseProcedure._build_data_config(base_config)`: merges `unix_time` + all system state keys into HDF5 schema — one call in `initiate()` replaces the manual data_config dict.
+  - `BaseProcedure._save_datapoint(measured_data)`: merges `unix_time` + `station.last_state_flat()` + procedure data, calls DataManager — no extra hardware poll. Replaces manual `get_state()` + `save_datapoint(...)` calls in every procedure's `measure()`.
+  - `BaseProcedure.get_data_keys()`: returns all plottable keys for GUI axis selectors (`unix_time` + sweep_data_keys + system_keys + measurement_data_keys).
+  - Each procedure gains class attrs: `sweep_data_keys`, `measurement_data_keys`, `default_x_key`.
+  - `ProcedureWindow`: each plot now has its own X and Y selector (4 selectors total), all populated from `proc.get_data_keys()` at run start. Datapoints stored in `_datapoints` list so changing any axis mid-run replots the full history. Axis labels auto-update on selector change.
 - [2026-04-18] GUI improvements — whole-window scrollability, connection check for measurement VIs, log filtering. All 145 tests pass:
   - MonitorWindow: entire content wrapped in outer QScrollArea (central widget); redundant inner lower_scroll removed. Window is now vertically scrollable on small screens while the splitter still works for large screens.
   - Other Devices panel: removed misleading class-name type label ("Delta Mode Measurement" was derived from class name, not live data). Replaced with a coloured dot (●) + "Unknown/Connected/Not reachable" label and a "Check" button.
@@ -283,7 +302,9 @@ cryosoft/
     vi_registry.yaml                   — NOT CREATED
     README.md                          — NOT CREATED
   procedures/
-    field_sweep_iv.py                  — NOT CREATED
+    field_sweep_iv.py                  — DONE (delta-mode field sweep; uses keithley_delta_mode VI)
+    field_sweep_dc.py                  — DONE (DC field sweep; uses dc_measurement VI)
+    temperature_sweep_dc.py            — DONE (DC temperature sweep; uses dc_measurement VI; ramp rate per-step)
     README.md                          — NOT CREATED
   configs/
     example_cryostat/
@@ -335,6 +356,13 @@ tests/
     test_level_vi.py                   — NOT CREATED
   test_procedures/
     test_field_sweep_iv.py             — NOT CREATED
+  test_l1_virtual_instruments.py       — DONE
+  test_l2_station.py                   — DONE (updated: keithley_delta_mode + dc_measurement in expected VI list)
+  test_l3_orchestrator.py              — DONE
+  test_l4_procedure.py                 — DONE (updated: iv_measurement → keithley_delta_mode)
+  test_l5_data_manager.py              — DONE (updated: iv_measurement → keithley_delta_mode)
+  test_measurement_dc_vi.py            — DONE (14 tests for DCMeasurementVI)
+  test_new_procedures.py               — DONE (22 tests: FieldSweepDC, TemperatureSweepDC, ramp-rate control)
   test_gui.py                          — DONE (145 tests total, all pass)
   fixtures/
     example_devices.yaml               — NOT CREATED
