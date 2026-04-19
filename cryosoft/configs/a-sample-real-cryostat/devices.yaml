@@ -1,0 +1,95 @@
+# Configuration for the Kläui Lab real cryostat.
+# Instruments: Oxford Mercury iPS-M (magnet), Oxford ITC 503 (VTI temperature),
+# Lakeshore 335 (sample temperature), Oxford ILM 200 (cryogen levels),
+# Keithley 6221 + 2182A (delta-mode resistance measurement).
+#
+# Physical calibration from field_voltage_logic.py:
+#   TESLA_TO_AMPERE = 7.954  A/T
+#   Switch heater warmup: 60 s  →  60 ticks at 1000 ms/tick
+#
+# ADDRESSES — update any placeholder before connecting to hardware.
+# Confirmed from old GUI: K6221 GPIB0::19, Mercury ASRL10, ILM ASRL11, ITC GPIB0::24.
+# Lakeshore 335 address is a placeholder — check rear-panel GPIB switch.
+
+# Default data directory (outside CryoSoft folder)
+data_directory: "C:/CryoData"
+
+real_drivers:
+  mercury_ips:
+    class: cryosoft.drivers.oxford_mercury_ips.OxfordMercuryiPS
+    address: "ASRL10::INSTR"
+  itc_vti:
+    class: cryosoft.drivers.oxford_itc503.OxfordITC503
+    address: "GPIB0::24::INSTR"
+  lakeshore_sample:
+    class: cryosoft.drivers.lakeshore_335.Lakeshore335
+    address: "GPIB0::12::INSTR"   # PLACEHOLDER — confirm on hardware
+  ilm:
+    class: cryosoft.drivers.oxford_ilm200.OxfordILM200
+    address: "ASRL11::INSTR"
+  keithley_6221:
+    class: cryosoft.drivers.keithley_6221.Keithley6221
+    address: "GPIB0::19::INSTR"
+  keithley_2182a:
+    class: cryosoft.drivers.keithley_2182a.Keithley2182A
+    address: "GPIB0::7::INSTR"    # PLACEHOLDER — confirm on hardware
+
+virtual_instruments:
+  magnet:
+    class: cryosoft.virtual_instruments.magnet.superconducting_magnet_persistent.SuperconductingMagnetPersistentVI
+    drivers: {main: mercury_ips}
+    vi_type: system
+    init_params:
+      amperes_per_tesla: 7.954
+      max_current: 90.0
+      min_current: -90.0
+      default_ramp_rate: 1.2         # most conservative rate (A/min) as safe default
+      # Ramp segments extracted from field_voltage_logic._get_rate_for_segment():
+      #   0–44 A → 12 A/min
+      #   44–76 A → 6 A/min
+      #   76–84 A → 2.4 A/min
+      #   84–90 A → 1.2 A/min
+      ramp_segments:
+        - {max_current_A: 44.0,  rate_A_per_min: 12.0}
+        - {max_current_A: 76.0,  rate_A_per_min: 6.0}
+        - {max_current_A: 84.0,  rate_A_per_min: 2.4}
+        - {max_current_A: 90.0,  rate_A_per_min: 1.2}
+      # 60 s warmup / cooldown at 1000 ms tick = 60 ticks each
+      switch_heater_warmup_ticks: 60
+      switch_heater_cooldown_ticks: 60
+
+  temperature_vti:
+    class: cryosoft.virtual_instruments.temperature.vti_temperature_controller.VTITemperatureControllerVI
+    drivers: {main: itc_vti}
+    vi_type: system
+    init_params:
+      default_ramp_rate: 2.0
+      tolerance: 0.5
+
+  temperature_sample:
+    class: cryosoft.virtual_instruments.temperature.sample_temperature_controller.SampleTemperatureControllerVI
+    drivers: {main: lakeshore_sample}
+    vi_type: system
+    init_params:
+      default_ramp_rate: 1.0
+      tolerance: 0.3
+
+  level_meter:
+    class: cryosoft.virtual_instruments.level.cryogen_level_meter.CryogenLevelMeterVI
+    drivers: {main: ilm}
+    vi_type: level
+    init_params:
+      helium_low_threshold: 20.0
+      buffer_size: 5
+
+  keithley_delta_mode:
+    class: cryosoft.virtual_instruments.measurement.measurement_delta_mode.DeltaModeMeasurementVI
+    drivers: {source: keithley_6221, meter: keithley_2182a}
+    vi_type: measurement
+    init_params: {}
+
+  dc_measurement:
+    class: cryosoft.virtual_instruments.measurement.dc_separate_measurement.DCSeparateMeasurementVI
+    drivers: {source: keithley_6221, meter: keithley_2182a}
+    vi_type: measurement
+    init_params: {}

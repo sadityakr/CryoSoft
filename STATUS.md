@@ -1,7 +1,7 @@
 # CryoSoft — Implementation Status
 
 > **This is a live document.** Read it before every session; update it after every task.
-> Last updated: 2026-04-19 (VI refactor complete — behavior-based names, subpackages, 3-column procedure form)
+> Last updated: 2026-04-19 (Phase 7 real drivers complete — all 6 real drivers, split delta lifecycle, a-sample-real-cryostat config)
 
 ---
 
@@ -123,31 +123,45 @@ All VIs are behavior-named and live in subpackages of `virtual_instruments/`:
 
 ## In progress
 
-_Nothing. All simulation-stack work is complete._
+_Nothing._
+
+---
+
+## Done (continued)
+
+### Phase 7: Real Driver Integration (2026-04-19)
+
+All real drivers written. Delta-mode VI updated to use real Keithley ARM/INIT/poll sequence.
+
+**Real drivers (`drivers/`):**
+- `keithley_6221.py` — PyVISA GPIB. Full delta-mode SCPI ported from `simple_delta_tk_logic.py`. Split lifecycle: `configure_and_start_delta()` (ARM + INIT), `acquire_delta_readings()` (polls `:CALC1:DATA:FRES?`), `stop_delta_mode()`. Legacy `configure_delta_mode()` / `trigger_delta_mode()` / `get_delta_readings()` preserved for test compatibility. 2182A configured via 6221 serial relay (`:SYST:COMM:SER:SEND`).
+- `keithley_2182a.py` — PyVISA GPIB. `get_voltage()` via `READ?`. `set_range()` / `get_range()` via `:SENS:VOLT:CHAN1:RANG`.
+- `oxford_mercury_ips.py` — PyVISA serial (ASRL10). SCPI `READ/SET:DEV:GRPZ:PSU:...`. `set_current_setpoint()` auto-issues `ACTN:RTOS` to match sim auto-ramp behaviour. Status mapping: RTOS/RTOZ → `"RAMPING"`, HOLD/CLMP → `"HOLD"`. Switch heater via `SIG:SWHN:ON/OFF`. Persistent coil current via `SIG:PCUR`.
+- `oxford_ilm200.py` — PyVISA serial (ASRL11), pure PyVISA (no QCoDeS). ISOBUS protocol: commands prefixed `@1`, 70 ms settle, 2 stop bits. `R1`/`R2` → He/N2 levels (÷10 for %). `X` status byte → refresh mode 0/1/2.
+- `oxford_itc503.py` — pymeasure wrapper (`ITC503`). Sets `control_mode="RU"` and `heater_gas_mode="AUTO"` on init. Needle valve maps to pymeasure `gas_flow` property (clamped 0–99.9%).
+- `lakeshore_335.py` — PyVISA GPIB. Sample temperature controller. `KRDG? A` (temp K), `SETP 1,<val>` / `SETP? 1` (setpoint), `HTR? 1` (heater %). Matches `SampleTemperatureControllerVI` interface.
+
+**Sim driver update:**
+- `sim_keithley_6221.py` — added `configure_and_start_delta()`, `acquire_delta_readings()`, `stop_delta_mode()` so `DeltaModeMeasurementVI` works identically against sim and real drivers.
+
+**VI update:**
+- `measurement_delta_mode.py` — `configure()` now calls `source.configure_and_start_delta()` (arms the engine immediately). `_read_delta_mode()` calls `source.acquire_delta_readings()` instead of the old manual polarity loop. `standby()` calls `source.stop_delta_mode()`. New optional `configure()` params: `delay`, `compliance`, `range_2182a`.
+
+**Config:**
+- `configs/a-sample-real-cryostat/devices.yaml` — real driver class paths, confirmed VISA addresses (K6221 `GPIB0::19`, Mercury `ASRL10`, ILM `ASRL11`, ITC503 `GPIB0::24`), `amperes_per_tesla: 7.954`, 4 ramp segments from `field_voltage_logic.py`, `switch_heater_warmup/cooldown_ticks: 60` (= 60 s at 1000 ms/tick). Two PLACEHOLDER addresses need hardware confirmation: Lakeshore 335 (`GPIB0::12`) and Keithley 2182A (`GPIB0::7`).
+- `configs/a-sample-real-cryostat/monitor.yaml` — `tick_interval_ms: 1000` (1 s per tick, required for warmup tick counts to match real wall-clock time).
 
 ---
 
 ## Next up
 
-### Phase 7: Real Driver Integration
+### Phase 7 remaining
 
-These are ordered by priority.
+1. **Driver test harness** (`tests/driver_test_harness.py`) — validates L0 contract against each real driver: single-string init, all expected methods present, correct return types, `CryoSoftCommunicationError` on disconnect. Run before connecting VIs to hardware.
 
-1. **Real IPS120 driver** (`drivers/oxford_ips120.py`) — GPIB/RS232 Oxford IPS 120-10. Validate against driver test harness. Swap `sim_oxford_ips120` → `oxford_ips120` in `vector_magnet_cryostat/devices.yaml`.
+2. **Confirm placeholder VISA addresses** — Lakeshore 335 GPIB address and Keithley 2182A GPIB address in `a-sample-real-cryostat/devices.yaml`.
 
-2. **Real ITC503 driver** (`drivers/oxford_itc503.py`) — GPIB Oxford ITC 503. Same contract as sim. Needle valve via auxiliary analog output (verify channel mapping on hardware).
-
-3. **Real ILM200 driver** (`drivers/oxford_ilm200.py`) — RS232 Oxford ILM 200/210. Verify 3-mode refresh rate command syntax.
-
-4. **Real Keithley 6221 driver** (`drivers/keithley_6221.py`) — GPIB. Delta-mode arming sequence.
-
-5. **Real Keithley 2182A driver** (`drivers/keithley_2182a.py`) — GPIB. Triggered voltage acquisition.
-
-6. **Driver test harness** (`tests/driver_test_harness.py`) — validates L0 contract: single-string init, all expected methods present and return correct types, communication-error recovery. Run against each real driver before connecting to the VI layer.
-
-7. **Production YAML config** (`configs/vector_magnet_cryostat/devices.yaml`) — real driver class paths, real VISA addresses, calibrated `amperes_per_tesla`, production safety limits.
-
-8. **Full system test** — run `FieldSweepIV` with real hardware, verify HDF5 output matches expected structure.
+3. **Full system test** — run `FieldSweepIV` with real hardware, verify HDF5 output matches expected structure.
 
 ---
 
@@ -165,6 +179,7 @@ _No current blockers._
 - [2026-04-19] **Procedure parameters split into 3 group dicts.** `sweep_parameters`, `system_parameters`, `measurement_parameters` are defined in concrete subclasses. `BaseProcedure.__init_subclass__` auto-builds the `parameters` union so all existing code (`cls.parameters.items()`, `FieldSweepIV.parameters`) continues to work without change. Rationale: flat form mixed sweep axis, system state, and measurement config — conceptually distinct, and the separation enables a 3-column GUI layout.
 - [2026-04-19] **3-column GUI parameter form.** `ProcedureWindow._build_param_form()` renders 3 `QGroupBox` panels (Sweep | System | Measurement) in a `QHBoxLayout`. Each panel uses a `QFormLayout`. This prepares for a future "custom sweep array" feature: the Sweep panel can be replaced by a file-picker widget without touching the other two.
 - [2026-04-19] **Persistent-mode ramp uses tick-count generators, never `time.sleep()`.** Switch heater warm-up and cool-down waits are counted in Orchestrator ticks. This keeps the ramp cooperative with the event loop and avoids freezing the Qt GUI. `switch_heater_warmup_ticks` and `switch_heater_cooldown_ticks` are `init_params` in YAML.
+- [2026-04-19] **Keithley delta mode uses ARM/INIT/poll, not a manual polarity loop.** `DeltaModeMeasurementVI.configure()` calls `source.configure_and_start_delta()` which arms the 6221 engine (`:SOUR:DELT:ARM` + `:INIT:IMM`). `read_datapoint()` calls `source.acquire_delta_readings()` which polls `:CALC1:DATA:FRES?`. The old manual polarity loop (`set_current(+I)` / `get_voltage()` / `set_current(-I)`) is removed; it did not match real hardware behaviour and would not have produced correct delta-mode readings on the physical instrument. `sim_keithley_6221` exposes the same three split-lifecycle methods so tests continue to work without hardware.
 
 ---
 
@@ -189,14 +204,15 @@ cryosoft/
     sim_oxford_ips120.py               — DONE (+ switch heater + persistent mode)
     sim_oxford_itc503.py               — DONE (+ needle valve)
     sim_oxford_ilm200.py               — DONE (+ 3-mode refresh)
-    sim_keithley_6221.py               — DONE (+ set/get_compliance, get_idn)
+    sim_keithley_6221.py               — DONE (+ set/get_compliance, get_idn, split delta lifecycle stubs)
     sim_keithley_2182a.py              — DONE (+ get_idn)
     sim_keithley_2400.py               — DONE (new SMU sim driver)
-    oxford_ips120.py                   — NOT CREATED (Phase 7)
-    oxford_itc503.py                   — NOT CREATED (Phase 7)
-    oxford_ilm200.py                   — NOT CREATED (Phase 7)
-    keithley_6221.py                   — NOT CREATED (Phase 7)
-    keithley_2182a.py                  — NOT CREATED (Phase 7)
+    keithley_6221.py                   — DONE (real; split delta lifecycle from simple_delta_tk_logic.py)
+    keithley_2182a.py                  — DONE (real; READ? voltage, range config)
+    oxford_mercury_ips.py              — DONE (real; GRPZ SCPI, auto-RTOS, switch heater)
+    oxford_ilm200.py                   — DONE (real; pure PyVISA ISOBUS, 2 stop bits)
+    oxford_itc503.py                   — DONE (real; pymeasure ITC503 wrapper)
+    lakeshore_335.py                   — DONE (real; KRDG/SETP/HTR SCPI)
   virtual_instruments/
     __init__.py
     base.py                            — DONE (all base classes + DCMeasurementBase)
@@ -215,7 +231,7 @@ cryosoft/
       __init__.py
       dc_separate_measurement.py       — DONE (6221 + 2182A, DC mode)
       dc_single_instrument.py          — DONE (K2400 SMU)
-      measurement_delta_mode.py        — DONE (6221 + 2182A, delta mode)
+      measurement_delta_mode.py        — DONE (6221 + 2182A, delta mode; configure() arms engine; acquire_delta_readings() polls)
       README.md                        — DONE
     level/
       __init__.py
@@ -231,7 +247,9 @@ cryosoft/
     sim_cryostat/
       devices.yaml                     — DONE (subpackage class paths)
       monitor.yaml                     — DONE
-    vector_magnet_cryostat/            — NOT CREATED (Phase 7)
+    a-sample-real-cryostat/
+      devices.yaml                     — DONE (real drivers; 7.954 A/T; 4 ramp segments; 60-tick heater warmup)
+      monitor.yaml                     — DONE (1000 ms/tick)
   gui/
     __init__.py
     theme.py                           — DONE (Material Dark; button classes)

@@ -14,7 +14,7 @@
 #   SimKeithley2182A meter if set, or returns zeros with noise otherwise.
 # output: |
 #   Returns bool source state, float current, and list[float] delta readings.
-# last_updated: 2026-04-06
+# last_updated: 2026-04-19
 # ---
 
 """Simulated Keithley 6221 AC/DC Current Source driver."""
@@ -156,6 +156,67 @@ class SimKeithley6221:
         """Return simulated *IDN? response string."""
         self._check_error()
         return "KEITHLEY,6221,SIM,1.0"
+
+    # ------------------------------------------------------------------
+    # Split delta lifecycle  (mirrors Keithley6221 real driver)
+    # ------------------------------------------------------------------
+
+    def configure_and_start_delta(
+        self,
+        high_current: float,
+        n_readings: int,
+        delay: float,
+        compliance: float = 1.0,
+        range_2182a: float = 0.01,
+    ) -> None:
+        """Configure delta-mode and 'arm' the simulated engine.
+
+        Stores all parameters; on the sim there is no hardware to arm.
+        Call acquire_delta_readings() to collect samples.
+
+        Args:
+            high_current: Peak delta current magnitude (A).
+            n_readings: Number of readings per acquisition call.
+            delay: Delay between source transitions (s).
+            compliance: Voltage compliance limit (V) — stored but unused in sim.
+            range_2182a: 2182A range (V) — stored but unused in sim.
+        """
+        self._delta_high_current = float(high_current)
+        self._delta_n_readings = int(n_readings)
+        self._delta_delay = float(delay)
+        self._delta_readings = []
+
+    def acquire_delta_readings(
+        self, n_readings: int, period: float = 0.01
+    ) -> list[float]:
+        """Collect *n_readings* simulated delta-voltage samples.
+
+        Generates readings using the paired meter or noise, matching the
+        behaviour of trigger_delta_mode() but as a split call.
+
+        Args:
+            n_readings: Number of readings to generate.
+            period: Ignored in simulation.
+
+        Returns:
+            List of float voltage readings.
+        """
+        import random
+
+        readings: list[float] = []
+        for _ in range(n_readings):
+            if self._paired_meter is not None:
+                readings.append(self._paired_meter.get_voltage())  # type: ignore[attr-defined]
+            else:
+                readings.append(random.gauss(1.5e-6, 1e-8))
+        self._delta_readings = readings
+        return list(self._delta_readings)
+
+    def stop_delta_mode(self) -> None:
+        """Abort the simulated delta engine and reset source to zero."""
+        self._current = 0.0
+        self._source_enabled = False
+        self._delta_readings = []
 
     # ------------------------------------------------------------------
     # Internal helpers
