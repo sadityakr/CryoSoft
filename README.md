@@ -4,6 +4,101 @@ Instrument-agnostic cryostat operating system — Kläui Lab, JGU Mainz.
 
 ---
 
+## Contents
+
+- [Motivation](#motivation)
+- [Architecture](#architecture)
+- [Install](#install)
+- [Run](#run)
+- [Config: connect a real cryostat](#config-connect-a-real-cryostat)
+- [Add a new driver](#add-a-new-driver)
+- [Add a new procedure](#add-a-new-procedure)
+- [Current drivers](#current-drivers)
+
+---
+
+## Motivation
+
+A typical cryostat measurement setup is not a fixed machine — it is a composition of interchangeable instruments. The magnet power supply might be an Oxford IPS 120-10 in one setup and an Oxford Mercury iPS in another. The temperature controller might be an Oxford ITC 503 or a Lakeshore 335. The measurement chain for transport experiments might use a Keithley 6221 + 2182A in delta mode, or a Keithley 2400 SMU in a different configuration. Each time a component is swapped, or the setup is moved to a different cryostat, conventional lab software requires a significant rewrite.
+
+CryoSoft was written to eliminate that rewrite. The core idea is borrowed from the [QCoDeS](https://qcodes.github.io/Qcodes/) station concept: instruments are registered in a central **Station** through a YAML configuration file, and every measurement procedure talks to the Station — never to a specific instrument directly. Swapping a magnet PSU means editing one line in a YAML file. No Python changes, no refactoring.
+
+Beyond instrument abstraction, CryoSoft addresses a second problem common in cryogenic labs: the need for continuous, unattended monitoring. Running a magnet sweep or a temperature ramp overnight requires confidence that the system will respond safely to unexpected events — a sudden pressure spike in the helium line, an anomalous heater output, or a cryogen level drop. CryoSoft's **Orchestrator** is a cooperative state machine that runs a monitoring tick on every cycle alongside any active procedure. If a safety threshold is breached, the system transitions to standby autonomously, without requiring a human to be present.
+
+Every data point saved by CryoSoft is accompanied by a full snapshot of the system state at the moment of acquisition: sample temperature, VTI temperature, heater powers, magnetic field, and cryogen level. This metadata travels with the data in HDF5 format, making it possible to retrospectively correlate measurement artifacts with transient cryogenic events — a pressure fluctuation, a helium refill, a heater glitch — and remove or flag them during analysis.
+
+The goal of CryoSoft is to standardize the measurement workflow across any instrument configuration: write a procedure once, run it on any compatible setup.
+
+---
+
+## Architecture
+
+CryoSoft is organized in six strict layers. Each layer only knows about the layer immediately below it. This constraint is what makes instrument swapping safe — a change at L0 cannot propagate upward unless the VI interface is also changed.
+
+```
+  ┌──────────────────────────────────────────────────────────────────┐
+  │  GUI  (PyQt6)                                                    │
+  │  Auto-generated panels from @monitored / @control decorators.   │
+  │  Displays live state; dispatches user commands to Orchestrator.  │
+  └───────────────────────────┬──────────────────────────────────────┘
+                              │
+  ┌───────────────────────────▼──────────────────────────────────────┐
+  │  Orchestrator  (L3)                                              │
+  │  QTimer-driven cooperative state machine. On every tick:        │
+  │    1. Poll all VIs → update system state snapshot               │
+  │    2. Check safety limits → go to standby if breached           │
+  │    3. Advance the active procedure by one step                  │
+  │    4. Write data point + full metadata to Data Manager          │
+  └────────────┬──────────────────────────────┬───────────────────── ┘
+               │                              │
+  ┌────────────▼────────────┐   ┌─────────────▼──────────────────────┐
+  │  Procedures  (L4)       │   │  Data Manager  (L5)                │
+  │  Declarative sweep      │   │  HDF5 writer. Each data point      │
+  │  classes. Define sweep  │   │  carries a full system-state       │
+  │  targets and measure    │   │  snapshot as metadata.             │
+  │  commands per step.     │   └────────────────────────────────────┘
+  │  Instrument-agnostic.   │
+  └────────────┬────────────┘
+               │
+  ┌────────────▼──────────────────────────────────────────────────────┐
+  │  Station + YAML Config  (L2)                                      │
+  │  Reads devices.yaml. Instantiates drivers and wraps them in VIs.  │
+  │  The Station is the only place that knows which instruments are   │
+  │  physically present.                                              │
+  └────────────┬──────────────────────────────────────────────────────┘
+               │
+  ┌────────────▼──────────────────────────────────────────────────────┐
+  │  Virtual Instruments  (L1)                                        │
+  │  Typed wrappers with behavior-based names:                        │
+  │    SuperconductingMagnetVI   ← any magnet PSU                    │
+  │    SampleTemperatureVI       ← any temperature controller        │
+  │    DeltaModeMeasurementVI    ← any delta-mode source+meter pair  │
+  │    CryogenLevelMeterVI       ← any level meter                   │
+  │  Decorated with @monitored / @control for auto GUI generation.   │
+  │  Swap the underlying driver via YAML — the VI interface is fixed. │
+  └────┬──────────────┬────────────────┬─────────────────────────────┘
+       │              │                │
+  ┌────▼─────┐  ┌─────▼──────┐  ┌─────▼────────────┐
+  │ Oxford   │  │ Oxford     │  │ Keithley 6221    │
+  │ Mercury  │  │ ITC 503 /  │  │ + 2182A  /  2400 │
+  │ iPS /    │  │ Lakeshore  │  │ (swap via YAML)  │
+  │ IPS 120  │  │ 335        │  └──────────────────┘
+  │ (swap    │  │ (swap      │
+  │ via YAML)│  │ via YAML)  │
+  └──────────┘  └────────────┘
+
+  L0 — Real Drivers: any Python class wrapping PyVISA, PyMeasure, or
+  a custom protocol. A simulated version exists for every real driver.
+```
+
+**Layer boundary rules:**
+- Drivers (L0) never import from VIs or above.
+- VIs (L1) never import from the Orchestrator or above.
+- Procedures (L4) never import drivers — only the Station (L2).
+- The GUI never talks to drivers or VIs directly — only through the Orchestrator.
+
+---
+
 ## Install
 
 ```bash
@@ -119,44 +214,6 @@ class YourInstrument:
 
 ---
 
-## Architecture (reference)
-
-```
-┌─────────────────────────────────────────────────┐
-│  GUI                                            │
-│  PyQt6 windows — auto-generated from decorator │
-│  metadata (@monitored / @control).              │
-├─────────────────────────────────────────────────┤
-│  Procedures (L4)                                │
-│  Declarative sweep classes. Declare system      │
-│  targets and measurement commands per step.     │
-├─────────────────────────────────────────────────┤
-│  Orchestrator (L3)                              │
-│  Cooperative QTimer state machine. Advances     │
-│  ramps, dispatches measurements, safety checks. │
-├─────────────────────────────────────────────────┤
-│  Station + YAML Config (L2)                     │
-│  VI registry built from devices.yaml.           │
-├─────────────────────────────────────────────────┤
-│  Virtual Instruments (L1)                       │
-│  Typed wrappers with @monitored / @control.     │
-│  Behavior-named (SuperconductingMagnetVI, not   │
-│  IPS120VI) — swap hardware via YAML only.       │
-├─────────────────────────────────────────────────┤
-│  Drivers (L0)                                   │
-│  Any Python class: PyVISA, PyMeasure, custom.  │
-│  Simulated versions for every real driver.     │
-└─────────────────────────────────────────────────┘
-```
-
-**Layer boundary rules:**
-- Drivers never import from VIs or above.
-- VIs never import from the Orchestrator or above.
-- Procedures never import drivers — only the Station.
-- The GUI never talks to drivers or VIs directly — only through the Orchestrator.
-
----
-
 ## Current drivers
 
 | File | Instrument |
@@ -168,7 +225,3 @@ class YourInstrument:
 | `oxford_itc503.py` / `sim_oxford_itc503.py` | Oxford ITC 503 temperature controller |
 | `oxford_ilm200.py` / `sim_oxford_ilm200.py` | Oxford ILM 200 cryogen level meter |
 | `lakeshore_335.py` | Lakeshore 335 temperature controller |
-
----
-
-See [STATUS.md](STATUS.md) for the full implementation log.
