@@ -4,14 +4,28 @@
 /*
 /.*
 
-# Always track this file and core project config
+# Always track these files
 !/.gitignore
 !/pyproject.toml
 !/requirements.txt
+!/README.md
+!/LICENSE
 !/STATUS.md
 
 # Tracked folders
 !/cryosoft/
-!/.claude/
 !/data/
 !/tests/
+
+# Exclude compiled Python bytecode
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+
+# Exclude log files (keep directory placeholder)
+cryosoft/logs/*.log
+cryosoft/logs/*.log.*
+
+# Exclude real experiment data; only sample files are tracked
+data/*.h5
+!data/sample_*.h5
