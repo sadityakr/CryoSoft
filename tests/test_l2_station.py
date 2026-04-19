@@ -25,7 +25,7 @@ def test_build_station_success(sim_station: Station):
     assert sim_station is not None
     # Check that expected VIs are registered
     vi_names = sim_station.get_vi_names()
-    expected = ["magnet_x", "magnet_y", "temperature_vti", "temperature_sample", "level_meter", "iv_measurement"]
+    expected = ["magnet_x", "magnet_y", "temperature_vti", "temperature_sample", "level_meter", "keithley_delta_mode", "dc_measurement"]
     for name in expected:
         assert name in vi_names
 
@@ -34,12 +34,12 @@ def test_station_getattr(sim_station: Station):
     """station.magnet_x returns correct VI instance."""
     magnet_x = sim_station.magnet_x
     assert magnet_x.vi_name == "magnet_x"
-    assert magnet_x.__class__.__name__ == "IPS120MagnetVI"
-    
+    assert magnet_x.__class__.__name__ == "SuperconductingMagnetVI"
+
     # Check another one to be sure
     temp_vti = sim_station.temperature_vti
     assert temp_vti.vi_name == "temperature_vti"
-    assert temp_vti.__class__.__name__ == "ITC503TemperatureVI"
+    assert temp_vti.__class__.__name__ == "VTITemperatureControllerVI"
 
 
 def test_get_state_format(sim_station: Station):

@@ -13,7 +13,7 @@
 #   override is available for testing low-helium conditions.
 # output: |
 #   Returns float level percentages (0-100) and int refresh rate via public API.
-# last_updated: 2026-04-06
+# last_updated: 2026-04-19
 # ---
 
 """Simulated Oxford ILM 200 Cryogen Level Meter driver."""
@@ -85,11 +85,14 @@ class SimOxfordILM200:
     def set_refresh_rate(self, mode: int) -> None:
         """Set the refresh rate mode.
 
+        Modes follow the three-mode standard:
+          0 = STANDBY, 1 = SLOW continuous polling, 2 = FAST (used during helium fills).
+
         Args:
-            mode: 0 for slow, 1 for fast.
+            mode: 0, 1, or 2.
         """
-        if mode not in (0, 1):
-            raise ValueError(f"Refresh rate mode must be 0 or 1, got {mode}")
+        if mode not in (0, 1, 2):
+            raise ValueError(f"Refresh rate mode must be 0, 1, or 2, got {mode}")
         self._refresh_rate = mode
 
     # ------------------------------------------------------------------

@@ -76,34 +76,34 @@ def test_communication_error_wrapping(monkeypatch):
 
 # 4. Magnet VI tests
 def test_magnet_vi_ramp_cycle():
-    from cryosoft.virtual_instruments.magnet_ips120 import IPS120MagnetVI
-    
+    from cryosoft.virtual_instruments.magnet.superconducting_magnet import SuperconductingMagnetVI
+
     driver = SimOxfordIPS120("SIM")
-    vi = IPS120MagnetVI({"main": driver}, default_ramp_rate=1200.0, amperes_per_tesla=10.0)
-    
+    vi = SuperconductingMagnetVI({"main": driver}, default_ramp_rate=1200.0, amperes_per_tesla=10.0)
+
     vi.start_ramp(1.0)
     assert vi.ramp_status() == "RAMPING"
-    
+
     for _ in range(50):
         vi.advance_ramp()
         driver._last_update = time.time() - 0.5
         driver._update_simulation()
-    
+
     assert vi.ramp_status() in ("TARGET_REACHED", "IDLE")
     assert vi.get_field() == pytest.approx(1.0, abs=0.1)
 
 def test_magnet_vi_ramp_segments():
-    from cryosoft.virtual_instruments.magnet_ips120 import IPS120MagnetVI
-    
+    from cryosoft.virtual_instruments.magnet.superconducting_magnet import SuperconductingMagnetVI
+
     driver = SimOxfordIPS120("SIM")
     segments = [
         {"max_current_A": 20.0, "rate_A_per_min": 600.0},
         {"max_current_A": float('inf'), "rate_A_per_min": 100.0}
     ]
-    vi = IPS120MagnetVI({"main": driver}, default_ramp_rate=5.0, amperes_per_tesla=10.0, ramp_segments=segments)
-    
+    vi = SuperconductingMagnetVI({"main": driver}, default_ramp_rate=5.0, amperes_per_tesla=10.0, ramp_segments=segments)
+
     vi.start_ramp(3.0)
-    
+
     rates_used = set()
     for _ in range(100):
         vi.advance_ramp()
@@ -118,41 +118,41 @@ def test_magnet_vi_ramp_segments():
     assert vi.get_field() == pytest.approx(3.0, abs=0.1)
 
 def test_magnet_vi_safety_clamping():
-    from cryosoft.virtual_instruments.magnet_ips120 import IPS120MagnetVI
-    
+    from cryosoft.virtual_instruments.magnet.superconducting_magnet import SuperconductingMagnetVI
+
     driver = SimOxfordIPS120("SIM")
-    vi = IPS120MagnetVI({"main": driver}, max_current=50.0, min_current=-50.0)
-    
+    vi = SuperconductingMagnetVI({"main": driver}, max_current=50.0, min_current=-50.0)
+
     vi.start_ramp(6.0)
     for _ in range(10):
         vi.advance_ramp()
-    
+
     assert driver.get_current_setpoint() <= 50.0
 
 # 10. Temperature VI tests
 def test_temperature_vi_ramp():
-    from cryosoft.virtual_instruments.temperature_itc503 import ITC503TemperatureVI
+    from cryosoft.virtual_instruments.temperature.sample_temperature_controller import SampleTemperatureControllerVI
     driver = SimOxfordITC503("SIM")
-    
-    vi = ITC503TemperatureVI({"main": driver}, default_ramp_rate=6000.0, tolerance=2.0)
+
+    vi = SampleTemperatureControllerVI({"main": driver}, default_ramp_rate=6000.0, tolerance=2.0)
     vi.start_ramp(200.0)
-    
+
     for _ in range(20):
         time.sleep(0.01)
         vi.advance_ramp()
         driver._last_update = time.time() - 1.0
         driver._update_simulation()
-        
+
     assert vi.ramp_status() in ("RAMPING", "TARGET_REACHED")
 
 # 13. Level meter tests
 def test_level_vi_buffer():
-    from cryosoft.virtual_instruments.level_ilm200 import ILM200LevelVI
+    from cryosoft.virtual_instruments.level.cryogen_level_meter import CryogenLevelMeterVI
     driver = SimOxfordILM200("SIM")
-    vi = ILM200LevelVI({"main": driver}, low_threshold=20.0, buffer_size=3)
-    
+    vi = CryogenLevelMeterVI({"main": driver}, helium_low_threshold=20.0, buffer_size=3)
+
     assert vi.helium_low() is False
-    
+
     driver._force_helium_level = 15.0
     vi.helium_level()
     assert vi.helium_low() is False
@@ -168,7 +168,7 @@ def test_level_vi_buffer():
 
 # 15. Delta-mode tests
 def test_delta_mode_vi():
-    from cryosoft.virtual_instruments.measurement_delta_mode import DeltaModeMeasurementVI
+    from cryosoft.virtual_instruments.measurement.measurement_delta_mode import DeltaModeMeasurementVI
     
     source = SimKeithley6221("SIM")
     meter = SimKeithley2182A("SIM")

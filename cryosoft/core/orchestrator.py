@@ -97,10 +97,22 @@ class Orchestrator(QObject):
     # ------------------------------------------------------------------
 
     def run_procedure(self, procedure: Any) -> None:
-        """Start a procedure if IDLE, else queue it."""
-        if self._state != OrchestratorState.IDLE:
+        """Start a procedure immediately if IDLE or during a manual ramp; else queue it."""
+        manual_ramping = (
+            self._state == OrchestratorState.RAMPING and self._procedure is None
+        )
+        if self._state != OrchestratorState.IDLE and not manual_ramping:
             self.queue_procedure(procedure)
             return
+
+        # Cancel any manual ramp generators before starting the procedure.
+        if manual_ramping:
+            for vi_name, vi in self._station._virtual_instruments.items():
+                if self._station._vi_registry.get(vi_name) == "system":
+                    if hasattr(vi, "_ramp_gen"):
+                        vi._ramp_gen = None
+                        vi._ramp_exhausted = True
+            logger.info("Manual ramp cancelled — procedure starting.")
 
         self._procedure = procedure
         system_targets, meas_commands, wait_time = self._procedure.initiate()
@@ -173,7 +185,11 @@ class Orchestrator(QObject):
 
     def submit_vi_action(self, vi_name: str, method_name: str, **kwargs: Any) -> None:
         """Submit a GUI action to a specific VI."""
-        if self._state != OrchestratorState.IDLE:
+        # Allow actions in IDLE or during a manual ramp (RAMPING with no active procedure).
+        manual_ramping = (
+            self._state == OrchestratorState.RAMPING and self._procedure is None
+        )
+        if self._state != OrchestratorState.IDLE and not manual_ramping:
             msg = f"Cannot control {vi_name}: procedure is running in state {self._state.name}"
             logger.info("Blocked action: %s", msg)
             self.action_blocked.emit(msg)
@@ -238,18 +254,24 @@ class Orchestrator(QObject):
                     self._change_state(OrchestratorState.ERROR)
                     break
 
-        # 3. GUI Actions
-        if self._state == OrchestratorState.IDLE:
+        # 3. GUI Actions — processed in IDLE or during a manual ramp (no active procedure).
+        _manual_ramping = (
+            self._state == OrchestratorState.RAMPING and self._procedure is None
+        )
+        if self._state == OrchestratorState.IDLE or _manual_ramping:
             for action in self._gui_action_queue:
                 try:
                     self._station.execute_vi_action(
-                        action["vi_name"], 
-                        action["method_name"], 
+                        action["vi_name"],
+                        action["method_name"],
                         **action["kwargs"]
                     )
                 except Exception as e:
                     logger.error("Error executing GUI action on %s: %s", action["vi_name"], e)
             self._gui_action_queue.clear()
+            # If a GUI action started (or restarted) a manual ramp, enter RAMPING.
+            if self._state == OrchestratorState.IDLE and not self._station.check_ramps():
+                self._change_state(OrchestratorState.RAMPING)
 
         # 4. State Machine matching
         if self._state == OrchestratorState.IDLE:
@@ -257,15 +279,19 @@ class Orchestrator(QObject):
         elif self._state == OrchestratorState.INITIATING:
             self._change_state(OrchestratorState.RAMPING)
         elif self._state == OrchestratorState.RAMPING:
-            if self._station.check_ramps(): # if true, all are done
-                import time
-                if not self._wait_started:
-                    self._wait_started = True
-                    self._wait_start_time = time.time()
-                
-                if time.time() - self._wait_start_time >= self._current_wait_time:
-                    self._wait_started = False
-                    self._change_state(OrchestratorState.MEASURING)
+            if self._station.check_ramps():  # True = all ramps complete
+                if self._procedure is None:
+                    # Manual ramp from GUI — return to IDLE.
+                    self._change_state(OrchestratorState.IDLE)
+                else:
+                    import time
+                    if not self._wait_started:
+                        self._wait_started = True
+                        self._wait_start_time = time.time()
+
+                    if time.time() - self._wait_start_time >= self._current_wait_time:
+                        self._wait_started = False
+                        self._change_state(OrchestratorState.MEASURING)
         elif self._state == OrchestratorState.MEASURING:
             if self._procedure:
                 self._procedure.measure()

@@ -50,6 +50,7 @@ class SimKeithley6221:
 
         self._source_enabled: bool = False
         self._current: float = 0.0         # Amperes
+        self._compliance: float = 0.1      # Volts (voltage compliance limit)
 
         # Delta-mode configuration
         self._delta_high_current: float = 0.0
@@ -94,6 +95,19 @@ class SimKeithley6221:
             current: Desired current in Amperes.
         """
         self._current = float(current)
+
+    def set_compliance(self, compliance_v: float) -> None:
+        """Set the voltage compliance limit.
+
+        Args:
+            compliance_v: Maximum output voltage in Volts.
+        """
+        self._compliance = float(compliance_v)
+
+    def get_compliance(self) -> float:
+        """Return the configured voltage compliance limit in Volts."""
+        self._check_error()
+        return self._compliance
 
     def configure_delta_mode(
         self, high_current: float, n_readings: int, delay: float

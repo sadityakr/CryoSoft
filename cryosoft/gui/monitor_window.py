@@ -357,7 +357,7 @@ class MonitorWindow(QMainWindow):
         IDN query, and Initiate/Standby lifecycle buttons.
 
         Args:
-            vi_name: Registered VI name (e.g. ``"iv_measurement"``).
+            vi_name: Registered VI name (e.g. ``"keithley_delta_mode"``).
 
         Returns:
             A compact QGroupBox with connection indicator and lifecycle buttons.

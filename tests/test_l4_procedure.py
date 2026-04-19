@@ -120,8 +120,8 @@ def test_initiate_returns_correct_structure(procedure, tmp_path):
     assert "temperature_vti" in sys_targets
     assert sys_targets["temperature_vti"]["target"] == pytest.approx(300.0)
 
-    assert "iv_measurement" in meas_cmds
-    assert "configure" in meas_cmds["iv_measurement"]
+    assert "keithley_delta_mode" in meas_cmds
+    assert "configure" in meas_cmds["keithley_delta_mode"]
 
     assert wait == pytest.approx(0.0)
 
@@ -211,7 +211,7 @@ def test_measure_saves_datapoint(procedure, tmp_path):
     """measure() writes data to the HDF5 file at the correct sweep index."""
     procedure.initiate()
     # Configure the measurement VI (normally done via station.send_measurement_commands)
-    procedure._station.iv_measurement.configure(
+    procedure._station.keithley_delta_mode.configure(
         method="delta_mode", current=1e-6, n_readings=5
     )
 
@@ -229,7 +229,7 @@ def test_measure_saves_datapoint(procedure, tmp_path):
 def test_measure_stores_snapshot(procedure, tmp_path):
     """measure() stores a JSON station snapshot."""
     procedure.initiate()
-    procedure._station.iv_measurement.configure(
+    procedure._station.keithley_delta_mode.configure(
         method="delta_mode", current=1e-6, n_readings=5
     )
     procedure.measure()
@@ -251,7 +251,7 @@ def test_standby_returns_correct_structure(procedure, tmp_path):
 
     assert "magnet_x" in sys_targets
     assert sys_targets["magnet_x"]["target"] == pytest.approx(0.0)
-    assert "iv_measurement" in meas_cmds
+    assert "keithley_delta_mode" in meas_cmds
     assert wait == pytest.approx(0.0)
 
 
@@ -294,7 +294,7 @@ def test_full_orchestrator_loop(station, tmp_path, qtbot):
 
     orch = Orchestrator(station, tick_interval_ms=10)
 
-    # Pre-configure iv_measurement (normally done by orchestrator via station)
+    # Pre-configure keithley_delta_mode (normally done by orchestrator via station)
     # The Orchestrator calls station.send_measurement_commands from run_procedure,
     # which dispatches configure(). That happens inside run_procedure → initiate().
     orch.run_procedure(procedure)

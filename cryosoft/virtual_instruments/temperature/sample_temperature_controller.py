@@ -1,28 +1,27 @@
 # ---
 # description: |
-#   ITC503TemperatureVI: Virtual Instrument wrapping the Oxford ITC 503
-#   temperature controller.  Implements a time-based ramp generator that sends
-#   a new setpoint each tick based on elapsed time and the configured rate.
+#   SampleTemperatureControllerVI: behavior-based VI for any single-sensor,
+#   single-heating-loop temperature controller used on the sample stage.
+#   No needle valve. Implements a time-based ramp generator.
 # entry_point: Not run directly; instantiated by Station factory.
 # dependencies:
 #   - cryosoft.virtual_instruments.base (TemperatureControllerBase)
 #   - cryosoft.virtual_instruments.rampable (RampableVI)
 #   - cryosoft.core.decorators (monitored, control)
 # input: |
-#   drivers = {"main": <ITC503 driver instance>}
-#   init_params keys: default_ramp_rate (K/min), tolerance (K),
-#   settling_time (s, optional).
+#   drivers = {"main": <temperature controller driver instance>}
+#   init_params keys: default_ramp_rate (K/min), tolerance (K).
 # process: |
 #   _ramp_generator yields each tick, computing the next intermediate setpoint
 #   from time.monotonic(). ramp_status() checks generator exhaustion AND hardware
 #   temperature proximity to setpoint within tolerance.
 # output: |
 #   Logged temperature (K), setpoint (K), heater_output (%) via @monitored;
-#   set_temperature available as @control.
-# last_updated: 2026-04-06
+#   set_temperature and set_ramp_rate available as @control.
+# last_updated: 2026-04-19
 # ---
 
-"""ITC503TemperatureVI — Oxford ITC 503 temperature controller Virtual Instrument."""
+"""SampleTemperatureControllerVI — behavior-based VI for sample-stage temperature control."""
 
 from __future__ import annotations
 
@@ -34,8 +33,12 @@ from cryosoft.virtual_instruments.base import TemperatureControllerBase
 from cryosoft.virtual_instruments.rampable import RampableVI
 
 
-class ITC503TemperatureVI(TemperatureControllerBase, RampableVI):
-    """Virtual Instrument for the Oxford ITC 503 temperature controller.
+class SampleTemperatureControllerVI(TemperatureControllerBase, RampableVI):
+    """Virtual Instrument for a single-sensor, single-loop sample temperature controller.
+
+    This VI controls the sample stage temperature. It has no needle valve.
+    Use ``VTITemperatureControllerVI`` for the VTI (bath) temperature, which
+    includes needle valve control.
 
     Ramp behaviour
     --------------
@@ -45,21 +48,24 @@ class ITC503TemperatureVI(TemperatureControllerBase, RampableVI):
        then calculates an intermediate setpoint each ``advance_ramp()`` tick.
     2. ``advance_ramp()`` sends the next ``driver.set_setpoint()`` command.
     3. ``ramp_status()`` reports ``"TARGET_REACHED"`` only when the generator is
-       exhausted *and* the hardware temperature is within ``tolerance`` of the
-       target.
+       exhausted *and* the hardware temperature is within ``tolerance`` of target.
+
+    Driver contract
+    ---------------
+    The ``"main"`` driver must implement:
+    * ``get_temperature() -> float``  — current temperature in Kelvin
+    * ``get_setpoint() -> float``     — current setpoint in Kelvin
+    * ``set_setpoint(float)``         — set target temperature
+    * ``get_heater_output() -> float`` — heater power 0–100%
     """
 
     def __init__(self, drivers: dict[str, object], **init_params: Any) -> None:
         super().__init__(drivers, **init_params)
         self._driver = drivers["main"]
 
-        # Ramp rate in K/min.
         self._default_ramp_rate: float = float(init_params.get("default_ramp_rate", 5.0))
-
-        # Temperature tolerance for TARGET_REACHED decision (kelvin).
         self._tolerance: float = float(init_params.get("tolerance", 0.5))
 
-        # Internal ramp generator state.
         self._ramp_gen: Generator | None = None
         self._ramp_exhausted: bool = True
         self._ramp_target: float | None = None
@@ -68,18 +74,18 @@ class ITC503TemperatureVI(TemperatureControllerBase, RampableVI):
     # RampableVI implementation
     # ------------------------------------------------------------------
 
-    def start_ramp(self, target: float) -> None:
+    def start_ramp(self, target: float, rate: float | None = None) -> None:
         """Begin a time-based temperature ramp to *target* kelvin.
 
         Args:
             target: Target temperature in kelvin.
+            rate: Ramp rate in K/min. If None, uses ``_default_ramp_rate``.
         """
         self._ramp_target = float(target)
-        rate_per_min = self._default_ramp_rate
+        rate_per_min = float(rate) if rate is not None else self._default_ramp_rate
 
         self._ramp_gen = self._ramp_generator(self._ramp_target, rate_per_min)
         self._ramp_exhausted = False
-        # Prime the generator.
         try:
             next(self._ramp_gen)
         except StopIteration:
@@ -106,7 +112,6 @@ class ITC503TemperatureVI(TemperatureControllerBase, RampableVI):
             return "IDLE"
         if not self._ramp_exhausted:
             return "RAMPING"
-        # Generator exhausted — check if hardware has settled within tolerance.
         if self._ramp_target is None:
             return "IDLE"
         current_T = self._driver.get_temperature()  # type: ignore[attr-defined]
@@ -119,16 +124,6 @@ class ITC503TemperatureVI(TemperatureControllerBase, RampableVI):
     # ------------------------------------------------------------------
 
     def _ramp_generator(self, target: float, rate_per_min: float) -> Generator:
-        """Time-based ramp generator.
-
-        Computes a new intermediate setpoint from elapsed time each tick and
-        sends it to the driver.  Finishes when the computed setpoint equals
-        *target*.
-
-        Args:
-            target: Final target temperature in kelvin.
-            rate_per_min: Ramp rate in K/min.
-        """
         driver = self._driver  # type: ignore[attr-defined]
         start_time = time.monotonic()
         start_T: float = driver.get_temperature()
@@ -140,7 +135,6 @@ class ITC503TemperatureVI(TemperatureControllerBase, RampableVI):
             elapsed_s = time.monotonic() - start_time
             new_setpoint = start_T + direction * rate_per_s * elapsed_s
 
-            # Clamp to target so we don't overshoot.
             if direction > 0:
                 new_setpoint = min(new_setpoint, target)
             else:
@@ -149,8 +143,8 @@ class ITC503TemperatureVI(TemperatureControllerBase, RampableVI):
             driver.set_setpoint(new_setpoint)
 
             if new_setpoint == target:
-                return  # Generator exhausted after sending final setpoint.
-            yield  # Return control to Orchestrator tick.
+                return
+            yield
 
     # ------------------------------------------------------------------
     # @monitored methods
@@ -176,6 +170,15 @@ class ITC503TemperatureVI(TemperatureControllerBase, RampableVI):
     # ------------------------------------------------------------------
 
     @control
+    def set_ramp_rate(self, rate_K_per_min: float) -> None:
+        """Change the default temperature ramp rate.
+
+        Args:
+            rate_K_per_min: New ramp rate in kelvin per minute.
+        """
+        self._default_ramp_rate = float(rate_K_per_min)
+
+    @control
     def set_temperature(self, target_K: float) -> None:
         """Manually command a temperature ramp (GUI use; blocked during procedures).
 
@@ -189,7 +192,7 @@ class ITC503TemperatureVI(TemperatureControllerBase, RampableVI):
     # ------------------------------------------------------------------
 
     def initiate(self) -> None:
-        """Initialise; no special startup command needed for ITC 503."""
+        """Initialise; no special startup command needed."""
 
     def standby(self) -> None:
         """Put temperature controller in a safe idle state (no action required)."""

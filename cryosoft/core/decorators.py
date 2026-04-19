@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import functools
 import inspect
+import typing
 from typing import Any, Callable
 
 
@@ -72,15 +73,21 @@ def control(func: Callable) -> Callable:
     wrapper._is_control = True
     wrapper._display_name = func.__name__
 
-    # Extract parameter info for GUI form generation
+    # Resolve annotations (handles `from __future__ import annotations` string form).
+    try:
+        hints = typing.get_type_hints(func)
+    except Exception:
+        hints = {}
+
     sig = inspect.signature(func)
     params = {}
     for name, param in sig.parameters.items():
         if name == "self":
             continue
         param_info: dict[str, Any] = {"name": name}
-        if param.annotation != inspect.Parameter.empty:
-            param_info["type"] = param.annotation
+        resolved_type = hints.get(name)
+        if resolved_type is not None:
+            param_info["type"] = resolved_type
         if param.default != inspect.Parameter.empty:
             param_info["default"] = param.default
         params[name] = param_info

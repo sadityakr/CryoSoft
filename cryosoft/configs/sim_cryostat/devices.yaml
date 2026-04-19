@@ -26,7 +26,7 @@ real_drivers:
 
 virtual_instruments:
   magnet_x:
-    class: cryosoft.virtual_instruments.magnet_ips120.IPS120MagnetVI
+    class: cryosoft.virtual_instruments.magnet.superconducting_magnet.SuperconductingMagnetVI
     drivers: {main: ips_x}
     vi_type: system
     init_params:
@@ -39,7 +39,7 @@ virtual_instruments:
         - {max_current_A: 70.0, rate_A_per_min: 3.0}
         - {max_current_A: 90.0, rate_A_per_min: 1.0}
   magnet_y:
-    class: cryosoft.virtual_instruments.magnet_ips120.IPS120MagnetVI
+    class: cryosoft.virtual_instruments.magnet.superconducting_magnet.SuperconductingMagnetVI
     drivers: {main: ips_y}
     vi_type: system
     init_params:
@@ -48,28 +48,33 @@ virtual_instruments:
       min_current: -20.0
       default_ramp_rate: 2.0
   temperature_vti:
-    class: cryosoft.virtual_instruments.temperature_itc503.ITC503TemperatureVI
+    class: cryosoft.virtual_instruments.temperature.vti_temperature_controller.VTITemperatureControllerVI
     drivers: {main: itc_vti}
     vi_type: system
     init_params:
       default_ramp_rate: 2.0
       tolerance: 0.5
   temperature_sample:
-    class: cryosoft.virtual_instruments.temperature_itc503.ITC503TemperatureVI
+    class: cryosoft.virtual_instruments.temperature.sample_temperature_controller.SampleTemperatureControllerVI
     drivers: {main: itc_sample}
     vi_type: system
     init_params:
       default_ramp_rate: 1.0
       tolerance: 0.3
   level_meter:
-    class: cryosoft.virtual_instruments.level_ilm200.ILM200LevelVI
+    class: cryosoft.virtual_instruments.level.cryogen_level_meter.CryogenLevelMeterVI
     drivers: {main: ilm}
     vi_type: level
     init_params:
       helium_low_threshold: 20.0
       buffer_size: 5
-  iv_measurement:
-    class: cryosoft.virtual_instruments.measurement_delta_mode.DeltaModeMeasurementVI
+  keithley_delta_mode:
+    class: cryosoft.virtual_instruments.measurement.measurement_delta_mode.DeltaModeMeasurementVI
+    drivers: {source: keithley_6221, meter: keithley_2182a}
+    vi_type: measurement
+    init_params: {}
+  dc_measurement:
+    class: cryosoft.virtual_instruments.measurement.dc_separate_measurement.DCSeparateMeasurementVI
     drivers: {source: keithley_6221, meter: keithley_2182a}
     vi_type: measurement
     init_params: {}

@@ -1,234 +1,153 @@
 # CryoSoft — Implementation Status
 
-> **This is a live document.** The agent reads it before every session and updates it after every task.
-> Last updated: 2026-04-19 (live-plot axis redesign: dynamic X/Y selectors, full system-state logging, unix_time per datapoint)
+> **This is a live document.** Read it before every session; update it after every task.
+> Last updated: 2026-04-19 (VI refactor complete — behavior-based names, subpackages, 3-column procedure form)
 
 ---
 
 ## Project phase
 
-**Current phase:** Pre-development (architecture and planning complete)
-**Current milestone target:** `v0.1-L0` — Real drivers and base classes
-**Architecture version:** v1.1 (docs/architecture_v1.1.docx)
+**Current phase:** Simulation stack complete. All layers implemented and tested against simulated drivers.
+**Current milestone:** Simulation-first development done. Ready for Phase 7 — real driver integration.
+**Architecture version:** v4.1 (`directives/CryoSoft_Architecture_v4_1.md`)
+**Active branch:** `feature/behavior-based-vis` (all refactor work)
 
 ---
 
 ## Layer status overview
 
-| Layer | Name                | Status      | Tests | Notes |
-|-------|---------------------|-------------|-------|-------|
-| L0    | Sim drivers         | Done        | Pass  | Simulated drivers implemented |
-| L1    | Virtual instruments | Done        | Pass  | Simulated implementation complete |
-| L2    | Station Config      | Done        | Pass  | Ready for Orchestrator |
-| L3    | Orchestrator        | Done        | Pass  | 9/9 tests pass |
-| L3W   | Monitor / watchdog  | N/A         | N/A   | Merged into L3 (Orchestrator tick + Station.check_safety) in architecture v4.0 |
-| L4    | Procedures          | Done        | Pass  | 3 procedures: FieldSweepIV, FieldSweepDC, TemperatureSweepDC. 41/41 tests pass |
-| L5    | Data manager        | Done        | Pass  | 17/17 tests pass |
-| GUI   | Monitor window      | Done        | Pass  | 24/24 tests pass (redesigned 2026-04-17) |
-| GUI   | Procedure window    | Done        | Pass  | Included in test_gui.py (redesigned 2026-04-17) |
+| Layer | Name                | Status | Tests  | Notes |
+|-------|---------------------|--------|--------|-------|
+| L0    | Sim drivers         | Done   | 54/54  | IPS120 + ITC503 + ILM200 + K6221 + K2182A + K2400 |
+| L1    | Virtual instruments | Done   | 133/133| 8 behavior-named VIs in 4 subpackages |
+| L2    | Station + Config    | Done   | 10/10  | build_station() factory, YAML config |
+| L3    | Orchestrator        | Done   | 9/9    | Full state machine; manual ramp; procedure preempt |
+| L4    | Procedures          | Done   | 63/63  | 3 procedures; 3-group parameter dicts |
+| L5    | Data manager        | Done   | 17/17  | HDF5; pre-allocation; early abort trim |
+| GUI   | Monitor + Procedure | Done   | 32/32  | Dark theme; dual live plots; 3-column param form |
+
+**Total: 271/271 tests passing.**
 
 ---
 
 ## Done
 
-- [2026-04-06] L0: Sim Drivers (`sim_oxford_ips120.py`, `sim_oxford_itc503.py`, `sim_oxford_ilm200.py`, `sim_keithley_6221.py`, `sim_keithley_2182a.py`). Unit tests pass (39/39). `tests/test_l0_simulated.py`
-- [2026-04-06] L1: Virtual Instruments (`base.py`, `rampable.py`, `magnet_ips120.py`, `temperature_itc503.py`, `level_ilm200.py`, `measurement_delta_mode.py`). Unit tests pass (9/9). `tests/test_l1_virtual_instruments.py`
-- [2026-04-06] L2: Station Config (`station.py`, UI configs). Unit tests pass (7/7). `tests/test_l2_station.py`
-- [2026-04-06] L3: Orchestrator (`orchestrator.py`). Complete. Tests pass 9/9 (`tests/test_l3_orchestrator.py`). Fix: downgraded PyQt6 to 6.7.1 (6.11.0 DLL conflict with Anaconda on Windows); fixed test ramp rate to set `_default_ramp_rate` on VI rather than `_driver.set_ramp_rate`.
-- [2026-04-06] L5: DataManager (`core/data_manager.py`). Complete. Tests pass 17/17 (`tests/test_l5_data_manager.py`).
-- [2026-04-06] L4: BaseProcedure (`core/procedure.py`) + FieldSweepIV (`procedures/field_sweep_iv.py`). Complete. Tests pass 19/19 (`tests/test_l4_procedure.py`). Includes full Orchestrator end-to-end loop test.
-- [2026-04-06] Architecture clarification: L3W Monitor/Watchdog does not exist in v4.0. Safety monitoring is integrated into Orchestrator._tick() + Station.check_safety().
-- [2026-04-06] GUI: MonitorWindow, InstrumentPanel, ProcedureWindow, main.py implemented. 22/22 tests pass. Total suite: 143/143. Added DataManager.last_datapoint and Orchestrator.measurement_ready signal for live plot data pipeline.
-- [2026-04-16] GUI refactor — MonitorWindow and ProcedureWindow restructured. Changes (all tests pass, 145/145):
-  - Sample Info panel moved from ProcedureWindow → MonitorWindow (session-level metadata belongs on the monitor)
-  - ProcedureWindow now opens via Procedures menu (Ctrl+P) from MonitorWindow; lazily created; not shown at startup
-  - Real-time Log panel added to MonitorWindow (QTextEdit + _QtLogHandler, colour-coded by level)
-  - System/level VI grid pinned always-visible at top of MonitorWindow (no scroll)
-  - Other Devices section: measurement VIs shown as status-only cards (Initiate/Standby only; Configure removed — configuration is handled exclusively by procedures)
-  - Lower section (Other Devices + Log/Sample Info splitter) wrapped in QScrollArea for small-screen access
-  - Log and Sample Info shown side-by-side in a QSplitter (50/50) in the scrollable lower section
-  - InstrumentPanel._submit_control: required fields now validated before submission; empty required params show a warning dialog instead of passing None to the VI
-- [2026-04-18] L1: DCMeasurementVI (`virtual_instruments/measurement_dc.py`). DC resistance measurement using 6221 + 2182A. `initiate(current_A, compliance_A, voltmeter_range_V)` arms both instruments; `take_reading(n_points)` collects N voltage samples. 14/14 tests pass (`tests/test_measurement_dc_vi.py`). Added `set_compliance()`/`get_compliance()` to `sim_keithley_6221.py`. Total suite: 159/159.
-- [2026-04-18] VI rename: `iv_measurement` → `keithley_delta_mode` in `devices.yaml`, `field_sweep_iv.py`, `test_l2_station.py`, `test_l4_procedure.py`, `test_l5_data_manager.py`, `monitor_window.py`. Added `dc_measurement` (DCMeasurementVI) to `devices.yaml`.
-- [2026-04-18] L1: `ITC503TemperatureVI.set_ramp_rate(rate_K_per_min)` added as `@control` — appears in GUI panel and can be called per-sweep by procedures. `start_ramp(target, rate=None)` now accepts an optional rate so callers can override `_default_ramp_rate` without mutating it.
-- [2026-04-18] L2: `Station.process_system_targets` now reads optional `rate` key from target dict and forwards it to `vi.start_ramp(rate=...)`. Backwards-compatible: existing calls without a rate key are unchanged.
-- [2026-04-18] L4: `FieldSweepDC` (`procedures/field_sweep_dc.py`) — field sweep using `dc_measurement` VI. Parameters: field_start, field_end, field_steps, temperature, current_A, compliance_A, voltmeter_range_V, readings_per_point, init_wait, step_wait. Full Orchestrator loop tested.
-- [2026-04-18] L4: `TemperatureSweepDC` (`procedures/temperature_sweep_dc.py`) — temperature sweep using `dc_measurement` VI. Parameters: temp_start, temp_end, n_points, ramp_rate_K_per_min, current_A, compliance_A, voltmeter_range_V, readings_per_point, point_wait. Ramp rate passed per-step via system_targets so it takes effect without editing YAML. Full Orchestrator loop tested.
-- [2026-04-18] 22 new tests in `tests/test_new_procedures.py` covering both new procedures, ramp-rate forwarding, and set_ramp_rate control. Total suite: 181/181.
-- [2026-04-19] Orchestrator: procedure preempts a manual ramp. run_procedure() now recognises RAMPING+procedure=None as a preemptable state: it cancels all system VI ramp generators (_ramp_gen=None, _ramp_exhausted=True) and starts the procedure immediately instead of queuing it. Any other busy state still queues. 9/9 orchestrator tests pass.
-- [2026-04-19] Orchestrator: manual ramps now enter RAMPING state. When GUI actions (set_temperature, set_field, etc.) call start_ramp(), the orchestrator detects an active ramp via check_ramps() after draining the queue and transitions to RAMPING. In RAMPING with procedure=None, advance_ramp() runs each tick; orchestrator returns to IDLE when all ramps are done (no wait, no measuring). Previously set_temperature/set_field were fire-and-forget: advance_ramp() was never called, so the generator froze after the first step.
-- [2026-04-19] Orchestrator: GUI actions no longer blocked during a manual ramp (RAMPING + procedure=None). submit_vi_action() and the GUI action queue now allow actions in this state, so multiple instruments can be commanded while one is already ramping (e.g. ramp VTI while sample temperature is still settling). Procedure ramps continue to block GUI actions.
-- [2026-04-19] @control decorator: fixed type resolution for `from __future__ import annotations`. Previously param.annotation returned the string 'float' instead of the float type, causing InstrumentPanel to log "could not coerce '10' to float" and pass the raw string to the VI. Fix: use typing.get_type_hints(func) which resolves lazy string annotations to actual types before building _control_params. All existing tests pass (181/181).
-- [2026-04-19] Live-plot axis redesign + full system-state logging per datapoint. 181/181 tests pass:
-  - `Station.cached_state` property: returns `_last_known_state` without any hardware poll (safe to call from procedure `measure()`).
-  - `Station.last_state_flat()`: flattens cached system VI state to `{vi_name_field: float}`, skipping strings (e.g. ramp_status) and measurement VIs.
-  - `BaseProcedure._build_data_config(base_config)`: merges `unix_time` + all system state keys into HDF5 schema — one call in `initiate()` replaces the manual data_config dict.
-  - `BaseProcedure._save_datapoint(measured_data)`: merges `unix_time` + `station.last_state_flat()` + procedure data, calls DataManager — no extra hardware poll. Replaces manual `get_state()` + `save_datapoint(...)` calls in every procedure's `measure()`.
-  - `BaseProcedure.get_data_keys()`: returns all plottable keys for GUI axis selectors (`unix_time` + sweep_data_keys + system_keys + measurement_data_keys).
-  - Each procedure gains class attrs: `sweep_data_keys`, `measurement_data_keys`, `default_x_key`.
-  - `ProcedureWindow`: each plot now has its own X and Y selector (4 selectors total), all populated from `proc.get_data_keys()` at run start. Datapoints stored in `_datapoints` list so changing any axis mid-run replots the full history. Axis labels auto-update on selector change.
-- [2026-04-18] GUI improvements — whole-window scrollability, connection check for measurement VIs, log filtering. All 145 tests pass:
-  - MonitorWindow: entire content wrapped in outer QScrollArea (central widget); redundant inner lower_scroll removed. Window is now vertically scrollable on small screens while the splitter still works for large screens.
-  - Other Devices panel: removed misleading class-name type label ("Delta Mode Measurement" was derived from class name, not live data). Replaced with a coloured dot (●) + "Unknown/Connected/Not reachable" label and a "Check" button.
-  - `MeasurementInstrumentBase.ping() -> bool` added to `base.py` (returns False by default).
-  - `DeltaModeMeasurementVI.ping()` overrides base: calls `get_idn()` on both source and meter drivers; returns True only if both respond.
-  - `SimKeithley6221.get_idn()` and `SimKeithley2182A.get_idn()` added to sim drivers.
-  - Qt log widget: `_QtLogHandler` now suppresses `cryosoft.vi.*` DEBUG records (per-method call/return noise). Warnings and errors from VIs still appear.
-  - `Orchestrator._tick()`: after `states_updated.emit()`, logs one compact DEBUG summary line per tick (e.g. "Monitor: magnet_x: field=1.234, ... | temperature_vti: ..."). File log unchanged.
-- [2026-04-17] GUI redesign — global dark theme, resizable panels, ProcedureWindow restructured. All 24 tests pass:
-  - NEW: `cryosoft/gui/theme.py` — central color palette (Material Dark) + `build_stylesheet()` returning full application QSS
-  - Global QSS applied in `main.py` (pyqtgraph background/foreground also set via `pg.setConfigOptions`)
-  - All panels resizable by dragging: MonitorWindow has QSplitter(Vertical) between VI grid and lower section; ProcedureWindow top section uses QSplitter(Horizontal) for params/queue split; plot section uses QSplitter(Horizontal)
-  - ProcedureWindow layout restructured: two-column top (params left ~60%, queue right ~40%); two live plots side-by-side below (Plot 1 cyan, Plot 2 magenta), each with its own Y-axis selector; progress bar full-width below plots
-  - Dual plot buffers (_plot_y1, _plot_y2) sharing a common X axis; missing Y keys produce NaN (rendered as plot gaps)
-  - Button hierarchy via dynamic `class` properties: primary (accent blue fill), secondary (outline), danger (red fill)
-  - InstrumentPanel value readout labels styled 17pt bold via QSS; log handler colors from theme constants
+### Foundation (2026-04-06)
+- `core/exceptions.py` — `CryoSoftError`, `CryoSoftCommunicationError`, `CryoSoftSafetyError`, `CryoSoftConfigError`
+- `core/decorators.py` — `@monitored`, `@control`; `__init_subclass__` logging wrapper; `get_monitored_methods()`, `get_control_methods()`; type-hint resolution via `typing.get_type_hints()` (fixes `from __future__ import annotations` string-annotation issue)
+- `core/logging_config.py` — rotating file handler; `_QtLogHandler` for GUI log widget; VI DEBUG suppression in Qt widget
 
-<!-- Example format:
-- [2026-04-01] L0: `core/real_driver.py` — RealDriver base class. Unit tests pass (8/8). `tests/test_core/test_real_driver.py`
-- [2026-04-02] L0: `drivers/oxford_ips120.py` — OxfordIPS120RealDriver. Unit tests pass (12/12) with MockIPS120.
--->
+### L0: Sim Drivers (2026-04-06 → 2026-04-19)
+- `drivers/sim_oxford_ips120.py` — current ramp, HOLD/RAMPING status, quench sim, safety clamping. **+** switch heater on/off, coil current tracking, persistent mode flag
+- `drivers/sim_oxford_itc503.py` — exponential temperature settling, heater output %. **+** needle valve 0–100% position
+- `drivers/sim_oxford_ilm200.py` — drifting He/N2 levels, configurable low-He. **+** 3-mode refresh (STANDBY=0, SLOW=1, FAST=2)
+- `drivers/sim_keithley_6221.py` — current source, delta-mode config, `get_idn()`, `set_compliance()`, `get_compliance()`
+- `drivers/sim_keithley_2182a.py` — voltage readings with Gaussian noise, delta-mode pairing, `get_idn()`
+- `drivers/sim_keithley_2400.py` — **new** SMU: sources current, measures voltage (V = R·I + noise), `_resistance=1500 Ω`, `_simulate_error` flag
+- Tests: `tests/test_l0_simulated.py` (39), `tests/test_l0_new_drivers.py` (15)
+
+### L1: Virtual Instruments (2026-04-06 → 2026-04-19)
+All VIs are behavior-named and live in subpackages of `virtual_instruments/`:
+
+**`virtual_instruments/magnet/`**
+- `superconducting_magnet.py` — `SuperconductingMagnetVI`: status-driven ramp, segment-based rate scheduling, tesla↔ampere conversion. `@monitored`: `magnet_current`, `get_field`, `magnet_status`. `@control`: `set_field`
+- `superconducting_magnet_persistent.py` — `SuperconductingMagnetPersistentVI` (extends above): switch heater + persistent mode ramp sequence via tick-count generators (never `time.sleep`). New `init_params`: `switch_heater_warmup_ticks` (default 30), `switch_heater_cooldown_ticks` (default 30). `@monitored`: `switch_heater_state`, `coil_current`, `is_persistent`. `@control`: `switch_heater_on/off`, `enter/exit_persistent_mode`
+
+**`virtual_instruments/temperature/`**
+- `sample_temperature_controller.py` — `SampleTemperatureControllerVI`: time-based ramp generator, tolerance-based settle detection. `start_ramp(target, rate=None)`. `@monitored`: `temperature`, `setpoint`, `heater_output`. `@control`: `set_temperature`, `set_ramp_rate`
+- `vti_temperature_controller.py` — `VTITemperatureControllerVI` (extends above): needle valve via same ITC503 driver auxiliary output. `@monitored`: `needle_valve`. `@control`: `set_needle_valve`
+
+**`virtual_instruments/level/`**
+- `cryogen_level_meter.py` — `CryogenLevelMeterVI`: rolling majority-vote buffer for noise-immune `helium_low()`. Module-level constants `STANDBY=0, SLOW=1, FAST=2`. `@monitored`: `helium_level`, `nitrogen_level`, `get_refresh_rate`. `@control`: `set_refresh_rate(mode: int)`
+
+**`virtual_instruments/measurement/`**
+- `dc_separate_measurement.py` — `DCSeparateMeasurementVI`: Keithley 6221 + 2182A, fixed DC current. `@control`: `initiate(current_A, compliance_A, voltmeter_range_V)`. `take_reading(n_points) → {"voltage_V": list, "current_A": list}`. `standby()`, `ping()`
+- `dc_single_instrument.py` — `DCSingleInstrumentVI`: Keithley 2400 SMU, same method contract as above. `{"main": K2400}`
+- `measurement_delta_mode.py` — `DeltaModeMeasurementVI`: Keithley 6221 + 2182A, delta-mode IV. `configure("delta_mode", current, n_readings, delay)`. `read_datapoint() → {"voltage_V": list, "current_A": list}`
+
+**Base classes** (`virtual_instruments/base.py`):
+- `BaseVirtualInstrument` — `__init_subclass__` logging wrapper, `get_state()` auto-build
+- `MagnetBase`, `TemperatureControllerBase`, `LevelMeterBase`, `MeasurementInstrumentBase`
+- `DCMeasurementBase` — grouping base for all DC measurement VIs; `raise NotImplementedError` (not `@abstractmethod`) for `initiate()` and `take_reading()`, following existing pattern
+
+- Tests: `tests/test_l1_virtual_instruments.py`, `tests/test_l1_new_vis.py` (61), `tests/test_measurement_dc_vi.py` (14)
+
+### L2: Station + Config (2026-04-06 → 2026-04-18)
+- `core/station.py` — `Station` + `build_station(config_path)` factory
+- Attribute-style VI access, VI type registry, `get_state()` with stale/disconnected error handling
+- `process_system_targets()` — dispatches `start_ramp(target, rate=...)` per VI; forwards optional `rate` key
+- `send_measurement_commands()` — dispatches method calls on measurement VIs
+- `check_ramps()`, `check_safety()`, `execute_vi_action()`, `initiate_all()`, `standby_all()`
+- `cached_state` property (no poll), `last_state_flat()` (numeric-only flat dict for system VIs)
+- `configs/sim_cryostat/devices.yaml` — 7 VIs with subpackage class paths; `configs/sim_cryostat/monitor.yaml`
+- Tests: `tests/test_l2_station.py` (10)
+
+### L3: Orchestrator (2026-04-06 → 2026-04-19)
+- `core/orchestrator.py` — cooperative QTimer state machine
+- States: `IDLE → INITIATING → RAMPING → MEASURING → SWEEPING → STANDBY → IDLE`; also `PAUSED`, `ERROR`, `EMERGENCY`
+- Manual ramps enter RAMPING state; `advance_ramp()` called every tick until done; returns to IDLE (no wait/measure step)
+- GUI actions unblocked during manual ramp (RAMPING + `_procedure=None`); blocked during procedure ramps
+- `run_procedure()` preempts a manual ramp (clears all generators, starts procedure immediately)
+- Abort: holds instruments at current position; monitor continues; ramp generators cleared
+- `measurement_ready` signal carries enriched datapoint dict (used by ProcedureWindow live plots)
+- Tests: `tests/test_l3_orchestrator.py` (9)
+
+### L4: Procedures (2026-04-06 → 2026-04-19)
+- `core/procedure.py` — `BaseProcedure` with three parameter group dicts + `__init_subclass__` union
+  - `sweep_parameters` — what to sweep (defines the sweep array)
+  - `system_parameters` — cryostat state during sweep (temperatures, wait times, ramp rates)
+  - `measurement_parameters` — measurement VI configuration (current, range, n_readings)
+  - `parameters` — auto-computed union; all existing code continues to work
+  - `_build_data_config(base_config)`, `_save_datapoint(measured_data)`, `get_data_keys()`
+  - `sweep_data_keys`, `measurement_data_keys`, `default_x_key` class attributes for GUI axis selectors
+- `procedures/field_sweep_iv.py` — `FieldSweepIV`: field sweep + delta-mode IV
+- `procedures/field_sweep_dc.py` — `FieldSweepDC`: field sweep + DC resistance
+- `procedures/temperature_sweep_dc.py` — `TemperatureSweepDC`: temperature sweep + DC resistance; per-step ramp rate via `system_targets`
+- Tests: `tests/test_l4_procedure.py` (19), `tests/test_new_procedures.py` (22)
+
+### L5: Data Manager (2026-04-06)
+- `core/data_manager.py` — HDF5 creation, pre-allocated datasets, per-point snapshots
+- File structure: `/metadata/`, `/data/` (1D sweep + 2D measurement arrays), `/snapshots/` (JSON)
+- `close()` trims datasets on early abort; records `end_time`
+- Tests: `tests/test_l5_data_manager.py` (17)
+
+### GUI (2026-04-06 → 2026-04-19)
+- `gui/theme.py` — Material Dark palette, `build_stylesheet()`, `BTN_CLASS_PRIMARY/SECONDARY/DANGER`
+- `gui/instrument_panel.py` — auto-generated panels from `@monitored`/`@control`; stale/disconnected indicators; required-field validation
+- `gui/monitor_window.py` — outer `QScrollArea` central widget; VI grid always-visible; Other Devices connection-check dot + "Check" button; `_QtLogHandler` (VI DEBUG suppressed in widget); per-tick monitor summary log; Sample Info section
+- `gui/procedure_window.py` — 3-column parameter form (`QGroupBox` Sweep | System | Measurement); dual live plots (`pyqtgraph`) with 4 independent axis selectors; progress bar; Pause/Resume/Abort; emergency acknowledge; queue management
+- `gui/main.py` — application entry point
+- Tests: `tests/test_gui.py` (32)
 
 ---
 
 ## In progress
 
-_Nothing yet. Items move here when work begins._
-
-<!-- Example format:
-- L0: `core/real_driver.py` — Writing base class with connect/disconnect/retry. ~60% complete.
--->
+_Nothing. All simulation-stack work is complete._
 
 ---
 
 ## Next up
 
-These are ordered by priority. Work top to bottom.
+### Phase 7: Real Driver Integration
 
-### Phase 1: Foundation (v0.1-L0)
+These are ordered by priority.
 
-1. **Project scaffolding**
-   - Create folder structure (`cryosoft/`, `tests/`, `docs/`, `configs/`)
-   - Create all folder `README.md` files
-   - Set up `pyproject.toml` with dependencies
-   - Set up `pytest` configuration (`conftest.py`, markers for `@pytest.mark.hardware`)
-   - Create `__init__.py` files
+1. **Real IPS120 driver** (`drivers/oxford_ips120.py`) — GPIB/RS232 Oxford IPS 120-10. Validate against driver test harness. Swap `sim_oxford_ips120` → `oxford_ips120` in `vector_magnet_cryostat/devices.yaml`.
 
-2. **Exception hierarchy**
-   - `core/exceptions.py` — `CryoSoftDriverError`, `CommunicationError`, `ValueOutOfRangeError`, `HardwareError`, `StabilizationTimeout`
-   - Tests: `tests/test_core/test_exceptions.py`
+2. **Real ITC503 driver** (`drivers/oxford_itc503.py`) — GPIB Oxford ITC 503. Same contract as sim. Needle valve via auxiliary analog output (verify channel mapping on hardware).
 
-3. **RealDriver base class**
-   - `core/real_driver.py` — connection management, `_write`/`_query` with auto-retry, `_validate_range`, `_wait_until_stable`
-   - Mock: `tests/mocks/mock_visa_resource.py` — simulates a PyVISA resource
-   - Tests: `tests/test_core/test_real_driver.py` — connect, disconnect, retry on failure, reconnect
+3. **Real ILM200 driver** (`drivers/oxford_ilm200.py`) — RS232 Oxford ILM 200/210. Verify 3-mode refresh rate command syntax.
 
-4. **First real driver: Oxford ITC 503**
-   - `drivers/oxford_itc503.py` — temperature read, heater control, set temperature, sensor channels, helium level
-   - Mock: `tests/mocks/mock_itc503.py` — simulates ITC 503 responses
-   - Tests: `tests/test_drivers/test_itc503_driver.py`
-   - Reason: ITC 503 is used on every cryostat and will be decomposed into multiple VIs later (1:N)
+4. **Real Keithley 6221 driver** (`drivers/keithley_6221.py`) — GPIB. Delta-mode arming sequence.
 
-5. **Second real driver: Oxford IPS 120**
-   - `drivers/oxford_ips120.py` — field read/write, ramp, switch heater, ramp to zero
-   - Mock: `tests/mocks/mock_ips120.py` — simulates ramp behavior over time
-   - Tests: `tests/test_drivers/test_ips120_driver.py`
+5. **Real Keithley 2182A driver** (`drivers/keithley_2182a.py`) — GPIB. Triggered voltage acquisition.
 
-6. **Third real driver: Keithley 6221**
-   - `drivers/keithley_6221.py` — current source, delta mode arming, output enable
-   - Mock: `tests/mocks/mock_keithley_6221.py`
-   - Tests: `tests/test_drivers/test_keithley_6221.py`
+6. **Driver test harness** (`tests/driver_test_harness.py`) — validates L0 contract: single-string init, all expected methods present and return correct types, communication-error recovery. Run against each real driver before connecting to the VI layer.
 
-7. **Fourth real driver: Keithley 2182A**
-   - `drivers/keithley_2182a.py` — voltage measurement, range, NPLC
-   - Mock: `tests/mocks/mock_keithley_2182a.py`
-   - Tests: `tests/test_drivers/test_keithley_2182a.py`
+7. **Production YAML config** (`configs/vector_magnet_cryostat/devices.yaml`) — real driver class paths, real VISA addresses, calibrated `amperes_per_tesla`, production safety limits.
 
-8. **Driver registry**
-   - `drivers/driver_registry.yaml`
-   - `core/driver_loader.py` — reads registry, imports driver classes by name
-   - Tests: `tests/test_core/test_driver_loader.py`
-
-### Phase 2: Virtual instruments (v0.2-L1)
-
-9. **BaseVirtualInstrument**
-    - `core/virtual_instrument.py` — base class with standby, initiate, get_state, get_system_value
-    - Tests: `tests/test_core/test_virtual_instrument.py`
-
-10. **MagnetVI**
-    - `virtual_instruments/magnet/ips120_magnet.py` — wraps IPS 120, set_field (blocking), ramp_to_zero
-    - Tests using MockIPS120
-
-11. **TemperatureVI (1:N decomposition)**
-    - `virtual_instruments/temperature/itc503_temperature.py` — wraps ITC 503 for one control channel
-    - Two instances from same real driver (VTI + sample)
-    - Tests using MockITC503
-
-12. **LevelMeterVI (1:N decomposition)**
-    - `virtual_instruments/level/itc503_level.py` — wraps ITC 503 for helium/nitrogen level
-    - Shares real driver with TemperatureVI
-    - Tests using MockITC503
-
-13. **MeasurementVI + DeltaMode (N:1 composition)**
-    - `core/virtual_instrument.py` — add MeasurementVI base with initiate_measurement / read_datapoint
-    - `virtual_instruments/measurement/delta_mode_6221_2182a.py` — wraps 6221 + 2182A
-    - Tests using MockKeithley6221 + MockKeithley2182A
-
-14. **VI registry**
-    - `virtual_instruments/vi_registry.yaml`
-    - `core/vi_loader.py`
-    - Tests: `tests/test_core/test_vi_loader.py`
-
-### Phase 3: Core infrastructure (v0.3-core)
-
-15. **Config loader**
-    - `core/config_loader.py` — parses devices.yaml + variables.yaml, validates, wires VIs to drivers
-    - Tests with example config files in `tests/fixtures/`
-
-16. **Command queue**
-    - `core/command_queue.py` — priority queue with interleaving
-    - Tests: concurrent submit from two threads, priority ordering, emergency pre-emption
-
-17. **Instrument manager**
-    - `core/instrument_manager.py` — load config, connect all, variable mapping, shared access via queue
-    - Integration tests with mocked VIs
-
-18. **Monitor / watchdog**
-    - `core/monitor.py` — QThread polling loop, safety rule evaluation
-    - `core/safety_engine.py` — YAML rule parser, action dispatcher
-    - Tests: safety rule triggers, emergency action
-
-### Phase 4: Measurement (v0.4-procedures)
-
-19. **BaseProcedure**
-    - `core/base_procedure.py` — set_state / run / cleanup contract, should_stop flag
-    - Tests
-
-20. **Data manager**
-    - `core/data_manager.py` — HDF5 creation with enriched start metadata, per-point snapshots
-    - `core/metadata.py` — state serialization
-    - Tests: verify HDF5 structure, read back metadata
-
-21. **First procedure: FieldSweepIV**
-    - `procedures/field_sweep_iv.py`
-    - End-to-end integration test with all mocks
-
-22. **Procedure loader**
-    - `core/procedure_loader.py` — auto-discover procedures
-    - Tests
-
-### Phase 5: GUI (v0.5-gui)
-
-23. **Main window** — connection bar, system state panel, monitor plots
-24. **Procedure window** — procedure browser, auto-form, sample metadata, live plot
-25. **Integration** — full stack test with mocks, manual hardware test
-
-### Phase 6: Deploy (v1.0)
-
-26. **PyInstaller packaging**
-27. **User documentation** — how to write a driver, how to write a VI, how to configure a cryostat
-28. **Hardware testing** on first cryostat
-29. **Second cryostat config** — copy and edit YAML
+8. **Full system test** — run `FieldSweepIV` with real hardware, verify HDF5 output matches expected structure.
 
 ---
 
@@ -236,146 +155,117 @@ These are ordered by priority. Work top to bottom.
 
 _No current blockers._
 
-<!-- Example format:
-- [2026-04-05] L1 MagnetVI: Unclear how IPS 120 reports quench status. Need to test on hardware or find manual section. Blocks: quench_detected flag in get_state().
--->
-
 ---
 
-## Design decisions and changelog
+## Design decisions (v4.0 → v4.1)
 
-Record any interface changes, architectural decisions, or deviations from the architecture doc.
-
-<!-- Example format:
-- [2026-04-03] Decided to use `pyvisa-sim` for mock VISA resources instead of pure unittest.mock. Reason: pyvisa-sim handles resource string parsing and timeout simulation natively.
-- [2026-04-07] Changed MeasurementVI.read_datapoint() return type from numpy array to list[list[float]]. Reason: avoids numpy dependency at the VI layer; conversion to numpy happens in DataManager.
--->
+- [2026-04-19] **Behavior-based VI naming.** VIs renamed from instrument model (`IPS120MagnetVI`) to behavioral role (`SuperconductingMagnetVI`). Rationale: procedures and the Station should be agnostic to which specific PSU is installed. Swapping hardware requires only a YAML change, not a VI rewrite.
+- [2026-04-19] **VI subpackage structure.** `virtual_instruments/` split into `magnet/`, `temperature/`, `measurement/`, `level/` subpackages. `base.py` and `rampable.py` remain at the top level (used across all subpackages). Rationale: flat directory with 10+ files was harder to navigate.
+- [2026-04-19] **`DCMeasurementBase` uses `raise NotImplementedError`, not `@abstractmethod`.** Consistent with `MagnetBase`, `TemperatureControllerBase` etc. — documentation/grouping purpose, not enforcement. Procedures type-hint `dc: DCMeasurementBase` and can swap between `DCSeparateMeasurementVI` and `DCSingleInstrumentVI` via YAML.
+- [2026-04-19] **Procedure parameters split into 3 group dicts.** `sweep_parameters`, `system_parameters`, `measurement_parameters` are defined in concrete subclasses. `BaseProcedure.__init_subclass__` auto-builds the `parameters` union so all existing code (`cls.parameters.items()`, `FieldSweepIV.parameters`) continues to work without change. Rationale: flat form mixed sweep axis, system state, and measurement config — conceptually distinct, and the separation enables a 3-column GUI layout.
+- [2026-04-19] **3-column GUI parameter form.** `ProcedureWindow._build_param_form()` renders 3 `QGroupBox` panels (Sweep | System | Measurement) in a `QHBoxLayout`. Each panel uses a `QFormLayout`. This prepares for a future "custom sweep array" feature: the Sweep panel can be replaced by a file-picker widget without touching the other two.
+- [2026-04-19] **Persistent-mode ramp uses tick-count generators, never `time.sleep()`.** Switch heater warm-up and cool-down waits are counted in Orchestrator ticks. This keeps the ramp cooperative with the event loop and avoids freezing the Qt GUI. `switch_heater_warmup_ticks` and `switch_heater_cooldown_ticks` are `init_params` in YAML.
 
 ---
 
 ## File inventory
 
-Track every file in the project. Update when adding new files.
-
 ```
 cryosoft/
-  __init__.py                          — NOT CREATED
-  main.py                              — NOT CREATED
-  core/
-    __init__.py                        — NOT CREATED
-    exceptions.py                      — NOT CREATED
-    real_driver.py                     — NOT CREATED
-    virtual_instrument.py              — NOT CREATED
-    driver_loader.py                   — NOT CREATED
-    vi_loader.py                       — NOT CREATED
-    config_loader.py                   — NOT CREATED
-    instrument_manager.py              — NOT CREATED
-    command_queue.py                   — NOT CREATED
-    monitor.py                         — NOT CREATED
-    safety_engine.py                   — NOT CREATED
-    base_procedure.py                  — NOT CREATED
-    procedure_loader.py                — NOT CREATED
-    data_manager.py                    — NOT CREATED
-    metadata.py                        — NOT CREATED
-    logger.py                          — NOT CREATED
-    README.md                          — NOT CREATED
-  drivers/
-    oxford_itc503.py                   — NOT CREATED
-    oxford_ips120.py                   — NOT CREATED
-    keithley_6221.py                   — NOT CREATED
-    keithley_2182a.py                  — NOT CREATED
-    driver_registry.yaml               — NOT CREATED
-    README.md                          — NOT CREATED
-  virtual_instruments/
-    magnet/
-      ips120_magnet.py                 — NOT CREATED
-      README.md                        — NOT CREATED
-    temperature/
-      itc503_temperature.py            — NOT CREATED
-      README.md                        — NOT CREATED
-    measurement/
-      delta_mode_6221_2182a.py         — NOT CREATED
-      README.md                        — NOT CREATED
-    level/
-      itc503_level.py                  — NOT CREATED
-      README.md                        — NOT CREATED
-    vi_registry.yaml                   — NOT CREATED
-    README.md                          — NOT CREATED
-  procedures/
-    field_sweep_iv.py                  — DONE (delta-mode field sweep; uses keithley_delta_mode VI)
-    field_sweep_dc.py                  — DONE (DC field sweep; uses dc_measurement VI)
-    temperature_sweep_dc.py            — DONE (DC temperature sweep; uses dc_measurement VI; ramp rate per-step)
-    README.md                          — NOT CREATED
-  configs/
-    example_cryostat/
-      devices.yaml                     — NOT CREATED
-      variables.yaml                   — NOT CREATED
-      safety_rules.yaml                — NOT CREATED
-      monitor_config.yaml              — NOT CREATED
-    README.md                          — NOT CREATED
-  gui/
-    __init__.py                        — DONE
-    theme.py                           — DONE (central color palette + build_stylesheet(); applied in main.py)
-    instrument_panel.py                — DONE (auto-generated per-VI panel; required-field validation; theme-aware)
-    monitor_window.py                  — DONE (outer QScrollArea central widget; Other Devices connection-check dot + Check button; VI DEBUG log filter; per-tick monitor summary)
-    procedure_window.py                — DONE (two-column layout + dual live plots + draggable splitters; theme-aware)
-    README.md                          — NOT CREATED
+  __init__.py
   main.py                              — DONE (application entry point)
-  data/                                — Created at runtime
-  logs/                                — Created at runtime
+  core/
+    __init__.py
+    exceptions.py                      — DONE (CryoSoftError hierarchy)
+    decorators.py                      — DONE (@monitored, @control, get_type_hints fix)
+    logging_config.py                  — DONE (rotating file + Qt log handler)
+    station.py                         — DONE (Station + build_station() factory)
+    orchestrator.py                    — DONE (cooperative state machine)
+    data_manager.py                    — DONE (HDF5 storage)
+    procedure.py                       — DONE (BaseProcedure + 3-group parameters)
+    README.md                          — DONE
+  drivers/
+    __init__.py
+    sim_oxford_ips120.py               — DONE (+ switch heater + persistent mode)
+    sim_oxford_itc503.py               — DONE (+ needle valve)
+    sim_oxford_ilm200.py               — DONE (+ 3-mode refresh)
+    sim_keithley_6221.py               — DONE (+ set/get_compliance, get_idn)
+    sim_keithley_2182a.py              — DONE (+ get_idn)
+    sim_keithley_2400.py               — DONE (new SMU sim driver)
+    oxford_ips120.py                   — NOT CREATED (Phase 7)
+    oxford_itc503.py                   — NOT CREATED (Phase 7)
+    oxford_ilm200.py                   — NOT CREATED (Phase 7)
+    keithley_6221.py                   — NOT CREATED (Phase 7)
+    keithley_2182a.py                  — NOT CREATED (Phase 7)
+  virtual_instruments/
+    __init__.py
+    base.py                            — DONE (all base classes + DCMeasurementBase)
+    rampable.py                        — DONE (RampableVI mixin)
+    magnet/
+      __init__.py
+      superconducting_magnet.py        — DONE (status-driven ramp, segment rates)
+      superconducting_magnet_persistent.py — DONE (switch heater + persistent mode)
+      README.md                        — DONE
+    temperature/
+      __init__.py
+      sample_temperature_controller.py — DONE (time-based ramp)
+      vti_temperature_controller.py    — DONE (+ needle valve)
+      README.md                        — DONE
+    measurement/
+      __init__.py
+      dc_separate_measurement.py       — DONE (6221 + 2182A, DC mode)
+      dc_single_instrument.py          — DONE (K2400 SMU)
+      measurement_delta_mode.py        — DONE (6221 + 2182A, delta mode)
+      README.md                        — DONE
+    level/
+      __init__.py
+      cryogen_level_meter.py           — DONE (majority-vote buffer, 3-mode)
+      README.md                        — DONE
+  procedures/
+    __init__.py
+    field_sweep_iv.py                  — DONE (field sweep + delta-mode IV)
+    field_sweep_dc.py                  — DONE (field sweep + DC resistance)
+    temperature_sweep_dc.py            — DONE (temperature sweep + DC resistance)
+    README.md                          — DONE
+  configs/
+    sim_cryostat/
+      devices.yaml                     — DONE (subpackage class paths)
+      monitor.yaml                     — DONE
+    vector_magnet_cryostat/            — NOT CREATED (Phase 7)
+  gui/
+    __init__.py
+    theme.py                           — DONE (Material Dark; button classes)
+    instrument_panel.py                — DONE (auto-generated panels; validation)
+    monitor_window.py                  — DONE (scrollable; check dot; log filter)
+    procedure_window.py                — DONE (3-column form; dual live plots)
+    README.md                          — DONE
 
 tests/
-  conftest.py                          — NOT CREATED
+  __init__.py
+  conftest.py                          — DONE
   mocks/
-    mock_visa_resource.py              — NOT CREATED
-    mock_ips120.py                     — NOT CREATED
-    mock_itc503.py                     — NOT CREATED
-    mock_keithley_6221.py              — NOT CREATED
-    mock_keithley_2182a.py             — NOT CREATED
-    README.md                          — NOT CREATED
-  test_core/
-    test_exceptions.py                 — NOT CREATED
-    test_real_driver.py                — NOT CREATED
-    test_virtual_instrument.py         — NOT CREATED
-    test_driver_loader.py              — NOT CREATED
-    test_vi_loader.py                  — NOT CREATED
-    test_config_loader.py              — NOT CREATED
-    test_instrument_manager.py         — NOT CREATED
-    test_command_queue.py              — NOT CREATED
-    test_monitor.py                    — NOT CREATED
-    test_data_manager.py               — NOT CREATED
-  test_drivers/
-    test_itc503_driver.py              — NOT CREATED
-    test_ips120_driver.py              — NOT CREATED
-    test_keithley_6221.py              — NOT CREATED
-    test_keithley_2182a.py             — NOT CREATED
-  test_virtual_instruments/
-    test_magnet_vi.py                  — NOT CREATED
-    test_temperature_vi.py             — NOT CREATED
-    test_delta_mode_vi.py              — NOT CREATED
-    test_level_vi.py                   — NOT CREATED
-  test_procedures/
-    test_field_sweep_iv.py             — NOT CREATED
-  test_l1_virtual_instruments.py       — DONE
-  test_l2_station.py                   — DONE (updated: keithley_delta_mode + dc_measurement in expected VI list)
-  test_l3_orchestrator.py              — DONE
-  test_l4_procedure.py                 — DONE (updated: iv_measurement → keithley_delta_mode)
-  test_l5_data_manager.py              — DONE (updated: iv_measurement → keithley_delta_mode)
-  test_measurement_dc_vi.py            — DONE (14 tests for DCMeasurementVI)
-  test_new_procedures.py               — DONE (22 tests: FieldSweepDC, TemperatureSweepDC, ramp-rate control)
-  test_gui.py                          — DONE (145 tests total, all pass)
-  fixtures/
-    example_devices.yaml               — NOT CREATED
-    example_variables.yaml             — NOT CREATED
-  README.md                            — NOT CREATED
+    __init__.py
+  test_foundation.py                   — DONE
+  test_l0_simulated.py                 — DONE (39 tests)
+  test_l0_new_drivers.py               — DONE (15 tests: IPS120 heater, ITC503 needle, ILM200 3-mode, K2400)
+  test_l1_virtual_instruments.py       — DONE (updated imports to subpackage paths)
+  test_l1_new_vis.py                   — DONE (61 tests for all 7 new VIs)
+  test_l2_station.py                   — DONE (10 tests)
+  test_l3_orchestrator.py              — DONE (9 tests)
+  test_l4_procedure.py                 — DONE (19 tests)
+  test_l5_data_manager.py              — DONE (17 tests)
+  test_measurement_dc_vi.py            — DONE (14 tests for DCSeparateMeasurementVI)
+  test_new_procedures.py               — DONE (22 tests: FieldSweepDC, TemperatureSweepDC)
+  test_gui.py                          — DONE (32 tests)
+  driver_test_harness.py               — NOT CREATED (Phase 7)
 
-docs/
-  architecture_v1.1.docx               — DONE
-  driver_standard_v1.md                — DONE
-  STATUS.md                            — THIS FILE
-  README.md                            — NOT CREATED
+directives/
+  CryoSoft_Architecture_v4_0.md       — DONE (previous architecture doc)
+  CryoSoft_Architecture_v4_1.md       — DONE (current)
+  layer_plans/                         — DONE (7 layer plan files)
+  deprecated/                          — archived older docs
 
-pyproject.toml                         — NOT CREATED
+STATUS.md                              — THIS FILE
 CLAUDE.md                              — DONE
-README.md                              — NOT CREATED
+README.md                              — DONE
 ```

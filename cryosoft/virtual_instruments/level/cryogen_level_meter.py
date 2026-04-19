@@ -1,27 +1,29 @@
 # ---
 # description: |
-#   ILM200LevelVI: Virtual Instrument wrapping the Oxford ILM 200 cryogen level
-#   meter.  Monitoring-only VI (no ramp API).  Implements a readings buffer for
-#   the helium_low() safety check to filter single-point dips.
+#   CryogenLevelMeterVI: behavior-based VI for any cryogen level meter.
+#   Standardizes the refresh rate to a three-mode contract: STANDBY (0),
+#   SLOW (1), FAST (2). Any real driver that maps its native modes to these
+#   three integers can back this VI. Implements a readings buffer for the
+#   helium_low() safety check to filter single-point dips.
 # entry_point: Not run directly; instantiated by Station factory.
 # dependencies:
 #   - cryosoft.virtual_instruments.base (LevelMeterBase)
 #   - cryosoft.core.decorators (monitored, control)
 # input: |
-#   drivers = {"main": <ILM200 driver instance>}
+#   drivers = {"main": <level meter driver instance>}
 #   init_params keys: helium_low_threshold (float, default 20.0),
 #   buffer_size (int, default 5).
 # process: |
 #   Each call to helium_level() appends to a circular buffer (deque).
 #   helium_low() returns True if the statistical mode of the buffer is below
-#   the threshold (majority-vote approach to avoid reacting to single dips).
+#   the threshold. Three-mode standard: 0=STANDBY, 1=SLOW, 2=FAST.
 # output: |
 #   Logged helium_level (%), nitrogen_level (%), get_refresh_rate (int)
 #   via @monitored; set_refresh_rate available as @control.
-# last_updated: 2026-04-06
+# last_updated: 2026-04-19
 # ---
 
-"""ILM200LevelVI — Oxford ILM 200 cryogen level meter Virtual Instrument."""
+"""CryogenLevelMeterVI — behavior-based VI for any cryogen level meter."""
 
 from __future__ import annotations
 
@@ -33,30 +35,44 @@ from cryosoft.core.decorators import control, monitored
 from cryosoft.virtual_instruments.base import LevelMeterBase
 
 
-class ILM200LevelVI(LevelMeterBase):
-    """Virtual Instrument for the Oxford ILM 200 cryogen level meter.
+# Three-mode standard constants
+STANDBY = 0
+SLOW = 1
+FAST = 2
+
+
+class CryogenLevelMeterVI(LevelMeterBase):
+    """Virtual Instrument for a cryogen level meter.
+
+    Refresh mode standard
+    ---------------------
+    The VI enforces a three-mode interface that any driver can be mapped to:
+
+    * ``0`` — STANDBY: measurements paused, lowest power.
+    * ``1`` — SLOW: continuous slow-rate polling (normal operation).
+    * ``2`` — FAST: rapid polling used during a helium fill.
+
+    The mapping from native instrument modes to these three values is the
+    driver's responsibility.
 
     Safety buffer
     -------------
     ``helium_level()`` appends each reading to a fixed-size deque.
     ``helium_low()`` computes the statistical mode of the buffer to suppress
-    transient single-point dips that would otherwise trigger a false alarm.
+    transient single-point dips.
     """
 
     def __init__(self, drivers: dict[str, object], **init_params: Any) -> None:
         super().__init__(drivers, **init_params)
         self._driver = drivers["main"]
 
-        # Threshold below which helium is considered low (%).
         self._helium_low_threshold: float = float(
             init_params.get("helium_low_threshold", 20.0)
         )
-
-        # Number of readings to keep in the buffer for helium_low() decision.
         self._buffer_size: int = int(init_params.get("buffer_size", 5))
-
-        # Circular buffer of helium readings (booleans: below threshold?).
-        self._helium_buffer: deque[bool] = deque([False] * self._buffer_size, maxlen=self._buffer_size)
+        self._helium_buffer: deque[bool] = deque(
+            [False] * self._buffer_size, maxlen=self._buffer_size
+        )
 
     # ------------------------------------------------------------------
     # @monitored methods
@@ -76,7 +92,7 @@ class ILM200LevelVI(LevelMeterBase):
 
     @monitored
     def get_refresh_rate(self) -> int:
-        """Return the current refresh rate mode (0 = slow, 1 = fast)."""
+        """Return the current refresh rate mode (0=STANDBY, 1=SLOW, 2=FAST)."""
         return self._driver.get_refresh_rate()  # type: ignore[attr-defined]
 
     # ------------------------------------------------------------------
@@ -85,11 +101,16 @@ class ILM200LevelVI(LevelMeterBase):
 
     @control
     def set_refresh_rate(self, mode: int) -> None:
-        """Set the ILM refresh rate mode.
+        """Set the refresh rate mode.
 
         Args:
-            mode: 0 for slow (continuous), 1 for fast (pulsed).
+            mode: 0 (STANDBY), 1 (SLOW), or 2 (FAST).
+
+        Raises:
+            ValueError: If mode is not 0, 1, or 2.
         """
+        if mode not in (STANDBY, SLOW, FAST):
+            raise ValueError(f"Refresh rate mode must be 0, 1, or 2, got {mode}")
         self._driver.set_refresh_rate(mode)  # type: ignore[attr-defined]
 
     # ------------------------------------------------------------------
@@ -99,9 +120,8 @@ class ILM200LevelVI(LevelMeterBase):
     def helium_low(self) -> bool:
         """Return True if the helium level is critically low.
 
-        Uses a majority vote of recent readings (mode of the buffer) to avoid
-        reacting to isolated single-point dips.  Returns ``False`` until the
-        buffer has at least one reading.
+        Uses majority vote of recent readings to avoid reacting to single dips.
+        Returns False until the buffer has at least one reading.
         """
         if not self._helium_buffer:
             return False
@@ -112,7 +132,7 @@ class ILM200LevelVI(LevelMeterBase):
     # ------------------------------------------------------------------
 
     def initiate(self) -> None:
-        """Initialise; no special startup command needed for ILM 200."""
+        """Initialise; no special startup command needed."""
 
     def standby(self) -> None:
-        """ILM 200 is read-only — no standby action required."""
+        """Level meter is read-only — no standby action required."""
