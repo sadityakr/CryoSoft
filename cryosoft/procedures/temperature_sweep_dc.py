@@ -9,21 +9,24 @@
 #   - numpy
 #   - cryosoft.core.procedure (BaseProcedure)
 #   - cryosoft.core.data_manager (DataManager)
-#   - Station must have: temperature_vti (system VI),
-#     dc_measurement (measurement VI with initiate() and take_reading()).
+#   - Station must have: temperature_vti (system VI), magnet_x (system VI),
+#     magnet_y (system VI), dc_measurement (measurement VI with initiate()
+#     and take_reading()).
 # input: |
 #   station, sample_info, data_directory, and keyword params matching the
 #   parameters dict: temp_start, temp_end, n_points, ramp_rate_K_per_min,
-#   current_A, compliance_A, voltmeter_range_V, readings_per_point, point_wait.
+#   field_x, field_y, current_A, compliance_A, voltmeter_range_V,
+#   readings_per_point, point_wait.
 # process: |
-#   initiate() ramps to temp_start at ramp_rate_K_per_min, arms dc_measurement.
-#   change_sweep_step() ramps to the next temperature at ramp_rate_K_per_min.
+#   initiate() ramps temperature_vti to temp_start, magnet_x to field_x, and
+#   magnet_y to field_y simultaneously, then arms dc_measurement.
+#   change_sweep_step() ramps only temperature_vti to the next step.
 #   measure() calls take_reading() and saves via DataManager.
 #   standby() closes the data file; temperature holds at last set point.
 # output: |
 #   HDF5 file with /data/temperature_K[N], /data/voltage_V[N,M],
 #   /data/current_A[N,M], /data/timestamp[N], /snapshots/ and /metadata/.
-# last_updated: 2026-04-18
+# last_updated: 2026-04-19
 # ---
 
 """TemperatureSweepDC — temperature sweep with DC resistance measurement."""
@@ -88,6 +91,18 @@ class TemperatureSweepDC(BaseProcedure):
     }
 
     system_parameters = {
+        "field_x": {
+            "type": float,
+            "default": 0.0,
+            "unit": "T",
+            "description": "Applied field (magnet X, held constant)",
+        },
+        "field_y": {
+            "type": float,
+            "default": 0.0,
+            "unit": "T",
+            "description": "Applied field (magnet Y, held constant)",
+        },
         "ramp_rate_K_per_min": {
             "type": float,
             "default": 2.0,
@@ -153,7 +168,11 @@ class TemperatureSweepDC(BaseProcedure):
         Returns:
             ``(system_targets, measurement_commands, point_wait)``
         """
-        system_targets = {"temperature_vti": self._temp_target(0)}
+        system_targets = {
+            "temperature_vti": self._temp_target(0),
+            "magnet_x": {"target": self._params["field_x"]},
+            "magnet_y": {"target": self._params["field_y"]},
+        }
 
         measurement_commands = {
             "dc_measurement": {
@@ -188,11 +207,13 @@ class TemperatureSweepDC(BaseProcedure):
 
         logger.info(
             "TemperatureSweepDC.initiate(): %d steps from %.1f K to %.1f K "
-            "at %.2f K/min",
+            "at %.2f K/min, Bx=%.3f T, By=%.3f T",
             len(self._sweep),
             self._params["temp_start"],
             self._params["temp_end"],
             self._params["ramp_rate_K_per_min"],
+            self._params["field_x"],
+            self._params["field_y"],
         )
 
         return system_targets, measurement_commands, float(self._params["point_wait"])
