@@ -60,7 +60,7 @@ class FieldSweepIV(BaseProcedure):
     measurement_data_keys = ["voltage_V", "current_A"]
     default_x_key = "field_T"
 
-    parameters = {
+    sweep_parameters = {
         "field_start": {
             "type": float,
             "default": -1.0,
@@ -79,23 +79,14 @@ class FieldSweepIV(BaseProcedure):
             "min": 2,
             "description": "Number of field steps",
         },
+    }
+
+    system_parameters = {
         "temperature": {
             "type": float,
             "default": 10.0,
             "unit": "K",
             "description": "Sample temperature",
-        },
-        "current": {
-            "type": float,
-            "default": 1e-6,
-            "unit": "A",
-            "description": "Measurement current",
-        },
-        "n_readings": {
-            "type": int,
-            "default": 100,
-            "min": 1,
-            "description": "Readings per point (delta mode)",
         },
         "init_wait": {
             "type": float,
@@ -108,6 +99,21 @@ class FieldSweepIV(BaseProcedure):
             "default": 5.0,
             "unit": "s",
             "description": "Wait between sweep points",
+        },
+    }
+
+    measurement_parameters = {
+        "current": {
+            "type": float,
+            "default": 1e-6,
+            "unit": "A",
+            "description": "Measurement current",
+        },
+        "n_readings": {
+            "type": int,
+            "default": 100,
+            "min": 1,
+            "description": "Readings per point (delta mode)",
         },
     }
 

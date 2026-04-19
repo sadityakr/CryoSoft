@@ -378,7 +378,7 @@ def _import_class(dotted_path: str) -> type:
     """Import and return a class from a dotted module path.
 
     Args:
-        dotted_path: E.g. ``"cryosoft.virtual_instruments.magnet_ips120.IPS120MagnetVI"``.
+        dotted_path: E.g. ``"cryosoft.virtual_instruments.magnet.superconducting_magnet.SuperconductingMagnetVI"``.
 
     Returns:
         The class object.

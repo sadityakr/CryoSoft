@@ -14,7 +14,7 @@
 #   to |Tsp - T|, capped at 100%.
 # output: |
 #   Returns float temperature, setpoint, and heater output values via public API.
-# last_updated: 2026-04-06
+# last_updated: 2026-04-19
 # ---
 
 """Simulated Oxford ITC 503 Temperature Controller driver."""
@@ -48,6 +48,9 @@ class SimOxfordITC503:
         self._setpoint: float = 300.0     # Kelvin
         self._tau: float = 60.0           # Time constant in seconds
         self._last_update: float = time.time()
+
+        # Needle valve state (auxiliary analog output on real ITC503)
+        self._needle_valve: float = 0.0  # Percent open, 0.0–100.0
 
         # Test control flags
         self._simulate_error: bool = False
@@ -84,6 +87,27 @@ class SimOxfordITC503:
         """
         self._check_error()
         return min(100.0, abs(self._setpoint - self._temperature) * 10.0)
+
+    # ------------------------------------------------------------------
+    # Needle valve API (auxiliary analog output on real ITC503)
+    # ------------------------------------------------------------------
+
+    def get_needle_valve(self) -> float:
+        """Return the needle valve position as a percentage open (0–100).
+
+        Returns:
+            Float in [0.0, 100.0].
+        """
+        self._check_error()
+        return self._needle_valve
+
+    def set_needle_valve(self, position: float) -> None:
+        """Set the needle valve position.
+
+        Args:
+            position: Percent open in [0.0, 100.0]. Clamped silently.
+        """
+        self._needle_valve = max(0.0, min(100.0, position))
 
     # ------------------------------------------------------------------
     # Internal simulation logic

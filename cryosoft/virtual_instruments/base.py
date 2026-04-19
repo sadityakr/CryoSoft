@@ -4,7 +4,7 @@
 #   Provides __init_subclass__ auto-wrapping of @monitored/@control methods with
 #   structured logging, get_state() auto-build, and typed sub-bases for each VI
 #   category (MagnetBase, TemperatureControllerBase, LevelMeterBase,
-#   MeasurementInstrumentBase).
+#   MeasurementInstrumentBase, DCMeasurementBase).
 # entry_point: Not run directly; imported by all concrete VI modules.
 # dependencies:
 #   - cryosoft.core.exceptions
@@ -203,3 +203,43 @@ class MeasurementInstrumentBase(BaseVirtualInstrument):
             overridden.
         """
         return False
+
+
+class DCMeasurementBase(MeasurementInstrumentBase):
+    """Base class for all DC resistance measurement VIs.
+
+    Documents the shared method contract that allows procedures to swap between
+    DCSeparateMeasurementVI (Keithley 6221 + 2182A) and DCSingleInstrumentVI
+    (Keithley 2400 SMU) by changing only the YAML config.
+
+    Subclasses must implement ``initiate()`` and ``take_reading()`` with these
+    exact signatures.  The base raises NotImplementedError so that a missing
+    implementation fails loudly at first use rather than silently.
+    """
+
+    def initiate(
+        self,
+        current_A: float = 1e-6,
+        compliance_A: float = 1e-3,
+        voltmeter_range_V: float = 0.1,
+    ) -> None:
+        """Arm the measurement hardware with fixed DC current and range.
+
+        Args:
+            current_A: DC source current in Amperes.
+            compliance_A: Compliance / protection limit in Amperes.
+            voltmeter_range_V: Full-scale voltage measurement range in Volts.
+        """
+        raise NotImplementedError
+
+    def take_reading(self, n_points: int = 10) -> dict[str, list[float]]:
+        """Acquire *n_points* voltage measurements at the configured current.
+
+        Args:
+            n_points: Number of samples to collect.
+
+        Returns:
+            ``{"voltage_V": list[float], "current_A": list[float]}``
+            with length *n_points*.
+        """
+        raise NotImplementedError

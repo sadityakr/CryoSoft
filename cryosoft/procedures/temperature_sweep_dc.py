@@ -66,7 +66,7 @@ class TemperatureSweepDC(BaseProcedure):
     measurement_data_keys = ["voltage_V", "current_A"]
     default_x_key = "temperature_K"
 
-    parameters = {
+    sweep_parameters = {
         "temp_start": {
             "type": float,
             "default": 10.0,
@@ -85,12 +85,24 @@ class TemperatureSweepDC(BaseProcedure):
             "min": 2,
             "description": "Number of temperature steps",
         },
+    }
+
+    system_parameters = {
         "ramp_rate_K_per_min": {
             "type": float,
             "default": 2.0,
             "unit": "K/min",
             "description": "Temperature ramp rate between steps",
         },
+        "point_wait": {
+            "type": float,
+            "default": 60.0,
+            "unit": "s",
+            "description": "Wait after reaching each temperature (thermal equilibration)",
+        },
+    }
+
+    measurement_parameters = {
         "current_A": {
             "type": float,
             "default": 1e-6,
@@ -114,12 +126,6 @@ class TemperatureSweepDC(BaseProcedure):
             "default": 10,
             "min": 1,
             "description": "DC voltage readings per temperature point",
-        },
-        "point_wait": {
-            "type": float,
-            "default": 60.0,
-            "unit": "s",
-            "description": "Wait after reaching each temperature (thermal equilibration)",
         },
     }
 

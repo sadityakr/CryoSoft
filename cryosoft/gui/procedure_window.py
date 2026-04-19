@@ -22,7 +22,7 @@
 #   goes through orchestrator.run_procedure().
 # output: |
 #   A QMainWindow. Two live plots update via orchestrator.measurement_ready.
-# last_updated: 2026-04-17
+# last_updated: 2026-04-19
 # ---
 
 """ProcedureWindow — procedure builder, queue, and live-data monitor."""
@@ -243,26 +243,43 @@ class ProcedureWindow(QMainWindow):
         return widget
 
     def _build_param_form(self, cls: type[BaseProcedure]) -> QWidget:
-        """Auto-generate a parameter form from the procedure's parameters dict.
+        """Auto-generate a three-column parameter form from the procedure's parameter groups.
+
+        Renders sweep_parameters, system_parameters, and measurement_parameters
+        in side-by-side QGroupBox panels so users can distinguish the different
+        kinds of input at a glance.
 
         Args:
             cls: The BaseProcedure subclass to introspect.
 
         Returns:
-            A QWidget containing the assembled form.
+            A QWidget containing the three-column form.
         """
         container = QWidget()
-        form = QFormLayout(container)
+        hbox = QHBoxLayout(container)
+        hbox.setSpacing(8)
+        hbox.setContentsMargins(0, 0, 0, 0)
         self._param_inputs.clear()
 
-        for param_name, spec in cls.parameters.items():
-            unit = spec.get("unit", "")
-            desc = spec.get("description", param_name)
-            label_text = f"{desc} ({unit}):" if unit else f"{desc}:"
-            field = QLineEdit(str(spec.get("default", "")))
-            field.setObjectName(f"param_{param_name}_input")
-            self._param_inputs[param_name] = field
-            form.addRow(label_text, field)
+        groups = [
+            ("Sweep", cls.sweep_parameters),
+            ("System", cls.system_parameters),
+            ("Measurement", cls.measurement_parameters),
+        ]
+
+        for group_title, group_params in groups:
+            box = QGroupBox(group_title)
+            form = QFormLayout(box)
+            form.setSpacing(4)
+            for param_name, spec in group_params.items():
+                unit = spec.get("unit", "")
+                desc = spec.get("description", param_name)
+                label_text = f"{desc} ({unit}):" if unit else f"{desc}:"
+                field = QLineEdit(str(spec.get("default", "")))
+                field.setObjectName(f"param_{param_name}_input")
+                self._param_inputs[param_name] = field
+                form.addRow(label_text, field)
+            hbox.addWidget(box)
 
         return container
 
@@ -439,7 +456,7 @@ class ProcedureWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_procedure_selected(self, index: int) -> None:
-        """Rebuild the parameter form when the user selects a procedure.
+        """Rebuild the parameter form and axis selectors when procedure changes.
 
         Args:
             index: Index of the selected procedure in the dropdown.
@@ -449,6 +466,7 @@ class ProcedureWindow(QMainWindow):
         cls = self._procedures[index]
         param_widget = self._build_param_form(cls)
         self._param_scroll.setWidget(param_widget)
+        self._populate_axis_selectors(cls)
 
     def _collect_params(self) -> tuple[dict, dict, str] | None:
         """Read and validate all form inputs.
@@ -511,7 +529,7 @@ class ProcedureWindow(QMainWindow):
 
         self._queue.append((cls, param_values, sample_info, data_dir))
 
-        sweep_keys = list(cls.parameters.keys())
+        sweep_keys = list(cls.sweep_parameters.keys()) or list(cls.parameters.keys())
         summary_parts = [f"{k}={param_values[k]}" for k in sweep_keys[:3]]
         summary = f"{cls.name} ({', '.join(summary_parts)})"
         item = QListWidgetItem(f"{len(self._queue)}. {summary}")
@@ -580,8 +598,44 @@ class ProcedureWindow(QMainWindow):
     # Plot helpers
     # ------------------------------------------------------------------
 
+    def _populate_axis_selectors(self, cls: type[BaseProcedure]) -> None:
+        """Populate all four axis selectors from cls metadata + current station state.
+
+        Safe to call before a run starts (reads from monitor cache, no poll).
+        Preserves existing selection when keys overlap (e.g. after a procedure
+        type change), so the user's choices survive switching procedures.
+
+        Args:
+            cls: The BaseProcedure subclass currently selected.
+        """
+        system_keys = list(self._station.last_state_flat().keys())
+        keys = ["unix_time"] + cls.sweep_data_keys + system_keys + cls.measurement_data_keys
+        if not keys:
+            return
+
+        default_x = cls.default_x_key if cls.default_x_key in keys else keys[0]
+
+        for sel in (self._x1_axis_selector, self._x2_axis_selector,
+                    self._y_axis_selector, self._y2_axis_selector):
+            prev = sel.currentText()
+            sel.blockSignals(True)
+            sel.clear()
+            sel.addItems(keys)
+            sel.setCurrentText(prev if prev in keys else keys[0])
+            sel.blockSignals(False)
+
+        # Apply sensible defaults only when the current selection is blank/unknown
+        if self._x1_axis_selector.currentText() not in keys:
+            self._x1_axis_selector.setCurrentText(default_x)
+        if self._x2_axis_selector.currentText() not in keys:
+            self._x2_axis_selector.setCurrentText(default_x)
+        if self._y_axis_selector.currentText() not in keys and "voltage_V" in keys:
+            self._y_axis_selector.setCurrentText("voltage_V")
+        if self._y2_axis_selector.currentText() not in keys and "current_A" in keys:
+            self._y2_axis_selector.setCurrentText("current_A")
+
     def _reset_plot(self, proc: BaseProcedure) -> None:
-        """Clear datapoints, rebuild all axis selectors from proc.get_data_keys().
+        """Clear datapoints and refresh axis selectors for a new run.
 
         Args:
             proc: The procedure about to run.
@@ -590,24 +644,7 @@ class ProcedureWindow(QMainWindow):
         self._plot_curve1.setData([], [])
         self._plot_curve2.setData([], [])
         self._progress_bar.setValue(0)
-
-        keys = proc.get_data_keys()
-        cls = type(proc)
-
-        for sel in (self._x1_axis_selector, self._x2_axis_selector,
-                    self._y_axis_selector, self._y2_axis_selector):
-            sel.blockSignals(True)
-            sel.clear()
-            sel.addItems(keys)
-            sel.blockSignals(False)
-
-        default_x = cls.default_x_key if cls.default_x_key in keys else (keys[0] if keys else "")
-        self._x1_axis_selector.setCurrentText(default_x)
-        self._x2_axis_selector.setCurrentText(default_x)
-        if "voltage_V" in keys:
-            self._y_axis_selector.setCurrentText("voltage_V")
-        if "current_A" in keys:
-            self._y2_axis_selector.setCurrentText("current_A")
+        self._populate_axis_selectors(type(proc))
 
     @staticmethod
     def _extract_scalar(raw: Any) -> float:
@@ -671,7 +708,7 @@ class ProcedureWindow(QMainWindow):
         """Rebuild the QListWidget from self._queue."""
         self._queue_list.clear()
         for idx, (cls, params, _sample, _dir) in enumerate(self._queue):
-            sweep_keys = list(cls.parameters.keys())
+            sweep_keys = list(cls.sweep_parameters.keys()) or list(cls.parameters.keys())
             summary_parts = [f"{k}={params[k]}" for k in sweep_keys[:3]]
             summary = f"{cls.name} ({', '.join(summary_parts)})"
             self._queue_list.addItem(f"{idx + 1}. {summary}")

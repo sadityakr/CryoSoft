@@ -17,7 +17,7 @@
 # output: |
 #   initiate() and standby() return (system_targets, measurement_commands, wait_time).
 #   change_sweep_step() returns (system_targets, wait_time) or None when done.
-# last_updated: 2026-04-06
+# last_updated: 2026-04-19
 # ---
 
 """BaseProcedure — abstract base class for all CryoSoft procedures."""
@@ -40,26 +40,53 @@ class BaseProcedure:
     Class attributes:
         name: Human-readable display name (shown in GUI procedure browser).
         description: One-line description.
-        parameters: Dict describing GUI form fields. Each key is a parameter
-            name; the value is a dict with keys: ``type``, ``default``,
-            optionally ``unit``, ``min``, ``max``, ``description``.
+        sweep_parameters: Parameters that define *what* to sweep over
+            (e.g. field_start, field_end, n_steps). The GUI renders these
+            in the Sweep column of the parameter form.
+        system_parameters: Parameters that set system state during the sweep
+            (e.g. temperature, ramp rates, wait times). Rendered in the
+            System column.
+        measurement_parameters: Parameters that configure the measurement VI
+            (e.g. current_A, compliance_A, readings_per_point). Rendered in
+            the Measurement column.
+        parameters: Union of the three groups above, auto-built by
+            ``__init_subclass__``. Read-only — do not set directly.
+
+    Each parameter value dict accepts keys: ``type``, ``default``,
+    optionally ``unit``, ``min``, ``max``, ``description``.
 
     Example::
 
         class FieldSweepIV(BaseProcedure):
             name = "Field Sweep IV"
             description = "Sweep magnetic field, measure IV at each point"
-            parameters = {
+            sweep_parameters = {
                 "field_start": {"type": float, "default": -1.0, "unit": "T"},
             }
     """
 
     name: str = ""
     description: str = ""
+
+    # Parameter groups — define these three in every concrete subclass.
+    # ``parameters`` is auto-built as their union by __init_subclass__ so
+    # existing code that iterates cls.parameters continues to work.
+    sweep_parameters: dict[str, dict] = {}
+    system_parameters: dict[str, dict] = {}
+    measurement_parameters: dict[str, dict] = {}
     parameters: dict[str, dict] = {}
+
     sweep_data_keys: list[str] = []        # procedure's own scalar sweep columns (e.g. field_T)
     measurement_data_keys: list[str] = []  # measurement array columns (e.g. voltage_V, current_A)
     default_x_key: str = ""                # default X axis for live plots
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        super().__init_subclass__(**kwargs)
+        cls.parameters = {
+            **cls.sweep_parameters,
+            **cls.system_parameters,
+            **cls.measurement_parameters,
+        }
 
     def __init__(
         self,

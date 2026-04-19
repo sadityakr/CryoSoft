@@ -61,7 +61,7 @@ class FieldSweepDC(BaseProcedure):
     measurement_data_keys = ["voltage_V", "current_A"]
     default_x_key = "field_T"
 
-    parameters = {
+    sweep_parameters = {
         "field_start": {
             "type": float,
             "default": -1.0,
@@ -80,12 +80,30 @@ class FieldSweepDC(BaseProcedure):
             "min": 2,
             "description": "Number of field steps",
         },
+    }
+
+    system_parameters = {
         "temperature": {
             "type": float,
             "default": 10.0,
             "unit": "K",
             "description": "Sample temperature",
         },
+        "init_wait": {
+            "type": float,
+            "default": 300.0,
+            "unit": "s",
+            "description": "Wait after initial ramp (thermal equilibration)",
+        },
+        "step_wait": {
+            "type": float,
+            "default": 5.0,
+            "unit": "s",
+            "description": "Wait between field steps",
+        },
+    }
+
+    measurement_parameters = {
         "current_A": {
             "type": float,
             "default": 1e-6,
@@ -109,18 +127,6 @@ class FieldSweepDC(BaseProcedure):
             "default": 10,
             "min": 1,
             "description": "DC voltage readings averaged per field point",
-        },
-        "init_wait": {
-            "type": float,
-            "default": 300.0,
-            "unit": "s",
-            "description": "Wait after initial ramp (thermal equilibration)",
-        },
-        "step_wait": {
-            "type": float,
-            "default": 5.0,
-            "unit": "s",
-            "description": "Wait between field steps",
         },
     }
 

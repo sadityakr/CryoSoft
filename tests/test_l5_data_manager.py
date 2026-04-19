@@ -45,7 +45,7 @@ def dm(tmp_path):
         sample_info=SAMPLE_INFO,
         instrument_state={"magnet_x": {"field": 0.0}},
         system_targets={"magnet_x": {"target": -1.0}},
-        measurement_commands={"iv_measurement": {"configure": {}}},
+        measurement_commands={"keithley_delta_mode": {"configure": {}}},
         data_config=DATA_CONFIG,
         n_sweep_points=5,
     )

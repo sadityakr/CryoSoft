@@ -13,7 +13,7 @@
 #   the configured ramp rate (A/min). Status transitions HOLD -> RAMPING -> HOLD.
 # output: |
 #   Returns float current/setpoint values and str status via public API.
-# last_updated: 2026-04-06
+# last_updated: 2026-04-19
 # ---
 
 """Simulated Oxford IPS 120-10 Magnet Power Supply driver."""
@@ -52,6 +52,11 @@ class SimOxfordIPS120:
         self._ramp_rate: float = 5.0     # A/min
         self._status: str = "HOLD"       # "HOLD", "RAMPING", or "QUENCH"
         self._last_update: float = time.time()
+
+        # Switch heater / persistent mode state
+        self._switch_heater_on: bool = False
+        self._coil_current: float = 0.0    # Amps — tracks the persistent coil current
+        self._persistent_mode: bool = False
 
         # Test control flags
         self._simulate_error: bool = False   # Raises CryoSoftCommunicationError on any get_
@@ -109,6 +114,54 @@ class SimOxfordIPS120:
             return "QUENCH"
         self._update_simulation()
         return self._status
+
+    # ------------------------------------------------------------------
+    # Switch heater / persistent mode API
+    # ------------------------------------------------------------------
+
+    def get_switch_heater_state(self) -> str:
+        """Return 'ON' if the switch heater is energised, 'OFF' otherwise."""
+        self._check_error()
+        return "ON" if self._switch_heater_on else "OFF"
+
+    def set_switch_heater(self, state: bool) -> None:
+        """Energise (True) or de-energise (False) the persistent mode switch heater.
+
+        Args:
+            state: True to turn on, False to turn off.
+        """
+        self._switch_heater_on = state
+
+    def get_coil_current(self) -> float:
+        """Return the persistent coil current in Amperes.
+
+        In persistent mode this differs from the PSU output current.
+        Outside persistent mode it tracks the PSU current.
+        """
+        self._check_error()
+        return self._coil_current
+
+    def get_persistent_mode(self) -> bool:
+        """Return True when the magnet is in persistent mode."""
+        self._check_error()
+        return self._persistent_mode
+
+    def set_persistent_mode(self, persistent: bool) -> None:
+        """Enter or exit persistent mode (used internally by the VI ramp generator).
+
+        When entering persistent mode the coil current is fixed at the current
+        PSU current and the PSU can safely be ramped to zero.
+        When exiting, the PSU must be ramped back to match the coil current
+        before the switch heater is opened again.
+
+        Args:
+            persistent: True to enter, False to exit.
+        """
+        if persistent:
+            self._coil_current = self._current
+            self._persistent_mode = True
+        else:
+            self._persistent_mode = False
 
     # ------------------------------------------------------------------
     # Internal simulation logic
