@@ -8,18 +8,18 @@
 # dependencies:
 #   - cryosoft.virtual_instruments.base (MeasurementInstrumentBase)
 #   - cryosoft.core.decorators (control)
-#   - numpy
 # input: |
 #   drivers = {"source": <K6221 driver>, "meter": <K2182A driver>}
 #   configure() must be called before read_datapoint().
-#   Supported methods: "delta_mode" with params current (A), n_readings (int).
+#   Supported methods: "delta_mode" with params current (A), n_readings (int),
+#   delay (s, default 0.01), compliance (V, default 1.0), range_2182a (V, default 0.01).
 # process: |
-#   configure() stores method and params. read_datapoint() drives the source
-#   and collects n_readings voltage measurements via the meter, returning arrays.
-#   Raises RuntimeError if called before configure().
+#   configure() arms the delta engine via source.configure_and_start_delta().
+#   read_datapoint() calls source.acquire_delta_readings() to collect samples.
+#   standby() calls source.stop_delta_mode() to abort the running engine.
 # output: |
-#   {"voltage_V": np.ndarray, "current_A": np.ndarray} with length n_readings.
-# last_updated: 2026-04-06
+#   {"voltage_V": list[float], "current_A": list[float]} with length n_readings.
+# last_updated: 2026-04-19
 # ---
 
 """DeltaModeMeasurementVI — Keithley 6221 + 2182A delta-mode measurement VI."""
@@ -27,8 +27,6 @@
 from __future__ import annotations
 
 from typing import Any
-
-
 
 from cryosoft.core.decorators import control
 from cryosoft.virtual_instruments.base import MeasurementInstrumentBase
@@ -72,17 +70,22 @@ class DeltaModeMeasurementVI(MeasurementInstrumentBase):
 
     @control
     def configure(self, method: str, **params: Any) -> None:
-        """Configure the measurement method and parameters.
+        """Configure the measurement method and arm the delta engine.
 
-        Must be called before ``read_datapoint()``.
+        Must be called before ``read_datapoint()``. For ``"delta_mode"`` this
+        calls ``source.configure_and_start_delta()`` immediately so the
+        instrument is armed and ready to deliver readings on demand.
 
         Args:
             method: Measurement method name. Supported: ``"delta_mode"``.
             **params: Method-specific parameters.
 
                 For ``"delta_mode"``:
-                    - ``current`` (float): Source current in amperes.
-                    - ``n_readings`` (int): Number of reading pairs to acquire.
+                    - ``current`` (float): Peak delta current in Amperes.
+                    - ``n_readings`` (int): Readings per acquisition call.
+                    - ``delay`` (float, optional): Inter-transition delay (s). Default 0.01.
+                    - ``compliance`` (float, optional): Voltage compliance (V). Default 1.0.
+                    - ``range_2182a`` (float, optional): 2182A range (V). Default 0.01.
 
         Raises:
             ValueError: If *method* is not supported.
@@ -94,6 +97,16 @@ class DeltaModeMeasurementVI(MeasurementInstrumentBase):
             )
         self._method = method
         self._meas_params = dict(params)
+
+        if method == "delta_mode":
+            current: float = float(params.get("current", 1e-6))
+            n_readings: int = int(params.get("n_readings", 100))
+            delay: float = float(params.get("delay", 0.01))
+            compliance: float = float(params.get("compliance", 1.0))
+            range_2182a: float = float(params.get("range_2182a", 0.01))
+            self._source.configure_and_start_delta(  # type: ignore[attr-defined]
+                current, n_readings, delay, compliance, range_2182a
+            )
 
     # ------------------------------------------------------------------
     # read_datapoint — NOT @monitored, NOT @control (Procedure-only)
@@ -127,35 +140,25 @@ class DeltaModeMeasurementVI(MeasurementInstrumentBase):
     # ------------------------------------------------------------------
 
     def _read_delta_mode(self) -> dict[str, list[float]]:
-        """Perform a delta-mode measurement sequence.
+        """Collect readings from the already-armed delta engine.
 
-        Alternates source current polarity between readings to cancel
-        thermoelectric offsets.
+        The engine was started in configure(). This call polls
+        ``source.acquire_delta_readings()`` for the configured number of
+        samples and packages them alongside the nominal current array.
 
         Returns:
             ``{"voltage_V": list, "current_A": list}``
         """
         current_A: float = float(self._meas_params.get("current", 1e-6))
         n_readings: int = int(self._meas_params.get("n_readings", 100))
+        delay: float = float(self._meas_params.get("delay", 0.01))
 
-        voltages: list[float] = []
-        currents: list[float] = []
+        voltages: list[float] = self._source.acquire_delta_readings(  # type: ignore[attr-defined]
+            n_readings, delay
+        )
 
-        source = self._source  # type: ignore[attr-defined]
-        meter = self._meter    # type: ignore[attr-defined]
-
-        for i in range(n_readings):
-            # Alternate polarity for delta (offset cancellation).
-            polarity = 1.0 if i % 2 == 0 else -1.0
-            applied_I = polarity * current_A
-
-            source.set_current(applied_I)
-            voltage = meter.get_voltage()
-
-            voltages.append(float(voltage))
-            currents.append(applied_I)
-
-        source.set_current(0.0)  # Return to zero after acquisition.
+        # current_A array mirrors the number of readings actually returned.
+        currents: list[float] = [current_A] * len(voltages)
 
         return {
             "voltage_V": voltages,
@@ -184,7 +187,10 @@ class DeltaModeMeasurementVI(MeasurementInstrumentBase):
         self._source.set_current(0.0)   # type: ignore[attr-defined]
 
     def standby(self) -> None:
-        """Turn off outputs and reset both instruments."""
-        self._source.set_current(0.0)   # type: ignore[attr-defined]
+        """Abort the delta engine, turn off outputs, and reset state."""
+        try:
+            self._source.stop_delta_mode()   # type: ignore[attr-defined]
+        except Exception:
+            pass
         self._method = _NOT_CONFIGURED
         self._meas_params = {}
