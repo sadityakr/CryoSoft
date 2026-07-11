@@ -33,6 +33,7 @@ Cross-cutting infrastructure — used by every layer from L1 to GUI. The key run
 | `procedure.py` | `BaseProcedure` | Abstract base for all measurement procedures |
 | `data_manager.py` | `DataManager(...)` | HDF5 file lifecycle for one procedure run |
 | `logging_config.py` | `setup_logging()` | Configures file + console logging |
+| `sweep_builder.py` | `SweepSegment`, `build_piecewise_sweep()`, `load_custom_sweep_csv()`, `apply_hysteresis()` | Reusable sweep-array construction (piecewise step sizes, CSV import, hysteresis) for Procedure `_build_sweep_array()` overrides |
 
 ## How to add a new module
 
