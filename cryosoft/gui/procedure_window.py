@@ -279,6 +279,15 @@ class ProcedureWindow(QMainWindow):
         in side-by-side QGroupBox panels so users can distinguish the different
         kinds of input at a glance.
 
+        The label IS the canonical parameter name — the same key used in the
+        procedure code and stored under ``/metadata/procedure_params`` in the
+        HDF5 output — plus its unit: ``f"{param_name} ({unit}):"`` when the
+        spec declares a non-empty ``unit``, else ``f"{param_name}:"``. The
+        prose ``description`` (plus default and min/max range, when present)
+        moves into a tooltip set on both the input field and its form label,
+        so the human-readable explanation is one hover away without cluttering
+        the form or diverging from the name actually written to disk.
+
         Args:
             cls: The BaseProcedure subclass to introspect.
 
@@ -303,15 +312,61 @@ class ProcedureWindow(QMainWindow):
             form.setSpacing(4)
             for param_name, spec in group_params.items():
                 unit = spec.get("unit", "")
-                desc = spec.get("description", param_name)
-                label_text = f"{desc} ({unit}):" if unit else f"{desc}:"
+                label_text = f"{param_name} ({unit}):" if unit else f"{param_name}:"
                 field = QLineEdit(str(spec.get("default", "")))
                 field.setObjectName(f"param_{param_name}_input")
+                tooltip = self._build_param_tooltip(spec)
+                field.setToolTip(tooltip)
                 self._param_inputs[param_name] = field
                 form.addRow(label_text, field)
+                row_label = form.labelForField(field)
+                if row_label is not None:
+                    row_label.setToolTip(tooltip)
             hbox.addWidget(box)
 
         return container
+
+    @staticmethod
+    def _build_param_tooltip(spec: dict) -> str:
+        """Build the hover-tooltip text for one parameter spec.
+
+        Assembles, in order and skipping any part whose source data is absent:
+        the ``description`` sentence (a period is appended if missing), then
+        ``Default: {default} {unit}.``, then a ``Range: ...`` line built from
+        ``min``/``max`` (one-sided phrasing — ``Min: ...`` / ``Max: ...`` — when
+        only one bound is declared).
+
+        Args:
+            spec: A single parameter's spec dict (``type``, ``default``, and
+                optionally ``unit``, ``min``, ``max``, ``description``).
+
+        Returns:
+            A single plain-text string, parts joined with a space.
+        """
+        unit = spec.get("unit", "")
+        parts: list[str] = []
+
+        description = spec.get("description")
+        if description:
+            parts.append(description if description.endswith(".") else f"{description}.")
+
+        if "default" in spec:
+            unit_suffix = f" {unit}" if unit else ""
+            parts.append(f"Default: {spec['default']}{unit_suffix}.")
+
+        has_min = "min" in spec
+        has_max = "max" in spec
+        if has_min and has_max:
+            unit_suffix = f" {unit}" if unit else ""
+            parts.append(f"Range: {spec['min']} to {spec['max']}{unit_suffix}.")
+        elif has_min:
+            unit_suffix = f" {unit}" if unit else ""
+            parts.append(f"Min: {spec['min']}{unit_suffix}.")
+        elif has_max:
+            unit_suffix = f" {unit}" if unit else ""
+            parts.append(f"Max: {spec['max']}{unit_suffix}.")
+
+        return " ".join(parts)
 
     def _build_queue_section(self) -> QGroupBox:
         """Build the queue group with list + reorder/remove buttons.

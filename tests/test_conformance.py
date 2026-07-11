@@ -257,6 +257,29 @@ def test_procedure_declaration(proc_cls: type) -> None:
 
 
 @pytest.mark.parametrize("proc_cls", _all_procedure_classes(), ids=lambda c: c.__name__)
+def test_procedure_parameter_has_description(proc_cls: type) -> None:
+    """Every procedure parameter declares a non-empty 'description'.
+
+    The GUI parameter form (ProcedureWindow._build_param_form) now labels
+    each field with the bare parameter name and moves the human-readable
+    explanation into a hover tooltip. A parameter without a description would
+    render a tooltip missing its most important sentence, so every parameter
+    in sweep_parameters / system_parameters / measurement_parameters must
+    carry one. 'unit' stays optional — dimensionless counts legitimately have
+    none.
+    """
+    for group_name in ("sweep_parameters", "system_parameters", "measurement_parameters"):
+        group_params = getattr(proc_cls, group_name)
+        for param_name, spec in group_params.items():
+            description = spec.get("description")
+            assert isinstance(description, str) and description.strip(), (
+                f"{proc_cls.__name__}.{group_name}['{param_name}'] lacks a "
+                f"non-empty 'description' — add a one-sentence physics-appropriate "
+                f"description, it is shown as the GUI tooltip"
+            )
+
+
+@pytest.mark.parametrize("proc_cls", _all_procedure_classes(), ids=lambda c: c.__name__)
 def test_procedure_constructs_from_defaults(proc_cls: type, tmp_path) -> None:
     """Every procedure must construct with zero explicit parameters.
 

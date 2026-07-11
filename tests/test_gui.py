@@ -18,7 +18,14 @@ import logging
 
 import pytest
 from PyQt6.QtCore import QSettings
-from PyQt6.QtWidgets import QLabel, QPushButton, QScrollArea, QSplitter
+from PyQt6.QtWidgets import (
+    QFormLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QScrollArea,
+    QSplitter,
+)
 
 from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 from cryosoft.core.station import build_station
@@ -301,6 +308,39 @@ def test_procedure_param_inputs_exist(procedure_win):
             f"param_{param_name}_input",
         )
         assert field is not None, f"Missing input for parameter '{param_name}'"
+
+
+def test_procedure_param_label_and_tooltip(procedure_win):
+    """Param label is the canonical `name (unit):` and carries the description tooltip.
+
+    The label is the same key stored under /metadata/procedure_params in the
+    HDF5 output (see BaseProcedure), not prose. The prose description lives in
+    a tooltip on both the input field and its form label.
+    """
+    from cryosoft.procedures.field_sweep_iv import FieldSweepIV
+
+    for i in range(procedure_win._proc_selector.count()):
+        if procedure_win._proc_selector.itemText(i) == FieldSweepIV.name:
+            procedure_win._proc_selector.setCurrentIndex(i)
+            break
+    else:
+        pytest.fail("FieldSweepIV not found in procedure selector")
+
+    spec = FieldSweepIV.sweep_parameters["field_start"]
+    field = procedure_win.findChild(QLineEdit, "param_field_start_input")
+    assert field is not None, "Missing input for parameter 'field_start'"
+
+    assert field.text() == str(spec["default"])
+
+    form = field.parent().layout()
+    assert isinstance(form, QFormLayout)
+    row_label = form.labelForField(field)
+    assert isinstance(row_label, QLabel)
+    assert row_label.text() == "field_start (T):"
+
+    for tooltip in (field.toolTip(), row_label.toolTip()):
+        assert tooltip, "Tooltip must be non-empty"
+        assert spec["description"] in tooltip
 
 
 def test_monitor_sample_info_inputs_exist(monitor_win):
