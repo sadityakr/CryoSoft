@@ -39,7 +39,7 @@ The GUI must **never**:
 | File | Description |
 |------|-------------|
 | `__init__.py` | Package marker. |
-| `instrument_panel.py` | `InstrumentPanel(QGroupBox)` — auto-generated per-VI panel. Discovers `@monitored` methods and renders them as live `QLabel` displays; discovers `@control` methods and renders them as `QPushButton` + `QLineEdit` input rows. Connected to `orchestrator.states_updated`. Applies orange/red border for stale/disconnected state. |
+| `instrument_panel.py` | `InstrumentPanel(QGroupBox)` — auto-generated per-VI panel. Discovers `@monitored` methods and renders them as live `QLabel` displays; discovers `@control` methods and renders them as `QPushButton` + `QLineEdit` input rows. Connected to `orchestrator.states_updated`. Sets a QSS `status` property (`stale`/`disconnected`) for the amber/red border defined in `theme.py`, only when the status changes. |
 | `monitor_window.py` | `MonitorWindow(QMainWindow)` — main live-monitor window. Creates one `InstrumentPanel` per VI in a scrollable grid. Hosts global "Initiate All" / "Standby All" buttons. Status bar reflects Orchestrator state via `state_changed` signal. |
 | `procedure_window.py` | `ProcedureWindow(QMainWindow)` — procedure builder and live-data window. Auto-discovers `BaseProcedure` subclasses from `cryosoft.procedures.*`. Auto-generates parameter forms from `BaseProcedure.parameters` dicts. Manages a local queue (backed by `orchestrator._procedure_queue`). Live `pyqtgraph` plot driven by `orchestrator.measurement_ready`. Progress bar driven by `orchestrator.procedure_progress`. Emergency-acknowledge button visible only in EMERGENCY state. |
 
@@ -47,7 +47,7 @@ The GUI must **never**:
 
 | Orchestrator signal | Receiver | Effect |
 |---------------------|----------|--------|
-| `states_updated(dict)` | `InstrumentPanel._on_states_updated` | Updates value labels and border style every tick. |
+| `states_updated(dict)` | `InstrumentPanel._on_states_updated` | Updates value labels every tick; updates the status-border property only when the stale/disconnected status changes. |
 | `state_changed(str)` | `MonitorWindow._on_state_changed` | Updates status bar label. |
 | `state_changed(str)` | `ProcedureWindow._on_state_changed` | Shows/hides emergency-acknowledge button. |
 | `procedure_progress(float)` | `ProcedureWindow._on_progress` | Fills progress bar (0–100%). |

@@ -28,9 +28,10 @@ from __future__ import annotations
 
 import logging
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QAction
+from PyQt6.QtCore import QSettings, Qt
+from PyQt6.QtGui import QAction, QCloseEvent
 from PyQt6.QtWidgets import (
+    QApplication,
     QFileDialog,
     QFormLayout,
     QGridLayout,
@@ -67,6 +68,7 @@ logger = logging.getLogger(__name__)
 
 _COLUMNS = 2  # columns in the system VI instrument grid
 _LOG_MAX_LINES = 500
+_GEOMETRY_KEY = "MonitorWindow/geometry"  # QSettings key for saved window geometry
 
 
 class _QtLogHandler(logging.Handler):
@@ -146,16 +148,20 @@ class MonitorWindow(QMainWindow):
         self._procedure_window = None  # lazily created
 
         self.setWindowTitle("CryoSoft — Monitor")
-        self.resize(960, 860)
+        self._restore_geometry()
 
         self._build_menu()
         self._build_ui()
         self._connect_signals()
 
-        # Attach log handler after UI exists
+        # Attach log handler after UI exists. Guard against a duplicate in case
+        # the window is ever reconstructed within the same process (handlers
+        # live on the shared "cryosoft" logger, so a leak would accumulate).
         self._log_handler = _QtLogHandler(self._log_widget)
         self._log_handler.setLevel(logging.DEBUG)
-        logging.getLogger("cryosoft").addHandler(self._log_handler)
+        cryosoft_logger = logging.getLogger("cryosoft")
+        if self._log_handler not in cryosoft_logger.handlers:
+            cryosoft_logger.addHandler(self._log_handler)
 
     # ------------------------------------------------------------------
     # Menu bar
@@ -232,29 +238,39 @@ class MonitorWindow(QMainWindow):
         if measurement_vis:
             lower_layout.addWidget(self._build_other_devices_section(measurement_vis))
 
+        log_section = self._build_log_section()
+        sample_info_section = self._build_sample_info_section()
+        # Keep both panes readable; setChildrenCollapsible(False) stops a drag
+        # from crushing either pane to zero width (the reported "collapse" bug).
+        log_section.setMinimumWidth(200)
+        sample_info_section.setMinimumWidth(200)
         log_info_splitter = QSplitter(Qt.Orientation.Horizontal)
-        log_info_splitter.addWidget(self._build_log_section())
-        log_info_splitter.addWidget(self._build_sample_info_section())
+        log_info_splitter.setChildrenCollapsible(False)
+        log_info_splitter.addWidget(log_section)
+        log_info_splitter.addWidget(sample_info_section)
         log_info_splitter.setStretchFactor(0, 1)
         log_info_splitter.setStretchFactor(1, 1)
         lower_layout.addWidget(log_info_splitter)
 
+        # ── VI grid scroll area ────────────────────────────────────────
+        # Only the instrument grid scrolls when there are more panels than fit;
+        # the rest of the window keeps its layout. setWidgetResizable(True) lets
+        # the grid expand to fill the viewport when there is room.
+        self._grid_scroll = QScrollArea()
+        self._grid_scroll.setWidgetResizable(True)
+        self._grid_scroll.setWidget(grid_container)
+        self._grid_scroll.setMinimumHeight(200)
+
         # ── Vertical splitter between VI grid and lower section ────────
         main_splitter = QSplitter(Qt.Orientation.Vertical)
-        main_splitter.addWidget(grid_container)
+        main_splitter.setChildrenCollapsible(False)
+        main_splitter.addWidget(self._grid_scroll)
         main_splitter.addWidget(lower_widget)
         main_splitter.setSizes([500, 400])
         root.addWidget(main_splitter)
 
-        # ── Outer scroll area — makes the whole window scrollable ──────
-        # setWidgetResizable(True) lets content_widget expand to fill the viewport,
-        # but minimumHeight ensures the scroll area activates when the window is small.
-        # Without it, content_widget shrinks to viewport height and nothing scrolls.
-        content_widget.setMinimumHeight(960)
-        outer_scroll = QScrollArea()
-        outer_scroll.setWidgetResizable(True)
-        outer_scroll.setWidget(content_widget)
-        self.setCentralWidget(outer_scroll)
+        # ── Content widget is the central widget directly (no outer scroll) ──
+        self.setCentralWidget(content_widget)
 
         # ── Status bar ────────────────────────────────────────────────
         self._status_bar = QStatusBar()
@@ -492,3 +508,36 @@ class MonitorWindow(QMainWindow):
             message: Human-readable error description.
         """
         QMessageBox.critical(self, "CryoSoft Error", message)
+
+    # ------------------------------------------------------------------
+    # Window geometry + lifecycle
+    # ------------------------------------------------------------------
+
+    def _restore_geometry(self) -> None:
+        """Restore the saved window geometry, or size to a fraction of the screen.
+
+        Geometry is persisted with ``QSettings``, which on Windows is backed by
+        the registry (``HKCU\\Software\\CryoSoft\\CryoSoft``). If nothing is
+        stored yet, the window is sized to ~70% of the available screen area.
+        """
+        settings = QSettings("CryoSoft", "CryoSoft")
+        saved = settings.value(_GEOMETRY_KEY)
+        if saved is not None and self.restoreGeometry(saved):
+            return
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            self.resize(int(available.width() * 0.7), int(available.height() * 0.7))
+
+    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 (Qt override)
+        """Detach the log handler and persist geometry before the window closes.
+
+        Removing the handler prevents it from writing to the destroyed
+        ``QTextEdit`` after the window is gone (RuntimeError on a dead widget).
+
+        Args:
+            event: The Qt close event.
+        """
+        logging.getLogger("cryosoft").removeHandler(self._log_handler)
+        QSettings("CryoSoft", "CryoSoft").setValue(_GEOMETRY_KEY, self.saveGeometry())
+        super().closeEvent(event)

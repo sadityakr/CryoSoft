@@ -14,8 +14,11 @@ These tests use pytest-qt (qtbot fixture). They run against the sim_cryostat
 config with no hardware. All 121 prior tests must pass before this file is run.
 """
 
+import logging
+
 import pytest
-from PyQt6.QtWidgets import QLabel, QPushButton
+from PyQt6.QtCore import QSettings
+from PyQt6.QtWidgets import QLabel, QPushButton, QScrollArea, QSplitter
 
 from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 from cryosoft.core.station import build_station
@@ -167,25 +170,70 @@ def test_instrument_panel_updates_values_on_signal(station, orchestrator, qtbot)
 
 
 def test_instrument_panel_stale_border(station, orchestrator, qtbot):
-    """Stale state sets orange border style."""
+    """Stale state sets the 'stale' status property (amber border via QSS)."""
     vi_name = "magnet_x"
     vi = station._virtual_instruments[vi_name]
     panel = InstrumentPanel(vi_name, vi, orchestrator)
     qtbot.addWidget(panel)
 
     orchestrator.states_updated.emit({vi_name: {"_stale": True}})
-    assert "orange" in panel.styleSheet()
+    assert panel.property("status") == "stale"
+    assert "[stale]" in panel.title()
 
 
 def test_instrument_panel_disconnected_border(station, orchestrator, qtbot):
-    """Disconnected state sets red border style."""
+    """Disconnected state sets the 'disconnected' status property (red border via QSS)."""
     vi_name = "magnet_x"
     vi = station._virtual_instruments[vi_name]
     panel = InstrumentPanel(vi_name, vi, orchestrator)
     qtbot.addWidget(panel)
 
     orchestrator.states_updated.emit({vi_name: {"_stale": True, "_disconnected": True}})
-    assert "red" in panel.styleSheet()
+    assert panel.property("status") == "disconnected"
+    assert "[DISCONNECTED]" in panel.title()
+
+
+def test_instrument_panel_status_resets_to_ok(station, orchestrator, qtbot):
+    """A stale panel returns to 'ok' status (plain title) when state is healthy again."""
+    vi_name = "magnet_x"
+    vi = station._virtual_instruments[vi_name]
+    panel = InstrumentPanel(vi_name, vi, orchestrator)
+    qtbot.addWidget(panel)
+
+    orchestrator.states_updated.emit({vi_name: {"_stale": True}})
+    assert panel.property("status") == "stale"
+
+    orchestrator.states_updated.emit({vi_name: {}})
+    assert panel.property("status") == "ok"
+    assert panel.title() == vi_name
+
+
+def test_instrument_panel_status_not_restyled_when_unchanged(
+    station, orchestrator, qtbot, monkeypatch
+):
+    """The status property is only re-set when it changes, not on every tick."""
+    vi_name = "magnet_x"
+    vi = station._virtual_instruments[vi_name]
+    panel = InstrumentPanel(vi_name, vi, orchestrator)
+    qtbot.addWidget(panel)
+
+    status_sets: list[object] = []
+    original_set = panel.setProperty
+
+    def spy(name, value):  # type: ignore[no-untyped-def]
+        if name == "status":
+            status_sets.append(value)
+        return original_set(name, value)
+
+    monkeypatch.setattr(panel, "setProperty", spy)
+
+    # First tick changes ok -> stale (one set); the next two are unchanged.
+    orchestrator.states_updated.emit({vi_name: {"_stale": True}})
+    orchestrator.states_updated.emit({vi_name: {"_stale": True}})
+    orchestrator.states_updated.emit({vi_name: {"_stale": True}})
+
+    assert status_sets == ["stale"]
+    assert panel.property("status") == "stale"
 
 
 # ── ProcedureWindow tests ─────────────────────────────────────────────────────
@@ -290,3 +338,51 @@ def test_measurement_ready_updates_plot(procedure_win, orchestrator):
 
     assert len(procedure_win._datapoints) == 1
     assert abs(procedure_win._datapoints[0]["field_T"] - 0.5) < 1e-9
+
+
+# ── Splitter / layout structure tests (Phase 1 GUI fixes) ──────────────────────
+
+def test_monitor_splitters_not_collapsible(monitor_win):
+    """Both MonitorWindow splitters have children-collapsing disabled."""
+    splitters = monitor_win.findChildren(QSplitter)
+    assert len(splitters) == 2, f"Expected 2 splitters, found {len(splitters)}"
+    for sp in splitters:
+        assert sp.childrenCollapsible() is False
+
+
+def test_procedure_splitters_not_collapsible(procedure_win):
+    """Both ProcedureWindow splitters have children-collapsing disabled."""
+    splitters = procedure_win.findChildren(QSplitter)
+    assert len(splitters) == 2, f"Expected 2 splitters, found {len(splitters)}"
+    for sp in splitters:
+        assert sp.childrenCollapsible() is False
+
+
+def test_monitor_central_widget_not_scroll_area(monitor_win):
+    """The central widget is the content widget directly, not an outer QScrollArea."""
+    assert not isinstance(monitor_win.centralWidget(), QScrollArea)
+    # Only the VI grid is wrapped in a resizable scroll area.
+    assert isinstance(monitor_win._grid_scroll, QScrollArea)
+    assert monitor_win._grid_scroll.widgetResizable() is True
+
+
+def test_log_handler_removed_on_close(station, orchestrator, qtbot):
+    """Closing MonitorWindow detaches its log handler from the cryosoft logger."""
+    win = MonitorWindow(station, orchestrator)
+    qtbot.addWidget(win)
+    handler = win._log_handler
+    cryosoft_logger = logging.getLogger("cryosoft")
+    assert handler in cryosoft_logger.handlers
+
+    win.close()
+    assert handler not in cryosoft_logger.handlers
+
+
+def test_monitor_window_default_geometry(station, orchestrator, qtbot):
+    """With no saved geometry, MonitorWindow sizes itself to a non-zero fraction."""
+    # Independent of any persisted state: clear the key first.
+    QSettings("CryoSoft", "CryoSoft").remove("MonitorWindow/geometry")
+    win = MonitorWindow(station, orchestrator)
+    qtbot.addWidget(win)
+    assert win.width() > 0
+    assert win.height() > 0

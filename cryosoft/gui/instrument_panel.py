@@ -14,7 +14,8 @@
 #   vi_name (str), vi instance, Orchestrator instance.
 # process: |
 #   __init__ introspects the VI for @monitored and @control methods and builds
-#   the layout. _on_states_updated() updates values and border styling each tick.
+#   the layout. _on_states_updated() updates values each tick and, only when the
+#   connection status changes, flips the QSS `status` property (ok/stale/disconnected).
 # output: |
 #   A QGroupBox with live values and control buttons embedded in MonitorWindow.
 # last_updated: 2026-04-17
@@ -44,10 +45,6 @@ from cryosoft.gui.theme import BTN_CLASS_PRIMARY, BTN_CLASS_SECONDARY
 from cryosoft.virtual_instruments.base import BaseVirtualInstrument
 
 logger = logging.getLogger(__name__)
-
-_STYLE_NORMAL = ""
-_STYLE_STALE = "QGroupBox { border: 2px solid orange; border-radius: 4px; margin-top: 1ex; } QGroupBox::title { subcontrol-origin: margin; left: 6px; }"
-_STYLE_DISCONNECTED = "QGroupBox { border: 2px solid red; border-radius: 4px; margin-top: 1ex; } QGroupBox::title { subcontrol-origin: margin; left: 6px; color: red; }"
 
 
 class InstrumentPanel(QGroupBox):
@@ -80,8 +77,18 @@ class InstrumentPanel(QGroupBox):
         self._value_labels: dict[str, QLabel] = {}
         # Maps method_name → {param_name → QLineEdit}
         self._control_inputs: dict[str, dict[str, QLineEdit]] = {}
+        # Current status ("ok"/"stale"/"disconnected"). Drives the QSS
+        # `status` property; tracked so styling is only re-applied on change.
+        self._status = "ok"
 
         self._build_layout()
+
+        # Keep panels readable: never let the grid squeeze a panel below the
+        # width of its content, and give it a natural minimum height from the
+        # assembled layout's sizeHint.
+        self.setMinimumWidth(300)
+        self.setMinimumHeight(self.sizeHint().height())
+
         orchestrator.states_updated.connect(self._on_states_updated)
         orchestrator.action_blocked.connect(self._on_action_blocked)
 
@@ -202,14 +209,29 @@ class InstrumentPanel(QGroupBox):
                 label.setText(str(value))
 
         if is_disconnected:
-            self.setStyleSheet(_STYLE_DISCONNECTED)
-            self.setTitle(f"{self._vi_name}  [DISCONNECTED]")
+            new_status = "disconnected"
         elif is_stale:
-            self.setStyleSheet(_STYLE_STALE)
-            self.setTitle(f"{self._vi_name}  [stale]")
+            new_status = "stale"
         else:
-            self.setStyleSheet(_STYLE_NORMAL)
-            self.setTitle(self._vi_name)
+            new_status = "ok"
+
+        # Only restyle when the status actually changes. Restyling every tick
+        # would force a needless full repolish of the panel each 3 s.
+        if new_status != self._status:
+            self._status = new_status
+            self.setProperty("status", new_status)
+            # Qt only re-evaluates property-based QSS selectors (e.g.
+            # QGroupBox[status="stale"]) after an unpolish/polish cycle;
+            # setProperty alone does not repaint.
+            self.style().unpolish(self)
+            self.style().polish(self)
+
+            if new_status == "disconnected":
+                self.setTitle(f"{self._vi_name}  [DISCONNECTED]")
+            elif new_status == "stale":
+                self.setTitle(f"{self._vi_name}  [stale]")
+            else:
+                self.setTitle(self._vi_name)
 
     def _on_action_blocked(self, message: str) -> None:
         """Show a dialog when the Orchestrator blocks a GUI action.

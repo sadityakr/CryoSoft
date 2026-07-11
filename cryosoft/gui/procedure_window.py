@@ -38,8 +38,10 @@ from typing import Any
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QSettings, Qt
+from PyQt6.QtGui import QCloseEvent
 from PyQt6.QtWidgets import (
+    QApplication,
     QComboBox,
     QFormLayout,
     QGroupBox,
@@ -64,6 +66,8 @@ from cryosoft.core.station import Station
 from cryosoft.gui.theme import BTN_CLASS_DANGER, BTN_CLASS_PRIMARY, BTN_CLASS_SECONDARY
 
 logger = logging.getLogger(__name__)
+
+_GEOMETRY_KEY = "ProcedureWindow/geometry"  # QSettings key for saved window geometry
 
 
 def _discover_procedures() -> list[type[BaseProcedure]]:
@@ -133,7 +137,7 @@ class ProcedureWindow(QMainWindow):
         self._datapoints: list[dict] = []
 
         self.setWindowTitle("CryoSoft — Procedure")
-        self.resize(1200, 820)
+        self._restore_geometry()
 
         self._build_ui()
         self._connect_signals()
@@ -176,9 +180,16 @@ class ProcedureWindow(QMainWindow):
             right widget (queue).
         """
         splitter = QSplitter(Qt.Orientation.Horizontal)
+        # setChildrenCollapsible(False) + per-pane minimums stop a drag from
+        # crushing either the params or the queue pane to zero width.
+        splitter.setChildrenCollapsible(False)
 
-        splitter.addWidget(self._build_left_column())
-        splitter.addWidget(self._build_right_column())
+        left_column = self._build_left_column()
+        right_column = self._build_right_column()
+        left_column.setMinimumWidth(300)
+        right_column.setMinimumWidth(250)
+        splitter.addWidget(left_column)
+        splitter.addWidget(right_column)
         splitter.setSizes([720, 480])
         return splitter
 
@@ -328,8 +339,17 @@ class ProcedureWindow(QMainWindow):
             QSplitter containing Plot 1 (left) and Plot 2 (right).
         """
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(self._build_plot1())
-        splitter.addWidget(self._build_plot2())
+        # Keep both plots usable; non-collapsible with a sane minimum size so a
+        # drag cannot squeeze either plot into an unreadable sliver.
+        splitter.setChildrenCollapsible(False)
+        plot1 = self._build_plot1()
+        plot2 = self._build_plot2()
+        plot1.setMinimumWidth(250)
+        plot2.setMinimumWidth(250)
+        plot1.setMinimumHeight(150)
+        plot2.setMinimumHeight(150)
+        splitter.addWidget(plot1)
+        splitter.addWidget(plot2)
         return splitter
 
     def _build_plot1(self) -> QGroupBox:
@@ -712,3 +732,32 @@ class ProcedureWindow(QMainWindow):
             summary_parts = [f"{k}={params[k]}" for k in sweep_keys[:3]]
             summary = f"{cls.name} ({', '.join(summary_parts)})"
             self._queue_list.addItem(f"{idx + 1}. {summary}")
+
+    # ------------------------------------------------------------------
+    # Window geometry + lifecycle
+    # ------------------------------------------------------------------
+
+    def _restore_geometry(self) -> None:
+        """Restore the saved window geometry, or size to a fraction of the screen.
+
+        Geometry is persisted with ``QSettings``, which on Windows is backed by
+        the registry (``HKCU\\Software\\CryoSoft\\CryoSoft``). If nothing is
+        stored yet, the window is sized to ~70% of the available screen area.
+        """
+        settings = QSettings("CryoSoft", "CryoSoft")
+        saved = settings.value(_GEOMETRY_KEY)
+        if saved is not None and self.restoreGeometry(saved):
+            return
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            self.resize(int(available.width() * 0.7), int(available.height() * 0.7))
+
+    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 (Qt override)
+        """Persist the window geometry before the window closes.
+
+        Args:
+            event: The Qt close event.
+        """
+        QSettings("CryoSoft", "CryoSoft").setValue(_GEOMETRY_KEY, self.saveGeometry())
+        super().closeEvent(event)

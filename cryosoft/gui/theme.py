@@ -84,7 +84,7 @@ QMainWindow {{
 /* ── Group boxes ──────────────────────────────────────────────────────── */
 QGroupBox {{
     background-color: {BG_SURFACE};
-    border: none;
+    border: 2px solid transparent;
     border-radius: 6px;
     margin-top: 14px;
     padding-top: 6px;
@@ -98,6 +98,20 @@ QGroupBox::title {{
     left: 10px;
     color: {TEXT_FADED};
     font-size: 9pt;
+}}
+
+/* ── Group box status borders (property-driven; set by InstrumentPanel) ── */
+/* The base rule reserves a 2px transparent border so switching a panel to a
+   coloured status border never changes its geometry — no layout jump. All
+   other geometry (radius/margins/padding) is inherited from the base rule. */
+QGroupBox[status="stale"] {{
+    border: 2px solid {STATUS_WARN};
+}}
+QGroupBox[status="disconnected"] {{
+    border: 2px solid {STATUS_ERROR};
+}}
+QGroupBox[status="disconnected"]::title {{
+    color: {STATUS_ERROR};
 }}
 
 /* ── Buttons — base (secondary) ──────────────────────────────────────── */
