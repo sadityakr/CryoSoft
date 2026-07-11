@@ -36,6 +36,14 @@ same commit that introduces it.
 | **VISA / GPIB** | The instrument-communication standard (PyVISA library) and the bus most lab instruments use. A "resource string" like `GPIB0::19::INSTR` addresses one instrument. |
 | **SI units rule** | All APIs use Tesla, Kelvin, Ampere, Volt, second. Display formatting (mK, µA) happens only in the GUI. |
 
+## GUI concepts
+
+| Term | Definition |
+|---|---|
+| **Splitter grid** | The Monitor window's layout for system/level `InstrumentPanel`s: a vertical `QSplitter` of rows (`grid_vsplitter`), each row a horizontal `QSplitter` (`grid_row_splitter_{i}`) holding up to N panels, N set by the "Columns" selector (`grid_columns_selector`, 2/3/4). Changing the column count reparents the existing panel instances into new row splitters rather than recreating them, so their Orchestrator signal connections survive. Replaces the earlier fixed 2-column `QGridLayout`. |
+| **MonitorHistory** | `cryosoft/gui/monitor_history.py`. A Qt-free, pure-Python ring buffer that accumulates flattened `{vi_name}_{field_name}` time-series history from `Orchestrator.states_updated`, one bounded `deque` per key, for the Trends section's plots. |
+| **Trends section** | The Monitor window's `trends_section` QGroupBox: a horizontal splitter (`trends_splitter`) of 1–4 `TrendPlotPanel`s, each showing one variable vs wall-clock time read from a shared `MonitorHistory`. An "Add plot" button (`trend_add_button`) adds panels up to the cap of 4; each panel's remove button drops it, never below 1. |
+
 ## Development harness
 
 | Term | Definition |

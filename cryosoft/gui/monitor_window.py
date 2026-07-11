@@ -1,32 +1,39 @@
 # ---
 # description: |
 #   MonitorWindow: the main CryoSoft window showing live instrument state.
-#   System/level VI panels are always visible (no scroll). Measurement VIs sit
-#   in a compact "Other Devices" section. The bottom row is a 50/50 splitter:
-#   Log (left) and Sample Info (right). A Procedures menu opens ProcedureWindow.
+#   System/level VI panels sit in a resizable splitter grid (configurable
+#   column count). A Trends section shows live time-series plots fed from a
+#   MonitorHistory ring buffer. Measurement VIs sit in a compact "Other
+#   Devices" section. The bottom row is a 50/50 splitter: Log (left) and
+#   Sample Info (right). A Procedures menu opens ProcedureWindow.
 # entry_point: Not run directly. Instantiated in main.py.
 # dependencies:
 #   - PyQt6 >= 6.5
 #   - cryosoft.core.station (Station)
 #   - cryosoft.core.orchestrator (Orchestrator)
 #   - cryosoft.gui.instrument_panel (InstrumentPanel)
+#   - cryosoft.gui.monitor_history (MonitorHistory)
+#   - cryosoft.gui.trend_plot_panel (TrendPlotPanel)
 # input: |
 #   Station instance and Orchestrator instance.
 # process: |
 #   Iterates over all VI names in the station, splits them by vi_type into the
-#   main grid (system/level) and Other Devices section (measurement). Connects
-#   Orchestrator signals for the state-driven status bar and the notification
-#   banner (errors/blocked actions). Owns ProcedureWindow and opens it lazily
-#   via the Procedures menu.
+#   main grid (system/level) and Other Devices section (measurement). System
+#   panels are distributed row-major into a splitter-of-rows whose column
+#   count is user-configurable. Connects Orchestrator signals for the
+#   state-driven status bar, the notification banner (errors/blocked
+#   actions), and MonitorHistory recording that feeds the Trends section.
+#   Owns ProcedureWindow and opens it lazily via the Procedures menu.
 # output: |
 #   A QMainWindow that stays open for the lifetime of the application.
-# last_updated: 2026-04-18
+# last_updated: 2026-07-12
 # ---
 
 """MonitorWindow — main CryoSoft monitor window."""
 
 from __future__ import annotations
 
+import json
 import logging
 
 import qtawesome as qta
@@ -34,9 +41,9 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction, QCloseEvent
 from PyQt6.QtWidgets import (
     QApplication,
+    QComboBox,
     QFileDialog,
     QFormLayout,
-    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -56,6 +63,7 @@ from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 from cryosoft.core.station import Station
 from cryosoft.gui import app_settings  # import the module (not the function) so tests can monkeypatch the factory
 from cryosoft.gui.instrument_panel import InstrumentPanel
+from cryosoft.gui.monitor_history import MonitorHistory
 from cryosoft.gui.notification_banner import NotificationBanner
 from cryosoft.gui.theme import (
     BANNER_SEVERITY_ERROR,
@@ -70,12 +78,23 @@ from cryosoft.gui.theme import (
     TEXT_ON_ACCENT,
     TEXT_PRIMARY,
 )
+from cryosoft.gui.trend_plot_panel import TrendPlotPanel
 
 logger = logging.getLogger(__name__)
 
-_COLUMNS = 2  # columns in the system VI instrument grid
+_DEFAULT_GRID_COLUMNS = 2  # default columns in the system VI instrument grid
+_GRID_COLUMN_CHOICES = ("2", "3", "4")
+_MIN_TREND_PANELS = 1
+_MAX_TREND_PANELS = 4
+_DEFAULT_TREND_PANEL_COUNT = 2
 _LOG_MAX_LINES = 500
-_GEOMETRY_KEY = "MonitorWindow/geometry"  # QSettings key for saved window geometry
+
+# QSettings keys for persisted window/layout state.
+_GEOMETRY_KEY = "MonitorWindow/geometry"
+_MAIN_SPLITTER_KEY = "MonitorWindow/main_splitter"
+_LOG_INFO_SPLITTER_KEY = "MonitorWindow/log_info_splitter"
+_GRID_COLUMNS_KEY = "MonitorWindow/grid_columns"
+_TRENDS_KEY = "MonitorWindow/trends"
 
 # Orchestrator state names that colour the status bar (dynamic 'level' property).
 _ACTIVE_STATES = frozenset({
@@ -145,10 +164,14 @@ class _QtLogHandler(logging.Handler):
 class MonitorWindow(QMainWindow):
     """Main window: live instrument monitor, sample info, global controls, and log.
 
-    System and level VIs get InstrumentPanels in a scrollable 2-column grid.
-    Measurement VIs appear in a separate "Other Devices" section below.
-    A real-time log panel shows the running cryosoft logger output.
-    The Procedures menu opens ProcedureWindow lazily.
+    System and level VIs get InstrumentPanels laid out in a splitter grid
+    (a vertical QSplitter of rows, each row a horizontal QSplitter) whose
+    column count the user can change live via a "Columns" selector. A
+    "Trends" section below the grid hosts up to four TrendPlotPanels fed by
+    a shared MonitorHistory ring buffer. Measurement VIs appear in a
+    separate "Other Devices" section below that. A real-time log panel
+    shows the running cryosoft logger output. The Procedures menu opens
+    ProcedureWindow lazily.
 
     Args:
         station: The active Station instance.
@@ -173,6 +196,7 @@ class MonitorWindow(QMainWindow):
         self._build_menu()
         self._build_ui()
         self._connect_signals()
+        self._restore_monitor_state()
 
         # Attach log handler after UI exists. Guard against a duplicate in case
         # the window is ever reconstructed within the same process (handlers
@@ -228,6 +252,11 @@ class MonitorWindow(QMainWindow):
             if self._station.get_vi_type(n) == "measurement"
         ]
 
+        # Shared ring-buffer history feeding all Trend plot panels. Qt-free
+        # by design (see monitor_history.py), so it is created here rather
+        # than inside TrendPlotPanel.
+        self._history = MonitorHistory()
+
         # ── Header ────────────────────────────────────────────────────
         root.addLayout(self._build_header())
 
@@ -236,21 +265,34 @@ class MonitorWindow(QMainWindow):
         root.addWidget(self._banner)
 
         # ── System / level VI grid ─────────────────────────────────────
-        grid_container = QWidget()
-        self._grid = QGridLayout(grid_container)
-        self._grid.setSpacing(8)
-        n_rows = (len(system_vis) + _COLUMNS - 1) // _COLUMNS
-        for c in range(_COLUMNS):
-            self._grid.setColumnStretch(c, 1)
-        for r in range(n_rows):
-            self._grid.setRowStretch(r, 1)
-
-        for idx, vi_name in enumerate(system_vis):
+        # Panels are built once, in config order, and kept in self._panels
+        # for the lifetime of the window. Changing the column count only
+        # reparents these same instances into new row splitters — recreating
+        # them would drop their Orchestrator signal connections.
+        self._panels: list[InstrumentPanel] = []
+        for vi_name in system_vis:
             vi = self._station._virtual_instruments[vi_name]
             panel = InstrumentPanel(vi_name, vi, self._orchestrator, parent=self)
             panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-            row, col = divmod(idx, _COLUMNS)
-            self._grid.addWidget(panel, row, col)
+            self._panels.append(panel)
+
+        self._grid_columns = _DEFAULT_GRID_COLUMNS
+        self._grid_vsplitter = self._build_grid_splitter(self._grid_columns)
+
+        # ── VI grid scroll area ────────────────────────────────────────
+        # Only the instrument grid scrolls when there are more panels than fit;
+        # the rest of the window keeps its layout. setWidgetResizable(True) lets
+        # the grid expand to fill the viewport when there is room. The
+        # splitter-of-rows is set directly as the scroll area's widget (a
+        # QSplitter is itself a QWidget, so no extra wrapping container).
+        self._grid_scroll = QScrollArea()
+        self._grid_scroll.setWidgetResizable(True)
+        self._grid_scroll.setWidget(self._grid_vsplitter)
+        self._grid_scroll.setMinimumHeight(200)
+
+        # ── Trends section ───────────────────────────────────────────
+        trends_section = self._build_trends_section()
+        trends_section.setMinimumHeight(200)
 
         # ── Lower section ──────────────────────────────────────────────
         lower_widget = QWidget()
@@ -268,30 +310,24 @@ class MonitorWindow(QMainWindow):
         # from crushing either pane to zero width (the reported "collapse" bug).
         log_section.setMinimumWidth(200)
         sample_info_section.setMinimumWidth(200)
-        log_info_splitter = QSplitter(Qt.Orientation.Horizontal)
-        log_info_splitter.setChildrenCollapsible(False)
-        log_info_splitter.addWidget(log_section)
-        log_info_splitter.addWidget(sample_info_section)
-        log_info_splitter.setStretchFactor(0, 1)
-        log_info_splitter.setStretchFactor(1, 1)
-        lower_layout.addWidget(log_info_splitter)
+        self._log_info_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._log_info_splitter.setObjectName("log_info_splitter")
+        self._log_info_splitter.setChildrenCollapsible(False)
+        self._log_info_splitter.addWidget(log_section)
+        self._log_info_splitter.addWidget(sample_info_section)
+        self._log_info_splitter.setStretchFactor(0, 1)
+        self._log_info_splitter.setStretchFactor(1, 1)
+        lower_layout.addWidget(self._log_info_splitter)
 
-        # ── VI grid scroll area ────────────────────────────────────────
-        # Only the instrument grid scrolls when there are more panels than fit;
-        # the rest of the window keeps its layout. setWidgetResizable(True) lets
-        # the grid expand to fill the viewport when there is room.
-        self._grid_scroll = QScrollArea()
-        self._grid_scroll.setWidgetResizable(True)
-        self._grid_scroll.setWidget(grid_container)
-        self._grid_scroll.setMinimumHeight(200)
-
-        # ── Vertical splitter between VI grid and lower section ────────
-        main_splitter = QSplitter(Qt.Orientation.Vertical)
-        main_splitter.setChildrenCollapsible(False)
-        main_splitter.addWidget(self._grid_scroll)
-        main_splitter.addWidget(lower_widget)
-        main_splitter.setSizes([500, 400])
-        root.addWidget(main_splitter)
+        # ── Vertical splitter: VI grid / Trends / lower section ─────────
+        self._main_splitter = QSplitter(Qt.Orientation.Vertical)
+        self._main_splitter.setObjectName("main_splitter")
+        self._main_splitter.setChildrenCollapsible(False)
+        self._main_splitter.addWidget(self._grid_scroll)
+        self._main_splitter.addWidget(trends_section)
+        self._main_splitter.addWidget(lower_widget)
+        self._main_splitter.setSizes([420, 260, 320])
+        root.addWidget(self._main_splitter)
 
         # ── Content widget is the central widget directly (no outer scroll) ──
         self.setCentralWidget(content_widget)
@@ -305,6 +341,194 @@ class MonitorWindow(QMainWindow):
         # dynamic-property restyle only fires when the level actually changes.
         self._status_level = ""
 
+    def _build_grid_splitter(self, columns: int) -> QSplitter:
+        """Build a vertical splitter of horizontal row splitters for the VI grid.
+
+        Distributes ``self._panels`` row-major, up to ``columns`` panels per
+        row, preserving config order. Reparents the existing panel instances
+        (does not create new ones).
+
+        Args:
+            columns: Number of panels per row.
+
+        Returns:
+            The assembled vertical QSplitter (objectName ``grid_vsplitter``),
+            containing one row QSplitter (objectName ``grid_row_splitter_{i}``)
+            per row of panels.
+        """
+        vsplitter = QSplitter(Qt.Orientation.Vertical)
+        vsplitter.setObjectName("grid_vsplitter")
+        vsplitter.setChildrenCollapsible(False)
+
+        for row_idx, start in enumerate(range(0, len(self._panels), columns)):
+            row_splitter = QSplitter(Qt.Orientation.Horizontal)
+            row_splitter.setObjectName(f"grid_row_splitter_{row_idx}")
+            row_splitter.setChildrenCollapsible(False)
+            for panel in self._panels[start:start + columns]:
+                # QSplitter.addWidget() reparents the widget: a Qt widget can
+                # only have one parent, so this automatically detaches the
+                # panel from whatever splitter (or the window) held it before.
+                row_splitter.addWidget(panel)
+            vsplitter.addWidget(row_splitter)
+
+        return vsplitter
+
+    def _reflow_grid(self, columns: int) -> None:
+        """Rebuild the grid splitter for a new column count, reparenting panels.
+
+        Args:
+            columns: New number of panels per row.
+        """
+        new_vsplitter = self._build_grid_splitter(columns)
+        # QScrollArea.setWidget() takes ownership of the new widget and
+        # schedules the old one for deletion; the panels were already
+        # reparented out of it by _build_grid_splitter(), so nothing of
+        # value is lost.
+        self._grid_scroll.setWidget(new_vsplitter)
+        self._grid_vsplitter = new_vsplitter
+
+    def _set_grid_columns(self, columns: int, save_previous: bool = True) -> None:
+        """Change the grid column count, reflowing panels and swapping splitter state.
+
+        Args:
+            columns: New column count (2, 3, or 4).
+            save_previous: If True, save the current density's splitter sizes
+                before reflowing (so returning to it later restores them).
+        """
+        if save_previous:
+            self._save_grid_density_splitters(self._grid_columns)
+        self._reflow_grid(columns)
+        self._grid_columns = columns
+        self._restore_grid_density_splitters(columns)
+
+    def _on_columns_changed(self, text: str) -> None:
+        """Handle the Columns selector changing: reflow and persist the choice.
+
+        Args:
+            text: The selector's new text ("2", "3", or "4").
+        """
+        try:
+            columns = int(text)
+        except ValueError:
+            return
+        if columns == self._grid_columns:
+            return
+        self._set_grid_columns(columns, save_previous=True)
+        app_settings.get_settings().setValue(_GRID_COLUMNS_KEY, self._grid_columns)
+
+    # ------------------------------------------------------------------
+    # Trends section
+    # ------------------------------------------------------------------
+
+    def _build_trends_section(self) -> QGroupBox:
+        """Build the Trends section: an add button and a splitter of TrendPlotPanels.
+
+        Returns:
+            A QGroupBox (objectName ``trends_section``) with a header row and
+            a horizontal splitter (objectName ``trends_splitter``) holding
+            the default set of TrendPlotPanels.
+        """
+        box = QGroupBox("Trends")
+        box.setObjectName("trends_section")
+        vlay = QVBoxLayout(box)
+
+        header = QHBoxLayout()
+        header.addWidget(QLabel("Live trend plots of instrument readings over time."))
+        header.addStretch()
+        self._trend_add_button = QPushButton()
+        self._trend_add_button.setObjectName("trend_add_button")
+        self._trend_add_button.setIcon(qta.icon("fa5s.plus", color=TEXT_PRIMARY))
+        self._trend_add_button.setToolTip(f"Add a trend plot (up to {_MAX_TREND_PANELS})")
+        self._trend_add_button.clicked.connect(self._on_trend_add_clicked)
+        header.addWidget(self._trend_add_button)
+        vlay.addLayout(header)
+
+        self._trends_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._trends_splitter.setObjectName("trends_splitter")
+        self._trends_splitter.setChildrenCollapsible(False)
+        vlay.addWidget(self._trends_splitter)
+
+        self._trend_panels: dict[str, TrendPlotPanel] = {}
+        self._trend_series_counter = 0
+        # Keys the restore path still wants applied once MonitorHistory has
+        # data for them (a fresh panel's Y combo is empty until the first
+        # states_updated tick, so set_selected_key() at restore time is a
+        # harmless no-op that we retry from _on_states_updated_for_history).
+        self._pending_trend_keys: dict[str, str] = {}
+        for _ in range(_DEFAULT_TREND_PANEL_COUNT):
+            self._add_trend_panel()
+
+        return box
+
+    def _add_trend_panel(self) -> str:
+        """Create and host a new TrendPlotPanel.
+
+        Returns:
+            The new panel's ``panel_id``.
+        """
+        panel_id = f"trend_{self._next_trend_panel_index()}"
+        panel = TrendPlotPanel(
+            self._history, panel_id, series_index=self._trend_series_counter, parent=self
+        )
+        self._trend_series_counter += 1
+        panel.remove_requested.connect(self._on_trend_remove_requested)
+        self._trends_splitter.addWidget(panel)
+        self._trend_panels[panel_id] = panel
+        self._update_trend_add_button_state()
+        return panel_id
+
+    def _next_trend_panel_index(self) -> int:
+        """Return the smallest non-negative integer not already used in a panel_id.
+
+        Returns:
+            An index such that ``f"trend_{index}"`` is not already in use, so
+            panel_ids never collide after panels are added and removed.
+        """
+        used: set[int] = set()
+        for panel_id in self._trend_panels:
+            try:
+                used.add(int(panel_id.rsplit("_", 1)[-1]))
+            except ValueError:
+                continue
+        index = 0
+        while index in used:
+            index += 1
+        return index
+
+    def _on_trend_add_clicked(self) -> None:
+        """Add a trend panel, up to the cap."""
+        if len(self._trend_panels) >= _MAX_TREND_PANELS:
+            return
+        self._add_trend_panel()
+
+    def _on_trend_remove_requested(self, panel_id: str) -> None:
+        """Remove a trend panel, never dropping below the minimum.
+
+        Args:
+            panel_id: The panel_id echoed back by TrendPlotPanel.remove_requested.
+        """
+        if len(self._trend_panels) <= _MIN_TREND_PANELS:
+            return
+        self._remove_trend_panel_widget(panel_id)
+        self._update_trend_add_button_state()
+
+    def _remove_trend_panel_widget(self, panel_id: str) -> None:
+        """Unconditionally drop a trend panel's widget and bookkeeping.
+
+        Args:
+            panel_id: The panel_id to remove. No-op if not present.
+        """
+        panel = self._trend_panels.pop(panel_id, None)
+        if panel is None:
+            return
+        panel.setParent(None)
+        panel.deleteLater()
+        self._pending_trend_keys.pop(panel_id, None)
+
+    def _update_trend_add_button_state(self) -> None:
+        """Enable/disable the add button based on the current panel count."""
+        self._trend_add_button.setEnabled(len(self._trend_panels) < _MAX_TREND_PANELS)
+
     def _build_header(self) -> QHBoxLayout:
         """Build the top toolbar with title and global action buttons.
 
@@ -315,6 +539,17 @@ class MonitorWindow(QMainWindow):
 
         title = QLabel("<b>CryoSoft</b>  — Instrument Monitor")
         row.addWidget(title)
+
+        columns_label = QLabel("Columns:")
+        row.addWidget(columns_label)
+        self._columns_selector = QComboBox()
+        self._columns_selector.setObjectName("grid_columns_selector")
+        self._columns_selector.addItems(list(_GRID_COLUMN_CHOICES))
+        self._columns_selector.setCurrentText(str(_DEFAULT_GRID_COLUMNS))
+        self._columns_selector.setToolTip("Number of columns in the instrument grid above")
+        self._columns_selector.currentTextChanged.connect(self._on_columns_changed)
+        row.addWidget(self._columns_selector)
+
         row.addStretch()
 
         initiate_all_btn = QPushButton("Initiate All")
@@ -532,6 +767,25 @@ class MonitorWindow(QMainWindow):
         self._orchestrator.state_changed.connect(self._on_state_changed)
         self._orchestrator.error_occurred.connect(self._on_error)
         self._orchestrator.action_blocked.connect(self._on_action_blocked)
+        # Separate from InstrumentPanel's own states_updated connections
+        # (each panel connects itself in its constructor) — this slot only
+        # feeds MonitorHistory and the Trend plots.
+        self._orchestrator.states_updated.connect(self._on_states_updated_for_history)
+
+    def _on_states_updated_for_history(self, state: dict) -> None:
+        """Record a state snapshot into MonitorHistory and refresh trend panels.
+
+        Args:
+            state: ``{vi_name: {field: value, ...}}`` from the Orchestrator.
+        """
+        self._history.record(state)
+        for panel_id, panel in self._trend_panels.items():
+            panel.refresh()
+            pending_key = self._pending_trend_keys.get(panel_id)
+            if pending_key is not None:
+                panel.set_selected_key(pending_key)
+                if panel.selected_key() == pending_key:
+                    del self._pending_trend_keys[panel_id]
 
     def _on_state_changed(self, state_name: str) -> None:
         """Update the status bar label and colour level when state changes.
@@ -604,7 +858,7 @@ class MonitorWindow(QMainWindow):
             self.resize(int(available.width() * 0.7), int(available.height() * 0.7))
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 (Qt override)
-        """Detach the log handler and persist geometry before the window closes.
+        """Detach the log handler and persist geometry/layout before the window closes.
 
         Removing the handler prevents it from writing to the destroyed
         ``QTextEdit`` after the window is gone (RuntimeError on a dead widget).
@@ -613,5 +867,144 @@ class MonitorWindow(QMainWindow):
             event: The Qt close event.
         """
         logging.getLogger("cryosoft").removeHandler(self._log_handler)
-        app_settings.get_settings().setValue(_GEOMETRY_KEY, self.saveGeometry())
+        settings = app_settings.get_settings()
+        settings.setValue(_GEOMETRY_KEY, self.saveGeometry())
+        # saveState() serializes a splitter's pane sizes (and collapsed
+        # state) into an opaque QByteArray; restoreState() on the matching
+        # splitter later reproduces the same sizes.
+        settings.setValue(_MAIN_SPLITTER_KEY, self._main_splitter.saveState())
+        settings.setValue(_LOG_INFO_SPLITTER_KEY, self._log_info_splitter.saveState())
+        settings.setValue(_GRID_COLUMNS_KEY, self._grid_columns)
+        self._save_grid_density_splitters(self._grid_columns)
+        self._save_trends()
         super().closeEvent(event)
+
+    # ------------------------------------------------------------------
+    # Layout persistence (grid density + trends)
+    # ------------------------------------------------------------------
+
+    def _save_grid_density_splitters(self, columns: int) -> None:
+        """Persist the current grid splitter sizes under this column count's key.
+
+        Args:
+            columns: The column count these sizes belong to.
+        """
+        settings = app_settings.get_settings()
+        settings.setValue(f"MonitorWindow/grid/cols{columns}/vsplitter", self._grid_vsplitter.saveState())
+        for i in range(self._grid_vsplitter.count()):
+            row_splitter = self._grid_vsplitter.widget(i)
+            settings.setValue(f"MonitorWindow/grid/cols{columns}/row{i}", row_splitter.saveState())
+
+    def _restore_grid_density_splitters(self, columns: int) -> None:
+        """Restore grid splitter sizes previously saved for this column count.
+
+        Silently does nothing for a density that was never saved (a fresh
+        density falls back to the splitters' natural equal-share sizes).
+
+        Args:
+            columns: The column count to restore sizes for.
+        """
+        settings = app_settings.get_settings()
+        vstate = settings.value(f"MonitorWindow/grid/cols{columns}/vsplitter")
+        if vstate is not None:
+            try:
+                self._grid_vsplitter.restoreState(vstate)
+            except (TypeError, ValueError) as exc:
+                logger.debug("MonitorWindow: could not restore grid_vsplitter state: %s", exc)
+        for i in range(self._grid_vsplitter.count()):
+            rstate = settings.value(f"MonitorWindow/grid/cols{columns}/row{i}")
+            if rstate is None:
+                continue
+            row_splitter = self._grid_vsplitter.widget(i)
+            try:
+                row_splitter.restoreState(rstate)
+            except (TypeError, ValueError) as exc:
+                logger.debug("MonitorWindow: could not restore grid_row_splitter %d state: %s", i, exc)
+
+    def _save_trends(self) -> None:
+        """Persist the ordered list of trend panels' selected key and window."""
+        ordered = [self._trends_splitter.widget(i) for i in range(self._trends_splitter.count())]
+        data = [
+            {"key": panel.selected_key(), "window_s": panel.selected_window_s()}
+            for panel in ordered
+        ]
+        app_settings.get_settings().setValue(_TRENDS_KEY, json.dumps(data))
+
+    def _apply_trend_restore(self, entries: list) -> None:
+        """Replace the current trend panels with ones matching saved entries.
+
+        Args:
+            entries: Parsed JSON list of ``{"key": ..., "window_s": ...}``
+                dicts, already validated to be a non-empty list.
+        """
+        valid_entries = [e for e in entries if isinstance(e, dict)][:_MAX_TREND_PANELS]
+        if not valid_entries:
+            return
+
+        for panel_id in list(self._trend_panels.keys()):
+            self._remove_trend_panel_widget(panel_id)
+
+        for entry in valid_entries:
+            panel_id = self._add_trend_panel()
+            panel = self._trend_panels[panel_id]
+
+            window_s = entry.get("window_s")
+            if isinstance(window_s, (int, float)) and not isinstance(window_s, bool):
+                panel.set_selected_window_s(float(window_s))
+
+            key = entry.get("key")
+            if isinstance(key, str) and key:
+                panel.set_selected_key(key)  # no-op now if history is still empty
+                self._pending_trend_keys[panel_id] = key
+
+        self._update_trend_add_button_state()
+
+    def _restore_monitor_state(self) -> None:
+        """Restore splitter sizes, grid column count, and trend panels from QSettings.
+
+        Called once at the end of ``__init__``, after the UI is built. Every
+        stored value is read defensively: a missing key, wrong type, or
+        corrupt JSON silently falls back to the default already built by
+        ``_build_ui``.
+        """
+        settings = app_settings.get_settings()
+
+        main_state = settings.value(_MAIN_SPLITTER_KEY)
+        if main_state is not None:
+            try:
+                self._main_splitter.restoreState(main_state)
+            except (TypeError, ValueError) as exc:
+                logger.debug("MonitorWindow: could not restore main_splitter state: %s", exc)
+
+        log_info_state = settings.value(_LOG_INFO_SPLITTER_KEY)
+        if log_info_state is not None:
+            try:
+                self._log_info_splitter.restoreState(log_info_state)
+            except (TypeError, ValueError) as exc:
+                logger.debug("MonitorWindow: could not restore log_info_splitter state: %s", exc)
+
+        try:
+            saved_columns = int(settings.value(_GRID_COLUMNS_KEY, _DEFAULT_GRID_COLUMNS))
+        except (TypeError, ValueError):
+            saved_columns = _DEFAULT_GRID_COLUMNS
+        if str(saved_columns) not in _GRID_COLUMN_CHOICES:
+            saved_columns = _DEFAULT_GRID_COLUMNS
+
+        if saved_columns != self._grid_columns:
+            self._set_grid_columns(saved_columns, save_previous=False)
+        else:
+            self._restore_grid_density_splitters(self._grid_columns)
+
+        self._columns_selector.blockSignals(True)
+        self._columns_selector.setCurrentText(str(self._grid_columns))
+        self._columns_selector.blockSignals(False)
+
+        raw_trends = settings.value(_TRENDS_KEY)
+        parsed = None
+        if raw_trends:
+            try:
+                parsed = json.loads(raw_trends)
+            except (TypeError, ValueError):
+                parsed = None
+        if isinstance(parsed, list) and parsed:
+            self._apply_trend_restore(parsed)

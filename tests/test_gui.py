@@ -17,9 +17,11 @@ config with no hardware. All 121 prior tests must pass before this file is run.
 import logging
 
 import pytest
-from PyQt6.QtCore import QSettings
+from PyQt6.QtCore import Qt, QSettings
 from PyQt6.QtWidgets import (
+    QComboBox,
     QFormLayout,
+    QGroupBox,
     QLabel,
     QLineEdit,
     QPushButton,
@@ -40,6 +42,7 @@ from cryosoft.gui.theme import (
     TEXT_PRIMARY,
     build_stylesheet,
 )
+from cryosoft.gui.trend_plot_panel import TrendPlotPanel
 
 
 CONFIG_PATH = "cryosoft/configs/sim_cryostat"
@@ -420,11 +423,170 @@ def test_measurement_ready_updates_plot(procedure_win, orchestrator):
 # ── Splitter / layout structure tests (Phase 1 GUI fixes) ──────────────────────
 
 def test_monitor_splitters_not_collapsible(monitor_win):
-    """Both MonitorWindow splitters have children-collapsing disabled."""
+    """Every MonitorWindow splitter (main, grid rows, trends, log/info) is non-collapsible."""
     splitters = monitor_win.findChildren(QSplitter)
-    assert len(splitters) == 2, f"Expected 2 splitters, found {len(splitters)}"
+    # main_splitter + log_info_splitter + trends_splitter + grid_vsplitter + >=1 grid row.
+    assert len(splitters) >= 5, f"Expected at least 5 splitters, found {len(splitters)}"
     for sp in splitters:
         assert sp.childrenCollapsible() is False
+
+
+# ── Phase 4: splitter grid + Trends section (Monitor GUI redesign) ─────────────
+
+def test_monitor_grid_vsplitter_contains_all_system_panels(monitor_win, station):
+    """grid_vsplitter's rows together hold every system/level InstrumentPanel, in order."""
+    vsplitter = monitor_win.findChild(QSplitter, "grid_vsplitter")
+    assert vsplitter is not None
+
+    system_vis = [
+        n for n in station.get_vi_names() if station.get_vi_type(n) in {"system", "level"}
+    ]
+    columns = monitor_win._grid_columns
+    expected_rows = (len(system_vis) + columns - 1) // columns if system_vis else 0
+    assert vsplitter.count() == expected_rows
+
+    all_panels = []
+    for i in range(vsplitter.count()):
+        row = vsplitter.widget(i)
+        assert isinstance(row, QSplitter)
+        assert row.objectName() == f"grid_row_splitter_{i}"
+        assert row.childrenCollapsible() is False
+        all_panels.extend(row.widget(j) for j in range(row.count()))
+
+    assert [p._vi_name for p in all_panels] == system_vis
+
+
+def test_monitor_columns_selector_reflows_same_panel_instances(monitor_win):
+    """Switching Columns to 3 redistributes the SAME InstrumentPanel instances row-major."""
+    panels_before = list(monitor_win._panels)
+    selector = monitor_win.findChild(QComboBox, "grid_columns_selector")
+    assert selector is not None
+
+    selector.setCurrentText("3")
+    assert monitor_win._grid_columns == 3
+
+    vsplitter = monitor_win.findChild(QSplitter, "grid_vsplitter")
+    n = len(panels_before)
+    expected_rows = (n + 2) // 3 if n else 0
+    assert vsplitter.count() == expected_rows
+
+    idx = 0
+    for i in range(vsplitter.count()):
+        row = vsplitter.widget(i)
+        row_panels = [row.widget(j) for j in range(row.count())]
+        expected = panels_before[idx: idx + 3]
+        assert len(row_panels) == len(expected)
+        for actual_panel, expected_panel in zip(row_panels, expected):
+            assert actual_panel is expected_panel  # identity: reparented, not recreated
+        idx += 3
+
+
+def test_monitor_trends_section_default_two_panels(monitor_win):
+    """Trends section exists with the default 2 panels and an enabled add button."""
+    section = monitor_win.findChild(QGroupBox, "trends_section")
+    assert section is not None
+    trends_splitter = monitor_win.findChild(QSplitter, "trends_splitter")
+    assert trends_splitter is not None
+    assert trends_splitter.count() == 2
+    add_btn = monitor_win.findChild(QPushButton, "trend_add_button")
+    assert add_btn is not None
+    assert add_btn.isEnabled()
+
+
+def test_monitor_trend_add_button_caps_at_four(monitor_win, qtbot):
+    """Clicking Add Plot adds panels up to 4, then the button disables and stays inert."""
+    add_btn = monitor_win.findChild(QPushButton, "trend_add_button")
+    trends_splitter = monitor_win.findChild(QSplitter, "trends_splitter")
+    assert trends_splitter.count() == 2
+
+    qtbot.mouseClick(add_btn, Qt.MouseButton.LeftButton)
+    assert trends_splitter.count() == 3
+    qtbot.mouseClick(add_btn, Qt.MouseButton.LeftButton)
+    assert trends_splitter.count() == 4
+    assert not add_btn.isEnabled()
+
+    qtbot.mouseClick(add_btn, Qt.MouseButton.LeftButton)
+    assert trends_splitter.count() == 4
+
+
+def test_monitor_trend_remove_never_below_one(monitor_win):
+    """Removing trend panels stops at 1 and never goes lower."""
+    trends_splitter = monitor_win.findChild(QSplitter, "trends_splitter")
+    assert trends_splitter.count() == 2
+
+    first_id = next(iter(monitor_win._trend_panels))
+    monitor_win._on_trend_remove_requested(first_id)
+    assert trends_splitter.count() == 1
+
+    remaining_id = next(iter(monitor_win._trend_panels))
+    monitor_win._on_trend_remove_requested(remaining_id)
+    assert trends_splitter.count() == 1
+
+    add_btn = monitor_win.findChild(QPushButton, "trend_add_button")
+    assert add_btn.isEnabled()
+
+
+def test_monitor_states_updated_feeds_history_and_trend_combos(monitor_win, orchestrator):
+    """states_updated records into MonitorHistory and populates the trend Y combos."""
+    fake_state = {"magnet_x": {"get_field": 0.25, "magnet_current": 12.0}}
+    orchestrator.states_updated.emit(fake_state)
+
+    assert "magnet_x_get_field" in monitor_win._history.keys()
+
+    panels = monitor_win.findChildren(TrendPlotPanel)
+    assert len(panels) == 2
+    for panel in panels:
+        combo = panel.findChild(QComboBox)
+        assert combo is not None
+        assert combo.count() > 0
+
+
+def test_monitor_persistence_roundtrip_columns_and_trends(
+    station, orchestrator, qtbot, isolated_settings
+):
+    """Columns density, trend panel count, and a trend's key/window persist across windows.
+
+    Mirrors the existing geometry-persistence test: build a window, change
+    state, close it (writes to the isolated ini), then build a fresh window
+    against the same settings and check the state came back.
+    """
+    win1 = MonitorWindow(station, orchestrator)
+    qtbot.addWidget(win1)
+    win1.show()
+
+    selector = win1.findChild(QComboBox, "grid_columns_selector")
+    selector.setCurrentText("3")
+    assert win1._grid_columns == 3
+
+    third_id = win1._add_trend_panel()
+    third_panel = win1._trend_panels[third_id]
+
+    # Feed history AFTER the third panel exists so its refresh() (triggered by
+    # this emit) populates its Y combo with a real key to select.
+    fake_state = {"magnet_x": {"get_field": 0.5, "magnet_current": 10.0}}
+    orchestrator.states_updated.emit(fake_state)
+    third_panel.set_selected_key("magnet_x_get_field")
+    third_panel.set_selected_window_s(21600.0)  # "6 h"
+
+    assert win1.findChild(QSplitter, "trends_splitter").count() == 3
+
+    win1.close()
+
+    win2 = MonitorWindow(station, orchestrator)
+    qtbot.addWidget(win2)
+    win2.show()
+
+    assert win2._grid_columns == 3
+    trends_splitter2 = win2.findChild(QSplitter, "trends_splitter")
+    assert trends_splitter2.count() == 3
+
+    # Give the new window's (empty) history the same key so the persisted
+    # selection, held pending, can actually be applied.
+    orchestrator.states_updated.emit(fake_state)
+
+    third_panel2 = trends_splitter2.widget(2)
+    assert third_panel2.selected_key() == "magnet_x_get_field"
+    assert third_panel2.selected_window_s() == 21600.0
 
 
 def test_procedure_splitters_not_collapsible(procedure_win):
