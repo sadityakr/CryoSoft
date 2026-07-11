@@ -6,7 +6,7 @@
 #   VTITemperatureControllerVI, CryogenLevelMeterVI, DCSeparateMeasurementVI,
 #   DCSingleInstrumentVI, and DCMeasurementBase.
 # entry_point: pytest tests/test_l1_new_vis.py -v
-# last_updated: 2026-04-19
+# last_updated: 2026-07-12
 # ---
 
 """Tests for behavior-based VIs (Stage 2 of VI refactor)."""
@@ -120,6 +120,13 @@ class TestSuperConductingMagnetVI:
         vi.set_field(2.0)
         assert vi.ramp_status() == "RAMPING"
 
+    def test_start_ramp_accepts_persistent_kwarg_as_noop(self, ips_driver):
+        """persistent= is accepted (ignored) so Station can forward it uniformly
+        to either magnet VI flavor without special-casing which one is configured."""
+        vi = self._make_vi(ips_driver)
+        vi.start_ramp(1.0, persistent=False)
+        assert vi.ramp_status() == "RAMPING"
+
     def test_standby_ramps_to_zero(self, ips_driver):
         vi = self._make_vi(ips_driver)
         ips_driver._current = 50.0
@@ -217,6 +224,75 @@ class TestSuperConductingMagnetPersistentVI:
     def test_vi_type_is_magnet(self, ips_driver):
         vi = self._make_vi(ips_driver)
         assert vi.vi_type == "magnet"
+
+    # -- persistent=False: repeated-sweep-ramp behavior (regression coverage
+    #    for the bug where every sweep point re-paid heater warmup and
+    #    get_field()/magnet_current() read back 0 after entering persistent
+    #    mode) --------------------------------------------------------------
+
+    def _drive_to_target_reached(self, vi, driver, max_ticks=100):
+        """Rewind the driver's simulated clock before every tick, so whichever
+        time-based ramp segment the generator is currently in jumps straight
+        to its setpoint (warmup/cooldown ticks are yield-counted, not
+        time-based, and are unaffected by the rewind).
+
+        A one-time rewind (as used elsewhere in this file) is not enough here:
+        the persistent generator's first few advance_ramp() calls are spent
+        exhausting the warmup-tick loop, and the driver's very first
+        get_current()/get_status() call after that (still status="HOLD")
+        resets its internal clock as a side effect without using the rewound
+        delta — so the rewind must be reapplied on every tick to guarantee
+        the *next* driver call that matters sees a large elapsed time.
+        """
+        for _ in range(max_ticks):
+            driver._last_update = time.time() - 3600.0
+            if vi.ramp_status() == "TARGET_REACHED":
+                return True
+            vi.advance_ramp()
+        return False
+
+    def test_persistent_false_keeps_heater_on_and_does_not_zero_psu(self, ips_driver):
+        vi = self._make_vi(ips_driver, warmup_ticks=2, cooldown_ticks=2)
+        vi.start_ramp(1.0, persistent=False)  # 1.0 T * 10 A/T = 10 A
+        assert self._drive_to_target_reached(vi, ips_driver)
+
+        assert vi.is_persistent() is False
+        assert vi.switch_heater_state() == "ON"
+        # PSU actually holds the target current directly (not zeroed).
+        assert vi.get_field() == pytest.approx(1.0, abs=0.01)
+        assert vi.magnet_current() == pytest.approx(10.0, abs=0.1)
+
+    def test_repeated_persistent_false_ramps_skip_warmup_after_first(self, ips_driver):
+        """The switch heater warmup (paid on the first ramp) must not be
+        paid again on a second persistent=False ramp while the heater is
+        already on — otherwise every sweep point would cost the full
+        warmup, as it did before this fix."""
+        vi = self._make_vi(ips_driver, warmup_ticks=30, cooldown_ticks=30)
+
+        vi.start_ramp(0.5, persistent=False)
+        assert self._drive_to_target_reached(vi, ips_driver, max_ticks=200)
+        assert vi.switch_heater_state() == "ON"
+
+        vi.start_ramp(0.8, persistent=False)
+        # No warmup this time: should reach target in far fewer ticks than
+        # the 30-tick warmup alone would take.
+        assert self._drive_to_target_reached(vi, ips_driver, max_ticks=10)
+        assert vi.switch_heater_state() == "ON"
+        assert vi.get_field() == pytest.approx(0.8, abs=0.01)
+
+    def test_persistent_true_default_still_parks_psu_at_zero(self, ips_driver):
+        """Regression: default (persistent=True, omitted) behavior is unchanged —
+        PSU parks at zero and the coil holds the field."""
+        vi = self._make_vi(ips_driver, warmup_ticks=1, cooldown_ticks=1)
+        vi.start_ramp(1.0)  # default persistent=True
+        assert self._drive_to_target_reached(vi, ips_driver)
+
+        assert vi.is_persistent() is True
+        assert vi.switch_heater_state() == "OFF"
+        assert ips_driver.get_current() == pytest.approx(0.0, abs=0.01)
+        # get_field()/magnet_current() must read the coil, not the zeroed PSU.
+        assert vi.get_field() == pytest.approx(1.0, abs=0.01)
+        assert vi.magnet_current() == pytest.approx(10.0, abs=0.1)
 
 
 # ---------------------------------------------------------------------------
