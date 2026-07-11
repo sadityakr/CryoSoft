@@ -38,6 +38,7 @@ from typing import Any
 
 import numpy as np
 import pyqtgraph as pg
+import qtawesome as qta
 from PyQt6.QtCore import QSettings, Qt
 from PyQt6.QtGui import QCloseEvent
 from PyQt6.QtWidgets import (
@@ -63,7 +64,17 @@ from PyQt6.QtWidgets import (
 from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 from cryosoft.core.procedure import BaseProcedure
 from cryosoft.core.station import Station
-from cryosoft.gui.theme import BTN_CLASS_DANGER, BTN_CLASS_PRIMARY, BTN_CLASS_SECONDARY
+from cryosoft.gui.notification_banner import NotificationBanner
+from cryosoft.gui.theme import (
+    BANNER_SEVERITY_ERROR,
+    BANNER_SEVERITY_WARNING,
+    BTN_CLASS_DANGER,
+    BTN_CLASS_PRIMARY,
+    BTN_CLASS_SECONDARY,
+    PLOT_SERIES,
+    TEXT_ON_ACCENT,
+    TEXT_PRIMARY,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +167,10 @@ class ProcedureWindow(QMainWindow):
         root.setSpacing(8)
         root.setContentsMargins(10, 10, 10, 10)
 
+        # ── Notification banner (hidden until a warning/error arrives) ─
+        self._banner = NotificationBanner()
+        root.addWidget(self._banner)
+
         # ── Top: params (left) | queue (right) ───────────────────────
         root.addWidget(self._build_top_splitter(), stretch=2)
 
@@ -227,10 +242,14 @@ class ProcedureWindow(QMainWindow):
         add_btn = QPushButton("Add to Queue")
         add_btn.setObjectName("add_to_queue_btn")
         add_btn.setProperty("class", BTN_CLASS_SECONDARY)
+        add_btn.setIcon(qta.icon("fa5s.plus", color=TEXT_PRIMARY))
+        add_btn.setToolTip("Add the current procedure and parameters to the run queue")
         add_btn.clicked.connect(self._on_add_to_queue)
         run_now_btn = QPushButton("Run Now")
         run_now_btn.setObjectName("run_now_btn")
         run_now_btn.setProperty("class", BTN_CLASS_PRIMARY)
+        run_now_btn.setIcon(qta.icon("fa5s.play", color=TEXT_ON_ACCENT))
+        run_now_btn.setToolTip("Run the current procedure immediately")
         run_now_btn.clicked.connect(self._on_run_now)
         action_row.addWidget(add_btn)
         action_row.addWidget(run_now_btn)
@@ -308,20 +327,28 @@ class ProcedureWindow(QMainWindow):
         vlay.addWidget(self._queue_list)
 
         btn_row = QHBoxLayout()
-        up_btn = QPushButton("↑")
+        up_btn = QPushButton()
         up_btn.setObjectName("queue_up_btn")
+        up_btn.setIcon(qta.icon("fa5s.arrow-up", color=TEXT_PRIMARY))
+        up_btn.setToolTip("Move the selected queue item up")
         up_btn.setMaximumWidth(40)
         up_btn.clicked.connect(self._queue_move_up)
-        down_btn = QPushButton("↓")
+        down_btn = QPushButton()
         down_btn.setObjectName("queue_down_btn")
+        down_btn.setIcon(qta.icon("fa5s.arrow-down", color=TEXT_PRIMARY))
+        down_btn.setToolTip("Move the selected queue item down")
         down_btn.setMaximumWidth(40)
         down_btn.clicked.connect(self._queue_move_down)
-        remove_btn = QPushButton("✕ Remove")
+        remove_btn = QPushButton("Remove")
         remove_btn.setObjectName("queue_remove_btn")
+        remove_btn.setIcon(qta.icon("fa5s.trash", color=TEXT_PRIMARY))
+        remove_btn.setToolTip("Remove the selected item from the queue")
         remove_btn.clicked.connect(self._queue_remove)
         run_queue_btn = QPushButton("Run Queue")
         run_queue_btn.setObjectName("run_queue_btn")
         run_queue_btn.setProperty("class", BTN_CLASS_PRIMARY)
+        run_queue_btn.setIcon(qta.icon("fa5s.forward", color=TEXT_ON_ACCENT))
+        run_queue_btn.setToolTip("Run all queued procedures in order")
         run_queue_btn.clicked.connect(self._orchestrator.run_queue)
         btn_row.addWidget(up_btn)
         btn_row.addWidget(down_btn)
@@ -384,7 +411,12 @@ class ProcedureWindow(QMainWindow):
         self._plot_widget.setMinimumHeight(150)
         self._plot_widget.setLabel("bottom", "Field (T)")
         self._plot_widget.setLabel("left", "Value")
-        self._plot_curve1 = self._plot_widget.plot([], [], pen="c", symbol="o", symbolSize=4)
+        self._plot_widget.showGrid(x=True, y=True, alpha=0.3)
+        pen1 = pg.mkPen(PLOT_SERIES[0], width=2)
+        self._plot_curve1 = self._plot_widget.plot(
+            [], [], pen=pen1, symbol="o", symbolSize=5,
+            symbolBrush=PLOT_SERIES[0], symbolPen=PLOT_SERIES[0],
+        )
         vlay.addWidget(self._plot_widget)
 
         return box
@@ -421,7 +453,12 @@ class ProcedureWindow(QMainWindow):
         self._plot_widget2.setMinimumHeight(150)
         self._plot_widget2.setLabel("bottom", "Field (T)")
         self._plot_widget2.setLabel("left", "Value")
-        self._plot_curve2 = self._plot_widget2.plot([], [], pen="m", symbol="o", symbolSize=4)
+        self._plot_widget2.showGrid(x=True, y=True, alpha=0.3)
+        pen2 = pg.mkPen(PLOT_SERIES[1], width=2)
+        self._plot_curve2 = self._plot_widget2.plot(
+            [], [], pen=pen2, symbol="o", symbolSize=5,
+            symbolBrush=PLOT_SERIES[1], symbolPen=PLOT_SERIES[1],
+        )
         vlay.addWidget(self._plot_widget2)
 
         return box
@@ -437,16 +474,22 @@ class ProcedureWindow(QMainWindow):
         pause_btn = QPushButton("Pause")
         pause_btn.setObjectName("pause_btn")
         pause_btn.setProperty("class", BTN_CLASS_SECONDARY)
+        pause_btn.setIcon(qta.icon("fa5s.pause", color=TEXT_PRIMARY))
+        pause_btn.setToolTip("Pause the running procedure at the next safe point")
         pause_btn.clicked.connect(self._orchestrator.pause_procedure)
 
         resume_btn = QPushButton("Resume")
         resume_btn.setObjectName("resume_btn")
         resume_btn.setProperty("class", BTN_CLASS_SECONDARY)
+        resume_btn.setIcon(qta.icon("fa5s.play", color=TEXT_PRIMARY))
+        resume_btn.setToolTip("Resume the paused procedure")
         resume_btn.clicked.connect(self._orchestrator.resume_procedure)
 
         abort_btn = QPushButton("Abort")
         abort_btn.setObjectName("abort_btn")
         abort_btn.setProperty("class", BTN_CLASS_DANGER)
+        abort_btn.setIcon(qta.icon("fa5s.stop", color=TEXT_ON_ACCENT))
+        abort_btn.setToolTip("Stop the running procedure and save data as-is")
         abort_btn.clicked.connect(self._on_abort)
 
         self._ack_btn = QPushButton("ACKNOWLEDGE EMERGENCY")
@@ -470,6 +513,12 @@ class ProcedureWindow(QMainWindow):
         self._orchestrator.measurement_ready.connect(self._on_measurement_ready)
         self._orchestrator.procedure_finished.connect(self._on_procedure_finished)
         self._orchestrator.state_changed.connect(self._on_state_changed)
+        self._orchestrator.error_occurred.connect(
+            lambda msg: self._banner.show_message(msg, BANNER_SEVERITY_ERROR)
+        )
+        self._orchestrator.action_blocked.connect(
+            lambda msg: self._banner.show_message(msg, BANNER_SEVERITY_WARNING)
+        )
 
     # ------------------------------------------------------------------
     # Slot handlers

@@ -32,7 +32,7 @@ from cryosoft.core.logging_config import setup_logging
 from cryosoft.core.orchestrator import Orchestrator
 from cryosoft.core.station import build_station
 from cryosoft.gui.monitor_window import MonitorWindow
-from cryosoft.gui.theme import build_stylesheet
+from cryosoft.gui.theme import PLOT_AXIS, PLOT_BG, build_stylesheet
 
 
 def main() -> None:
@@ -43,7 +43,7 @@ def main() -> None:
     app.setApplicationName("CryoSoft")
     app.setApplicationVersion("0.1.0")
     app.setStyleSheet(build_stylesheet())
-    pg.setConfigOptions(background="#121212", foreground="#D4D4D4")
+    pg.setConfigOptions(background=PLOT_BG, foreground=PLOT_AXIS, antialias=True)
 
     station = build_station("cryosoft/configs/sim_cryostat")
     orchestrator = Orchestrator(station, tick_interval_ms=3000)

@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+import qtawesome as qta
 from PyQt6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
@@ -41,7 +42,12 @@ from PyQt6.QtWidgets import (
 
 from cryosoft.core.decorators import get_control_methods, get_monitored_methods
 from cryosoft.core.orchestrator import Orchestrator
-from cryosoft.gui.theme import BTN_CLASS_PRIMARY, BTN_CLASS_SECONDARY
+from cryosoft.gui.theme import (
+    BTN_CLASS_PRIMARY,
+    BTN_CLASS_SECONDARY,
+    TEXT_ON_ACCENT,
+    TEXT_PRIMARY,
+)
 from cryosoft.virtual_instruments.base import BaseVirtualInstrument
 
 logger = logging.getLogger(__name__)
@@ -90,7 +96,6 @@ class InstrumentPanel(QGroupBox):
         self.setMinimumHeight(self.sizeHint().height())
 
         orchestrator.states_updated.connect(self._on_states_updated)
-        orchestrator.action_blocked.connect(self._on_action_blocked)
 
     # ------------------------------------------------------------------
     # Layout construction
@@ -125,10 +130,14 @@ class InstrumentPanel(QGroupBox):
         initiate_btn = QPushButton("Initiate")
         initiate_btn.setObjectName(f"{self._vi_name}_initiate_btn")
         initiate_btn.setProperty("class", BTN_CLASS_PRIMARY)
+        initiate_btn.setIcon(qta.icon("fa5s.play", color=TEXT_ON_ACCENT))
+        initiate_btn.setToolTip("Bring this instrument to its operating state")
         initiate_btn.clicked.connect(lambda: self._submit_lifecycle("initiate"))
         standby_btn = QPushButton("Standby")
         standby_btn.setObjectName(f"{self._vi_name}_standby_btn")
         standby_btn.setProperty("class", BTN_CLASS_SECONDARY)
+        standby_btn.setIcon(qta.icon("fa5s.power-off", color=TEXT_PRIMARY))
+        standby_btn.setToolTip("Return this instrument to a safe standby state")
         standby_btn.clicked.connect(lambda: self._submit_lifecycle("standby"))
         btn_row.addWidget(initiate_btn)
         btn_row.addWidget(standby_btn)
@@ -232,19 +241,6 @@ class InstrumentPanel(QGroupBox):
                 self.setTitle(f"{self._vi_name}  [stale]")
             else:
                 self.setTitle(self._vi_name)
-
-    def _on_action_blocked(self, message: str) -> None:
-        """Show a dialog when the Orchestrator blocks a GUI action.
-
-        Only shown if the blocked action was for this VI.
-
-        Args:
-            message: Human-readable reason for the block.
-        """
-        if self._vi_name not in message:
-            return
-        from PyQt6.QtWidgets import QMessageBox
-        QMessageBox.warning(self, "Action Blocked", message)
 
     # ------------------------------------------------------------------
     # Action dispatch

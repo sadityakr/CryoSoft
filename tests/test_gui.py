@@ -24,7 +24,15 @@ from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 from cryosoft.core.station import build_station
 from cryosoft.gui.instrument_panel import InstrumentPanel
 from cryosoft.gui.monitor_window import MonitorWindow
+from cryosoft.gui.notification_banner import NotificationBanner
 from cryosoft.gui.procedure_window import ProcedureWindow
+from cryosoft.gui.theme import (
+    BANNER_ERROR_TEXT,
+    BANNER_WARNING_TEXT,
+    TEXT_ON_ACCENT,
+    TEXT_PRIMARY,
+    build_stylesheet,
+)
 
 
 CONFIG_PATH = "cryosoft/configs/sim_cryostat"
@@ -252,11 +260,15 @@ def test_procedure_param_inputs_exist(procedure_win):
     """Parameter form inputs are created for the selected procedure."""
     from cryosoft.procedures.field_sweep_iv import FieldSweepIV
 
-    # Select FieldSweepIV (index 0 if it's the only one)
+    # Select FieldSweepIV by its exact name. A substring match ("Field Sweep")
+    # is ambiguous with Field Sweep DC, and procedure discovery order depends
+    # on import order across the test session — this made the test flaky.
     for i in range(procedure_win._proc_selector.count()):
-        if "Field Sweep" in procedure_win._proc_selector.itemText(i):
+        if procedure_win._proc_selector.itemText(i) == FieldSweepIV.name:
             procedure_win._proc_selector.setCurrentIndex(i)
             break
+    else:
+        pytest.fail("FieldSweepIV not found in procedure selector")
 
     for param_name in FieldSweepIV.parameters:
         field = procedure_win.findChild(
@@ -386,3 +398,161 @@ def test_monitor_window_default_geometry(station, orchestrator, qtbot):
     qtbot.addWidget(win)
     assert win.width() > 0
     assert win.height() > 0
+
+
+# ── Phase 2: notification banner (replaces modal dialog storms) ────────────────
+
+def test_banner_hidden_by_default(qtbot):
+    """A fresh NotificationBanner is hidden until a message arrives."""
+    banner = NotificationBanner()
+    qtbot.addWidget(banner)
+    assert banner.isHidden()
+    assert banner.count == 0
+
+
+def test_banner_error_shows_with_severity(qtbot):
+    """show_message with 'error' makes the banner visible and sets the property."""
+    banner = NotificationBanner()
+    qtbot.addWidget(banner)
+    banner.show_message("Magnet quench detected", "error")
+    assert banner.isVisible()
+    assert banner.property("severity") == "error"
+    assert "Magnet quench detected" in banner._label.text()
+
+
+def test_banner_warning_shows_with_severity(qtbot):
+    """show_message with 'warning' sets the warning severity property."""
+    banner = NotificationBanner()
+    qtbot.addWidget(banner)
+    banner.show_message("Action blocked while busy", "warning")
+    assert banner.isVisible()
+    assert banner.property("severity") == "warning"
+
+
+def test_banner_dismiss_hides(qtbot):
+    """Dismissing the banner hides it and resets the counter."""
+    banner = NotificationBanner()
+    qtbot.addWidget(banner)
+    banner.show_message("Something happened", "warning")
+    assert banner.isVisible()
+    banner.dismiss()
+    assert not banner.isVisible()
+    assert banner.count == 0
+
+
+def test_banner_repeat_increments_counter_no_stack(qtbot):
+    """A repeated identical message bumps the counter instead of stacking."""
+    banner = NotificationBanner()
+    qtbot.addWidget(banner)
+    banner.show_message("Blocked: magnet_x busy", "warning")
+    assert banner.count == 1
+    banner.show_message("Blocked: magnet_x busy", "warning")
+    banner.show_message("Blocked: magnet_x busy", "warning")
+    assert banner.count == 3
+    assert "(3×)" in banner._label.text()
+    # Still exactly one banner, still visible (nothing stacked).
+    assert banner.isVisible()
+
+
+def test_monitor_error_signal_drives_banner(monitor_win, orchestrator):
+    """error_occurred routes to the MonitorWindow banner (no modal dialog)."""
+    orchestrator.error_occurred.emit("Interlock tripped")
+    assert monitor_win._banner.isVisible()
+    assert monitor_win._banner.property("severity") == "error"
+    assert "Interlock tripped" in monitor_win._banner._label.text()
+
+
+def test_monitor_action_blocked_drives_banner(monitor_win, orchestrator):
+    """action_blocked routes to the MonitorWindow banner as a warning."""
+    orchestrator.action_blocked.emit("Cannot initiate: procedure running")
+    assert monitor_win._banner.isVisible()
+    assert monitor_win._banner.property("severity") == "warning"
+
+
+def test_procedure_error_signal_drives_banner(procedure_win, orchestrator):
+    """error_occurred routes to the ProcedureWindow banner as an error."""
+    orchestrator.error_occurred.emit("Sweep failed")
+    assert procedure_win._banner.isVisible()
+    assert procedure_win._banner.property("severity") == "error"
+
+
+def test_instrument_panel_has_no_action_blocked_handler(station, orchestrator, qtbot):
+    """The per-panel modal warning handler was removed (banner replaces it)."""
+    vi_name = "magnet_x"
+    vi = station._virtual_instruments[vi_name]
+    panel = InstrumentPanel(vi_name, vi, orchestrator)
+    qtbot.addWidget(panel)
+    assert not hasattr(panel, "_on_action_blocked")
+
+
+# ── Phase 2: state-aware status bar ────────────────────────────────────────────
+
+def test_status_bar_level_flips_on_state(monitor_win, orchestrator):
+    """Status bar 'level' property tracks the Orchestrator state category."""
+    # Active state → "active"
+    orchestrator.state_changed.emit(OrchestratorState.RAMPING.value)
+    assert monitor_win._status_bar.property("level") == "active"
+
+    # Emergency → "error"
+    orchestrator.state_changed.emit(OrchestratorState.EMERGENCY.value)
+    assert monitor_win._status_bar.property("level") == "error"
+
+    # Back to idle → default (empty)
+    orchestrator.state_changed.emit(OrchestratorState.IDLE.value)
+    assert monitor_win._status_bar.property("level") == ""
+
+
+# ── Phase 2: light theme smoke check ───────────────────────────────────────────
+
+def test_stylesheet_has_no_dark_theme_hexes():
+    """build_stylesheet() no longer contains the old dark-theme background hexes."""
+    qss = build_stylesheet().lower()
+    for dark_hex in ("#121212", "#252526", "#1e1e1e", "#2d2d30"):
+        assert dark_hex not in qss, f"Leftover dark-theme colour {dark_hex} in stylesheet"
+
+
+# ── Phase 2: effective colours after descendant repolish (regression) ──────────
+# Property-only assertions would not have caught the bug these tests pin down:
+# repolishing only the parent left child QLabels with their stale colour, so
+# these assert the EFFECTIVE palette colour under the real stylesheet.
+
+@pytest.fixture
+def themed_app(qapp):
+    """Apply the real application stylesheet for the test, then restore it.
+
+    The plain test QApplication has no stylesheet, so palette-based colour
+    assertions only mean anything with build_stylesheet() applied.
+    """
+    qapp.setStyleSheet(build_stylesheet())
+    yield qapp
+    qapp.setStyleSheet("")
+
+
+def test_banner_error_effective_label_color(themed_app, qtbot):
+    """After an error show_message, the label's palette colour is the error text."""
+    banner = NotificationBanner()
+    qtbot.addWidget(banner)
+    banner.show_message("Interlock tripped", "error")
+    assert banner._label.palette().windowText().color().name() == BANNER_ERROR_TEXT
+
+
+def test_banner_warning_effective_label_color(themed_app, qtbot):
+    """Switching a visible banner to warning re-colours the label (child repolish)."""
+    banner = NotificationBanner()
+    qtbot.addWidget(banner)
+    banner.show_message("Boom", "error")
+    banner.show_message("Blocked", "warning")
+    assert banner._label.palette().windowText().color().name() == BANNER_WARNING_TEXT
+
+
+def test_status_bar_label_effective_color_flips(themed_app, station, orchestrator, qtbot):
+    """The status-bar label renders white in EMERGENCY and dark again on IDLE."""
+    win = MonitorWindow(station, orchestrator)
+    qtbot.addWidget(win)
+    win.show()
+
+    orchestrator.state_changed.emit(OrchestratorState.EMERGENCY.value)
+    assert win._state_label.palette().windowText().color().name() == TEXT_ON_ACCENT
+
+    orchestrator.state_changed.emit(OrchestratorState.IDLE.value)
+    assert win._state_label.palette().windowText().color().name() == TEXT_PRIMARY
