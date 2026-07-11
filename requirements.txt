@@ -5,8 +5,11 @@ qtawesome>=1.3
 ruamel.yaml>=0.18
 h5py>=3.9
 numpy>=1.24
+pyvisa>=1.13
 
 # Dev / test dependencies
 pytest>=7.4
 pytest-qt>=4.2
 mypy>=1.5
+import-linter>=2.0
+ruff>=0.4

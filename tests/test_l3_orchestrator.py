@@ -7,13 +7,10 @@
 # ---
 
 import pytest
-from unittest.mock import MagicMock
 
-from PyQt6.QtCore import QCoreApplication
 
 from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
-from cryosoft.core.station import Station, build_station
-from cryosoft.core.exceptions import CryoSoftCommunicationError
+from cryosoft.core.station import build_station
 
 
 class MockProcedure:
@@ -116,12 +113,9 @@ def test_wait_time_respected(orchestrator, station, qtbot):
     station.magnet_x._ramp_segments = []
     
     orchestrator.run_procedure(procedure)
-    
-    import time
-    start = time.time()
-    
+
     # Wait until MEASURING state
-    with qtbot.waitSignal(orchestrator.state_changed, timeout=1000) as blocker:
+    with qtbot.waitSignal(orchestrator.state_changed, timeout=1000):
         pass
         
     # Should take at least 0.1s to reach MEASURING once the ramp finishes

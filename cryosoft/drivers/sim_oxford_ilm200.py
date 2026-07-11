@@ -95,6 +95,11 @@ class SimOxfordILM200:
             raise ValueError(f"Refresh rate mode must be 0, 1, or 2, got {mode}")
         self._refresh_rate = mode
 
+    def get_idn(self) -> str:
+        """Return simulated identification string (matches OxfordILM200)."""
+        self._check_error()
+        return "OXFORD,ILM200,SIM,1.0"
+
     # ------------------------------------------------------------------
     # Internal simulation logic
     # ------------------------------------------------------------------

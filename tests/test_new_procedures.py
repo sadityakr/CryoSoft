@@ -7,7 +7,6 @@
 # last_updated: 2026-04-18
 # ---
 
-import json
 
 import h5py
 import numpy as np

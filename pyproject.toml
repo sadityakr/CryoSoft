@@ -14,6 +14,7 @@ dependencies = [
     "ruamel.yaml>=0.18",
     "h5py>=3.9",
     "numpy>=1.24",
+    "pyvisa>=1.13",
 ]
 
 [project.optional-dependencies]
@@ -21,6 +22,8 @@ dev = [
     "pytest>=7.4",
     "pytest-qt>=4.2",
     "mypy>=1.5",
+    "import-linter>=2.0",
+    "ruff>=0.4",
 ]
 
 [tool.pytest.ini_options]
@@ -31,3 +34,151 @@ markers = [
 
 [tool.setuptools.packages.find]
 include = ["cryosoft*"]
+
+# ── Ruff (linter) ─────────────────────────────────────────────────────────────
+# Conservative rule set: real errors only (pyflakes F, syntax errors E9).
+# No formatting/style enforcement — the goal is catching undefined names,
+# unused imports, and broken code before the tests even run.
+[tool.ruff]
+target-version = "py311"
+extend-exclude = ["resources", "data", "notes", "directives"]
+
+[tool.ruff.lint]
+select = ["F", "E9"]
+
+# ── Mypy (type checker) ───────────────────────────────────────────────────────
+# Basic mode for now (CLAUDE.md: "start with mypy basic"). Run via `make typecheck`;
+# advisory, not part of the blocking `make check` gate yet.
+[tool.mypy]
+python_version = "3.11"
+packages = ["cryosoft"]
+ignore_missing_imports = true
+
+# ── Import-linter (layer contracts) ───────────────────────────────────────────
+# Machine-checked architecture boundaries. Run via `make contracts`.
+# Each contract below freezes an existing boundary of the six-layer architecture
+# (see CLAUDE.md §4 and GLOSSARY.md). If your change violates one of these, the
+# fix is to route through the proper interface, not to edit the contract.
+[tool.importlinter]
+root_package = "cryosoft"
+
+[[tool.importlinter.contracts]]
+name = "C1: foundation modules (exceptions/decorators/logging) import nothing from cryosoft"
+type = "forbidden"
+source_modules = [
+    "cryosoft.core.exceptions",
+    "cryosoft.core.decorators",
+    "cryosoft.core.logging_config",
+]
+forbidden_modules = [
+    "cryosoft.drivers",
+    "cryosoft.virtual_instruments",
+    "cryosoft.procedures",
+    "cryosoft.gui",
+    "cryosoft.main",
+    "cryosoft.core.station",
+    "cryosoft.core.orchestrator",
+    "cryosoft.core.procedure",
+    "cryosoft.core.data_manager",
+]
+
+[[tool.importlinter.contracts]]
+name = "C2: drivers are leaves — they import only the foundation (plus pyvisa/stdlib)"
+type = "forbidden"
+source_modules = ["cryosoft.drivers"]
+forbidden_modules = [
+    "cryosoft.virtual_instruments",
+    "cryosoft.procedures",
+    "cryosoft.gui",
+    "cryosoft.main",
+    "cryosoft.core.station",
+    "cryosoft.core.orchestrator",
+    "cryosoft.core.procedure",
+    "cryosoft.core.data_manager",
+]
+
+[[tool.importlinter.contracts]]
+name = "C3: VIs never import drivers (drivers are injected by the Station) nor anything above"
+type = "forbidden"
+source_modules = ["cryosoft.virtual_instruments"]
+forbidden_modules = [
+    "cryosoft.drivers",
+    "cryosoft.procedures",
+    "cryosoft.gui",
+    "cryosoft.main",
+    "cryosoft.core.station",
+    "cryosoft.core.orchestrator",
+    "cryosoft.core.procedure",
+    "cryosoft.core.data_manager",
+]
+
+[[tool.importlinter.contracts]]
+name = "C4: the Station sits below the Orchestrator, procedures, and GUI"
+type = "forbidden"
+source_modules = ["cryosoft.core.station"]
+forbidden_modules = [
+    "cryosoft.core.orchestrator",
+    "cryosoft.core.procedure",
+    "cryosoft.core.data_manager",
+    "cryosoft.procedures",
+    "cryosoft.gui",
+    "cryosoft.main",
+]
+
+[[tool.importlinter.contracts]]
+name = "C5: the Orchestrator talks only to the Station (and the BaseProcedure interface)"
+type = "forbidden"
+source_modules = ["cryosoft.core.orchestrator"]
+# The Station legitimately imports VI base classes (C4 allows it); chains that
+# merely pass through the Station are not violations of this contract.
+ignore_imports = ["cryosoft.core.station -> cryosoft.virtual_instruments.*"]
+forbidden_modules = [
+    "cryosoft.drivers",
+    "cryosoft.virtual_instruments",
+    "cryosoft.procedures",
+    "cryosoft.gui",
+    "cryosoft.main",
+    "cryosoft.core.data_manager",
+]
+
+[[tool.importlinter.contracts]]
+name = "C6: procedures are hardware-blind — no drivers, no VIs, no Orchestrator, no GUI"
+type = "forbidden"
+source_modules = ["cryosoft.procedures", "cryosoft.core.procedure"]
+# Same pass-through exemption as C5: procedures may import the Station, and the
+# Station's own VI imports do not make procedures hardware-aware.
+ignore_imports = ["cryosoft.core.station -> cryosoft.virtual_instruments.*"]
+forbidden_modules = [
+    "cryosoft.drivers",
+    "cryosoft.virtual_instruments",
+    "cryosoft.core.orchestrator",
+    "cryosoft.gui",
+    "cryosoft.main",
+]
+
+[[tool.importlinter.contracts]]
+name = "C7: the data manager is standalone (foundation + h5py/numpy only)"
+type = "forbidden"
+source_modules = ["cryosoft.core.data_manager"]
+forbidden_modules = [
+    "cryosoft.drivers",
+    "cryosoft.virtual_instruments",
+    "cryosoft.procedures",
+    "cryosoft.gui",
+    "cryosoft.main",
+    "cryosoft.core.station",
+    "cryosoft.core.orchestrator",
+    "cryosoft.core.procedure",
+]
+
+[[tool.importlinter.contracts]]
+name = "C8: the GUI never imports drivers or concrete VIs (virtual_instruments.base is the one allowed exception, for @monitored/@control discovery)"
+type = "forbidden"
+source_modules = ["cryosoft.gui"]
+forbidden_modules = [
+    "cryosoft.drivers",
+    "cryosoft.virtual_instruments.magnet",
+    "cryosoft.virtual_instruments.temperature",
+    "cryosoft.virtual_instruments.measurement",
+    "cryosoft.virtual_instruments.level",
+]

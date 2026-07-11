@@ -19,7 +19,6 @@
 
 """Simulated Keithley 6221 AC/DC Current Source driver."""
 
-import time
 from typing import TYPE_CHECKING
 
 from cryosoft.core.exceptions import CryoSoftCommunicationError
