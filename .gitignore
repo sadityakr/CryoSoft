@@ -10,6 +10,12 @@
 !/requirements.txt
 !/README.md
 !/LICENSE
+!/Makefile
+!/GLOSSARY.md
+
+# CI configuration (GitHub Actions now; .gitlab-ci.yml is ready for the GitLab migration)
+!/.github/
+!/.gitlab-ci.yml
 
 # Tracked folders
 !/cryosoft/
