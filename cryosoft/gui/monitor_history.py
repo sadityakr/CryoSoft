@@ -1,0 +1,147 @@
+# ---
+# description: |
+#   MonitorHistory: a Qt-free, pure-Python ring-buffer that accumulates
+#   time-series history of instrument readings for the Monitor window's trend
+#   plots. Flattens nested Station state dicts the same way
+#   Station.last_state_flat() does, and keeps one bounded deque per flat key.
+# entry_point: Not run directly. Instantiated by MonitorWindow (future work);
+#   fed from Orchestrator.states_updated ({vi_name: {field_name: value}}).
+# dependencies:
+#   - Python standard library only (collections, time, logging).
+# input: |
+#   record() takes a nested state dict shaped like Station.get_state()'s
+#   output, plus an optional timestamp (defaults to time.time()).
+# process: |
+#   record() flattens the state to {vi_name}_{field_name} numeric scalar
+#   keys, skipping bool values and any field name starting with "_", then
+#   appends (timestamp, value) to a per-key ring buffer (deque with maxlen).
+# output: |
+#   series(key, window_s, now) returns parallel (times, values) lists for a
+#   flat key, optionally windowed to the last window_s seconds.
+# ---
+
+"""MonitorHistory — ring-buffer time-series store for the Monitor window's trend plots.
+
+Qt-free by design: this module imports nothing from PyQt6, the Orchestrator,
+Virtual Instruments, or drivers, so it cannot violate any layer-boundary
+import-linter contract. It is intended to be fed from the Orchestrator's
+``states_updated`` signal (emitted roughly every 3 seconds), but the wiring
+of that signal is out of scope here — this module only stores and serves
+the accumulated history.
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from collections import deque
+
+logger = logging.getLogger(__name__)
+
+
+class MonitorHistory:
+    """Bounded time-series history of flattened instrument readings.
+
+    Flattens nested station state dicts (``{vi_name: {field_name: value}}``)
+    into flat keys (``{vi_name}_{field_name}``) exactly as
+    ``Station.last_state_flat()`` does, and stores each key's history in its
+    own ring buffer so memory use stays bounded regardless of how long the
+    Monitor window has been open.
+
+    Attributes:
+        retention_s: How many seconds of history each key retains.
+        tick_interval_s: Expected seconds between successive ``record()``
+            calls, used only to size the ring buffer.
+    """
+
+    def __init__(self, retention_s: float = 86400.0, tick_interval_s: float = 3.0) -> None:
+        """Initialise an empty history store.
+
+        Args:
+            retention_s: How many seconds of history to retain per key.
+                Defaults to 86400 s (24 hours).
+            tick_interval_s: Expected interval in seconds between ``record()``
+                calls. Used only to size each key's ring buffer; a mismatch
+                between this estimate and the actual call rate just means
+                slightly more or less history than ``retention_s`` is kept.
+        """
+        self.retention_s = retention_s
+        self.tick_interval_s = tick_interval_s
+        # A small amount of slack above the exact point count absorbs jitter
+        # in the actual tick rate without under-retaining.
+        self._maxlen = int(retention_s / tick_interval_s) + 8
+        # One ring buffer per flat key. A deque with maxlen is a ring buffer:
+        # once it is full, appending a new point silently drops the oldest
+        # one, so memory stays bounded with no manual cleanup/eviction code.
+        self._history: dict[str, deque[tuple[float, float]]] = {}
+
+    def record(self, state: dict[str, dict[str, object]], timestamp: float | None = None) -> None:
+        """Flatten a station state snapshot and append it to each key's history.
+
+        Mirrors ``Station.last_state_flat()``'s flattening convention: flat
+        key is ``f"{vi_name}_{field_name}"``, only numeric scalar values
+        (``int``/``float``, excluding ``bool``) are kept, and any field name
+        starting with ``"_"`` (e.g. ``_stale``, ``_disconnected``) is skipped.
+        A flat key seen for the first time simply starts a new ring buffer.
+
+        Args:
+            state: Nested state dict, ``{vi_name: {field_name: value, ...}}``,
+                as produced by ``Station.get_state()`` / ``Orchestrator.states_updated``.
+            timestamp: Unix timestamp to record the point under. Defaults to
+                ``time.time()`` when ``None``; the explicit parameter exists
+                so tests can inject deterministic times.
+        """
+        if timestamp is None:
+            timestamp = time.time()
+
+        for vi_name, fields in state.items():
+            for field_name, value in fields.items():
+                if field_name.startswith("_"):
+                    continue
+                # bool is a subclass of int, so it must be excluded explicitly.
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    continue
+                key = f"{vi_name}_{field_name}"
+                if key not in self._history:
+                    self._history[key] = deque(maxlen=self._maxlen)
+                self._history[key].append((timestamp, float(value)))
+
+    def keys(self) -> list[str]:
+        """Return all flat keys seen so far.
+
+        Returns:
+            Sorted list of flat keys (``{vi_name}_{field_name}``).
+        """
+        return sorted(self._history.keys())
+
+    def series(
+        self, key: str, window_s: float | None = None, now: float | None = None
+    ) -> tuple[list[float], list[float]]:
+        """Return the recorded time series for a flat key.
+
+        Args:
+            key: Flat key as produced by ``record()`` (e.g. ``"magnet_x_get_field"``).
+            window_s: If given, only include points with ``t >= now - window_s``.
+                ``None`` (the default) returns the full retained history.
+            now: Reference time for windowing. Defaults to ``time.time()``
+                when ``None``; ignored if ``window_s`` is ``None``.
+
+        Returns:
+            A ``(times, values)`` tuple of two parallel lists in chronological
+            order. Returns ``([], [])`` for a key that has never been recorded.
+        """
+        points = self._history.get(key)
+        if points is None:
+            return [], []
+
+        if window_s is None:
+            times = [t for t, _ in points]
+            values = [v for _, v in points]
+            return times, values
+
+        if now is None:
+            now = time.time()
+        cutoff = now - window_s
+        times = [t for t, v in points if t >= cutoff]
+        values = [v for t, v in points if t >= cutoff]
+        return times, values
