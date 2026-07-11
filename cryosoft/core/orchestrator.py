@@ -12,11 +12,14 @@
 #   Constructed with a Station instance and tick interval.
 # process: |
 #   On _tick(): gets state from station, checks for stale active system VIs,
-#   processes IDLE gui actions, and runs the state machine.
+#   processes IDLE gui actions, and runs the state machine. STANDBY is a
+#   two-phase wait: first for any ramp already in flight when SWEEPING ended,
+#   then (after dispatching procedure.standby()'s own targets) for whatever
+#   ramp standby() itself started, before declaring the procedure finished.
 # output: |
-#   Emits signals: states_updated, state_changed, procedure_progress, 
+#   Emits signals: states_updated, state_changed, procedure_progress,
 #   procedure_finished, error_occurred, action_blocked
-# last_updated: 2026-04-06
+# last_updated: 2026-07-12
 # ---
 
 """Orchestrator — cooperative state machine for CryoSoft.
@@ -86,6 +89,7 @@ class Orchestrator(QObject):
         self._wait_started = False
         self._wait_start_time = 0.0
         self._current_wait_time = 0.0
+        self._standby_dispatched = False
 
         self._timer = QTimer(self)
         self._timer.setInterval(tick_interval_ms)
@@ -115,6 +119,7 @@ class Orchestrator(QObject):
             logger.info("Manual ramp cancelled — procedure starting.")
 
         self._procedure = procedure
+        self._standby_dispatched = False
         system_targets, meas_commands, wait_time = self._procedure.initiate()
         
         # Track active system VIs for stale monitoring
@@ -175,6 +180,7 @@ class Orchestrator(QObject):
         
         self._procedure = None
         self._active_system_vis.clear()
+        self._standby_dispatched = False
         self._change_state(OrchestratorState.IDLE)
         self.run_queue()
 
@@ -313,19 +319,26 @@ class Orchestrator(QObject):
                     self._current_wait_time = wait_time
                     self._change_state(OrchestratorState.RAMPING)
         elif self._state == OrchestratorState.STANDBY:
-            self._station.check_ramps()
-            if self._station.check_ramps():
-                if self._procedure and hasattr(self._procedure, "standby"):
-                    sys_targ, meas_cmd, wait = self._procedure.standby()
-                     # If the procedure returned targets for standby, we should run them.
-                    self._station.process_system_targets(sys_targ)
-                    self._station.send_measurement_commands(meas_cmd)
-                
-                self.procedure_finished.emit()
-                self._procedure = None
-                self._active_system_vis.clear()
-                self._change_state(OrchestratorState.IDLE)
-                self.run_queue()
+            if not self._standby_dispatched:
+                # Wait for whatever ramp was already in flight when SWEEPING
+                # ended, then call standby() exactly once and dispatch
+                # whatever targets it returns (e.g. ramp magnet to 0 T).
+                if self._station.check_ramps():
+                    if self._procedure and hasattr(self._procedure, "standby"):
+                        sys_targ, meas_cmd, wait = self._procedure.standby()
+                        self._station.process_system_targets(sys_targ)
+                        self._station.send_measurement_commands(meas_cmd)
+                    self._standby_dispatched = True
+            else:
+                # Wait for the ramp standby() itself just started (if any)
+                # before declaring the procedure finished.
+                if self._station.check_ramps():
+                    self.procedure_finished.emit()
+                    self._procedure = None
+                    self._active_system_vis.clear()
+                    self._standby_dispatched = False
+                    self._change_state(OrchestratorState.IDLE)
+                    self.run_queue()
         elif self._state == OrchestratorState.PAUSED:
             pass # Monitor continues, no ramp advancement
         elif self._state == OrchestratorState.ERROR:
