@@ -40,6 +40,31 @@ CONFIG_PATH = "cryosoft/configs/sim_cryostat"
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
+@pytest.fixture(autouse=True)
+def isolated_settings(tmp_path, monkeypatch):
+    """Redirect the app QSettings factory to a throwaway INI file.
+
+    Dependency seam: both windows call ``app_settings.get_settings()`` for
+    geometry persistence. Monkeypatching that factory to an INI file under
+    ``tmp_path`` means a pytest run never reads or overwrites the user's real
+    saved geometry in the Windows registry. Autouse so every GUI test is
+    isolated without opting in.
+
+    Yields:
+        The Path of the throwaway INI file, so a test can inspect what was
+        written to it.
+    """
+    from cryosoft.gui import app_settings
+
+    ini_path = tmp_path / "cryosoft_test_settings.ini"
+
+    def _fake_get_settings():
+        return QSettings(str(ini_path), QSettings.Format.IniFormat)
+
+    monkeypatch.setattr(app_settings, "get_settings", _fake_get_settings)
+    return ini_path
+
+
 @pytest.fixture
 def station():
     """Real simulated station from sim_cryostat config."""
@@ -392,12 +417,32 @@ def test_log_handler_removed_on_close(station, orchestrator, qtbot):
 
 def test_monitor_window_default_geometry(station, orchestrator, qtbot):
     """With no saved geometry, MonitorWindow sizes itself to a non-zero fraction."""
-    # Independent of any persisted state: clear the key first.
-    QSettings("CryoSoft", "CryoSoft").remove("MonitorWindow/geometry")
+    # The isolated_settings fixture already points the factory at an empty INI,
+    # so no explicit key-clearing is needed here.
     win = MonitorWindow(station, orchestrator)
     qtbot.addWidget(win)
     assert win.width() > 0
     assert win.height() > 0
+
+
+def test_closing_window_persists_to_isolated_ini_not_real_scope(
+    station, orchestrator, qtbot, isolated_settings
+):
+    """Closing a window writes geometry to the throwaway INI, never the real registry.
+
+    Pins the Phase 3 test seam: because app_settings.get_settings is monkeypatched
+    to the tmp INI, closeEvent's setValue lands there. Seeing the key in that file
+    is proof the real QSettings scope was left untouched by the test run.
+    """
+    win = MonitorWindow(station, orchestrator)
+    qtbot.addWidget(win)
+    win.show()
+    win.close()
+
+    settings = QSettings(str(isolated_settings), QSettings.Format.IniFormat)
+    settings.sync()
+    assert settings.value("MonitorWindow/geometry") is not None
+    assert isolated_settings.exists()
 
 
 # ── Phase 2: notification banner (replaces modal dialog storms) ────────────────

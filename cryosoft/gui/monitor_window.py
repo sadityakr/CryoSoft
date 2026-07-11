@@ -30,7 +30,7 @@ from __future__ import annotations
 import logging
 
 import qtawesome as qta
-from PyQt6.QtCore import QSettings, Qt
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction, QCloseEvent
 from PyQt6.QtWidgets import (
     QApplication,
@@ -54,6 +54,7 @@ from PyQt6.QtWidgets import (
 
 from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 from cryosoft.core.station import Station
+from cryosoft.gui import app_settings  # import the module (not the function) so tests can monkeypatch the factory
 from cryosoft.gui.instrument_panel import InstrumentPanel
 from cryosoft.gui.notification_banner import NotificationBanner
 from cryosoft.gui.theme import (
@@ -593,7 +594,7 @@ class MonitorWindow(QMainWindow):
         the registry (``HKCU\\Software\\CryoSoft\\CryoSoft``). If nothing is
         stored yet, the window is sized to ~70% of the available screen area.
         """
-        settings = QSettings("CryoSoft", "CryoSoft")
+        settings = app_settings.get_settings()
         saved = settings.value(_GEOMETRY_KEY)
         if saved is not None and self.restoreGeometry(saved):
             return
@@ -612,5 +613,5 @@ class MonitorWindow(QMainWindow):
             event: The Qt close event.
         """
         logging.getLogger("cryosoft").removeHandler(self._log_handler)
-        QSettings("CryoSoft", "CryoSoft").setValue(_GEOMETRY_KEY, self.saveGeometry())
+        app_settings.get_settings().setValue(_GEOMETRY_KEY, self.saveGeometry())
         super().closeEvent(event)
