@@ -5,12 +5,10 @@
 # last_updated: 2026-04-06
 # ---
 
-import os
 from pathlib import Path
 
 import pytest
 from cryosoft.core.station import Station, build_station
-from cryosoft.core.exceptions import CryoSoftCommunicationError
 
 
 @pytest.fixture

@@ -15,8 +15,9 @@
 # process: |
 #   Iterates over all VI names in the station, splits them by vi_type into the
 #   main grid (system/level) and Other Devices section (measurement). Connects
-#   Orchestrator signals for status bar and error dialogs. Owns ProcedureWindow
-#   and opens it lazily via the Procedures menu.
+#   Orchestrator signals for the state-driven status bar and the notification
+#   banner (errors/blocked actions). Owns ProcedureWindow and opens it lazily
+#   via the Procedures menu.
 # output: |
 #   A QMainWindow that stays open for the lifetime of the application.
 # last_updated: 2026-04-18
@@ -28,9 +29,11 @@ from __future__ import annotations
 
 import logging
 
+import qtawesome as qta
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QAction
+from PyQt6.QtGui import QAction, QCloseEvent
 from PyQt6.QtWidgets import (
+    QApplication,
     QFileDialog,
     QFormLayout,
     QGridLayout,
@@ -39,7 +42,6 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
-    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -50,10 +52,14 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from cryosoft.core.orchestrator import Orchestrator
+from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 from cryosoft.core.station import Station
+from cryosoft.gui import app_settings  # import the module (not the function) so tests can monkeypatch the factory
 from cryosoft.gui.instrument_panel import InstrumentPanel
+from cryosoft.gui.notification_banner import NotificationBanner
 from cryosoft.gui.theme import (
+    BANNER_SEVERITY_ERROR,
+    BANNER_SEVERITY_WARNING,
     BTN_CLASS_PRIMARY,
     BTN_CLASS_SECONDARY,
     LOG_CRITICAL,
@@ -61,12 +67,28 @@ from cryosoft.gui.theme import (
     LOG_ERROR,
     LOG_INFO,
     LOG_WARNING,
+    TEXT_ON_ACCENT,
+    TEXT_PRIMARY,
 )
 
 logger = logging.getLogger(__name__)
 
 _COLUMNS = 2  # columns in the system VI instrument grid
 _LOG_MAX_LINES = 500
+_GEOMETRY_KEY = "MonitorWindow/geometry"  # QSettings key for saved window geometry
+
+# Orchestrator state names that colour the status bar (dynamic 'level' property).
+_ACTIVE_STATES = frozenset({
+    OrchestratorState.INITIATING.value,
+    OrchestratorState.RAMPING.value,
+    OrchestratorState.MEASURING.value,
+    OrchestratorState.SWEEPING.value,
+    OrchestratorState.PAUSED.value,
+})
+_ERROR_STATES = frozenset({
+    OrchestratorState.ERROR.value,
+    OrchestratorState.EMERGENCY.value,
+})
 
 
 class _QtLogHandler(logging.Handler):
@@ -101,7 +123,7 @@ class _QtLogHandler(logging.Handler):
             if not widget or not widget.isVisible():
                 return
             text = self.format(record)
-            colour = self._LEVEL_COLOURS.get(record.levelno, "#d4d4d4")
+            colour = self._LEVEL_COLOURS.get(record.levelno, TEXT_PRIMARY)
             bold_open = "<b>" if record.levelno >= logging.CRITICAL else ""
             bold_close = "</b>" if record.levelno >= logging.CRITICAL else ""
             html = f'<span style="color:{colour};">{bold_open}{text}{bold_close}</span>'
@@ -146,16 +168,20 @@ class MonitorWindow(QMainWindow):
         self._procedure_window = None  # lazily created
 
         self.setWindowTitle("CryoSoft — Monitor")
-        self.resize(960, 860)
+        self._restore_geometry()
 
         self._build_menu()
         self._build_ui()
         self._connect_signals()
 
-        # Attach log handler after UI exists
+        # Attach log handler after UI exists. Guard against a duplicate in case
+        # the window is ever reconstructed within the same process (handlers
+        # live on the shared "cryosoft" logger, so a leak would accumulate).
         self._log_handler = _QtLogHandler(self._log_widget)
         self._log_handler.setLevel(logging.DEBUG)
-        logging.getLogger("cryosoft").addHandler(self._log_handler)
+        cryosoft_logger = logging.getLogger("cryosoft")
+        if self._log_handler not in cryosoft_logger.handlers:
+            cryosoft_logger.addHandler(self._log_handler)
 
     # ------------------------------------------------------------------
     # Menu bar
@@ -205,6 +231,10 @@ class MonitorWindow(QMainWindow):
         # ── Header ────────────────────────────────────────────────────
         root.addLayout(self._build_header())
 
+        # ── Notification banner (hidden until a warning/error arrives) ─
+        self._banner = NotificationBanner()
+        root.addWidget(self._banner)
+
         # ── System / level VI grid ─────────────────────────────────────
         grid_container = QWidget()
         self._grid = QGridLayout(grid_container)
@@ -232,35 +262,48 @@ class MonitorWindow(QMainWindow):
         if measurement_vis:
             lower_layout.addWidget(self._build_other_devices_section(measurement_vis))
 
+        log_section = self._build_log_section()
+        sample_info_section = self._build_sample_info_section()
+        # Keep both panes readable; setChildrenCollapsible(False) stops a drag
+        # from crushing either pane to zero width (the reported "collapse" bug).
+        log_section.setMinimumWidth(200)
+        sample_info_section.setMinimumWidth(200)
         log_info_splitter = QSplitter(Qt.Orientation.Horizontal)
-        log_info_splitter.addWidget(self._build_log_section())
-        log_info_splitter.addWidget(self._build_sample_info_section())
+        log_info_splitter.setChildrenCollapsible(False)
+        log_info_splitter.addWidget(log_section)
+        log_info_splitter.addWidget(sample_info_section)
         log_info_splitter.setStretchFactor(0, 1)
         log_info_splitter.setStretchFactor(1, 1)
         lower_layout.addWidget(log_info_splitter)
 
+        # ── VI grid scroll area ────────────────────────────────────────
+        # Only the instrument grid scrolls when there are more panels than fit;
+        # the rest of the window keeps its layout. setWidgetResizable(True) lets
+        # the grid expand to fill the viewport when there is room.
+        self._grid_scroll = QScrollArea()
+        self._grid_scroll.setWidgetResizable(True)
+        self._grid_scroll.setWidget(grid_container)
+        self._grid_scroll.setMinimumHeight(200)
+
         # ── Vertical splitter between VI grid and lower section ────────
         main_splitter = QSplitter(Qt.Orientation.Vertical)
-        main_splitter.addWidget(grid_container)
+        main_splitter.setChildrenCollapsible(False)
+        main_splitter.addWidget(self._grid_scroll)
         main_splitter.addWidget(lower_widget)
         main_splitter.setSizes([500, 400])
         root.addWidget(main_splitter)
 
-        # ── Outer scroll area — makes the whole window scrollable ──────
-        # setWidgetResizable(True) lets content_widget expand to fill the viewport,
-        # but minimumHeight ensures the scroll area activates when the window is small.
-        # Without it, content_widget shrinks to viewport height and nothing scrolls.
-        content_widget.setMinimumHeight(960)
-        outer_scroll = QScrollArea()
-        outer_scroll.setWidgetResizable(True)
-        outer_scroll.setWidget(content_widget)
-        self.setCentralWidget(outer_scroll)
+        # ── Content widget is the central widget directly (no outer scroll) ──
+        self.setCentralWidget(content_widget)
 
         # ── Status bar ────────────────────────────────────────────────
         self._status_bar = QStatusBar()
         self.setStatusBar(self._status_bar)
         self._state_label = QLabel("State: IDLE")
         self._status_bar.addWidget(self._state_label)
+        # Current status-bar 'level' ("", "active", "error"); tracked so the
+        # dynamic-property restyle only fires when the level actually changes.
+        self._status_level = ""
 
     def _build_header(self) -> QHBoxLayout:
         """Build the top toolbar with title and global action buttons.
@@ -277,6 +320,8 @@ class MonitorWindow(QMainWindow):
         initiate_all_btn = QPushButton("Initiate All")
         initiate_all_btn.setObjectName("initiate_all_btn")
         initiate_all_btn.setProperty("class", BTN_CLASS_PRIMARY)
+        initiate_all_btn.setIcon(qta.icon("fa5s.play", color=TEXT_ON_ACCENT))
+        initiate_all_btn.setToolTip("Bring every instrument to its operating state")
         initiate_all_btn.clicked.connect(
             lambda: self._orchestrator.submit_global_action("initiate_all")
         )
@@ -284,6 +329,8 @@ class MonitorWindow(QMainWindow):
         standby_all_btn = QPushButton("Standby All")
         standby_all_btn.setObjectName("standby_all_btn")
         standby_all_btn.setProperty("class", BTN_CLASS_SECONDARY)
+        standby_all_btn.setIcon(qta.icon("fa5s.power-off", color=TEXT_PRIMARY))
+        standby_all_btn.setToolTip("Return every instrument to a safe standby state")
         standby_all_btn.clicked.connect(
             lambda: self._orchestrator.submit_global_action("standby_all")
         )
@@ -321,6 +368,8 @@ class MonitorWindow(QMainWindow):
         self._data_dir_input.setObjectName("data_dir_input")
         browse_btn = QPushButton("Browse…")
         browse_btn.setObjectName("browse_btn")
+        browse_btn.setIcon(qta.icon("fa5s.folder-open", color=TEXT_PRIMARY))
+        browse_btn.setToolTip("Choose the directory where run data is saved")
         browse_btn.clicked.connect(self._on_browse_dir)
         dir_row.addWidget(self._data_dir_input)
         dir_row.addWidget(browse_btn)
@@ -375,7 +424,10 @@ class MonitorWindow(QMainWindow):
         status_lbl.setProperty("class", "secondary_label")
         check_btn = QPushButton("Check")
         check_btn.setObjectName(f"{vi_name}_check_btn")
-        check_btn.setMaximumWidth(60)
+        check_btn.setIcon(qta.icon("fa5s.plug", color=TEXT_PRIMARY))
+        check_btn.setToolTip("Send an identity query to test the connection")
+        # No max width: the size hint must fit icon + text ("Check" was
+        # truncated by the old fixed cap once the icon was added).
 
         vi = self._station._virtual_instruments[vi_name]
 
@@ -402,11 +454,15 @@ class MonitorWindow(QMainWindow):
         btn_row = QHBoxLayout()
         initiate_btn = QPushButton("Initiate")
         initiate_btn.setObjectName(f"{vi_name}_initiate_btn")
+        initiate_btn.setIcon(qta.icon("fa5s.play", color=TEXT_PRIMARY))
+        initiate_btn.setToolTip("Bring this instrument to its operating state")
         initiate_btn.clicked.connect(
             lambda checked=False, n=vi_name: self._orchestrator.submit_vi_action(n, "initiate")
         )
         standby_btn = QPushButton("Standby")
         standby_btn.setObjectName(f"{vi_name}_standby_btn")
+        standby_btn.setIcon(qta.icon("fa5s.power-off", color=TEXT_PRIMARY))
+        standby_btn.setToolTip("Return this instrument to a safe standby state")
         standby_btn.clicked.connect(
             lambda checked=False, n=vi_name: self._orchestrator.submit_vi_action(n, "standby")
         )
@@ -475,9 +531,14 @@ class MonitorWindow(QMainWindow):
     def _connect_signals(self) -> None:
         self._orchestrator.state_changed.connect(self._on_state_changed)
         self._orchestrator.error_occurred.connect(self._on_error)
+        self._orchestrator.action_blocked.connect(self._on_action_blocked)
 
     def _on_state_changed(self, state_name: str) -> None:
-        """Update the status bar label when the Orchestrator state changes.
+        """Update the status bar label and colour level when state changes.
+
+        The status bar background is driven by a dynamic ``level`` QSS property
+        (``""``/``"active"``/``"error"``). The restyle only fires when the level
+        actually changes (same repolish pattern as the InstrumentPanel border).
 
         Args:
             state_name: The new state name string (e.g. ``"IDLE"``).
@@ -485,10 +546,72 @@ class MonitorWindow(QMainWindow):
         self._state_label.setText(f"State: {state_name}")
         logger.debug("MonitorWindow: orchestrator state → %s", state_name)
 
+        if state_name in _ERROR_STATES:
+            level = "error"
+        elif state_name in _ACTIVE_STATES:
+            level = "active"
+        else:
+            level = ""
+
+        if level != self._status_level:
+            self._status_level = level
+            self._status_bar.setProperty("level", level)
+            # Repolish the child label too: descendant selectors like
+            # QStatusBar[level="error"] QLabel are resolved per-widget, so
+            # repolishing only the status bar leaves the label's old colour.
+            for widget in (self._status_bar, self._state_label):
+                widget.style().unpolish(widget)
+                widget.style().polish(widget)
+
     def _on_error(self, message: str) -> None:
-        """Show an error dialog when ERROR or EMERGENCY state is entered.
+        """Show a non-modal error banner when ERROR or EMERGENCY is entered.
+
+        Replaces the old blocking ``QMessageBox.critical`` so repeated error
+        signals no longer stack modal dialogs over the GUI.
 
         Args:
             message: Human-readable error description.
         """
-        QMessageBox.critical(self, "CryoSoft Error", message)
+        logger.error("MonitorWindow: %s", message)
+        self._banner.show_message(message, BANNER_SEVERITY_ERROR)
+
+    def _on_action_blocked(self, message: str) -> None:
+        """Show a non-modal warning banner when the Orchestrator blocks an action.
+
+        Args:
+            message: Human-readable reason the action was blocked.
+        """
+        self._banner.show_message(message, BANNER_SEVERITY_WARNING)
+
+    # ------------------------------------------------------------------
+    # Window geometry + lifecycle
+    # ------------------------------------------------------------------
+
+    def _restore_geometry(self) -> None:
+        """Restore the saved window geometry, or size to a fraction of the screen.
+
+        Geometry is persisted with ``QSettings``, which on Windows is backed by
+        the registry (``HKCU\\Software\\CryoSoft\\CryoSoft``). If nothing is
+        stored yet, the window is sized to ~70% of the available screen area.
+        """
+        settings = app_settings.get_settings()
+        saved = settings.value(_GEOMETRY_KEY)
+        if saved is not None and self.restoreGeometry(saved):
+            return
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            self.resize(int(available.width() * 0.7), int(available.height() * 0.7))
+
+    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 (Qt override)
+        """Detach the log handler and persist geometry before the window closes.
+
+        Removing the handler prevents it from writing to the destroyed
+        ``QTextEdit`` after the window is gone (RuntimeError on a dead widget).
+
+        Args:
+            event: The Qt close event.
+        """
+        logging.getLogger("cryosoft").removeHandler(self._log_handler)
+        app_settings.get_settings().setValue(_GEOMETRY_KEY, self.saveGeometry())
+        super().closeEvent(event)

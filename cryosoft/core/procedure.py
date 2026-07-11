@@ -10,6 +10,7 @@
 # input: |
 #   Constructor receives a Station, sample_info dict, data_directory string,
 #   and **param_values matching the procedure's parameters class attribute.
+#   Declared parameter defaults are merged in for any omitted param_values.
 # process: |
 #   _build_sweep_array() is called at construction to build the sweep points list.
 #   The Orchestrator calls initiate(), then alternates change_sweep_step() /
@@ -102,11 +103,19 @@ class BaseProcedure:
             sample_info: ``{"sample_name": str, "sample_id": str, "comments": str}``.
             data_directory: Base directory for HDF5 output files.
             **param_values: Procedure-specific parameter values from the GUI form.
+                Any declared parameter with a ``default`` that the caller omits
+                is filled in automatically; caller-supplied values always win.
         """
         self._station = station
         self._sample_info = sample_info
         self._data_directory = data_directory
-        self._params: dict[str, Any] = param_values
+        merged_params: dict[str, Any] = {
+            param_name: spec["default"]
+            for param_name, spec in type(self).parameters.items()
+            if "default" in spec
+        }
+        merged_params.update(param_values)
+        self._params: dict[str, Any] = merged_params
         self._data_manager = None
         self._sweep: list = self._build_sweep_array()
         self._index: int = 0

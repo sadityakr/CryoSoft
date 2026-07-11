@@ -1,0 +1,48 @@
+# CryoSoft CI — thin wrapper around the Makefile.
+#
+# All check logic lives in the Makefile (single source of truth). This file
+# only prepares a Python + headless-Qt environment and calls the make targets.
+# The planned GitLab migration reuses the same targets: see .gitlab-ci.yml,
+# which is already in the repo and kept in step with this file.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    env:
+      # PyQt6 without a display server: render offscreen for the GUI tests.
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install Qt system libraries (headless)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgl1 libglib2.0-0 libfontconfig1 libxkbcommon0 libdbus-1-3
+
+      - name: Install package with dev dependencies
+        run: make install
+
+      - name: Lint (ruff)
+        run: make lint
+
+      - name: Layer contracts (import-linter)
+        run: make contracts
+
+      - name: Tests (pytest)
+        run: make test
+
+      - name: Type check (mypy, advisory)
+        run: make typecheck
+        continue-on-error: true

@@ -36,10 +36,11 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-import pyqtgraph as pg
+import qtawesome as qta
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QCloseEvent
 from PyQt6.QtWidgets import (
+    QApplication,
     QComboBox,
     QFormLayout,
     QGroupBox,
@@ -61,9 +62,23 @@ from PyQt6.QtWidgets import (
 from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 from cryosoft.core.procedure import BaseProcedure
 from cryosoft.core.station import Station
-from cryosoft.gui.theme import BTN_CLASS_DANGER, BTN_CLASS_PRIMARY, BTN_CLASS_SECONDARY
+from cryosoft.gui import app_settings  # import the module (not the function) so tests can monkeypatch the factory
+from cryosoft.gui.live_plot_panel import LivePlotPanel
+from cryosoft.gui.notification_banner import NotificationBanner
+from cryosoft.gui.theme import (
+    BANNER_SEVERITY_ERROR,
+    BANNER_SEVERITY_WARNING,
+    BTN_CLASS_DANGER,
+    BTN_CLASS_PRIMARY,
+    BTN_CLASS_SECONDARY,
+    PLOT_SERIES,
+    TEXT_ON_ACCENT,
+    TEXT_PRIMARY,
+)
 
 logger = logging.getLogger(__name__)
+
+_GEOMETRY_KEY = "ProcedureWindow/geometry"  # QSettings key for saved window geometry
 
 
 def _discover_procedures() -> list[type[BaseProcedure]]:
@@ -133,7 +148,7 @@ class ProcedureWindow(QMainWindow):
         self._datapoints: list[dict] = []
 
         self.setWindowTitle("CryoSoft — Procedure")
-        self.resize(1200, 820)
+        self._restore_geometry()
 
         self._build_ui()
         self._connect_signals()
@@ -151,6 +166,10 @@ class ProcedureWindow(QMainWindow):
         root = QVBoxLayout(central)
         root.setSpacing(8)
         root.setContentsMargins(10, 10, 10, 10)
+
+        # ── Notification banner (hidden until a warning/error arrives) ─
+        self._banner = NotificationBanner()
+        root.addWidget(self._banner)
 
         # ── Top: params (left) | queue (right) ───────────────────────
         root.addWidget(self._build_top_splitter(), stretch=2)
@@ -176,9 +195,16 @@ class ProcedureWindow(QMainWindow):
             right widget (queue).
         """
         splitter = QSplitter(Qt.Orientation.Horizontal)
+        # setChildrenCollapsible(False) + per-pane minimums stop a drag from
+        # crushing either the params or the queue pane to zero width.
+        splitter.setChildrenCollapsible(False)
 
-        splitter.addWidget(self._build_left_column())
-        splitter.addWidget(self._build_right_column())
+        left_column = self._build_left_column()
+        right_column = self._build_right_column()
+        left_column.setMinimumWidth(300)
+        right_column.setMinimumWidth(250)
+        splitter.addWidget(left_column)
+        splitter.addWidget(right_column)
         splitter.setSizes([720, 480])
         return splitter
 
@@ -216,10 +242,14 @@ class ProcedureWindow(QMainWindow):
         add_btn = QPushButton("Add to Queue")
         add_btn.setObjectName("add_to_queue_btn")
         add_btn.setProperty("class", BTN_CLASS_SECONDARY)
+        add_btn.setIcon(qta.icon("fa5s.plus", color=TEXT_PRIMARY))
+        add_btn.setToolTip("Add the current procedure and parameters to the run queue")
         add_btn.clicked.connect(self._on_add_to_queue)
         run_now_btn = QPushButton("Run Now")
         run_now_btn.setObjectName("run_now_btn")
         run_now_btn.setProperty("class", BTN_CLASS_PRIMARY)
+        run_now_btn.setIcon(qta.icon("fa5s.play", color=TEXT_ON_ACCENT))
+        run_now_btn.setToolTip("Run the current procedure immediately")
         run_now_btn.clicked.connect(self._on_run_now)
         action_row.addWidget(add_btn)
         action_row.addWidget(run_now_btn)
@@ -297,20 +327,28 @@ class ProcedureWindow(QMainWindow):
         vlay.addWidget(self._queue_list)
 
         btn_row = QHBoxLayout()
-        up_btn = QPushButton("↑")
+        up_btn = QPushButton()
         up_btn.setObjectName("queue_up_btn")
+        up_btn.setIcon(qta.icon("fa5s.arrow-up", color=TEXT_PRIMARY))
+        up_btn.setToolTip("Move the selected queue item up")
         up_btn.setMaximumWidth(40)
         up_btn.clicked.connect(self._queue_move_up)
-        down_btn = QPushButton("↓")
+        down_btn = QPushButton()
         down_btn.setObjectName("queue_down_btn")
+        down_btn.setIcon(qta.icon("fa5s.arrow-down", color=TEXT_PRIMARY))
+        down_btn.setToolTip("Move the selected queue item down")
         down_btn.setMaximumWidth(40)
         down_btn.clicked.connect(self._queue_move_down)
-        remove_btn = QPushButton("✕ Remove")
+        remove_btn = QPushButton("Remove")
         remove_btn.setObjectName("queue_remove_btn")
+        remove_btn.setIcon(qta.icon("fa5s.trash", color=TEXT_PRIMARY))
+        remove_btn.setToolTip("Remove the selected item from the queue")
         remove_btn.clicked.connect(self._queue_remove)
         run_queue_btn = QPushButton("Run Queue")
         run_queue_btn.setObjectName("run_queue_btn")
         run_queue_btn.setProperty("class", BTN_CLASS_PRIMARY)
+        run_queue_btn.setIcon(qta.icon("fa5s.forward", color=TEXT_ON_ACCENT))
+        run_queue_btn.setToolTip("Run all queued procedures in order")
         run_queue_btn.clicked.connect(self._orchestrator.run_queue)
         btn_row.addWidget(up_btn)
         btn_row.addWidget(down_btn)
@@ -322,89 +360,36 @@ class ProcedureWindow(QMainWindow):
         return box
 
     def _build_plot_section_dual(self) -> QSplitter:
-        """Build two side-by-side live-plot panels in a horizontal splitter.
+        """Build two side-by-side LivePlotPanels in a horizontal splitter.
+
+        Both panels are ``LivePlotPanel`` instances (widget extraction of the
+        formerly duplicated Plot 1 / Plot 2 code). The legacy objectNames are
+        passed through unchanged so ``findChild`` keeps resolving them.
 
         Returns:
             QSplitter containing Plot 1 (left) and Plot 2 (right).
         """
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(self._build_plot1())
-        splitter.addWidget(self._build_plot2())
+        # Keep both plots usable; non-collapsible with a sane minimum size so a
+        # drag cannot squeeze either plot into an unreadable sliver.
+        splitter.setChildrenCollapsible(False)
+        self._plot1 = LivePlotPanel(
+            "Plot 1", PLOT_SERIES[0],
+            x_selector_name="x1_axis_selector",
+            y_selector_name="y_axis_selector",
+            plot_object_name="live_plot",
+        )
+        self._plot2 = LivePlotPanel(
+            "Plot 2", PLOT_SERIES[1],
+            x_selector_name="x2_axis_selector",
+            y_selector_name="y2_axis_selector",
+            plot_object_name="live_plot_2",
+        )
+        for panel in (self._plot1, self._plot2):
+            panel.setMinimumWidth(250)
+            panel.setMinimumHeight(150)
+            splitter.addWidget(panel)
         return splitter
-
-    def _build_plot1(self) -> QGroupBox:
-        """Build the first live-plot panel (Y1 selector + PlotWidget).
-
-        Returns:
-            QGroupBox for Plot 1.
-        """
-        box = QGroupBox("Plot 1")
-        vlay = QVBoxLayout(box)
-
-        x_row = QHBoxLayout()
-        x_row.addWidget(QLabel("X axis:"))
-        self._x1_axis_selector = QComboBox()
-        self._x1_axis_selector.setObjectName("x1_axis_selector")
-        self._x1_axis_selector.currentTextChanged.connect(self._redraw_plot)
-        x_row.addWidget(self._x1_axis_selector)
-        x_row.addStretch()
-        vlay.addLayout(x_row)
-
-        y_row = QHBoxLayout()
-        y_row.addWidget(QLabel("Y axis:"))
-        self._y_axis_selector = QComboBox()
-        self._y_axis_selector.setObjectName("y_axis_selector")
-        self._y_axis_selector.currentTextChanged.connect(self._redraw_plot)
-        y_row.addWidget(self._y_axis_selector)
-        y_row.addStretch()
-        vlay.addLayout(y_row)
-
-        self._plot_widget = pg.PlotWidget()
-        self._plot_widget.setObjectName("live_plot")
-        self._plot_widget.setMinimumHeight(150)
-        self._plot_widget.setLabel("bottom", "Field (T)")
-        self._plot_widget.setLabel("left", "Value")
-        self._plot_curve1 = self._plot_widget.plot([], [], pen="c", symbol="o", symbolSize=4)
-        vlay.addWidget(self._plot_widget)
-
-        return box
-
-    def _build_plot2(self) -> QGroupBox:
-        """Build the second live-plot panel (Y2 selector + PlotWidget).
-
-        Returns:
-            QGroupBox for Plot 2.
-        """
-        box = QGroupBox("Plot 2")
-        vlay = QVBoxLayout(box)
-
-        x_row = QHBoxLayout()
-        x_row.addWidget(QLabel("X axis:"))
-        self._x2_axis_selector = QComboBox()
-        self._x2_axis_selector.setObjectName("x2_axis_selector")
-        self._x2_axis_selector.currentTextChanged.connect(self._redraw_plot2)
-        x_row.addWidget(self._x2_axis_selector)
-        x_row.addStretch()
-        vlay.addLayout(x_row)
-
-        y_row = QHBoxLayout()
-        y_row.addWidget(QLabel("Y axis:"))
-        self._y2_axis_selector = QComboBox()
-        self._y2_axis_selector.setObjectName("y2_axis_selector")
-        self._y2_axis_selector.currentTextChanged.connect(self._redraw_plot2)
-        y_row.addWidget(self._y2_axis_selector)
-        y_row.addStretch()
-        vlay.addLayout(y_row)
-
-        self._plot_widget2 = pg.PlotWidget()
-        self._plot_widget2.setObjectName("live_plot_2")
-        self._plot_widget2.setMinimumHeight(150)
-        self._plot_widget2.setLabel("bottom", "Field (T)")
-        self._plot_widget2.setLabel("left", "Value")
-        self._plot_curve2 = self._plot_widget2.plot([], [], pen="m", symbol="o", symbolSize=4)
-        vlay.addWidget(self._plot_widget2)
-
-        return box
 
     def _build_control_buttons(self) -> QHBoxLayout:
         """Build Pause / Resume / Abort / Emergency-Acknowledge buttons.
@@ -417,16 +402,22 @@ class ProcedureWindow(QMainWindow):
         pause_btn = QPushButton("Pause")
         pause_btn.setObjectName("pause_btn")
         pause_btn.setProperty("class", BTN_CLASS_SECONDARY)
+        pause_btn.setIcon(qta.icon("fa5s.pause", color=TEXT_PRIMARY))
+        pause_btn.setToolTip("Pause the running procedure at the next safe point")
         pause_btn.clicked.connect(self._orchestrator.pause_procedure)
 
         resume_btn = QPushButton("Resume")
         resume_btn.setObjectName("resume_btn")
         resume_btn.setProperty("class", BTN_CLASS_SECONDARY)
+        resume_btn.setIcon(qta.icon("fa5s.play", color=TEXT_PRIMARY))
+        resume_btn.setToolTip("Resume the paused procedure")
         resume_btn.clicked.connect(self._orchestrator.resume_procedure)
 
         abort_btn = QPushButton("Abort")
         abort_btn.setObjectName("abort_btn")
         abort_btn.setProperty("class", BTN_CLASS_DANGER)
+        abort_btn.setIcon(qta.icon("fa5s.stop", color=TEXT_ON_ACCENT))
+        abort_btn.setToolTip("Stop the running procedure and save data as-is")
         abort_btn.clicked.connect(self._on_abort)
 
         self._ack_btn = QPushButton("ACKNOWLEDGE EMERGENCY")
@@ -450,6 +441,12 @@ class ProcedureWindow(QMainWindow):
         self._orchestrator.measurement_ready.connect(self._on_measurement_ready)
         self._orchestrator.procedure_finished.connect(self._on_procedure_finished)
         self._orchestrator.state_changed.connect(self._on_state_changed)
+        self._orchestrator.error_occurred.connect(
+            lambda msg: self._banner.show_message(msg, BANNER_SEVERITY_ERROR)
+        )
+        self._orchestrator.action_blocked.connect(
+            lambda msg: self._banner.show_message(msg, BANNER_SEVERITY_WARNING)
+        )
 
     # ------------------------------------------------------------------
     # Slot handlers
@@ -498,16 +495,27 @@ class ProcedureWindow(QMainWindow):
         data_dir = self._get_data_dir()
         return param_values, sample_info, data_dir
 
-    def _build_procedure_instance(self) -> BaseProcedure | None:
-        """Build a procedure instance from current form values.
+    def _build_procedure_instance(
+        self, collected: tuple[dict, dict, str] | None = None
+    ) -> BaseProcedure | None:
+        """Build a procedure instance from current (or supplied) form values.
+
+        This is the single construction path shared by the run-now and the
+        queue flows, so a procedure is only ever instantiated in one place.
+
+        Args:
+            collected: An already-validated ``(param_values, sample_info,
+                data_dir)`` tuple from ``_collect_params``. When ``None`` the
+                form is read afresh (the run-now path).
 
         Returns:
             A ready ``BaseProcedure`` instance, or ``None`` on validation error.
         """
-        result = self._collect_params()
-        if result is None:
+        if collected is None:
+            collected = self._collect_params()
+        if collected is None:
             return None
-        param_values, sample_info, data_dir = result
+        param_values, sample_info, data_dir = collected
         index = self._proc_selector.currentIndex()
         cls = self._procedures[index]
 
@@ -535,13 +543,11 @@ class ProcedureWindow(QMainWindow):
         item = QListWidgetItem(f"{len(self._queue)}. {summary}")
         self._queue_list.addItem(item)
 
-        proc = cls(
-            station=self._station,
-            sample_info=sample_info,
-            data_directory=data_dir,
-            **param_values,
-        )
-        self._orchestrator.queue_procedure(proc)
+        # Construct through the shared _build_procedure_instance path (reusing the
+        # params we already collected) instead of re-implementing cls(...) here.
+        proc = self._build_procedure_instance(result)
+        if proc is not None:
+            self._orchestrator.queue_procedure(proc)
 
     def _on_run_now(self) -> None:
         """Build and immediately run the current procedure via the Orchestrator."""
@@ -577,8 +583,8 @@ class ProcedureWindow(QMainWindow):
             datapoint: Latest enriched data dict emitted by the Orchestrator.
         """
         self._datapoints.append(datapoint)
-        self._redraw_plot()
-        self._redraw_plot2()
+        self._plot1.redraw(self._datapoints)
+        self._plot2.redraw(self._datapoints)
 
     def _on_procedure_finished(self) -> None:
         """Reset progress bar and clear the active procedure reference."""
@@ -599,11 +605,13 @@ class ProcedureWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _populate_axis_selectors(self, cls: type[BaseProcedure]) -> None:
-        """Populate all four axis selectors from cls metadata + current station state.
+        """Populate both plot panels' axis selectors from cls metadata + station state.
 
         Safe to call before a run starts (reads from monitor cache, no poll).
-        Preserves existing selection when keys overlap (e.g. after a procedure
-        type change), so the user's choices survive switching procedures.
+        Each panel preserves its existing selection when keys overlap (e.g. after
+        a procedure type change), so the user's choices survive switching
+        procedures. Kept as a thin loop delegating to ``LivePlotPanel`` so
+        existing callers do not change.
 
         Args:
             cls: The BaseProcedure subclass currently selected.
@@ -615,24 +623,9 @@ class ProcedureWindow(QMainWindow):
 
         default_x = cls.default_x_key if cls.default_x_key in keys else keys[0]
 
-        for sel in (self._x1_axis_selector, self._x2_axis_selector,
-                    self._y_axis_selector, self._y2_axis_selector):
-            prev = sel.currentText()
-            sel.blockSignals(True)
-            sel.clear()
-            sel.addItems(keys)
-            sel.setCurrentText(prev if prev in keys else keys[0])
-            sel.blockSignals(False)
-
-        # Apply sensible defaults only when the current selection is blank/unknown
-        if self._x1_axis_selector.currentText() not in keys:
-            self._x1_axis_selector.setCurrentText(default_x)
-        if self._x2_axis_selector.currentText() not in keys:
-            self._x2_axis_selector.setCurrentText(default_x)
-        if self._y_axis_selector.currentText() not in keys and "voltage_V" in keys:
-            self._y_axis_selector.setCurrentText("voltage_V")
-        if self._y2_axis_selector.currentText() not in keys and "current_A" in keys:
-            self._y2_axis_selector.setCurrentText("current_A")
+        # Per-panel Y defaults: Plot 1 → voltage, Plot 2 → current.
+        self._plot1.set_available_keys(keys, default_x, "voltage_V")
+        self._plot2.set_available_keys(keys, default_x, "current_A")
 
     def _reset_plot(self, proc: BaseProcedure) -> None:
         """Clear datapoints and refresh axis selectors for a new run.
@@ -641,37 +634,10 @@ class ProcedureWindow(QMainWindow):
             proc: The procedure about to run.
         """
         self._datapoints.clear()
-        self._plot_curve1.setData([], [])
-        self._plot_curve2.setData([], [])
+        self._plot1.clear()
+        self._plot2.clear()
         self._progress_bar.setValue(0)
         self._populate_axis_selectors(type(proc))
-
-    @staticmethod
-    def _extract_scalar(raw: Any) -> float:
-        """Convert a datapoint value to a plottable float."""
-        if raw is None:
-            return float("nan")
-        return float(np.mean(raw)) if hasattr(raw, "__len__") else float(raw)
-
-    def _redraw_plot(self) -> None:
-        """Redraw Plot 1 from the stored datapoint history."""
-        x_key = self._x1_axis_selector.currentText()
-        y_key = self._y_axis_selector.currentText()
-        xs = [self._extract_scalar(dp.get(x_key)) for dp in self._datapoints]
-        ys = [self._extract_scalar(dp.get(y_key)) for dp in self._datapoints]
-        self._plot_curve1.setData(xs, ys)
-        self._plot_widget.setLabel("bottom", x_key.replace("_", " "))
-        self._plot_widget.setLabel("left", y_key.replace("_", " "))
-
-    def _redraw_plot2(self) -> None:
-        """Redraw Plot 2 from the stored datapoint history."""
-        x_key = self._x2_axis_selector.currentText()
-        y_key = self._y2_axis_selector.currentText()
-        xs = [self._extract_scalar(dp.get(x_key)) for dp in self._datapoints]
-        ys = [self._extract_scalar(dp.get(y_key)) for dp in self._datapoints]
-        self._plot_curve2.setData(xs, ys)
-        self._plot_widget2.setLabel("bottom", x_key.replace("_", " "))
-        self._plot_widget2.setLabel("left", y_key.replace("_", " "))
 
     # ------------------------------------------------------------------
     # Queue management helpers
@@ -712,3 +678,32 @@ class ProcedureWindow(QMainWindow):
             summary_parts = [f"{k}={params[k]}" for k in sweep_keys[:3]]
             summary = f"{cls.name} ({', '.join(summary_parts)})"
             self._queue_list.addItem(f"{idx + 1}. {summary}")
+
+    # ------------------------------------------------------------------
+    # Window geometry + lifecycle
+    # ------------------------------------------------------------------
+
+    def _restore_geometry(self) -> None:
+        """Restore the saved window geometry, or size to a fraction of the screen.
+
+        Geometry is persisted with ``QSettings``, which on Windows is backed by
+        the registry (``HKCU\\Software\\CryoSoft\\CryoSoft``). If nothing is
+        stored yet, the window is sized to ~70% of the available screen area.
+        """
+        settings = app_settings.get_settings()
+        saved = settings.value(_GEOMETRY_KEY)
+        if saved is not None and self.restoreGeometry(saved):
+            return
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            self.resize(int(available.width() * 0.7), int(available.height() * 0.7))
+
+    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 (Qt override)
+        """Persist the window geometry before the window closes.
+
+        Args:
+            event: The Qt close event.
+        """
+        app_settings.get_settings().setValue(_GEOMETRY_KEY, self.saveGeometry())
+        super().closeEvent(event)

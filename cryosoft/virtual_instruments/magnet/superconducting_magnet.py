@@ -33,7 +33,6 @@ from __future__ import annotations
 from typing import Any, Generator
 
 from cryosoft.core.decorators import control, monitored
-from cryosoft.core.exceptions import CryoSoftSafetyError
 from cryosoft.virtual_instruments.base import MagnetBase
 from cryosoft.virtual_instruments.rampable import RampableVI
 
