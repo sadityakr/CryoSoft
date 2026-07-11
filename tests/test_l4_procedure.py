@@ -14,6 +14,7 @@ import pytest
 
 from cryosoft.core.procedure import BaseProcedure
 from cryosoft.core.station import build_station
+from cryosoft.core.sweep_builder import SweepSegment
 from cryosoft.procedures.field_sweep_iv import FieldSweepIV
 
 CONFIG_PATH = "cryosoft/configs/sim_cryostat"
@@ -99,6 +100,67 @@ def test_sweep_array_values(procedure):
     assert sweep[0] == pytest.approx(-0.1)
     assert sweep[-1] == pytest.approx(0.1)
     assert sweep[1] == pytest.approx(0.0)
+
+
+# ── Sweep-shape overrides (sweep_builder integration) ───────────────────────────
+
+
+def test_sweep_segments_override_take_precedence(station, tmp_path):
+    """Passing sweep_segments builds a piecewise sweep instead of the linear default."""
+    params = dict(FAST_PARAMS)
+    params["sweep_segments"] = [
+        {"start": -0.1, "end": -0.02, "step": 0.04},
+        {"start": -0.02, "end": 0.02, "step": 0.02},
+        {"start": 0.02, "end": 0.1, "step": 0.04},
+    ]
+    procedure = FieldSweepIV(
+        station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path), **params
+    )
+    sweep = procedure.get_sweep_array()
+    assert sweep[0] == pytest.approx(-0.1)
+    assert sweep[-1] == pytest.approx(0.1)
+    assert any(abs(v) < 1e-9 for v in sweep)  # the fine sub-segment crosses zero
+
+
+def test_sweep_segments_accepts_sweepsegment_instances(station, tmp_path):
+    """sweep_segments may also be a list of SweepSegment dataclass instances."""
+    params = dict(FAST_PARAMS)
+    params["sweep_segments"] = [
+        SweepSegment(start=0.0, end=0.1, step=0.05),
+    ]
+    procedure = FieldSweepIV(
+        station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path), **params
+    )
+    assert procedure.get_sweep_array() == pytest.approx([0.0, 0.05, 0.1])
+
+
+def test_sweep_csv_path_overrides_segments(station, tmp_path):
+    """sweep_csv_path takes precedence over both sweep_segments and linear params."""
+    csv_file = tmp_path / "fields.csv"
+    csv_file.write_text("0.1\n0.0\n-0.1\n")
+
+    params = dict(FAST_PARAMS)
+    params["sweep_csv_path"] = str(csv_file)
+    params["sweep_segments"] = [{"start": 0.0, "end": 1.0, "step": 0.5}]  # should be ignored
+
+    procedure = FieldSweepIV(
+        station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path), **params
+    )
+    assert procedure.get_sweep_array() == pytest.approx([0.1, 0.0, -0.1])
+
+
+def test_sweep_hysteresis_extends_linear_sweep(station, tmp_path):
+    """sweep_hysteresis=True appends the reverse sweep (minus the duplicated peak)."""
+    params = dict(FAST_PARAMS)
+    params["field_start"] = -0.1
+    params["field_end"] = 0.1
+    params["field_steps"] = 3
+    params["sweep_hysteresis"] = True
+
+    procedure = FieldSweepIV(
+        station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path), **params
+    )
+    assert procedure.get_sweep_array() == pytest.approx([-0.1, 0.0, 0.1, 0.0, -0.1])
 
 
 def test_initial_progress(procedure):

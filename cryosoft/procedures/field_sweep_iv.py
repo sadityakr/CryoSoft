@@ -2,18 +2,25 @@
 # description: |
 #   FieldSweepIV procedure: sweeps the magnetic field from field_start to
 #   field_end in field_steps steps, measuring IV (delta-mode) at each point.
-#   Stores data and station snapshots in an HDF5 file via DataManager.
+#   Stores data and station snapshots in an HDF5 file via DataManager. This
+#   is the CryoSoft port of the old field_voltage_logic.py script (Mercury
+#   iPS-M + Keithley 6221/2182A delta mode).
 # entry_point: Not run directly. Instantiated via GUI or tests.
 # dependencies:
 #   - numpy
 #   - cryosoft.core.procedure (BaseProcedure)
 #   - cryosoft.core.data_manager (DataManager)
+#   - cryosoft.core.sweep_builder (SweepSegment, build_piecewise_sweep,
+#     load_custom_sweep_csv, apply_hysteresis) — optional sweep-shape overrides
 #   - Station must have: magnet_x (system VI), temperature_vti (system VI),
 #     keithley_delta_mode (measurement VI with configure() and read_datapoint()).
 # input: |
 #   station, sample_info, data_directory, and keyword params matching the
 #   parameters dict: field_start, field_end, field_steps, temperature,
-#   current, n_readings, init_wait, step_wait.
+#   current, n_readings, init_wait, step_wait. A caller that instantiates
+#   this procedure directly (not through the GUI form) may additionally pass
+#   sweep_segments, sweep_csv_path, and/or sweep_hysteresis to change the
+#   sweep shape — see _build_sweep_array().
 # process: |
 #   initiate() ramps to first field point + target temperature, configures
 #   delta-mode. change_sweep_step() steps through fields. measure() reads
@@ -21,7 +28,7 @@
 # output: |
 #   HDF5 file with /data/field_T[N], /data/voltage_V[N,M],
 #   /data/current_A[N,M], /data/timestamp[N], /snapshots/ and /metadata/.
-# last_updated: 2026-04-06
+# last_updated: 2026-07-11
 # ---
 
 """FieldSweepIV — magnetic field sweep with IV delta-mode measurement."""
@@ -34,6 +41,12 @@ import numpy as np
 
 from cryosoft.core.data_manager import DataManager
 from cryosoft.core.procedure import BaseProcedure
+from cryosoft.core.sweep_builder import (
+    SweepSegment,
+    apply_hysteresis,
+    build_piecewise_sweep,
+    load_custom_sweep_csv,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -122,16 +135,53 @@ class FieldSweepIV(BaseProcedure):
     # ------------------------------------------------------------------
 
     def _build_sweep_array(self) -> list:
-        """Build field sweep array from field_start, field_end, field_steps.
+        """Build the field sweep array.
+
+        Default (GUI-driven) behavior is unchanged: a linear sweep from
+        field_start to field_end in field_steps points. A caller that
+        instantiates this procedure directly — a test, a script, or a future
+        GUI extension — can override the sweep shape with extra keyword
+        arguments that are *not* part of ``sweep_parameters`` and therefore
+        never appear in the GUI form:
+
+        - ``sweep_csv_path`` (str): path to a single-column CSV of field
+          values in tesla, for an arbitrary non-uniform field list. Highest
+          precedence.
+        - ``sweep_segments`` (list of ``SweepSegment`` or ``{"start", "end",
+          "step"}`` dicts): a piecewise sweep with a different step size per
+          sub-range (e.g. coarse steps outside a region, fine steps inside
+          it). Used if ``sweep_csv_path`` is not given.
+        - ``sweep_hysteresis`` (bool): if True, extend whichever array was
+          built above into a forward+backward loop.
 
         Returns:
             List of field values in tesla.
         """
-        return np.linspace(
-            self._params["field_start"],
-            self._params["field_end"],
-            int(self._params["field_steps"]),
-        ).tolist()
+        if "sweep_csv_path" in self._params:
+            base = load_custom_sweep_csv(self._params["sweep_csv_path"])
+        elif "sweep_segments" in self._params:
+            segments = [
+                seg if isinstance(seg, SweepSegment) else SweepSegment(**seg)
+                for seg in self._params["sweep_segments"]
+            ]
+            # Normalize to plain dicts: self._params is JSON-serialized into
+            # the HDF5 metadata by DataManager, and SweepSegment (a dataclass
+            # instance) is not JSON-serializable.
+            self._params["sweep_segments"] = [
+                {"start": s.start, "end": s.end, "step": s.step} for s in segments
+            ]
+            base = build_piecewise_sweep(segments)
+        else:
+            base = np.linspace(
+                self._params["field_start"],
+                self._params["field_end"],
+                int(self._params["field_steps"]),
+            ).tolist()
+
+        if self._params.get("sweep_hysteresis", False):
+            base = apply_hysteresis(base)
+
+        return base
 
     # ------------------------------------------------------------------
     # Four-method interface
@@ -148,7 +198,10 @@ class FieldSweepIV(BaseProcedure):
         n_readings = int(self._params["n_readings"])
 
         system_targets = {
-            "magnet_x": {"target": self._sweep[0]},
+            # persistent=False: keep the switch heater energised across the
+            # whole sweep (paid once here) instead of re-heating/re-cooling
+            # it on every sweep point. See standby() for the final park.
+            "magnet_x": {"target": self._sweep[0], "persistent": False},
             "temperature_vti": {"target": self._params["temperature"]},
         }
 
@@ -196,15 +249,15 @@ class FieldSweepIV(BaseProcedure):
         """Advance to the next field step.
 
         Returns:
-            ``({"magnet_x": {"target": next_field}}, step_wait)`` or ``None``
-            when all sweep points have been measured.
+            ``({"magnet_x": {"target": next_field, "persistent": False}},
+            step_wait)`` or ``None`` when all sweep points have been measured.
         """
         self._index += 1
         if self._index >= len(self._sweep):
             return None
 
         system_targets = {
-            "magnet_x": {"target": self._sweep[self._index]},
+            "magnet_x": {"target": self._sweep[self._index], "persistent": False},
         }
         return system_targets, float(self._params["step_wait"])
 
@@ -230,6 +283,11 @@ class FieldSweepIV(BaseProcedure):
 
     def standby(self) -> tuple[dict, dict, float]:
         """Close data file and park magnet at 0 T.
+
+        No ``"persistent"`` key here, so this ramp uses the default
+        (``persistent=True``): switch heater cools and the PSU parks at zero
+        once the field reaches 0 T, matching the old script's end-of-run
+        cleanup (zero field, then switch heater off).
 
         Returns:
             ``(system_targets, measurement_commands, 0.0)``
