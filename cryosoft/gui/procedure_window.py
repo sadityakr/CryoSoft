@@ -25,8 +25,10 @@
 #   _discover_procedures() imports all modules in cryosoft/procedures/ and collects
 #   BaseProcedure subclasses. The selected procedure's parameters dict drives form
 #   generation; sweep_axis (if declared) drives a SweepAxisWidget instead of flat
-#   fields for its hidden parameters. Queued procedures are stored as (cls, params)
-#   tuples. Execution goes through orchestrator.run_procedure().
+#   fields for its hidden parameters. A filename-prefix field above the form is
+#   captured per queue entry, so each queued procedure can save under a different
+#   filename. Queued procedures are stored as (cls, params, sample_info, data_dir,
+#   file_prefix) tuples. Execution goes through orchestrator.run_procedure().
 # output: |
 #   A QMainWindow. Two live plots update via orchestrator.measurement_ready.
 # ---
@@ -147,8 +149,8 @@ class ProcedureWindow(QMainWindow):
         self._get_data_dir = get_data_dir
 
         self._procedures: list[type[BaseProcedure]] = _discover_procedures()
-        # Queue items: list of (procedure_class, params_dict, sample_info_dict, data_dir)
-        self._queue: list[tuple[type[BaseProcedure], dict, dict, str]] = []
+        # Queue items: list of (procedure_class, params_dict, sample_info_dict, data_dir, file_prefix)
+        self._queue: list[tuple[type[BaseProcedure], dict, dict, str, str]] = []
         # Widgets for the parameter form (rebuilt on procedure selection)
         self._param_inputs: dict[str, QLineEdit] = {}
         # Sweep-axis editor for the selected procedure, if it declares one
@@ -262,6 +264,22 @@ class ProcedureWindow(QMainWindow):
         sel_row.addWidget(add_btn)
         sel_row.addWidget(run_now_btn)
         col.addLayout(sel_row)
+
+        # ── Filename prefix (carried into the queue per entry) ─────────
+        prefix_row = QHBoxLayout()
+        prefix_row.addWidget(QLabel("Filename prefix:"))
+        self._file_prefix_input = QLineEdit()
+        self._file_prefix_input.setObjectName("file_prefix_input")
+        self._file_prefix_input.setPlaceholderText(
+            "optional — defaults to procedure name"
+        )
+        self._file_prefix_input.setToolTip(
+            "Prepended to the saved HDF5 filename, still followed by a unique "
+            "timestamp. Captured when a procedure is added to the queue, so "
+            "each queued entry can carry its own filename."
+        )
+        prefix_row.addWidget(self._file_prefix_input)
+        col.addLayout(prefix_row)
 
         # ── Parameters (scroll area; rebuilt on selector change) ──────
         self._param_scroll = QScrollArea()
@@ -567,12 +585,12 @@ class ProcedureWindow(QMainWindow):
         self._param_scroll.setWidget(param_widget)
         self._populate_axis_selectors(cls)
 
-    def _collect_params(self) -> tuple[dict, dict, str] | None:
+    def _collect_params(self) -> tuple[dict, dict, str, str] | None:
         """Read and validate all form inputs.
 
         Returns:
-            ``(param_values, sample_info, data_dir)`` on success, or ``None``
-            if a field cannot be parsed.
+            ``(param_values, sample_info, data_dir, file_prefix)`` on success,
+            or ``None`` if a field cannot be parsed.
         """
         index = self._proc_selector.currentIndex()
         if index < 0 or index >= len(self._procedures):
@@ -606,10 +624,11 @@ class ProcedureWindow(QMainWindow):
 
         sample_info = self._get_sample_info()
         data_dir = self._get_data_dir()
-        return param_values, sample_info, data_dir
+        file_prefix = self._file_prefix_input.text().strip()
+        return param_values, sample_info, data_dir, file_prefix
 
     def _build_procedure_instance(
-        self, collected: tuple[dict, dict, str] | None = None
+        self, collected: tuple[dict, dict, str, str] | None = None
     ) -> BaseProcedure | None:
         """Build a procedure instance from current (or supplied) form values.
 
@@ -618,8 +637,8 @@ class ProcedureWindow(QMainWindow):
 
         Args:
             collected: An already-validated ``(param_values, sample_info,
-                data_dir)`` tuple from ``_collect_params``. When ``None`` the
-                form is read afresh (the run-now path).
+                data_dir, file_prefix)`` tuple from ``_collect_params``. When
+                ``None`` the form is read afresh (the run-now path).
 
         Returns:
             A ready ``BaseProcedure`` instance, or ``None`` on validation error.
@@ -628,7 +647,7 @@ class ProcedureWindow(QMainWindow):
             collected = self._collect_params()
         if collected is None:
             return None
-        param_values, sample_info, data_dir = collected
+        param_values, sample_info, data_dir, file_prefix = collected
         index = self._proc_selector.currentIndex()
         cls = self._procedures[index]
 
@@ -636,6 +655,7 @@ class ProcedureWindow(QMainWindow):
             station=self._station,
             sample_info=sample_info,
             data_directory=data_dir,
+            file_prefix=file_prefix,
             **param_values,
         )
 
@@ -644,14 +664,15 @@ class ProcedureWindow(QMainWindow):
         result = self._collect_params()
         if result is None:
             return
-        param_values, sample_info, data_dir = result
+        param_values, sample_info, data_dir, file_prefix = result
         index = self._proc_selector.currentIndex()
         cls = self._procedures[index]
 
-        self._queue.append((cls, param_values, sample_info, data_dir))
+        self._queue.append((cls, param_values, sample_info, data_dir, file_prefix))
 
         summary_parts = self._queue_summary_parts(cls, param_values)
-        summary = f"{cls.name} ({', '.join(summary_parts)})"
+        label = f"[{file_prefix}] {cls.name}" if file_prefix else cls.name
+        summary = f"{label} ({', '.join(summary_parts)})"
         item = QListWidgetItem(f"{len(self._queue)}. {summary}")
         self._queue_list.addItem(item)
 
@@ -785,9 +806,10 @@ class ProcedureWindow(QMainWindow):
     def _refresh_queue_list(self) -> None:
         """Rebuild the QListWidget from self._queue."""
         self._queue_list.clear()
-        for idx, (cls, params, _sample, _dir) in enumerate(self._queue):
+        for idx, (cls, params, _sample, _dir, file_prefix) in enumerate(self._queue):
             summary_parts = self._queue_summary_parts(cls, params)
-            summary = f"{cls.name} ({', '.join(summary_parts)})"
+            label = f"[{file_prefix}] {cls.name}" if file_prefix else cls.name
+            summary = f"{label} ({', '.join(summary_parts)})"
             self._queue_list.addItem(f"{idx + 1}. {summary}")
 
     @staticmethod

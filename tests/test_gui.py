@@ -424,6 +424,52 @@ def test_add_to_queue_appends_item(procedure_win, qtbot):
     assert procedure_win._queue_list.count() == initial_count + 1
 
 
+def test_file_prefix_input_exists(procedure_win):
+    """The filename-prefix field is present above the parameter form."""
+    from PyQt6.QtWidgets import QLineEdit
+
+    assert procedure_win.findChild(QLineEdit, "file_prefix_input") is not None
+
+
+def test_add_to_queue_captures_current_file_prefix(procedure_win, qtbot):
+    """Each queue entry freezes the file-prefix field's value at add-time."""
+    add_btn = procedure_win.findChild(QPushButton, "add_to_queue_btn")
+    Qt = __import__("PyQt6.QtCore", fromlist=["Qt"]).Qt
+
+    procedure_win._file_prefix_input.setText("run_a")
+    qtbot.mouseClick(add_btn, Qt.MouseButton.LeftButton)
+
+    procedure_win._file_prefix_input.setText("run_b")
+    qtbot.mouseClick(add_btn, Qt.MouseButton.LeftButton)
+
+    prefixes = [entry[4] for entry in procedure_win._queue]
+    assert prefixes[-2:] == ["run_a", "run_b"]
+    assert "run_a" in procedure_win._queue_list.item(len(prefixes) - 2).text()
+    assert "run_b" in procedure_win._queue_list.item(len(prefixes) - 1).text()
+
+
+def test_blank_file_prefix_omitted_from_queue_label(procedure_win, qtbot):
+    """A blank prefix leaves the queue label as just the procedure name."""
+    add_btn = procedure_win.findChild(QPushButton, "add_to_queue_btn")
+    Qt = __import__("PyQt6.QtCore", fromlist=["Qt"]).Qt
+
+    procedure_win._file_prefix_input.setText("")
+    qtbot.mouseClick(add_btn, Qt.MouseButton.LeftButton)
+
+    cls, _params, _sample, _dir, file_prefix = procedure_win._queue[-1]
+    assert file_prefix == ""
+    assert "[" not in procedure_win._queue_list.item(procedure_win._queue_list.count() - 1).text()
+    assert cls.name in procedure_win._queue_list.item(procedure_win._queue_list.count() - 1).text()
+
+
+def test_run_now_passes_file_prefix_to_procedure_instance(procedure_win, qtbot):
+    """Run Now builds a procedure carrying the current file-prefix field value."""
+    procedure_win._file_prefix_input.setText("live_run")
+    proc = procedure_win._build_procedure_instance()
+    assert proc is not None
+    assert proc._file_prefix == "live_run"
+
+
 def test_measurement_ready_updates_plot(procedure_win, orchestrator):
     """measurement_ready signal appends the datapoint to _datapoints."""
     datapoint = {"field_T": 0.5, "voltage_V": [1.23e-6] * 10}

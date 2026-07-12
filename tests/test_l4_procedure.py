@@ -240,6 +240,25 @@ def test_initiate_hdf5_metadata(procedure, tmp_path):
         assert si["sample_name"] == "Test Sample"
 
 
+def test_initiate_uses_custom_file_prefix(station, tmp_path):
+    """A procedure constructed with file_prefix names its HDF5 file accordingly."""
+    proc = FieldSweepIV(
+        station=station,
+        sample_info=SAMPLE_INFO,
+        data_directory=str(tmp_path),
+        file_prefix="my_custom_run",
+        **FAST_PARAMS,
+    )
+    proc.initiate()
+    filepath = proc._data_manager.filepath
+    proc.standby()
+
+    assert filepath.name.startswith("my_custom_run_")
+    with h5py.File(filepath, "r") as f:
+        # Metadata still records the real procedure name, independent of the filename.
+        assert f["metadata"].attrs["procedure_name"] == "Field Sweep IV"
+
+
 # ── change_sweep_step() ───────────────────────────────────────────────────────
 
 def test_change_sweep_step_returns_targets(procedure, tmp_path):

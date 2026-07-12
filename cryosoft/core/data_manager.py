@@ -8,18 +8,19 @@
 #   - h5py >= 3.9
 #   - numpy >= 1.24
 # input: |
-#   Constructor receives procedure name, parameter dicts (procedure_params,
-#   sample_info, instrument_state, system_targets, measurement_commands,
-#   data_config), target data directory, and n_sweep_points (int).
-#   data_config defines sweep_columns (1-D) and measurement_arrays (2-D).
+#   Constructor receives procedure name, an optional user filename prefix,
+#   parameter dicts (procedure_params, sample_info, instrument_state,
+#   system_targets, measurement_commands, data_config), target data
+#   directory, and n_sweep_points (int). data_config defines sweep_columns
+#   (1-D) and measurement_arrays (2-D).
 # process: |
-#   Creates an HDF5 file at {data_directory}/{procedure_name}_{YYYYMMDD_HHMMSS}.h5,
-#   writes all metadata as JSON-encoded attributes, pre-allocates resizable
-#   datasets, and exposes save_datapoint() and close() for the procedure loop.
+#   Creates an HDF5 file at {data_directory}/{stem}_{YYYYMMDD_HHMMSS}.h5,
+#   where stem is file_prefix if given, else procedure_name; writes all
+#   metadata as JSON-encoded attributes, pre-allocates resizable datasets,
+#   and exposes save_datapoint() and close() for the procedure loop.
 # output: |
 #   A single HDF5 file written to disk.  Datasets are trimmed to the number of
 #   actually-saved points when close() is called after an early abort.
-# last_updated: 2026-04-06
 # ---
 
 from __future__ import annotations
@@ -64,6 +65,7 @@ class DataManager:
         measurement_commands: dict,
         data_config: dict,
         n_sweep_points: int,
+        file_prefix: str = "",
     ) -> None:
         """Create the HDF5 file and write all metadata.
 
@@ -72,7 +74,13 @@ class DataManager:
         data_directory:
             Root directory where the HDF5 file will be written.
         procedure_name:
-            Short name used in the filename and stored as metadata.
+            Short name stored as metadata (``/metadata/procedure_name``). Also
+            used as the filename prefix when ``file_prefix`` is empty.
+        file_prefix:
+            User-chosen filename prefix. When non-empty, the file is named
+            ``{file_prefix}_{timestamp}.h5`` instead of
+            ``{procedure_name}_{timestamp}.h5``. Metadata still records the
+            true ``procedure_name`` regardless.
         procedure_params:
             Arbitrary procedure parameters (JSON-serialisable dict).
         sample_info:
@@ -114,7 +122,8 @@ class DataManager:
         timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
         data_dir = Path(data_directory)
         data_dir.mkdir(parents=True, exist_ok=True)
-        self._filepath = data_dir / f"{procedure_name}_{timestamp_str}.h5"
+        stem = file_prefix.strip() or procedure_name
+        self._filepath = data_dir / f"{stem}_{timestamp_str}.h5"
 
         logger.info("DataManager: creating HDF5 file at %s", self._filepath)
 
