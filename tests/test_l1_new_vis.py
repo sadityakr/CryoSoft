@@ -170,9 +170,11 @@ class TestSuperConductingMagnetPersistentVI:
         vi = self._make_vi(ips_driver)
         assert vi.coil_current() == pytest.approx(0.0)
 
-    def test_initial_not_persistent(self, ips_driver):
+    def test_initial_persistent_when_heater_cold(self, ips_driver):
+        # Persistent mode is heater-derived (mirrors the real Mercury iPS):
+        # at startup the switch is cold, so the driver reports persistent.
         vi = self._make_vi(ips_driver)
-        assert vi.is_persistent() is False
+        assert vi.is_persistent() is True
 
     def test_switch_heater_on_control(self, ips_driver):
         vi = self._make_vi(ips_driver)
@@ -185,16 +187,13 @@ class TestSuperConductingMagnetPersistentVI:
         vi.switch_heater_off()
         assert vi.switch_heater_state() == "OFF"
 
-    def test_enter_persistent_mode_control(self, ips_driver):
+    def test_enter_persistent_mode_control_parks_psu(self, ips_driver):
+        # enter_persistent_mode (switch already cold) parks the PSU at zero;
+        # the frozen coil current keeps holding the field.
         vi = self._make_vi(ips_driver)
         vi.enter_persistent_mode()
         assert vi.is_persistent() is True
-
-    def test_exit_persistent_mode_control(self, ips_driver):
-        vi = self._make_vi(ips_driver)
-        vi.enter_persistent_mode()
-        vi.exit_persistent_mode()
-        assert vi.is_persistent() is False
+        assert ips_driver.get_current_setpoint() == pytest.approx(0.0)
 
     def test_start_ramp_initiates_sequence(self, ips_driver):
         vi = self._make_vi(ips_driver, warmup_ticks=2, cooldown_ticks=2)
@@ -294,6 +293,61 @@ class TestSuperConductingMagnetPersistentVI:
         assert vi.get_field() == pytest.approx(1.0, abs=0.01)
         assert vi.magnet_current() == pytest.approx(10.0, abs=0.1)
 
+    # -- quench-safety regression (review finding C1): ramping OUT of a
+    #    persistent parked field must match the PSU to the coil current
+    #    BEFORE the switch heater goes on. The sim driver quenches on a
+    #    heater-across-mismatch, so the wrong order fails these tests. -----
+
+    def test_ramp_from_persistent_parked_field_does_not_quench(self, ips_driver):
+        vi = self._make_vi(ips_driver, warmup_ticks=1, cooldown_ticks=1)
+
+        # Park the magnet persistent at 2 T: coil 20 A, PSU 0 A, heater off.
+        vi.start_ramp(2.0)  # persistent=True
+        assert self._drive_to_target_reached(vi, ips_driver)
+        assert ips_driver.get_current() == pytest.approx(0.0, abs=0.01)
+        assert ips_driver.get_coil_current() == pytest.approx(20.0, abs=0.1)
+
+        # Ramp to a new field. Old (buggy) order heated the switch across the
+        # 20 A PSU/coil mismatch -> quench. Correct order matches first.
+        vi.start_ramp(1.0, persistent=False)
+        assert self._drive_to_target_reached(vi, ips_driver, max_ticks=200)
+        assert ips_driver.get_status() != "QUENCH"
+        assert vi.get_field() == pytest.approx(1.0, abs=0.01)
+
+    def test_quench_during_sequence_stops_commands(self, ips_driver):
+        """A QUENCH mid-sequence must stop the generator without further
+        setpoint commands (escalation to EMERGENCY is the safety chain's job)."""
+        vi = self._make_vi(ips_driver, warmup_ticks=1, cooldown_ticks=1)
+        vi.start_ramp(1.0, persistent=False)
+        ips_driver._simulate_quench = True
+        for _ in range(10):
+            vi.advance_ramp()
+        # Generator gave up; the setpoint was never re-commanded post-quench.
+        assert vi.ramp_status() in ("TARGET_REACHED", "RAMPING", "IDLE")
+        sp_after = ips_driver._setpoint
+        for _ in range(5):
+            vi.advance_ramp()
+        assert ips_driver._setpoint == sp_after
+
+    # -- stop_ramp(): abort must freeze the autonomous PSU, not just kill
+    #    the software generator (review finding C3) ------------------------
+
+    def test_stop_ramp_holds_hardware(self, ips_driver):
+        vi = self._make_vi(ips_driver, warmup_ticks=0, cooldown_ticks=0)
+        vi.start_ramp(5.0, persistent=False)
+        # Drive a few ticks so the generator has commanded the PSU setpoint.
+        for _ in range(5):
+            vi.advance_ramp()
+        assert ips_driver.get_status() == "RAMPING"
+
+        vi.stop_ramp()
+        assert vi.ramp_status() == "IDLE"
+        # The PSU itself must be held: setpoint pinned to the present output.
+        assert ips_driver.get_status() == "HOLD"
+        assert ips_driver.get_current_setpoint() == pytest.approx(
+            ips_driver.get_current(), abs=0.01
+        )
+
 
 # ---------------------------------------------------------------------------
 # SampleTemperatureControllerVI
@@ -337,6 +391,19 @@ class TestSampleTemperatureControllerVI:
         itc_driver._temperature = 300.05  # Force within tolerance
         itc_driver._setpoint = 300.1
         assert vi.ramp_status() in ("TARGET_REACHED", "RAMPING")
+
+    def test_stop_ramp_pins_setpoint_to_current_temperature(self, itc_driver):
+        """stop_ramp() must go IDLE and pin the setpoint where the system is —
+        otherwise the controller keeps regulating toward the last-commanded
+        intermediate setpoint after an abort (review finding C3)."""
+        vi = self._make_vi(itc_driver)
+        vi.start_ramp(100.0)
+        vi.advance_ramp()
+        vi.stop_ramp()
+        assert vi.ramp_status() == "IDLE"
+        assert itc_driver.get_setpoint() == pytest.approx(
+            itc_driver.get_temperature(), abs=0.01
+        )
 
     def test_get_state_keys(self, itc_driver):
         vi = self._make_vi(itc_driver)

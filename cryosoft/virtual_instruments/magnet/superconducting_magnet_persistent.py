@@ -3,15 +3,17 @@
 #   SuperconductingMagnetPersistentVI: behavior-based VI for any superconducting
 #   magnet power supply that includes a persistent-mode switch heater.
 #   Extends SuperconductingMagnetVI with switch heater control and a
-#   switch-heater-aware ramp sequence. start_ramp(target, persistent=True)
-#   supports two modes: persistent=True (default, original behavior) heats
-#   the switch, ramps, cools the switch, then parks the PSU at zero with the
+#   switch-heater-aware ramp sequence. Every ramp first matches the PSU output
+#   to the coil current while the switch is still cold (heating the switch
+#   across a PSU/coil mismatch quenches the magnet), then heats the switch.
+#   start_ramp(target, persistent=True) supports two modes: persistent=True
+#   (default) ramps, cools the switch, then parks the PSU at zero with the
 #   coil holding the field — for a single set-and-hold. persistent=False
-#   heats the switch (only if not already on) and ramps directly to target,
-#   leaving the switch heater energised — for a sequence of many ramps (e.g.
-#   a field sweep) that should only pay the heater warmup once. Wait steps
-#   are implemented as tick-count generators (never time.sleep) so they are
-#   compatible with the Orchestrator tick loop.
+#   ramps directly to target, leaving the switch heater energised — for a
+#   sequence of many ramps (e.g. a field sweep) that should only pay the
+#   heater warmup once. A driver status of QUENCH aborts the sequence.
+#   Wait steps are implemented as tick-count generators (never time.sleep)
+#   so they are compatible with the Orchestrator tick loop.
 # entry_point: Not run directly; instantiated by Station factory.
 # dependencies:
 #   - cryosoft.virtual_instruments.superconducting_magnet (SuperconductingMagnetVI)
@@ -57,9 +59,10 @@ class SuperconductingMagnetPersistentVI(SuperconductingMagnetVI):
     ``start_ramp(target, persistent=True)``:
 
     * ``persistent=True`` (default) — set-and-hold sequence:
-      1. Turn on switch heater (skipped if already on) — wait ``_warmup_ticks``.
-      2. If currently in persistent mode, ramp PSU to match the coil current
-         and exit persistent mode (avoids a current jump through the switch).
+      1. With the switch still cold, ramp the PSU to match the coil current
+         (no-op unless the magnet was parked persistent). Matching MUST happen
+         before the heater goes on: heating across a mismatch quenches.
+      2. Turn on switch heater (skipped if already on) — wait ``_warmup_ticks``.
       3. Ramp to target field.
       4. Turn off switch heater — wait ``_cooldown_ticks`` ticks.
       5. Enter persistent mode: PSU current returns to zero; coil holds field.
@@ -68,6 +71,10 @@ class SuperconductingMagnetPersistentVI(SuperconductingMagnetVI):
       steps 1-3 only. The switch heater stays energised and the PSU keeps
       holding the target current directly, so the next ``start_ramp()`` call
       does not have to pay the heater warmup again.
+
+    Any step that observes the driver status ``"QUENCH"`` stops the sequence
+    immediately (no further commands are sent); the Station safety check is
+    responsible for escalating a quench to EMERGENCY.
 
     ``magnet_current()`` / ``get_field()`` read the coil current (not the PSU
     current, which is zero) whenever the driver reports persistent mode —
@@ -156,23 +163,36 @@ class SuperconductingMagnetPersistentVI(SuperconductingMagnetVI):
     def _persistent_ramp_generator(self, target_A: float, persistent: bool) -> Generator:
         driver = self._driver  # type: ignore[attr-defined]
 
-        # --- Step 1: Turn on switch heater (if not already) and wait for warmup ---
+        # --- Step 1: With the switch still cold (superconducting), match the
+        # PSU output to the coil current BEFORE energising the heater.
+        # Heating the switch across a PSU/coil mismatch forces the stored coil
+        # current through the resistive switch — a quench. Matching first is
+        # always safe: if the magnet was never persistent, coil == PSU and
+        # this is a no-op.
         if driver.get_switch_heater_state() != "ON":
-            driver.set_switch_heater(True)
-            for _ in range(self._warmup_ticks):
-                yield
-
-        # --- Step 2: If currently persistent, match PSU to coil current and exit ---
-        if driver.get_persistent_mode():
             coil_A = driver.get_coil_current()
             if abs(driver.get_current() - coil_A) > 0.01:
                 driver.set_ramp_rate(self._default_ramp_rate)
                 driver.set_current_setpoint(coil_A)
-                # Wait until driver reaches coil current
-                while driver.get_status() == "RAMPING":
+                # Wait until the PSU actually reaches the coil current.
+                while (
+                    driver.get_status() == "RAMPING"
+                    or abs(driver.get_current() - coil_A) > 0.01
+                ):
+                    if driver.get_status() == "QUENCH":
+                        return  # stop the sequence; safety monitoring handles it
                     yield
-                while abs(driver.get_current() - coil_A) > 0.01:
-                    yield
+            driver.set_persistent_mode(False)
+
+            # --- Step 2: Energise the switch heater (currents now matched)
+            # and wait for thermal warmup ---
+            driver.set_switch_heater(True)
+            for _ in range(self._warmup_ticks):
+                yield
+        elif driver.get_persistent_mode():
+            # Heater already on (e.g. mid-sweep persistent=False ramps): a
+            # flag-based driver may still report persistent mode; clear it so
+            # current/field readback follows the PSU again.
             driver.set_persistent_mode(False)
 
         # --- Step 3: Ramp to target using standard segment generator ---
@@ -180,18 +200,21 @@ class SuperconductingMagnetPersistentVI(SuperconductingMagnetVI):
         # Wait for hardware to report HOLD
         while driver.get_status() == "RAMPING":
             yield
+        if driver.get_status() == "QUENCH":
+            return  # stop the sequence; safety monitoring handles it
 
         if not persistent:
             # Switch heater stays energised; PSU holds target_A directly.
             # Generator exhausted — ramp_status() reports TARGET_REACHED now.
             return
 
-        # --- Step 4: Cool switch heater and enter persistent mode ---
+        # --- Step 4: Cool switch heater (PSU == coil, so this is safe) ---
         driver.set_switch_heater(False)
         for _ in range(self._cooldown_ticks):
             yield
 
-        # --- Step 5: Enter persistent mode; ramp PSU to zero ---
+        # --- Step 5: Enter persistent mode; park PSU at zero (the cold
+        # switch now carries the coil current) ---
         driver.set_persistent_mode(True)
         driver.set_ramp_rate(self._default_ramp_rate)
         driver.set_current_setpoint(0.0)
@@ -265,21 +288,13 @@ class SuperconductingMagnetPersistentVI(SuperconductingMagnetVI):
 
     @control
     def enter_persistent_mode(self) -> None:
-        """Enter persistent mode (manual GUI use only).
+        """Park the PSU at zero with the coil holding the field (manual GUI use only).
 
-        Assumes the switch heater has already been cooled. The PSU will ramp
-        to zero; the coil current is captured first.
+        Only safe once the switch heater has been cooled (switch
+        superconducting): the cold switch then carries the coil current while
+        the PSU ramps to zero.
         """
         driver = self._driver  # type: ignore[attr-defined]
         driver.set_persistent_mode(True)
         driver.set_ramp_rate(self._default_ramp_rate)
         driver.set_current_setpoint(0.0)
-
-    @control
-    def exit_persistent_mode(self) -> None:
-        """Exit persistent mode (manual GUI use only).
-
-        Marks persistent mode off; caller must then heat the switch and ramp the
-        PSU to match the coil current before changing the field.
-        """
-        self._driver.set_persistent_mode(False)  # type: ignore[attr-defined]

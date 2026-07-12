@@ -1,13 +1,15 @@
 # ---
 # description: |
 #   RampableVI mixin for Virtual Instruments that support controlled ramping.
-#   Defines the abstract Ramp API (start_ramp, advance_ramp, ramp_status) that
-#   the Orchestrator calls every tick while a ramp is active.
+#   Defines the abstract Ramp API (start_ramp, advance_ramp, ramp_status,
+#   stop_ramp) that the Orchestrator calls every tick while a ramp is active
+#   (stop_ramp on abort/ERROR/EMERGENCY: kills the generator AND holds the
+#   hardware).
 # entry_point: Not run directly; mixed into magnet and temperature VIs.
 # dependencies:
 #   - abc
 # input: |
-#   Subclasses must implement all three abstract methods.
+#   Subclasses must implement all four abstract methods.
 # process: |
 #   start_ramp() initialises the ramp generator. advance_ramp() calls next()
 #   on the generator. ramp_status() returns one of RAMPING / TARGET_REACHED / IDLE.
@@ -30,7 +32,7 @@ class RampableVI:
     ``advance_ramp()`` every tick until ``ramp_status()`` returns
     ``"TARGET_REACHED"``.
 
-    Subclasses *must* implement all three abstract methods.
+    Subclasses *must* implement all four abstract methods.
     """
 
     @abstractmethod
@@ -65,5 +67,18 @@ class RampableVI:
             ``"RAMPING"``        — VI has not yet reached its target.
             ``"TARGET_REACHED"`` — target reached and confirmed.
             ``"IDLE"``           — no ramp active.
+        """
+        ...
+
+    @abstractmethod
+    def stop_ramp(self) -> None:
+        """Stop any active ramp and freeze the hardware where it is.
+
+        Called by the Orchestrator on abort and on ERROR/EMERGENCY entry.
+        Implementations MUST both clear the internal ramp generator and
+        command the hardware to hold: for autonomous hardware (a magnet PSU
+        keeps ramping to its last setpoint on its own), clearing the
+        generator alone does not stop the physical ramp. After this call,
+        ``ramp_status()`` must report ``"IDLE"``.
         """
         ...

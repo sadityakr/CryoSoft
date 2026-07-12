@@ -119,6 +119,19 @@ class SampleTemperatureControllerVI(TemperatureControllerBase, RampableVI):
             return "TARGET_REACHED"
         return "RAMPING"
 
+    def stop_ramp(self) -> None:
+        """Stop the ramp: kill the generator and pin the setpoint where we are.
+
+        The controller would otherwise keep regulating toward the
+        last-commanded intermediate setpoint; pinning the setpoint to the
+        current temperature freezes the system at its present state.
+        """
+        self._ramp_gen = None
+        self._ramp_exhausted = True
+        self._ramp_target = None
+        driver = self._driver  # type: ignore[attr-defined]
+        driver.set_setpoint(driver.get_temperature())
+
     # ------------------------------------------------------------------
     # Internal generator
     # ------------------------------------------------------------------

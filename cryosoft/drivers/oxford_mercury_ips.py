@@ -131,6 +131,14 @@ class OxfordMercuryiPS:
             raise ValueError(f"Ramp rate must be positive, got {rate}")
         self._write(f"SET:DEV:GRPZ:PSU:SIG:RCST:{rate:.4f}")
 
+    def hold(self) -> None:
+        """Freeze the output where it is (ACTN:HOLD).
+
+        Used by the VI layer's ``stop_ramp()`` on abort/error: the PSU would
+        otherwise keep ramping autonomously to its last setpoint.
+        """
+        self._write("SET:DEV:GRPZ:PSU:ACTN:HOLD")
+
     def get_status(self) -> str:
         """Return the magnet status.
 

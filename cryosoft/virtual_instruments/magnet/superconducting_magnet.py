@@ -59,6 +59,10 @@ class SuperconductingMagnetVI(MagnetBase, RampableVI):
     * ``set_current_setpoint(float)``    — set target current
     * ``set_ramp_rate(float)``           — ramp rate in A/min
 
+    Optionally:
+    * ``hold()`` — freeze the output where it is (used by ``stop_ramp()``;
+      without it the current output is re-sent as the setpoint instead).
+
     The physical mapping (e.g. whether the instrument takes rate + setpoint
     simultaneously or rate first then setpoint) is the driver's responsibility.
     """
@@ -129,6 +133,23 @@ class SuperconductingMagnetVI(MagnetBase, RampableVI):
             return "RAMPING"
         return "RAMPING"
 
+    def stop_ramp(self) -> None:
+        """Stop the ramp: kill the generator AND command the PSU to hold.
+
+        Clearing the generator alone is not enough — the PSU is autonomous and
+        keeps ramping to its last-commanded setpoint. If the driver exposes a
+        ``hold()`` method it is called to freeze the output where it is;
+        otherwise the current output value is re-sent as the setpoint.
+        """
+        self._ramp_gen = None
+        self._ramp_exhausted = True
+        driver = self._driver  # type: ignore[attr-defined]
+        hold = getattr(driver, "hold", None)
+        if callable(hold):
+            hold()
+        else:
+            driver.set_current_setpoint(driver.get_current())
+
     # ------------------------------------------------------------------
     # Internal generator
     # ------------------------------------------------------------------
@@ -142,6 +163,10 @@ class SuperconductingMagnetVI(MagnetBase, RampableVI):
                 return
 
             status = driver.get_status()
+            if status == "QUENCH":
+                # Send no further setpoints; the Station safety check is
+                # responsible for escalating a quench to EMERGENCY.
+                return
             if status == "RAMPING":
                 yield
                 continue

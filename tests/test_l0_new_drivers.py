@@ -20,7 +20,9 @@ class TestSimOxfordIPS120SwitchHeater:
 
         d = SimOxfordIPS120("SIM")
         assert d.get_switch_heater_state() == "OFF"
-        assert d.get_persistent_mode() is False
+        # Persistent mode is heater-derived (mirrors the real Mercury iPS):
+        # a cold switch means persistent, even at zero field.
+        assert d.get_persistent_mode() is True
         assert d.get_coil_current() == pytest.approx(0.0)
 
     def test_switch_heater_on_off(self):
@@ -29,29 +31,74 @@ class TestSimOxfordIPS120SwitchHeater:
         d = SimOxfordIPS120("SIM")
         d.set_switch_heater(True)
         assert d.get_switch_heater_state() == "ON"
+        assert d.get_persistent_mode() is False
         d.set_switch_heater(False)
         assert d.get_switch_heater_state() == "OFF"
-
-    def test_enter_persistent_mode_captures_current(self):
-        """Entering persistent mode fixes the coil current at the PSU current."""
-        from cryosoft.drivers.sim_oxford_ips120 import SimOxfordIPS120
-
-        d = SimOxfordIPS120("SIM")
-        d._current = 42.5
-        d.set_persistent_mode(True)
         assert d.get_persistent_mode() is True
-        assert d.get_coil_current() == pytest.approx(42.5)
 
-    def test_exit_persistent_mode(self):
+    def test_heater_off_freezes_coil_current(self):
+        """Cooling the switch freezes the coil current at the PSU current."""
         from cryosoft.drivers.sim_oxford_ips120 import SimOxfordIPS120
 
         d = SimOxfordIPS120("SIM")
-        d._current = 42.5
-        d.set_persistent_mode(True)
-        d.set_persistent_mode(False)
-        assert d.get_persistent_mode() is False
-        # Coil current retains its value until VI explicitly resets it
+        d.set_switch_heater(True)          # currents matched at 0 — no quench
+        d._current = 42.5                  # PSU ramped to 42.5 A (heater on)
+        d.set_switch_heater(False)         # freeze coil at 42.5 A
         assert d.get_coil_current() == pytest.approx(42.5)
+        d._current = 0.0                   # PSU parked at zero
+        assert d.get_coil_current() == pytest.approx(42.5)  # coil unchanged
+
+    def test_heater_on_coil_follows_psu(self):
+        """While the heater is on (switch resistive) the coil follows the PSU."""
+        from cryosoft.drivers.sim_oxford_ips120 import SimOxfordIPS120
+
+        d = SimOxfordIPS120("SIM")
+        d.set_switch_heater(True)
+        d._current = 10.0
+        assert d.get_coil_current() == pytest.approx(10.0)
+
+    def test_heater_on_with_current_mismatch_quenches(self):
+        """Energising the heater across a PSU/coil mismatch quenches the magnet.
+
+        This is the physical failure mode the persistent VI's ramp order
+        exists to prevent (match currents FIRST, then heat) — the sim makes
+        the wrong order loud so it fails in tests instead of on hardware.
+        """
+        from cryosoft.drivers.sim_oxford_ips120 import SimOxfordIPS120
+
+        d = SimOxfordIPS120("SIM")
+        d.set_switch_heater(True)
+        d._current = 20.0
+        d.set_switch_heater(False)         # parked persistent at 20 A
+        d._current = 0.0                   # PSU ramped to zero
+
+        d.set_switch_heater(True)          # WRONG order: heat across mismatch
+        assert d.get_status() == "QUENCH"
+        assert d.get_coil_current() == pytest.approx(0.0)  # field dumped
+
+    def test_quench_blocks_ramp_commands_until_reset(self):
+        from cryosoft.drivers.sim_oxford_ips120 import SimOxfordIPS120
+
+        d = SimOxfordIPS120("SIM")
+        d.set_switch_heater(True)
+        d._current = 20.0
+        d.set_switch_heater(False)
+        d._current = 0.0
+        d.set_switch_heater(True)          # quench
+        d.set_current_setpoint(50.0)       # must be ignored while quenched
+        assert d.get_status() == "QUENCH"
+        d.reset_quench()
+        assert d.get_status() == "HOLD"
+
+    def test_hold_freezes_output(self):
+        from cryosoft.drivers.sim_oxford_ips120 import SimOxfordIPS120
+
+        d = SimOxfordIPS120("SIM")
+        d.set_current_setpoint(50.0)
+        assert d.get_status() == "RAMPING"
+        d.hold()
+        assert d.get_status() == "HOLD"
+        assert d.get_current_setpoint() == pytest.approx(d.get_current())
 
     def test_return_types(self):
         from cryosoft.drivers.sim_oxford_ips120 import SimOxfordIPS120
