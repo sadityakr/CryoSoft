@@ -61,6 +61,9 @@ _MODE_LABELS = ["Linear", "Segments", "CSV"]
 # The last row's step is unused (no following breakpoint) and disabled in
 # the UI rather than shown as a live, ignorable input.
 _SEGMENT_COLUMNS = ["Value", "Step to next"]
+# Max width (px) for the single-value Linear/CSV input fields, so a short
+# number doesn't stretch the Sweep column wide and leave it looking empty.
+_FIELD_MAX_WIDTH = 150
 
 
 class SweepAxisWidget(QWidget):
@@ -101,8 +104,12 @@ class SweepAxisWidget(QWidget):
         self._stack.addWidget(self._build_csv_page())
         root.addWidget(self._stack)
 
-        self._hysteresis_checkbox = QCheckBox(f"Hysteresis (forward + backward {self._axis.description.lower()} loop)")
+        self._hysteresis_checkbox = QCheckBox("Hysteresis")
         self._hysteresis_checkbox.setObjectName(f"sweep_{k}_hysteresis_checkbox")
+        self._hysteresis_checkbox.setToolTip(
+            "Run the sweep forward then back to its start (forward + backward "
+            f"{self._axis.description.lower()} loop)."
+        )
         root.addWidget(self._hysteresis_checkbox)
 
     def _build_linear_page(self) -> QWidget:
@@ -111,7 +118,6 @@ class SweepAxisWidget(QWidget):
         form = QFormLayout(page)
         form.setSpacing(4)
 
-        unit = self._axis.unit
         self._start_input = QLineEdit(str(self._axis.default_start))
         self._start_input.setObjectName(f"sweep_{k}_start_input")
         self._end_input = QLineEdit(str(self._axis.default_end))
@@ -119,8 +125,14 @@ class SweepAxisWidget(QWidget):
         self._steps_input = QLineEdit(str(self._axis.default_steps))
         self._steps_input.setObjectName(f"sweep_{k}_steps_input")
 
-        form.addRow(f"Start ({unit}):", self._start_input)
-        form.addRow(f"End ({unit}):", self._end_input)
+        # Cap the field width so short values (e.g. "-1.0") don't stretch the
+        # whole Sweep column wide and leave it looking empty. Wide enough for
+        # a full-precision number; the column then hugs its content.
+        for field in (self._start_input, self._end_input, self._steps_input):
+            field.setMaximumWidth(_FIELD_MAX_WIDTH)
+
+        form.addRow("Start:", self._start_input)
+        form.addRow("End:", self._end_input)
         form.addRow("Steps:", self._steps_input)
         return page
 
@@ -132,9 +144,7 @@ class SweepAxisWidget(QWidget):
 
         self._segments_table = QTableWidget(0, len(_SEGMENT_COLUMNS))
         self._segments_table.setObjectName(f"sweep_{k}_segments_table")
-        self._segments_table.setHorizontalHeaderLabels(
-            [f"{name} ({self._axis.unit})" for name in _SEGMENT_COLUMNS]
-        )
+        self._segments_table.setHorizontalHeaderLabels(list(_SEGMENT_COLUMNS))
         col.addWidget(self._segments_table)
 
         btn_row = QHBoxLayout()

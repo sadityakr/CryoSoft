@@ -499,9 +499,11 @@ QWidget#notification_banner[severity="warning"] QPushButton#banner_dismiss_btn {
     color: {BANNER_WARNING_TEXT};
 }}
 
-/* ── Labels — value readout (large instrument values) ────────────────── */
+/* ── Labels — value readout (instrument values) ──────────────────────── */
+/* Kept just above the 10pt field label and bold so values still read as the
+   emphasised element, while staying compact enough to show full numbers. */
 QLabel[class="value_readout"] {{
-    font-size: 17pt;
+    font-size: 11pt;
     font-weight: bold;
     color: {TEXT_PRIMARY};
     background-color: transparent;

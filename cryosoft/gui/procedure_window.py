@@ -63,6 +63,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QProgressBar,
     QScrollArea,
+    QSizePolicy,
     QSplitter,
     QVBoxLayout,
     QWidget,
@@ -97,6 +98,9 @@ from cryosoft.gui.theme import (
 logger = logging.getLogger(__name__)
 
 _GEOMETRY_KEY = "ProcedureWindow/geometry"  # QSettings key for saved window geometry
+# Max width (px) for the Sweep parameter column. Its inputs are narrow, so this
+# stops it expanding to an equal third and crowding out the Measurement column.
+_SWEEP_COLUMN_MAX_WIDTH = 260
 
 
 @dataclass
@@ -374,6 +378,14 @@ class ProcedureWindow(QMainWindow):
         self._axis_widget = None
 
         sweep_box = QGroupBox("Sweep")
+        # The sweep inputs are narrow (single values / a compact 2-col table),
+        # so cap the column width instead of letting it expand to an equal
+        # third — otherwise it sits half-empty and pushes the Measurement
+        # column out of view. Maximum policy lets it hug even narrower content;
+        # the hard cap overrides the hidden Segments table's wide size hint.
+        # System/Measurement (default Expanding) absorb the freed width.
+        sweep_box.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
+        sweep_box.setMaximumWidth(_SWEEP_COLUMN_MAX_WIDTH)
         sweep_col = QVBoxLayout(sweep_box)
         sweep_col.setSpacing(4)
         if cls.sweep_axis is not None:
