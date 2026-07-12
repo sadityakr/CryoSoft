@@ -48,6 +48,33 @@ This package should stay small. New diagnostic primitives go into
 surfaces (CLI subcommands) go into `cli.py`. Anything Qt belongs in
 `cryosoft/gui/`, not here.
 
+## CLI
+`python -m cryosoft.troubleshoot <subcommand>` — one-shot commands, each
+terminating on its own, with `--json` for machine-readable output and exit
+code 0 (all OK) / 1 (any fault). Every invocation appends a JSONL line to
+`cryosoft/logs/troubleshoot.jsonl` (the session transcript agents mine when
+hardening the triage skill).
+
+| Subcommand | What it does | Allowlist-safe? |
+|---|---|---|
+| `scan [--probe] [--probe-serial]` | list bus resources, optionally identify each | yes |
+| `probe <address>` | raw identify query to one bare address | yes |
+| `check [--config X] [--no-bus]` | preflight every driver in a config | yes |
+| `methods <target>` | list a driver's public methods | yes |
+| `idn <target>` | identify one instrument via its driver | yes |
+| `read <target> <method> [args]` | call a read-only driver method | yes |
+| `write <target> <method> [args]` | call a state-changing method | **no — keep prompted** |
+| `query <target> "<cmd>"` | raw command with reply | **no — raw bytes can mutate state** |
+| `send <target> "<cmd>"` | raw command, no reply | **no — keep prompted** |
+
+`<target>` is a config alias, or a dotted driver class path together with
+`--address` (driver development). `--config` takes a path or a bare name
+resolved against shipped and user config folders; default is the machine's
+saved active config, falling back to `sim_cryostat`.
+
 ## Files
 - `engine.py` — bus scan, config preflight (`check_config`), `DriverBench`
   (introspect / call / raw query-send), `FaultCode` taxonomy.
+- `cli.py` — the one-shot argparse CLI over the engine (grammar above is API
+  for skills and allowlists).
+- `__main__.py` — `python -m cryosoft.troubleshoot` entry point.

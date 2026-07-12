@@ -129,6 +129,7 @@ _THIS = "tests.test_troubleshoot_engine"
 
 def make_config(tmp_path: Path, drivers: dict[str, dict]) -> str:
     """Write a minimal valid config directory and return its path."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
     lines = ["real_drivers:"]
     for alias, cfg in drivers.items():
         lines.append(f"  {alias}:")
