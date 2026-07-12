@@ -92,6 +92,63 @@ def test_file_created(tmp_path):
     dm.close()
 
 
+def test_file_prefix_overrides_filename_stem(tmp_path):
+    """A non-empty file_prefix replaces procedure_name in the filename."""
+    dm = DataManager(
+        data_directory=str(tmp_path),
+        procedure_name="MySweep",
+        file_prefix="custom_run",
+        procedure_params={},
+        sample_info=SAMPLE_INFO,
+        instrument_state={},
+        system_targets={},
+        measurement_commands={},
+        data_config=DATA_CONFIG,
+        n_sweep_points=3,
+    )
+    assert dm.filepath.name.startswith("custom_run_")
+    assert "MySweep" not in dm.filepath.name
+    dm.close()
+
+
+def test_file_prefix_metadata_still_records_true_procedure_name(tmp_path):
+    """procedure_name metadata is unaffected by a custom file_prefix."""
+    dm = DataManager(
+        data_directory=str(tmp_path),
+        procedure_name="MySweep",
+        file_prefix="custom_run",
+        procedure_params={},
+        sample_info=SAMPLE_INFO,
+        instrument_state={},
+        system_targets={},
+        measurement_commands={},
+        data_config=DATA_CONFIG,
+        n_sweep_points=3,
+    )
+    filepath = dm.filepath
+    dm.close()
+    with h5py.File(filepath, "r") as f:
+        assert f["metadata"].attrs["procedure_name"] == "MySweep"
+
+
+def test_blank_file_prefix_falls_back_to_procedure_name(tmp_path):
+    """An empty/whitespace file_prefix behaves like the default (unset) case."""
+    dm = DataManager(
+        data_directory=str(tmp_path),
+        procedure_name="MySweep",
+        file_prefix="   ",
+        procedure_params={},
+        sample_info=SAMPLE_INFO,
+        instrument_state={},
+        system_targets={},
+        measurement_commands={},
+        data_config=DATA_CONFIG,
+        n_sweep_points=3,
+    )
+    assert dm.filepath.name.startswith("MySweep_")
+    dm.close()
+
+
 def test_invalid_n_sweep_points(tmp_path):
     """n_sweep_points < 1 raises ValueError."""
     with pytest.raises(ValueError):

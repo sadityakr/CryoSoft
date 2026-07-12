@@ -16,15 +16,17 @@
 #   A SweepAxis instance at construction. No other coupling to a Procedure
 #   class or Station.
 # process: |
-#   The mode QComboBox switches the QStackedWidget page. get_params() reads
-#   whichever page is active (plus the always-visible hysteresis checkbox)
-#   and returns a dict of {axis.key}_-prefixed values matching
-#   sweep_builder.sweep_axis_param_specs(); ProcedureWindow merges this
-#   directly into the collected parameter dict.
+#   The mode QComboBox switches the QStackedWidget page. The Segments page is
+#   a 2-column breakpoint table (Value, Step to next): row i's value and row
+#   i+1's value become one SweepSegment's start/end, and row i's step is that
+#   segment's step, so a contiguous piecewise sweep never needs an endpoint
+#   re-typed. get_params() reads whichever page is active (plus the
+#   always-visible hysteresis checkbox) and returns a dict of
+#   {axis.key}_-prefixed values matching sweep_builder.sweep_axis_param_specs();
+#   ProcedureWindow merges this directly into the collected parameter dict.
 # output: |
 #   get_params() -> dict[str, Any]; raises ValueError (with a user-facing
 #   message) if the active mode's own inputs are missing or unparseable.
-# last_updated: 2026-07-12
 # ---
 
 """SweepAxisWidget — mode-selector sweep-shape editor for a SweepAxis."""
@@ -33,6 +35,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -53,7 +56,11 @@ from cryosoft.core.sweep_builder import SweepAxis
 # Row order matches the QComboBox item order; index <-> mode string.
 _MODES = ["linear", "segments", "csv"]
 _MODE_LABELS = ["Linear", "Segments", "CSV"]
-_SEGMENT_COLUMNS = ["Start", "End", "Step"]
+# Each row is one breakpoint. Row i's Value and row i+1's Value become one
+# SweepSegment's start/end; row i's "Step to next" is that segment's step.
+# The last row's step is unused (no following breakpoint) and disabled in
+# the UI rather than shown as a live, ignorable input.
+_SEGMENT_COLUMNS = ["Value", "Step to next"]
 
 
 class SweepAxisWidget(QWidget):
@@ -131,10 +138,10 @@ class SweepAxisWidget(QWidget):
         col.addWidget(self._segments_table)
 
         btn_row = QHBoxLayout()
-        add_btn = QPushButton("Add segment")
+        add_btn = QPushButton("Add breakpoint")
         add_btn.setObjectName(f"sweep_{k}_add_segment_btn")
         add_btn.clicked.connect(self._add_segment_row)
-        remove_btn = QPushButton("Remove segment")
+        remove_btn = QPushButton("Remove breakpoint")
         remove_btn.setObjectName(f"sweep_{k}_remove_segment_btn")
         remove_btn.clicked.connect(self._remove_segment_row)
         btn_row.addWidget(add_btn)
@@ -165,24 +172,40 @@ class SweepAxisWidget(QWidget):
         self._stack.setCurrentIndex(index)
 
     def _add_segment_row(self) -> None:
-        """Append a blank segment row, seeding Start from the previous row's End.
+        """Append a blank breakpoint row (Value, Step to next).
 
-        Segments must be contiguous (each start == the previous end), so
-        carrying the value forward saves retyping it for the common case of
-        building up a piecewise sweep one sub-range at a time.
+        Segment contiguity is automatic in the 2-column breakpoint model —
+        row i's Value doubles as the previous segment's End — so, unlike a
+        3-column Start/End/Step table, there is nothing to carry forward.
         """
         row = self._segments_table.rowCount()
         self._segments_table.insertRow(row)
-        prev_end = self._segments_table.item(row - 1, 1) if row > 0 else None
-        start_text = prev_end.text() if prev_end is not None else ""
-        self._segments_table.setItem(row, 0, QTableWidgetItem(start_text))
+        self._segments_table.setItem(row, 0, QTableWidgetItem(""))
         self._segments_table.setItem(row, 1, QTableWidgetItem(""))
-        self._segments_table.setItem(row, 2, QTableWidgetItem(""))
+        self._refresh_step_column_state()
 
     def _remove_segment_row(self) -> None:
         row = self._segments_table.currentRow()
         if row >= 0:
             self._segments_table.removeRow(row)
+            self._refresh_step_column_state()
+
+    def _refresh_step_column_state(self) -> None:
+        """Disable the last row's Step cell: there is no following breakpoint for it to reach.
+
+        Every other row's Step cell is (re-)enabled, since a row that used to
+        be last (and got disabled) may no longer be after an insert/remove.
+        """
+        last_row = self._segments_table.rowCount() - 1
+        for row in range(self._segments_table.rowCount()):
+            item = self._segments_table.item(row, 1)
+            if item is None:
+                continue
+            if row == last_row:
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                item.setText("")
+            else:
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
 
     def _on_browse_csv(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -280,20 +303,51 @@ class SweepAxisWidget(QWidget):
             return default
 
     def _read_segments_table(self) -> list[dict[str, float]]:
-        segments: list[dict[str, float]] = []
+        """Read the 2-column breakpoint table and pair consecutive rows into segments.
+
+        Row i's Value and row i+1's Value become one SweepSegment's
+        start/end; row i's Step is that segment's step. The last row
+        contributes only its Value (its Step cell is disabled in the UI).
+
+        Returns:
+            List of ``{"start": ..., "end": ..., "step": ...}`` dicts, one
+            per consecutive breakpoint pair — the same shape
+            ``build_piecewise_sweep`` already consumes.
+
+        Raises:
+            ValueError: Fewer than two breakpoints, or a Value/Step cell
+                that isn't a number.
+        """
+        rows = []
         for row in range(self._segments_table.rowCount()):
-            cells = [self._segments_table.item(row, col) for col in range(3)]
-            texts = [cell.text().strip() if cell is not None else "" for cell in cells]
-            if all(text == "" for text in texts):
+            value_item = self._segments_table.item(row, 0)
+            step_item = self._segments_table.item(row, 1)
+            value_text = value_item.text().strip() if value_item is not None else ""
+            step_text = step_item.text().strip() if step_item is not None else ""
+            if value_text == "" and step_text == "":
                 continue
+            rows.append((row, value_text, step_text))
+
+        if len(rows) < 2:
+            raise ValueError(
+                "Segments sweep mode selected but at least two breakpoints are needed."
+            )
+
+        values: list[float] = []
+        for row, value_text, _step_text in rows:
             try:
-                start, end, step = (float(t) for t in texts)
+                values.append(float(value_text))
+            except ValueError:
+                raise ValueError(f"Breakpoint row {row + 1}: Value must be a number.") from None
+
+        segments: list[dict[str, float]] = []
+        for i, (row, _value_text, step_text) in enumerate(rows[:-1]):
+            try:
+                step = float(step_text)
             except ValueError:
                 raise ValueError(
-                    f"Segment row {row + 1}: all of Start, End, Step must be numbers."
+                    f"Breakpoint row {row + 1}: Step to next must be a number."
                 ) from None
-            segments.append({"start": start, "end": end, "step": step})
+            segments.append({"start": values[i], "end": values[i + 1], "step": step})
 
-        if not segments:
-            raise ValueError("Segments sweep mode selected but no segments were added.")
         return segments

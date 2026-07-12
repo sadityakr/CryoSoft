@@ -18,8 +18,7 @@
 #   ramp standby() itself started, before declaring the procedure finished.
 # output: |
 #   Emits signals: states_updated, state_changed, procedure_progress,
-#   procedure_finished, error_occurred, action_blocked
-# last_updated: 2026-07-12
+#   procedure_finished, error_occurred, action_blocked, action_succeeded
 # ---
 
 """Orchestrator — cooperative state machine for CryoSoft.
@@ -67,6 +66,11 @@ class Orchestrator(QObject):
         procedure_finished (): Emitted when a procedure ends cleanly.
         error_occurred (str): Emitted when ERROR or EMERGENCY state entered.
         action_blocked (str): Emitted if GUI action submitted while busy.
+        action_succeeded (str, str): Emitted (vi_name, method_name) after a
+            submit_vi_action() GUI action executes without raising — the
+            source of truth for GUI state like InstrumentPanel's lifecycle
+            toggle, which must reflect confirmed instrument state rather
+            than an optimistic click.
     """
 
     states_updated = pyqtSignal(dict)
@@ -75,6 +79,7 @@ class Orchestrator(QObject):
     procedure_finished = pyqtSignal()
     error_occurred = pyqtSignal(str)
     action_blocked = pyqtSignal(str)
+    action_succeeded = pyqtSignal(str, str)
     measurement_ready = pyqtSignal(dict)  # emitted after each measure() with last_datapoint
 
     def __init__(self, station: Station, tick_interval_ms: int = 3000) -> None:
@@ -272,6 +277,7 @@ class Orchestrator(QObject):
                         action["method_name"],
                         **action["kwargs"]
                     )
+                    self.action_succeeded.emit(action["vi_name"], action["method_name"])
                 except Exception as e:
                     logger.error("Error executing GUI action on %s: %s", action["vi_name"], e)
             self._gui_action_queue.clear()

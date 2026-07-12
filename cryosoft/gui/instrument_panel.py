@@ -16,9 +16,14 @@
 #   __init__ introspects the VI for @monitored and @control methods and builds
 #   the layout. _on_states_updated() updates values each tick and, only when the
 #   connection status changes, flips the QSS `status` property (ok/stale/disconnected).
+#   The panel uses no native QGroupBox title — QGroupBox can't embed a widget
+#   next to its title text, so the name + status suffix live in a QLabel in a
+#   custom header row alongside the LifecycleToggleButton, keeping the toggle
+#   compact instead of its own full-width row. The toggle's state only
+#   changes on Orchestrator's action_succeeded signal, not on click, so it
+#   reflects confirmed state.
 # output: |
 #   A QGroupBox with live values and control buttons embedded in MonitorWindow.
-# last_updated: 2026-04-17
 # ---
 
 """InstrumentPanel — auto-generated per-VI monitor panel."""
@@ -28,7 +33,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import qtawesome as qta
 from PyQt6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
@@ -42,12 +46,7 @@ from PyQt6.QtWidgets import (
 
 from cryosoft.core.decorators import get_control_methods, get_monitored_methods
 from cryosoft.core.orchestrator import Orchestrator
-from cryosoft.gui.theme import (
-    BTN_CLASS_PRIMARY,
-    BTN_CLASS_SECONDARY,
-    TEXT_ON_ACCENT,
-    TEXT_PRIMARY,
-)
+from cryosoft.gui.lifecycle_toggle import LifecycleToggleButton
 from cryosoft.virtual_instruments.base import BaseVirtualInstrument
 
 logger = logging.getLogger(__name__)
@@ -74,7 +73,7 @@ class InstrumentPanel(QGroupBox):
         orchestrator: Orchestrator,
         parent: QWidget | None = None,
     ) -> None:
-        super().__init__(vi_name, parent)
+        super().__init__(parent)  # no native title — see module docstring
         self._vi_name = vi_name
         self._vi = vi
         self._orchestrator = orchestrator
@@ -96,6 +95,7 @@ class InstrumentPanel(QGroupBox):
         self.setMinimumHeight(self.sizeHint().height())
 
         orchestrator.states_updated.connect(self._on_states_updated)
+        orchestrator.action_succeeded.connect(self._on_action_succeeded)
 
     # ------------------------------------------------------------------
     # Layout construction
@@ -104,7 +104,18 @@ class InstrumentPanel(QGroupBox):
     def _build_layout(self) -> None:
         outer = QVBoxLayout()
         outer.setSpacing(4)
-        outer.setContentsMargins(8, 12, 8, 8)
+        outer.setContentsMargins(8, 8, 8, 8)
+
+        # ── Header: name/status label + lifecycle toggle, one compact row ──
+        header_row = QHBoxLayout()
+        self._name_label = QLabel(f"<b>{self._vi_name}</b>")
+        self._name_label.setObjectName(f"{self._vi_name}_name_label")
+        self._name_label.setProperty("class", "panel_name_label")
+        header_row.addWidget(self._name_label)
+        header_row.addStretch()
+        self._lifecycle = LifecycleToggleButton(self._vi_name, self._submit_lifecycle, parent=self)
+        header_row.addWidget(self._lifecycle)
+        outer.addLayout(header_row)
 
         # ── Monitored fields ──────────────────────────────────────────
         for method_name in get_monitored_methods(self._vi):
@@ -124,25 +135,6 @@ class InstrumentPanel(QGroupBox):
         # ── Control methods ───────────────────────────────────────────
         for method_name, params in get_control_methods(self._vi).items():
             outer.addWidget(self._build_control_row(method_name, params))
-
-        # ── Lifecycle buttons ─────────────────────────────────────────
-        btn_row = QHBoxLayout()
-        initiate_btn = QPushButton("Initiate")
-        initiate_btn.setObjectName(f"{self._vi_name}_initiate_btn")
-        initiate_btn.setProperty("class", BTN_CLASS_PRIMARY)
-        initiate_btn.setIcon(qta.icon("fa5s.play", color=TEXT_ON_ACCENT))
-        initiate_btn.setToolTip("Bring this instrument to its operating state")
-        initiate_btn.clicked.connect(lambda: self._submit_lifecycle("initiate"))
-        standby_btn = QPushButton("Standby")
-        standby_btn.setObjectName(f"{self._vi_name}_standby_btn")
-        standby_btn.setProperty("class", BTN_CLASS_SECONDARY)
-        standby_btn.setIcon(qta.icon("fa5s.power-off", color=TEXT_PRIMARY))
-        standby_btn.setToolTip("Return this instrument to a safe standby state")
-        standby_btn.clicked.connect(lambda: self._submit_lifecycle("standby"))
-        btn_row.addWidget(initiate_btn)
-        btn_row.addWidget(standby_btn)
-        btn_row.addStretch()
-        outer.addLayout(btn_row)
 
         # Absorb any extra vertical space so control rows never expand beyond
         # their natural height when the panel is stretched by the grid.
@@ -229,18 +221,20 @@ class InstrumentPanel(QGroupBox):
         if new_status != self._status:
             self._status = new_status
             self.setProperty("status", new_status)
+            self._name_label.setProperty("status", new_status)
             # Qt only re-evaluates property-based QSS selectors (e.g.
             # QGroupBox[status="stale"]) after an unpolish/polish cycle;
             # setProperty alone does not repaint.
-            self.style().unpolish(self)
-            self.style().polish(self)
+            for widget in (self, self._name_label):
+                widget.style().unpolish(widget)
+                widget.style().polish(widget)
 
             if new_status == "disconnected":
-                self.setTitle(f"{self._vi_name}  [DISCONNECTED]")
+                self._name_label.setText(f"<b>{self._vi_name}</b>  [DISCONNECTED]")
             elif new_status == "stale":
-                self.setTitle(f"{self._vi_name}  [stale]")
+                self._name_label.setText(f"<b>{self._vi_name}</b>  [stale]")
             else:
-                self.setTitle(self._vi_name)
+                self._name_label.setText(f"<b>{self._vi_name}</b>")
 
     # ------------------------------------------------------------------
     # Action dispatch
@@ -294,3 +288,17 @@ class InstrumentPanel(QGroupBox):
             action: ``"initiate"`` or ``"standby"``.
         """
         self._orchestrator.submit_vi_action(self._vi_name, action)
+
+    def _on_action_succeeded(self, vi_name: str, method_name: str) -> None:
+        """Flip the lifecycle toggle once Orchestrator confirms initiate/standby ran.
+
+        Args:
+            vi_name: The VI the confirmed action was submitted for.
+            method_name: The confirmed method name.
+        """
+        if vi_name != self._vi_name:
+            return
+        if method_name == "initiate":
+            self._lifecycle.set_initiated(True)
+        elif method_name == "standby":
+            self._lifecycle.set_initiated(False)

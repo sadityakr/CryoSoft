@@ -173,7 +173,11 @@ QGroupBox[status="stale"] {{
 QGroupBox[status="disconnected"] {{
     border: 2px solid {STATUS_ERROR};
 }}
-QGroupBox[status="disconnected"]::title {{
+
+/* ── Panel name label (InstrumentPanel's custom header row) ───────────── */
+/* Replaces QGroupBox::title now that the toggle button sits next to it —
+   QGroupBox can't embed a widget next to its native title. */
+QLabel[class="panel_name_label"][status="disconnected"] {{
     color: {STATUS_ERROR};
 }}
 
@@ -558,5 +562,17 @@ QLabel[class="conn_dot"][status="connected"] {{
 }}
 QLabel[class="conn_dot"][status="disconnected"] {{
     color: {STATUS_ERROR};
+}}
+
+/* ── Lifecycle glow dot (LifecycleToggleButton) ───────────────────────── */
+QLabel[class="lifecycle_dot"] {{
+    font-size: 16px;
+    background-color: transparent;
+}}
+QLabel[class="lifecycle_dot"][status="standby"] {{
+    color: {STATUS_ERROR};
+}}
+QLabel[class="lifecycle_dot"][status="initiated"] {{
+    color: {STATUS_OK};
 }}
 """

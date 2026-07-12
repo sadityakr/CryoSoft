@@ -121,9 +121,16 @@ class TrendPlotPanel(QGroupBox):
 
         self._y_selector = QComboBox()
         self._y_selector.setObjectName(f"trend_y_selector_{panel_id}")
-        self._y_selector.setToolTip("Variable to plot on this trend")
+        # AdjustToContents sizes both the closed combo and its dropdown to
+        # the widest key currently in the list — without it, Qt's default
+        # policy truncates long flat keys (e.g. "temperature_sample_heater_output")
+        # in both places, leaving no way to tell which variable is selected.
+        self._y_selector.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         self._y_selector.currentTextChanged.connect(self._redraw)
-        top_row.addWidget(self._y_selector)
+        # Stretch factor 1: this combo claims all leftover row width, pushing
+        # the time-window selector and remove button to the right instead of
+        # them sitting immediately after it at their own natural size.
+        top_row.addWidget(self._y_selector, 1)
 
         self._window_selector = QComboBox()
         self._window_selector.setObjectName(f"trend_window_selector_{panel_id}")
@@ -133,8 +140,6 @@ class TrendPlotPanel(QGroupBox):
         self._window_selector.setCurrentText(_DEFAULT_WINDOW_LABEL)
         self._window_selector.currentTextChanged.connect(self._redraw)
         top_row.addWidget(self._window_selector)
-
-        top_row.addStretch()
 
         self._remove_button = QPushButton()
         self._remove_button.setObjectName(f"trend_remove_button_{panel_id}")
@@ -155,7 +160,9 @@ class TrendPlotPanel(QGroupBox):
         self._plot_widget.showGrid(x=True, y=True, alpha=0.3)
         series_color = PLOT_SERIES[series_index % len(PLOT_SERIES)]
         pen = pg.mkPen(series_color, width=2)
-        self._curve = self._plot_widget.plot([], [], pen=pen)
+        self._curve = self._plot_widget.plot(
+            [], [], pen=pen, symbol="o", symbolSize=5, symbolBrush=series_color, symbolPen=None
+        )
         vlay.addWidget(self._plot_widget)
 
         self._update_y_label()
@@ -237,6 +244,10 @@ class TrendPlotPanel(QGroupBox):
     def _redraw(self) -> None:
         """Fetch the windowed series for the selected key and update the curve."""
         key = self.selected_key()
+        # Belt-and-suspenders alongside AdjustToContents: a hover tooltip
+        # with the full key, in case the panel is ever narrower than the
+        # combo would like to be.
+        self._y_selector.setToolTip(key or "Variable to plot on this trend")
         if not key or key not in self._known_keys:
             self._curve.setData([], [])
             return

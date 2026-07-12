@@ -5,9 +5,10 @@
 #   A procedure that declares sweep_axis gets a SweepAxisWidget (linear /
 #   segments / CSV, with hysteresis) in the Sweep column instead of flat text
 #   fields — this file is the only GUI code sweep-shape support needs; new
-#   procedures never touch it. Two-column top layout (params left, queue
-#   right) with two live pyqtgraph plots spanning full-width below. Sample
-#   info is read from MonitorWindow via callables.
+#   procedures never touch it. Fixed 2x2 quadrant grid (top-left params,
+#   top-right queue, bottom-left/right Plot 1/Plot 2), the same nested-
+#   QSplitter pattern as MonitorWindow. Sample info is read from
+#   MonitorWindow via callables.
 # entry_point: Not run directly. Opened via MonitorWindow Procedures menu.
 # dependencies:
 #   - PyQt6 >= 6.5
@@ -24,11 +25,12 @@
 #   _discover_procedures() imports all modules in cryosoft/procedures/ and collects
 #   BaseProcedure subclasses. The selected procedure's parameters dict drives form
 #   generation; sweep_axis (if declared) drives a SweepAxisWidget instead of flat
-#   fields for its hidden parameters. Queued procedures are stored as (cls, params)
-#   tuples. Execution goes through orchestrator.run_procedure().
+#   fields for its hidden parameters. A filename-prefix field above the form is
+#   captured per queue entry, so each queued procedure can save under a different
+#   filename. Queued procedures are stored as (cls, params, sample_info, data_dir,
+#   file_prefix) tuples. Execution goes through orchestrator.run_procedure().
 # output: |
 #   A QMainWindow. Two live plots update via orchestrator.measurement_ready.
-# last_updated: 2026-07-12
 # ---
 
 """ProcedureWindow — procedure builder, queue, and live-data monitor."""
@@ -113,11 +115,13 @@ def _discover_procedures() -> list[type[BaseProcedure]]:
 class ProcedureWindow(QMainWindow):
     """Procedure builder, queue manager, and live-data window.
 
-    Layout:
-    - Top: QSplitter(Horizontal) — left pane (selector + params + buttons),
-      right pane (queue).
-    - Bottom: QSplitter(Horizontal) — Plot 1 and Plot 2 side-by-side.
-    - Full-width progress bar and control buttons below plots.
+    A fixed 2x2 quadrant grid, the same nested-QSplitter pattern as
+    MonitorWindow: top-left is the procedure selector + full parameter form
+    (Sweep/System/Measurement, filling the quadrant rather than capped at a
+    fixed height with empty space below), top-right is the Queue, and the
+    bottom row is Plot 1 (left) / Plot 2 (right). Every splitter boundary is
+    draggable; nothing in the grid can be closed or detached. A full-width
+    progress bar and control buttons sit below the grid.
 
     Sample info and data directory are read from MonitorWindow via
     ``get_sample_info`` and ``get_data_dir`` callables injected at construction.
@@ -145,8 +149,8 @@ class ProcedureWindow(QMainWindow):
         self._get_data_dir = get_data_dir
 
         self._procedures: list[type[BaseProcedure]] = _discover_procedures()
-        # Queue items: list of (procedure_class, params_dict, sample_info_dict, data_dir)
-        self._queue: list[tuple[type[BaseProcedure], dict, dict, str]] = []
+        # Queue items: list of (procedure_class, params_dict, sample_info_dict, data_dir, file_prefix)
+        self._queue: list[tuple[type[BaseProcedure], dict, dict, str, str]] = []
         # Widgets for the parameter form (rebuilt on procedure selection)
         self._param_inputs: dict[str, QLineEdit] = {}
         # Sweep-axis editor for the selected procedure, if it declares one
@@ -180,11 +184,33 @@ class ProcedureWindow(QMainWindow):
         self._banner = NotificationBanner()
         root.addWidget(self._banner)
 
-        # ── Top: params (left) | queue (right) ───────────────────────
-        root.addWidget(self._build_top_splitter(), stretch=2)
+        # ── Fixed 2x2 quadrant grid ────────────────────────────────────
+        top_left = self._build_params_quadrant()
+        top_right = self._build_queue_quadrant()
+        bottom_left, bottom_right = self._build_plot_quadrants()
 
-        # ── Bottom: Plot 1 | Plot 2 ───────────────────────────────────
-        root.addWidget(self._build_plot_section_dual(), stretch=3)
+        self._left_splitter = QSplitter(Qt.Orientation.Vertical)
+        self._left_splitter.setObjectName("left_splitter")
+        self._left_splitter.setChildrenCollapsible(False)
+        self._left_splitter.addWidget(top_left)
+        self._left_splitter.addWidget(bottom_left)
+        self._left_splitter.setSizes([600, 400])
+
+        self._right_splitter = QSplitter(Qt.Orientation.Vertical)
+        self._right_splitter.setObjectName("right_splitter")
+        self._right_splitter.setChildrenCollapsible(False)
+        self._right_splitter.addWidget(top_right)
+        self._right_splitter.addWidget(bottom_right)
+        self._right_splitter.setSizes([600, 400])
+
+        self._main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._main_splitter.setObjectName("main_splitter")
+        self._main_splitter.setChildrenCollapsible(False)
+        self._main_splitter.addWidget(self._left_splitter)
+        self._main_splitter.addWidget(self._right_splitter)
+        self._main_splitter.setSizes([720, 480])
+
+        root.addWidget(self._main_splitter, stretch=1)
 
         # ── Progress bar (full-width) ─────────────────────────────────
         self._progress_bar = QProgressBar()
@@ -196,39 +222,23 @@ class ProcedureWindow(QMainWindow):
         # ── Control buttons ───────────────────────────────────────────
         root.addLayout(self._build_control_buttons())
 
-    def _build_top_splitter(self) -> QSplitter:
-        """Build the horizontal splitter that separates params (left) and queue (right).
+    def _build_params_quadrant(self) -> QWidget:
+        """Build the top-left quadrant: procedure selector, Add/Run buttons, and the full parameter form.
+
+        The parameter scroll area has no height cap and no trailing stretch
+        — it fills whatever height the quadrant is given, instead of sitting
+        at a fixed small height with empty space below it.
 
         Returns:
-            QSplitter with left widget (selector + form + buttons) and
-            right widget (queue).
-        """
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        # setChildrenCollapsible(False) + per-pane minimums stop a drag from
-        # crushing either the params or the queue pane to zero width.
-        splitter.setChildrenCollapsible(False)
-
-        left_column = self._build_left_column()
-        right_column = self._build_right_column()
-        left_column.setMinimumWidth(300)
-        right_column.setMinimumWidth(250)
-        splitter.addWidget(left_column)
-        splitter.addWidget(right_column)
-        splitter.setSizes([720, 480])
-        return splitter
-
-    def _build_left_column(self) -> QWidget:
-        """Build the left pane: procedure selector, parameter form, Add/Run buttons.
-
-        Returns:
-            QWidget containing the left-column layout.
+            QWidget containing the quadrant layout.
         """
         widget = QWidget()
+        widget.setObjectName("params_quadrant")
         col = QVBoxLayout(widget)
         col.setSpacing(8)
         col.setContentsMargins(0, 0, 4, 0)
 
-        # ── Procedure selector ────────────────────────────────────────
+        # ── Procedure selector + Add/Run buttons (one row) ─────────────
         sel_row = QHBoxLayout()
         sel_row.addWidget(QLabel("Procedure:"))
         self._proc_selector = QComboBox()
@@ -238,16 +248,7 @@ class ProcedureWindow(QMainWindow):
         self._proc_selector.currentIndexChanged.connect(self._on_procedure_selected)
         sel_row.addWidget(self._proc_selector)
         sel_row.addStretch()
-        col.addLayout(sel_row)
 
-        # ── Parameters (scroll area; rebuilt on selector change) ──────
-        self._param_scroll = QScrollArea()
-        self._param_scroll.setWidgetResizable(True)
-        self._param_scroll.setMaximumHeight(250)
-        col.addWidget(self._param_scroll)
-
-        # ── Add / Run buttons ─────────────────────────────────────────
-        action_row = QHBoxLayout()
         add_btn = QPushButton("Add to Queue")
         add_btn.setObjectName("add_to_queue_btn")
         add_btn.setProperty("class", BTN_CLASS_SECONDARY)
@@ -260,21 +261,42 @@ class ProcedureWindow(QMainWindow):
         run_now_btn.setIcon(qta.icon("fa5s.play", color=TEXT_ON_ACCENT))
         run_now_btn.setToolTip("Run the current procedure immediately")
         run_now_btn.clicked.connect(self._on_run_now)
-        action_row.addWidget(add_btn)
-        action_row.addWidget(run_now_btn)
-        action_row.addStretch()
-        col.addLayout(action_row)
+        sel_row.addWidget(add_btn)
+        sel_row.addWidget(run_now_btn)
+        col.addLayout(sel_row)
 
-        col.addStretch()
+        # ── Filename prefix (carried into the queue per entry) ─────────
+        prefix_row = QHBoxLayout()
+        prefix_row.addWidget(QLabel("Filename prefix:"))
+        self._file_prefix_input = QLineEdit()
+        self._file_prefix_input.setObjectName("file_prefix_input")
+        self._file_prefix_input.setPlaceholderText(
+            "optional — defaults to procedure name"
+        )
+        self._file_prefix_input.setToolTip(
+            "Prepended to the saved HDF5 filename, still followed by a unique "
+            "timestamp. Captured when a procedure is added to the queue, so "
+            "each queued entry can carry its own filename."
+        )
+        prefix_row.addWidget(self._file_prefix_input)
+        col.addLayout(prefix_row)
+
+        # ── Parameters (scroll area; rebuilt on selector change) ──────
+        self._param_scroll = QScrollArea()
+        self._param_scroll.setObjectName("param_scroll")
+        self._param_scroll.setWidgetResizable(True)
+        col.addWidget(self._param_scroll)
+
         return widget
 
-    def _build_right_column(self) -> QWidget:
-        """Build the right pane: queue list with management buttons.
+    def _build_queue_quadrant(self) -> QWidget:
+        """Build the top-right quadrant: the Queue list with management buttons.
 
         Returns:
-            QWidget containing the right-column layout.
+            QWidget containing the quadrant layout.
         """
         widget = QWidget()
+        widget.setObjectName("queue_quadrant")
         col = QVBoxLayout(widget)
         col.setSpacing(0)
         col.setContentsMargins(4, 0, 0, 0)
@@ -459,20 +481,19 @@ class ProcedureWindow(QMainWindow):
 
         return box
 
-    def _build_plot_section_dual(self) -> QSplitter:
-        """Build two side-by-side LivePlotPanels in a horizontal splitter.
+    def _build_plot_quadrants(self) -> tuple[QWidget, QWidget]:
+        """Build the bottom-left/bottom-right quadrants: Plot 1 and Plot 2.
 
-        Both panels are ``LivePlotPanel`` instances (widget extraction of the
-        formerly duplicated Plot 1 / Plot 2 code). The legacy objectNames are
-        passed through unchanged so ``findChild`` keeps resolving them.
+        Both panels are ``LivePlotPanel`` instances; legacy objectNames are
+        passed through unchanged so ``findChild`` keeps resolving them. Each
+        sits in its own quadrant (left_splitter's bottom / right_splitter's
+        bottom) rather than a separate dedicated splitter — the same
+        left/right boundary that divides params from queue above also
+        divides Plot 1 from Plot 2 below.
 
         Returns:
-            QSplitter containing Plot 1 (left) and Plot 2 (right).
+            ``(plot1, plot2)`` widgets, not yet placed in a splitter.
         """
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        # Keep both plots usable; non-collapsible with a sane minimum size so a
-        # drag cannot squeeze either plot into an unreadable sliver.
-        splitter.setChildrenCollapsible(False)
         self._plot1 = LivePlotPanel(
             "Plot 1", PLOT_SERIES[0],
             x_selector_name="x1_axis_selector",
@@ -488,8 +509,7 @@ class ProcedureWindow(QMainWindow):
         for panel in (self._plot1, self._plot2):
             panel.setMinimumWidth(250)
             panel.setMinimumHeight(150)
-            splitter.addWidget(panel)
-        return splitter
+        return self._plot1, self._plot2
 
     def _build_control_buttons(self) -> QHBoxLayout:
         """Build Pause / Resume / Abort / Emergency-Acknowledge buttons.
@@ -565,12 +585,12 @@ class ProcedureWindow(QMainWindow):
         self._param_scroll.setWidget(param_widget)
         self._populate_axis_selectors(cls)
 
-    def _collect_params(self) -> tuple[dict, dict, str] | None:
+    def _collect_params(self) -> tuple[dict, dict, str, str] | None:
         """Read and validate all form inputs.
 
         Returns:
-            ``(param_values, sample_info, data_dir)`` on success, or ``None``
-            if a field cannot be parsed.
+            ``(param_values, sample_info, data_dir, file_prefix)`` on success,
+            or ``None`` if a field cannot be parsed.
         """
         index = self._proc_selector.currentIndex()
         if index < 0 or index >= len(self._procedures):
@@ -604,10 +624,11 @@ class ProcedureWindow(QMainWindow):
 
         sample_info = self._get_sample_info()
         data_dir = self._get_data_dir()
-        return param_values, sample_info, data_dir
+        file_prefix = self._file_prefix_input.text().strip()
+        return param_values, sample_info, data_dir, file_prefix
 
     def _build_procedure_instance(
-        self, collected: tuple[dict, dict, str] | None = None
+        self, collected: tuple[dict, dict, str, str] | None = None
     ) -> BaseProcedure | None:
         """Build a procedure instance from current (or supplied) form values.
 
@@ -616,8 +637,8 @@ class ProcedureWindow(QMainWindow):
 
         Args:
             collected: An already-validated ``(param_values, sample_info,
-                data_dir)`` tuple from ``_collect_params``. When ``None`` the
-                form is read afresh (the run-now path).
+                data_dir, file_prefix)`` tuple from ``_collect_params``. When
+                ``None`` the form is read afresh (the run-now path).
 
         Returns:
             A ready ``BaseProcedure`` instance, or ``None`` on validation error.
@@ -626,7 +647,7 @@ class ProcedureWindow(QMainWindow):
             collected = self._collect_params()
         if collected is None:
             return None
-        param_values, sample_info, data_dir = collected
+        param_values, sample_info, data_dir, file_prefix = collected
         index = self._proc_selector.currentIndex()
         cls = self._procedures[index]
 
@@ -634,6 +655,7 @@ class ProcedureWindow(QMainWindow):
             station=self._station,
             sample_info=sample_info,
             data_directory=data_dir,
+            file_prefix=file_prefix,
             **param_values,
         )
 
@@ -642,14 +664,15 @@ class ProcedureWindow(QMainWindow):
         result = self._collect_params()
         if result is None:
             return
-        param_values, sample_info, data_dir = result
+        param_values, sample_info, data_dir, file_prefix = result
         index = self._proc_selector.currentIndex()
         cls = self._procedures[index]
 
-        self._queue.append((cls, param_values, sample_info, data_dir))
+        self._queue.append((cls, param_values, sample_info, data_dir, file_prefix))
 
         summary_parts = self._queue_summary_parts(cls, param_values)
-        summary = f"{cls.name} ({', '.join(summary_parts)})"
+        label = f"[{file_prefix}] {cls.name}" if file_prefix else cls.name
+        summary = f"{label} ({', '.join(summary_parts)})"
         item = QListWidgetItem(f"{len(self._queue)}. {summary}")
         self._queue_list.addItem(item)
 
@@ -783,9 +806,10 @@ class ProcedureWindow(QMainWindow):
     def _refresh_queue_list(self) -> None:
         """Rebuild the QListWidget from self._queue."""
         self._queue_list.clear()
-        for idx, (cls, params, _sample, _dir) in enumerate(self._queue):
+        for idx, (cls, params, _sample, _dir, file_prefix) in enumerate(self._queue):
             summary_parts = self._queue_summary_parts(cls, params)
-            summary = f"{cls.name} ({', '.join(summary_parts)})"
+            label = f"[{file_prefix}] {cls.name}" if file_prefix else cls.name
+            summary = f"{label} ({', '.join(summary_parts)})"
             self._queue_list.addItem(f"{idx + 1}. {summary}")
 
     @staticmethod

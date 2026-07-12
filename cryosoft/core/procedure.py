@@ -118,6 +118,7 @@ class BaseProcedure:
         station: Station,
         sample_info: dict[str, str],
         data_directory: str,
+        file_prefix: str = "",
         **param_values: Any,
     ) -> None:
         """Initialise the procedure.
@@ -126,6 +127,11 @@ class BaseProcedure:
             station: The active Station instance.
             sample_info: ``{"sample_name": str, "sample_id": str, "comments": str}``.
             data_directory: Base directory for HDF5 output files.
+            file_prefix: User-chosen filename prefix for the HDF5 output file
+                (still suffixed with a unique timestamp by ``DataManager``).
+                Empty string falls back to ``self.name``. Frozen into the
+                procedure instance at construction time, so queued entries
+                each keep the prefix that was set when they were added.
             **param_values: Procedure-specific parameter values from the GUI form.
                 Any declared parameter with a ``default`` that the caller omits
                 is filled in automatically; caller-supplied values always win.
@@ -133,6 +139,7 @@ class BaseProcedure:
         self._station = station
         self._sample_info = sample_info
         self._data_directory = data_directory
+        self._file_prefix = file_prefix
         merged_params: dict[str, Any] = {
             param_name: spec["default"]
             for param_name, spec in type(self).parameters.items()

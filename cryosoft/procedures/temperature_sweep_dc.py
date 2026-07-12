@@ -184,6 +184,7 @@ class TemperatureSweepDC(BaseProcedure):
         self._data_manager = DataManager(
             data_directory=self._data_directory,
             procedure_name=self.name,
+            file_prefix=self._file_prefix,
             procedure_params=self._params,
             sample_info=self._sample_info,
             instrument_state=self._station.get_state(),
