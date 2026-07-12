@@ -62,7 +62,7 @@ hardening the triage skill).
 | `check [--config X] [--no-bus]` | preflight every driver in a config | yes |
 | `methods <target>` | list a driver's public methods | yes |
 | `idn <target>` | identify one instrument via its driver | yes |
-| `read <target> <method> [args]` | call a read-only driver method | yes |
+| `read <target> <method> [args] [--repeat N] [--interval S]` | call a read-only driver method; repeats expose intermittent/timing faults | yes |
 | `write <target> <method> [args]` | call a state-changing method | **no — keep prompted** |
 | `query <target> "<cmd>"` | raw command with reply | **no — raw bytes can mutate state** |
 | `send <target> "<cmd>"` | raw command, no reply | **no — keep prompted** |

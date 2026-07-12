@@ -276,7 +276,57 @@ def _cmd_idn(args: argparse.Namespace) -> tuple[bool, dict[str, Any]]:
 
 
 def _cmd_read(args: argparse.Namespace) -> tuple[bool, dict[str, Any]]:
-    return _call_and_report(args, args.method, args.args, allow_write=False)
+    if args.repeat <= 1:
+        return _call_and_report(args, args.method, args.args, allow_write=False)
+    return _cmd_read_repeated(args)
+
+
+def _cmd_read_repeated(args: argparse.Namespace) -> tuple[bool, dict[str, Any]]:
+    """Repeat a read to expose intermittent faults (timing/settling class).
+
+    A read that passes some repeats and fails others — especially when the
+    failure rate drops at longer --interval values — is the signature of a
+    too-short waiting time rather than a dead instrument. Failures are
+    collected, not aborted on, because the failure *pattern* is the datum.
+    """
+    import time
+
+    bench = _make_bench(args)
+    outcomes: list[dict[str, Any]] = []
+    failures = 0
+    try:
+        for i in range(args.repeat):
+            if i > 0 and args.interval > 0:
+                time.sleep(args.interval)
+            try:
+                value = bench.call(args.method, args.args, allow_write=False)
+                outcomes.append({"i": i, "ok": True, "value": value})
+            except Exception as exc:  # noqa: BLE001 — per-iteration capture is the point
+                failures += 1
+                outcomes.append(
+                    {"i": i, "ok": False, "error": f"{type(exc).__name__}: {exc}"}
+                )
+    finally:
+        bench.close()
+
+    ok = failures == 0
+    payload = {
+        "target": args.target,
+        "method": args.method,
+        "args": args.args,
+        "repeat": args.repeat,
+        "interval_s": args.interval,
+        "failures": failures,
+        "outcomes": outcomes,
+    }
+    if args.json:
+        _print_json(payload)
+    else:
+        for o in outcomes:
+            print(f"[{o['i']:>4}] {'ok   ' if o['ok'] else 'FAIL '} "
+                  f"{o.get('value', o.get('error'))!r}")
+        print(f"=> {failures}/{args.repeat} failed at interval {args.interval}s")
+    return ok, payload
 
 
 def _cmd_write(args: argparse.Namespace) -> tuple[bool, dict[str, Any]]:
@@ -387,6 +437,11 @@ def build_parser() -> argparse.ArgumentParser:
     _add_target_args(p)
     p.add_argument("method")
     p.add_argument("args", nargs="*", help="method arguments (coerced by type hints)")
+    p.add_argument("--repeat", type=int, default=1,
+                   help="repeat the read N times to expose intermittent faults")
+    p.add_argument("--interval", type=float, default=0.2,
+                   help="seconds between repeats (default 0.2); a failure rate "
+                        "that drops at longer intervals points to timing")
     p.set_defaults(func=_cmd_read)
 
     p = sub.add_parser("write", parents=[common], help="call a state-changing driver method")

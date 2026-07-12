@@ -174,6 +174,43 @@ def test_adhoc_bench_via_class_and_address(capsys) -> None:
     assert _json_out(capsys)["result"] == "ACME,MODEL1,SN42,9.9"
 
 
+class FlakyDriver:
+    """Fails every second read — the intermittent/timing fault signature."""
+
+    _calls = 0
+
+    def __init__(self, resource_string: str) -> None:
+        type(self)._calls = 0
+
+    def get_value(self) -> float:
+        type(self)._calls += 1
+        if type(self)._calls % 2 == 0:
+            raise OSError("timeout")
+        return 1.0
+
+
+def test_read_repeat_all_ok(sim_config, capsys) -> None:
+    exit_code = cli.main(
+        ["read", "meter", "get_voltage", "--config", sim_config,
+         "--repeat", "3", "--interval", "0", "--json"]
+    )
+    assert exit_code == 0
+    payload = _json_out(capsys)
+    assert payload["failures"] == 0
+    assert len(payload["outcomes"]) == 3
+
+
+def test_read_repeat_exposes_intermittency(capsys) -> None:
+    exit_code = cli.main(
+        ["read", "tests.test_troubleshoot_cli.FlakyDriver", "get_value",
+         "--address", "SIM::FLAKY", "--repeat", "4", "--interval", "0", "--json"]
+    )
+    assert exit_code == 1
+    payload = _json_out(capsys)
+    assert payload["failures"] == 2
+    assert [o["ok"] for o in payload["outcomes"]] == [True, False, True, False]
+
+
 # ── query / send ──────────────────────────────────────────────────────────────
 
 
