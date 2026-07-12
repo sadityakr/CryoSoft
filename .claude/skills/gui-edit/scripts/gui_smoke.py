@@ -8,12 +8,18 @@ assert properties, only pixels catch wrong-looking output.
 
 Input:
     No mandatory arguments. Must run with the project venv python from the
-    repo root (imports the cryosoft package). --out overrides the output dir.
+    repo root (imports the cryosoft package). --out overrides the output dir;
+    --size WxH (e.g. "1920x1080") resizes both windows before capture and is
+    applied on top of whatever geometry MonitorWindow/ProcedureWindow chose
+    themselves (default: leave their natural size alone).
 
 Process:
     Constructs Station/Orchestrator/MonitorWindow/ProcedureWindow on the Qt
-    "offscreen" platform, emits orchestrator signals to reach each state,
-    grabs window pixmaps, and samples effective (post-QSS) label colors.
+    "offscreen" platform, lets the Orchestrator's real tick loop run for at
+    least two ticks (via QTest.qWait) so instrument values and trend curves
+    show real simulated data before the idle screenshot, then emits
+    orchestrator signals to reach each error/stale/emergency state, grabs
+    window pixmaps, and samples effective (post-QSS) label colors.
 
 Output:
     monitor_idle.png, monitor_error.png, procedure.png in
@@ -49,7 +55,18 @@ def main() -> None:
         default=None,
         help="Output directory (default: tmp/gui-edit/<timestamp>/)",
     )
+    parser.add_argument(
+        "--size",
+        type=str,
+        default=None,
+        help='Window size as "WxH" (e.g. "1920x1080"), applied to both windows before capture.',
+    )
     args = parser.parse_args()
+
+    size = None
+    if args.size:
+        w_str, _, h_str = args.size.lower().partition("x")
+        size = (int(w_str), int(h_str))
 
     out_dir = args.out or (
         Path("tmp") / "gui-edit" / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -57,6 +74,7 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     import pyqtgraph as pg
+    from PyQt6.QtTest import QTest
     from PyQt6.QtWidgets import QApplication
 
     from cryosoft.core.orchestrator import Orchestrator
@@ -69,12 +87,21 @@ def main() -> None:
     app.setStyleSheet(build_stylesheet())
     pg.setConfigOptions(background=PLOT_BG, foreground=PLOT_AXIS, antialias=True)
 
+    tick_ms = 200
     station = build_station("cryosoft/configs/sim_cryostat")
-    orchestrator = Orchestrator(station, tick_interval_ms=60000)
+    orchestrator = Orchestrator(station, tick_interval_ms=tick_ms)
 
     monitor = MonitorWindow(station, orchestrator)
-    monitor.resize(1280, 940)
+    if size is not None:
+        monitor.resize(*size)
+    else:
+        monitor.resize(1280, 940)
     monitor.show()
+    app.processEvents()
+
+    # Let the orchestrator's real tick loop run for at least two ticks so
+    # instrument values and trend curves show real simulated data, not "—".
+    QTest.qWait(tick_ms * 2 + 100)
     app.processEvents()
     monitor.grab().save(str(out_dir / "monitor_idle.png"))
 
@@ -104,7 +131,10 @@ def main() -> None:
         get_sample_info=monitor.get_sample_info,
         get_data_dir=monitor.get_data_dir,
     )
-    proc.resize(1280, 900)
+    if size is not None:
+        proc.resize(*size)
+    else:
+        proc.resize(1280, 900)
     proc.show()
     app.processEvents()
     proc.grab().save(str(out_dir / "procedure.png"))
