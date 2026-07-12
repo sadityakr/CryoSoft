@@ -88,6 +88,7 @@ class SampleTemperatureControllerVI(TemperatureControllerBase, RampableVI):
         self._ramp_gen: Generator | None = None
         self._ramp_exhausted: bool = True
         self._ramp_target: float | None = None
+        self._ramp_rate: float | None = None
 
     # ------------------------------------------------------------------
     # RampableVI implementation
@@ -102,6 +103,7 @@ class SampleTemperatureControllerVI(TemperatureControllerBase, RampableVI):
         """
         self._ramp_target = float(target)
         rate_per_min = float(rate) if rate is not None else self._default_ramp_rate
+        self._ramp_rate = rate_per_min
 
         self._ramp_gen = self._ramp_generator(self._ramp_target, rate_per_min)
         self._ramp_exhausted = False
@@ -148,8 +150,17 @@ class SampleTemperatureControllerVI(TemperatureControllerBase, RampableVI):
         self._ramp_gen = None
         self._ramp_exhausted = True
         self._ramp_target = None
+        self._ramp_rate = None
         driver = self._driver  # type: ignore[attr-defined]
         driver.set_setpoint(driver.get_temperature())
+
+    def ramp_target(self) -> float | None:
+        """Return the active temperature target in kelvin, or ``None`` when idle."""
+        return self._ramp_target
+
+    def ramp_rate(self) -> float | None:
+        """Return the active ramp rate in kelvin/min, or ``None`` when idle."""
+        return self._ramp_rate
 
     # ------------------------------------------------------------------
     # Internal generator

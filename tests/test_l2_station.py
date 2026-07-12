@@ -75,6 +75,33 @@ def test_station_getattr(sim_station: Station):
     assert temp_vti.__class__.__name__ == "VTITemperatureControllerVI"
 
 
+def test_get_ramp_status_covers_system_rampables(sim_station: Station):
+    """get_ramp_status() returns a target/rate/ramp_status entry for every system
+    VI that can ramp, excludes measurement VIs, and reports idle VIs as IDLE with
+    a None target."""
+    ramps = sim_station.get_ramp_status()
+
+    assert "magnet_x" in ramps
+    assert "temperature_sample" in ramps
+    for entry in ramps.values():
+        assert {"target", "rate", "ramp_status"} <= set(entry)
+
+    # Nothing commanded yet: idle, no target.
+    assert ramps["magnet_x"]["ramp_status"] == "IDLE"
+    assert ramps["magnet_x"]["target"] is None
+
+    # Measurement VIs are not ramp targets and must not appear.
+    assert "dc_measurement" not in ramps
+
+
+def test_get_ramp_status_reports_active_target(sim_station: Station):
+    """After a system VI starts ramping, its live target shows up in the aggregate."""
+    sim_station.process_system_targets({"magnet_x": {"target": 1.0}})
+    ramps = sim_station.get_ramp_status()
+    assert ramps["magnet_x"]["ramp_status"] == "RAMPING"
+    assert ramps["magnet_x"]["target"] == pytest.approx(1.0)
+
+
 def test_get_state_format(sim_station: Station):
     """get_state() returns dict with all VI states."""
     state = sim_station.get_state()

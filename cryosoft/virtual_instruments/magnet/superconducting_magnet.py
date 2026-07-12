@@ -99,6 +99,7 @@ class SuperconductingMagnetVI(MagnetBase, RampableVI):
 
         self._ramp_gen: Generator | None = None
         self._ramp_exhausted: bool = True
+        self._ramp_target_T: float | None = None
 
     # ------------------------------------------------------------------
     # RampableVI implementation
@@ -118,6 +119,7 @@ class SuperconductingMagnetVI(MagnetBase, RampableVI):
         """
         _ = persistent
         target_A = self._clamp_target_A(target * self._amperes_per_tesla)
+        self._ramp_target_T = target_A / self._amperes_per_tesla
 
         self._ramp_gen = self._ramp_generator(target_A)
         self._ramp_exhausted = False
@@ -186,6 +188,30 @@ class SuperconductingMagnetVI(MagnetBase, RampableVI):
             hold()
         else:
             driver.set_current_setpoint(driver.get_current())
+        self._ramp_target_T = None
+
+    def ramp_target(self) -> float | None:
+        """Return the active field target in tesla, or ``None`` when idle.
+
+        Set when ``start_ramp`` begins (the clamped target, so it matches the
+        field the magnet will actually reach) and cleared by ``stop_ramp``.
+        """
+        return self._ramp_target_T
+
+    def ramp_rate(self) -> float | None:
+        """Return the current ramp segment's rate in tesla/min, or ``None`` when idle.
+
+        The magnet ramps through current-dependent segments, so this is the rate
+        for the segment the output is currently in, read live and converted from
+        the internal amperes/min to tesla/min for consistency with
+        ``get_field()`` and ``ramp_target()``.
+        """
+        if self._ramp_target_T is None:
+            return None
+        curr_A = self._driver.get_current()  # type: ignore[attr-defined]
+        target_A = self._ramp_target_T * self._amperes_per_tesla
+        direction = 1 if target_A >= curr_A else -1
+        return self._get_segment_rate(curr_A, direction) / self._amperes_per_tesla
 
     # ------------------------------------------------------------------
     # Internal generator

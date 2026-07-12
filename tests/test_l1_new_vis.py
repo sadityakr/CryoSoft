@@ -137,6 +137,25 @@ class TestSuperConductingMagnetVI:
         vi = self._make_vi(ips_driver)
         assert vi.vi_type == "magnet"
 
+    def test_ramp_target_and_rate_none_when_idle(self, ips_driver):
+        vi = self._make_vi(ips_driver)
+        assert vi.ramp_target() is None
+        assert vi.ramp_rate() is None
+
+    def test_ramp_target_reports_field_in_tesla(self, ips_driver):
+        vi = self._make_vi(ips_driver)
+        vi.start_ramp(1.0)
+        assert vi.ramp_target() == pytest.approx(1.0)
+        # Segment rate at 0 A is 5 A/min; at 10 A/T that is 0.5 T/min.
+        assert vi.ramp_rate() == pytest.approx(0.5)
+
+    def test_stop_ramp_clears_ramp_target(self, ips_driver):
+        vi = self._make_vi(ips_driver)
+        vi.start_ramp(1.0)
+        vi.stop_ramp()
+        assert vi.ramp_target() is None
+        assert vi.ramp_rate() is None
+
 
 # ---------------------------------------------------------------------------
 # SuperconductingMagnetPersistentVI
@@ -199,6 +218,12 @@ class TestSuperConductingMagnetPersistentVI:
         vi = self._make_vi(ips_driver, warmup_ticks=2, cooldown_ticks=2)
         vi.start_ramp(0.0)  # Ramp to zero (already there, but exercises sequence)
         assert vi.ramp_status() == "RAMPING"
+
+    def test_ramp_target_set_by_persistent_start_ramp(self, ips_driver):
+        # The persistent override stores its own target (inherits the getters).
+        vi = self._make_vi(ips_driver, warmup_ticks=2, cooldown_ticks=2)
+        vi.start_ramp(1.5)
+        assert vi.ramp_target() == pytest.approx(1.5)
 
     def test_get_state_includes_persistent_fields(self, ips_driver):
         vi = self._make_vi(ips_driver)
@@ -465,6 +490,24 @@ class TestSampleTemperatureControllerVI:
         # 250 K is genuinely in progress).
         vi.set_temperature(250.0)
         assert vi.ramp_status() == "RAMPING"
+
+    def test_ramp_target_and_rate_none_when_idle(self, itc_driver):
+        vi = self._make_vi(itc_driver)
+        assert vi.ramp_target() is None
+        assert vi.ramp_rate() is None
+
+    def test_ramp_target_and_rate_reported_during_ramp(self, itc_driver):
+        vi = self._make_vi(itc_driver)
+        vi.start_ramp(100.0, rate=5.0)
+        assert vi.ramp_target() == pytest.approx(100.0)
+        assert vi.ramp_rate() == pytest.approx(5.0)
+
+    def test_stop_ramp_clears_target_and_rate(self, itc_driver):
+        vi = self._make_vi(itc_driver)
+        vi.start_ramp(100.0, rate=5.0)
+        vi.stop_ramp()
+        assert vi.ramp_target() is None
+        assert vi.ramp_rate() is None
 
     def test_no_limits_in_init_params_means_unbounded(self, itc_driver):
         """A setup that declares no temperature bounds keeps working (open range)."""
