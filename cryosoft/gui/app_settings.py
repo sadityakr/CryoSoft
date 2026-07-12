@@ -30,10 +30,14 @@ function directly, so that ``monkeypatch.setattr(app_settings, "get_settings",
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QSettings
+from pathlib import Path
+
+from PyQt6.QtCore import QSettings, QStandardPaths
 
 _ORGANISATION = "CryoSoft"
 _APPLICATION = "CryoSoft"
+
+_SESSION_FILENAME = "last_session.json"
 
 
 def get_settings() -> QSettings:
@@ -45,3 +49,24 @@ def get_settings() -> QSettings:
         GUI tests monkeypatch this function to return an INI-file store instead.
     """
     return QSettings(_ORGANISATION, _APPLICATION)
+
+
+def session_file_path() -> Path:
+    """Return the path to the persistent ``last_session.json`` file.
+
+    The file lives in the platform per-user application-data directory
+    (``%APPDATA%/CryoSoft/`` on Windows), separate from both the registry and
+    the user's measurement data directory. This is the second persistence tier:
+    ``get_settings()`` holds machine-specific window/dock *chrome*, while this
+    file holds portable session *content* (sample metadata, procedure params,
+    run queue). Like ``get_settings``, GUI tests monkeypatch this function to
+    redirect it into a throwaway directory.
+
+    Returns:
+        The absolute ``Path`` of the session JSON file. The parent directory is
+        not guaranteed to exist yet; ``session.save`` creates it on first write.
+    """
+    base = QStandardPaths.writableLocation(
+        QStandardPaths.StandardLocation.AppDataLocation
+    )
+    return Path(base) / _SESSION_FILENAME

@@ -53,6 +53,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QSizePolicy,
     QStatusBar,
@@ -64,6 +65,7 @@ from PyQt6.QtWidgets import (
 from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 from cryosoft.core.station import Station
 from cryosoft.gui import app_settings  # import the module (not the function) so tests can monkeypatch the factory
+from cryosoft.gui import session as session_store  # module import keeps save/load monkeypatchable
 from cryosoft.gui.instrument_panel import InstrumentPanel
 from cryosoft.gui.monitor_history import MonitorHistory
 from cryosoft.gui.notification_banner import NotificationBanner
@@ -214,10 +216,17 @@ class MonitorWindow(QMainWindow):
         self._trend_actions_anchor = None
         self._add_trend_action = None
 
+        # Persistent session *content* (sample metadata, procedure params, run
+        # queue) — the second persistence tier, separate from the QSettings
+        # window/dock *chrome*. Loaded here and applied to the fields once they
+        # exist; re-saved on close and by the Session menu.
+        self._session = session_store.load(app_settings.session_file_path())
+
         self.setWindowTitle("CryoSoft — Monitor")
         self._restore_geometry()
 
         self._build_ui()
+        self._apply_session_fields()
         self._build_menu()
         self._connect_signals()
         self._restore_monitor_state()
@@ -242,6 +251,21 @@ class MonitorWindow(QMainWindow):
         ``toggleViewAction()``s), so this runs after ``_build_ui()``.
         """
         menu_bar = self.menuBar()
+
+        # Session menu is added first so it sits leftmost (menu order follows
+        # addMenu() call order), matching the desktop convention for file/session
+        # actions.
+        session_menu = menu_bar.addMenu("Session")
+        new_session_action = QAction("New Session", self)
+        new_session_action.setToolTip(
+            "Clear sample info, parameters, and queue and start a fresh session"
+        )
+        new_session_action.triggered.connect(self._on_new_session)
+        session_menu.addAction(new_session_action)
+        save_session_action = QAction("Save Session Now", self)
+        save_session_action.setToolTip("Write the current session to disk immediately")
+        save_session_action.triggered.connect(self._save_session)
+        session_menu.addAction(save_session_action)
 
         proc_menu = menu_bar.addMenu("Procedures")
         open_action = QAction("Open Procedures…", self)
@@ -290,6 +314,7 @@ class MonitorWindow(QMainWindow):
                 self._orchestrator,
                 get_sample_info=self.get_sample_info,
                 get_data_dir=self.get_data_dir,
+                initial_session=self._session,
             )
         self._procedure_window.show()
         self._procedure_window.raise_()
@@ -879,6 +904,80 @@ class MonitorWindow(QMainWindow):
         return self._data_dir_input.text().strip() or "C:/CryoData"
 
     # ------------------------------------------------------------------
+    # Session persistence (content tier: sample info, procedure params, queue)
+    # ------------------------------------------------------------------
+
+    def _apply_session_fields(self) -> None:
+        """Populate the Sample Info fields from the loaded session.
+
+        Called once after ``_build_ui()`` (the fields must exist). Only the
+        MonitorWindow-owned fields are applied here; the procedure selection,
+        parameters, and queue held in ``self._session`` are applied by the
+        ProcedureWindow when it opens.
+        """
+        state = self._session
+        self._sample_name_input.setText(state.sample_name)
+        self._sample_id_input.setText(state.sample_id)
+        self._comments_input.setPlainText(state.comments)
+        self._data_dir_input.setText(state.data_dir or "C:/CryoData")
+
+    def _collect_session_state(self) -> session_store.SessionState:
+        """Build a SessionState from the current UI, preserving procedure data.
+
+        The Sample Info fields are read live. The procedure selection,
+        parameters, and queue come from the open ProcedureWindow if there is
+        one; otherwise the values loaded at startup are preserved unchanged, so
+        closing without ever opening the ProcedureWindow does not discard its
+        saved state.
+
+        Returns:
+            A ``SessionState`` snapshot ready to persist.
+        """
+        info = self.get_sample_info()
+        state = session_store.SessionState(
+            sample_name=info["sample_name"],
+            sample_id=info["sample_id"],
+            comments=info["comments"],
+            data_dir=self.get_data_dir(),
+            selected_procedure=self._session.selected_procedure,
+            procedure_params=self._session.procedure_params,
+            queue=self._session.queue,
+        )
+        if self._procedure_window is not None:
+            self._procedure_window.export_session_state(state)
+        return state
+
+    def _save_session(self) -> None:
+        """Persist the current session to disk, tolerating write failures.
+
+        A failed save (e.g. the app-data directory is not writable) is logged
+        and swallowed so it cannot crash window shutdown.
+        """
+        self._session = self._collect_session_state()
+        try:
+            session_store.save(self._session, app_settings.session_file_path())
+        except OSError as exc:
+            logger.warning("MonitorWindow: could not save session: %s", exc)
+
+    def _on_new_session(self) -> None:
+        """Clear the session to defaults after user confirmation."""
+        reply = QMessageBox.question(
+            self,
+            "New Session",
+            "Clear the current session (sample info, parameters, and queue) "
+            "and start fresh?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._session = session_store.SessionState()
+        self._apply_session_fields()
+        if self._procedure_window is not None:
+            self._procedure_window.reset_session()
+        self._save_session()
+
+    # ------------------------------------------------------------------
     # Internal slots
     # ------------------------------------------------------------------
 
@@ -1033,16 +1132,18 @@ class MonitorWindow(QMainWindow):
             self.move(x, y)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 (Qt override)
-        """Detach the log handler and persist geometry before the window closes.
+        """Persist session + geometry and detach the log handler on close.
 
-        Removing the handler prevents it from writing to the destroyed
+        Session *content* (sample info, procedure params, queue) is auto-saved
+        here so reopening restores it. Window/dock *layout* is saved explicitly
+        via the View menu's "Save layout" action, by design — not auto-saved.
+        Removing the log handler prevents it from writing to the destroyed
         ``QTextEdit`` after the window is gone (RuntimeError on a dead widget).
-        Layout (dock state + trend selections) is saved explicitly via the
-        View menu's "Save layout" action, by design — not auto-saved here.
 
         Args:
             event: The Qt close event.
         """
+        self._save_session()
         logging.getLogger("cryosoft").removeHandler(self._log_handler)
         settings = app_settings.get_settings()
         settings.setValue(_GEOMETRY_KEY, self.saveGeometry())

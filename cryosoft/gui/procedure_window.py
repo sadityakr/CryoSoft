@@ -33,6 +33,7 @@ import importlib
 import logging
 import pkgutil
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -65,6 +66,12 @@ from cryosoft.core.station import Station
 from cryosoft.gui import app_settings  # import the module (not the function) so tests can monkeypatch the factory
 from cryosoft.gui.live_plot_panel import LivePlotPanel
 from cryosoft.gui.notification_banner import NotificationBanner
+from cryosoft.gui.session import (
+    STATUS_PENDING,
+    STATUS_RUNNING,
+    QueueItemState,
+    SessionState,
+)
 from cryosoft.gui.theme import (
     BANNER_SEVERITY_ERROR,
     BANNER_SEVERITY_WARNING,
@@ -79,6 +86,33 @@ from cryosoft.gui.theme import (
 logger = logging.getLogger(__name__)
 
 _GEOMETRY_KEY = "ProcedureWindow/geometry"  # QSettings key for saved window geometry
+
+
+@dataclass
+class _QueueEntry:
+    """One row of the run queue, held in memory by the ProcedureWindow.
+
+    A ``@dataclass`` (auto-generated ``__init__`` from the fields below) that
+    pairs the procedure spec with its captured parameters and a lifecycle
+    ``status``. The built ``proc`` instance is kept for pending entries so the
+    Orchestrator queue can be rebuilt from the GUI's entries without
+    re-reading the form; it is ``None`` for entries restored as already-done.
+
+    Attributes:
+        cls: The BaseProcedure subclass for this run.
+        params: Validated parameter values captured when the entry was queued.
+        sample_info: Sample metadata captured at queue time.
+        data_dir: Data directory captured at queue time.
+        status: One of the ``session.STATUS_*`` values.
+        proc: The built procedure instance for a pending entry, else ``None``.
+    """
+
+    cls: type[BaseProcedure]
+    params: dict[str, Any]
+    sample_info: dict[str, str]
+    data_dir: str
+    status: str = STATUS_PENDING
+    proc: BaseProcedure | None = field(default=None, repr=False)
 
 
 def _discover_procedures() -> list[type[BaseProcedure]]:
@@ -130,6 +164,7 @@ class ProcedureWindow(QMainWindow):
         get_sample_info: Callable[[], dict[str, str]],
         get_data_dir: Callable[[], str],
         parent: QWidget | None = None,
+        initial_session: SessionState | None = None,
     ) -> None:
         super().__init__(parent)
         self._station = station
@@ -138,8 +173,17 @@ class ProcedureWindow(QMainWindow):
         self._get_data_dir = get_data_dir
 
         self._procedures: list[type[BaseProcedure]] = _discover_procedures()
-        # Queue items: list of (procedure_class, params_dict, sample_info_dict, data_dir)
-        self._queue: list[tuple[type[BaseProcedure], dict, dict, str]] = []
+        # Run queue as _QueueEntry objects (spec + params + lifecycle status).
+        self._queue: list[_QueueEntry] = []
+        # Per-procedure last-typed parameter text, keyed by procedure name, so
+        # switching procedures and back restores each one's field values.
+        self._procedure_params: dict[str, dict[str, str]] = {}
+        # Name of the procedure whose form is currently shown (for param cache
+        # bookkeeping across selection changes).
+        self._current_procedure_name: str = ""
+        # True while a queued run is executing, so procedure_finished advances
+        # the queue's per-item status.
+        self._queue_running = False
         # Widgets for the parameter form (rebuilt on procedure selection)
         self._param_inputs: dict[str, QLineEdit] = {}
         # Active procedure reference (set on run)
@@ -155,6 +199,9 @@ class ProcedureWindow(QMainWindow):
 
         if self._procedures:
             self._on_procedure_selected(0)
+
+        if initial_session is not None:
+            self._restore_session(initial_session)
 
     # ------------------------------------------------------------------
     # UI construction
@@ -515,10 +562,15 @@ class ProcedureWindow(QMainWindow):
         """
         if index < 0 or index >= len(self._procedures):
             return
+        # Preserve the outgoing procedure's typed values before rebuilding.
+        self._cache_current_params()
         cls = self._procedures[index]
         param_widget = self._build_param_form(cls)
         self._param_scroll.setWidget(param_widget)
         self._populate_axis_selectors(cls)
+        self._current_procedure_name = getattr(cls, "name", cls.__name__)
+        # Re-apply any previously-typed values for the incoming procedure.
+        self._apply_cached_params(self._current_procedure_name)
 
     def _collect_params(self) -> tuple[dict, dict, str] | None:
         """Read and validate all form inputs.
@@ -590,17 +642,20 @@ class ProcedureWindow(QMainWindow):
         index = self._proc_selector.currentIndex()
         cls = self._procedures[index]
 
-        self._queue.append((cls, param_values, sample_info, data_dir))
-
-        sweep_keys = list(cls.sweep_parameters.keys()) or list(cls.parameters.keys())
-        summary_parts = [f"{k}={param_values[k]}" for k in sweep_keys[:3]]
-        summary = f"{cls.name} ({', '.join(summary_parts)})"
-        item = QListWidgetItem(f"{len(self._queue)}. {summary}")
-        self._queue_list.addItem(item)
-
         # Construct through the shared _build_procedure_instance path (reusing the
         # params we already collected) instead of re-implementing cls(...) here.
         proc = self._build_procedure_instance(result)
+        entry = _QueueEntry(
+            cls=cls,
+            params=param_values,
+            sample_info=sample_info,
+            data_dir=data_dir,
+            status=STATUS_PENDING,
+            proc=proc,
+        )
+        self._queue.append(entry)
+        self._refresh_queue_list()
+
         if proc is not None:
             self._orchestrator.queue_procedure(proc)
 
@@ -722,17 +777,217 @@ class ProcedureWindow(QMainWindow):
         if row < 0 or row >= len(self._queue):
             return
         self._queue.pop(row)
-        self._orchestrator._procedure_queue.pop(row)
+        # Pending entries mirror the Orchestrator queue 1:1 and in order, so the
+        # same row indexes the instance to drop.
+        if row < len(self._orchestrator._procedure_queue):
+            self._orchestrator._procedure_queue.pop(row)
         self._refresh_queue_list()
 
+    def _entry_summary(self, entry: _QueueEntry) -> str:
+        """Return the one-line queue summary for a queue entry.
+
+        Args:
+            entry: The queue entry to summarise.
+
+        Returns:
+            ``"<ProcedureName> (k1=v1, k2=v2, ...)"`` using up to three sweep
+            (or, if none, plain) parameter keys.
+        """
+        cls = entry.cls
+        sweep_keys = list(cls.sweep_parameters.keys()) or list(cls.parameters.keys())
+        summary_parts = [
+            f"{k}={entry.params[k]}" for k in sweep_keys[:3] if k in entry.params
+        ]
+        return f"{cls.name} ({', '.join(summary_parts)})"
+
     def _refresh_queue_list(self) -> None:
-        """Rebuild the QListWidget from self._queue."""
+        """Rebuild the QListWidget from self._queue, annotating non-pending status."""
         self._queue_list.clear()
-        for idx, (cls, params, _sample, _dir) in enumerate(self._queue):
-            sweep_keys = list(cls.sweep_parameters.keys()) or list(cls.parameters.keys())
-            summary_parts = [f"{k}={params[k]}" for k in sweep_keys[:3]]
-            summary = f"{cls.name} ({', '.join(summary_parts)})"
-            self._queue_list.addItem(f"{idx + 1}. {summary}")
+        for idx, entry in enumerate(self._queue):
+            label = f"{idx + 1}. {self._entry_summary(entry)}"
+            if entry.status != STATUS_PENDING:
+                label = f"{label}  — {entry.status}"
+            self._queue_list.addItem(QListWidgetItem(label))
+
+    # ------------------------------------------------------------------
+    # Session persistence (procedure selection, params, queue)
+    # ------------------------------------------------------------------
+
+    def _cache_current_params(self) -> None:
+        """Store the current form's raw text under the current procedure name.
+
+        Raw text (not validated values) is cached so persistence never triggers
+        the "Invalid Parameter" dialog and half-typed values survive a switch.
+        """
+        if self._current_procedure_name and self._param_inputs:
+            self._procedure_params[self._current_procedure_name] = {
+                name: field.text() for name, field in self._param_inputs.items()
+            }
+
+    def _apply_cached_params(self, procedure_name: str) -> None:
+        """Fill the current form with cached values for ``procedure_name``, if any.
+
+        Args:
+            procedure_name: The procedure whose cached values to apply. Keys not
+                present in the current form are ignored.
+        """
+        cached = self._procedure_params.get(procedure_name)
+        if not cached:
+            return
+        for name, value in cached.items():
+            field = self._param_inputs.get(name)
+            if field is not None:
+                field.setText(str(value))
+
+    def _procedure_by_name(self, name: str) -> type[BaseProcedure] | None:
+        """Return the discovered procedure class whose name matches, or None."""
+        for cls in self._procedures:
+            if getattr(cls, "name", cls.__name__) == name:
+                return cls
+        return None
+
+    def _select_procedure_by_name(self, name: str) -> None:
+        """Select ``name`` in the dropdown and rebuild its form.
+
+        Rebuilds the form even when the index does not change (so a restored
+        selection that equals the default still gets its cached params applied).
+
+        Args:
+            name: The procedure name to select. A no-op if not found.
+        """
+        for i, cls in enumerate(self._procedures):
+            if getattr(cls, "name", cls.__name__) == name:
+                if self._proc_selector.currentIndex() == i:
+                    self._on_procedure_selected(i)  # signal won't fire; rebuild directly
+                else:
+                    self._proc_selector.setCurrentIndex(i)  # fires _on_procedure_selected
+                return
+
+    def _build_entry_procedure(self, entry: _QueueEntry) -> BaseProcedure | None:
+        """Build a procedure instance from a queue entry's stored values.
+
+        Unlike ``_build_procedure_instance`` (which reads the live form), this
+        rebuilds from an entry's frozen params/sample/data — used when re-arming
+        a restored queue.
+
+        Args:
+            entry: The queue entry to instantiate.
+
+        Returns:
+            The built procedure, or ``None`` if construction fails (logged).
+        """
+        try:
+            return entry.cls(
+                station=self._station,
+                sample_info=entry.sample_info,
+                data_directory=entry.data_dir,
+                **entry.params,
+            )
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "session: could not rebuild queued %s: %s", entry.cls.name, exc
+            )
+            return None
+
+    def _restore_queue(self, items: list[QueueItemState]) -> None:
+        """Rebuild the queue from persisted items, re-arming pending ones.
+
+        Items whose procedure name is unknown (e.g. a procedure removed since
+        the session was saved) are skipped with a warning. Pending items (and
+        any that were mid-run when the app closed) are rebuilt and re-queued in
+        the Orchestrator; already-completed items are shown for reference but
+        not re-run.
+
+        Args:
+            items: The persisted queue, oldest first.
+        """
+        self._queue.clear()
+        self._orchestrator._procedure_queue.clear()
+        for item in items:
+            cls = self._procedure_by_name(item.procedure)
+            if cls is None:
+                logger.warning(
+                    "session: unknown procedure %r in saved queue; skipping",
+                    item.procedure,
+                )
+                continue
+            # A "running" item never finished (app closed mid-run) — treat as pending.
+            status = (
+                STATUS_PENDING
+                if item.status in (STATUS_PENDING, STATUS_RUNNING)
+                else item.status
+            )
+            entry = _QueueEntry(
+                cls=cls,
+                params=dict(item.params),
+                sample_info=dict(item.sample_info),
+                data_dir=item.data_dir,
+                status=status,
+            )
+            if status == STATUS_PENDING:
+                entry.proc = self._build_entry_procedure(entry)
+                if entry.proc is not None:
+                    self._orchestrator.queue_procedure(entry.proc)
+            self._queue.append(entry)
+        self._refresh_queue_list()
+
+    def _restore_session(self, session_state: SessionState) -> None:
+        """Apply a loaded session to the procedure form and queue.
+
+        Args:
+            session_state: The session loaded at startup.
+        """
+        self._procedure_params = {
+            name: dict(values)
+            for name, values in session_state.procedure_params.items()
+        }
+        # Suppress caching the current default values over the restored ones
+        # while we switch the selector.
+        self._current_procedure_name = ""
+        if session_state.selected_procedure:
+            self._select_procedure_by_name(session_state.selected_procedure)
+        else:
+            # No saved selection: re-render the current procedure so any cached
+            # params for it are applied.
+            self._on_procedure_selected(self._proc_selector.currentIndex())
+        self._restore_queue(session_state.queue)
+
+    def export_session_state(self, state: SessionState) -> None:
+        """Write this window's selection, params, and queue into ``state``.
+
+        Called by MonitorWindow when persisting the session. Mutates ``state``
+        in place (the MonitorWindow owns the sample-info fields on the same
+        object).
+
+        Args:
+            state: The SessionState to populate.
+        """
+        self._cache_current_params()
+        state.selected_procedure = self._current_procedure_name
+        state.procedure_params = {
+            name: dict(values) for name, values in self._procedure_params.items()
+        }
+        state.queue = [
+            QueueItemState(
+                procedure=getattr(entry.cls, "name", entry.cls.__name__),
+                params=entry.params,
+                sample_info=entry.sample_info,
+                data_dir=entry.data_dir,
+                status=entry.status,
+            )
+            for entry in self._queue
+        ]
+
+    def reset_session(self) -> None:
+        """Clear the queue and cached params, resetting the form to defaults."""
+        self._queue.clear()
+        self._orchestrator._procedure_queue.clear()
+        self._queue_running = False
+        self._procedure_params.clear()
+        self._current_procedure_name = ""  # suppress caching stale values
+        self._refresh_queue_list()
+        if self._procedures:
+            self._on_procedure_selected(self._proc_selector.currentIndex())
 
     # ------------------------------------------------------------------
     # Window geometry + lifecycle

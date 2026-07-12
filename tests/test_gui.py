@@ -35,6 +35,7 @@ from cryosoft.core.station import build_station
 from cryosoft.gui.instrument_panel import InstrumentPanel
 from cryosoft.gui.monitor_window import MonitorWindow
 from cryosoft.gui.notification_banner import NotificationBanner
+from cryosoft.gui import session as session_store
 from cryosoft.gui.procedure_window import ProcedureWindow
 from cryosoft.gui.theme import (
     BANNER_ERROR_TEXT,
@@ -73,6 +74,11 @@ def isolated_settings(tmp_path, monkeypatch):
         return QSettings(str(ini_path), QSettings.Format.IniFormat)
 
     monkeypatch.setattr(app_settings, "get_settings", _fake_get_settings)
+
+    # Same seam for the JSON session file: redirect it into tmp_path so a pytest
+    # run never reads or overwrites the user's real last_session.json in AppData.
+    session_path = tmp_path / "last_session.json"
+    monkeypatch.setattr(app_settings, "session_file_path", lambda: session_path)
     return ini_path
 
 
@@ -864,3 +870,142 @@ def test_status_bar_label_effective_color_flips(themed_app, station, orchestrato
 
     orchestrator.state_changed.emit(OrchestratorState.IDLE.value)
     assert win._state_label.palette().windowText().color().name() == TEXT_PRIMARY
+
+
+# ── Session persistence tests ──────────────────────────────────────────────────
+# The autouse isolated_settings fixture redirects both QSettings and the JSON
+# session file into tmp_path, so these never touch the user's real AppData.
+
+
+def _sample_stub():
+    return lambda: {"sample_name": "s", "sample_id": "id", "comments": ""}
+
+
+def _data_dir_stub():
+    return lambda: "C:/CryoData"
+
+
+def test_monitor_window_has_session_menu(monitor_win):
+    """The menu bar has a leftmost 'Session' menu."""
+    titles = [a.text() for a in monitor_win.menuBar().actions()]
+    assert "Session" in titles
+    assert titles[0] == "Session"  # leftmost, by convention
+
+
+def test_monitor_restores_sample_fields_from_session(station, orchestrator, qtbot, tmp_path):
+    """Sample Info fields are populated from a saved session on open."""
+    session_store.save(
+        session_store.SessionState(
+            sample_name="Si_001",
+            sample_id="S2024-01",
+            comments="cooldown 2",
+            data_dir="D:/runs",
+        ),
+        tmp_path / "last_session.json",
+    )
+    win = MonitorWindow(station, orchestrator)
+    qtbot.addWidget(win)
+    assert win._sample_name_input.text() == "Si_001"
+    assert win._sample_id_input.text() == "S2024-01"
+    assert win._comments_input.toPlainText() == "cooldown 2"
+    assert win._data_dir_input.text() == "D:/runs"
+
+
+def test_monitor_saves_session_on_close(monitor_win, tmp_path):
+    """Closing the window persists the current Sample Info to the session file."""
+    monitor_win._sample_name_input.setText("SampleZ")
+    monitor_win._data_dir_input.setText("E:/data")
+    monitor_win.close()
+    loaded = session_store.load(tmp_path / "last_session.json")
+    assert loaded.sample_name == "SampleZ"
+    assert loaded.data_dir == "E:/data"
+
+
+def test_new_session_clears_fields(monitor_win, monkeypatch):
+    """New Session (confirmed) resets the Sample Info fields to defaults."""
+    from PyQt6.QtWidgets import QMessageBox
+
+    monitor_win._sample_name_input.setText("ToClear")
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes
+    )
+    monitor_win._on_new_session()
+    assert monitor_win._sample_name_input.text() == ""
+    assert monitor_win._data_dir_input.text() == "C:/CryoData"
+
+
+def test_new_session_cancel_keeps_fields(monitor_win, monkeypatch):
+    """Declining the New Session confirmation leaves the fields untouched."""
+    from PyQt6.QtWidgets import QMessageBox
+
+    monitor_win._sample_name_input.setText("Keep")
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.No
+    )
+    monitor_win._on_new_session()
+    assert monitor_win._sample_name_input.text() == "Keep"
+
+
+def test_procedure_window_restores_selection_and_params(station, orchestrator, qtbot):
+    """A ProcedureWindow built with a session restores its selection and params."""
+    info, ddir = _sample_stub(), _data_dir_stub()
+    win = ProcedureWindow(station, orchestrator, info, ddir)
+    qtbot.addWidget(win)
+
+    proc_name = win._current_procedure_name
+    param_key = next(iter(win._param_inputs))
+    win._param_inputs[param_key].setText("42")
+
+    state = session_store.SessionState()
+    win.export_session_state(state)
+    assert state.selected_procedure == proc_name
+    assert state.procedure_params[proc_name][param_key] == "42"
+
+    # Reuse the fixture Orchestrator (avoids a second live QTimer in teardown).
+    win2 = ProcedureWindow(station, orchestrator, info, ddir, initial_session=state)
+    qtbot.addWidget(win2)
+    assert win2._proc_selector.currentText() == proc_name
+    assert win2._param_inputs[param_key].text() == "42"
+
+
+def test_procedure_window_exports_and_restores_queue(station, orchestrator, qtbot):
+    """A queued procedure round-trips through a session and is re-armed on restore."""
+    info, ddir = _sample_stub(), _data_dir_stub()
+    win = ProcedureWindow(station, orchestrator, info, ddir)
+    qtbot.addWidget(win)
+
+    win._on_add_to_queue()
+    assert win._queue_list.count() == 1, "default form params should be valid to queue"
+
+    state = session_store.SessionState()
+    win.export_session_state(state)
+    assert len(state.queue) == 1
+
+    # Restore into a second window on the SAME Orchestrator: _restore_queue
+    # clears the pending queue and re-arms it, so the count stays 1.
+    win2 = ProcedureWindow(station, orchestrator, info, ddir, initial_session=state)
+    qtbot.addWidget(win2)
+    assert win2._queue_list.count() == 1
+    assert len(orchestrator._procedure_queue) == 1
+
+
+def test_monitor_persists_procedure_queue_on_close(monitor_win, tmp_path):
+    """Closing the Monitor persists an open ProcedureWindow's queue."""
+    monitor_win._open_procedures()
+    pw = monitor_win._procedure_window
+    pw._on_add_to_queue()
+    assert pw._queue_list.count() == 1
+    monitor_win.close()
+    loaded = session_store.load(tmp_path / "last_session.json")
+    assert len(loaded.queue) == 1
+
+
+def test_procedure_window_skips_unknown_procedure_in_queue(station, orchestrator, qtbot):
+    """A saved queue item for an unknown procedure is skipped, not fatal."""
+    info, ddir = _sample_stub(), _data_dir_stub()
+    state = session_store.SessionState(
+        queue=[session_store.QueueItemState(procedure="NoSuchProcedure")]
+    )
+    win = ProcedureWindow(station, orchestrator, info, ddir, initial_session=state)
+    qtbot.addWidget(win)
+    assert win._queue_list.count() == 0
