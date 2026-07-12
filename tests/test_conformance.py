@@ -150,6 +150,35 @@ def test_driver_module_contract(module_name: str) -> None:
     )
 
 
+@pytest.mark.parametrize("module_name", _driver_module_names())
+def test_driver_has_get_idn(module_name: str) -> None:
+    """Every driver exposes get_idn() taking no arguments.
+
+    get_idn() is the universal "is the right instrument at this address?"
+    probe used by the troubleshoot engine's config preflight. Pre-SCPI
+    instruments that do not answer ``*IDN?`` (the Oxford ISOBUS family)
+    implement it with their native identify command (``V``) instead.
+    """
+    module = importlib.import_module(f"cryosoft.drivers.{module_name}")
+    (cls,) = _public_classes(module)
+    method = getattr(cls, "get_idn", None)
+    assert callable(method), (
+        f"{cls.__name__} lacks get_idn() — every driver must expose an "
+        f"identification query under this uniform name"
+    )
+    required = [
+        p
+        for p in inspect.signature(method).parameters.values()
+        if p.name != "self"
+        and p.default is inspect.Parameter.empty
+        and p.kind not in (p.VAR_POSITIONAL, p.VAR_KEYWORD)
+    ]
+    assert not required, (
+        f"{cls.__name__}.get_idn() must take no required arguments, "
+        f"got {[p.name for p in required]}"
+    )
+
+
 @pytest.mark.parametrize(
     "module_name",
     [m for m in _driver_module_names() if m.startswith("sim_")],

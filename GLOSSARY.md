@@ -56,7 +56,13 @@ same commit that introduces it.
 
 | Term | Definition |
 |---|---|
-| **Layer contracts (C1–C8)** | The machine-checked import rules in `pyproject.toml` `[tool.importlinter]`. Run with `make contracts`. A broken contract means the change crosses a layer boundary — route through the proper interface instead of editing the contract. |
+| **Layer contracts (C1–C10)** | The machine-checked import rules in `pyproject.toml` `[tool.importlinter]`. Run with `make contracts`. A broken contract means the change crosses a layer boundary — route through the proper interface instead of editing the contract. C9/C10 isolate the troubleshoot toolbox in both directions. |
+| **Troubleshoot toolbox** | `cryosoft/troubleshoot/` — the diagnostic package (engine + CLI) for commissioning and debugging a setup. A leaf entry point beside the stack, like `main.py`: it may import drivers and the Station's config helpers; nothing in cryosoft imports it. Run while the main app is closed (serial ports are exclusive-open). |
+| **Fault taxonomy / FaultCode** | The stable machine-readable outcome codes every troubleshoot probe returns (`OK`, `CONFIG_INVALID`, `ADDRESS_NOT_ON_BUS`, `OPEN_FAILED`, `NO_RESPONSE`, `WRONG_IDN`, `GARBLED_RESPONSE`, `DRIVER_ERROR`). Codes are API for the triage skill: never renamed, only extended. |
+| **Config preflight** | `check_config()` in the troubleshoot engine: for every `real_drivers` entry, verify bus presence, construct the driver, call `get_idn()`, and optionally match the config's `expect_idn` substring. The "is everything connected?" check run before a cooldown. |
+| **Driver bench** | `DriverBench` in the troubleshoot engine: wraps one driver instance for method introspection, read/write-gated calls, and raw SCPI query/send. The primitive behind driver development and per-instrument debugging. |
+| **`expect_idn`** | Optional key on a `real_drivers` entry in `devices.yaml`: a case-insensitive substring the instrument's `get_idn()` reply must contain. Lets the preflight detect swapped addresses/cables (`WRONG_IDN`). |
+| **`get_idn()` (driver contract)** | Every driver — sim and real — exposes `get_idn()` taking no arguments, returning an identification string. Pre-SCPI Oxford instruments implement it with their native `V` command. Enforced by conformance. |
 | **Conformance tests** | `tests/test_conformance.py`. Auto-discover every driver, VI, procedure, and config and check they follow their interface contracts. A new module is covered automatically, with no test-writing needed. |
 | **`make check`** | The blocking quality gate (lint + contracts + tests). Run it before declaring any work done; CI runs exactly the same targets. |
 | **`hardware` marker** | Pytest marker for tests needing physical instruments. Excluded by `make test` and CI; run manually at the cryostat. |

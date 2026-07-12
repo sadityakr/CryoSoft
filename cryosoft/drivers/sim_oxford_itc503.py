@@ -88,6 +88,11 @@ class SimOxfordITC503:
         self._check_error()
         return min(100.0, abs(self._setpoint - self._temperature) * 10.0)
 
+    def get_idn(self) -> str:
+        """Return simulated identification string (matches OxfordITC503)."""
+        self._check_error()
+        return "OXFORD,ITC503,SIM,1.0"
+
     # ------------------------------------------------------------------
     # Needle valve API (auxiliary analog output on real ITC503)
     # ------------------------------------------------------------------
