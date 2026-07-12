@@ -79,6 +79,21 @@ def test_base_procedure_empty_sweep():
     proc = NullProc(station=None, sample_info={}, data_directory="/tmp")
     assert proc.get_sweep_array() == []
     assert proc.get_progress() == 1.0
+    assert proc.get_sweep_position() == (0, 0)
+
+
+def test_base_procedure_sweep_position_is_one_based():
+    """get_sweep_position() reports human 1-based point number and total."""
+    class AxisProc(BaseProcedure):
+        sweep_axis = SweepAxis(
+            key="voltage", unit="V", data_key="voltage_V", description="Bias voltage",
+            default_start=0.0, default_end=1.0, default_steps=3,
+        )
+
+    proc = AxisProc(station=None, sample_info={}, data_directory="/tmp")
+    assert proc.get_sweep_position() == (1, 3)   # _index starts at 0 -> point 1 of 3
+    proc._index = 2
+    assert proc.get_sweep_position() == (3, 3)
 
 
 def test_base_procedure_sweep_axis_default_build_sweep_array():

@@ -100,6 +100,45 @@ def test_full_procedure_cycle(orchestrator, station, qtbot):
     assert OrchestratorState.STANDBY.value in states
 
 
+def test_status_messages_emitted_during_run(orchestrator, station, qtbot):
+    """A full run emits concise status milestones on status_message.
+
+    MockProcedure has no get_sweep_position/get_sweep_array, so the line
+    builders exercise their generic fallbacks — this also confirms status
+    formatting can never raise into the tick.
+    """
+    procedure = MockProcedure(station)
+    station.magnet_x._default_ramp_rate = 6000.0
+    station.magnet_x._ramp_segments = []
+
+    messages: list[str] = []
+    orchestrator.status_message.connect(messages.append)
+
+    orchestrator.run_procedure(procedure)
+    with qtbot.waitSignal(orchestrator.procedure_finished, timeout=5000):
+        pass
+
+    assert messages, "no status messages were emitted during the run"
+    assert any("Initiating" in m for m in messages)
+    # Distinct setup action, labelled from the magnet VI's setpoint metadata.
+    assert any("Ramping field to" in m for m in messages)
+    assert any("Measuring" in m for m in messages)
+    assert any("parking" in m.lower() for m in messages)
+    assert any("finished" in m.lower() for m in messages)
+    # The initiation line must not be mislabelled as a sweep point.
+    assert not any(m.startswith("Point 1/") for m in messages)
+
+
+def test_station_setpoint_and_measurement_labels(station):
+    """Station exposes each VI's declarative label/unit for status lines."""
+    assert station.system_setpoint_meta("magnet_x") == ("field", "T")
+    assert station.system_setpoint_meta("temperature_vti") == ("temperature", "K")
+    assert station.measurement_label("dc_measurement") == "DC resistance"
+    # Unknown VI degrades to (name, "") / name rather than raising.
+    assert station.system_setpoint_meta("nope") == ("nope", "")
+    assert station.measurement_label("nope") == "nope"
+
+
 def test_standby_waits_for_its_own_ramp_before_finishing(orchestrator, station, qtbot):
     """procedure_finished must not fire until standby()'s own ramp completes.
 

@@ -54,6 +54,7 @@ class DeltaModeMeasurementVI(MeasurementInstrumentBase):
     """
 
     SUPPORTED_METHODS = ("delta_mode",)
+    display_label: str = "delta-mode resistance"
 
     def __init__(self, drivers: dict[str, object], **init_params: Any) -> None:
         super().__init__(drivers, **init_params)

@@ -29,6 +29,7 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QSplitter,
     QStackedWidget,
+    QTextEdit,
 )
 
 from cryosoft.core.config_catalog import ConfigCatalog
@@ -696,11 +697,30 @@ def test_monitor_default_layout_when_settings_empty(monitor_win, station):
 
 
 def test_procedure_splitters_not_collapsible(procedure_win):
-    """All 3 ProcedureWindow quadrant splitters have children-collapsing disabled."""
+    """All ProcedureWindow splitters have children-collapsing disabled.
+
+    Four splitters: the main horizontal split, the left/right vertical
+    quadrant splits, and the queue-over-status vertical split inside the
+    top-right quadrant.
+    """
     splitters = procedure_win.findChildren(QSplitter)
-    assert len(splitters) == 3, f"Expected 3 splitters, found {len(splitters)}"
+    assert len(splitters) == 4, f"Expected 4 splitters, found {len(splitters)}"
     for sp in splitters:
         assert sp.childrenCollapsible() is False
+
+
+def test_status_log_present_and_read_only(procedure_win):
+    """The concise Status log widget exists in the top-right quadrant and is read-only."""
+    status_log = procedure_win.findChild(QTextEdit, "status_log")
+    assert status_log is not None, "status_log not found"
+    assert status_log.isReadOnly()
+
+
+def test_status_log_appends_status_messages(procedure_win, orchestrator):
+    """A status_message signal appends a timestamped line to the Status log."""
+    status_log = procedure_win.findChild(QTextEdit, "status_log")
+    orchestrator.status_message.emit("Measuring point 3/11")
+    assert "Measuring point 3/11" in status_log.toPlainText()
 
 
 def test_procedure_quadrant_splitters_correctly_oriented(procedure_win):

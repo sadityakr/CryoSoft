@@ -278,8 +278,9 @@ QTextEdit {{
     selection-color: {TEXT_ON_ACCENT};
 }}
 
-/* Log panel — targeted by objectName ─────────────────────────────────── */
-QTextEdit#log_panel {{
+/* Log panels — targeted by objectName ────────────────────────────────── */
+QTextEdit#log_panel,
+QTextEdit#status_log {{
     background-color: {BG_ELEVATED};
     font-family: "Consolas", "Courier New", monospace;
     font-size: 10pt;

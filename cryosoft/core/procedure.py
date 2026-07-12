@@ -261,6 +261,21 @@ class BaseProcedure:
             return 1.0
         return self._index / len(self._sweep)
 
+    def get_sweep_position(self) -> tuple[int, int]:
+        """Return ``(current_point, total_points)`` as human 1-based counts.
+
+        The Orchestrator uses this to compose concise status lines such as
+        "Point 13/101" without reaching into ``_index``. Returns ``(0, 0)``
+        for an empty sweep.
+
+        Returns:
+            ``(index + 1, len(sweep))``; ``(0, 0)`` when the sweep is empty.
+        """
+        total = len(self._sweep)
+        if total == 0:
+            return (0, 0)
+        return (self._index + 1, total)
+
     # ------------------------------------------------------------------
     # Four-method procedure interface — must override in subclass
     # ------------------------------------------------------------------

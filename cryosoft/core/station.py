@@ -106,6 +106,35 @@ class Station:
         """
         return self._vi_registry[vi_name]
 
+    def system_setpoint_meta(self, vi_name: str) -> tuple[str, str]:
+        """Return ``(label, unit)`` describing a VI's ramp setpoint.
+
+        Reads the VI class's declarative ``setpoint_label`` / ``setpoint_unit``
+        (declared once per instrument category), falling back to the VI name and
+        no unit. Lets the Orchestrator render human status lines like
+        "Ramping field to -1 T" without reaching into VI internals.
+
+        Args:
+            vi_name: Name of the registered VI.
+
+        Returns:
+            ``(label, unit)``; ``(vi_name, "")`` if the VI is unknown or
+            declares no setpoint metadata.
+        """
+        vi = self._virtual_instruments.get(vi_name)
+        label = getattr(vi, "setpoint_label", "") or vi_name
+        unit = getattr(vi, "setpoint_unit", "") or ""
+        return label, unit
+
+    def measurement_label(self, vi_name: str) -> str:
+        """Return a human label for a measurement VI (e.g. "DC resistance").
+
+        Falls back to the VI name if the VI is unknown or declares no
+        ``display_label``.
+        """
+        vi = self._virtual_instruments.get(vi_name)
+        return getattr(vi, "display_label", "") or vi_name
+
     def __getattr__(self, name: str) -> BaseVirtualInstrument:
         """Attribute-style access to VIs: ``station.magnet_x``.
 
