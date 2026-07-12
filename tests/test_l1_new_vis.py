@@ -329,6 +329,48 @@ class TestSuperConductingMagnetPersistentVI:
             vi.advance_ramp()
         assert ips_driver._setpoint == sp_after
 
+    # -- control-validation standard: switch-heater mismatch guard ---------
+
+    def test_switch_heater_on_refused_across_current_mismatch(self, ips_driver):
+        """The manual heater button must refuse when PSU != coil current —
+        pressing it would quench the magnet. The guard fires BEFORE any
+        driver command, so the sim must not see a quench either."""
+        from cryosoft.core.exceptions import CryoSoftSafetyError
+
+        vi = self._make_vi(ips_driver, warmup_ticks=1, cooldown_ticks=1)
+        # Park persistent at 2 T: coil 20 A, PSU 0 A, heater off.
+        vi.start_ramp(2.0)
+        assert self._drive_to_target_reached(vi, ips_driver)
+
+        with pytest.raises(CryoSoftSafetyError, match="switch heater"):
+            vi.switch_heater_on()
+        assert ips_driver.get_status() != "QUENCH"
+        assert vi.switch_heater_state() == "OFF"
+
+    def test_switch_heater_on_allowed_when_currents_match(self, ips_driver):
+        vi = self._make_vi(ips_driver)
+        # Fresh magnet: coil 0 A, PSU 0 A — matched, heater may go on.
+        vi.switch_heater_on()
+        assert vi.switch_heater_state() == "ON"
+
+    # -- control-validation standard: declarative field limit --------------
+
+    def test_set_field_beyond_setup_limit_is_refused(self, ips_driver):
+        """set_field() outside the config-derived field limit must raise
+        (loud reject), not silently clamp — the user asked for a field the
+        setup cannot produce and must be told."""
+        from cryosoft.core.exceptions import CryoSoftSafetyError
+
+        vi = self._make_vi(ips_driver)  # max_current 90 A / 10 A/T -> ±9 T
+        with pytest.raises(CryoSoftSafetyError, match="outside the allowed range"):
+            vi.set_field(12.0)
+        assert vi.ramp_status() == "IDLE"  # no ramp was started
+
+    def test_set_field_within_limit_still_works(self, ips_driver):
+        vi = self._make_vi(ips_driver)
+        vi.set_field(2.0)
+        assert vi.ramp_status() == "RAMPING"
+
     # -- stop_ramp(): abort must freeze the autonomous PSU, not just kill
     #    the software generator (review finding C3) ------------------------
 
@@ -391,6 +433,44 @@ class TestSampleTemperatureControllerVI:
         itc_driver._temperature = 300.05  # Force within tolerance
         itc_driver._setpoint = 300.1
         assert vi.ramp_status() in ("TARGET_REACHED", "RAMPING")
+
+    def test_temperature_and_rate_limits_from_init_params(self, itc_driver):
+        """Config-declared temperature / ramp-rate bounds are enforced on the
+        @control entry points (control-validation standard)."""
+        from cryosoft.core.exceptions import CryoSoftSafetyError
+        from cryosoft.virtual_instruments.temperature.sample_temperature_controller import (
+            SampleTemperatureControllerVI,
+        )
+
+        vi = SampleTemperatureControllerVI(
+            {"main": itc_driver},
+            default_ramp_rate=2.0,
+            tolerance=0.5,
+            min_temperature_K=1.4,
+            max_temperature_K=320.0,
+            max_ramp_rate_K_per_min=20.0,
+        )
+        vi.vi_name = "temperature_sample"
+
+        with pytest.raises(CryoSoftSafetyError, match="outside the allowed range"):
+            vi.set_temperature(400.0)
+        with pytest.raises(CryoSoftSafetyError, match="outside the allowed range"):
+            vi.set_temperature(0.5)
+        with pytest.raises(CryoSoftSafetyError, match="outside the allowed range"):
+            vi.set_ramp_rate(50.0)
+        with pytest.raises(ValueError):
+            vi.set_ramp_rate(0.0)  # semantic guard: rate must be positive
+
+        # Within bounds — accepted (driver starts at 300 K, so ramp toward
+        # 250 K is genuinely in progress).
+        vi.set_temperature(250.0)
+        assert vi.ramp_status() == "RAMPING"
+
+    def test_no_limits_in_init_params_means_unbounded(self, itc_driver):
+        """A setup that declares no temperature bounds keeps working (open range)."""
+        vi = self._make_vi(itc_driver)
+        vi.set_temperature(500.0)  # no max_temperature_K configured
+        assert vi.ramp_status() == "RAMPING"
 
     def test_stop_ramp_pins_setpoint_to_current_temperature(self, itc_driver):
         """stop_ramp() must go IDLE and pin the setpoint where the system is —

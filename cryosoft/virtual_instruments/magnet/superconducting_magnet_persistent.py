@@ -48,6 +48,7 @@ from __future__ import annotations
 from typing import Any, Generator
 
 from cryosoft.core.decorators import control, monitored
+from cryosoft.core.exceptions import CryoSoftSafetyError
 from cryosoft.virtual_instruments.magnet.superconducting_magnet import SuperconductingMagnetVI
 
 
@@ -122,8 +123,7 @@ class SuperconductingMagnetPersistentVI(SuperconductingMagnetVI):
                 holding the target directly — for a sequence of many ramps
                 (e.g. a field sweep) that should only heat the switch once.
         """
-        target_A = target * self._amperes_per_tesla
-        target_A = max(self._min_current, min(self._max_current, target_A))
+        target_A = self._clamp_target_A(target * self._amperes_per_tesla)
 
         self._pending_persistent = persistent
         self._ramp_gen = self._persistent_ramp_generator(target_A, persistent)
@@ -275,11 +275,26 @@ class SuperconductingMagnetPersistentVI(SuperconductingMagnetVI):
     def switch_heater_on(self) -> None:
         """Energise the switch heater (manual GUI use only).
 
-        Warning: use ``start_ramp()`` for safe field changes. Directly
-        toggling the heater while the PSU current differs from the coil
-        current will cause a quench.
+        Refused while the PSU output differs from the coil current: heating
+        the switch across a mismatch forces the stored coil current through
+        the resistive switch — a quench. Use ``start_ramp()`` for field
+        changes; it sequences the current matching automatically.
+
+        Raises:
+            CryoSoftSafetyError: If PSU and coil currents are mismatched.
         """
-        self._driver.set_switch_heater(True)  # type: ignore[attr-defined]
+        driver = self._driver  # type: ignore[attr-defined]
+        psu_A = driver.get_current()
+        coil_A = driver.get_coil_current()
+        if abs(psu_A - coil_A) > 0.01:
+            raise CryoSoftSafetyError(
+                f"Refusing to energise switch heater: PSU output is "
+                f"{psu_A:.3f} A but the coil holds {coil_A:.3f} A. Heating "
+                f"the switch across this mismatch would quench the magnet. "
+                f"Ramp the PSU to the coil current first (start_ramp does "
+                f"this automatically)."
+            )
+        driver.set_switch_heater(True)
 
     @control
     def switch_heater_off(self) -> None:

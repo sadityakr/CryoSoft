@@ -30,11 +30,14 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Generator
 
 from cryosoft.core.decorators import control, monitored
 from cryosoft.virtual_instruments.base import MagnetBase
 from cryosoft.virtual_instruments.rampable import RampableVI
+
+logger = logging.getLogger(__name__)
 
 
 class SuperconductingMagnetVI(MagnetBase, RampableVI):
@@ -67,6 +70,12 @@ class SuperconductingMagnetVI(MagnetBase, RampableVI):
     simultaneously or rate first then setpoint) is the driver's responsibility.
     """
 
+    # Control-validation standard (see BaseVirtualInstrument): user-facing
+    # set_field() is bounded by the setup's field limit, derived in __init__
+    # from the config's max_current / min_current (or explicit
+    # min_field_T / max_field_T keys when the config provides them).
+    control_limits = {"set_field": {"target_T": "field_T"}}
+
     def __init__(self, drivers: dict[str, object], **init_params: Any) -> None:
         super().__init__(drivers, **init_params)
         self._driver = drivers["main"]
@@ -76,6 +85,17 @@ class SuperconductingMagnetVI(MagnetBase, RampableVI):
         self._ramp_segments: list[dict] = list(init_params.get("ramp_segments", []))
         self._max_current: float = float(init_params.get("max_current", 90.0))
         self._min_current: float = float(init_params.get("min_current", -90.0))
+
+        # Field limit for set_field(): explicit config keys win; otherwise
+        # derived from the setup's current limits.
+        min_field = init_params.get("min_field_T")
+        max_field = init_params.get("max_field_T")
+        self._limits["field_T"] = (
+            float(min_field) if min_field is not None
+            else self._min_current / self._amperes_per_tesla,
+            float(max_field) if max_field is not None
+            else self._max_current / self._amperes_per_tesla,
+        )
 
         self._ramp_gen: Generator | None = None
         self._ramp_exhausted: bool = True
@@ -97,8 +117,7 @@ class SuperconductingMagnetVI(MagnetBase, RampableVI):
                 ``SuperconductingMagnetPersistentVI``.
         """
         _ = persistent
-        target_A = target * self._amperes_per_tesla
-        target_A = max(self._min_current, min(self._max_current, target_A))
+        target_A = self._clamp_target_A(target * self._amperes_per_tesla)
 
         self._ramp_gen = self._ramp_generator(target_A)
         self._ramp_exhausted = False
@@ -106,6 +125,24 @@ class SuperconductingMagnetVI(MagnetBase, RampableVI):
             next(self._ramp_gen)
         except StopIteration:
             self._ramp_exhausted = True
+
+    def _clamp_target_A(self, target_A: float) -> float:
+        """Clamp a target current to the setup's limits, loudly.
+
+        Last-resort hardware protection for programmatic callers
+        (procedures). User-facing set_field() already rejects loudly via the
+        control-limits wrapper before reaching this point, so a silent clamp
+        here would only ever hide a bug — hence the warning.
+        """
+        clamped_A = max(self._min_current, min(self._max_current, target_A))
+        if clamped_A != target_A:
+            logger.warning(
+                "%s: requested %.4g A exceeds current limits [%.4g, %.4g] — "
+                "clamped to %.4g A",
+                self.vi_name or type(self).__name__,
+                target_A, self._min_current, self._max_current, clamped_A,
+            )
+        return clamped_A
 
     def advance_ramp(self) -> None:
         """Advance the ramp generator by one tick."""

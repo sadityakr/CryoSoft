@@ -42,8 +42,9 @@ import pytest
 import cryosoft.drivers
 import cryosoft.procedures
 import cryosoft.virtual_instruments
+from cryosoft.core.exceptions import CryoSoftSafetyError
 from cryosoft.core.procedure import BaseProcedure
-from cryosoft.core.station import Station, _import_class
+from cryosoft.core.station import Station, _import_class, build_station
 from cryosoft.virtual_instruments.base import BaseVirtualInstrument
 
 CONFIGS_DIR = Path(cryosoft.__file__).parent / "configs"
@@ -341,3 +342,107 @@ def test_config_schema(config_dir: Path) -> None:
             assert drv_ref in driver_names, (
                 f"VI '{vi_name}' role '{role}' references unknown driver '{drv_ref}'"
             )
+
+
+# ── Control-validation standard ───────────────────────────────────────────────
+# See BaseVirtualInstrument's "Control-validation standard" docstring: VIs
+# declare control_limits (method -> {param: limit_name}); __init__ populates
+# self._limits from the config's init_params; the base class enforces at call
+# time. These tests make the standard binding for every future VI and config.
+
+
+def test_control_limits_reference_real_control_methods_and_params() -> None:
+    """Every control_limits entry names an existing @control method and real params."""
+    for cls in _all_vi_classes():
+        for method_name, param_map in cls.control_limits.items():
+            method = getattr(cls, method_name, None)
+            assert callable(method), (
+                f"{cls.__name__}.control_limits names '{method_name}', "
+                f"which is not a method on the class"
+            )
+            assert getattr(method, "_is_control", False), (
+                f"{cls.__name__}.control_limits names '{method_name}', "
+                f"which is not tagged @control — limits only guard @control methods"
+            )
+            sig_params = set(inspect.signature(method).parameters)
+            for param_name in param_map:
+                assert param_name in sig_params, (
+                    f"{cls.__name__}.control_limits['{method_name}'] names "
+                    f"parameter '{param_name}', which is not in the method signature"
+                )
+
+
+def _sim_config_dirs() -> list[Path]:
+    """Config dirs whose drivers are all simulated (buildable without hardware)."""
+    result = []
+    for config_dir in _config_dirs():
+        devices = _load_yaml(config_dir / "devices.yaml")
+        driver_classes = [
+            cfg["class"] for cfg in devices.get("real_drivers", {}).values()
+        ]
+        if driver_classes and all(".sim_" in c for c in driver_classes):
+            result.append(config_dir)
+    return result
+
+
+@pytest.mark.parametrize("config_dir", _sim_config_dirs(), ids=lambda p: p.name)
+def test_config_populates_all_declared_control_limits(config_dir: Path) -> None:
+    """Every limit a VI declares must be populated when built from this config.
+
+    A declared-but-unpopulated limit would otherwise only explode when a user
+    presses the button (CryoSoftConfigError at call time); this test moves
+    that failure to CI.
+    """
+    station = build_station(str(config_dir))
+    for vi_name in station.get_vi_names():
+        vi = getattr(station, vi_name)
+        for method_name, param_map in type(vi).control_limits.items():
+            for param_name, limit_name in param_map.items():
+                assert limit_name in vi._limits, (
+                    f"{config_dir.name}: VI '{vi_name}' declares limit "
+                    f"'{limit_name}' for {method_name}({param_name}) but its "
+                    f"__init__ never populated self._limits with it — add the "
+                    f"config key or the derivation"
+                )
+
+
+@pytest.mark.parametrize("config_dir", _sim_config_dirs(), ids=lambda p: p.name)
+def test_declared_finite_limits_reject_out_of_range(config_dir: Path) -> None:
+    """Every finite upper limit actually refuses an out-of-range @control call.
+
+    Calls each limited @control method with a value beyond its declared
+    maximum and requires CryoSoftSafetyError — i.e. the standard is not just
+    declared, it is enforced, for every VI in every buildable config.
+    """
+    station = build_station(str(config_dir))
+    enforced = 0
+    for vi_name in station.get_vi_names():
+        vi = getattr(station, vi_name)
+        for method_name, param_map in type(vi).control_limits.items():
+            method = getattr(vi, method_name)
+            control_params = getattr(method, "_control_params", {})
+            for param_name, limit_name in param_map.items():
+                _lo, hi = vi._limits[limit_name]
+                if hi is None:
+                    continue  # unbounded above — nothing to violate
+                # Fill the method's other params from their defaults; skip if
+                # any lacks one (cannot build a safe call generically).
+                kwargs: dict = {}
+                buildable = True
+                for other_name, other_info in control_params.items():
+                    if other_name == param_name:
+                        continue
+                    if "default" in other_info:
+                        kwargs[other_name] = other_info["default"]
+                    else:
+                        buildable = False
+                if not buildable:
+                    continue
+                kwargs[param_name] = hi + abs(hi) + 1.0
+                with pytest.raises(CryoSoftSafetyError):
+                    method(**kwargs)
+                enforced += 1
+    assert enforced > 0, (
+        f"{config_dir.name}: no finite limits were exercised — expected at "
+        f"least one limited @control method"
+    )

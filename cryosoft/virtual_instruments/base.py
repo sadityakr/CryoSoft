@@ -2,9 +2,13 @@
 # description: |
 #   BaseVirtualInstrument: the root class for all CryoSoft Virtual Instruments.
 #   Provides __init_subclass__ auto-wrapping of @monitored/@control methods with
-#   structured logging, get_state() auto-build, and typed sub-bases for each VI
-#   category (MagnetBase, TemperatureControllerBase, LevelMeterBase,
-#   MeasurementInstrumentBase, DCMeasurementBase).
+#   structured logging AND declarative limit enforcement (the control-validation
+#   standard: control_limits class attr + self._limits populated from config
+#   init_params; out-of-range @control calls raise CryoSoftSafetyError before
+#   any hardware command). Also get_state() auto-build, evaluate_safety() hook,
+#   and typed sub-bases for each VI category (MagnetBase,
+#   TemperatureControllerBase, LevelMeterBase, MeasurementInstrumentBase,
+#   DCMeasurementBase).
 # entry_point: Not run directly; imported by all concrete VI modules.
 # dependencies:
 #   - cryosoft.core.exceptions
@@ -33,10 +37,15 @@ Do NOT import from Station, Orchestrator, or Procedure here.
 from __future__ import annotations
 
 import functools
+import inspect
 import logging
 from typing import Any
 
-from cryosoft.core.exceptions import CryoSoftCommunicationError
+from cryosoft.core.exceptions import (
+    CryoSoftCommunicationError,
+    CryoSoftConfigError,
+    CryoSoftSafetyError,
+)
 
 
 class BaseVirtualInstrument:
@@ -50,11 +59,42 @@ class BaseVirtualInstrument:
     * Tag read-only polling methods with ``@monitored``.
     * Tag user-callable action methods with ``@control``.
     * The constructor signature MUST be ``__init__(self, drivers, **init_params)``.
+
+    Control-validation standard
+    ---------------------------
+    Every numeric ``@control`` parameter with a physical bound MUST be covered
+    by the declarative limits mechanism:
+
+    1. Declare ``control_limits`` on the class, mapping method name →
+       ``{parameter_name: limit_name}``.
+    2. In ``__init__``, populate ``self._limits[limit_name] = (lo, hi)`` from
+       ``init_params`` (setup-specific values from the config YAML; ``None``
+       means unbounded on that side). A limit may be derived (e.g. max field
+       from max current), but the *values* always originate from the config,
+       because limits are properties of the setup, not the code.
+    3. Enforcement is inherited: ``__init_subclass__`` wraps every ``@control``
+       method so an out-of-range value raises ``CryoSoftSafetyError`` with the
+       reason BEFORE any hardware command is sent. A declared limit_name that
+       was never populated raises ``CryoSoftConfigError`` (loud standard
+       violation, caught by the conformance tests).
+
+    Rules that cannot be expressed as a numeric range (e.g. "never energise
+    the switch heater across a PSU/coil current mismatch") are written as
+    explicit checks at the top of the ``@control`` method, raising
+    ``CryoSoftSafetyError`` with a human-readable reason.
+
+    Subclasses that ADD limits must merge, not replace::
+
+        control_limits = {**ParentVI.control_limits, "set_x": {"x": "x_lim"}}
     """
 
     vi_type: str = "unknown"
     # vi_name is set by the Station factory after instantiation, not in __init__.
     vi_name: str = ""
+
+    # Declarative control limits: {method_name: {param_name: limit_name}}.
+    # See "Control-validation standard" in the class docstring.
+    control_limits: dict[str, dict[str, str]] = {}
 
     # ------------------------------------------------------------------
     # __init_subclass__: auto-wrap @monitored / @control methods
@@ -73,6 +113,13 @@ class BaseVirtualInstrument:
             is_monitored = getattr(attr_value, "_is_monitored", False)
             is_control = getattr(attr_value, "_is_control", False)
             if is_monitored or is_control:
+                if is_control:
+                    # Innermost wrapper: declarative limit enforcement (the
+                    # control-validation standard). Composed inside the
+                    # logging wrapper so rejections are also logged.
+                    attr_value = BaseVirtualInstrument._make_limit_wrapper(
+                        attr_value, attr_name
+                    )
                 wrapped = BaseVirtualInstrument._make_logging_wrapper(attr_value, attr_name)
                 # Preserve the marker attributes so discovery still works
                 if is_monitored:
@@ -83,6 +130,53 @@ class BaseVirtualInstrument:
                     wrapped._display_name = getattr(attr_value, "_display_name", attr_name)
                     wrapped._control_params = getattr(attr_value, "_control_params", {})
                 setattr(cls, attr_name, wrapped)
+
+    # ------------------------------------------------------------------
+    # Limit-enforcement wrapper factory (control-validation standard)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _make_limit_wrapper(method, method_name: str):
+        """Return *method* guarded by the class's declarative control limits.
+
+        Looks up ``type(self).control_limits`` at call time, so a subclass can
+        declare limits for methods it inherits without re-wrapping them.
+        """
+        sig = inspect.signature(method)
+
+        @functools.wraps(method)
+        def wrapper(self, *args, **kwargs):
+            limit_spec = type(self).control_limits.get(method_name)
+            if limit_spec:
+                bound = sig.bind(self, *args, **kwargs)
+                bound.apply_defaults()
+                for param_name, limit_name in limit_spec.items():
+                    if param_name not in bound.arguments:
+                        continue
+                    if limit_name not in getattr(self, "_limits", {}):
+                        raise CryoSoftConfigError(
+                            f"{type(self).__name__}.{method_name}: "
+                            f"control_limits references limit '{limit_name}' "
+                            f"but __init__ never populated self._limits with "
+                            f"it — define it from init_params."
+                        )
+                    lo, hi = self._limits[limit_name]
+                    value = float(bound.arguments[param_name])
+                    if (lo is not None and value < lo) or (
+                        hi is not None and value > hi
+                    ):
+                        lo_txt = "-inf" if lo is None else f"{lo:g}"
+                        hi_txt = "+inf" if hi is None else f"{hi:g}"
+                        raise CryoSoftSafetyError(
+                            f"{self.vi_name or type(self).__name__}."
+                            f"{method_name}: {param_name}={value:g} is outside "
+                            f"the allowed range [{lo_txt}, {hi_txt}] for this "
+                            f"setup (limit '{limit_name}' from the station "
+                            f"config). Command refused."
+                        )
+            return method(self, *args, **kwargs)
+
+        return wrapper
 
     # ------------------------------------------------------------------
     # Logging wrapper factory
@@ -138,6 +232,10 @@ class BaseVirtualInstrument:
         """
         self._drivers = drivers
         self._init_params = init_params
+        # Numeric control limits: {limit_name: (lo, hi)}, populated by each
+        # VI's __init__ from init_params (None = unbounded on that side).
+        # Referenced by name from the class's control_limits declaration.
+        self._limits: dict[str, tuple[float | None, float | None]] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle

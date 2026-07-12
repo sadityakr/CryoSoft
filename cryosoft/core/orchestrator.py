@@ -24,7 +24,8 @@
 #   the safety condition persists; recover_from_error() exits ERROR.
 # output: |
 #   Emits signals: states_updated, state_changed, procedure_progress,
-#   procedure_finished, error_occurred, action_blocked, action_succeeded
+#   procedure_finished, error_occurred, action_blocked, action_succeeded,
+#   action_failed (vi, method, reason — the uniform per-action verdict)
 # ---
 
 """Orchestrator — cooperative state machine for CryoSoft.
@@ -84,6 +85,11 @@ class Orchestrator(QObject):
             source of truth for GUI state like InstrumentPanel's lifecycle
             toggle, which must reflect confirmed instrument state rather
             than an optimistic click.
+        action_failed (str, str, str): Emitted (vi_name, method_name, reason)
+            when a submitted GUI action raises — including a control-limits
+            rejection or a VI safety guard (e.g. switch-heater mismatch).
+            The reason string is the exception message, written by the VI to
+            be shown to the user verbatim.
     """
 
     states_updated = pyqtSignal(dict)
@@ -93,6 +99,7 @@ class Orchestrator(QObject):
     error_occurred = pyqtSignal(str)
     action_blocked = pyqtSignal(str)
     action_succeeded = pyqtSignal(str, str)
+    action_failed = pyqtSignal(str, str, str)
     measurement_ready = pyqtSignal(dict)  # emitted after each measure() with last_datapoint
 
     def __init__(self, station: Station, tick_interval_ms: int = 3000) -> None:
@@ -359,7 +366,13 @@ class Orchestrator(QObject):
                     )
                     self.action_succeeded.emit(action["vi_name"], action["method_name"])
                 except Exception as e:
+                    # Every user action gets an explicit verdict: rejections
+                    # (limit violations, safety guards) and failures surface
+                    # to the GUI with the reason, never silently.
                     logger.error("Error executing GUI action on %s: %s", action["vi_name"], e)
+                    self.action_failed.emit(
+                        action["vi_name"], action["method_name"], str(e)
+                    )
             self._gui_action_queue.clear()
             # If a GUI action started (or restarted) a manual ramp, enter RAMPING.
             if self._state == OrchestratorState.IDLE and not self._station.check_ramps():

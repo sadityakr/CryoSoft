@@ -1060,6 +1060,8 @@ class MonitorWindow(QMainWindow):
         self._orchestrator.state_changed.connect(self._on_state_changed)
         self._orchestrator.error_occurred.connect(self._on_error)
         self._orchestrator.action_blocked.connect(self._on_action_blocked)
+        self._orchestrator.action_failed.connect(self._on_action_failed)
+        self._orchestrator.action_succeeded.connect(self._on_action_confirmed)
         # Separate from InstrumentPanel's own states_updated connections
         # (each panel connects itself in its constructor) — this slot only
         # feeds MonitorHistory and the Trend plots.
@@ -1167,6 +1169,37 @@ class MonitorWindow(QMainWindow):
             message: Human-readable reason the action was blocked.
         """
         self._banner.show_message(message, BANNER_SEVERITY_WARNING)
+
+    def _on_action_failed(self, vi_name: str, method_name: str, reason: str) -> None:
+        """Show a non-modal error banner when a submitted GUI action raises.
+
+        This is the uniform failure verdict of the control-validation
+        standard: limit rejections and VI safety guards (e.g. the
+        switch-heater mismatch refusal) arrive here with the reason string
+        the VI wrote for the user.
+
+        Args:
+            vi_name: The VI the action targeted.
+            method_name: The @control method that was called.
+            reason: The exception message explaining why it was refused.
+        """
+        self._banner.show_message(
+            f"{vi_name}.{method_name} failed: {reason}", BANNER_SEVERITY_ERROR
+        )
+
+    def _on_action_confirmed(self, vi_name: str, method_name: str) -> None:
+        """Confirm a successful GUI action with a transient status-bar message.
+
+        A self-expiring status-bar message (not the banner) on purpose:
+        success is routine and should not demand a dismissal click, while
+        failures (banner) must. ``showMessage`` temporarily overlays the
+        permanent state label and restores it automatically.
+
+        Args:
+            vi_name: The VI the action targeted.
+            method_name: The @control method that completed.
+        """
+        self._status_bar.showMessage(f"{vi_name}.{method_name} ✓ done", 4000)
 
     # ------------------------------------------------------------------
     # Window geometry + lifecycle

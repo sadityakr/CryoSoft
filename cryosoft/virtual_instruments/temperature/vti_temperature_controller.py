@@ -50,8 +50,17 @@ class VTITemperatureControllerVI(SampleTemperatureControllerVI):
     * ``set_needle_valve(position: float)``   — set percent open (0–100)
     """
 
+    # Control-validation standard: inherit the temperature/rate limits and ADD
+    # the needle valve bound (a physical property of the valve, 0-100 % open,
+    # not setup-dependent — so it is set directly rather than from config).
+    control_limits = {
+        **SampleTemperatureControllerVI.control_limits,
+        "set_needle_valve": {"position": "needle_valve_pct"},
+    }
+
     def __init__(self, drivers: dict[str, object], **init_params: Any) -> None:
         super().__init__(drivers, **init_params)
+        self._limits["needle_valve_pct"] = (0.0, 100.0)
 
     # ------------------------------------------------------------------
     # @monitored methods — needle valve

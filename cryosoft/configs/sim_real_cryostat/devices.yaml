@@ -63,6 +63,10 @@ virtual_instruments:
     init_params:
       default_ramp_rate: 2.0
       tolerance: 0.5
+      # Setup limits enforced on user @control actions (control-validation standard)
+      min_temperature_K: 1.4
+      max_temperature_K: 320.0
+      max_ramp_rate_K_per_min: 20.0
 
   temperature_sample:
     class: cryosoft.virtual_instruments.temperature.sample_temperature_controller.SampleTemperatureControllerVI
@@ -71,6 +75,10 @@ virtual_instruments:
     init_params:
       default_ramp_rate: 1.0
       tolerance: 0.3
+      # Setup limits enforced on user @control actions (control-validation standard)
+      min_temperature_K: 1.4
+      max_temperature_K: 320.0
+      max_ramp_rate_K_per_min: 20.0
 
   level_meter:
     class: cryosoft.virtual_instruments.level.cryogen_level_meter.CryogenLevelMeterVI

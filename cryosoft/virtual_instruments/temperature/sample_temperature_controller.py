@@ -59,12 +59,31 @@ class SampleTemperatureControllerVI(TemperatureControllerBase, RampableVI):
     * ``get_heater_output() -> float`` — heater power 0–100%
     """
 
+    # Control-validation standard (see BaseVirtualInstrument): temperature
+    # and ramp-rate bounds are setup properties, read from the config's
+    # init_params in __init__ (missing keys mean unbounded on that side).
+    control_limits = {
+        "set_temperature": {"target_K": "temperature_K"},
+        "set_ramp_rate": {"rate_K_per_min": "ramp_rate_K_per_min"},
+    }
+
     def __init__(self, drivers: dict[str, object], **init_params: Any) -> None:
         super().__init__(drivers, **init_params)
         self._driver = drivers["main"]
 
         self._default_ramp_rate: float = float(init_params.get("default_ramp_rate", 5.0))
         self._tolerance: float = float(init_params.get("tolerance", 0.5))
+
+        max_temp = init_params.get("max_temperature_K")
+        self._limits["temperature_K"] = (
+            float(init_params.get("min_temperature_K", 0.0)),
+            float(max_temp) if max_temp is not None else None,
+        )
+        max_rate = init_params.get("max_ramp_rate_K_per_min")
+        self._limits["ramp_rate_K_per_min"] = (
+            0.0,
+            float(max_rate) if max_rate is not None else None,
+        )
 
         self._ramp_gen: Generator | None = None
         self._ramp_exhausted: bool = True
@@ -187,8 +206,17 @@ class SampleTemperatureControllerVI(TemperatureControllerBase, RampableVI):
         """Change the default temperature ramp rate.
 
         Args:
-            rate_K_per_min: New ramp rate in kelvin per minute.
+            rate_K_per_min: New ramp rate in kelvin per minute. Must be
+                positive; the setup's upper bound (if any) comes from the
+                config's ``max_ramp_rate_K_per_min``.
+
+        Raises:
+            ValueError: If the rate is zero or negative.
         """
+        if float(rate_K_per_min) <= 0:
+            raise ValueError(
+                f"Ramp rate must be positive, got {rate_K_per_min} K/min"
+            )
         self._default_ramp_rate = float(rate_K_per_min)
 
     @control

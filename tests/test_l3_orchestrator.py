@@ -202,6 +202,23 @@ def test_action_succeeded_not_emitted_on_failed_gui_action(orchestrator, qtbot):
     assert received == []
 
 
+def test_action_failed_emitted_with_reason(orchestrator, qtbot):
+    """A refused GUI action emits action_failed(vi, method, reason).
+
+    This is the uniform per-action verdict of the control-validation
+    standard: here a set_field beyond the setup's field limit is rejected by
+    the limits wrapper and the reason reaches the GUI signal verbatim.
+    """
+    with qtbot.waitSignal(orchestrator.action_failed, timeout=500) as blocker:
+        orchestrator.submit_vi_action("magnet_x", "set_field", target_T=99.0)
+
+    vi_name, method_name, reason = blocker.args
+    assert (vi_name, method_name) == ("magnet_x", "set_field")
+    assert "outside the allowed range" in reason
+    # The refused command must not have started a ramp.
+    assert orchestrator._state == OrchestratorState.IDLE
+
+
 def test_stale_vi_during_procedure(orchestrator, station, qtbot):
     """Patched driver fails -> ERROR state."""
     procedure = MockProcedure(station)
