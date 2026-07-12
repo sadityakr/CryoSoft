@@ -327,6 +327,11 @@ def test_procedure_param_label_and_tooltip(procedure_win):
     The label is the same key stored under /metadata/procedure_params in the
     HDF5 output (see BaseProcedure), not prose. The prose description lives in
     a tooltip on both the input field and its form label.
+
+    Uses FieldSweepIV's ``temperature`` system_parameter rather than one of
+    its sweep_axis-generated fields (e.g. field_start): those are rendered by
+    SweepAxisWidget, not a flat QLineEdit + QFormLayout row, so they are not a
+    valid target for this label/tooltip check.
     """
     from cryosoft.procedures.field_sweep_iv import FieldSweepIV
 
@@ -337,9 +342,9 @@ def test_procedure_param_label_and_tooltip(procedure_win):
     else:
         pytest.fail("FieldSweepIV not found in procedure selector")
 
-    spec = FieldSweepIV.sweep_parameters["field_start"]
-    field = procedure_win.findChild(QLineEdit, "param_field_start_input")
-    assert field is not None, "Missing input for parameter 'field_start'"
+    spec = FieldSweepIV.system_parameters["temperature"]
+    field = procedure_win.findChild(QLineEdit, "param_temperature_input")
+    assert field is not None, "Missing input for parameter 'temperature'"
 
     assert field.text() == str(spec["default"])
 
@@ -347,7 +352,7 @@ def test_procedure_param_label_and_tooltip(procedure_win):
     assert isinstance(form, QFormLayout)
     row_label = form.labelForField(field)
     assert isinstance(row_label, QLabel)
-    assert row_label.text() == "field_start (T):"
+    assert row_label.text() == "temperature (K):"
 
     for tooltip in (field.toolTip(), row_label.toolTip()):
         assert tooltip, "Tooltip must be non-empty"
