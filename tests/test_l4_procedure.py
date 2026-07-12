@@ -3,7 +3,7 @@
 #   Integration tests for Layer 4 (Procedures). Tests BaseProcedure subclassing,
 #   FieldSweepIV method contracts, DataManager integration, and a full
 #   Orchestrator end-to-end loop with FieldSweepIV using simulated instruments.
-# last_updated: 2026-04-06
+# last_updated: 2026-07-12
 # ---
 
 import json
@@ -14,6 +14,7 @@ import pytest
 
 from cryosoft.core.procedure import BaseProcedure
 from cryosoft.core.station import build_station
+from cryosoft.core.sweep_builder import SweepAxis, SweepSegment
 from cryosoft.procedures.field_sweep_iv import FieldSweepIV
 
 CONFIG_PATH = "cryosoft/configs/sim_cryostat"
@@ -80,6 +81,30 @@ def test_base_procedure_empty_sweep():
     assert proc.get_progress() == 1.0
 
 
+def test_base_procedure_sweep_axis_default_build_sweep_array():
+    """A subclass that only declares sweep_axis gets a working sweep for free."""
+    class AxisProc(BaseProcedure):
+        sweep_axis = SweepAxis(
+            key="voltage", unit="V", data_key="voltage_V", description="Bias voltage",
+            default_start=0.0, default_end=1.0, default_steps=3,
+        )
+
+    proc = AxisProc(station=None, sample_info={}, data_directory="/tmp")
+    assert proc.get_sweep_array() == pytest.approx([0.0, 0.5, 1.0])
+
+
+def test_base_procedure_sweep_axis_merges_hidden_params():
+    """sweep_axis's hidden parameters are merged into cls.parameters."""
+    class AxisProc(BaseProcedure):
+        sweep_axis = SweepAxis(
+            key="voltage", unit="V", data_key="voltage_V", description="Bias voltage",
+        )
+
+    assert "voltage_mode" in AxisProc.parameters
+    assert "voltage_start" in AxisProc.parameters
+    assert "voltage_segments" in AxisProc.parameters
+
+
 # ── FieldSweepIV instantiation ────────────────────────────────────────────────
 
 def test_instantiation(procedure):
@@ -99,6 +124,70 @@ def test_sweep_array_values(procedure):
     assert sweep[0] == pytest.approx(-0.1)
     assert sweep[-1] == pytest.approx(0.1)
     assert sweep[1] == pytest.approx(0.0)
+
+
+# ── Sweep-shape overrides (sweep_builder integration) ───────────────────────────
+
+
+def test_sweep_segments_override_take_precedence(station, tmp_path):
+    """Passing field_segments (+field_mode) builds a piecewise sweep instead of linear."""
+    params = dict(FAST_PARAMS)
+    params["field_mode"] = "segments"
+    params["field_segments"] = [
+        {"start": -0.1, "end": -0.02, "step": 0.04},
+        {"start": -0.02, "end": 0.02, "step": 0.02},
+        {"start": 0.02, "end": 0.1, "step": 0.04},
+    ]
+    procedure = FieldSweepIV(
+        station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path), **params
+    )
+    sweep = procedure.get_sweep_array()
+    assert sweep[0] == pytest.approx(-0.1)
+    assert sweep[-1] == pytest.approx(0.1)
+    assert any(abs(v) < 1e-9 for v in sweep)  # the fine sub-segment crosses zero
+
+
+def test_sweep_segments_accepts_sweepsegment_instances(station, tmp_path):
+    """field_segments may also be a list of SweepSegment dataclass instances."""
+    params = dict(FAST_PARAMS)
+    params["field_mode"] = "segments"
+    params["field_segments"] = [
+        SweepSegment(start=0.0, end=0.1, step=0.05),
+    ]
+    procedure = FieldSweepIV(
+        station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path), **params
+    )
+    assert procedure.get_sweep_array() == pytest.approx([0.0, 0.05, 0.1])
+
+
+def test_sweep_csv_mode_ignores_segments(station, tmp_path):
+    """field_mode='csv' reads field_csv_path and ignores field_segments entirely."""
+    csv_file = tmp_path / "fields.csv"
+    csv_file.write_text("0.1\n0.0\n-0.1\n")
+
+    params = dict(FAST_PARAMS)
+    params["field_mode"] = "csv"
+    params["field_csv_path"] = str(csv_file)
+    params["field_segments"] = [{"start": 0.0, "end": 1.0, "step": 0.5}]  # ignored: mode is csv
+
+    procedure = FieldSweepIV(
+        station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path), **params
+    )
+    assert procedure.get_sweep_array() == pytest.approx([0.1, 0.0, -0.1])
+
+
+def test_sweep_hysteresis_extends_linear_sweep(station, tmp_path):
+    """field_hysteresis=True appends the reverse sweep (minus the duplicated peak)."""
+    params = dict(FAST_PARAMS)
+    params["field_start"] = -0.1
+    params["field_end"] = 0.1
+    params["field_steps"] = 3
+    params["field_hysteresis"] = True
+
+    procedure = FieldSweepIV(
+        station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path), **params
+    )
+    assert procedure.get_sweep_array() == pytest.approx([-0.1, 0.0, 0.1, 0.0, -0.1])
 
 
 def test_initial_progress(procedure):

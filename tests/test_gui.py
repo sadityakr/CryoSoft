@@ -5,7 +5,7 @@
 #   that InstrumentPanel widgets are auto-generated for all registered VIs,
 #   and that Orchestrator signals (state_changed, procedure_progress,
 #   measurement_ready) update the GUI correctly.
-# last_updated: 2026-04-16
+# last_updated: 2026-07-12
 # ---
 
 """GUI smoke tests — Layer 6.
@@ -293,7 +293,12 @@ def test_procedure_selector_populated(procedure_win):
 
 
 def test_procedure_param_inputs_exist(procedure_win):
-    """Parameter form inputs are created for the selected procedure."""
+    """Parameter form inputs are created for the selected procedure.
+
+    FieldSweepIV declares sweep_axis, so its hidden axis parameters
+    (field_mode, field_start, ...) are handled by the SweepAxisWidget instead
+    of a flat QLineEdit — those are skipped here and checked separately.
+    """
     from cryosoft.procedures.field_sweep_iv import FieldSweepIV
 
     # Select FieldSweepIV by its exact name. A substring match ("Field Sweep")
@@ -306,11 +311,13 @@ def test_procedure_param_inputs_exist(procedure_win):
     else:
         pytest.fail("FieldSweepIV not found in procedure selector")
 
+    assert procedure_win._axis_widget is not None
+    axis_keys = procedure_win._axis_widget.param_keys()
+
     for param_name in FieldSweepIV.parameters:
-        field = procedure_win.findChild(
-            __import__("PyQt6.QtWidgets", fromlist=["QLineEdit"]).QLineEdit,
-            f"param_{param_name}_input",
-        )
+        if param_name in axis_keys:
+            continue
+        field = procedure_win.findChild(QLineEdit, f"param_{param_name}_input")
         assert field is not None, f"Missing input for parameter '{param_name}'"
 
 

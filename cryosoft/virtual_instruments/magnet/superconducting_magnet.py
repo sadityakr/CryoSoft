@@ -80,12 +80,19 @@ class SuperconductingMagnetVI(MagnetBase, RampableVI):
     # RampableVI implementation
     # ------------------------------------------------------------------
 
-    def start_ramp(self, target: float) -> None:
+    def start_ramp(self, target: float, persistent: bool = True) -> None:
         """Begin ramping to *target* tesla.
 
         Args:
             target: Target field in tesla.
+            persistent: Ignored — this VI has no persistent-mode switch
+                heater. Accepted so callers (e.g. Station.process_system_targets,
+                or a Procedure written against either magnet VI flavor) can
+                pass ``persistent=`` uniformly regardless of whether the
+                configured magnet_x is this class or
+                ``SuperconductingMagnetPersistentVI``.
         """
+        _ = persistent
         target_A = target * self._amperes_per_tesla
         target_A = max(self._min_current, min(self._max_current, target_A))
 

@@ -1,42 +1,44 @@
-# Configuration for the Kläui Lab real cryostat.
-# Instruments: Oxford Mercury iPS-M (magnet), Oxford ITC 503 (VTI temperature),
-# Lakeshore 335 (sample temperature), Oxford ILM 200 (cryogen levels),
+# Simulated digital twin of configs/a-sample-real-cryostat/.
+#
+# Same VI graph, VI names, and init_params (ramp_segments, switch heater
+# ticks, tolerances) as a-sample-real-cryostat/devices.yaml — only the
+# real_drivers block differs, swapping each real PyVISA driver for its Sim*
+# equivalent. This is what "test with a virtual adapter" means in this
+# project: everything above the driver layer (VI, Station, Orchestrator,
+# Procedure) runs completely unchanged against real or simulated hardware.
+# To go live at the Kläui Lab cryostat, swap this file for
+# a-sample-real-cryostat/devices.yaml (or edit the class:/address: lines
+# in place) — no VI, Orchestrator, or Procedure code changes needed.
+#
+# Instruments: Oxford Mercury iPS-M (magnet), Oxford ITC 503 (VTI
+# temperature), Lakeshore 335 (sample temperature — simulated here with a
+# second SimOxfordITC503, same pattern as sim_cryostat/devices.yaml since no
+# SimLakeshore335 driver exists yet), Oxford ILM 200 (cryogen levels),
 # Keithley 6221 + 2182A (delta-mode resistance measurement).
-#
-# Physical calibration from field_voltage_logic.py:
-#   TESLA_TO_AMPERE = 7.954  A/T
-#   Switch heater warmup: 60 s  →  60 ticks at 1000 ms/tick
-#
-# ADDRESSES — update any placeholder before connecting to hardware.
-# Confirmed from old GUI: K6221 GPIB0::19, Mercury ASRL10, ILM ASRL11, ITC GPIB0::24.
-# Lakeshore 335 address is a placeholder — check rear-panel GPIB switch.
 
-# Default data directory (outside CryoSoft folder)
 data_directory: "C:/CryoData"
 
 real_drivers:
   mercury_ips:
-    class: cryosoft.drivers.oxford_mercury_ips.OxfordMercuryiPS
-    address: "ASRL10::INSTR"
+    class: cryosoft.drivers.sim_oxford_ips120.SimOxfordIPS120
+    address: "SIM::MERCURY_IPS"
   itc_vti:
-    class: cryosoft.drivers.oxford_itc503.OxfordITC503
-    address: "GPIB0::24::INSTR"
+    class: cryosoft.drivers.sim_oxford_itc503.SimOxfordITC503
+    address: "SIM::ITC_VTI"
   lakeshore_sample:
-    class: cryosoft.drivers.lakeshore_335.Lakeshore335
-    address: "GPIB0::12::INSTR"   # PLACEHOLDER — confirm on hardware
+    class: cryosoft.drivers.sim_oxford_itc503.SimOxfordITC503
+    address: "SIM::LAKESHORE_SAMPLE"
   ilm:
-    class: cryosoft.drivers.oxford_ilm200.OxfordILM200
-    address: "ASRL11::INSTR"
+    class: cryosoft.drivers.sim_oxford_ilm200.SimOxfordILM200
+    address: "SIM::ILM"
   keithley_6221:
-    class: cryosoft.drivers.keithley_6221.Keithley6221
-    address: "GPIB0::19::INSTR"
+    class: cryosoft.drivers.sim_keithley_6221.SimKeithley6221
+    address: "SIM::K6221"
   keithley_2182a:
-    class: cryosoft.drivers.keithley_2182a.Keithley2182A
-    address: "GPIB0::7::INSTR"    # PLACEHOLDER — confirm on hardware
+    class: cryosoft.drivers.sim_keithley_2182a.SimKeithley2182A
+    address: "SIM::K2182A"
 
 virtual_instruments:
-  # Named magnet_x (not magnet) so this config is a drop-in swap with
-  # sim_cryostat: FieldSweepIV and other procedures address station.magnet_x.
   magnet_x:
     class: cryosoft.virtual_instruments.magnet.superconducting_magnet_persistent.SuperconductingMagnetPersistentVI
     drivers: {main: mercury_ips}
@@ -45,18 +47,12 @@ virtual_instruments:
       amperes_per_tesla: 7.954
       max_current: 90.0
       min_current: -90.0
-      default_ramp_rate: 1.2         # most conservative rate (A/min) as safe default
-      # Ramp segments extracted from field_voltage_logic._get_rate_for_segment():
-      #   0–44 A → 12 A/min
-      #   44–76 A → 6 A/min
-      #   76–84 A → 2.4 A/min
-      #   84–90 A → 1.2 A/min
+      default_ramp_rate: 1.2
       ramp_segments:
         - {max_current_A: 44.0,  rate_A_per_min: 12.0}
         - {max_current_A: 76.0,  rate_A_per_min: 6.0}
         - {max_current_A: 84.0,  rate_A_per_min: 2.4}
         - {max_current_A: 90.0,  rate_A_per_min: 1.2}
-      # 60 s warmup / cooldown at 1000 ms tick = 60 ticks each
       switch_heater_warmup_ticks: 60
       switch_heater_cooldown_ticks: 60
 

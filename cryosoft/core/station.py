@@ -212,7 +212,10 @@ class Station:
         """Dispatch ramp targets to system VIs.
 
         Only VIs whose ``vi_type == "system"`` are valid ramp targets.
-        Each entry in *system_targets* must be ``{vi_name: {"target": float}}``.
+        Each entry in *system_targets* must be ``{vi_name: {"target": float}}``,
+        optionally with a ``"rate"`` and/or ``"persistent"`` key — both are
+        forwarded to ``start_ramp()`` only if present, so VIs that do not
+        accept them (most VIs do not) are unaffected.
 
         Args:
             system_targets: Mapping of VI name → target dict.
@@ -234,12 +237,13 @@ class Station:
                     f"process_system_targets: VI '{vi_name}' does not implement RampableVI"
                 )
             target = float(params["target"])
-            rate = params.get("rate")
+            kwargs: dict[str, Any] = {}
+            if params.get("rate") is not None:
+                kwargs["rate"] = float(params["rate"])
+            if "persistent" in params:
+                kwargs["persistent"] = bool(params["persistent"])
             logger.info("Starting ramp on '%s' to target=%s", vi_name, target)
-            if rate is not None:
-                vi.start_ramp(target, rate=float(rate))  # type: ignore[call-arg]
-            else:
-                vi.start_ramp(target)
+            vi.start_ramp(target, **kwargs)  # type: ignore[call-arg]
 
     def check_ramps(self) -> bool:
         """Advance all active system VI ramps and report completion.
@@ -447,7 +451,7 @@ def build_station(config_path: str) -> Station:
     drivers_map: dict[str, Any] = {}
     for driver_name, driver_cfg in devices_config.get("real_drivers", {}).items():
         cls = _import_class(driver_cfg["class"])
-        resource = driver_cfg.get("resource_string", "SIM")
+        resource = driver_cfg.get("address", "SIM")
         drivers_map[driver_name] = cls(resource)
         logger.info("Built driver '%s' (%s)", driver_name, driver_cfg["class"])
 

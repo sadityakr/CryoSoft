@@ -3,7 +3,7 @@
 #   Unit tests for Layer 3 (Orchestrator).
 #   Verifies state machine transitions, wait timers, procedures spanning multiple ticks,
 #   emergency abort, action blocking, and queue logic.
-# last_updated: 2026-04-06
+# last_updated: 2026-07-12
 # ---
 
 import pytest
@@ -98,6 +98,28 @@ def test_full_procedure_cycle(orchestrator, station, qtbot):
     assert OrchestratorState.MEASURING.value in states
     assert OrchestratorState.SWEEPING.value in states
     assert OrchestratorState.STANDBY.value in states
+
+
+def test_standby_waits_for_its_own_ramp_before_finishing(orchestrator, station, qtbot):
+    """procedure_finished must not fire until standby()'s own ramp completes.
+
+    Regression test: the STANDBY handler used to check check_ramps() BEFORE
+    calling procedure.standby(), then declare the procedure finished in the
+    same tick — never waiting for the ramp standby() itself dispatches (e.g.
+    ramping the magnet back to 0 T). By the time procedure_finished fired,
+    the magnet was often still mid-ramp.
+    """
+    procedure = MockProcedure(station)  # standby() ramps magnet_x to 0.0 T
+    station.magnet_x._default_ramp_rate = 6000.0
+    station.magnet_x._ramp_segments = []
+
+    orchestrator.run_procedure(procedure)
+
+    with qtbot.waitSignal(orchestrator.procedure_finished, timeout=5000):
+        pass
+
+    assert station.magnet_x.ramp_status() in ("TARGET_REACHED", "IDLE")
+    assert station.magnet_x.get_field() == pytest.approx(0.0, abs=0.01)
 
 
 def test_wait_time_respected(orchestrator, station, qtbot):

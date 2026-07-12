@@ -2,7 +2,7 @@
 # description: |
 #   Integration tests for the Station class and build_station factory using the
 #   simulated cryostat YAML configuration.
-# last_updated: 2026-04-06
+# last_updated: 2026-07-12
 # ---
 
 from pathlib import Path
@@ -11,11 +11,46 @@ import pytest
 from cryosoft.core.station import Station, build_station
 
 
+class _AddressCapturingDriver:
+    """Test double for build_station(): records the resource string it was built with."""
+
+    last_resource: str | None = None
+
+    def __init__(self, resource_string: str) -> None:
+        type(self).last_resource = resource_string
+
+    def get_state(self) -> dict:
+        return {}
+
+
 @pytest.fixture
 def sim_station():
     """Fixture to build a Station from the sim_cryostat configuration."""
     config_path = Path(__file__).parent.parent / "cryosoft" / "configs" / "sim_cryostat"
     return build_station(str(config_path))
+
+
+def test_build_station_passes_address_to_driver(tmp_path):
+    """build_station() must pass the YAML 'address:' value to the driver constructor.
+
+    Regression test: build_station() previously read a nonexistent
+    'resource_string' key and silently defaulted every real driver to
+    'SIM', so real hardware would never receive its actual VISA address.
+    """
+    (tmp_path / "devices.yaml").write_text(
+        "real_drivers:\n"
+        "  probe:\n"
+        "    class: tests.test_l2_station._AddressCapturingDriver\n"
+        '    address: "GPIB0::19::INSTR"\n'
+        "virtual_instruments: {}\n"
+    )
+    (tmp_path / "monitor.yaml").write_text(
+        "monitor:\n  tick_interval_ms: 1000\n  max_vi_errors: 3\n"
+    )
+
+    build_station(str(tmp_path))
+
+    assert _AddressCapturingDriver.last_resource == "GPIB0::19::INSTR"
 
 
 def test_build_station_success(sim_station: Station):
@@ -81,13 +116,25 @@ def test_get_state_error_handling(sim_station: Station):
     assert sim_station._error_counts["magnet_x"] == 3
 
 
+def test_process_system_targets_forwards_persistent_key(sim_station: Station):
+    """An optional 'persistent' key in a target dict is forwarded to start_ramp().
+
+    sim_cryostat's magnet_x is a plain SuperconductingMagnetVI, which accepts
+    persistent= as a no-op — this must not raise, so any procedure can include
+    'persistent' in a magnet target regardless of which magnet VI flavor a
+    config wires up.
+    """
+    sim_station.process_system_targets({"magnet_x": {"target": 1.0, "persistent": False}})
+    assert sim_station.magnet_x.ramp_status() == "RAMPING"
+
+
 def test_process_system_targets_dispatch(sim_station: Station):
     """process_system_targets dispatches to correct VIs only."""
     targets = {
         "magnet_x": {"target": 1.0},
         "temperature_vti": {"target": 150.0}
     }
-    
+
     sim_station.process_system_targets(targets)
     
     # Verify that the ramps have started
