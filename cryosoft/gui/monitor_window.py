@@ -1119,8 +1119,34 @@ class MonitorWindow(QMainWindow):
         """
         settings = app_settings.get_settings()
         saved = settings.value(_GEOMETRY_KEY)
-        if saved is not None and self.restoreGeometry(saved):
+        if saved is not None and self.restoreGeometry(saved) and self._geometry_on_screen():
             return
+        # No saved geometry, a restore failure, or geometry that landed
+        # off-screen (e.g. saved on a monitor that is no longer attached — the
+        # usual cause of a window that "does not appear") all fall back to a
+        # centered default sized to the primary screen.
+        self._center_on_primary_screen()
+
+    def _geometry_on_screen(self) -> bool:
+        """Return True if the window frame overlaps an attached screen enough to see.
+
+        ``restoreGeometry`` reports success even when it places the window on a
+        screen that no longer exists, so this guards against an invisible
+        window: it requires at least a 100x100 overlap with some screen's
+        available area.
+
+        Returns:
+            True if a usable portion of the window is on an attached screen.
+        """
+        frame = self.frameGeometry()
+        for screen in QApplication.screens():
+            overlap = screen.availableGeometry().intersected(frame)
+            if overlap.width() >= 100 and overlap.height() >= 100:
+                return True
+        return False
+
+    def _center_on_primary_screen(self) -> None:
+        """Size the window to ~90% of the primary screen and center it."""
         screen = QApplication.primaryScreen()
         if screen is not None:
             available = screen.availableGeometry()

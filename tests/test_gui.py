@@ -1009,3 +1009,127 @@ def test_procedure_window_skips_unknown_procedure_in_queue(station, orchestrator
     win = ProcedureWindow(station, orchestrator, info, ddir, initial_session=state)
     qtbot.addWidget(win)
     assert win._queue_list.count() == 0
+
+
+def test_run_queue_marks_running_then_done(station, orchestrator, qtbot, monkeypatch):
+    """Running the queue marks items running, then done as each finishes."""
+    info, ddir = _sample_stub(), _data_dir_stub()
+    win = ProcedureWindow(station, orchestrator, info, ddir)
+    qtbot.addWidget(win)
+    win._on_add_to_queue()
+    win._on_add_to_queue()
+    assert [e.status for e in win._queue] == ["pending", "pending"]
+
+    # Stub the actual run: we only exercise the GUI's per-item status logic,
+    # driven by the procedure_finished signal, with no real procedure I/O.
+    monkeypatch.setattr(orchestrator, "run_queue", lambda: None)
+    win._on_run_queue()
+    assert win._queue[0].status == "running"
+    assert win._queue_running is True
+
+    orchestrator.procedure_finished.emit()
+    assert win._queue[0].status == "done"
+    assert win._queue[1].status == "running"
+
+    orchestrator.procedure_finished.emit()
+    assert win._queue[1].status == "done"
+    assert win._queue_running is False
+
+
+def test_abort_marks_running_item_failed(station, orchestrator, qtbot, monkeypatch):
+    """Aborting a queued run marks that item failed and promotes the next."""
+    from PyQt6.QtWidgets import QMessageBox
+
+    info, ddir = _sample_stub(), _data_dir_stub()
+    win = ProcedureWindow(station, orchestrator, info, ddir)
+    qtbot.addWidget(win)
+    win._on_add_to_queue()
+    win._on_add_to_queue()
+    # Stub run + abort so no real procedure runs (avoids HDF5 file I/O in tests).
+    monkeypatch.setattr(orchestrator, "run_queue", lambda: None)
+    monkeypatch.setattr(orchestrator, "abort_procedure", lambda: None)
+    win._on_run_queue()
+    assert win._queue[0].status == "running"
+
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes
+    )
+    win._on_abort()
+    assert win._queue[0].status == "failed"
+    assert win._queue[1].status == "running"
+
+
+def test_restore_rearms_only_pending_items(station, orchestrator, qtbot):
+    """On restore, done/failed items are shown but only pending ones re-arm."""
+    info, ddir = _sample_stub(), _data_dir_stub()
+    src = ProcedureWindow(station, orchestrator, info, ddir)
+    qtbot.addWidget(src)
+    src._on_add_to_queue()
+    export = session_store.SessionState()
+    src.export_session_state(export)
+    template = export.queue[0]
+
+    def _item(status):
+        return session_store.QueueItemState(
+            procedure=template.procedure,
+            params=dict(template.params),
+            sample_info=dict(template.sample_info),
+            data_dir=template.data_dir,
+            status=status,
+        )
+
+    state = session_store.SessionState(
+        queue=[_item("done"), _item("failed"), _item("pending")]
+    )
+    win = ProcedureWindow(station, orchestrator, info, ddir, initial_session=state)
+    qtbot.addWidget(win)
+    assert [e.status for e in win._queue] == ["done", "failed", "pending"]
+    # _restore_queue clears then re-arms only the single pending item.
+    assert len(orchestrator._procedure_queue) == 1
+
+
+def test_offscreen_saved_geometry_recenters(station, orchestrator, qtbot):
+    """A saved geometry that lands off-screen is discarded for a centered one."""
+    from cryosoft.gui import app_settings
+
+    win = MonitorWindow(station, orchestrator)
+    qtbot.addWidget(win)
+    win.move(-10000, -10000)  # far off any screen
+    assert not win._geometry_on_screen()
+    app_settings.get_settings().setValue("MonitorWindow/geometry", win.saveGeometry())
+
+    win2 = MonitorWindow(station, orchestrator)
+    qtbot.addWidget(win2)
+    # The off-screen geometry was rejected; the window is placed on a screen.
+    assert win2._geometry_on_screen()
+
+
+def test_onscreen_saved_geometry_is_kept(station, orchestrator, qtbot):
+    """A valid on-screen saved geometry is restored, not overridden."""
+    from cryosoft.gui import app_settings
+
+    win = MonitorWindow(station, orchestrator)
+    qtbot.addWidget(win)
+    win.resize(800, 600)
+    win.move(20, 20)
+    app_settings.get_settings().setValue("MonitorWindow/geometry", win.saveGeometry())
+
+    win2 = MonitorWindow(station, orchestrator)
+    qtbot.addWidget(win2)
+    assert win2._geometry_on_screen()
+    assert win2.size().width() == 800
+    assert win2.size().height() == 600
+
+
+def test_queue_remove_resyncs_orchestrator(station, orchestrator, qtbot):
+    """Removing a pending queue item keeps the Orchestrator queue in sync."""
+    info, ddir = _sample_stub(), _data_dir_stub()
+    win = ProcedureWindow(station, orchestrator, info, ddir)
+    qtbot.addWidget(win)
+    win._on_add_to_queue()
+    win._on_add_to_queue()
+    assert len(orchestrator._procedure_queue) == 2
+    win._queue_list.setCurrentRow(0)
+    win._queue_remove()
+    assert win._queue_list.count() == 1
+    assert len(orchestrator._procedure_queue) == 1

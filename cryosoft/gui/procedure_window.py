@@ -67,6 +67,8 @@ from cryosoft.gui import app_settings  # import the module (not the function) so
 from cryosoft.gui.live_plot_panel import LivePlotPanel
 from cryosoft.gui.notification_banner import NotificationBanner
 from cryosoft.gui.session import (
+    STATUS_DONE,
+    STATUS_FAILED,
     STATUS_PENDING,
     STATUS_RUNNING,
     QueueItemState,
@@ -451,7 +453,7 @@ class ProcedureWindow(QMainWindow):
         run_queue_btn.setProperty("class", BTN_CLASS_PRIMARY)
         run_queue_btn.setIcon(qta.icon("fa5s.forward", color=TEXT_ON_ACCENT))
         run_queue_btn.setToolTip("Run all queued procedures in order")
-        run_queue_btn.clicked.connect(self._orchestrator.run_queue)
+        run_queue_btn.clicked.connect(self._on_run_queue)
         btn_row.addWidget(up_btn)
         btn_row.addWidget(down_btn)
         btn_row.addWidget(remove_btn)
@@ -676,6 +678,10 @@ class ProcedureWindow(QMainWindow):
             "Abort the running procedure? The data file will be saved as-is.",
         )
         if answer == QMessageBox.StandardButton.Yes:
+            # Record the aborted queue item as failed (abort_procedure does not
+            # emit procedure_finished; it goes IDLE and auto-runs the next item).
+            if self._queue_running:
+                self._advance_queue_status(STATUS_FAILED)
             self._orchestrator.abort_procedure()
 
     def _on_progress(self, fraction: float) -> None:
@@ -697,9 +703,13 @@ class ProcedureWindow(QMainWindow):
         self._plot2.redraw(self._datapoints)
 
     def _on_procedure_finished(self) -> None:
-        """Reset progress bar and clear the active procedure reference."""
+        """Reset progress bar, clear the active procedure, advance the queue."""
         self._progress_bar.setValue(100)
         self._active_procedure = None
+        # A queued run finished cleanly: mark it done and promote the next item
+        # (the Orchestrator auto-chains run_queue() right after this signal).
+        if self._queue_running:
+            self._advance_queue_status(STATUS_DONE)
 
     def _on_state_changed(self, state_name: str) -> None:
         """Show/hide the emergency-acknowledge button based on state.
@@ -753,12 +763,65 @@ class ProcedureWindow(QMainWindow):
     # Queue management helpers
     # ------------------------------------------------------------------
 
+    def _on_run_queue(self) -> None:
+        """Start the queue run, marking the first pending item as running.
+
+        Wraps ``Orchestrator.run_queue`` so the queue's per-item status reflects
+        execution: the first pending entry becomes ``running`` and, from here on,
+        ``procedure_finished`` advances the status (see ``_advance_queue_status``).
+        """
+        first_pending = next(
+            (e for e in self._queue if e.status == STATUS_PENDING), None
+        )
+        if first_pending is None:
+            return
+        self._queue_running = True
+        first_pending.status = STATUS_RUNNING
+        self._refresh_queue_list()
+        self._orchestrator.run_queue()
+
+    def _advance_queue_status(self, final_status: str) -> None:
+        """Finalise the running entry and promote the next pending one.
+
+        Args:
+            final_status: Status to assign the entry that just stopped running
+                (``done`` on clean completion, ``failed`` on abort).
+        """
+        for entry in self._queue:
+            if entry.status == STATUS_RUNNING:
+                entry.status = final_status
+                break
+        next_pending = next(
+            (e for e in self._queue if e.status == STATUS_PENDING), None
+        )
+        if next_pending is not None:
+            next_pending.status = STATUS_RUNNING
+        else:
+            self._queue_running = False
+        self._refresh_queue_list()
+
+    def _resync_orchestrator_queue(self) -> None:
+        """Rebuild the Orchestrator's pending queue from this window's entries.
+
+        The GUI queue is the source of truth. After a reorder or removal, the
+        Orchestrator's not-yet-started queue is rebuilt in-place from the pending
+        entries (each holds its built ``proc``), so it always matches the GUI —
+        removing the old index-alignment fragility. The currently-running item
+        was already popped by ``run_queue`` and is not re-added.
+        """
+        self._orchestrator._procedure_queue[:] = [
+            entry.proc
+            for entry in self._queue
+            if entry.status == STATUS_PENDING and entry.proc is not None
+        ]
+
     def _queue_move_up(self) -> None:
         """Move the selected queue item up by one position."""
         row = self._queue_list.currentRow()
         if row <= 0:
             return
         self._queue[row - 1], self._queue[row] = self._queue[row], self._queue[row - 1]
+        self._resync_orchestrator_queue()
         self._refresh_queue_list()
         self._queue_list.setCurrentRow(row - 1)
 
@@ -768,6 +831,7 @@ class ProcedureWindow(QMainWindow):
         if row < 0 or row >= len(self._queue) - 1:
             return
         self._queue[row], self._queue[row + 1] = self._queue[row + 1], self._queue[row]
+        self._resync_orchestrator_queue()
         self._refresh_queue_list()
         self._queue_list.setCurrentRow(row + 1)
 
@@ -777,10 +841,7 @@ class ProcedureWindow(QMainWindow):
         if row < 0 or row >= len(self._queue):
             return
         self._queue.pop(row)
-        # Pending entries mirror the Orchestrator queue 1:1 and in order, so the
-        # same row indexes the instance to drop.
-        if row < len(self._orchestrator._procedure_queue):
-            self._orchestrator._procedure_queue.pop(row)
+        self._resync_orchestrator_queue()
         self._refresh_queue_list()
 
     def _entry_summary(self, entry: _QueueEntry) -> str:
@@ -1002,12 +1063,37 @@ class ProcedureWindow(QMainWindow):
         """
         settings = app_settings.get_settings()
         saved = settings.value(_GEOMETRY_KEY)
-        if saved is not None and self.restoreGeometry(saved):
+        if saved is not None and self.restoreGeometry(saved) and self._geometry_on_screen():
             return
+        # Fall back when there is no saved geometry, restore fails, or the
+        # geometry landed off-screen (monitor no longer attached).
         screen = QApplication.primaryScreen()
         if screen is not None:
             available = screen.availableGeometry()
-            self.resize(int(available.width() * 0.7), int(available.height() * 0.7))
+            width = int(available.width() * 0.7)
+            height = int(available.height() * 0.7)
+            self.resize(width, height)
+            self.move(
+                available.x() + (available.width() - width) // 2,
+                available.y() + (available.height() - height) // 2,
+            )
+
+    def _geometry_on_screen(self) -> bool:
+        """Return True if the window frame overlaps an attached screen enough to see.
+
+        Guards against ``restoreGeometry`` succeeding onto a screen that no
+        longer exists (a window that never appears): requires at least a
+        100x100 overlap with some screen's available area.
+
+        Returns:
+            True if a usable portion of the window is on an attached screen.
+        """
+        frame = self.frameGeometry()
+        for screen in QApplication.screens():
+            overlap = screen.availableGeometry().intersected(frame)
+            if overlap.width() >= 100 and overlap.height() >= 100:
+                return True
+        return False
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 (Qt override)
         """Persist the window geometry before the window closes.
