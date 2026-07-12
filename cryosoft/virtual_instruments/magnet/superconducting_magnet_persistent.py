@@ -108,6 +108,10 @@ class SuperconductingMagnetPersistentVI(SuperconductingMagnetVI):
         # in persistent mode. Read by ramp_status() to pick the completion test.
         self._pending_persistent: bool = True
 
+        # Current ramp sub-phase, for the watchdog (no-motion phases must not
+        # read as a stall). Set as the generator walks its steps.
+        self._phase: str = "idle"
+
     # ------------------------------------------------------------------
     # RampableVI override — switch-heater-aware
     # ------------------------------------------------------------------
@@ -157,12 +161,24 @@ class SuperconductingMagnetPersistentVI(SuperconductingMagnetVI):
             return "RAMPING"
         return "RAMPING"
 
+    def ramp_phase(self) -> str:
+        """Return the active persistent-ramp sub-phase.
+
+        One of ``matching`` / ``warmup`` / ``ramping`` / ``cooldown`` /
+        ``parking`` while a ramp is in flight, or ``"idle"`` when none is
+        active. The watchdog suppresses stall detection during the no-motion
+        phases (matching/warmup/cooldown/parking), where the field deliberately
+        holds still and a flat gap is expected, not a fault.
+        """
+        return "idle" if self._ramp_gen is None else self._phase
+
     # ------------------------------------------------------------------
     # Internal persistent-mode generator
     # ------------------------------------------------------------------
 
     def _persistent_ramp_generator(self, target_A: float, persistent: bool) -> Generator:
         driver = self._driver  # type: ignore[attr-defined]
+        self._phase = "matching"
 
         # --- Step 1: With the switch still cold (superconducting), match the
         # PSU output to the coil current BEFORE energising the heater.
@@ -188,6 +204,7 @@ class SuperconductingMagnetPersistentVI(SuperconductingMagnetVI):
             # --- Step 2: Energise the switch heater (currents now matched)
             # and wait for thermal warmup ---
             driver.set_switch_heater(True)
+            self._phase = "warmup"
             for _ in range(self._warmup_ticks):
                 yield
         elif driver.get_persistent_mode():
@@ -197,6 +214,7 @@ class SuperconductingMagnetPersistentVI(SuperconductingMagnetVI):
             driver.set_persistent_mode(False)
 
         # --- Step 3: Ramp to target using standard segment generator ---
+        self._phase = "ramping"
         yield from self._ramp_generator(target_A)
         # Wait for hardware to report HOLD
         while driver.get_status() == "RAMPING":
@@ -211,11 +229,13 @@ class SuperconductingMagnetPersistentVI(SuperconductingMagnetVI):
 
         # --- Step 4: Cool switch heater (PSU == coil, so this is safe) ---
         driver.set_switch_heater(False)
+        self._phase = "cooldown"
         for _ in range(self._cooldown_ticks):
             yield
 
         # --- Step 5: Enter persistent mode; park PSU at zero (the cold
         # switch now carries the coil current) ---
+        self._phase = "parking"
         driver.set_persistent_mode(True)
         driver.set_ramp_rate(self._default_ramp_rate)
         driver.set_current_setpoint(0.0)

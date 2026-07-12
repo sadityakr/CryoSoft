@@ -118,3 +118,14 @@ class RampableVI:
         each VI type. Default ``None``; ramp-tracking VIs override it.
         """
         return None
+
+    def ramp_phase(self) -> str | None:
+        """Return the active ramp sub-phase, or ``None`` if the VI has none.
+
+        Most VIs ramp in a single phase and return ``None`` (the watchdog then
+        treats them as always making progress toward target). VIs with distinct
+        no-motion phases — a persistent magnet's switch-heater warmup/cooldown,
+        where the field deliberately holds still — override this so the watchdog
+        does not read those expected pauses as a stall.
+        """
+        return None

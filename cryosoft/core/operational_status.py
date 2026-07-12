@@ -4,7 +4,8 @@
 #   taking so long?" signal. A pure function that assembles one machine-readable
 #   status record per Orchestrator tick from the already-polled station state
 #   and Station.get_ramp_status(). No hardware, no Qt, no I/O — the Orchestrator
-#   owns emission and logging; this module owns the data shape and the verdict.
+#   owns emission and logging; this module owns the data shape and the codes.
+#   The heuristic stall verdict is applied on top by cryosoft.core.watchdog.
 # entry_point: Not run directly; called by the Orchestrator each tick.
 # dependencies:
 #   - dataclasses, enum (stdlib only)
@@ -15,7 +16,7 @@
 # process: |
 #   For each system VI it computes gap-to-target, gap closing since last tick,
 #   and an ETA, and assigns an unambiguous RunFaultCode (stale / disconnected /
-#   quench / ok). Heuristic stall detection is deliberately NOT done here yet.
+#   quench / ok). Heuristic stall detection is done by the watchdog, not here.
 # output: |
 #   A JSON-ready dict record (the schema the troubleshoot layer reads from
 #   logs/status.jsonl) plus the new per-VI gap map for the next tick.
@@ -42,34 +43,49 @@ class RunFaultCode(str, Enum):
     """Stable, machine-readable runtime health codes.
 
     ``str, Enum`` makes each member serialize as its plain string value, so a
-    record is directly JSON-ready. Only unambiguous conditions are emitted
-    today; heuristic codes (a "possibly stuck" ramp) are added with the
-    watchdog increment.
+    record is directly JSON-ready.
 
     * ``OK``              — ramping/settling normally, or idle.
     * ``VI_STALE``        — the instrument stopped updating (cached values).
     * ``VI_DISCONNECTED`` — repeated comms failures; assumed off the bus.
     * ``QUENCH``          — a magnet reported a quench.
+    * ``RAMP_STALLED``    — a ramp made no progress for several ticks (watchdog).
+    * ``STALLED_RUN``     — the run sat in a transient state far too long
+                            (watchdog).
     """
 
     OK = "OK"
     VI_STALE = "VI_STALE"
     VI_DISCONNECTED = "VI_DISCONNECTED"
     QUENCH = "QUENCH"
+    RAMP_STALLED = "RAMP_STALLED"
+    STALLED_RUN = "STALLED_RUN"
 
 
 # Higher = more severe; the record's overall verdict is the worst VI's code.
+# Physical instrument faults (quench, lost comms) outrank a progress stall.
 _SEVERITY: dict[RunFaultCode, int] = {
     RunFaultCode.OK: 0,
     RunFaultCode.VI_STALE: 2,
-    RunFaultCode.QUENCH: 3,
-    RunFaultCode.VI_DISCONNECTED: 3,
+    RunFaultCode.RAMP_STALLED: 3,
+    RunFaultCode.STALLED_RUN: 3,
+    RunFaultCode.QUENCH: 4,
+    RunFaultCode.VI_DISCONNECTED: 4,
 }
+
+_SEVERITY_BY_VALUE: dict[str, int] = {code.value: sev for code, sev in _SEVERITY.items()}
 
 
 def _worse(a: RunFaultCode, b: RunFaultCode) -> RunFaultCode:
     """Return the more severe of two codes."""
     return a if _SEVERITY[a] >= _SEVERITY[b] else b
+
+
+def worst_code(code_values: list[str]) -> str:
+    """Return the most severe of a list of code string values (OK if empty)."""
+    if not code_values:
+        return RunFaultCode.OK.value
+    return max(code_values, key=lambda c: _SEVERITY_BY_VALUE.get(c, 0))
 
 
 @dataclass
@@ -89,6 +105,7 @@ class VIHealth:
     rate: float | None          # user units per minute
     eta_s: float | None        # gap / rate, seconds to target at current rate
     ramp_status: str           # RAMPING / TARGET_REACHED / IDLE
+    phase: str | None          # sub-phase (e.g. warmup/ramping) or None if N/A
     code: RunFaultCode
     detail: str = ""
 
@@ -114,15 +131,16 @@ def build_operational_status(
 
     Pure: no hardware, no Qt, no I/O. The caller (Orchestrator) supplies the
     already-polled ``state`` snapshot and ``ramp_info`` (Station.get_ramp_status,
-    which carries value/target/rate/ramp_status per system VI) so this does not
-    poll anything itself.
+    which carries value/target/rate/ramp_status/phase per system VI) so this
+    does not poll anything itself. Only unambiguous codes are set here; the
+    heuristic stall verdict is layered on by ``cryosoft.core.watchdog``.
 
     Args:
         orch_state: Orchestrator state name (e.g. ``"RAMPING"``).
         elapsed_in_state_s: Seconds since that state was entered.
         state: The station state snapshot ``{vi_name: {field: value, ...}}``,
             used for the ``_stale`` / ``_disconnected`` flags and magnet quench.
-        ramp_info: ``{vi_name: {"value","target","rate","ramp_status", ...}}``.
+        ramp_info: ``{vi_name: {"value","target","rate","ramp_status","phase"}}``.
         prev_gaps: Per-VI gap from the previous tick, for the closing fact.
         wait_target_s / wait_elapsed_s: Settle-wait clock, if in a wait.
         progress: Procedure progress 0..1, if a procedure is running.
@@ -141,6 +159,7 @@ def build_operational_status(
         target = ramp.get("target")
         rate = ramp.get("rate")
         ramp_status = ramp.get("ramp_status", "IDLE")
+        phase = ramp.get("phase")
 
         gap: float | None = None
         closing: float | None = None
@@ -173,6 +192,7 @@ def build_operational_status(
                 rate=rate,
                 eta_s=eta_s,
                 ramp_status=ramp_status,
+                phase=phase,
                 code=code,
                 detail=detail,
             ).as_dict()
@@ -189,6 +209,7 @@ def build_operational_status(
         ),
         "progress": progress,
         "verdict": verdict.value,
+        "alerts": [],
         "vis": vis,
     }
     return record, new_gaps

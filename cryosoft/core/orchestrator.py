@@ -53,6 +53,7 @@ from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
 from cryosoft.core.operational_status import build_operational_status
 from cryosoft.core.station import Station
+from cryosoft.core.watchdog import WatchdogConfig, WatchdogState, apply_watchdog
 # Procedures will be imported/type-checked but for now we expect a BaseProcedure mock.
 # We don't import BaseProcedure directly to avoid circular dependency.
 
@@ -124,6 +125,8 @@ class Orchestrator(QObject):
         self._prev_gaps: dict[str, float] = {}
         self._operational_status: dict = {}
         self._status_logger = logging.getLogger("cryosoft.status")
+        self._watchdog_state = WatchdogState()
+        self._watchdog_config = WatchdogConfig()
 
         self._pre_pause_state = OrchestratorState.IDLE
         self._paused_wait_elapsed = 0.0
@@ -347,6 +350,9 @@ class Orchestrator(QObject):
                 wait_target_s=wait_target,
                 wait_elapsed_s=wait_elapsed,
                 progress=progress,
+            )
+            record, self._watchdog_state = apply_watchdog(
+                record, self._watchdog_state, self._watchdog_config
             )
             self._operational_status = record
             self.operational_status.emit(record)

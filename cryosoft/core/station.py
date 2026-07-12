@@ -332,6 +332,7 @@ class Station:
                     "target": vi.ramp_target(),
                     "rate": vi.ramp_rate(),
                     "ramp_status": vi.ramp_status(),
+                    "phase": vi.ramp_phase(),
                 }
             except CryoSoftCommunicationError:
                 result[vi_name] = {
@@ -339,6 +340,7 @@ class Station:
                     "target": None,
                     "rate": None,
                     "ramp_status": "IDLE",
+                    "phase": None,
                     "_stale": True,
                 }
         return result
