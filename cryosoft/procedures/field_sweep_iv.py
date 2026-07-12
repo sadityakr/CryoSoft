@@ -16,9 +16,11 @@
 #     keithley_delta_mode (measurement VI with configure() and read_datapoint()).
 # input: |
 #   station, sample_info, data_directory, and keyword params matching the
-#   parameters dict: temperature, current, n_readings, init_wait, step_wait,
-#   plus the sweep_axis-generated field_mode/field_start/field_end/
-#   field_steps/field_segments/field_csv_path/field_hysteresis (see
+#   parameters dict: temperature, init_wait, step_wait; delta-mode measurement
+#   params current, n_readings, voltmeter_range_V (enumerated 2182A range),
+#   compliance_V, delay_s, compliance_abort (bool), cold_switch (bool); plus
+#   the sweep_axis-generated field_mode/field_start/field_end/field_steps/
+#   field_segments/field_csv_path/field_hysteresis (see
 #   core.sweep_builder.sweep_axis_param_specs()).
 # process: |
 #   initiate() ramps to first field point + target temperature, configures
@@ -59,8 +61,8 @@ class FieldSweepIV(BaseProcedure):
         ``keithley_delta_mode`` (measurement).
     """
 
-    name = "Field Sweep IV"
-    description = "Sweep magnetic field, measure IV at each point"
+    name = "Field Sweep IV (Delta Mode)"
+    description = "Sweep magnetic field, measure delta-mode IV at each point"
     sweep_axis = SweepAxis(
         key="field",
         unit="T",
@@ -100,13 +102,48 @@ class FieldSweepIV(BaseProcedure):
             "type": float,
             "default": 1e-6,
             "unit": "A",
-            "description": "Measurement current",
+            "description": "Peak delta current (±I, reversed each cycle)",
         },
         "n_readings": {
             "type": int,
             "default": 100,
             "min": 1,
             "description": "Readings per point (delta mode)",
+        },
+        "voltmeter_range_V": {
+            "type": float,
+            "default": 0.01,
+            "unit": "V",
+            "choices": {
+                "10 mV": 0.01,
+                "100 mV": 0.1,
+                "1 V": 1.0,
+                "10 V": 10.0,
+                "100 V": 100.0,
+            },
+            "description": "Keithley 2182A voltmeter measurement range",
+        },
+        "compliance_V": {
+            "type": float,
+            "default": 1.0,
+            "unit": "V",
+            "description": "Source voltage compliance limit",
+        },
+        "delay_s": {
+            "type": float,
+            "default": 0.01,
+            "unit": "s",
+            "description": "Delta inter-transition delay (0 = hardware minimum)",
+        },
+        "compliance_abort": {
+            "type": bool,
+            "default": True,
+            "description": "Abort the delta run if the source reaches compliance",
+        },
+        "cold_switch": {
+            "type": bool,
+            "default": False,
+            "description": "Cold-switch between current reversals (lower thermal EMF)",
         },
     }
 
@@ -141,6 +178,11 @@ class FieldSweepIV(BaseProcedure):
                     "method": "delta_mode",
                     "current": self._params["current"],
                     "n_readings": n_readings,
+                    "delay": self._params["delay_s"],
+                    "compliance": self._params["compliance_V"],
+                    "range_2182a": self._params["voltmeter_range_V"],
+                    "compliance_abort": self._params["compliance_abort"],
+                    "cold_switch": self._params["cold_switch"],
                 }
             }
         }

@@ -310,6 +310,38 @@ def test_procedure_parameter_has_description(proc_cls: type) -> None:
 
 
 @pytest.mark.parametrize("proc_cls", _all_procedure_classes(), ids=lambda c: c.__name__)
+def test_procedure_choices_spec(proc_cls: type) -> None:
+    """Enumerated ('choices') parameters follow the label->value dict standard.
+
+    A parameter that declares 'choices' renders as a GUI drop-down and its
+    collected value is the *mapped* value (see BaseProcedure docstring and
+    ProcedureWindow._build_param_widget). For that contract to hold:
+      * choices must be a non-empty dict (label -> value);
+      * every value must be an instance of the declared 'type' (so the value
+        the procedure receives matches what it expects); and
+      * 'default' must be one of the mapped values (so the drop-down has a
+        valid initial selection and unattended runs get a legal value).
+    """
+    for param_name, spec in proc_cls.parameters.items():
+        if "choices" not in spec:
+            continue
+        choices = spec["choices"]
+        ctx = f"{proc_cls.__name__}.{param_name}"
+        assert isinstance(choices, dict) and choices, (
+            f"{ctx} 'choices' must be a non-empty label->value dict"
+        )
+        param_type = spec["type"]
+        for label, value in choices.items():
+            assert isinstance(value, param_type), (
+                f"{ctx} choice {label!r} maps to {value!r}, not a {param_type.__name__}"
+            )
+        assert spec["default"] in choices.values(), (
+            f"{ctx} default {spec['default']!r} is not one of the choice values "
+            f"{list(choices.values())}"
+        )
+
+
+@pytest.mark.parametrize("proc_cls", _all_procedure_classes(), ids=lambda c: c.__name__)
 def test_procedure_constructs_from_defaults(proc_cls: type, tmp_path) -> None:
     """Every procedure must construct with zero explicit parameters.
 

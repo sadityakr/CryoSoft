@@ -180,9 +180,41 @@ def test_delta_mode_vi():
         vi.read_datapoint()
         
     vi.configure("delta_mode", current=1e-6, n_readings=10, delay=0.001)
-    
+
     data = vi.read_datapoint()
     assert "voltage_V" in data
     assert "current_A" in data
     assert len(data["voltage_V"]) == 10
     assert len(data["current_A"]) == 10
+
+
+def test_delta_mode_vi_forwards_all_config_params():
+    """configure() forwards the full delta parameter set to the source driver.
+
+    Regression guard: compliance, range, compliance_abort and cold_switch must
+    reach configure_and_start_delta() (a wrong/skipped delta command errors on
+    the real 6221), so the sim driver records them for inspection here.
+    """
+    from cryosoft.virtual_instruments.measurement.measurement_delta_mode import DeltaModeMeasurementVI
+
+    source = SimKeithley6221("SIM")
+    meter = SimKeithley2182A("SIM")
+    source._paired_meter = meter
+    vi = DeltaModeMeasurementVI({"source": source, "meter": meter})
+
+    vi.configure(
+        "delta_mode",
+        current=2e-6,
+        n_readings=5,
+        delay=0.002,
+        compliance=3.0,
+        range_2182a=0.1,
+        compliance_abort=False,
+        cold_switch=True,
+    )
+
+    assert source._delta_high_current == pytest.approx(2e-6)
+    assert source._delta_compliance == pytest.approx(3.0)
+    assert source._delta_range_2182a == pytest.approx(0.1)
+    assert source._delta_compliance_abort is False
+    assert source._delta_cold_switch is True
