@@ -2,12 +2,14 @@
 # description: |
 #   Unit tests for cryosoft.gui.sweep_axis_widget.SweepAxisWidget: mode
 #   switching (Linear/Segments/CSV), get_params() per mode, and validation
-#   errors for the active mode's own inputs.
+#   errors for the active mode's own inputs. Segments mode uses a 2-column
+#   breakpoint table (Value, Step to next): consecutive rows pair into
+#   SweepSegment start/end/step dicts.
 # entry_point: pytest tests/test_sweep_axis_widget.py -v
-# last_updated: 2026-07-12
 # ---
 
 import pytest
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QTableWidgetItem
 
 from cryosoft.core.sweep_builder import SweepAxis
@@ -34,10 +36,9 @@ def widget(axis, qtbot):
     return w
 
 
-def _set_row(table, row, start, end, step):
-    table.setItem(row, 0, QTableWidgetItem(str(start)))
-    table.setItem(row, 1, QTableWidgetItem(str(end)))
-    table.setItem(row, 2, QTableWidgetItem(str(step)))
+def _set_row(table, row, value, step):
+    table.setItem(row, 0, QTableWidgetItem(str(value)))
+    table.setItem(row, 1, QTableWidgetItem(str(step)))
 
 
 def test_param_keys(widget):
@@ -88,16 +89,26 @@ def test_linear_mode_unparseable_field_raises(widget):
 
 def test_segments_mode_without_rows_raises(widget):
     widget._mode_combo.setCurrentIndex(1)  # Segments
-    with pytest.raises(ValueError, match="no segments"):
+    with pytest.raises(ValueError, match="at least two breakpoints"):
         widget.get_params()
 
 
-def test_segments_mode_returns_filled_rows(widget):
+def test_segments_mode_single_row_raises(widget):
     widget._mode_combo.setCurrentIndex(1)
     widget._add_segment_row()
-    _set_row(widget._segments_table, 0, -0.1, -0.02, 0.04)
+    _set_row(widget._segments_table, 0, -0.1, 0.04)
+    with pytest.raises(ValueError, match="at least two breakpoints"):
+        widget.get_params()
+
+
+def test_segments_mode_returns_paired_breakpoints(widget):
+    widget._mode_combo.setCurrentIndex(1)
     widget._add_segment_row()
-    _set_row(widget._segments_table, 1, -0.02, 0.02, 0.02)
+    _set_row(widget._segments_table, 0, -0.1, 0.04)
+    widget._add_segment_row()
+    _set_row(widget._segments_table, 1, -0.02, 0.02)
+    widget._add_segment_row()
+    _set_row(widget._segments_table, 2, 0.02, "")  # last row: step disabled/unused
 
     params = widget.get_params()
     assert params["field_mode"] == "segments"
@@ -107,17 +118,30 @@ def test_segments_mode_returns_filled_rows(widget):
     ]
 
 
-def test_add_segment_row_seeds_start_from_previous_end(widget):
+def test_add_segment_row_disables_last_row_step_cell(widget):
     widget._add_segment_row()
-    _set_row(widget._segments_table, 0, -0.1, -0.02, 0.04)
+    assert not (widget._segments_table.item(0, 1).flags() & Qt.ItemFlag.ItemIsEditable)
     widget._add_segment_row()
-    assert widget._segments_table.item(1, 0).text() == "-0.02"
+    assert widget._segments_table.item(0, 1).flags() & Qt.ItemFlag.ItemIsEditable
+    assert not (widget._segments_table.item(1, 1).flags() & Qt.ItemFlag.ItemIsEditable)
 
 
-def test_segments_mode_bad_cell_raises(widget):
+def test_segments_mode_bad_value_cell_raises(widget):
     widget._mode_combo.setCurrentIndex(1)
     widget._add_segment_row()
-    _set_row(widget._segments_table, 0, "oops", -0.02, 0.04)
+    _set_row(widget._segments_table, 0, "oops", 0.04)
+    widget._add_segment_row()
+    _set_row(widget._segments_table, 1, 0.02, "")
+    with pytest.raises(ValueError, match="row 1"):
+        widget.get_params()
+
+
+def test_segments_mode_bad_step_cell_raises(widget):
+    widget._mode_combo.setCurrentIndex(1)
+    widget._add_segment_row()
+    _set_row(widget._segments_table, 0, -0.1, "oops")
+    widget._add_segment_row()
+    _set_row(widget._segments_table, 1, 0.02, "")
     with pytest.raises(ValueError, match="row 1"):
         widget.get_params()
 

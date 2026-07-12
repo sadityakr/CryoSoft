@@ -5,9 +5,10 @@
 #   A procedure that declares sweep_axis gets a SweepAxisWidget (linear /
 #   segments / CSV, with hysteresis) in the Sweep column instead of flat text
 #   fields — this file is the only GUI code sweep-shape support needs; new
-#   procedures never touch it. Two-column top layout (params left, queue
-#   right) with two live pyqtgraph plots spanning full-width below. Sample
-#   info is read from MonitorWindow via callables.
+#   procedures never touch it. Fixed 2x2 quadrant grid (top-left params,
+#   top-right queue, bottom-left/right Plot 1/Plot 2), the same nested-
+#   QSplitter pattern as MonitorWindow. Sample info is read from
+#   MonitorWindow via callables.
 # entry_point: Not run directly. Opened via MonitorWindow Procedures menu.
 # dependencies:
 #   - PyQt6 >= 6.5
@@ -28,7 +29,6 @@
 #   tuples. Execution goes through orchestrator.run_procedure().
 # output: |
 #   A QMainWindow. Two live plots update via orchestrator.measurement_ready.
-# last_updated: 2026-07-12
 # ---
 
 """ProcedureWindow — procedure builder, queue, and live-data monitor."""
@@ -113,11 +113,13 @@ def _discover_procedures() -> list[type[BaseProcedure]]:
 class ProcedureWindow(QMainWindow):
     """Procedure builder, queue manager, and live-data window.
 
-    Layout:
-    - Top: QSplitter(Horizontal) — left pane (selector + params + buttons),
-      right pane (queue).
-    - Bottom: QSplitter(Horizontal) — Plot 1 and Plot 2 side-by-side.
-    - Full-width progress bar and control buttons below plots.
+    A fixed 2x2 quadrant grid, the same nested-QSplitter pattern as
+    MonitorWindow: top-left is the procedure selector + full parameter form
+    (Sweep/System/Measurement, filling the quadrant rather than capped at a
+    fixed height with empty space below), top-right is the Queue, and the
+    bottom row is Plot 1 (left) / Plot 2 (right). Every splitter boundary is
+    draggable; nothing in the grid can be closed or detached. A full-width
+    progress bar and control buttons sit below the grid.
 
     Sample info and data directory are read from MonitorWindow via
     ``get_sample_info`` and ``get_data_dir`` callables injected at construction.
@@ -180,11 +182,33 @@ class ProcedureWindow(QMainWindow):
         self._banner = NotificationBanner()
         root.addWidget(self._banner)
 
-        # ── Top: params (left) | queue (right) ───────────────────────
-        root.addWidget(self._build_top_splitter(), stretch=2)
+        # ── Fixed 2x2 quadrant grid ────────────────────────────────────
+        top_left = self._build_params_quadrant()
+        top_right = self._build_queue_quadrant()
+        bottom_left, bottom_right = self._build_plot_quadrants()
 
-        # ── Bottom: Plot 1 | Plot 2 ───────────────────────────────────
-        root.addWidget(self._build_plot_section_dual(), stretch=3)
+        self._left_splitter = QSplitter(Qt.Orientation.Vertical)
+        self._left_splitter.setObjectName("left_splitter")
+        self._left_splitter.setChildrenCollapsible(False)
+        self._left_splitter.addWidget(top_left)
+        self._left_splitter.addWidget(bottom_left)
+        self._left_splitter.setSizes([600, 400])
+
+        self._right_splitter = QSplitter(Qt.Orientation.Vertical)
+        self._right_splitter.setObjectName("right_splitter")
+        self._right_splitter.setChildrenCollapsible(False)
+        self._right_splitter.addWidget(top_right)
+        self._right_splitter.addWidget(bottom_right)
+        self._right_splitter.setSizes([600, 400])
+
+        self._main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._main_splitter.setObjectName("main_splitter")
+        self._main_splitter.setChildrenCollapsible(False)
+        self._main_splitter.addWidget(self._left_splitter)
+        self._main_splitter.addWidget(self._right_splitter)
+        self._main_splitter.setSizes([720, 480])
+
+        root.addWidget(self._main_splitter, stretch=1)
 
         # ── Progress bar (full-width) ─────────────────────────────────
         self._progress_bar = QProgressBar()
@@ -196,39 +220,23 @@ class ProcedureWindow(QMainWindow):
         # ── Control buttons ───────────────────────────────────────────
         root.addLayout(self._build_control_buttons())
 
-    def _build_top_splitter(self) -> QSplitter:
-        """Build the horizontal splitter that separates params (left) and queue (right).
+    def _build_params_quadrant(self) -> QWidget:
+        """Build the top-left quadrant: procedure selector, Add/Run buttons, and the full parameter form.
+
+        The parameter scroll area has no height cap and no trailing stretch
+        — it fills whatever height the quadrant is given, instead of sitting
+        at a fixed small height with empty space below it.
 
         Returns:
-            QSplitter with left widget (selector + form + buttons) and
-            right widget (queue).
-        """
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        # setChildrenCollapsible(False) + per-pane minimums stop a drag from
-        # crushing either the params or the queue pane to zero width.
-        splitter.setChildrenCollapsible(False)
-
-        left_column = self._build_left_column()
-        right_column = self._build_right_column()
-        left_column.setMinimumWidth(300)
-        right_column.setMinimumWidth(250)
-        splitter.addWidget(left_column)
-        splitter.addWidget(right_column)
-        splitter.setSizes([720, 480])
-        return splitter
-
-    def _build_left_column(self) -> QWidget:
-        """Build the left pane: procedure selector, parameter form, Add/Run buttons.
-
-        Returns:
-            QWidget containing the left-column layout.
+            QWidget containing the quadrant layout.
         """
         widget = QWidget()
+        widget.setObjectName("params_quadrant")
         col = QVBoxLayout(widget)
         col.setSpacing(8)
         col.setContentsMargins(0, 0, 4, 0)
 
-        # ── Procedure selector ────────────────────────────────────────
+        # ── Procedure selector + Add/Run buttons (one row) ─────────────
         sel_row = QHBoxLayout()
         sel_row.addWidget(QLabel("Procedure:"))
         self._proc_selector = QComboBox()
@@ -238,16 +246,7 @@ class ProcedureWindow(QMainWindow):
         self._proc_selector.currentIndexChanged.connect(self._on_procedure_selected)
         sel_row.addWidget(self._proc_selector)
         sel_row.addStretch()
-        col.addLayout(sel_row)
 
-        # ── Parameters (scroll area; rebuilt on selector change) ──────
-        self._param_scroll = QScrollArea()
-        self._param_scroll.setWidgetResizable(True)
-        self._param_scroll.setMaximumHeight(250)
-        col.addWidget(self._param_scroll)
-
-        # ── Add / Run buttons ─────────────────────────────────────────
-        action_row = QHBoxLayout()
         add_btn = QPushButton("Add to Queue")
         add_btn.setObjectName("add_to_queue_btn")
         add_btn.setProperty("class", BTN_CLASS_SECONDARY)
@@ -260,21 +259,26 @@ class ProcedureWindow(QMainWindow):
         run_now_btn.setIcon(qta.icon("fa5s.play", color=TEXT_ON_ACCENT))
         run_now_btn.setToolTip("Run the current procedure immediately")
         run_now_btn.clicked.connect(self._on_run_now)
-        action_row.addWidget(add_btn)
-        action_row.addWidget(run_now_btn)
-        action_row.addStretch()
-        col.addLayout(action_row)
+        sel_row.addWidget(add_btn)
+        sel_row.addWidget(run_now_btn)
+        col.addLayout(sel_row)
 
-        col.addStretch()
+        # ── Parameters (scroll area; rebuilt on selector change) ──────
+        self._param_scroll = QScrollArea()
+        self._param_scroll.setObjectName("param_scroll")
+        self._param_scroll.setWidgetResizable(True)
+        col.addWidget(self._param_scroll)
+
         return widget
 
-    def _build_right_column(self) -> QWidget:
-        """Build the right pane: queue list with management buttons.
+    def _build_queue_quadrant(self) -> QWidget:
+        """Build the top-right quadrant: the Queue list with management buttons.
 
         Returns:
-            QWidget containing the right-column layout.
+            QWidget containing the quadrant layout.
         """
         widget = QWidget()
+        widget.setObjectName("queue_quadrant")
         col = QVBoxLayout(widget)
         col.setSpacing(0)
         col.setContentsMargins(4, 0, 0, 0)
@@ -459,20 +463,19 @@ class ProcedureWindow(QMainWindow):
 
         return box
 
-    def _build_plot_section_dual(self) -> QSplitter:
-        """Build two side-by-side LivePlotPanels in a horizontal splitter.
+    def _build_plot_quadrants(self) -> tuple[QWidget, QWidget]:
+        """Build the bottom-left/bottom-right quadrants: Plot 1 and Plot 2.
 
-        Both panels are ``LivePlotPanel`` instances (widget extraction of the
-        formerly duplicated Plot 1 / Plot 2 code). The legacy objectNames are
-        passed through unchanged so ``findChild`` keeps resolving them.
+        Both panels are ``LivePlotPanel`` instances; legacy objectNames are
+        passed through unchanged so ``findChild`` keeps resolving them. Each
+        sits in its own quadrant (left_splitter's bottom / right_splitter's
+        bottom) rather than a separate dedicated splitter — the same
+        left/right boundary that divides params from queue above also
+        divides Plot 1 from Plot 2 below.
 
         Returns:
-            QSplitter containing Plot 1 (left) and Plot 2 (right).
+            ``(plot1, plot2)`` widgets, not yet placed in a splitter.
         """
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        # Keep both plots usable; non-collapsible with a sane minimum size so a
-        # drag cannot squeeze either plot into an unreadable sliver.
-        splitter.setChildrenCollapsible(False)
         self._plot1 = LivePlotPanel(
             "Plot 1", PLOT_SERIES[0],
             x_selector_name="x1_axis_selector",
@@ -488,8 +491,7 @@ class ProcedureWindow(QMainWindow):
         for panel in (self._plot1, self._plot2):
             panel.setMinimumWidth(250)
             panel.setMinimumHeight(150)
-            splitter.addWidget(panel)
-        return splitter
+        return self._plot1, self._plot2
 
     def _build_control_buttons(self) -> QHBoxLayout:
         """Build Pause / Resume / Abort / Emergency-Acknowledge buttons.

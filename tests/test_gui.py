@@ -17,17 +17,16 @@ config with no hardware. All 121 prior tests must pass before this file is run.
 import logging
 
 import pytest
-from PyQt6.QtCore import QSettings
+from PyQt6.QtCore import Qt, QSettings
 from PyQt6.QtWidgets import (
     QComboBox,
-    QDockWidget,
     QFormLayout,
     QLabel,
     QLineEdit,
-    QMainWindow,
     QPushButton,
     QScrollArea,
     QSplitter,
+    QStackedWidget,
 )
 
 from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
@@ -187,14 +186,15 @@ def test_instrument_panel_creates_control_buttons(station, orchestrator, qtbot):
 
 
 def test_instrument_panel_lifecycle_buttons_exist(station, orchestrator, qtbot):
-    """InstrumentPanel has Initiate and Standby buttons."""
+    """InstrumentPanel has a single lifecycle toggle button (Initiate/Standby)."""
     vi_name = "temperature_vti"
     vi = station._virtual_instruments[vi_name]
     panel = InstrumentPanel(vi_name, vi, orchestrator)
     qtbot.addWidget(panel)
 
-    assert panel.findChild(QPushButton, f"{vi_name}_initiate_btn") is not None
-    assert panel.findChild(QPushButton, f"{vi_name}_standby_btn") is not None
+    assert panel.findChild(QPushButton, f"{vi_name}_lifecycle_btn") is not None
+    assert panel.findChild(QPushButton, f"{vi_name}_initiate_btn") is None
+    assert panel.findChild(QPushButton, f"{vi_name}_standby_btn") is None
 
 
 def test_instrument_panel_updates_values_on_signal(station, orchestrator, qtbot):
@@ -222,7 +222,7 @@ def test_instrument_panel_stale_border(station, orchestrator, qtbot):
 
     orchestrator.states_updated.emit({vi_name: {"_stale": True}})
     assert panel.property("status") == "stale"
-    assert "[stale]" in panel.title()
+    assert "[stale]" in panel._name_label.text()
 
 
 def test_instrument_panel_disconnected_border(station, orchestrator, qtbot):
@@ -234,7 +234,7 @@ def test_instrument_panel_disconnected_border(station, orchestrator, qtbot):
 
     orchestrator.states_updated.emit({vi_name: {"_stale": True, "_disconnected": True}})
     assert panel.property("status") == "disconnected"
-    assert "[DISCONNECTED]" in panel.title()
+    assert "[DISCONNECTED]" in panel._name_label.text()
 
 
 def test_instrument_panel_status_resets_to_ok(station, orchestrator, qtbot):
@@ -249,7 +249,7 @@ def test_instrument_panel_status_resets_to_ok(station, orchestrator, qtbot):
 
     orchestrator.states_updated.emit({vi_name: {}})
     assert panel.property("status") == "ok"
-    assert panel.title() == vi_name
+    assert panel._name_label.text() == f"<b>{vi_name}</b>"
 
 
 def test_instrument_panel_status_not_restyled_when_unchanged(
@@ -433,134 +433,106 @@ def test_measurement_ready_updates_plot(procedure_win, orchestrator):
     assert abs(procedure_win._datapoints[0]["field_T"] - 0.5) < 1e-9
 
 
-# ── Dock-based layout tests (Monitor GUI redesign) ──────────────────────────
+# ── Fixed 2x2 quadrant layout tests (GUI optimization redesign) ─────────────
 
-def test_monitor_dock_host_exists(monitor_win):
-    """The dock host is an inner QMainWindow with dock nesting enabled."""
-    dock_host = monitor_win.findChild(QMainWindow, "dock_host")
-    assert dock_host is not None
-    assert dock_host is monitor_win._dock_host
-    assert dock_host.isDockNestingEnabled()
+def test_monitor_quadrant_splitters_not_collapsible(monitor_win):
+    """The 3 quadrant splitters exist, resizable (not collapsible), correctly oriented."""
+    assert monitor_win._main_splitter.orientation() == Qt.Orientation.Horizontal
+    assert monitor_win._left_splitter.orientation() == Qt.Orientation.Vertical
+    assert monitor_win._right_splitter.orientation() == Qt.Orientation.Vertical
+    for splitter in (monitor_win._main_splitter, monitor_win._left_splitter, monitor_win._right_splitter):
+        assert splitter.childrenCollapsible() is False
+        assert splitter.count() == 2
 
 
-def test_monitor_instrument_docks_exist_for_system_vis(monitor_win, station):
-    """One dock_{vi_name} QDockWidget exists per system/level VI, wrapping its InstrumentPanel."""
+def test_monitor_instrument_panels_exist_for_system_vis(monitor_win, station):
+    """One InstrumentPanel exists per system/level VI, in the top-left quadrant."""
     system_vis = [
         n for n in station.get_vi_names() if station.get_vi_type(n) in {"system", "level"}
     ]
     assert system_vis, "sim_cryostat should have at least one system/level VI"
-    for vi_name in system_vis:
-        dock = monitor_win.findChild(QDockWidget, f"dock_{vi_name}")
-        assert dock is not None, f"Missing dock for {vi_name}"
-        assert isinstance(dock.widget(), InstrumentPanel)
-        assert dock.widget()._vi_name == vi_name
+    panel_vi_names = {p._vi_name for p in monitor_win._panels}
+    assert panel_vi_names == set(system_vis)
+    for panel in monitor_win._panels:
+        assert isinstance(panel, InstrumentPanel)
 
 
-def test_monitor_fixed_docks_exist_with_expected_content(monitor_win):
-    """Other Devices, Log, and Sample Info each have a dock wrapping the expected widget."""
-    other_dock = monitor_win.findChild(QDockWidget, "dock_other_devices")
-    log_dock = monitor_win.findChild(QDockWidget, "dock_log")
-    sample_dock = monitor_win.findChild(QDockWidget, "dock_sample_info")
-    assert other_dock is not None
-    assert log_dock is not None
-    assert sample_dock is not None
-    assert log_dock.widget() is monitor_win._log_widget
-    assert sample_dock.widget() is not None
+def test_monitor_fixed_quadrants_exist_with_expected_content(monitor_win):
+    """Sample Info and the Other Devices/Log stack contain the expected widgets."""
+    sample_quadrant = monitor_win.findChild(QScrollArea, "sample_info_scroll")
+    assert sample_quadrant is not None
+    assert sample_quadrant.widget().findChild(QLineEdit, "sample_name_input") is not None
+
+    stack = monitor_win.findChild(QStackedWidget, "devices_log_stack")
+    assert stack is not None
+    assert stack.count() == 2
+    assert stack.widget(1) is monitor_win._log_widget
 
 
-def test_monitor_default_trend_docks_exist(monitor_win):
-    """Two trend docks exist by default, each wrapping its registered TrendPlotPanel."""
+def test_monitor_default_trend_panels_exist_and_gridded(monitor_win):
+    """Two trend panels exist by default, each placed in the trends QGridLayout."""
     assert len(monitor_win._trend_panels) == 2
-    for panel_id, panel in monitor_win._trend_panels.items():
-        dock = monitor_win.findChild(QDockWidget, f"dock_{panel_id}")
-        assert dock is not None
-        assert dock.widget() is panel
+    for panel in monitor_win._trend_panels.values():
+        assert monitor_win._trends_grid.indexOf(panel) != -1
 
 
-def test_monitor_view_menu_has_toggle_action_per_dock(monitor_win, station):
-    """The View menu lists a checkable toggle action for every dock."""
-    system_vis = [
-        n for n in station.get_vi_names() if station.get_vi_type(n) in {"system", "level"}
-    ]
-    action_texts = {a.text() for a in monitor_win._view_menu.actions() if a.text()}
-
-    for vi_name in system_vis:
-        assert vi_name in action_texts
-    for expected in ("Other Devices", "Log", "Sample Info", "Trend — trend_0", "Trend — trend_1"):
-        assert expected in action_texts
-
-    dock_titles = {"Other Devices", "Log", "Sample Info", "Trend — trend_0", "Trend — trend_1", *system_vis}
-    for action in monitor_win._view_menu.actions():
-        if action.text() in dock_titles:
-            assert action.isCheckable()
+def test_monitor_has_no_view_menu(monitor_win):
+    """Nothing in the fixed quadrant layout can be hidden/closed, so there is no View menu."""
+    menu_titles = {action.text() for action in monitor_win.menuBar().actions()}
+    assert menu_titles == {"Procedures"}
 
 
-def test_monitor_view_menu_toggle_hides_and_shows_dock(monitor_win):
-    """Triggering a dock's toggleViewAction hides, then shows, that dock again."""
-    dock = monitor_win.findChild(QDockWidget, "dock_log")
-    action = dock.toggleViewAction()
-    assert action.isChecked() is True
-    assert dock.isVisible()
-
-    action.trigger()
-    assert dock.isVisible() is False
-    assert action.isChecked() is False
-
-    action.trigger()
-    assert dock.isVisible() is True
-    assert action.isChecked() is True
-
-
-def test_monitor_add_trend_plot_action_caps_at_four(monitor_win):
-    """The View menu's 'Add trend plot' action adds panels up to 4, then disables and stays inert."""
-    assert len(monitor_win._trend_panels) == 2
-    assert monitor_win._add_trend_action.isEnabled()
-
-    monitor_win._add_trend_action.trigger()
-    assert len(monitor_win._trend_panels) == 3
-    monitor_win._add_trend_action.trigger()
+def test_monitor_trends_grid_arranges_in_ceil_sqrt_grid(monitor_win):
+    """Adding trend plots up to the cap of 4 arranges them in a 2x2 grid, not a stack."""
+    monitor_win._add_trend_panel()  # 3rd panel: ceil(sqrt(3)) = 2 columns
+    monitor_win._add_trend_panel()  # 4th panel: ceil(sqrt(4)) = 2 columns
     assert len(monitor_win._trend_panels) == 4
-    assert not monitor_win._add_trend_action.isEnabled()
 
-    monitor_win._add_trend_action.trigger()
+    positions = {
+        monitor_win._trends_grid.getItemPosition(i)[:2]
+        for i in range(monitor_win._trends_grid.count())
+    }
+    assert positions == {(0, 0), (0, 1), (1, 0), (1, 1)}
+
+
+def test_monitor_add_trend_plot_button_caps_at_four(monitor_win):
+    """The Trends quadrant's Add button adds panels up to 4, then disables and stays inert."""
+    assert len(monitor_win._trend_panels) == 2
+    assert monitor_win._add_trend_btn.isEnabled()
+
+    monitor_win._add_trend_btn.click()
+    assert len(monitor_win._trend_panels) == 3
+    monitor_win._add_trend_btn.click()
+    assert len(monitor_win._trend_panels) == 4
+    assert not monitor_win._add_trend_btn.isEnabled()
+
+    monitor_win._add_trend_btn.click()
     assert len(monitor_win._trend_panels) == 4
 
 
 def test_monitor_trend_remove_button_drops_panel_never_below_one(monitor_win):
-    """The panel's own remove button destroys the panel+dock, stopping at a floor of 1."""
+    """The panel's own remove button destroys the panel, stopping at a floor of 1."""
     assert len(monitor_win._trend_panels) == 2
     first_id = next(iter(monitor_win._trend_panels))
-    first_dock_name = monitor_win._trend_docks[first_id].objectName()
 
     monitor_win._on_trend_remove_requested(first_id)
     assert len(monitor_win._trend_panels) == 1
     assert first_id not in monitor_win._trend_panels
-    assert monitor_win.findChild(QDockWidget, first_dock_name) is None  # actually destroyed
 
     remaining_id = next(iter(monitor_win._trend_panels))
     monitor_win._on_trend_remove_requested(remaining_id)
     assert len(monitor_win._trend_panels) == 1  # floor holds
 
-    assert monitor_win._add_trend_action.isEnabled()
+    assert monitor_win._add_trend_btn.isEnabled()
 
 
-def test_monitor_trend_dock_close_only_hides_not_removes(monitor_win):
-    """A trend dock's own close button (Qt's default) hides it — it stays registered.
-
-    This is the "collapse" behavior every dock gets for free from
-    toggleViewAction(); genuine removal is only via the panel's own remove
-    button (see test_monitor_trend_remove_button_drops_panel_never_below_one).
-    """
-    panel_id = next(iter(monitor_win._trend_panels))
-    dock = monitor_win._trend_docks[panel_id]
-
-    dock.close()
-    assert dock.isVisible() is False
-    assert panel_id in monitor_win._trend_panels
-    assert panel_id in monitor_win._trend_docks
-
-    dock.show()
-    assert dock.isVisible() is True
+def test_monitor_other_devices_log_selector_switches_stack(monitor_win):
+    """Changing the View selector switches the bottom-right stacked widget's page."""
+    assert monitor_win._devices_log_stack.currentIndex() == 0
+    monitor_win._devices_log_selector.setCurrentIndex(1)
+    assert monitor_win._devices_log_stack.currentIndex() == 1
+    monitor_win._devices_log_selector.setCurrentIndex(0)
+    assert monitor_win._devices_log_stack.currentIndex() == 0
 
 
 def test_monitor_states_updated_feeds_history_and_trend_combos(monitor_win, orchestrator):
@@ -600,14 +572,17 @@ def test_monitor_default_trend_key_hints_prefer_readings_over_settings(monitor_w
     assert trend_1.selected_key().endswith(("_helium_level", "_nitrogen_level"))
 
 
-def test_monitor_persistence_roundtrip_dock_state_and_trends(
+def test_monitor_persistence_roundtrip_splitters_and_trends(
     station, orchestrator, qtbot, isolated_settings
 ):
-    """'Save layout' persists dock_state + trend selections; a fresh window restores them.
+    """Closing persists splitter proportions + trend selections; a fresh window restores them.
 
     Mirrors the existing geometry-persistence test: build a window, change
-    state, save+close it (writes to the isolated ini), then build a fresh
-    window against the same settings and check the state came back.
+    state, close it (persisting via closeEvent to the isolated ini), then
+    build a fresh window against the same settings and check the state came
+    back. Unlike the old dock-based design, there is no explicit "Save
+    layout" action — splitter state persists automatically alongside window
+    geometry, the same way it already did for plain window size/position.
     """
     win1 = MonitorWindow(station, orchestrator)
     qtbot.addWidget(win1)
@@ -625,16 +600,16 @@ def test_monitor_persistence_roundtrip_dock_state_and_trends(
 
     assert len(win1._trend_panels) == 3
 
-    win1._on_save_layout()
-    assert win1._status_bar.currentMessage() == "Layout saved"
-
-    win1.close()
+    win1._main_splitter.setSizes([300, 900])
+    win1.close()  # persists geometry + splitter state via closeEvent
 
     win2 = MonitorWindow(station, orchestrator)
     qtbot.addWidget(win2)
     win2.show()
 
     assert len(win2._trend_panels) == 3
+    # Splitter proportions were restored, not left at the [600, 600] default.
+    assert win2._main_splitter.sizes() != [600, 600]
 
     # Give the new window's (empty) history the same key so the persisted
     # selection, held pending, can actually be applied.
@@ -646,36 +621,47 @@ def test_monitor_persistence_roundtrip_dock_state_and_trends(
     assert third_panel_2.selected_window_s() == 21600.0
 
 
-def test_monitor_default_layout_when_settings_empty(monitor_win):
-    """With no saved dock_state (fresh isolated settings), the DEFAULT layout stands."""
+def test_monitor_default_layout_when_settings_empty(monitor_win, station):
+    """With no saved splitter state (fresh isolated settings), the DEFAULT layout stands."""
+    system_vis = [
+        n for n in station.get_vi_names() if station.get_vi_type(n) in {"system", "level"}
+    ]
     assert len(monitor_win._trend_panels) == 2
-    assert monitor_win._instrument_docks  # instrument docks were built and placed
-    assert monitor_win._default_dock_state is not None
-
-
-def test_monitor_restore_default_layout_action_resets_trend_docks(monitor_win):
-    """'Restore default layout' rebuilds exactly the default trend-dock count, with a status message."""
-    monitor_win._add_trend_action.trigger()
-    monitor_win._add_trend_action.trigger()
-    assert len(monitor_win._trend_panels) == 4
-
-    monitor_win._on_restore_default_layout()
-    assert len(monitor_win._trend_panels) == 2
-    assert monitor_win._status_bar.currentMessage() == "Default layout restored"
+    assert len(monitor_win._panels) == len(system_vis)  # instrument panels were built and placed
+    # setSizes([600, 600]) is a proportional hint, not exact pixels once shown
+    # at the real window width — check the default is an even 50/50 split.
+    left, right = monitor_win._main_splitter.sizes()
+    assert abs(left - right) <= 2
 
 
 def test_procedure_splitters_not_collapsible(procedure_win):
-    """Both ProcedureWindow splitters have children-collapsing disabled."""
+    """All 3 ProcedureWindow quadrant splitters have children-collapsing disabled."""
     splitters = procedure_win.findChildren(QSplitter)
-    assert len(splitters) == 2, f"Expected 2 splitters, found {len(splitters)}"
+    assert len(splitters) == 3, f"Expected 3 splitters, found {len(splitters)}"
     for sp in splitters:
         assert sp.childrenCollapsible() is False
 
 
+def test_procedure_quadrant_splitters_correctly_oriented(procedure_win):
+    """main_splitter is horizontal; left/right splitters (params/plot1, queue/plot2) are vertical."""
+    assert procedure_win._main_splitter.orientation() == Qt.Orientation.Horizontal
+    assert procedure_win._left_splitter.orientation() == Qt.Orientation.Vertical
+    assert procedure_win._right_splitter.orientation() == Qt.Orientation.Vertical
+    assert procedure_win._left_splitter.widget(0).objectName() == "params_quadrant"
+    assert procedure_win._left_splitter.widget(1) is procedure_win._plot1
+    assert procedure_win._right_splitter.widget(0).objectName() == "queue_quadrant"
+    assert procedure_win._right_splitter.widget(1) is procedure_win._plot2
+
+
+def test_procedure_param_scroll_has_no_height_cap(procedure_win):
+    """The parameter scroll area fills its quadrant instead of being capped at a fixed height."""
+    assert procedure_win._param_scroll.maximumHeight() >= 16777215  # Qt's QWIDGETSIZE_MAX default (uncapped)
+
+
 def test_monitor_central_widget_not_scroll_area(monitor_win):
-    """The central widget is the content widget directly; the dock host is a plain QMainWindow."""
+    """The central widget is the content widget directly, holding the main quadrant splitter."""
     assert not isinstance(monitor_win.centralWidget(), QScrollArea)
-    assert isinstance(monitor_win._dock_host, QMainWindow)
+    assert monitor_win.centralWidget().findChild(QSplitter, "main_splitter") is monitor_win._main_splitter
 
 
 def test_log_handler_removed_on_close(station, orchestrator, qtbot):

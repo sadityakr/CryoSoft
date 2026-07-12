@@ -183,6 +183,25 @@ def test_action_blocking(orchestrator, station, qtbot):
     orchestrator.abort_procedure()
 
 
+def test_action_succeeded_emitted_on_successful_gui_action(orchestrator, qtbot):
+    """submit_vi_action() in IDLE, once executed by the tick loop, emits action_succeeded."""
+    with qtbot.waitSignal(orchestrator.action_succeeded, timeout=500) as blocker:
+        orchestrator.submit_vi_action("magnet_x", "initiate")
+
+    assert blocker.args == ["magnet_x", "initiate"]
+
+
+def test_action_succeeded_not_emitted_on_failed_gui_action(orchestrator, qtbot):
+    """A GUI action that raises must not emit action_succeeded."""
+    received = []
+    orchestrator.action_succeeded.connect(lambda vi, method: received.append((vi, method)))
+
+    orchestrator.submit_vi_action("magnet_x", "not_a_real_method")
+    qtbot.wait(50)  # let one tick pass
+
+    assert received == []
+
+
 def test_stale_vi_during_procedure(orchestrator, station, qtbot):
     """Patched driver fails -> ERROR state."""
     procedure = MockProcedure(station)
