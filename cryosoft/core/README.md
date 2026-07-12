@@ -48,7 +48,8 @@ Cross-cutting infrastructure — used by every layer from L1 to GUI. The key run
 | `__init__.py` | Package marker (empty) |
 | `exceptions.py` | All CryoSoft exception classes |
 | `decorators.py` | `@monitored` and `@control` marker decorators; `get_monitored_methods()`, `get_control_methods()` discovery helpers |
-| `station.py` | `Station` — VI registry, state polling with stale-value caching, ramp dispatch, safety aggregation; `build_station()` factory |
+| `station.py` | `Station` — VI registry, state polling with stale-value caching, ramp dispatch, safety aggregation; `build_station()` factory, `validate_config_dir()` dry-run, `build_station_with_fallback()` safe startup chain |
+| `config_catalog.py` | `ConfigCatalog` — discovery of shipped (read-only) and user config directories, copy-on-edit fork, and named version history (save/list/restore) |
 | `orchestrator.py` | `Orchestrator` — single-threaded cooperative state machine driven by `QTimer`; `OrchestratorState` enum |
 | `procedure.py` | `BaseProcedure` — abstract base class defining the 4-method interface all procedures must implement |
 | `data_manager.py` | `DataManager` — HDF5 file creation, metadata storage, pre-allocated dataset management, per-point save, abort trimming |

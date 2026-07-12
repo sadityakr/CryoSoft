@@ -15,6 +15,7 @@ config with no hardware. All 121 prior tests must pass before this file is run.
 """
 
 import logging
+from pathlib import Path
 
 import pytest
 from PyQt6.QtCore import QSettings
@@ -25,6 +26,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSplitter,
@@ -35,6 +37,8 @@ from cryosoft.core.station import build_station
 from cryosoft.gui.instrument_panel import InstrumentPanel
 from cryosoft.gui.monitor_window import MonitorWindow
 from cryosoft.gui.notification_banner import NotificationBanner
+from cryosoft.core.config_catalog import ConfigCatalog
+from cryosoft.gui import app_settings as _app_settings
 from cryosoft.gui import session as session_store
 from cryosoft.gui.procedure_window import ProcedureWindow
 from cryosoft.gui.theme import (
@@ -1086,6 +1090,98 @@ def test_restore_rearms_only_pending_items(station, orchestrator, qtbot):
     assert [e.status for e in win._queue] == ["done", "failed", "pending"]
     # _restore_queue clears then re-arms only the single pending item.
     assert len(orchestrator._procedure_queue) == 1
+
+
+def _catalog(tmp_path):
+    return ConfigCatalog(_app_settings.shipped_config_dir(), tmp_path / "user")
+
+
+def test_monitor_no_config_menu_without_catalog(monitor_win):
+    """Without a catalog, no Config menu appears (backward compatible)."""
+    titles = [a.text() for a in monitor_win.menuBar().actions()]
+    assert "Config" not in titles
+
+
+def test_monitor_has_config_menu_with_catalog(station, orchestrator, qtbot, tmp_path):
+    """A catalog wires in a Config menu listing the shipped configs."""
+    win = MonitorWindow(station, orchestrator, catalog=_catalog(tmp_path))
+    qtbot.addWidget(win)
+    titles = [a.text() for a in win.menuBar().actions()]
+    assert "Config" in titles
+
+
+def test_select_config_confirmed_triggers_restart(station, orchestrator, qtbot, tmp_path, monkeypatch):
+    """Confirming a config switch persists it and calls the restart callback."""
+    restarted = []
+    catalog = _catalog(tmp_path)
+    win = MonitorWindow(
+        station,
+        orchestrator,
+        catalog=catalog,
+        active_config_path="/nowhere/active",
+        restart_callback=lambda: restarted.append(True),
+    )
+    qtbot.addWidget(win)
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes
+    )
+    target = str(catalog.list_configs()[0].path)
+    win._on_select_config(target)
+    assert restarted == [True]
+    assert Path(_app_settings.config_active_path()).resolve() == Path(target).resolve()
+
+
+def test_select_config_cancelled_does_not_restart(station, orchestrator, qtbot, tmp_path, monkeypatch):
+    """Declining the switch warning does not restart."""
+    restarted = []
+    catalog = _catalog(tmp_path)
+    win = MonitorWindow(
+        station, orchestrator, catalog=catalog,
+        active_config_path="/nowhere/active",
+        restart_callback=lambda: restarted.append(True),
+    )
+    qtbot.addWidget(win)
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.No
+    )
+    win._on_select_config(str(catalog.list_configs()[0].path))
+    assert restarted == []
+
+
+def test_startup_candidates_end_with_sim_and_dedup(tmp_path, monkeypatch):
+    """The candidate chain always ends with sim_cryostat and has no duplicates."""
+    from cryosoft import main as app_main
+
+    catalog = _catalog(tmp_path)
+    monkeypatch.setattr(_app_settings, "config_active_path", lambda: None)
+    candidates = app_main._startup_candidates(catalog)
+    assert Path(candidates[-1]).name == "sim_cryostat"
+    assert len(candidates) == len(set(candidates))
+
+
+def test_startup_candidates_inserts_shipped_baseline_for_user_config(tmp_path, monkeypatch):
+    """An active user config is followed by its shipped baseline, then sim."""
+    from cryosoft import main as app_main
+
+    catalog = _catalog(tmp_path)
+    entry = catalog.fork_shipped("sim_cryostat", "sim_cryostat")  # same name → baseline exists
+    monkeypatch.setattr(_app_settings, "config_active_path", lambda: str(entry.path))
+    candidates = app_main._startup_candidates(catalog)
+    assert candidates[0] == str(entry.path)  # active user copy first
+    shipped_sim = str(_app_settings.shipped_config_dir() / "sim_cryostat")
+    assert shipped_sim in candidates  # its never-edited baseline is a fallback
+
+
+def test_startup_warning_shown_in_banner(station, orchestrator, qtbot, tmp_path):
+    """A startup fallback warning is surfaced in the notification banner."""
+    win = MonitorWindow(
+        station, orchestrator, catalog=_catalog(tmp_path),
+        startup_warning="active config was invalid",
+    )
+    qtbot.addWidget(win)
+    # isHidden() reflects the banner's own visibility flag without needing the
+    # (un-shown) parent window to be visible.
+    assert not win._banner.isHidden()
 
 
 def test_offscreen_saved_geometry_recenters(station, orchestrator, qtbot):

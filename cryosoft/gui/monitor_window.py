@@ -39,10 +39,12 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 import qtawesome as qta
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QAction, QCloseEvent
+from PyQt6.QtGui import QAction, QActionGroup, QCloseEvent
 from PyQt6.QtWidgets import (
     QApplication,
     QDockWidget,
@@ -83,6 +85,11 @@ from cryosoft.gui.theme import (
     TEXT_PRIMARY,
 )
 from cryosoft.gui.trend_plot_panel import TrendPlotPanel
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from cryosoft.core.config_catalog import ConfigCatalog
 
 logger = logging.getLogger(__name__)
 
@@ -204,11 +211,25 @@ class MonitorWindow(QMainWindow):
         station: Station,
         orchestrator: Orchestrator,
         parent: QWidget | None = None,
+        catalog: ConfigCatalog | None = None,
+        active_config_path: str | None = None,
+        restart_callback: Callable[[], None] | None = None,
+        startup_warning: str | None = None,
     ) -> None:
         super().__init__(parent)
         self._station = station
         self._orchestrator = orchestrator
         self._procedure_window = None  # lazily created
+
+        # Config management (optional — absent in unit tests that build the
+        # window without a catalog). The Config menu is only built when a
+        # catalog is provided.
+        self._catalog = catalog
+        self._active_config_path = active_config_path
+        self._restart_callback = restart_callback
+        self._startup_warning = startup_warning
+        self._config_menu = None
+        self._config_editor = None
 
         # Populated by _build_menu(); referenced by dock-creation helpers
         # that run earlier (during _build_ui()) so they must tolerate None.
@@ -240,6 +261,13 @@ class MonitorWindow(QMainWindow):
         if self._log_handler not in cryosoft_logger.handlers:
             cryosoft_logger.addHandler(self._log_handler)
 
+        # Surface a startup config fallback (a bad active config was skipped).
+        if self._startup_warning:
+            self._banner.show_message(
+                f"Config fallback in effect — {self._startup_warning}",
+                BANNER_SEVERITY_WARNING,
+            )
+
     # ------------------------------------------------------------------
     # Menu bar
     # ------------------------------------------------------------------
@@ -266,6 +294,11 @@ class MonitorWindow(QMainWindow):
         save_session_action.setToolTip("Write the current session to disk immediately")
         save_session_action.triggered.connect(self._save_session)
         session_menu.addAction(save_session_action)
+
+        # Config menu (only when config management is wired in).
+        if self._catalog is not None:
+            self._config_menu = menu_bar.addMenu("Config")
+            self._populate_config_menu()
 
         proc_menu = menu_bar.addMenu("Procedures")
         open_action = QAction("Open Procedures…", self)
@@ -976,6 +1009,83 @@ class MonitorWindow(QMainWindow):
         if self._procedure_window is not None:
             self._procedure_window.reset_session()
         self._save_session()
+
+    # ------------------------------------------------------------------
+    # Config management (menu + selection + restart)
+    # ------------------------------------------------------------------
+
+    def _populate_config_menu(self) -> None:
+        """(Re)build the Config menu: a checkable list plus the editor entry."""
+        if self._config_menu is None or self._catalog is None:
+            return
+        self._config_menu.clear()
+        group = QActionGroup(self)
+        group.setExclusive(True)
+        active = self._active_config_path
+        for entry in self._catalog.list_configs():
+            label = entry.name + ("  (read-only)" if entry.read_only else "")
+            action = QAction(label, self, checkable=True)
+            path_str = str(entry.path)
+            if active and Path(path_str).resolve() == Path(active).resolve():
+                action.setChecked(True)
+            action.triggered.connect(
+                lambda _checked, p=path_str: self._on_select_config(p)
+            )
+            group.addAction(action)
+            self._config_menu.addAction(action)
+
+        self._config_menu.addSeparator()
+        editor_action = QAction("Open Config Editor…", self)
+        editor_action.setToolTip("Edit device/instrument configs with validation")
+        editor_action.triggered.connect(self._on_open_config_editor)
+        self._config_menu.addAction(editor_action)
+
+    def _on_select_config(self, path: str) -> None:
+        """Switch the active config to ``path`` after a warning, then restart.
+
+        Args:
+            path: The config directory to make active.
+        """
+        if self._active_config_path and (
+            Path(path).resolve() == Path(self._active_config_path).resolve()
+        ):
+            return
+        reply = QMessageBox.question(
+            self,
+            "Switch Config",
+            f"Switch to config '{Path(path).name}'?\n\n"
+            "CryoSoft will save the current session and restart to load it.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            self._populate_config_menu()  # revert the radio selection
+            return
+        self._apply_active_config(path)
+
+    def _apply_active_config(self, path: str) -> None:
+        """Persist ``path`` as active, save the session, and request a restart."""
+        self._save_session()
+        app_settings.set_config_active_path(path)
+        if self._restart_callback is not None:
+            self._restart_callback()
+
+    def _on_open_config_editor(self) -> None:
+        """Open the config editor window (lazily created)."""
+        if self._catalog is None:
+            return
+        from cryosoft.gui.config_editor import ConfigEditorWindow
+
+        if self._config_editor is None:
+            self._config_editor = ConfigEditorWindow(
+                self._catalog,
+                active_config_path=self._active_config_path,
+                apply_callback=self._apply_active_config,
+                parent=self,
+            )
+        self._config_editor.show()
+        self._config_editor.raise_()
+        self._config_editor.activateWindow()
 
     # ------------------------------------------------------------------
     # Internal slots

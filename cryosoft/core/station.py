@@ -475,3 +475,119 @@ def build_station(config_path: str) -> Station:
         config_dir,
     )
     return station
+
+
+def build_station_with_fallback(
+    candidate_paths: list[str],
+) -> tuple[Station, str, list[str]]:
+    """Build a Station from the first usable config, falling back in order.
+
+    Each candidate is validated (``validate_config_dir``) and then built; the
+    first that succeeds wins. This is the startup safety net: a corrupted or
+    hardware-missing active config no longer crashes the app, because a later
+    candidate (ultimately the always-loadable ``sim_cryostat``) takes over.
+
+    Args:
+        candidate_paths: Config directories to try, most-preferred first.
+            Callers should end the list with a guaranteed-safe config.
+
+    Returns:
+        A ``(station, used_path, warnings)`` tuple. ``warnings`` describes each
+        candidate that was skipped, for surfacing to the user.
+
+    Raises:
+        CryoSoftConfigError: If no candidate could be built.
+    """
+    warnings: list[str] = []
+    for path in candidate_paths:
+        errors = validate_config_dir(path)
+        if errors:
+            warnings.append(f"Config '{path}' is invalid ({errors[0]}); skipped.")
+            continue
+        try:
+            station = build_station(path)
+            return station, path, warnings
+        except Exception as exc:  # noqa: BLE001 — fallback must catch any build failure
+            warnings.append(f"Config '{path}' failed to load ({exc}); skipped.")
+    raise CryoSoftConfigError(
+        f"No usable config among {candidate_paths}: {'; '.join(warnings)}"
+    )
+
+
+def validate_config_dir(config_path: str) -> list[str]:
+    """Check a config directory without instantiating any driver or VI.
+
+    A dry-run for the config editor and startup fallback: it parses both YAML
+    files and verifies that every declared class is importable and that every
+    VI's driver references resolve to a defined driver. It deliberately does
+    **not** call any class constructor, so validating a real-hardware config
+    never opens a VISA session or touches an instrument.
+
+    Args:
+        config_path: Path to the config directory (containing devices.yaml and
+            monitor.yaml).
+
+    Returns:
+        A list of human-readable error strings. An empty list means the config
+        is structurally valid and safe to load.
+    """
+    try:
+        from ruamel.yaml import YAML  # type: ignore
+    except ImportError:
+        return ["ruamel.yaml is required but not installed"]
+
+    config_dir = Path(config_path)
+    devices_file = config_dir / "devices.yaml"
+    monitor_file = config_dir / "monitor.yaml"
+
+    errors: list[str] = []
+    if not devices_file.exists():
+        errors.append(f"devices.yaml not found in {config_dir}")
+    if not monitor_file.exists():
+        errors.append(f"monitor.yaml not found in {config_dir}")
+    if errors:
+        return errors
+
+    yaml = YAML()
+    try:
+        with devices_file.open("r", encoding="utf-8") as f:
+            devices_config = dict(yaml.load(f) or {})
+    except Exception as exc:  # noqa: BLE001 — any YAML parse failure is a config error
+        return [f"devices.yaml is not valid YAML: {exc}"]
+    try:
+        with monitor_file.open("r", encoding="utf-8") as f:
+            yaml.load(f)
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"monitor.yaml is not valid YAML: {exc}")
+
+    real_drivers = devices_config.get("real_drivers") or {}
+    if not isinstance(real_drivers, dict):
+        return errors + ["'real_drivers' must be a mapping"]
+    for driver_name, driver_cfg in real_drivers.items():
+        if not isinstance(driver_cfg, dict) or "class" not in driver_cfg:
+            errors.append(f"driver '{driver_name}' is missing a 'class'")
+            continue
+        try:
+            _import_class(driver_cfg["class"])
+        except CryoSoftConfigError as exc:
+            errors.append(f"driver '{driver_name}': {exc}")
+
+    virtual_instruments = devices_config.get("virtual_instruments") or {}
+    if not isinstance(virtual_instruments, dict):
+        return errors + ["'virtual_instruments' must be a mapping"]
+    for vi_name, vi_cfg in virtual_instruments.items():
+        if not isinstance(vi_cfg, dict) or "class" not in vi_cfg:
+            errors.append(f"VI '{vi_name}' is missing a 'class'")
+            continue
+        try:
+            _import_class(vi_cfg["class"])
+        except CryoSoftConfigError as exc:
+            errors.append(f"VI '{vi_name}': {exc}")
+        for role, driver_name in (vi_cfg.get("drivers") or {}).items():
+            if driver_name not in real_drivers:
+                errors.append(
+                    f"VI '{vi_name}' role '{role}' references unknown driver "
+                    f"'{driver_name}'"
+                )
+
+    return errors
