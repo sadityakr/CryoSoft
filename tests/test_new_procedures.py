@@ -308,3 +308,49 @@ def test_temp_dc_full_orchestrator_loop(station, tmp_path, qtbot):
     assert orch._state == OrchestratorState.IDLE
     h5_files = list(tmp_path.glob("*.h5"))
     assert len(h5_files) == 1
+
+
+# ── TemperatureSweepDC on stations without magnets (review finding H7) ───────
+
+def _partial_station(*keep: str):
+    """A station containing only the named VIs from the sim config."""
+    from cryosoft.core.station import Station
+
+    full = build_station(CONFIG_PATH)
+    partial = Station()
+    for name in keep:
+        partial.register_vi(name, getattr(full, name), full.get_vi_type(name))
+    return partial
+
+
+def test_temp_dc_missing_magnet_with_zero_field_is_skipped(tmp_path):
+    """A station without magnet_y still runs the sweep at field_y=0 —
+    the missing magnet is simply left out of the system targets."""
+    station = _partial_station("magnet_x", "temperature_vti", "dc_measurement")
+    proc = TemperatureSweepDC(
+        station=station,
+        sample_info=SAMPLE_INFO,
+        data_directory=str(tmp_path),
+        **FAST_TEMP_PARAMS,  # field_x / field_y default to 0.0
+    )
+    targets, _, _ = proc.initiate()
+    assert "magnet_y" not in targets
+    assert "magnet_x" in targets
+    assert "temperature_vti" in targets
+    proc.standby()  # close the HDF5 file
+
+
+def test_temp_dc_missing_magnet_with_nonzero_field_is_refused(tmp_path):
+    """A NONZERO field on a missing magnet must fail at construction:
+    silently measuring at 0 T while the metadata claims 0.5 T would
+    corrupt a dataset without anyone noticing."""
+    from cryosoft.core.exceptions import CryoSoftConfigError
+
+    station = _partial_station("magnet_x", "temperature_vti", "dc_measurement")
+    with pytest.raises(CryoSoftConfigError, match="magnet_y"):
+        TemperatureSweepDC(
+            station=station,
+            sample_info=SAMPLE_INFO,
+            data_directory=str(tmp_path),
+            **{**FAST_TEMP_PARAMS, "field_y": 0.5},
+        )

@@ -99,7 +99,7 @@ class Keithley6221:
 
     def get_current(self) -> float:
         """Return the configured source current in Amperes."""
-        return float(self._query(":SOUR:CURR?"))
+        return self._query_float(":SOUR:CURR?")
 
     def set_current(self, current: float) -> None:
         """Set the DC source current; enables output for non-zero values.
@@ -120,7 +120,7 @@ class Keithley6221:
 
     def get_compliance(self) -> float:
         """Return the configured voltage compliance limit in Volts."""
-        return float(self._query(":SOUR:CURR:COMP?"))
+        return self._query_float(":SOUR:CURR:COMP?")
 
     def get_idn(self) -> str:
         """Return the instrument identification string."""
@@ -364,5 +364,21 @@ class Keithley6221:
         except pyvisa.VisaIOError as exc:
             raise CryoSoftCommunicationError(
                 f"Keithley 6221 query failed ({cmd!r}): {exc}",
+                vi_name="Keithley6221",
+            ) from exc
+
+    def _query_float(self, cmd: str) -> float:
+        """Query and parse a float, treating garbage responses as comm errors.
+
+        A malformed response (electrical noise, mixed-up read buffer) would
+        otherwise raise a bare ValueError that bypasses the stale-value
+        handling in Station.get_state().
+        """
+        raw = self._query(cmd)
+        try:
+            return float(raw)
+        except ValueError as exc:
+            raise CryoSoftCommunicationError(
+                f"Keithley 6221: unparseable response to {cmd!r}: {raw!r}",
                 vi_name="Keithley6221",
             ) from exc

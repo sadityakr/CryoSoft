@@ -706,13 +706,21 @@ class ProcedureWindow(QMainWindow):
         index = self._proc_selector.currentIndex()
         cls = self._procedures[index]
 
-        return cls(
-            station=self._station,
-            sample_info=sample_info,
-            data_directory=data_dir,
-            file_prefix=file_prefix,
-            **param_values,
-        )
+        try:
+            return cls(
+                station=self._station,
+                sample_info=sample_info,
+                data_directory=data_dir,
+                file_prefix=file_prefix,
+                **param_values,
+            )
+        except Exception as exc:
+            # A procedure may refuse construction (e.g. a nonzero field
+            # requested on a magnet this station does not have). Surface it
+            # as a form error — an uncaught raise in a Qt slot kills the app.
+            logger.warning("Procedure %s refused construction: %s", cls.name, exc)
+            QMessageBox.warning(self, "Cannot Build Procedure", str(exc))
+            return None
 
     def _on_add_to_queue(self) -> None:
         """Freeze current form values and add a procedure entry to the queue."""

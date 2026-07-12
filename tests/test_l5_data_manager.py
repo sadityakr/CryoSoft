@@ -322,3 +322,36 @@ def test_file_readable_after_close(saved_dm):
         assert f["data"]["field_T"][1] == pytest.approx(0.5)
         assert f["data"]["field_T"][2] == pytest.approx(1.0)
         assert json.loads(f["metadata"].attrs["procedure_params"])["field_start"] == -1.0
+
+
+# ── Short / long measurement arrays (review finding H6) ──────────────────────
+
+def test_save_datapoint_pads_short_measurement_arrays(dm):
+    """A short array (e.g. the delta engine aborted an acquisition early)
+    must be NaN-padded to the allocated width, not crash with a
+    shape-mismatch ValueError that would kill the whole run."""
+    dm.save_datapoint(
+        sweep_index=0,
+        measured_data={
+            "field_T": 0.1,
+            "voltage_V": [1e-6, 2e-6, 3e-6],  # only 3 of the 10 allocated
+            "current_A": [1e-6] * 10,
+        },
+        station_snapshot={},
+    )
+    stored = dm._file["data"]["voltage_V"][0, :]
+    assert stored.shape == (10,)
+    assert np.allclose(stored[:3], [1e-6, 2e-6, 3e-6])
+    assert np.all(np.isnan(stored[3:]))
+
+
+def test_save_datapoint_truncates_long_measurement_arrays(dm):
+    """An over-long array is truncated to the allocated width, not fatal."""
+    dm.save_datapoint(
+        sweep_index=0,
+        measured_data={"voltage_V": list(range(15))},
+        station_snapshot={},
+    )
+    stored = dm._file["data"]["voltage_V"][0, :]
+    assert stored.shape == (10,)
+    assert np.allclose(stored, np.arange(10, dtype=float))

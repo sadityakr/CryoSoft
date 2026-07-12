@@ -83,7 +83,15 @@ class Keithley2182A:
         raw = self._query("READ?")
         # Response may contain multiple comma-separated values; take channel 1.
         vals = [v.strip() for v in raw.split(",") if v.strip()]
-        return float(vals[0])
+        try:
+            return float(vals[0])
+        except (IndexError, ValueError) as exc:
+            # Empty or garbage response — surface as a communication error so
+            # the stale-value handling upstream applies instead of a crash.
+            raise CryoSoftCommunicationError(
+                f"Keithley 2182A: unparseable READ? response: {raw!r}",
+                vi_name="Keithley2182A",
+            ) from exc
 
     def set_range(self, range_v: float) -> None:
         """Set the DC voltage measurement range.
@@ -96,7 +104,14 @@ class Keithley2182A:
 
     def get_range(self) -> float:
         """Return the current DC voltage range setting in Volts."""
-        return float(self._query(":SENS:VOLT:CHAN1:RANG?"))
+        raw = self._query(":SENS:VOLT:CHAN1:RANG?")
+        try:
+            return float(raw)
+        except ValueError as exc:
+            raise CryoSoftCommunicationError(
+                f"Keithley 2182A: unparseable range response: {raw!r}",
+                vi_name="Keithley2182A",
+            ) from exc
 
     def get_idn(self) -> str:
         """Return the instrument identification string."""

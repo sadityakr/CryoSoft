@@ -11,9 +11,10 @@
 #   - cryosoft.core.data_manager (DataManager)
 #   - cryosoft.core.sweep_builder (SweepAxis) — sweep-shape construction is
 #     handled entirely by BaseProcedure's default _build_sweep_array()
-#   - Station must have: temperature_vti (system VI), magnet_x (system VI),
-#     magnet_y (system VI), dc_measurement (measurement VI with initiate()
-#     and take_reading()).
+#   - Station must have: temperature_vti (system VI) and dc_measurement
+#     (measurement VI with initiate() and take_reading()). magnet_x and
+#     magnet_y are OPTIONAL: a missing magnet is skipped when its requested
+#     field is 0, and refused at construction when the field is nonzero.
 # input: |
 #   station, sample_info, data_directory, and keyword params matching the
 #   parameters dict: ramp_rate_K_per_min, field_x, field_y, current_A,
@@ -38,8 +39,10 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from cryosoft.core.data_manager import DataManager
+from cryosoft.core.exceptions import CryoSoftConfigError
 from cryosoft.core.procedure import BaseProcedure
 from cryosoft.core.sweep_builder import SweepAxis
 
@@ -64,6 +67,8 @@ class TemperatureSweepDC(BaseProcedure):
 
     Required VIs in Station:
         ``temperature_vti`` (system), ``dc_measurement`` (measurement).
+        ``magnet_x`` / ``magnet_y`` are optional — used when present; a
+        nonzero field on a missing magnet is refused at construction.
     """
 
     name = "Temperature Sweep DC"
@@ -139,6 +144,32 @@ class TemperatureSweepDC(BaseProcedure):
     # implementation delegates to sweep_builder.build_axis_sweep() using the
     # sweep_axis declared above (linear / segments / CSV, with hysteresis).
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Validate the magnet configuration against the station up front.
+
+        The applied fields are optional: a station without ``magnet_x`` /
+        ``magnet_y`` can still run this procedure at zero field. But a
+        NONZERO field requested on a missing magnet is refused here, at
+        construction — silently measuring at 0 T while the metadata claims
+        0.5 T would corrupt a dataset without anyone noticing.
+        """
+        super().__init__(*args, **kwargs)
+        self._magnet_targets: dict[str, dict] = {}
+        for magnet, param in (("magnet_x", "field_x"), ("magnet_y", "field_y")):
+            field = float(self._params[param])
+            if self._station.has_vi(magnet):
+                self._magnet_targets[magnet] = {"target": field}
+            elif field != 0.0:
+                raise CryoSoftConfigError(
+                    f"{param}={field} T requested, but this station has no "
+                    f"'{magnet}' VI. Set {param} to 0 or configure the magnet."
+                )
+            else:
+                logger.info(
+                    "TemperatureSweepDC: station has no '%s' — running without it "
+                    "(%s=0).", magnet, param,
+                )
+
     def _temp_target(self, index: int) -> dict:
         """Build a system_targets entry for temperature_vti at *index*."""
         return {
@@ -158,8 +189,7 @@ class TemperatureSweepDC(BaseProcedure):
         """
         system_targets = {
             "temperature_vti": self._temp_target(0),
-            "magnet_x": {"target": self._params["field_x"]},
-            "magnet_y": {"target": self._params["field_y"]},
+            **self._magnet_targets,  # only magnets the station actually has
         }
 
         measurement_commands = {
@@ -253,3 +283,12 @@ class TemperatureSweepDC(BaseProcedure):
 
         measurement_commands = {"dc_measurement": {"standby": {}}}
         return {}, measurement_commands, 0.0
+
+    def abort(self) -> dict:
+        """Close the data file and zero the DC source (no ramping).
+
+        Returns:
+            Measurement safe-off commands for the Orchestrator to dispatch.
+        """
+        super().abort()
+        return {"dc_measurement": {"standby": {}}}

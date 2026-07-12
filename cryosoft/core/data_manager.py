@@ -249,6 +249,21 @@ class DataManager:
                 data_group[col_name][sweep_index] = float(value)
             elif col_name in self._measurement_arrays:
                 arr = np.asarray(value, dtype=np.float64)
+                # Instruments can legitimately return fewer readings than
+                # allocated (e.g. the delta engine aborts an acquisition
+                # early). Pad with NaN / truncate to the allocated width —
+                # a raw shape-mismatch here would crash the whole run.
+                expected = int(self._measurement_arrays[col_name])
+                if arr.shape != (expected,):
+                    logger.warning(
+                        "DataManager: column '%s' at index %d has %d values "
+                        "(expected %d) — padding/truncating with NaN",
+                        col_name, sweep_index, arr.size, expected,
+                    )
+                    padded = np.full(expected, np.nan)
+                    n = min(arr.size, expected)
+                    padded[:n] = arr.ravel()[:n]
+                    arr = padded
                 data_group[col_name][sweep_index, :] = arr
             else:
                 logger.warning(
