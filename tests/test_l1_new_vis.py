@@ -17,6 +17,8 @@ import time
 
 import pytest
 
+from cryosoft.virtual_instruments.magnet.switch_heater import SwitchHeater
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -164,7 +166,7 @@ class TestSuperConductingMagnetVI:
 class TestSuperConductingMagnetPersistentVI:
     """Tests for SuperconductingMagnetPersistentVI (with switch heater)."""
 
-    def _make_vi(self, driver, warmup_ticks=2, cooldown_ticks=2):
+    def _make_vi(self, driver, warmup_s=0.0, cooldown_s=0.0):
         from cryosoft.virtual_instruments.magnet.superconducting_magnet_persistent import (
             SuperconductingMagnetPersistentVI,
         )
@@ -175,8 +177,8 @@ class TestSuperConductingMagnetPersistentVI:
             max_current=90.0,
             min_current=-90.0,
             ramp_segments=[],
-            switch_heater_warmup_ticks=warmup_ticks,
-            switch_heater_cooldown_ticks=cooldown_ticks,
+            switch_heater_warmup_s=warmup_s,
+            switch_heater_cooldown_s=cooldown_s,
         )
         vi.vi_name = "magnet_x"
         return vi
@@ -190,40 +192,18 @@ class TestSuperConductingMagnetPersistentVI:
         assert vi.coil_current() == pytest.approx(0.0)
 
     def test_initial_persistent_when_heater_cold(self, ips_driver):
-        # Persistent mode is heater-derived (mirrors the real Mercury iPS):
-        # at startup the switch is cold, so the driver reports persistent.
+        # Physical persistent state is heater-derived (mirrors the real Mercury
+        # iPS): at startup the switch is cold, so the driver reports persistent.
         vi = self._make_vi(ips_driver)
         assert vi.is_persistent() is True
 
-    def test_switch_heater_on_control(self, ips_driver):
+    def test_persistent_mode_disabled_by_default(self, ips_driver):
         vi = self._make_vi(ips_driver)
-        vi.switch_heater_on()
-        assert vi.switch_heater_state() == "ON"
+        assert vi.persistent_mode_enabled() is False
 
-    def test_switch_heater_off_control(self, ips_driver):
+    def test_vi_type_is_magnet(self, ips_driver):
         vi = self._make_vi(ips_driver)
-        vi.switch_heater_on()
-        vi.switch_heater_off()
-        assert vi.switch_heater_state() == "OFF"
-
-    def test_enter_persistent_mode_control_parks_psu(self, ips_driver):
-        # enter_persistent_mode (switch already cold) parks the PSU at zero;
-        # the frozen coil current keeps holding the field.
-        vi = self._make_vi(ips_driver)
-        vi.enter_persistent_mode()
-        assert vi.is_persistent() is True
-        assert ips_driver.get_current_setpoint() == pytest.approx(0.0)
-
-    def test_start_ramp_initiates_sequence(self, ips_driver):
-        vi = self._make_vi(ips_driver, warmup_ticks=2, cooldown_ticks=2)
-        vi.start_ramp(0.0)  # Ramp to zero (already there, but exercises sequence)
-        assert vi.ramp_status() == "RAMPING"
-
-    def test_ramp_target_set_by_persistent_start_ramp(self, ips_driver):
-        # The persistent override stores its own target (inherits the getters).
-        vi = self._make_vi(ips_driver, warmup_ticks=2, cooldown_ticks=2)
-        vi.start_ramp(1.5)
-        assert vi.ramp_target() == pytest.approx(1.5)
+        assert vi.vi_type == "magnet"
 
     def test_get_state_includes_persistent_fields(self, ips_driver):
         vi = self._make_vi(ips_driver)
@@ -231,42 +211,13 @@ class TestSuperConductingMagnetPersistentVI:
         assert "switch_heater_state" in state
         assert "coil_current" in state
         assert "is_persistent" in state
-
-    def test_full_persistent_ramp_sequence(self, ips_driver):
-        """Drive the persistent ramp generator to completion with fast ticks."""
-        vi = self._make_vi(ips_driver, warmup_ticks=1, cooldown_ticks=1)
-        # Pre-position PSU at 0 A (target = 0 T, so no actual field ramp needed)
-        vi.start_ramp(0.0)
-        # Drive ticks — with warmup=1, cooldown=1, this completes in ~5-10 ticks
-        for _ in range(50):
-            if vi.ramp_status() == "TARGET_REACHED":
-                break
-            vi.advance_ramp()
-        assert vi.ramp_status() == "TARGET_REACHED"
-        assert vi.is_persistent() is True
-
-    def test_vi_type_is_magnet(self, ips_driver):
-        vi = self._make_vi(ips_driver)
-        assert vi.vi_type == "magnet"
-
-    # -- persistent=False: repeated-sweep-ramp behavior (regression coverage
-    #    for the bug where every sweep point re-paid heater warmup and
-    #    get_field()/magnet_current() read back 0 after entering persistent
-    #    mode) --------------------------------------------------------------
+        assert "persistent_mode_enabled" in state
 
     def _drive_to_target_reached(self, vi, driver, max_ticks=100):
-        """Rewind the driver's simulated clock before every tick, so whichever
-        time-based ramp segment the generator is currently in jumps straight
-        to its setpoint (warmup/cooldown ticks are yield-counted, not
-        time-based, and are unaffected by the rewind).
-
-        A one-time rewind (as used elsewhere in this file) is not enough here:
-        the persistent generator's first few advance_ramp() calls are spent
-        exhausting the warmup-tick loop, and the driver's very first
-        get_current()/get_status() call after that (still status="HOLD")
-        resets its internal clock as a side effect without using the rewound
-        delta — so the rewind must be reapplied on every tick to guarantee
-        the *next* driver call that matters sees a large elapsed time.
+        """Drive advance_ramp() to completion, rewinding the driver's simulated
+        clock each tick so the wall-clock PSU ramp jumps to its setpoint. The
+        switch-heater warmup is timed separately by SwitchHeater; tests that
+        need no warmup use warmup_s=0 so is_ready() is immediately true.
         """
         for _ in range(max_ticks):
             driver._last_update = time.time() - 3600.0
@@ -275,115 +226,172 @@ class TestSuperConductingMagnetPersistentVI:
             vi.advance_ramp()
         return False
 
-    def test_persistent_false_keeps_heater_on_and_does_not_zero_psu(self, ips_driver):
-        vi = self._make_vi(ips_driver, warmup_ticks=2, cooldown_ticks=2)
-        vi.start_ramp(1.0, persistent=False)  # 1.0 T * 10 A/T = 10 A
-        assert self._drive_to_target_reached(vi, ips_driver)
+    # -- Normal mode: field changes keep the switch heater on ---------------
 
-        assert vi.is_persistent() is False
+    def test_start_ramp_normal_mode_transitions_to_ramping(self, ips_driver):
+        vi = self._make_vi(ips_driver)
+        vi.start_ramp(1.5)
+        assert vi.ramp_status() == "RAMPING"
+        assert vi.ramp_target() == pytest.approx(1.5)
+
+    def test_normal_ramp_completes_with_heater_on(self, ips_driver):
+        """Normal mode leaves the heater ON and the PSU holding the target
+        directly — no cooldown, no persistent park."""
+        vi = self._make_vi(ips_driver, warmup_s=0.0)
+        vi.start_ramp(1.0)  # 1 T * 10 A/T = 10 A
+        assert self._drive_to_target_reached(vi, ips_driver)
         assert vi.switch_heater_state() == "ON"
-        # PSU actually holds the target current directly (not zeroed).
+        assert vi.is_persistent() is False
         assert vi.get_field() == pytest.approx(1.0, abs=0.01)
         assert vi.magnet_current() == pytest.approx(10.0, abs=0.1)
 
-    def test_repeated_persistent_false_ramps_skip_warmup_after_first(self, ips_driver):
-        """The switch heater warmup (paid on the first ramp) must not be
-        paid again on a second persistent=False ramp while the heater is
-        already on — otherwise every sweep point would cost the full
-        warmup, as it did before this fix."""
-        vi = self._make_vi(ips_driver, warmup_ticks=30, cooldown_ticks=30)
-
-        vi.start_ramp(0.5, persistent=False)
-        assert self._drive_to_target_reached(vi, ips_driver, max_ticks=200)
+    def test_repeated_normal_ramps_keep_heater_on(self, ips_driver):
+        """A field sweep energises the heater once and keeps it on across
+        points (no per-point re-warm/park)."""
+        vi = self._make_vi(ips_driver, warmup_s=0.0)
+        vi.start_ramp(0.5)
+        assert self._drive_to_target_reached(vi, ips_driver)
         assert vi.switch_heater_state() == "ON"
-
-        vi.start_ramp(0.8, persistent=False)
-        # No warmup this time: should reach target in far fewer ticks than
-        # the 30-tick warmup alone would take.
-        assert self._drive_to_target_reached(vi, ips_driver, max_ticks=10)
+        vi.start_ramp(0.8)
+        assert self._drive_to_target_reached(vi, ips_driver)
         assert vi.switch_heater_state() == "ON"
         assert vi.get_field() == pytest.approx(0.8, abs=0.01)
 
-    def test_persistent_true_default_still_parks_psu_at_zero(self, ips_driver):
-        """Regression: default (persistent=True, omitted) behavior is unchanged —
-        PSU parks at zero and the coil holds the field."""
-        vi = self._make_vi(ips_driver, warmup_ticks=1, cooldown_ticks=1)
-        vi.start_ramp(1.0)  # default persistent=True
+    def test_normal_ramp_waits_for_warmup_then_completes(self, ips_driver):
+        """The first ramp blocks in warmup until the (wall-clock) switch heater
+        is ready, then completes — readiness is time-based, not tick-based."""
+        vi = self._make_vi(ips_driver, warmup_s=60.0)
+        # Swap in a fake-clock heater so the 60 s warmup is deterministic.
+        clock = {"t": 0.0}
+        vi._heater = SwitchHeater(warmup_s=60.0, clock=lambda: clock["t"])
+        vi.start_ramp(1.0)
+        # Heater energised but cold: the ramp cannot finish yet.
+        assert not self._drive_to_target_reached(vi, ips_driver, max_ticks=20)
+        assert vi.switch_heater_state() == "ON"
+        # Warm up, then it completes.
+        clock["t"] = 60.0
         assert self._drive_to_target_reached(vi, ips_driver)
+        assert vi.get_field() == pytest.approx(1.0, abs=0.01)
 
-        assert vi.is_persistent() is True
+    def test_manual_switch_heater_refused_in_normal_mode(self, ips_driver):
+        from cryosoft.core.exceptions import CryoSoftSafetyError
+
+        vi = self._make_vi(ips_driver)
+        with pytest.raises(CryoSoftSafetyError, match="persistent mode"):
+            vi.switch_heater_on()
+        with pytest.raises(CryoSoftSafetyError, match="persistent mode"):
+            vi.switch_heater_off()
+
+    # -- Persistent mode: manual switch-heater / PSU control ----------------
+
+    def test_switch_heater_on_off_in_persistent_mode(self, ips_driver):
+        vi = self._make_vi(ips_driver)
+        vi.enable_persistent_mode()
+        vi.switch_heater_on()   # fresh magnet: PSU 0 == coil 0, allowed
+        assert vi.switch_heater_state() == "ON"
+        vi.switch_heater_off()  # always allowed
         assert vi.switch_heater_state() == "OFF"
-        assert ips_driver.get_current() == pytest.approx(0.0, abs=0.01)
-        # get_field()/magnet_current() must read the coil, not the zeroed PSU.
-        assert vi.get_field() == pytest.approx(1.0, abs=0.01)
-        assert vi.magnet_current() == pytest.approx(10.0, abs=0.1)
 
-    # -- quench-safety regression (review finding C1): ramping OUT of a
-    #    persistent parked field must match the PSU to the coil current
-    #    BEFORE the switch heater goes on. The sim driver quenches on a
-    #    heater-across-mismatch, so the wrong order fails these tests. -----
+    def test_switch_heater_on_allowed_when_currents_match(self, ips_driver):
+        vi = self._make_vi(ips_driver)
+        vi.enable_persistent_mode()
+        vi.switch_heater_on()
+        assert vi.switch_heater_state() == "ON"
 
-    def test_ramp_from_persistent_parked_field_does_not_quench(self, ips_driver):
-        vi = self._make_vi(ips_driver, warmup_ticks=1, cooldown_ticks=1)
+    def test_disable_persistent_refused_when_heater_off(self, ips_driver):
+        from cryosoft.core.exceptions import CryoSoftSafetyError
 
-        # Park the magnet persistent at 2 T: coil 20 A, PSU 0 A, heater off.
-        vi.start_ramp(2.0)  # persistent=True
+        vi = self._make_vi(ips_driver)
+        vi.enable_persistent_mode()  # heater still off
+        with pytest.raises(CryoSoftSafetyError, match="switch heater is off"):
+            vi.disable_persistent_mode()
+        assert vi.persistent_mode_enabled() is True
+
+    def test_disable_persistent_allowed_when_heater_on(self, ips_driver):
+        vi = self._make_vi(ips_driver)
+        vi.enable_persistent_mode()
+        vi.switch_heater_on()
+        vi.disable_persistent_mode()
+        assert vi.persistent_mode_enabled() is False
+
+    def test_manual_persistent_park_flow(self, ips_driver):
+        """The persistent dance: heater on, ramp field, heater off, ramp PSU to
+        zero -> magnet holds the field persistently with the PSU parked."""
+        vi = self._make_vi(ips_driver)
+        vi.enable_persistent_mode()
+        vi.switch_heater_on()
+        vi.start_ramp(2.0)                       # raw PSU ramp; heater on -> field moves
+        assert self._drive_to_target_reached(vi, ips_driver)
+        assert vi.get_field() == pytest.approx(2.0, abs=0.01)
+        vi.switch_heater_off()                   # freeze coil at 20 A, heater off
+        assert vi.is_persistent() is True
+        vi.start_ramp(0.0)                       # park PSU at zero; coil holds field
         assert self._drive_to_target_reached(vi, ips_driver)
         assert ips_driver.get_current() == pytest.approx(0.0, abs=0.01)
-        assert ips_driver.get_coil_current() == pytest.approx(20.0, abs=0.1)
+        # Field reads back from the coil, not the parked PSU.
+        assert vi.get_field() == pytest.approx(2.0, abs=0.01)
+        assert vi.magnet_current() == pytest.approx(20.0, abs=0.1)
 
-        # Ramp to a new field. Old (buggy) order heated the switch across the
-        # 20 A PSU/coil mismatch -> quench. Correct order matches first.
-        vi.start_ramp(1.0, persistent=False)
-        assert self._drive_to_target_reached(vi, ips_driver, max_ticks=200)
-        assert ips_driver.get_status() != "QUENCH"
+    def test_exit_persistent_safely_then_ramp_normally(self, ips_driver):
+        """Leaving persistent mode: match the PSU to the coil, energise the
+        heater, disable the toggle, then a normal ramp works."""
+        vi = self._make_vi(ips_driver, warmup_s=0.0)
+        # Park persistent at 2 T (coil 20 A, PSU 0 A, heater off).
+        vi.enable_persistent_mode()
+        vi.switch_heater_on()
+        vi.start_ramp(2.0)
+        assert self._drive_to_target_reached(vi, ips_driver)
+        vi.switch_heater_off()
+        vi.start_ramp(0.0)
+        assert self._drive_to_target_reached(vi, ips_driver)
+        # Exit: match PSU back to the coil, then heater on, then leave the mode.
+        vi.start_ramp(2.0)                       # PSU -> 20 A == coil
+        assert self._drive_to_target_reached(vi, ips_driver)
+        vi.switch_heater_on()                    # matched -> allowed
+        vi.disable_persistent_mode()             # heater on -> allowed
+        assert vi.persistent_mode_enabled() is False
+        vi.start_ramp(1.0)                       # normal ramp
+        assert self._drive_to_target_reached(vi, ips_driver)
         assert vi.get_field() == pytest.approx(1.0, abs=0.01)
+
+    # -- quench safety ------------------------------------------------------
+
+    def test_switch_heater_on_refused_across_current_mismatch(self, ips_driver):
+        """Energising the heater across a PSU/coil mismatch would quench; the
+        guard must refuse BEFORE any driver command."""
+        from cryosoft.core.exceptions import CryoSoftSafetyError
+
+        vi = self._make_vi(ips_driver)
+        vi.enable_persistent_mode()
+        vi.switch_heater_on()
+        vi.start_ramp(2.0)                       # field to 2 T, coil follows PSU
+        assert self._drive_to_target_reached(vi, ips_driver)
+        vi.switch_heater_off()                   # coil frozen at 20 A
+        vi.start_ramp(0.0)                       # PSU -> 0, coil still 20 (mismatch)
+        assert self._drive_to_target_reached(vi, ips_driver)
+        with pytest.raises(CryoSoftSafetyError, match="switch heater"):
+            vi.switch_heater_on()
+        assert ips_driver.get_status() != "QUENCH"
 
     def test_quench_during_sequence_stops_commands(self, ips_driver):
-        """A QUENCH mid-sequence must stop the generator without further
-        setpoint commands (escalation to EMERGENCY is the safety chain's job)."""
-        vi = self._make_vi(ips_driver, warmup_ticks=1, cooldown_ticks=1)
-        vi.start_ramp(1.0, persistent=False)
+        """A QUENCH mid-ramp must stop the generator without further setpoint
+        commands (escalation to EMERGENCY is the safety chain's job)."""
+        vi = self._make_vi(ips_driver, warmup_s=0.0)
+        vi.start_ramp(1.0)
         ips_driver._simulate_quench = True
         for _ in range(10):
             vi.advance_ramp()
-        # Generator gave up; the setpoint was never re-commanded post-quench.
         assert vi.ramp_status() in ("TARGET_REACHED", "RAMPING", "IDLE")
         sp_after = ips_driver._setpoint
         for _ in range(5):
             vi.advance_ramp()
         assert ips_driver._setpoint == sp_after
 
-    # -- control-validation standard: switch-heater mismatch guard ---------
-
-    def test_switch_heater_on_refused_across_current_mismatch(self, ips_driver):
-        """The manual heater button must refuse when PSU != coil current —
-        pressing it would quench the magnet. The guard fires BEFORE any
-        driver command, so the sim must not see a quench either."""
-        from cryosoft.core.exceptions import CryoSoftSafetyError
-
-        vi = self._make_vi(ips_driver, warmup_ticks=1, cooldown_ticks=1)
-        # Park persistent at 2 T: coil 20 A, PSU 0 A, heater off.
-        vi.start_ramp(2.0)
-        assert self._drive_to_target_reached(vi, ips_driver)
-
-        with pytest.raises(CryoSoftSafetyError, match="switch heater"):
-            vi.switch_heater_on()
-        assert ips_driver.get_status() != "QUENCH"
-        assert vi.switch_heater_state() == "OFF"
-
-    def test_switch_heater_on_allowed_when_currents_match(self, ips_driver):
-        vi = self._make_vi(ips_driver)
-        # Fresh magnet: coil 0 A, PSU 0 A — matched, heater may go on.
-        vi.switch_heater_on()
-        assert vi.switch_heater_state() == "ON"
-
     # -- control-validation standard: declarative field limit --------------
 
     def test_set_field_beyond_setup_limit_is_refused(self, ips_driver):
         """set_field() outside the config-derived field limit must raise
-        (loud reject), not silently clamp — the user asked for a field the
-        setup cannot produce and must be told."""
+        (loud reject), not silently clamp."""
         from cryosoft.core.exceptions import CryoSoftSafetyError
 
         vi = self._make_vi(ips_driver)  # max_current 90 A / 10 A/T -> ±9 T
@@ -392,7 +400,7 @@ class TestSuperConductingMagnetPersistentVI:
         assert vi.ramp_status() == "IDLE"  # no ramp was started
 
     def test_set_field_within_limit_still_works(self, ips_driver):
-        vi = self._make_vi(ips_driver)
+        vi = self._make_vi(ips_driver, warmup_s=0.0)
         vi.set_field(2.0)
         assert vi.ramp_status() == "RAMPING"
 
@@ -400,8 +408,8 @@ class TestSuperConductingMagnetPersistentVI:
     #    the software generator (review finding C3) ------------------------
 
     def test_stop_ramp_holds_hardware(self, ips_driver):
-        vi = self._make_vi(ips_driver, warmup_ticks=0, cooldown_ticks=0)
-        vi.start_ramp(5.0, persistent=False)
+        vi = self._make_vi(ips_driver, warmup_s=0.0)
+        vi.start_ramp(5.0)
         # Drive a few ticks so the generator has commanded the PSU setpoint.
         for _ in range(5):
             vi.advance_ramp()

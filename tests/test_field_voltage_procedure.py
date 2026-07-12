@@ -35,8 +35,8 @@ def station():
     # changes timing, not the switch-heater-aware sequence itself.
     s.magnet_x._default_ramp_rate = 6000.0
     s.magnet_x._ramp_segments = []
-    s.magnet_x._warmup_ticks = 2
-    s.magnet_x._cooldown_ticks = 2
+    s.magnet_x._heater.warmup_s = 0.0
+    s.magnet_x._heater.cooldown_s = 0.0
     return s
 
 
@@ -77,10 +77,10 @@ def test_field_voltage_sweep_full_orchestrator_loop(station, tmp_path, qtbot):
     assert orch._state == OrchestratorState.IDLE
     assert procedure._index == expected_n_points
 
-    # Magnet parked safely at the end: standby() ramps to 0 T with the
-    # default persistent=True, so the switch heater cools and the PSU zeros.
-    assert station.magnet_x.switch_heater_state() == "OFF"
-    assert station.magnet_x.is_persistent() is True
+    # Procedures run in normal mode: standby() ramps the field to 0 T with the
+    # switch heater left ON (persistent mode is a manual Monitor-window action).
+    assert station.magnet_x.switch_heater_state() == "ON"
+    assert station.magnet_x.is_persistent() is False
     assert station.magnet_x.get_field() == pytest.approx(0.0, abs=1e-3)
 
     h5_files = list(tmp_path.glob("*.h5"))
