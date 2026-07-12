@@ -138,6 +138,11 @@ class SimOxfordIPS120:
         self._update_simulation()
         return self._status
 
+    def get_idn(self) -> str:
+        """Return simulated identification string."""
+        self._check_error()
+        return "OXFORD,IPS120,SIM,1.0"
+
     # ------------------------------------------------------------------
     # Switch heater / persistent mode API
     # ------------------------------------------------------------------

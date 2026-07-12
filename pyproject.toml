@@ -182,3 +182,33 @@ forbidden_modules = [
     "cryosoft.virtual_instruments.measurement",
     "cryosoft.virtual_instruments.level",
 ]
+
+[[tool.importlinter.contracts]]
+name = "C9: nothing in cryosoft imports the troubleshoot toolbox (a leaf entry point, like main)"
+type = "forbidden"
+source_modules = [
+    "cryosoft.core",
+    "cryosoft.drivers",
+    "cryosoft.virtual_instruments",
+    "cryosoft.procedures",
+    "cryosoft.gui",
+    "cryosoft.main",
+]
+forbidden_modules = ["cryosoft.troubleshoot"]
+
+[[tool.importlinter.contracts]]
+name = "C10: the troubleshoot toolbox talks to drivers and the Station's config helpers only — never to the Orchestrator, procedures, data manager, or GUI"
+type = "forbidden"
+source_modules = ["cryosoft.troubleshoot"]
+# Same pass-through exemption as C5/C6: the Station's own VI imports do not
+# make the troubleshoot package VI-aware.
+ignore_imports = ["cryosoft.core.station -> cryosoft.virtual_instruments.*"]
+forbidden_modules = [
+    "cryosoft.core.orchestrator",
+    "cryosoft.core.procedure",
+    "cryosoft.core.data_manager",
+    "cryosoft.procedures",
+    "cryosoft.virtual_instruments",
+    "cryosoft.gui",
+    "cryosoft.main",
+]

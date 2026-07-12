@@ -129,6 +129,26 @@ class OxfordITC503:
                 vi_name="OxfordITC503",
             ) from exc
 
+    def get_idn(self) -> str:
+        """Return the instrument identification/version string.
+
+        The ITC 503 predates SCPI and does not answer ``*IDN?``; the ISOBUS
+        ``V`` command returns the firmware version string instead (same
+        convention as the Oxford ILM 200 driver).
+        """
+        try:
+            # pymeasure's Oxford base exposes the V command as `version` on
+            # recent releases; fall back to a raw ask("V") if it is absent.
+            version = getattr(self._itc, "version", None)
+            if version is None:
+                version = self._itc.ask("V")
+            return str(version).strip()
+        except Exception as exc:
+            raise CryoSoftCommunicationError(
+                f"ITC503: could not read version string: {exc}",
+                vi_name="OxfordITC503",
+            ) from exc
+
     # ------------------------------------------------------------------
     # Needle-valve API  (VTITemperatureControllerVI only)
     # ------------------------------------------------------------------
