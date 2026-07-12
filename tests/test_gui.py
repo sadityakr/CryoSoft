@@ -18,7 +18,17 @@ import logging
 
 import pytest
 from PyQt6.QtCore import QSettings
-from PyQt6.QtWidgets import QLabel, QPushButton, QScrollArea, QSplitter
+from PyQt6.QtWidgets import (
+    QComboBox,
+    QDockWidget,
+    QFormLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QPushButton,
+    QScrollArea,
+    QSplitter,
+)
 
 from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 from cryosoft.core.station import build_station
@@ -33,6 +43,7 @@ from cryosoft.gui.theme import (
     TEXT_PRIMARY,
     build_stylesheet,
 )
+from cryosoft.gui.trend_plot_panel import TrendPlotPanel
 
 
 CONFIG_PATH = "cryosoft/configs/sim_cryostat"
@@ -303,6 +314,39 @@ def test_procedure_param_inputs_exist(procedure_win):
         assert field is not None, f"Missing input for parameter '{param_name}'"
 
 
+def test_procedure_param_label_and_tooltip(procedure_win):
+    """Param label is the canonical `name (unit):` and carries the description tooltip.
+
+    The label is the same key stored under /metadata/procedure_params in the
+    HDF5 output (see BaseProcedure), not prose. The prose description lives in
+    a tooltip on both the input field and its form label.
+    """
+    from cryosoft.procedures.field_sweep_iv import FieldSweepIV
+
+    for i in range(procedure_win._proc_selector.count()):
+        if procedure_win._proc_selector.itemText(i) == FieldSweepIV.name:
+            procedure_win._proc_selector.setCurrentIndex(i)
+            break
+    else:
+        pytest.fail("FieldSweepIV not found in procedure selector")
+
+    spec = FieldSweepIV.sweep_parameters["field_start"]
+    field = procedure_win.findChild(QLineEdit, "param_field_start_input")
+    assert field is not None, "Missing input for parameter 'field_start'"
+
+    assert field.text() == str(spec["default"])
+
+    form = field.parent().layout()
+    assert isinstance(form, QFormLayout)
+    row_label = form.labelForField(field)
+    assert isinstance(row_label, QLabel)
+    assert row_label.text() == "field_start (T):"
+
+    for tooltip in (field.toolTip(), row_label.toolTip()):
+        assert tooltip, "Tooltip must be non-empty"
+        assert spec["description"] in tooltip
+
+
 def test_monitor_sample_info_inputs_exist(monitor_win):
     """Sample name, ID, and comments fields are present in MonitorWindow."""
     assert monitor_win._sample_name_input is not None
@@ -377,14 +421,235 @@ def test_measurement_ready_updates_plot(procedure_win, orchestrator):
     assert abs(procedure_win._datapoints[0]["field_T"] - 0.5) < 1e-9
 
 
-# ── Splitter / layout structure tests (Phase 1 GUI fixes) ──────────────────────
+# ── Dock-based layout tests (Monitor GUI redesign) ──────────────────────────
 
-def test_monitor_splitters_not_collapsible(monitor_win):
-    """Both MonitorWindow splitters have children-collapsing disabled."""
-    splitters = monitor_win.findChildren(QSplitter)
-    assert len(splitters) == 2, f"Expected 2 splitters, found {len(splitters)}"
-    for sp in splitters:
-        assert sp.childrenCollapsible() is False
+def test_monitor_dock_host_exists(monitor_win):
+    """The dock host is an inner QMainWindow with dock nesting enabled."""
+    dock_host = monitor_win.findChild(QMainWindow, "dock_host")
+    assert dock_host is not None
+    assert dock_host is monitor_win._dock_host
+    assert dock_host.isDockNestingEnabled()
+
+
+def test_monitor_instrument_docks_exist_for_system_vis(monitor_win, station):
+    """One dock_{vi_name} QDockWidget exists per system/level VI, wrapping its InstrumentPanel."""
+    system_vis = [
+        n for n in station.get_vi_names() if station.get_vi_type(n) in {"system", "level"}
+    ]
+    assert system_vis, "sim_cryostat should have at least one system/level VI"
+    for vi_name in system_vis:
+        dock = monitor_win.findChild(QDockWidget, f"dock_{vi_name}")
+        assert dock is not None, f"Missing dock for {vi_name}"
+        assert isinstance(dock.widget(), InstrumentPanel)
+        assert dock.widget()._vi_name == vi_name
+
+
+def test_monitor_fixed_docks_exist_with_expected_content(monitor_win):
+    """Other Devices, Log, and Sample Info each have a dock wrapping the expected widget."""
+    other_dock = monitor_win.findChild(QDockWidget, "dock_other_devices")
+    log_dock = monitor_win.findChild(QDockWidget, "dock_log")
+    sample_dock = monitor_win.findChild(QDockWidget, "dock_sample_info")
+    assert other_dock is not None
+    assert log_dock is not None
+    assert sample_dock is not None
+    assert log_dock.widget() is monitor_win._log_widget
+    assert sample_dock.widget() is not None
+
+
+def test_monitor_default_trend_docks_exist(monitor_win):
+    """Two trend docks exist by default, each wrapping its registered TrendPlotPanel."""
+    assert len(monitor_win._trend_panels) == 2
+    for panel_id, panel in monitor_win._trend_panels.items():
+        dock = monitor_win.findChild(QDockWidget, f"dock_{panel_id}")
+        assert dock is not None
+        assert dock.widget() is panel
+
+
+def test_monitor_view_menu_has_toggle_action_per_dock(monitor_win, station):
+    """The View menu lists a checkable toggle action for every dock."""
+    system_vis = [
+        n for n in station.get_vi_names() if station.get_vi_type(n) in {"system", "level"}
+    ]
+    action_texts = {a.text() for a in monitor_win._view_menu.actions() if a.text()}
+
+    for vi_name in system_vis:
+        assert vi_name in action_texts
+    for expected in ("Other Devices", "Log", "Sample Info", "Trend — trend_0", "Trend — trend_1"):
+        assert expected in action_texts
+
+    dock_titles = {"Other Devices", "Log", "Sample Info", "Trend — trend_0", "Trend — trend_1", *system_vis}
+    for action in monitor_win._view_menu.actions():
+        if action.text() in dock_titles:
+            assert action.isCheckable()
+
+
+def test_monitor_view_menu_toggle_hides_and_shows_dock(monitor_win):
+    """Triggering a dock's toggleViewAction hides, then shows, that dock again."""
+    dock = monitor_win.findChild(QDockWidget, "dock_log")
+    action = dock.toggleViewAction()
+    assert action.isChecked() is True
+    assert dock.isVisible()
+
+    action.trigger()
+    assert dock.isVisible() is False
+    assert action.isChecked() is False
+
+    action.trigger()
+    assert dock.isVisible() is True
+    assert action.isChecked() is True
+
+
+def test_monitor_add_trend_plot_action_caps_at_four(monitor_win):
+    """The View menu's 'Add trend plot' action adds panels up to 4, then disables and stays inert."""
+    assert len(monitor_win._trend_panels) == 2
+    assert monitor_win._add_trend_action.isEnabled()
+
+    monitor_win._add_trend_action.trigger()
+    assert len(monitor_win._trend_panels) == 3
+    monitor_win._add_trend_action.trigger()
+    assert len(monitor_win._trend_panels) == 4
+    assert not monitor_win._add_trend_action.isEnabled()
+
+    monitor_win._add_trend_action.trigger()
+    assert len(monitor_win._trend_panels) == 4
+
+
+def test_monitor_trend_remove_button_drops_panel_never_below_one(monitor_win):
+    """The panel's own remove button destroys the panel+dock, stopping at a floor of 1."""
+    assert len(monitor_win._trend_panels) == 2
+    first_id = next(iter(monitor_win._trend_panels))
+    first_dock_name = monitor_win._trend_docks[first_id].objectName()
+
+    monitor_win._on_trend_remove_requested(first_id)
+    assert len(monitor_win._trend_panels) == 1
+    assert first_id not in monitor_win._trend_panels
+    assert monitor_win.findChild(QDockWidget, first_dock_name) is None  # actually destroyed
+
+    remaining_id = next(iter(monitor_win._trend_panels))
+    monitor_win._on_trend_remove_requested(remaining_id)
+    assert len(monitor_win._trend_panels) == 1  # floor holds
+
+    assert monitor_win._add_trend_action.isEnabled()
+
+
+def test_monitor_trend_dock_close_only_hides_not_removes(monitor_win):
+    """A trend dock's own close button (Qt's default) hides it — it stays registered.
+
+    This is the "collapse" behavior every dock gets for free from
+    toggleViewAction(); genuine removal is only via the panel's own remove
+    button (see test_monitor_trend_remove_button_drops_panel_never_below_one).
+    """
+    panel_id = next(iter(monitor_win._trend_panels))
+    dock = monitor_win._trend_docks[panel_id]
+
+    dock.close()
+    assert dock.isVisible() is False
+    assert panel_id in monitor_win._trend_panels
+    assert panel_id in monitor_win._trend_docks
+
+    dock.show()
+    assert dock.isVisible() is True
+
+
+def test_monitor_states_updated_feeds_history_and_trend_combos(monitor_win, orchestrator):
+    """states_updated records into MonitorHistory and populates the trend Y combos."""
+    fake_state = {"magnet_x": {"get_field": 0.25, "magnet_current": 12.0}}
+    orchestrator.states_updated.emit(fake_state)
+
+    assert "magnet_x_get_field" in monitor_win._history.keys()
+
+    panels = monitor_win.findChildren(TrendPlotPanel)
+    assert len(panels) == 2
+    for panel in panels:
+        combo = panel.findChild(QComboBox)
+        assert combo is not None
+        assert combo.count() > 0
+
+
+def test_monitor_default_trend_key_hints_prefer_readings_over_settings(monitor_win, orchestrator):
+    """The two default trend docks pick a temperature/level READING, not a setting/rate field.
+
+    Regression pin: a plain substring search for "temperature"/"level" matches
+    the VI-name prefix on fields like temperature_sample_heater_output or
+    level_meter_get_refresh_rate before it reaches the actual reading. Which
+    specific VI wins alphabetically is not asserted here (real orchestrator
+    ticks may have already populated history for other VIs too) — only that
+    the FIELD chosen is the reading, not a setting/rate.
+    """
+    fake_state = {
+        "temperature_vti": {"heater_output": 0.0, "temperature": 4.2, "setpoint": 4.2},
+        "level_meter": {"get_refresh_rate": 0.0, "helium_level": 77.0, "nitrogen_level": 88.0},
+    }
+    orchestrator.states_updated.emit(fake_state)
+
+    trend_0 = monitor_win._trend_panels["trend_0"]
+    trend_1 = monitor_win._trend_panels["trend_1"]
+    assert trend_0.selected_key().endswith("_temperature")
+    assert trend_1.selected_key().endswith(("_helium_level", "_nitrogen_level"))
+
+
+def test_monitor_persistence_roundtrip_dock_state_and_trends(
+    station, orchestrator, qtbot, isolated_settings
+):
+    """'Save layout' persists dock_state + trend selections; a fresh window restores them.
+
+    Mirrors the existing geometry-persistence test: build a window, change
+    state, save+close it (writes to the isolated ini), then build a fresh
+    window against the same settings and check the state came back.
+    """
+    win1 = MonitorWindow(station, orchestrator)
+    qtbot.addWidget(win1)
+    win1.show()
+
+    third_id = win1._add_trend_panel()
+    third_panel = win1._trend_panels[third_id]
+
+    # Feed history AFTER the third panel exists so its refresh() (triggered by
+    # this emit) populates its Y combo with a real key to select.
+    fake_state = {"magnet_x": {"get_field": 0.5, "magnet_current": 10.0}}
+    orchestrator.states_updated.emit(fake_state)
+    third_panel.set_selected_key("magnet_x_get_field")
+    third_panel.set_selected_window_s(21600.0)  # "6 h"
+
+    assert len(win1._trend_panels) == 3
+
+    win1._on_save_layout()
+    assert win1._status_bar.currentMessage() == "Layout saved"
+
+    win1.close()
+
+    win2 = MonitorWindow(station, orchestrator)
+    qtbot.addWidget(win2)
+    win2.show()
+
+    assert len(win2._trend_panels) == 3
+
+    # Give the new window's (empty) history the same key so the persisted
+    # selection, held pending, can actually be applied.
+    orchestrator.states_updated.emit(fake_state)
+
+    third_id_2 = list(win2._trend_panels.keys())[2]
+    third_panel_2 = win2._trend_panels[third_id_2]
+    assert third_panel_2.selected_key() == "magnet_x_get_field"
+    assert third_panel_2.selected_window_s() == 21600.0
+
+
+def test_monitor_default_layout_when_settings_empty(monitor_win):
+    """With no saved dock_state (fresh isolated settings), the DEFAULT layout stands."""
+    assert len(monitor_win._trend_panels) == 2
+    assert monitor_win._instrument_docks  # instrument docks were built and placed
+    assert monitor_win._default_dock_state is not None
+
+
+def test_monitor_restore_default_layout_action_resets_trend_docks(monitor_win):
+    """'Restore default layout' rebuilds exactly the default trend-dock count, with a status message."""
+    monitor_win._add_trend_action.trigger()
+    monitor_win._add_trend_action.trigger()
+    assert len(monitor_win._trend_panels) == 4
+
+    monitor_win._on_restore_default_layout()
+    assert len(monitor_win._trend_panels) == 2
+    assert monitor_win._status_bar.currentMessage() == "Default layout restored"
 
 
 def test_procedure_splitters_not_collapsible(procedure_win):
@@ -396,11 +661,9 @@ def test_procedure_splitters_not_collapsible(procedure_win):
 
 
 def test_monitor_central_widget_not_scroll_area(monitor_win):
-    """The central widget is the content widget directly, not an outer QScrollArea."""
+    """The central widget is the content widget directly; the dock host is a plain QMainWindow."""
     assert not isinstance(monitor_win.centralWidget(), QScrollArea)
-    # Only the VI grid is wrapped in a resizable scroll area.
-    assert isinstance(monitor_win._grid_scroll, QScrollArea)
-    assert monitor_win._grid_scroll.widgetResizable() is True
+    assert isinstance(monitor_win._dock_host, QMainWindow)
 
 
 def test_log_handler_removed_on_close(station, orchestrator, qtbot):

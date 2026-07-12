@@ -36,6 +36,14 @@ same commit that introduces it.
 | **VISA / GPIB** | The instrument-communication standard (PyVISA library) and the bus most lab instruments use. A "resource string" like `GPIB0::19::INSTR` addresses one instrument. |
 | **SI units rule** | All APIs use Tesla, Kelvin, Ampere, Volt, second. Display formatting (mK, µA) happens only in the GUI. |
 
+## GUI concepts
+
+| Term | Definition |
+|---|---|
+| **Dock layout** | The Monitor window's layout: everything below the header/banner lives inside an inner `QMainWindow` used purely as a docking area (`dock_host`, `setDockNestingEnabled(True)`). Every panel is a `QDockWidget` — one `dock_{vi_name}` per system/level `InstrumentPanel`, one `dock_trend_{n}` per `TrendPlotPanel`, plus `dock_other_devices`/`dock_log`/`dock_sample_info` — arranged via `addDockWidget`/`splitDockWidget`/`tabifyDockWidget`/`resizeDocks`. A View menu exposes each dock's `toggleViewAction()` for collapse/restore. Replaces the earlier fixed splitter grid, which crushed panels at real window sizes. |
+| **MonitorHistory** | `cryosoft/gui/monitor_history.py`. A Qt-free, pure-Python ring buffer that accumulates flattened `{vi_name}_{field_name}` time-series history from `Orchestrator.states_updated`, one bounded `deque` per key, for the trend docks' plots. |
+| **Trend docks** | 1–4 `TrendPlotPanel`s, each wrapped in its own `dock_trend_{n}` `QDockWidget`, each showing one variable vs wall-clock time read from a shared `MonitorHistory`. The View menu's "Add trend plot" action adds docks up to a cap of 4 (disabling once reached); each panel's own remove button drops it, never below a floor of 1 — distinct from a dock's own close button, which only hides it (recoverable via its View-menu toggle action). The two default docks opportunistically select a temperature/level reading (not a setting/rate field) once `MonitorHistory` has data. |
+
 ## Development harness
 
 | Term | Definition |

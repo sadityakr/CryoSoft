@@ -1,32 +1,43 @@
 # ---
 # description: |
 #   MonitorWindow: the main CryoSoft window showing live instrument state.
-#   System/level VI panels are always visible (no scroll). Measurement VIs sit
-#   in a compact "Other Devices" section. The bottom row is a 50/50 splitter:
-#   Log (left) and Sample Info (right). A Procedures menu opens ProcedureWindow.
+#   Content below the header/banner is an inner QMainWindow used purely as a
+#   dock host (setDockNestingEnabled), with one QDockWidget per system/level
+#   InstrumentPanel, one per TrendPlotPanel (1-4), and one each for Other
+#   Devices / Log / Sample Info. A View menu exposes each dock's
+#   toggleViewAction() plus Add trend plot / Save layout / Restore default
+#   layout. Replaces the earlier splitter-grid + fixed Trends section layout,
+#   which crushed panels at real window sizes.
 # entry_point: Not run directly. Instantiated in main.py.
 # dependencies:
 #   - PyQt6 >= 6.5
 #   - cryosoft.core.station (Station)
 #   - cryosoft.core.orchestrator (Orchestrator)
 #   - cryosoft.gui.instrument_panel (InstrumentPanel)
+#   - cryosoft.gui.monitor_history (MonitorHistory)
+#   - cryosoft.gui.trend_plot_panel (TrendPlotPanel)
 # input: |
 #   Station instance and Orchestrator instance.
 # process: |
-#   Iterates over all VI names in the station, splits them by vi_type into the
-#   main grid (system/level) and Other Devices section (measurement). Connects
-#   Orchestrator signals for the state-driven status bar and the notification
-#   banner (errors/blocked actions). Owns ProcedureWindow and opens it lazily
-#   via the Procedures menu.
+#   Iterates over all VI names in the station, splitting system/level VIs
+#   into InstrumentPanel docks and measurement VIs into a compact Other
+#   Devices dock. Builds the DEFAULT dock arrangement (two instrument
+#   columns left, two stacked trend docks right, a tabbed Other
+#   Devices/Log/Sample Info dock along the bottom) and captures its
+#   saveState() in memory for "Restore default layout". Connects
+#   Orchestrator signals for the state-driven status bar, the notification
+#   banner (errors/blocked actions), and MonitorHistory recording that feeds
+#   the trend docks. Owns ProcedureWindow and opens it lazily via the
+#   Procedures menu.
 # output: |
 #   A QMainWindow that stays open for the lifetime of the application.
-# last_updated: 2026-04-18
 # ---
 
 """MonitorWindow — main CryoSoft monitor window."""
 
 from __future__ import annotations
 
+import json
 import logging
 
 import qtawesome as qta
@@ -34,18 +45,16 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction, QCloseEvent
 from PyQt6.QtWidgets import (
     QApplication,
+    QDockWidget,
     QFileDialog,
     QFormLayout,
     QGridLayout,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMainWindow,
     QPushButton,
-    QScrollArea,
     QSizePolicy,
-    QSplitter,
     QStatusBar,
     QTextEdit,
     QVBoxLayout,
@@ -56,6 +65,7 @@ from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 from cryosoft.core.station import Station
 from cryosoft.gui import app_settings  # import the module (not the function) so tests can monkeypatch the factory
 from cryosoft.gui.instrument_panel import InstrumentPanel
+from cryosoft.gui.monitor_history import MonitorHistory
 from cryosoft.gui.notification_banner import NotificationBanner
 from cryosoft.gui.theme import (
     BANNER_SEVERITY_ERROR,
@@ -70,12 +80,24 @@ from cryosoft.gui.theme import (
     TEXT_ON_ACCENT,
     TEXT_PRIMARY,
 )
+from cryosoft.gui.trend_plot_panel import TrendPlotPanel
 
 logger = logging.getLogger(__name__)
 
-_COLUMNS = 2  # columns in the system VI instrument grid
+_MIN_TREND_PANELS = 1
+_MAX_TREND_PANELS = 4
+_DEFAULT_TREND_PANEL_COUNT = 2
 _LOG_MAX_LINES = 500
-_GEOMETRY_KEY = "MonitorWindow/geometry"  # QSettings key for saved window geometry
+
+# Default key-selection hints applied to the two default trend docks, in
+# creation order, once MonitorHistory has keys (first key whose flat name
+# contains the hint substring; falls back to the first available key).
+_DEFAULT_TREND_KEY_HINTS = ("temperature", "level")
+
+# QSettings keys for persisted window/layout state.
+_GEOMETRY_KEY = "MonitorWindow/geometry"
+_DOCK_STATE_KEY = "MonitorWindow/dock_state"
+_TRENDS_KEY = "MonitorWindow/trends"
 
 # Orchestrator state names that colour the status bar (dynamic 'level' property).
 _ACTIVE_STATES = frozenset({
@@ -89,6 +111,20 @@ _ERROR_STATES = frozenset({
     OrchestratorState.ERROR.value,
     OrchestratorState.EMERGENCY.value,
 })
+
+
+def _dock_features() -> QDockWidget.DockWidgetFeature:
+    """Return the standard feature set (movable + closable + floatable) shared by every dock.
+
+    Returns:
+        The OR'd ``QDockWidget.DockWidgetFeature`` flags used on every dock
+        this window creates.
+    """
+    return (
+        QDockWidget.DockWidgetFeature.DockWidgetMovable
+        | QDockWidget.DockWidgetFeature.DockWidgetClosable
+        | QDockWidget.DockWidgetFeature.DockWidgetFloatable
+    )
 
 
 class _QtLogHandler(logging.Handler):
@@ -145,10 +181,15 @@ class _QtLogHandler(logging.Handler):
 class MonitorWindow(QMainWindow):
     """Main window: live instrument monitor, sample info, global controls, and log.
 
-    System and level VIs get InstrumentPanels in a scrollable 2-column grid.
-    Measurement VIs appear in a separate "Other Devices" section below.
-    A real-time log panel shows the running cryosoft logger output.
-    The Procedures menu opens ProcedureWindow lazily.
+    Everything below the header/banner lives inside an inner QMainWindow
+    (``dock_host``) used purely as a docking area — the standard Qt pattern
+    for embedding a dock layout inside a larger window. Every panel is a
+    QDockWidget: one ``dock_{vi_name}`` per system/level InstrumentPanel, one
+    ``dock_trend_{n}`` per TrendPlotPanel (1-4, backed by a shared
+    MonitorHistory), and one each for Other Devices, Log, and Sample Info.
+    A View menu exposes each dock's toggle action plus "Add trend plot",
+    "Save layout", and "Restore default layout". The Procedures menu opens
+    ProcedureWindow lazily.
 
     Args:
         station: The active Station instance.
@@ -167,12 +208,19 @@ class MonitorWindow(QMainWindow):
         self._orchestrator = orchestrator
         self._procedure_window = None  # lazily created
 
+        # Populated by _build_menu(); referenced by dock-creation helpers
+        # that run earlier (during _build_ui()) so they must tolerate None.
+        self._view_menu = None
+        self._trend_actions_anchor = None
+        self._add_trend_action = None
+
         self.setWindowTitle("CryoSoft — Monitor")
         self._restore_geometry()
 
-        self._build_menu()
         self._build_ui()
+        self._build_menu()
         self._connect_signals()
+        self._restore_monitor_state()
 
         # Attach log handler after UI exists. Guard against a duplicate in case
         # the window is ever reconstructed within the same process (handlers
@@ -188,12 +236,50 @@ class MonitorWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _build_menu(self) -> None:
+        """Build the Procedures and View menus.
+
+        The View menu needs every dock to already exist (it lists their
+        ``toggleViewAction()``s), so this runs after ``_build_ui()``.
+        """
         menu_bar = self.menuBar()
+
         proc_menu = menu_bar.addMenu("Procedures")
         open_action = QAction("Open Procedures…", self)
         open_action.setShortcut("Ctrl+P")
         open_action.triggered.connect(self._open_procedures)
         proc_menu.addAction(open_action)
+
+        view_menu = menu_bar.addMenu("View")
+        self._view_menu = view_menu
+
+        for vi_name in self._system_vi_names:
+            view_menu.addAction(self._instrument_docks[vi_name].toggleViewAction())
+        view_menu.addAction(self._other_devices_dock.toggleViewAction())
+        view_menu.addAction(self._log_dock.toggleViewAction())
+        view_menu.addAction(self._sample_info_dock.toggleViewAction())
+
+        # Trend dock actions live between this anchor separator and the next
+        # one, so panels added/removed later can insert/remove around it
+        # without disturbing the fixed-dock actions above.
+        self._trend_actions_anchor = view_menu.addSeparator()
+        for dock in self._trend_docks.values():
+            view_menu.insertAction(self._trend_actions_anchor, dock.toggleViewAction())
+
+        view_menu.addSeparator()
+        self._add_trend_action = QAction("Add trend plot", self)
+        self._add_trend_action.setToolTip(f"Add a trend plot (up to {_MAX_TREND_PANELS})")
+        self._add_trend_action.triggered.connect(self._on_trend_add_clicked)
+        view_menu.addAction(self._add_trend_action)
+        self._update_trend_add_action_state()
+
+        view_menu.addSeparator()
+        save_layout_action = QAction("Save layout", self)
+        save_layout_action.triggered.connect(self._on_save_layout)
+        view_menu.addAction(save_layout_action)
+
+        restore_default_action = QAction("Restore default layout", self)
+        restore_default_action.triggered.connect(self._on_restore_default_layout)
+        view_menu.addAction(restore_default_action)
 
     def _open_procedures(self) -> None:
         """Lazily create and show the ProcedureWindow."""
@@ -219,7 +305,7 @@ class MonitorWindow(QMainWindow):
         root.setSpacing(6)
         root.setContentsMargins(8, 8, 8, 8)
 
-        system_vis = [
+        self._system_vi_names = [
             n for n in self._station.get_vi_names()
             if self._station.get_vi_type(n) in {"system", "level"}
         ]
@@ -228,6 +314,11 @@ class MonitorWindow(QMainWindow):
             if self._station.get_vi_type(n) == "measurement"
         ]
 
+        # Shared ring-buffer history feeding all Trend plot panels. Qt-free
+        # by design (see monitor_history.py), so it is created here rather
+        # than inside TrendPlotPanel.
+        self._history = MonitorHistory()
+
         # ── Header ────────────────────────────────────────────────────
         root.addLayout(self._build_header())
 
@@ -235,63 +326,69 @@ class MonitorWindow(QMainWindow):
         self._banner = NotificationBanner()
         root.addWidget(self._banner)
 
-        # ── System / level VI grid ─────────────────────────────────────
-        grid_container = QWidget()
-        self._grid = QGridLayout(grid_container)
-        self._grid.setSpacing(8)
-        n_rows = (len(system_vis) + _COLUMNS - 1) // _COLUMNS
-        for c in range(_COLUMNS):
-            self._grid.setColumnStretch(c, 1)
-        for r in range(n_rows):
-            self._grid.setRowStretch(r, 1)
+        # ── Dock host ─────────────────────────────────────────────────
+        # A QMainWindow is itself just a widget and needs no central widget;
+        # used here purely as a docking area embedded inside the outer
+        # window's layout (the standard Qt "dock host" pattern).
+        self._dock_host = QMainWindow()
+        self._dock_host.setObjectName("dock_host")
+        self._dock_host.setDockNestingEnabled(True)
+        self._dock_host.setDockOptions(
+            QMainWindow.DockOption.AnimatedDocks
+            | QMainWindow.DockOption.AllowNestedDocks
+            | QMainWindow.DockOption.AllowTabbedDocks
+        )
+        # A zero-size central widget keeps the surrounding dock areas from
+        # sharing space with an empty middle region.
+        placeholder = QWidget()
+        placeholder.setMaximumSize(0, 0)
+        self._dock_host.setCentralWidget(placeholder)
 
-        for idx, vi_name in enumerate(system_vis):
+        # ── Instrument panel docks (system/level VIs) ───────────────────
+        # Panels are built once, in config order, and kept in self._panels
+        # for the lifetime of the window — recreating them would drop their
+        # Orchestrator signal connections.
+        self._panels: list[InstrumentPanel] = []
+        self._instrument_docks: dict[str, QDockWidget] = {}
+        for vi_name in self._system_vi_names:
             vi = self._station._virtual_instruments[vi_name]
             panel = InstrumentPanel(vi_name, vi, self._orchestrator, parent=self)
             panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-            row, col = divmod(idx, _COLUMNS)
-            self._grid.addWidget(panel, row, col)
+            self._panels.append(panel)
 
-        # ── Lower section ──────────────────────────────────────────────
-        lower_widget = QWidget()
-        lower_widget.setMinimumHeight(380)
-        lower_layout = QVBoxLayout(lower_widget)
-        lower_layout.setSpacing(6)
-        lower_layout.setContentsMargins(0, 0, 0, 0)
+            dock = QDockWidget(vi_name, self._dock_host)
+            dock.setObjectName(f"dock_{vi_name}")
+            dock.setFeatures(_dock_features())
+            dock.setWidget(panel)
+            self._instrument_docks[vi_name] = dock
 
-        if measurement_vis:
-            lower_layout.addWidget(self._build_other_devices_section(measurement_vis))
+        # ── Trend docks (populated by _apply_default_layout / restore) ──
+        self._trend_panels: dict[str, TrendPlotPanel] = {}
+        self._trend_docks: dict[str, QDockWidget] = {}
+        self._trend_series_counter = 0
+        # Keys the restore path still wants applied once MonitorHistory has
+        # data for them (a fresh panel's Y combo is empty until the first
+        # states_updated tick, so set_selected_key() at restore time is a
+        # harmless no-op that we retry from _on_states_updated_for_history).
+        self._pending_trend_keys: dict[str, str] = {}
+        # Same retry pattern for the DEFAULT (non-restored) trend docks'
+        # opportunistic temperature/level key selection.
+        self._default_trend_key_hints: dict[str, str] = {}
 
-        log_section = self._build_log_section()
-        sample_info_section = self._build_sample_info_section()
-        # Keep both panes readable; setChildrenCollapsible(False) stops a drag
-        # from crushing either pane to zero width (the reported "collapse" bug).
-        log_section.setMinimumWidth(200)
-        sample_info_section.setMinimumWidth(200)
-        log_info_splitter = QSplitter(Qt.Orientation.Horizontal)
-        log_info_splitter.setChildrenCollapsible(False)
-        log_info_splitter.addWidget(log_section)
-        log_info_splitter.addWidget(sample_info_section)
-        log_info_splitter.setStretchFactor(0, 1)
-        log_info_splitter.setStretchFactor(1, 1)
-        lower_layout.addWidget(log_info_splitter)
+        # ── Other Devices / Log / Sample Info docks ─────────────────────
+        self._other_devices_dock = self._build_dock(
+            "dock_other_devices", "Other Devices", self._build_other_devices_section(measurement_vis)
+        )
+        self._log_dock = self._build_dock("dock_log", "Log", self._build_log_section())
+        self._sample_info_dock = self._build_dock(
+            "dock_sample_info", "Sample Info", self._build_sample_info_section()
+        )
 
-        # ── VI grid scroll area ────────────────────────────────────────
-        # Only the instrument grid scrolls when there are more panels than fit;
-        # the rest of the window keeps its layout. setWidgetResizable(True) lets
-        # the grid expand to fill the viewport when there is room.
-        self._grid_scroll = QScrollArea()
-        self._grid_scroll.setWidgetResizable(True)
-        self._grid_scroll.setWidget(grid_container)
-        self._grid_scroll.setMinimumHeight(200)
+        # ── Assemble the DEFAULT layout and remember it for later restore ──
+        self._apply_default_layout()
+        self._default_dock_state = self._dock_host.saveState()
 
-        # ── Vertical splitter between VI grid and lower section ────────
-        main_splitter = QSplitter(Qt.Orientation.Vertical)
-        main_splitter.setChildrenCollapsible(False)
-        main_splitter.addWidget(self._grid_scroll)
-        main_splitter.addWidget(lower_widget)
-        main_splitter.setSizes([500, 400])
-        root.addWidget(main_splitter)
+        root.addWidget(self._dock_host)
 
         # ── Content widget is the central widget directly (no outer scroll) ──
         self.setCentralWidget(content_widget)
@@ -305,6 +402,24 @@ class MonitorWindow(QMainWindow):
         # dynamic-property restyle only fires when the level actually changes.
         self._status_level = ""
 
+    def _build_dock(self, object_name: str, title: str, widget: QWidget) -> QDockWidget:
+        """Wrap a widget in a QDockWidget with the standard feature set.
+
+        Args:
+            object_name: The dock's objectName (mandatory — saveState() and
+                findChild() both key off it).
+            title: The dock's title-bar text.
+            widget: The content widget the dock hosts.
+
+        Returns:
+            The assembled, not-yet-placed QDockWidget.
+        """
+        dock = QDockWidget(title, self._dock_host)
+        dock.setObjectName(object_name)
+        dock.setFeatures(_dock_features())
+        dock.setWidget(widget)
+        return dock
+
     def _build_header(self) -> QHBoxLayout:
         """Build the top toolbar with title and global action buttons.
 
@@ -315,6 +430,7 @@ class MonitorWindow(QMainWindow):
 
         title = QLabel("<b>CryoSoft</b>  — Instrument Monitor")
         row.addWidget(title)
+
         row.addStretch()
 
         initiate_all_btn = QPushButton("Initiate All")
@@ -339,13 +455,17 @@ class MonitorWindow(QMainWindow):
         row.addWidget(standby_all_btn)
         return row
 
-    def _build_sample_info_section(self) -> QGroupBox:
-        """Build the sample-info group box (session-level metadata).
+    def _build_sample_info_section(self) -> QWidget:
+        """Build the sample-info form (session-level metadata).
+
+        No outer QGroupBox: the dock's own title bar ("Sample Info") already
+        supplies that chrome, so wrapping it again would waste vertical space
+        in the compact bottom tab band.
 
         Returns:
-            A QGroupBox with name, ID, comments, and data-dir fields.
+            A QWidget with name, ID, comments, and data-dir form fields.
         """
-        box = QGroupBox("Sample Info")
+        box = QWidget()
         form = QFormLayout(box)
 
         self._sample_name_input = QLineEdit()
@@ -377,57 +497,86 @@ class MonitorWindow(QMainWindow):
 
         return box
 
-    def _build_other_devices_section(self, vi_names: list[str]) -> QGroupBox:
-        """Build the Other Devices section — connection status cards for measurement VIs.
+    def _build_other_devices_section(self, vi_names: list[str]) -> QWidget:
+        """Build the compact Other Devices content: one row per measurement VI.
 
-        Shows only what is connected and lifecycle (Initiate/Standby).
-        Configuration is always handled by procedures, not the monitor.
+        Each row is name + connection dot/status + small icon Check/Initiate/
+        Standby buttons — no tall card boxes. Rows stack vertically for up to
+        three VIs; a tight 3-column grid is used beyond that so the dock's
+        default height stays small regardless of how many measurement VIs a
+        station has.
 
         Args:
             vi_names: Names of measurement VIs to display.
 
         Returns:
-            A QGroupBox with one compact status card per measurement VI.
+            A QWidget holding one compact status row per measurement VI (or a
+            placeholder label if there are none).
         """
-        box = QGroupBox("Other Devices")
-        h_layout = QHBoxLayout(box)
-        h_layout.setSpacing(8)
+        container = QWidget()
 
-        for vi_name in vi_names:
-            h_layout.addWidget(self._build_device_status_card(vi_name))
+        if not vi_names:
+            layout = QVBoxLayout(container)
+            layout.addWidget(QLabel("No other devices configured."))
+            return container
 
-        h_layout.addStretch()
-        return box
+        if len(vi_names) > 3:
+            grid = QGridLayout(container)
+            grid.setSpacing(6)
+            columns = 3
+            for idx, vi_name in enumerate(vi_names):
+                row, col = divmod(idx, columns)
+                grid.addWidget(self._build_device_status_row(vi_name), row, col)
+        else:
+            vlay = QVBoxLayout(container)
+            vlay.setSpacing(4)
+            vlay.setContentsMargins(6, 6, 6, 6)
+            for vi_name in vi_names:
+                vlay.addWidget(self._build_device_status_row(vi_name))
+            vlay.addStretch()
 
-    def _build_device_status_card(self, vi_name: str) -> QGroupBox:
-        """Build a connection-check status card for a measurement VI.
+        return container
 
-        Shows a coloured dot + status text, a "Check" button that sends an
-        IDN query, and Initiate/Standby lifecycle buttons.
+    def _build_device_status_row(self, vi_name: str) -> QWidget:
+        """Build one compact connection-check row for a measurement VI.
+
+        A single ~32-40 px row: coloured dot + status text, then small icon
+        Check/Initiate/Standby buttons with tooltips.
 
         Args:
             vi_name: Registered VI name (e.g. ``"keithley_delta_mode"``).
 
         Returns:
-            A compact QGroupBox with connection indicator and lifecycle buttons.
+            A QWidget containing the assembled row.
         """
-        box = QGroupBox(vi_name)
-        vlay = QVBoxLayout(box)
+        row_widget = QWidget()
+        row_widget.setObjectName(f"{vi_name}_device_row")
+        row = QHBoxLayout(row_widget)
+        row.setContentsMargins(6, 2, 6, 2)
+        row.setSpacing(8)
 
-        # ── Connection indicator row ───────────────────────────────────
-        conn_row = QHBoxLayout()
+        # Connection dot: styled via the dynamic 'status' QSS property
+        # (theme.py QLabel[class="conn_dot"][status=...]), never setStyleSheet.
         dot = QLabel("●")
-        dot.setStyleSheet("color: gray; font-size: 16px;")
         dot.setObjectName(f"{vi_name}_conn_dot")
+        dot.setProperty("class", "conn_dot")
+        dot.setProperty("status", "unknown")
+        row.addWidget(dot)
+
+        name_lbl = QLabel(vi_name)
+        row.addWidget(name_lbl)
+
         status_lbl = QLabel("Unknown")
         status_lbl.setObjectName(f"{vi_name}_conn_status")
         status_lbl.setProperty("class", "secondary_label")
-        check_btn = QPushButton("Check")
+        row.addWidget(status_lbl)
+
+        row.addStretch()
+
+        check_btn = QPushButton()
         check_btn.setObjectName(f"{vi_name}_check_btn")
         check_btn.setIcon(qta.icon("fa5s.plug", color=TEXT_PRIMARY))
-        check_btn.setToolTip("Send an identity query to test the connection")
-        # No max width: the size hint must fit icon + text ("Check" was
-        # truncated by the old fixed cap once the icon was added).
+        check_btn.setToolTip(f"Send an identity query to test the {vi_name} connection")
 
         vi = self._station._virtual_instruments[vi_name]
 
@@ -436,57 +585,274 @@ class MonitorWindow(QMainWindow):
                 ok = _vi.ping()
             except Exception:
                 ok = False
-            if ok:
-                _dot.setStyleSheet("color: #4ec94e; font-size: 16px;")
-                _lbl.setText("Connected")
-            else:
-                _dot.setStyleSheet("color: #e74c3c; font-size: 16px;")
-                _lbl.setText("Not reachable")
+            new_status = "connected" if ok else "disconnected"
+            _dot.setProperty("status", new_status)
+            # Qt only re-evaluates property-based QSS selectors after an
+            # unpolish/polish cycle (same pattern InstrumentPanel uses).
+            _dot.style().unpolish(_dot)
+            _dot.style().polish(_dot)
+            _lbl.setText("Connected" if ok else "Not reachable")
 
         check_btn.clicked.connect(_on_check)
-        conn_row.addWidget(dot)
-        conn_row.addWidget(status_lbl)
-        conn_row.addStretch()
-        conn_row.addWidget(check_btn)
-        vlay.addLayout(conn_row)
 
-        # ── Lifecycle buttons ──────────────────────────────────────────
-        btn_row = QHBoxLayout()
-        initiate_btn = QPushButton("Initiate")
+        initiate_btn = QPushButton()
         initiate_btn.setObjectName(f"{vi_name}_initiate_btn")
         initiate_btn.setIcon(qta.icon("fa5s.play", color=TEXT_PRIMARY))
-        initiate_btn.setToolTip("Bring this instrument to its operating state")
+        initiate_btn.setToolTip(f"Bring {vi_name} to its operating state")
         initiate_btn.clicked.connect(
             lambda checked=False, n=vi_name: self._orchestrator.submit_vi_action(n, "initiate")
         )
-        standby_btn = QPushButton("Standby")
+
+        standby_btn = QPushButton()
         standby_btn.setObjectName(f"{vi_name}_standby_btn")
         standby_btn.setIcon(qta.icon("fa5s.power-off", color=TEXT_PRIMARY))
-        standby_btn.setToolTip("Return this instrument to a safe standby state")
+        standby_btn.setToolTip(f"Return {vi_name} to a safe standby state")
         standby_btn.clicked.connect(
             lambda checked=False, n=vi_name: self._orchestrator.submit_vi_action(n, "standby")
         )
-        btn_row.addWidget(initiate_btn)
-        btn_row.addWidget(standby_btn)
-        btn_row.addStretch()
-        vlay.addLayout(btn_row)
 
-        return box
+        row.addWidget(check_btn)
+        row.addWidget(initiate_btn)
+        row.addWidget(standby_btn)
 
-    def _build_log_section(self) -> QGroupBox:
-        """Build the real-time log display panel.
+        return row_widget
+
+    def _build_log_section(self) -> QTextEdit:
+        """Build the real-time log display widget.
+
+        No outer QGroupBox: the dock's own title bar ("Log") already supplies
+        that chrome.
 
         Returns:
-            A QGroupBox containing a read-only QTextEdit with dark background.
+            A read-only QTextEdit (objectName ``log_panel``).
         """
-        box = QGroupBox("Log")
-        vlay = QVBoxLayout(box)
         self._log_widget = QTextEdit()
         self._log_widget.setObjectName("log_panel")
         self._log_widget.setReadOnly(True)
         self._log_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        vlay.addWidget(self._log_widget)
-        return box
+        return self._log_widget
+
+    # ------------------------------------------------------------------
+    # Default layout
+    # ------------------------------------------------------------------
+
+    def _apply_default_layout(self) -> None:
+        """Arrange every dock into the DEFAULT layout.
+
+        Two instrument columns on the left (VIs distributed round-robin by
+        config order — for the standard 5-VI sim_cryostat station this yields
+        magnet_x/temperature_vti/level_meter in column 1 and
+        magnet_y/temperature_sample in column 2), two trend docks stacked on
+        the right, and a tabbed Other Devices/Log/Sample Info dock along the
+        bottom (Log active). ``resizeDocks`` enforces the intended
+        proportions explicitly — Qt's automatic split guesses are exactly
+        what produced the crushed layout this replaces.
+        """
+        dh = self._dock_host
+
+        self._build_default_trend_docks()
+
+        col1 = self._system_vi_names[0::2]
+        col2 = self._system_vi_names[1::2]
+
+        if col1:
+            first = self._instrument_docks[col1[0]]
+            dh.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, first)
+            for a, b in zip(col1, col1[1:]):
+                dh.splitDockWidget(self._instrument_docks[a], self._instrument_docks[b], Qt.Orientation.Vertical)
+            if col2:
+                second = self._instrument_docks[col2[0]]
+                dh.splitDockWidget(first, second, Qt.Orientation.Horizontal)
+                for a, b in zip(col2, col2[1:]):
+                    dh.splitDockWidget(self._instrument_docks[a], self._instrument_docks[b], Qt.Orientation.Vertical)
+
+        dh.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self._other_devices_dock)
+        dh.tabifyDockWidget(self._other_devices_dock, self._log_dock)
+        dh.tabifyDockWidget(self._log_dock, self._sample_info_dock)
+        self._log_dock.raise_()
+
+        trend_ids = list(self._trend_docks.keys())
+        if col1 and trend_ids:
+            dh.resizeDocks(
+                [self._instrument_docks[col1[0]], self._trend_docks[trend_ids[0]]],
+                [55, 45],
+                Qt.Orientation.Horizontal,
+            )
+
+        top_ref = None
+        if col1:
+            top_ref = self._instrument_docks[col1[0]]
+        elif trend_ids:
+            top_ref = self._trend_docks[trend_ids[0]]
+        if top_ref is not None:
+            dh.resizeDocks([top_ref, self._other_devices_dock], [1000, 220], Qt.Orientation.Vertical)
+
+    def _build_default_trend_docks(self) -> None:
+        """(Re)create exactly the default number of trend docks, stacked vertically.
+
+        Replaces any existing trend panels/docks, then creates
+        ``_DEFAULT_TREND_PANEL_COUNT`` fresh ones, docked on the right and
+        split vertically, with opportunistic temperature/level default-key
+        hints (applied once MonitorHistory has data — see
+        ``_on_states_updated_for_history``).
+        """
+        for panel_id in list(self._trend_panels.keys()):
+            self._remove_trend_panel_widget(panel_id)
+        self._trend_series_counter = 0
+        self._default_trend_key_hints.clear()
+
+        created = [self._create_trend_panel() for _ in range(_DEFAULT_TREND_PANEL_COUNT)]
+        docks = [dock for _, _, dock in created]
+        if docks:
+            self._dock_host.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, docks[0])
+            for a, b in zip(docks, docks[1:]):
+                self._dock_host.splitDockWidget(a, b, Qt.Orientation.Vertical)
+
+        for (panel_id, _panel, _dock), hint in zip(created, _DEFAULT_TREND_KEY_HINTS):
+            self._default_trend_key_hints[panel_id] = hint
+
+        self._update_trend_add_action_state()
+
+    # ------------------------------------------------------------------
+    # Trend docks
+    # ------------------------------------------------------------------
+
+    def _create_trend_panel(self) -> tuple[str, TrendPlotPanel, QDockWidget]:
+        """Create and register a new TrendPlotPanel + its QDockWidget.
+
+        Registers the panel/dock in ``self._trend_panels``/``self._trend_docks``
+        and (if the View menu already exists) inserts its toggle action, but
+        does NOT place the dock in ``dock_host`` — callers decide placement
+        (the default layout stacks the initial pair vertically; later
+        additions tabify onto the last trend dock via ``_place_trend_dock``).
+
+        Returns:
+            ``(panel_id, panel, dock)`` for the caller to place.
+        """
+        panel_id = f"trend_{self._next_trend_panel_index()}"
+        panel = TrendPlotPanel(
+            self._history, panel_id, series_index=self._trend_series_counter, parent=self
+        )
+        self._trend_series_counter += 1
+        panel.remove_requested.connect(self._on_trend_remove_requested)
+
+        dock = QDockWidget(f"Trend — {panel_id}", self._dock_host)
+        dock.setObjectName(f"dock_{panel_id}")
+        dock.setFeatures(_dock_features())
+        dock.setWidget(panel)
+
+        self._trend_panels[panel_id] = panel
+        self._trend_docks[panel_id] = dock
+        if self._view_menu is not None:
+            self._view_menu.insertAction(self._trend_actions_anchor, dock.toggleViewAction())
+
+        return panel_id, panel, dock
+
+    def _place_trend_dock(self, dock: QDockWidget) -> None:
+        """Dock a newly created trend dock: tabify onto the last trend dock, or dock right if it is the first.
+
+        Args:
+            dock: The (already registered, not yet placed) trend dock.
+        """
+        others = [d for d in self._trend_docks.values() if d is not dock]
+        if others:
+            self._dock_host.tabifyDockWidget(others[-1], dock)
+        else:
+            self._dock_host.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+
+    def _add_trend_panel(self) -> str:
+        """Create, place, and menu-wire a new trend panel (menu action / restore path).
+
+        Returns:
+            The new panel's ``panel_id``.
+        """
+        panel_id, _panel, dock = self._create_trend_panel()
+        self._place_trend_dock(dock)
+        self._update_trend_add_action_state()
+        return panel_id
+
+    def _next_trend_panel_index(self) -> int:
+        """Return the smallest non-negative integer not already used in a panel_id.
+
+        Returns:
+            An index such that ``f"trend_{index}"`` is not already in use, so
+            panel_ids never collide after panels are added and removed.
+        """
+        used: set[int] = set()
+        for panel_id in self._trend_panels:
+            try:
+                used.add(int(panel_id.rsplit("_", 1)[-1]))
+            except ValueError:
+                continue
+        index = 0
+        while index in used:
+            index += 1
+        return index
+
+    def _on_trend_add_clicked(self) -> None:
+        """Add a trend panel via the View menu action, up to the cap."""
+        if len(self._trend_panels) >= _MAX_TREND_PANELS:
+            return
+        self._add_trend_panel()
+
+    def _on_trend_remove_requested(self, panel_id: str) -> None:
+        """Remove a trend panel, never dropping below the minimum.
+
+        This is a genuine removal (panel + dock destroyed), distinct from a
+        dock's own close button, which just hides it (standard QDockWidget
+        behavior) — the toggle action in the View menu brings it back.
+
+        Args:
+            panel_id: The panel_id echoed back by TrendPlotPanel.remove_requested.
+        """
+        if len(self._trend_panels) <= _MIN_TREND_PANELS:
+            return
+        self._remove_trend_panel_widget(panel_id)
+        self._update_trend_add_action_state()
+
+    def _remove_trend_panel_widget(self, panel_id: str) -> None:
+        """Unconditionally drop a trend panel's dock and bookkeeping.
+
+        Args:
+            panel_id: The panel_id to remove. No-op if not present.
+        """
+        self._trend_panels.pop(panel_id, None)
+        dock = self._trend_docks.pop(panel_id, None)
+        if dock is not None:
+            if self._view_menu is not None:
+                self._view_menu.removeAction(dock.toggleViewAction())
+            self._dock_host.removeDockWidget(dock)
+            dock.setParent(None)
+            dock.deleteLater()  # also deletes the TrendPlotPanel it owns via setWidget()
+        self._pending_trend_keys.pop(panel_id, None)
+        self._default_trend_key_hints.pop(panel_id, None)
+
+    def _update_trend_add_action_state(self) -> None:
+        """Enable/disable the "Add trend plot" action based on the current panel count."""
+        if self._add_trend_action is not None:
+            self._add_trend_action.setEnabled(len(self._trend_panels) < _MAX_TREND_PANELS)
+
+    # ------------------------------------------------------------------
+    # Layout persistence actions (View menu)
+    # ------------------------------------------------------------------
+
+    def _on_save_layout(self) -> None:
+        """Persist the current dock arrangement and trend selections, with a status-bar confirmation."""
+        settings = app_settings.get_settings()
+        settings.setValue(_DOCK_STATE_KEY, self._dock_host.saveState())
+        self._save_trends()
+        self._status_bar.showMessage("Layout saved", 3000)
+
+    def _on_restore_default_layout(self) -> None:
+        """Rebuild the default trend docks, then reapply the captured default dock state."""
+        self._build_default_trend_docks()
+        if self._default_dock_state is not None:
+            self._dock_host.restoreState(self._default_dock_state)
+        else:
+            # Should not normally happen (captured at construction time);
+            # defensive fallback rebuilds the arrangement from scratch.
+            self._apply_default_layout()
+        self._status_bar.showMessage("Default layout restored", 3000)
 
     # ------------------------------------------------------------------
     # Public sample-info accessors (used by ProcedureWindow)
@@ -532,6 +898,63 @@ class MonitorWindow(QMainWindow):
         self._orchestrator.state_changed.connect(self._on_state_changed)
         self._orchestrator.error_occurred.connect(self._on_error)
         self._orchestrator.action_blocked.connect(self._on_action_blocked)
+        # Separate from InstrumentPanel's own states_updated connections
+        # (each panel connects itself in its constructor) — this slot only
+        # feeds MonitorHistory and the Trend plots.
+        self._orchestrator.states_updated.connect(self._on_states_updated_for_history)
+
+    def _on_states_updated_for_history(self, state: dict) -> None:
+        """Record a state snapshot into MonitorHistory and refresh trend panels.
+
+        Args:
+            state: ``{vi_name: {field: value, ...}}`` from the Orchestrator.
+        """
+        self._history.record(state)
+        for panel_id, panel in self._trend_panels.items():
+            panel.refresh()
+
+            pending_key = self._pending_trend_keys.get(panel_id)
+            if pending_key is not None:
+                panel.set_selected_key(pending_key)
+                if panel.selected_key() == pending_key:
+                    del self._pending_trend_keys[panel_id]
+                continue
+
+            hint = self._default_trend_key_hints.get(panel_id)
+            if hint is not None:
+                keys = self._history.keys()
+                if keys:
+                    panel.set_selected_key(self._pick_default_trend_key(hint, keys))
+                    del self._default_trend_key_hints[panel_id]
+
+    def _pick_default_trend_key(self, hint: str, keys: list[str]) -> str:
+        """Pick the best default trend key for a hint substring (e.g. "temperature").
+
+        Flat keys are ``{vi_name}_{field_name}``, and several VI names
+        themselves contain hint words (e.g. ``temperature_vti``,
+        ``temperature_sample``), which would make a plain substring search
+        match a boring setting field (``temperature_sample_heater_output``)
+        before the actual reading. This strips the known vi_name prefix first
+        so the hint is matched against the FIELD name, falling back to a
+        plain substring match over the whole key, and finally the first key,
+        if nothing more specific matches.
+
+        Args:
+            hint: Substring to look for (e.g. ``"temperature"``, ``"level"``).
+            keys: Non-empty, sorted list of MonitorHistory flat keys.
+
+        Returns:
+            The chosen flat key.
+        """
+        for key in keys:
+            for vi_name in self._station.get_vi_names():
+                prefix = f"{vi_name}_"
+                if key.startswith(prefix) and hint in key[len(prefix):]:
+                    return key
+        for key in keys:
+            if hint in key:
+                return key
+        return keys[0]
 
     def _on_state_changed(self, state_name: str) -> None:
         """Update the status bar label and colour level when state changes.
@@ -588,11 +1011,12 @@ class MonitorWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _restore_geometry(self) -> None:
-        """Restore the saved window geometry, or size to a fraction of the screen.
+        """Restore the saved window geometry, or size to a fraction of the screen, centered.
 
         Geometry is persisted with ``QSettings``, which on Windows is backed by
         the registry (``HKCU\\Software\\CryoSoft\\CryoSoft``). If nothing is
-        stored yet, the window is sized to ~70% of the available screen area.
+        stored yet, the window is sized to ~90% of the available screen area
+        and centered on it.
         """
         settings = app_settings.get_settings()
         saved = settings.value(_GEOMETRY_KEY)
@@ -601,17 +1025,100 @@ class MonitorWindow(QMainWindow):
         screen = QApplication.primaryScreen()
         if screen is not None:
             available = screen.availableGeometry()
-            self.resize(int(available.width() * 0.7), int(available.height() * 0.7))
+            width = int(available.width() * 0.9)
+            height = int(available.height() * 0.9)
+            self.resize(width, height)
+            x = available.x() + (available.width() - width) // 2
+            y = available.y() + (available.height() - height) // 2
+            self.move(x, y)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 (Qt override)
         """Detach the log handler and persist geometry before the window closes.
 
         Removing the handler prevents it from writing to the destroyed
         ``QTextEdit`` after the window is gone (RuntimeError on a dead widget).
+        Layout (dock state + trend selections) is saved explicitly via the
+        View menu's "Save layout" action, by design — not auto-saved here.
 
         Args:
             event: The Qt close event.
         """
         logging.getLogger("cryosoft").removeHandler(self._log_handler)
-        app_settings.get_settings().setValue(_GEOMETRY_KEY, self.saveGeometry())
+        settings = app_settings.get_settings()
+        settings.setValue(_GEOMETRY_KEY, self.saveGeometry())
         super().closeEvent(event)
+
+    # ------------------------------------------------------------------
+    # Layout persistence (restore path)
+    # ------------------------------------------------------------------
+
+    def _save_trends(self) -> None:
+        """Persist the ordered list of trend panels' selected key and window."""
+        ordered = [self._trend_panels[pid] for pid in self._trend_docks]
+        data = [
+            {"key": panel.selected_key(), "window_s": panel.selected_window_s()}
+            for panel in ordered
+        ]
+        app_settings.get_settings().setValue(_TRENDS_KEY, json.dumps(data))
+
+    def _apply_trend_restore(self, entries: list) -> None:
+        """Replace the current trend docks with ones matching saved entries.
+
+        Args:
+            entries: Parsed JSON list of ``{"key": ..., "window_s": ...}``
+                dicts, already validated to be a non-empty list.
+        """
+        valid_entries = [e for e in entries if isinstance(e, dict)][:_MAX_TREND_PANELS]
+        if not valid_entries:
+            return
+
+        for panel_id in list(self._trend_panels.keys()):
+            self._remove_trend_panel_widget(panel_id)
+        self._default_trend_key_hints.clear()
+
+        for entry in valid_entries:
+            panel_id = self._add_trend_panel()
+            panel = self._trend_panels[panel_id]
+
+            window_s = entry.get("window_s")
+            if isinstance(window_s, (int, float)) and not isinstance(window_s, bool):
+                panel.set_selected_window_s(float(window_s))
+
+            key = entry.get("key")
+            if isinstance(key, str) and key:
+                panel.set_selected_key(key)  # no-op now if history is still empty
+                self._pending_trend_keys[panel_id] = key
+
+    def _restore_monitor_state(self) -> None:
+        """Restore trend docks and dock layout from QSettings, defensively.
+
+        Called once at the end of ``__init__``, after the UI and menu are
+        built. The saved trend count/keys are applied FIRST (recreating the
+        matching set of trend docks), then ``dock_host.restoreState()`` is
+        attempted — restoreState() needs every dock objectName it references
+        to already exist. A missing key, wrong type, corrupt JSON, or a
+        ``restoreState()`` failure all silently fall back to the DEFAULT
+        layout already built by ``_build_ui()``.
+        """
+        settings = app_settings.get_settings()
+
+        raw_trends = settings.value(_TRENDS_KEY)
+        parsed = None
+        if raw_trends:
+            try:
+                parsed = json.loads(raw_trends)
+            except (TypeError, ValueError):
+                parsed = None
+        if isinstance(parsed, list) and parsed:
+            self._apply_trend_restore(parsed)
+
+        dock_state = settings.value(_DOCK_STATE_KEY)
+        if dock_state is None:
+            return
+        try:
+            restored = bool(self._dock_host.restoreState(dock_state))
+        except (TypeError, ValueError) as exc:
+            logger.debug("MonitorWindow: could not restore dock_host state: %s", exc)
+            restored = False
+        if not restored:
+            logger.debug("MonitorWindow: dock_state present but invalid; kept default layout")

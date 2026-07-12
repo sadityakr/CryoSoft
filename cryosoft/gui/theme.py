@@ -522,4 +522,41 @@ QToolTip {{
     border: 1px solid {BORDER_HAIRLINE};
     padding: 4px;
 }}
+
+/* ── Dock widgets (Monitor window dock-based layout) ──────────────────── */
+QDockWidget {{
+    color: {TEXT_PRIMARY};
+    font-size: 9pt;
+    font-weight: bold;
+}}
+QDockWidget::title {{
+    background-color: {BG_ELEVATED};
+    border: 1px solid {BORDER_HAIRLINE};
+    border-bottom: none;
+    padding: 4px 6px;
+}}
+QDockWidget::close-button,
+QDockWidget::float-button {{
+    background-color: transparent;
+    border: none;
+    padding: 2px;
+}}
+QDockWidget::close-button:hover,
+QDockWidget::float-button:hover {{
+    background-color: {BTN_SECONDARY_PRESSED};
+    border-radius: 2px;
+}}
+
+/* ── Connection status dot (compact Other Devices rows) ───────────────── */
+QLabel[class="conn_dot"] {{
+    font-size: 16px;
+    color: {TEXT_MUTED};
+    background-color: transparent;
+}}
+QLabel[class="conn_dot"][status="connected"] {{
+    color: {STATUS_OK};
+}}
+QLabel[class="conn_dot"][status="disconnected"] {{
+    color: {STATUS_ERROR};
+}}
 """
