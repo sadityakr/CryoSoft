@@ -17,8 +17,8 @@ Cross-cutting infrastructure — used by every layer from L1 to GUI. The key run
 
 ## Exit (what goes out)
 
-- `station.py` → station state dicts `{vi_name: {field: value}}` via `get_state()`; ramp completion signals via `check_ramps()`.
-- `orchestrator.py` → Qt signals: `states_updated`, `state_changed`, `procedure_progress`, `procedure_finished`, `error_occurred`, `action_blocked`.
+- `station.py` → station state dicts `{vi_name: {field: value}}` via `get_state()`; ramp completion via `check_ramps()`; hardware hold via `stop_ramps()`; aggregated VI safety flags via `check_safety(state)` (no extra poll — reuses the tick's snapshot).
+- `orchestrator.py` → Qt signals: `states_updated`, `state_changed`, `procedure_progress`, `procedure_finished`, `measurement_ready`, `error_occurred`, `action_blocked`, `action_succeeded`, `action_failed` (the per-action verdict pair of the control-validation standard).
 - `data_manager.py` → HDF5 file written to disk.
 - `procedure.py` → abstract interface consumed by `Orchestrator`.
 
@@ -51,7 +51,7 @@ Cross-cutting infrastructure — used by every layer from L1 to GUI. The key run
 | `decorators.py` | `@monitored` and `@control` marker decorators; `get_monitored_methods()`, `get_control_methods()` discovery helpers |
 | `station.py` | `Station` — VI registry, state polling with stale-value caching, ramp dispatch, safety aggregation; `build_station()` factory, `validate_config_dir()` dry-run, `build_station_with_fallback()` safe startup chain |
 | `config_catalog.py` | `ConfigCatalog` — discovery of shipped (read-only) and user config directories, copy-on-edit fork, and named version history (save/list/restore) |
-| `orchestrator.py` | `Orchestrator` — single-threaded cooperative state machine driven by `QTimer`; `OrchestratorState` enum |
-| `procedure.py` | `BaseProcedure` — abstract base class defining the 4-method interface all procedures must implement |
+| `orchestrator.py` | `Orchestrator` — single-threaded cooperative state machine driven by `QTimer`; `OrchestratorState` enum. Every tick runs inside an exception boundary that closes the data file, holds all ramps, and degrades to ERROR (PyQt6 would otherwise abort the process on an unhandled slot exception). EMERGENCY entry is one-shot; `acknowledge_emergency()` is refused while the condition persists; `recover_from_error()` exits ERROR |
+| `procedure.py` | `BaseProcedure` — abstract base class defining the 4-method interface (`initiate`/`change_sweep_step`/`measure`/`standby`) plus `abort()` (default closes the data file; subclasses add measurement safe-off commands) |
 | `data_manager.py` | `DataManager` — HDF5 file creation, metadata storage, pre-allocated dataset management, per-point save, abort trimming |
 | `logging_config.py` | `setup_logging()` — configures rotating file handler + console handler |

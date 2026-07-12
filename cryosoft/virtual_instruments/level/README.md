@@ -17,6 +17,9 @@ Driver dict `{"main": <level meter real driver>}` and `init_params`:
 `nitrogen_level() → float (%)`, `get_refresh_rate() → int`.
 `@control` actions: `set_refresh_rate(mode: int)` where STANDBY=0, SLOW=1, FAST=2.
 `helium_low() → bool` — majority-vote over a rolling buffer for noise immunity.
+`evaluate_safety()` reports the debounced `{"helium_low": ...}` verdict to
+`Station.check_safety()` every tick (a sustained low level, or a disconnected
+level meter, escalates to EMERGENCY).
 
 ## Interface contract
 All classes here inherit `LevelMeterBase` from `virtual_instruments/base.py`.
