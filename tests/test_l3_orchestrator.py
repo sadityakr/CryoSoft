@@ -69,6 +69,30 @@ def test_basic_ticking(orchestrator, qtbot):
     assert orchestrator._state == OrchestratorState.IDLE
 
 
+def test_operational_status_populated_after_tick(orchestrator, qtbot):
+    """A tick builds an operational-status record with the documented schema."""
+    orchestrator._tick()
+    status = orchestrator.get_operational_status()
+    assert status["orch_state"] == "IDLE"
+    assert "elapsed_in_state_s" in status
+    assert status["verdict"] == "OK"
+    assert status["vis"], "expected at least one system VI"
+    keys = {"vi_name", "value", "target", "gap", "rate", "eta_s", "ramp_status", "code"}
+    for vi in status["vis"]:
+        assert keys <= set(vi)
+
+
+def test_operational_status_reports_live_ramp_target(orchestrator, station, qtbot):
+    """During a ramp, the record shows the VI's live target and a gap."""
+    station.process_system_targets({"magnet_x": {"target": 1.0}})
+    orchestrator._tick()
+    status = orchestrator.get_operational_status()
+    magnet = next(v for v in status["vis"] if v["vi_name"] == "magnet_x")
+    assert magnet["target"] == pytest.approx(1.0)
+    assert magnet["ramp_status"] == "RAMPING"
+    assert magnet["gap"] is not None
+
+
 def test_full_procedure_cycle(orchestrator, station, qtbot):
     """run_procedure() -> INITIATING -> RAMPING -> MEASURING -> SWEEPING -> ... -> IDLE."""
     procedure = MockProcedure(station)

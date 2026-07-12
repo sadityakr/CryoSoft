@@ -108,3 +108,13 @@ class RampableVI:
         default returns ``None``; ramp-tracking VIs override it.
         """
         return None
+
+    def ramp_value(self) -> float | None:
+        """Return the current value in the same user units as ``ramp_target()``.
+
+        Tesla for magnets, kelvin for temperature — the ``@monitored`` reading
+        the ramp is driving. Lets operational-status reporting compute
+        gap-to-target without knowing which monitored field is "the value" for
+        each VI type. Default ``None``; ramp-tracking VIs override it.
+        """
+        return None

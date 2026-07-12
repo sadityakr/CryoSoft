@@ -213,6 +213,10 @@ class SuperconductingMagnetVI(MagnetBase, RampableVI):
         direction = 1 if target_A >= curr_A else -1
         return self._get_segment_rate(curr_A, direction) / self._amperes_per_tesla
 
+    def ramp_value(self) -> float | None:
+        """Return the current field in tesla (the value the ramp drives)."""
+        return self.get_field()
+
     # ------------------------------------------------------------------
     # Internal generator
     # ------------------------------------------------------------------

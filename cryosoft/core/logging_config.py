@@ -31,6 +31,21 @@ def setup_logging(log_dir: str | Path | None = None, level: int = logging.DEBUG)
 
     log_file = log_dir / "cryosoft.log"
 
+    # Structured operational-status stream: one JSON object per line, consumed
+    # by the troubleshoot layer. Kept OFF the human handlers (propagate=False)
+    # so JSON never clutters the console or GUI log. Its own idempotency guard,
+    # so it survives the root-handler early-return on repeated setup_logging().
+    status_logger = logging.getLogger("cryosoft.status")
+    status_logger.setLevel(logging.INFO)
+    status_logger.propagate = False
+    if not status_logger.handlers:
+        status_handler = logging.handlers.RotatingFileHandler(
+            log_dir / "status.jsonl", maxBytes=10 * 1024 * 1024,
+            backupCount=3, encoding="utf-8",
+        )
+        status_handler.setFormatter(logging.Formatter("%(message)s"))
+        status_logger.addHandler(status_handler)
+
     # Root logger
     root = logging.getLogger("cryosoft")
     root.setLevel(level)

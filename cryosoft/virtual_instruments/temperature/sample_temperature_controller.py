@@ -162,6 +162,10 @@ class SampleTemperatureControllerVI(TemperatureControllerBase, RampableVI):
         """Return the active ramp rate in kelvin/min, or ``None`` when idle."""
         return self._ramp_rate
 
+    def ramp_value(self) -> float | None:
+        """Return the current temperature in kelvin (the value the ramp drives)."""
+        return self.temperature()
+
     # ------------------------------------------------------------------
     # Internal generator
     # ------------------------------------------------------------------

@@ -43,6 +43,7 @@ all ramps (hardware hold), and degrades to the ERROR state.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from enum import Enum
@@ -50,6 +51,7 @@ from typing import Any
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
+from cryosoft.core.operational_status import build_operational_status
 from cryosoft.core.station import Station
 # Procedures will be imported/type-checked but for now we expect a BaseProcedure mock.
 # We don't import BaseProcedure directly to avoid circular dependency.
@@ -101,6 +103,7 @@ class Orchestrator(QObject):
     action_succeeded = pyqtSignal(str, str)
     action_failed = pyqtSignal(str, str, str)
     measurement_ready = pyqtSignal(dict)  # emitted after each measure() with last_datapoint
+    operational_status = pyqtSignal(dict)  # per-tick runtime status record (troubleshooting)
 
     def __init__(self, station: Station, tick_interval_ms: int = 3000) -> None:
         super().__init__()
@@ -115,6 +118,12 @@ class Orchestrator(QObject):
         self._wait_start_time = 0.0
         self._current_wait_time = 0.0
         self._standby_dispatched = False
+
+        # Operational-status reporting (runtime troubleshooting signal).
+        self._state_entered_at = time.time()
+        self._prev_gaps: dict[str, float] = {}
+        self._operational_status: dict = {}
+        self._status_logger = logging.getLogger("cryosoft.status")
 
         self._pre_pause_state = OrchestratorState.IDLE
         self._paused_wait_elapsed = 0.0
@@ -298,7 +307,52 @@ class Orchestrator(QObject):
     def _change_state(self, new_state: OrchestratorState) -> None:
         logger.info("Orchestrator state: %s -> %s", self._state.name, new_state.name)
         self._state = new_state
+        self._state_entered_at = time.time()
         self.state_changed.emit(self._state.value)
+
+    def get_operational_status(self) -> dict:
+        """Return the most recent operational-status record.
+
+        The runtime troubleshooting signal: orchestrator state, elapsed time in
+        it, and per-system-VI gap-to-target / rate / ETA / verdict. See
+        ``cryosoft.core.operational_status`` for the schema; the same record is
+        emitted on ``operational_status`` and appended to ``logs/status.jsonl``.
+        """
+        return dict(self._operational_status)
+
+    def _update_operational_status(self, state: dict) -> None:
+        """Build this tick's operational-status record, emit it, and log it.
+
+        Guarded: operational-status reporting is non-critical, so a failure here
+        must never degrade a running procedure to ERROR via the tick boundary.
+        """
+        try:
+            ramp_info = self._station.get_ramp_status()
+            wait_target = self._current_wait_time if self._wait_started else None
+            wait_elapsed = (
+                time.time() - self._wait_start_time if self._wait_started else None
+            )
+            progress = None
+            if self._procedure is not None and hasattr(self._procedure, "get_progress"):
+                try:
+                    progress = self._procedure.get_progress()
+                except Exception:
+                    progress = None
+            record, self._prev_gaps = build_operational_status(
+                orch_state=self._state.value,
+                elapsed_in_state_s=time.time() - self._state_entered_at,
+                state=state,
+                ramp_info=ramp_info,
+                prev_gaps=self._prev_gaps,
+                wait_target_s=wait_target,
+                wait_elapsed_s=wait_elapsed,
+                progress=progress,
+            )
+            self._operational_status = record
+            self.operational_status.emit(record)
+            self._status_logger.info(json.dumps(record))
+        except Exception:
+            logger.exception("operational-status update failed (non-fatal)")
 
     def _tick(self) -> None:
         """One cooperative cycle, inside the exception boundary.
@@ -333,6 +387,10 @@ class Orchestrator(QObject):
                 )
                 parts.append(f"{vi_name}: {kv}")
         logger.debug("Monitor: %s", " | ".join(parts))
+
+        # Operational-status record (runtime troubleshooting signal): assembled
+        # from this tick's snapshot, emitted, and appended to logs/status.jsonl.
+        self._update_operational_status(state)
 
         # Safety check — reuses this tick's snapshot (no second hardware poll).
         safety = self._station.check_safety(state)
