@@ -179,17 +179,29 @@ def test_check_ramps(sim_station: Station):
 
 
 def test_check_safety(sim_station: Station):
-    """check_safety() returns {'helium_low': bool} accurately."""
+    """check_safety() aggregates the level meter's DEBOUNCED helium verdict.
+
+    The helium flag comes from the level-meter VI's majority-vote buffer
+    (filled during get_state() polls) — a single glitched low reading must
+    NOT trip it, and check_safety() itself never polls hardware.
+    """
     # Warm up get_state cache
     sim_station.get_state()
     safety = sim_station.check_safety()
     assert safety["helium_low"] is False
-    
-    # Simulate a low helium condition (below 10%)
+
+    # Simulate a low helium condition
     level_driver = sim_station.level_meter._driver
     level_driver._force_helium_level = 5.0
-    
-    sim_station.get_state()  # pull new low value
+
+    # One low poll is a glitch — debounce must suppress it.
+    sim_station.get_state()
+    safety = sim_station.check_safety()
+    assert safety["helium_low"] is False
+
+    # A sustained low level (buffer majority) must trip the flag.
+    for _ in range(3):
+        sim_station.get_state()
     safety = sim_station.check_safety()
     assert safety["helium_low"] is True
 
@@ -197,8 +209,47 @@ def test_check_safety(sim_station: Station):
     level_driver._simulate_error = True
     for _ in range(3):
         sim_station.get_state()  # Trigger _disconnected
-    
+
     safety = sim_station.check_safety()
     # It should still be True because of disconnection assumption
     assert safety["helium_low"] is True
+
+
+def test_check_safety_uses_snapshot_without_polling(sim_station: Station):
+    """check_safety(state) must not poll hardware (review finding H1).
+
+    The old implementation called get_state() internally, doubling GPIB
+    traffic every tick and double-counting the error counters.
+    """
+    state = sim_station.get_state()
+    level_driver = sim_station.level_meter._driver
+    calls_before = getattr(level_driver, "_get_helium_calls", None)
+
+    # Count driver polls around check_safety via a wrapper.
+    call_count = {"n": 0}
+    original = level_driver.get_helium_level
+
+    def counting(*args, **kwargs):
+        call_count["n"] += 1
+        return original(*args, **kwargs)
+
+    level_driver.get_helium_level = counting
+    try:
+        sim_station.check_safety(state)
+        sim_station.check_safety()  # cached-state variant
+    finally:
+        level_driver.get_helium_level = original
+    _ = calls_before
+    assert call_count["n"] == 0
+
+
+def test_check_safety_flags_magnet_quench(sim_station: Station):
+    """A magnet reporting QUENCH must trip the 'quench' safety flag."""
+    sim_station.get_state()
+    assert sim_station.check_safety().get("quench", False) is False
+
+    sim_station.magnet_x._driver._simulate_quench = True
+    state = sim_station.get_state()
+    safety = sim_station.check_safety(state)
+    assert safety["quench"] is True
 

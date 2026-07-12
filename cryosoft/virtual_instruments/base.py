@@ -168,6 +168,30 @@ class BaseVirtualInstrument:
             state[method_name] = getattr(self, method_name)()
         return state
 
+    # ------------------------------------------------------------------
+    # Safety
+    # ------------------------------------------------------------------
+
+    def evaluate_safety(self, state: dict) -> dict[str, bool]:
+        """Judge this VI's own polled state for safety conditions.
+
+        Called by ``Station.check_safety()`` every monitor tick with the
+        fragment of the snapshot belonging to this VI. Must NOT poll
+        hardware — decide from *state* (and internal buffers filled during
+        the poll). Any flag returned True escalates the Orchestrator to
+        EMERGENCY, so only report conditions that warrant a full shutdown.
+
+        Args:
+            state: This VI's slice of the get_state() snapshot,
+                ``{monitored_method_name: value, ...}``.
+
+        Returns:
+            ``{flag_name: bool}`` — e.g. ``{"quench": True}``. Empty dict
+            (the default) means this VI declares no safety conditions.
+        """
+        _ = state
+        return {}
+
 
 # ── Typed category bases ──────────────────────────────────────────────────────
 # Directive §"Common Mistakes": all category bases live in base.py.

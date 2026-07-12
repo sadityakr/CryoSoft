@@ -221,19 +221,168 @@ def test_stale_vi_during_procedure(orchestrator, station, qtbot):
 
 
 def test_emergency_on_helium_low(orchestrator, station, qtbot):
-    """Simulated helium_low -> EMERGENCY, acknowledge returns to IDLE."""
+    """Sustained helium_low -> EMERGENCY; acknowledge only after it clears.
+
+    The helium flag is debounced (majority vote over the level meter's
+    reading buffer), so EMERGENCY requires a few consecutive low polls.
+    acknowledge_emergency() is refused while the condition persists and
+    succeeds once the level recovers.
+    """
     # Force helium low
     station.level_meter._driver._force_helium_level = 5.0
-    
+
     def check_state():
         return orchestrator._state == OrchestratorState.EMERGENCY
-        
-    qtbot.waitUntil(check_state, timeout=1000)
+
+    qtbot.waitUntil(check_state, timeout=2000)
     assert orchestrator._state == OrchestratorState.EMERGENCY
-    
-    # Acknowledge
+
+    # Acknowledging while helium is still low must be refused.
+    orchestrator.acknowledge_emergency()
+    assert orchestrator._state == OrchestratorState.EMERGENCY
+
+    # Helium recovers; after enough clean polls the debounce buffer clears.
+    station.level_meter._driver._force_helium_level = None
+
+    def safety_cleared():
+        return not any(station.check_safety().values())
+
+    qtbot.waitUntil(safety_cleared, timeout=2000)
     orchestrator.acknowledge_emergency()
     assert orchestrator._state == OrchestratorState.IDLE
+
+
+def test_emergency_shutdown_runs_once_not_every_tick(orchestrator, station, qtbot):
+    """standby_all() must run once on EMERGENCY entry, not every tick.
+
+    Repeating it each tick would restart a persistent magnet's full
+    switch-heater warmup/cooldown cycle every few seconds.
+    """
+    calls = {"n": 0}
+    original = station.standby_all
+
+    def counting():
+        calls["n"] += 1
+        original()
+
+    station.standby_all = counting
+    try:
+        station.level_meter._driver._force_helium_level = 5.0
+        qtbot.waitUntil(
+            lambda: orchestrator._state == OrchestratorState.EMERGENCY,
+            timeout=2000,
+        )
+        # Let several more ticks pass in EMERGENCY.
+        qtbot.wait(100)
+    finally:
+        station.standby_all = original
+    assert calls["n"] == 1
+
+
+def test_quench_triggers_emergency(orchestrator, station, qtbot):
+    """A magnet QUENCH status must escalate to EMERGENCY."""
+    station.magnet_x._driver._simulate_quench = True
+    qtbot.waitUntil(
+        lambda: orchestrator._state == OrchestratorState.EMERGENCY,
+        timeout=2000,
+    )
+    assert orchestrator._state == OrchestratorState.EMERGENCY
+
+
+class RecordingProcedure(MockProcedure):
+    """MockProcedure with a BaseProcedure-style abort() that records calls."""
+
+    def __init__(self, station):
+        super().__init__(station)
+        self.abort_called = 0
+
+    def abort(self):
+        self.abort_called += 1
+        return {}
+
+
+def test_abort_calls_procedure_abort_and_holds_magnet(orchestrator, station, qtbot):
+    """Abort must run the procedure's cleanup AND freeze the PSU (finding C3).
+
+    Clearing the software generator alone is not enough: the PSU ramps
+    autonomously to its last-commanded setpoint, so an abort that does not
+    command a hardware hold leaves the field still moving.
+    """
+    proc = RecordingProcedure(station)
+    orchestrator.run_procedure(proc)  # ramps magnet_x toward 1.0 T (slow rate)
+    assert station.magnet_x.ramp_status() == "RAMPING"
+
+    orchestrator.abort_procedure()
+
+    assert proc.abort_called == 1
+    assert orchestrator._state == OrchestratorState.IDLE
+    assert orchestrator._procedure is None
+    assert orchestrator._wait_started is False  # stale wait clock reset (H5)
+    # Hardware held: PSU setpoint pinned to its present output.
+    assert station.magnet_x.ramp_status() == "IDLE"
+    drv = station.magnet_x._driver
+    assert drv.get_status() == "HOLD"
+    assert drv.get_current_setpoint() == pytest.approx(drv.get_current(), abs=0.01)
+
+
+def test_measure_exception_degrades_to_error_not_crash(orchestrator, station, qtbot):
+    """An exception inside the tick must contain to ERROR, never propagate.
+
+    PyQt6 aborts the whole process on an unhandled exception in a slot
+    (finding C2) — with the magnet live that is the worst possible failure.
+    """
+    class ExplodingProcedure(RecordingProcedure):
+        def measure(self):
+            raise RuntimeError("simulated measurement failure")
+
+    station.magnet_x._default_ramp_rate = 6000.0
+    station.magnet_x._ramp_segments = []
+    proc = ExplodingProcedure(station)
+    orchestrator.run_procedure(proc)
+
+    qtbot.waitUntil(
+        lambda: orchestrator._state == OrchestratorState.ERROR, timeout=5000
+    )
+    assert orchestrator._procedure is None   # run cleaned up
+    assert proc.abort_called == 1            # data-file cleanup hook ran
+
+    orchestrator.recover_from_error()
+    assert orchestrator._state == OrchestratorState.IDLE
+
+
+def test_run_procedure_setup_failure_degrades_to_error(orchestrator, station):
+    """initiate() raising must not crash the GUI slot; it lands in ERROR."""
+    class BadInit(RecordingProcedure):
+        def initiate(self):
+            raise ValueError("bad parameters")
+
+    proc = BadInit(station)
+    orchestrator.run_procedure(proc)
+
+    assert orchestrator._state == OrchestratorState.ERROR
+    assert orchestrator._procedure is None
+    orchestrator.recover_from_error()
+    assert orchestrator._state == OrchestratorState.IDLE
+
+
+def test_pause_holds_hardware_and_resume_redispatches(orchestrator, station, qtbot):
+    """Pause must freeze the autonomous PSU; resume must restart the ramp."""
+    proc = MockProcedure(station)
+    orchestrator.run_procedure(proc)  # slow ramp toward 1.0 T
+    assert station.magnet_x.ramp_status() == "RAMPING"
+
+    orchestrator.pause_procedure()
+    assert orchestrator._state == OrchestratorState.PAUSED
+    drv = station.magnet_x._driver
+    assert drv.get_status() == "HOLD"  # field frozen, not still ramping
+
+    orchestrator.resume_procedure()
+    assert orchestrator._state in (
+        OrchestratorState.INITIATING, OrchestratorState.RAMPING
+    )
+    assert station.magnet_x.ramp_status() == "RAMPING"  # ramp re-dispatched
+
+    orchestrator.abort_procedure()
 
 
 def test_queue_procedures(orchestrator, station, qtbot):

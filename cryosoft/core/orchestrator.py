@@ -11,11 +11,17 @@
 # input: |
 #   Constructed with a Station instance and tick interval.
 # process: |
-#   On _tick(): gets state from station, checks for stale active system VIs,
-#   processes IDLE gui actions, and runs the state machine. STANDBY is a
+#   On _tick() (inside an exception boundary that degrades to ERROR instead
+#   of crashing the app): gets state from station, evaluates safety flags on
+#   that same snapshot (any tripped flag -> one-shot EMERGENCY entry: abort
+#   procedure, stop ramps, standby_all once), checks for stale active system
+#   VIs, processes IDLE gui actions, and runs the state machine. STANDBY is a
 #   two-phase wait: first for any ramp already in flight when SWEEPING ended,
 #   then (after dispatching procedure.standby()'s own targets) for whatever
 #   ramp standby() itself started, before declaring the procedure finished.
+#   abort/pause/ERROR hold hardware via Station.stop_ramps(); resume
+#   re-dispatches the last targets. acknowledge_emergency() is refused while
+#   the safety condition persists; recover_from_error() exits ERROR.
 # output: |
 #   Emits signals: states_updated, state_changed, procedure_progress,
 #   procedure_finished, error_occurred, action_blocked, action_succeeded
@@ -26,11 +32,18 @@
 The Orchestrator is single-threaded. The Qt event loop is the only
 concurrency mechanism. It drives procedures via a state machine and
 continually monitors the system.
+
+Failure containment: every tick runs inside an exception boundary. PyQt6
+aborts the whole process on an unhandled Python exception in a slot, which
+for a cryostat controller would mean vanishing with the magnet still
+ramping — so any unexpected exception instead closes the data file, stops
+all ramps (hardware hold), and degrades to the ERROR state.
 """
 
 from __future__ import annotations
 
 import logging
+import time
 from enum import Enum
 from typing import Any
 
@@ -96,6 +109,12 @@ class Orchestrator(QObject):
         self._current_wait_time = 0.0
         self._standby_dispatched = False
 
+        self._pre_pause_state = OrchestratorState.IDLE
+        self._paused_wait_elapsed = 0.0
+        # Last targets dispatched to the Station — re-dispatched on resume,
+        # because pause_procedure() holds the hardware (which forgets its ramp).
+        self._last_system_targets: dict[str, dict] = {}
+
         self._timer = QTimer(self)
         self._timer.setInterval(tick_interval_ms)
         self._timer.timeout.connect(self._tick)
@@ -106,7 +125,13 @@ class Orchestrator(QObject):
     # ------------------------------------------------------------------
 
     def run_procedure(self, procedure: Any) -> None:
-        """Start a procedure immediately if IDLE or during a manual ramp; else queue it."""
+        """Start a procedure immediately if IDLE or during a manual ramp; else queue it.
+
+        Any exception during setup (initiate(), target dispatch) is contained:
+        the partially-started run is cleaned up (data file closed, ramps
+        stopped) and the Orchestrator degrades to ERROR instead of crashing
+        the application.
+        """
         manual_ramping = (
             self._state == OrchestratorState.RAMPING and self._procedure is None
         )
@@ -114,27 +139,34 @@ class Orchestrator(QObject):
             self.queue_procedure(procedure)
             return
 
-        # Cancel any manual ramp generators before starting the procedure.
+        # Cancel any manual ramp before starting the procedure (hardware
+        # holds; the procedure's own targets take over immediately below).
         if manual_ramping:
-            for vi_name, vi in self._station._virtual_instruments.items():
-                if self._station._vi_registry.get(vi_name) == "system":
-                    if hasattr(vi, "_ramp_gen"):
-                        vi._ramp_gen = None
-                        vi._ramp_exhausted = True
+            self._station.stop_ramps()
             logger.info("Manual ramp cancelled — procedure starting.")
 
         self._procedure = procedure
         self._standby_dispatched = False
-        system_targets, meas_commands, wait_time = self._procedure.initiate()
-        
-        # Track active system VIs for stale monitoring
-        self._active_system_vis = set(system_targets.keys())
-        
+        self._wait_started = False
+        try:
+            system_targets, meas_commands, wait_time = self._procedure.initiate()
+
+            # Track active system VIs for stale monitoring
+            self._active_system_vis = set(system_targets.keys())
+
+            self._dispatch_targets(system_targets)
+            self._station.send_measurement_commands(meas_commands)
+            self._current_wait_time = wait_time
+
+            self._change_state(OrchestratorState.INITIATING)
+        except Exception as exc:
+            logger.exception("run_procedure() failed during setup")
+            self._fail_to_error(f"Could not start procedure: {exc}")
+
+    def _dispatch_targets(self, system_targets: dict[str, dict]) -> None:
+        """Forward targets to the Station, remembering them for resume."""
+        self._last_system_targets = dict(system_targets)
         self._station.process_system_targets(system_targets)
-        self._station.send_measurement_commands(meas_commands)
-        self._current_wait_time = wait_time
-        
-        self._change_state(OrchestratorState.INITIATING)
 
     def queue_procedure(self, procedure: Any) -> None:
         """Add procedure to queue."""
@@ -147,52 +179,83 @@ class Orchestrator(QObject):
             self.run_procedure(proc)
 
     def pause_procedure(self) -> None:
-        """Pause current procedure."""
-        if self._state in (OrchestratorState.INITIATING, OrchestratorState.RAMPING, 
-                           OrchestratorState.MEASURING, OrchestratorState.SWEEPING, 
+        """Pause the current procedure and hold all hardware where it is.
+
+        Pausing stops the physical ramps (not just the schedule): a magnet
+        PSU ramps autonomously to its last setpoint, so without a hardware
+        hold "pause" would only stop the software while the field kept
+        moving. The wait clock is also frozen and restored on resume.
+        """
+        if self._procedure is None:
+            return
+        if self._state in (OrchestratorState.INITIATING, OrchestratorState.RAMPING,
+                           OrchestratorState.MEASURING, OrchestratorState.SWEEPING,
                            OrchestratorState.STANDBY):
-            # We don't save previous state explicitly here, logic depends on IDLE resuming etc.
-            # Wait, the spec says "transition back to pre-pause state". So we should store it.
             self._pre_pause_state = self._state
+            if self._wait_started:
+                self._paused_wait_elapsed = time.time() - self._wait_start_time
+            self._station.stop_ramps(self._active_system_vis or None)
             self._change_state(OrchestratorState.PAUSED)
 
     def resume_procedure(self) -> None:
-        """Resume procedure from PAUSED."""
-        if self._state == OrchestratorState.PAUSED:
-            self._change_state(self._pre_pause_state)
+        """Resume from PAUSED: restart held ramps and unfreeze the wait clock."""
+        if self._state != OrchestratorState.PAUSED:
+            return
+        # pause_procedure() held the hardware, which forgot its ramp — states
+        # that were mid-ramp need their targets re-dispatched to continue.
+        if self._pre_pause_state in (
+            OrchestratorState.INITIATING,
+            OrchestratorState.RAMPING,
+            OrchestratorState.STANDBY,
+        ) and self._last_system_targets:
+            self._dispatch_targets(self._last_system_targets)
+        if self._wait_started:
+            self._wait_start_time = time.time() - self._paused_wait_elapsed
+        self._change_state(self._pre_pause_state)
 
     def abort_procedure(self) -> None:
-        """Abort without ramping to zero."""
-        if self._procedure:
-            # We assume procedure has a close or abort method?
-            # Architecture doc says: "Close data file (partial data preserved)."
-            # DataManager does this or procedure might do this. If procedure has an abort, call it.
-            if hasattr(self._procedure, "abort"):
-                self._procedure.abort()
+        """Abort the run: hold instruments where they are (no ramp-to-zero).
 
-        # Clear ramp generators on active VIs (set vi._ramp = None, but we don't directly access _ramp
-        # We can call vi.advance_ramp? No, the directive says: "instruments hold at current position (no ramp-to-zero)."
-        # But `station` has no clear_ramps. The architecture doc says "Clear ramp generators on active VIs (set vi._ramp = None)".
-        # We'll try to reach inside if needed, or if start_ramp is sufficient.
-        for vi_name in self._active_system_vis:
-            try:
-                vi = getattr(self._station, vi_name)
-                # Hack to stop generators per the directive string
-                if hasattr(vi, "_ramp_gen"):
-                    vi._ramp_gen = None
-            except Exception:
-                pass
-        
-        self._procedure = None
-        self._active_system_vis.clear()
-        self._standby_dispatched = False
+        Closes the data file (partial data preserved), sends the procedure's
+        measurement safe-off commands, stops all active ramps with a hardware
+        hold, and returns to IDLE. Ignored during EMERGENCY — the emergency
+        flow owns cleanup there and is exited via acknowledge_emergency().
+        """
+        if self._state == OrchestratorState.EMERGENCY:
+            logger.info("abort_procedure ignored during EMERGENCY")
+            return
+        self._abort_active_procedure()
         self._change_state(OrchestratorState.IDLE)
         self.run_queue()
 
-    def acknowledge_emergency(self) -> None:
-        """Return to IDLE after an EMERGENCY is acknowledged."""
-        if self._state == OrchestratorState.EMERGENCY:
+    def recover_from_error(self) -> None:
+        """Return to IDLE after the user has reviewed an ERROR condition.
+
+        The failed procedure was already cleaned up on ERROR entry. Queued
+        procedures are NOT auto-started — after an error the queue's
+        assumptions may no longer hold; the user restarts explicitly.
+        """
+        if self._state == OrchestratorState.ERROR:
             self._change_state(OrchestratorState.IDLE)
+
+    def acknowledge_emergency(self) -> None:
+        """Return to IDLE after an EMERGENCY, once the cause has cleared.
+
+        Refused (with an error signal) while any safety condition is still
+        active — acknowledging an ongoing emergency would bounce straight
+        back on the next tick.
+        """
+        if self._state != OrchestratorState.EMERGENCY:
+            return
+        safety = self._station.check_safety()
+        active = sorted(flag for flag, tripped in safety.items() if tripped)
+        if active:
+            self._error(
+                "Cannot acknowledge emergency: condition still active "
+                f"({', '.join(active)})"
+            )
+            return
+        self._change_state(OrchestratorState.IDLE)
 
     def submit_vi_action(self, vi_name: str, method_name: str, **kwargs: Any) -> None:
         """Submit a GUI action to a specific VI."""
@@ -231,6 +294,23 @@ class Orchestrator(QObject):
         self.state_changed.emit(self._state.value)
 
     def _tick(self) -> None:
+        """One cooperative cycle, inside the exception boundary.
+
+        PyQt6 aborts the process on an unhandled exception in a slot; here
+        that would mean dying with the magnet mid-ramp and the data file
+        open. Anything unexpected instead cleans up and degrades to ERROR.
+        """
+        try:
+            self._tick_body()
+        except Exception as exc:  # noqa: BLE001 — boundary must be broad
+            logger.exception("Unhandled exception in orchestrator tick")
+            if self._state == OrchestratorState.EMERGENCY:
+                # Already in the most severe state; just report.
+                self._error(f"Internal error during EMERGENCY: {exc}")
+                return
+            self._fail_to_error(f"Internal error: {exc}")
+
+    def _tick_body(self) -> None:
         # 1. Always monitor
         state = self._station.get_state()
         self.states_updated.emit(state)
@@ -247,22 +327,22 @@ class Orchestrator(QObject):
                 parts.append(f"{vi_name}: {kv}")
         logger.debug("Monitor: %s", " | ".join(parts))
 
-        # Safety check
-        safety = self._station.check_safety()
-        if safety.get("helium_low") and self._state != OrchestratorState.EMERGENCY:
-            self._error("Emergency: Safety condition triggered (helium_low)")
-            self._change_state(OrchestratorState.EMERGENCY)
-            # EMERGENCY: call station.standby_all() is done in the state machine below 
-            # but wait, let's just abort immediately
-        
+        # Safety check — reuses this tick's snapshot (no second hardware poll).
+        safety = self._station.check_safety(state)
+        active_flags = sorted(flag for flag, tripped in safety.items() if tripped)
+        if active_flags and self._state != OrchestratorState.EMERGENCY:
+            self._enter_emergency(", ".join(active_flags))
+            return  # emergency entry already cleaned up; nothing else this tick
+
         # 2. Stale check during procedure
-        if self._state not in (OrchestratorState.IDLE, OrchestratorState.PAUSED, 
+        if self._state not in (OrchestratorState.IDLE, OrchestratorState.PAUSED,
                                OrchestratorState.ERROR, OrchestratorState.EMERGENCY):
             for vi_name in self._active_system_vis:
                 vi_state = state.get(vi_name, {})
                 if vi_state.get("_stale"):
-                    self._error(f"Active VI '{vi_name}' became stale during procedure.")
-                    self._change_state(OrchestratorState.ERROR)
+                    self._fail_to_error(
+                        f"Active VI '{vi_name}' became stale during procedure."
+                    )
                     break
 
         # 3. GUI Actions — processed in IDLE or during a manual ramp (no active procedure).
@@ -296,7 +376,6 @@ class Orchestrator(QObject):
                     # Manual ramp from GUI — return to IDLE.
                     self._change_state(OrchestratorState.IDLE)
                 else:
-                    import time
                     if not self._wait_started:
                         self._wait_started = True
                         self._wait_start_time = time.time()
@@ -321,7 +400,7 @@ class Orchestrator(QObject):
                     self._change_state(OrchestratorState.STANDBY)
                 else:
                     sys_targets, wait_time = sys_targ_wait
-                    self._station.process_system_targets(sys_targets)
+                    self._dispatch_targets(sys_targets)
                     self._current_wait_time = wait_time
                     self._change_state(OrchestratorState.RAMPING)
         elif self._state == OrchestratorState.STANDBY:
@@ -332,7 +411,7 @@ class Orchestrator(QObject):
                 if self._station.check_ramps():
                     if self._procedure and hasattr(self._procedure, "standby"):
                         sys_targ, meas_cmd, wait = self._procedure.standby()
-                        self._station.process_system_targets(sys_targ)
+                        self._dispatch_targets(sys_targ)
                         self._station.send_measurement_commands(meas_cmd)
                     self._standby_dispatched = True
             else:
@@ -348,11 +427,73 @@ class Orchestrator(QObject):
         elif self._state == OrchestratorState.PAUSED:
             pass # Monitor continues, no ramp advancement
         elif self._state == OrchestratorState.ERROR:
-            pass # Awaiting user interaction
+            pass # Awaiting user interaction (recover_from_error)
         elif self._state == OrchestratorState.EMERGENCY:
+            # Shutdown already ran once on entry (_enter_emergency).
+            # Monitoring continues; awaiting acknowledge_emergency().
+            pass
+
+    # ------------------------------------------------------------------
+    # Failure handling
+    # ------------------------------------------------------------------
+
+    def _abort_active_procedure(self) -> None:
+        """Clean up the running procedure: data file, measurement VI, ramps.
+
+        Safe to call with no procedure active (stops manual ramps then).
+        Each cleanup step is individually guarded so one failure (e.g. a dead
+        instrument) cannot prevent the others.
+        """
+        procedure = self._procedure
+        if procedure is not None and hasattr(procedure, "abort"):
+            try:
+                meas_commands = procedure.abort()
+                if meas_commands:
+                    self._station.send_measurement_commands(meas_commands)
+            except Exception:
+                logger.exception("Procedure abort cleanup failed")
+        try:
+            # Hold hardware where it is: clearing generators alone would let
+            # autonomous hardware (magnet PSU) keep ramping to its last setpoint.
+            self._station.stop_ramps(self._active_system_vis or None)
+        except Exception:
+            logger.exception("Stopping ramps during abort failed")
+
+        self._procedure = None
+        self._active_system_vis.clear()
+        self._standby_dispatched = False
+        self._wait_started = False
+        self._last_system_targets = {}
+
+    def _fail_to_error(self, message: str) -> None:
+        """Contain a failure: clean up the run and degrade to ERROR."""
+        self._error(message)
+        try:
+            self._abort_active_procedure()
+        except Exception:
+            logger.exception("Cleanup while entering ERROR also failed")
+        self._change_state(OrchestratorState.ERROR)
+
+    def _enter_emergency(self, reason: str) -> None:
+        """One-shot emergency entry: clean up the run, then safe shutdown.
+
+        The shutdown runs exactly once here (not every tick): repeating
+        standby_all() each tick would, for a persistent magnet, restart the
+        full switch-heater warmup/cooldown cycle every few seconds.
+        """
+        self._error(f"EMERGENCY: safety condition triggered ({reason})")
+        try:
+            self._abort_active_procedure()
+        except Exception:
+            logger.exception("Cleanup while entering EMERGENCY failed")
+        self._change_state(OrchestratorState.EMERGENCY)
+        try:
             self._station.standby_all()
             self._error("Emergency shutdown executed.")
-    
+        except Exception:
+            logger.exception("standby_all during emergency entry failed")
+            self._error("Emergency shutdown could not complete — check instruments.")
+
     def _error(self, message: str) -> None:
         logger.error(message)
         self.error_occurred.emit(message)

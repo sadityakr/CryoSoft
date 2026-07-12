@@ -228,3 +228,12 @@ class FieldSweepDC(BaseProcedure):
         system_targets = {"magnet_x": {"target": 0.0}}
         measurement_commands = {"dc_measurement": {"standby": {}}}
         return system_targets, measurement_commands, 0.0
+
+    def abort(self) -> dict:
+        """Close the data file and zero the DC source (no ramping).
+
+        Returns:
+            Measurement safe-off commands for the Orchestrator to dispatch.
+        """
+        super().abort()
+        return {"dc_measurement": {"standby": {}}}

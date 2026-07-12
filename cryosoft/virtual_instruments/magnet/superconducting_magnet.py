@@ -231,6 +231,14 @@ class SuperconductingMagnetVI(MagnetBase, RampableVI):
         return self._driver.get_status()  # type: ignore[attr-defined]
 
     # ------------------------------------------------------------------
+    # Safety
+    # ------------------------------------------------------------------
+
+    def evaluate_safety(self, state: dict) -> dict[str, bool]:
+        """Flag a quench from the already-polled magnet status (no hardware poll)."""
+        return {"quench": state.get("magnet_status") == "QUENCH"}
+
+    # ------------------------------------------------------------------
     # @control methods
     # ------------------------------------------------------------------
 

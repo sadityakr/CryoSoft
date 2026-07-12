@@ -234,3 +234,12 @@ class FieldSweepIV(BaseProcedure):
             "keithley_delta_mode": {"standby": {}},
         }
         return system_targets, measurement_commands, 0.0
+
+    def abort(self) -> dict:
+        """Close the data file and stop the delta engine (no ramping).
+
+        Returns:
+            Measurement safe-off commands for the Orchestrator to dispatch.
+        """
+        super().abort()
+        return {"keithley_delta_mode": {"standby": {}}}

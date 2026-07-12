@@ -1,8 +1,10 @@
 # ---
 # description: |
 #   Station class: the runtime registry of all Virtual Instruments. Provides
-#   get_state() with stale-value caching on communication failures, and
-#   process_system_targets() / check_ramps() used by the Orchestrator.
+#   get_state() with stale-value caching on communication failures,
+#   process_system_targets() / check_ramps() / stop_ramps() used by the
+#   Orchestrator, and check_safety(state) which aggregates each VI's
+#   evaluate_safety() verdict from an existing snapshot (no extra poll).
 #   build_station() is the factory that constructs the full instrument stack
 #   from a YAML config directory.
 # entry_point: Not run directly; used by Orchestrator and GUI.
@@ -85,6 +87,10 @@ class Station:
     def get_vi_names(self) -> list[str]:
         """Return a list of all registered VI names."""
         return list(self._virtual_instruments.keys())
+
+    def has_vi(self, vi_name: str) -> bool:
+        """Return True if a VI with this name is registered."""
+        return vi_name in self._virtual_instruments
 
     def get_vi_type(self, vi_name: str) -> str:
         """Return the vi_type for the given VI name.
@@ -274,34 +280,64 @@ class Station:
                 pass
         return all_done
 
+    def stop_ramps(self, vi_names: set[str] | None = None) -> None:
+        """Stop active ramps and hold hardware where it is.
+
+        Calls ``stop_ramp()`` on every system VI implementing ``RampableVI``
+        (or only those in *vi_names* if given). Each call is individually
+        guarded: a dead instrument must not prevent the others from stopping.
+
+        Args:
+            vi_names: Restrict to these VI names; ``None`` means all system VIs.
+        """
+        for vi_name, vi_type in self._vi_registry.items():
+            if vi_type != "system":
+                continue
+            if vi_names is not None and vi_name not in vi_names:
+                continue
+            vi = self._virtual_instruments[vi_name]
+            if not isinstance(vi, RampableVI):
+                continue
+            try:
+                vi.stop_ramp()
+            except Exception:
+                logger.exception("stop_ramp failed on VI '%s'", vi_name)
+
     # ------------------------------------------------------------------
     # Safety
     # ------------------------------------------------------------------
 
-    def check_safety(self) -> dict[str, bool]:
-        """Return a safety status dict.
+    def check_safety(self, state: dict[str, dict] | None = None) -> dict[str, bool]:
+        """Aggregate every VI's safety verdict from a state snapshot.
 
-        Currently checks for low helium level from any VIs that expose a
-        ``helium_level`` field. If the VI is disconnected, assumes unsafe.
+        Each VI judges its own state fragment via ``evaluate_safety()`` (the
+        level meter reports its debounced ``helium_low``, magnet VIs report
+        ``quench``). No hardware is polled here — pass the snapshot the
+        monitor tick already collected, or omit it to use the cached one.
+
+        A disconnected level meter also trips ``helium_low``: if the helium
+        level cannot be monitored, it must be assumed unsafe.
+
+        Args:
+            state: Snapshot from ``get_state()``. ``None`` uses the last
+                known state (no hardware poll).
 
         Returns:
-            ``{"helium_low": bool}`` — True if helium is below 10% or disconnected.
+            ``{flag_name: bool}`` — a flag is True if ANY VI tripped it.
         """
-        last_state = self.get_state()
-        helium_low = False
-        for vi_name, state in last_state.items():
-            # Check for disconnected VIs that monitor helium
-            if state.get("_disconnected"):
-                # A disconnected level meter is a safety concern.
-                vi = self._virtual_instruments.get(vi_name)
-                if vi is not None and hasattr(vi, "vi_type") and vi.vi_type == "level":
-                    helium_low = True
-            # Check helium_level key if present
-            helium = state.get("helium_level")
-            if helium is not None and isinstance(helium, (int, float)):
-                if helium < 10.0:
-                    helium_low = True
-        return {"helium_low": helium_low}
+        if state is None:
+            state = self._last_known_state
+        flags: dict[str, bool] = {}
+        for vi_name, vi in self._virtual_instruments.items():
+            vi_state = state.get(vi_name, {})
+            if vi_state.get("_disconnected") and getattr(vi, "vi_type", "") == "level":
+                flags["helium_low"] = True
+            try:
+                for flag, tripped in vi.evaluate_safety(vi_state).items():
+                    flags[flag] = flags.get(flag, False) or bool(tripped)
+            except Exception:
+                logger.exception("evaluate_safety failed on VI '%s'", vi_name)
+        return flags
 
     # ------------------------------------------------------------------
     # Measurement command dispatch

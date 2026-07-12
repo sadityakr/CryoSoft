@@ -127,6 +127,17 @@ class CryogenLevelMeterVI(LevelMeterBase):
             return False
         return bool(mode(self._helium_buffer))
 
+    def evaluate_safety(self, state: dict) -> dict[str, bool]:
+        """Report the debounced helium verdict to Station.check_safety().
+
+        The buffer was already filled by this tick's ``helium_level()`` poll,
+        so no hardware is touched here. The majority vote suppresses
+        single-reading glitches that would otherwise trigger a full
+        EMERGENCY shutdown of a running measurement.
+        """
+        _ = state
+        return {"helium_low": self.helium_low()}
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------

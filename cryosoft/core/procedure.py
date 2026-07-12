@@ -20,7 +20,9 @@
 #   If the subclass declares sweep_axis, the default implementation delegates
 #   to sweep_builder.build_axis_sweep(); otherwise a subclass must override it.
 #   The Orchestrator calls initiate(), then alternates change_sweep_step() /
-#   measure() until done, then calls standby().
+#   measure() until done, then calls standby(). On user abort or ERROR/
+#   EMERGENCY entry it calls abort() instead, which closes the data file
+#   (default implementation) and returns measurement safe-off commands.
 # output: |
 #   initiate() and standby() return (system_targets, measurement_commands, wait_time).
 #   change_sweep_step() returns (system_targets, wait_time) or None when done.
@@ -324,3 +326,30 @@ class BaseProcedure:
             NotImplementedError: If not overridden in subclass.
         """
         raise NotImplementedError(f"{type(self).__name__} must implement standby()")
+
+    # ------------------------------------------------------------------
+    # Abort — has a working default; override to add measurement safe-off
+    # ------------------------------------------------------------------
+
+    def abort(self) -> dict:
+        """Clean up after an abort: close the data file, keep partial data.
+
+        Called by the Orchestrator on user abort and on ERROR/EMERGENCY
+        entry. Unlike ``standby()`` it must not ramp anything — the
+        Orchestrator holds the hardware separately via ``stop_ramps()``.
+
+        Subclasses should extend this to also safe their measurement VI::
+
+            def abort(self) -> dict:
+                super().abort()
+                return {"dc_measurement": {"standby": {}}}
+
+        Returns:
+            ``measurement_commands`` dict (``{vi_name: {method: kwargs}}``)
+            the Orchestrator dispatches to safe the measurement hardware.
+            The base implementation returns ``{}``.
+        """
+        if self._data_manager is not None:
+            self._data_manager.close()
+            self._data_manager = None
+        return {}
