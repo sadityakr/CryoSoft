@@ -82,3 +82,29 @@ class RampableVI:
         ``ramp_status()`` must report ``"IDLE"``.
         """
         ...
+
+    # ------------------------------------------------------------------
+    # Optional introspection hooks (concrete defaults; override to expose)
+    # ------------------------------------------------------------------
+
+    def ramp_target(self) -> float | None:
+        """Return the active ramp target in user units, or ``None``.
+
+        User units means tesla for magnets, kelvin for temperature — the same
+        units as ``start_ramp``'s *target* and the VI's ``@monitored`` value —
+        so operational-status reporting can compute gap-to-target ("how far
+        from the setpoint, and is it closing?"). Unlike the four methods above,
+        this is not part of the required behaviour contract: it is a read-only
+        diagnostic accessor with a safe default. The default returns ``None``
+        (target not exposed); ramp-tracking VIs override it.
+        """
+        return None
+
+    def ramp_rate(self) -> float | None:
+        """Return the active ramp rate in user units per minute, or ``None``.
+
+        Tesla/min for magnets, kelvin/min for temperature — consistent with
+        ``ramp_target()`` — so a rough ETA (gap ÷ rate) can be estimated. The
+        default returns ``None``; ramp-tracking VIs override it.
+        """
+        return None

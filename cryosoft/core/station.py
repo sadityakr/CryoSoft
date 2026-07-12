@@ -303,6 +303,44 @@ class Station:
             except Exception:
                 logger.exception("stop_ramp failed on VI '%s'", vi_name)
 
+    def get_ramp_status(self) -> dict[str, dict]:
+        """Aggregate each system VI's ramp target, rate, and status.
+
+        For operational-status display ("what is the run waiting on, and how far
+        from setpoint?"). For every system VI implementing ``RampableVI``,
+        collects ``ramp_target()`` / ``ramp_rate()`` (user units — tesla,
+        kelvin; ``None`` if the VI does not expose them) and its
+        ``ramp_status()`` string. Each VI is guarded individually: a
+        communication error on one instrument yields a stale entry rather than
+        breaking the whole snapshot.
+
+        Returns:
+            ``{vi_name: {"target": float|None, "rate": float|None,
+            "ramp_status": str}}`` for every system VI. A VI that raised on read
+            also carries ``"_stale": True``.
+        """
+        result: dict[str, dict] = {}
+        for vi_name, vi_type in self._vi_registry.items():
+            if vi_type != "system":
+                continue
+            vi = self._virtual_instruments[vi_name]
+            if not isinstance(vi, RampableVI):
+                continue
+            try:
+                result[vi_name] = {
+                    "target": vi.ramp_target(),
+                    "rate": vi.ramp_rate(),
+                    "ramp_status": vi.ramp_status(),
+                }
+            except CryoSoftCommunicationError:
+                result[vi_name] = {
+                    "target": None,
+                    "rate": None,
+                    "ramp_status": "IDLE",
+                    "_stale": True,
+                }
+        return result
+
     # ------------------------------------------------------------------
     # Safety
     # ------------------------------------------------------------------

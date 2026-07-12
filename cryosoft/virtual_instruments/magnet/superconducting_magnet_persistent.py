@@ -124,6 +124,7 @@ class SuperconductingMagnetPersistentVI(SuperconductingMagnetVI):
                 (e.g. a field sweep) that should only heat the switch once.
         """
         target_A = self._clamp_target_A(target * self._amperes_per_tesla)
+        self._ramp_target_T = target_A / self._amperes_per_tesla
 
         self._pending_persistent = persistent
         self._ramp_gen = self._persistent_ramp_generator(target_A, persistent)
