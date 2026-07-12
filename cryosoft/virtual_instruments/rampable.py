@@ -108,3 +108,24 @@ class RampableVI:
         default returns ``None``; ramp-tracking VIs override it.
         """
         return None
+
+    def ramp_value(self) -> float | None:
+        """Return the current value in the same user units as ``ramp_target()``.
+
+        Tesla for magnets, kelvin for temperature — the ``@monitored`` reading
+        the ramp is driving. Lets operational-status reporting compute
+        gap-to-target without knowing which monitored field is "the value" for
+        each VI type. Default ``None``; ramp-tracking VIs override it.
+        """
+        return None
+
+    def ramp_phase(self) -> str | None:
+        """Return the active ramp sub-phase, or ``None`` if the VI has none.
+
+        Most VIs ramp in a single phase and return ``None`` (the watchdog then
+        treats them as always making progress toward target). VIs with distinct
+        no-motion phases — a persistent magnet's switch-heater warmup/cooldown,
+        where the field deliberately holds still — override this so the watchdog
+        does not read those expected pauses as a stall.
+        """
+        return None

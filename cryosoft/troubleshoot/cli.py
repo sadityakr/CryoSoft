@@ -1,7 +1,8 @@
 # ---
 # description: |
 #   One-shot CLI over the troubleshoot engine: scan / probe / check / methods /
-#   idn / read / write / query / send. Built for agents first: every command
+#   idn / read / write / query / send, plus `status` (reads the running app's
+#   operational-status log). Built for agents first: every command
 #   terminates on its own, supports --json, returns exit code 0 (all OK) or
 #   1 (any fault), and appends a JSONL transcript line to cryosoft/logs/.
 # entry_point: python -m cryosoft.troubleshoot <subcommand> ...
@@ -27,8 +28,8 @@ Command grammar is API: the setup-supervisor skills and permission allowlists
 hard-code it, so subcommand names and their meanings must stay stable.
 
 Read/write split for permission gating: ``scan``, ``probe``, ``check``,
-``methods``, ``idn``, and ``read`` never change instrument state and are safe
-to allowlist. ``write`` calls state-changing driver methods and ``query`` /
+``methods``, ``idn``, ``read``, and ``status`` never change instrument state and
+are safe to allowlist (``status`` only reads a log file). ``write`` calls state-changing driver methods and ``query`` /
 ``send`` transmit arbitrary raw bytes (a raw query can mutate state too), so
 those three should stay behind a permission prompt.
 
@@ -48,7 +49,7 @@ from typing import Any
 
 import cryosoft
 from cryosoft.core.logging_config import setup_logging
-from cryosoft.troubleshoot import engine
+from cryosoft.troubleshoot import engine, status_reader
 from cryosoft.troubleshoot.engine import (
     DriverBench,
     ProbeResult,
@@ -386,6 +387,26 @@ def _add_target_args(parser: argparse.ArgumentParser) -> None:
     _add_config_arg(parser)
 
 
+def _cmd_status(args: argparse.Namespace) -> tuple[bool, dict[str, Any]]:
+    """Summarize the running app's operational-status log (works while it runs).
+
+    Reads cryosoft/logs/status.jsonl (written by the Orchestrator each tick) and
+    reports the current state, per-instrument ramp progress and trend, and any
+    watchdog alerts. Exit 0 only when a log exists and its verdict is OK, so an
+    agent can gate on the exit code. This is the one troubleshoot command that
+    reads the LIVE app rather than opening instruments with the app closed.
+    """
+    log_path = args.log or (_transcript_dir() / "status.jsonl")
+    records = status_reader.read_records(log_path, last=args.last)
+    digest = status_reader.summarize(records)
+    if args.json:
+        _print_json(digest)
+    else:
+        print(status_reader.render_text(digest))
+    ok = bool(digest.get("available")) and digest.get("verdict") == "OK"
+    return ok, digest
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the argparse command tree (kept separate for --help testing)."""
     parser = argparse.ArgumentParser(
@@ -424,6 +445,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-bus", action="store_true",
                    help="skip the bus-presence scan (probe by opening only)")
     p.set_defaults(func=_cmd_check)
+
+    p = sub.add_parser("status", parents=[common],
+                       help="summarize the RUNNING app's operational-status log")
+    p.add_argument("--log", help="path to status.jsonl (default: cryosoft/logs/status.jsonl)")
+    p.add_argument("--last", type=int, default=5,
+                   help="recent records to fold in for the gap trend (default 5)")
+    p.set_defaults(func=_cmd_status)
 
     p = sub.add_parser("methods", parents=[common], help="list a driver's public methods")
     _add_target_args(p)
