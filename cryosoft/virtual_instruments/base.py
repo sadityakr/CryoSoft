@@ -297,11 +297,21 @@ class BaseVirtualInstrument:
 class MagnetBase(BaseVirtualInstrument):
     """Base class for all magnet-type VIs."""
     vi_type: str = "magnet"
+    # Human label + unit for this VI's ramp setpoint, read centrally (via the
+    # Station) to render concise procedure status lines such as
+    # "Ramping field to -1 T". Declared once per instrument category so every
+    # magnet VI, procedure, and config inherits it — no per-procedure code.
+    setpoint_label: str = "field"
+    setpoint_unit: str = "T"
+    display_label: str = "magnet"
 
 
 class TemperatureControllerBase(BaseVirtualInstrument):
     """Base class for all temperature-controller VIs."""
     vi_type: str = "temperature"
+    setpoint_label: str = "temperature"
+    setpoint_unit: str = "K"
+    display_label: str = "temperature"
 
 
 class LevelMeterBase(BaseVirtualInstrument):
@@ -313,6 +323,8 @@ class MeasurementInstrumentBase(BaseVirtualInstrument):
     """Base class for all measurement-instrument VIs."""
 
     vi_type: str = "measurement"
+    # Human label for status lines like "Arming DC resistance measurement".
+    display_label: str = "measurement"
 
     def ping(self) -> bool:
         """Send IDN queries to all drivers and return True if all respond.
@@ -338,6 +350,8 @@ class DCMeasurementBase(MeasurementInstrumentBase):
     exact signatures.  The base raises NotImplementedError so that a missing
     implementation fails loudly at first use rather than silently.
     """
+
+    display_label: str = "DC resistance"
 
     def initiate(
         self,

@@ -25,7 +25,11 @@
 # output: |
 #   Emits signals: states_updated, state_changed, procedure_progress,
 #   procedure_finished, error_occurred, action_blocked, action_succeeded,
-#   action_failed (vi, method, reason — the uniform per-action verdict)
+#   action_failed (vi, method, reason — the uniform per-action verdict),
+#   status_message (concise human-readable procedure milestones for the
+#   Procedure window's status log; also written to the cryosoft.procedure_status
+#   logger, which propagates to the main log — distinct from the machine-only
+#   cryosoft.status JSONL stream)
 # ---
 
 """Orchestrator — cooperative state machine for CryoSoft.
@@ -93,6 +97,15 @@ class Orchestrator(QObject):
             rejection or a VI safety guard (e.g. switch-heater mismatch).
             The reason string is the exception message, written by the VI to
             be shown to the user verbatim.
+        status_message (str): Concise, human-readable milestone of the running
+            procedure. Initiation is broken into one line per distinct setup
+            action ("Ramping temperature to 300 K", "Ramping field to -1 T",
+            "Arming DC resistance measurement"), followed by "Waiting N s at
+            setpoint", "Measuring point 13/101", "Point 14/101: ramping field
+            -> 0.55 T", etc. Labels/units come from each VI's setpoint metadata
+            via the Station, so every procedure gets a status feed with no
+            per-procedure code; consumed by the Procedure window's status log.
+            Distinct from the per-tick detail stream on the Monitor log.
     """
 
     states_updated = pyqtSignal(dict)
@@ -105,6 +118,7 @@ class Orchestrator(QObject):
     action_failed = pyqtSignal(str, str, str)
     measurement_ready = pyqtSignal(dict)  # emitted after each measure() with last_datapoint
     operational_status = pyqtSignal(dict)  # per-tick runtime status record (troubleshooting)
+    status_message = pyqtSignal(str)  # concise, human-readable procedure milestone line
 
     def __init__(self, station: Station, tick_interval_ms: int = 3000) -> None:
         super().__init__()
@@ -190,6 +204,7 @@ class Orchestrator(QObject):
             self._current_wait_time = wait_time
 
             self._change_state(OrchestratorState.INITIATING)
+            self._emit_initiation_status(system_targets, meas_commands)
         except Exception as exc:
             logger.exception("run_procedure() failed during setup")
             self._fail_to_error(f"Could not start procedure: {exc}")
@@ -227,6 +242,7 @@ class Orchestrator(QObject):
                 self._paused_wait_elapsed = time.time() - self._wait_start_time
             self._station.stop_ramps(self._active_system_vis or None)
             self._change_state(OrchestratorState.PAUSED)
+            self._emit_status("Paused - hardware held")
 
     def resume_procedure(self) -> None:
         """Resume from PAUSED: restart held ramps and unfreeze the wait clock."""
@@ -243,6 +259,7 @@ class Orchestrator(QObject):
         if self._wait_started:
             self._wait_start_time = time.time() - self._paused_wait_elapsed
         self._change_state(self._pre_pause_state)
+        self._emit_status("Resumed")
 
     def abort_procedure(self) -> None:
         """Abort the run: hold instruments where they are (no ramp-to-zero).
@@ -257,6 +274,7 @@ class Orchestrator(QObject):
             return
         self._abort_active_procedure()
         self._change_state(OrchestratorState.IDLE)
+        self._emit_status("Aborted by user")
         self.run_queue()
 
     def recover_from_error(self) -> None:
@@ -372,6 +390,116 @@ class Orchestrator(QObject):
         except Exception:
             logger.exception("operational-status update failed (non-fatal)")
 
+    # ------------------------------------------------------------------
+    # Concise status feed (Procedure-window status log)
+    # ------------------------------------------------------------------
+
+    def _emit_status(self, text: str) -> None:
+        """Emit one concise milestone line to listeners and the status logger.
+
+        Wrapped so a formatting or signal error can never abort a run: the tick
+        runs inside an exception boundary that degrades to ERROR, and a
+        cosmetic status line must not be able to trip it.
+
+        The milestone text goes to the ``cryosoft.procedure_status`` logger
+        (propagates to the main log for history) — deliberately NOT the
+        ``cryosoft.status`` logger, which carries the machine-only JSONL
+        operational-status stream and must stay pure JSON.
+        """
+        try:
+            logging.getLogger("cryosoft.procedure_status").info(text)
+            self.status_message.emit(text)
+        except Exception:  # noqa: BLE001 — status must never disrupt the run
+            logger.exception("status_message emit failed")
+
+    def _describe_system_target(self, vi_name: str, params: dict, *, verb: str) -> str:
+        """Compose "<verb> <label> to <value> <unit>" for one system ramp target.
+
+        Label and unit come from the VI's declarative setpoint metadata via the
+        Station (e.g. magnet -> "field"/"T"), so any procedure's targets render
+        without per-procedure code. Best-effort: degrades to the raw VI name
+        rather than raising into the tick.
+        """
+        try:
+            label, unit = self._station.system_setpoint_meta(vi_name)
+            value = float(params.get("target"))
+            unit_suffix = f" {unit}" if unit else ""
+            return f"{verb} {label} to {value:g}{unit_suffix}"
+        except Exception:  # noqa: BLE001 — degrade, never raise into the tick
+            return f"{verb} {vi_name}"
+
+    def _describe_measurement_command(self, vi_name: str, spec: dict) -> str | None:
+        """Compose "Arming/Disarming <label> measurement" for one measurement command.
+
+        Returns None if the command cannot be described. ``spec`` is the
+        ``{method: kwargs}`` mapping a procedure returns per measurement VI.
+        """
+        try:
+            label = self._station.measurement_label(vi_name)
+            method = next(iter(spec), "")
+            if method in ("standby", "disarm"):
+                return f"Disarming {label} measurement"
+            return f"Arming {label} measurement"
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _emit_setup_actions(self, system_targets: dict, meas_commands: dict, *, verb: str) -> None:
+        """Emit one status line per distinct setup action (ramps, then measurement).
+
+        Used for both initiation and standby/parking so each thing being done
+        (set temperature, ramp field, arm the measurement) shows separately.
+        """
+        for vi_name, params in system_targets.items():
+            self._emit_status(self._describe_system_target(vi_name, params, verb=verb))
+        for vi_name, spec in meas_commands.items():
+            line = self._describe_measurement_command(vi_name, spec)
+            if line:
+                self._emit_status(line)
+
+    def _emit_initiation_status(self, system_targets: dict, meas_commands: dict) -> None:
+        """Emit the initiation header plus one line per distinct setup action.
+
+        Initiation is a distinct, often slow phase: the procedure brings the
+        NON-swept system state to its setpoints (target temperature in a field
+        sweep, target field in a temperature sweep) AND moves the swept quantity
+        to its start value AND arms the measurement instrument. Each is shown as
+        its own line — none of these setpoints are reached yet, and a magnet or
+        temperature ramp can take a long time.
+        """
+        try:
+            name = getattr(self._procedure, "name", "") or type(self._procedure).__name__
+            _, n = self._procedure.get_sweep_position()
+            self._emit_status(f'Initiating "{name}" ({n} points)')
+        except Exception:  # noqa: BLE001
+            self._emit_status("Initiating procedure")
+        self._emit_setup_actions(system_targets, meas_commands, verb="Ramping")
+
+    def _ramp_status_line(self, system_targets: dict) -> str:
+        """Compose "Point i/n: ramping <label> -> <value> <unit>" for a sweep step.
+
+        Describes the (usually single) target the sweep step ramps, using the
+        VI's setpoint metadata via the Station. Best-effort.
+        """
+        try:
+            i, n = self._procedure.get_sweep_position()
+            parts = []
+            for vi_name, params in system_targets.items():
+                label, unit = self._station.system_setpoint_meta(vi_name)
+                unit_suffix = f" {unit}" if unit else ""
+                parts.append(f"{label} -> {float(params.get('target')):g}{unit_suffix}")
+            detail = "; ".join(parts) if parts else "next setpoint"
+            return f"Point {i}/{n}: ramping {detail}"
+        except Exception:  # noqa: BLE001 — degrade, never raise into the tick
+            return "Ramping to next setpoint"
+
+    def _measure_status_line(self) -> str:
+        """Compose "Measuring point i/n" for the current point (best-effort)."""
+        try:
+            i, n = self._procedure.get_sweep_position()
+            return f"Measuring point {i}/{n}"
+        except Exception:  # noqa: BLE001
+            return "Measuring"
+
     def _tick(self) -> None:
         """One cooperative cycle, inside the exception boundary.
 
@@ -468,12 +596,17 @@ class Orchestrator(QObject):
                     if not self._wait_started:
                         self._wait_started = True
                         self._wait_start_time = time.time()
+                        if self._current_wait_time > 0:
+                            self._emit_status(
+                                f"Waiting {self._current_wait_time:g} s at setpoint"
+                            )
 
                     if time.time() - self._wait_start_time >= self._current_wait_time:
                         self._wait_started = False
                         self._change_state(OrchestratorState.MEASURING)
         elif self._state == OrchestratorState.MEASURING:
             if self._procedure:
+                self._emit_status(self._measure_status_line())
                 self._procedure.measure()
                 if hasattr(self._procedure, "get_progress"):
                     self.procedure_progress.emit(self._procedure.get_progress())
@@ -492,21 +625,27 @@ class Orchestrator(QObject):
                     self._dispatch_targets(sys_targets)
                     self._current_wait_time = wait_time
                     self._change_state(OrchestratorState.RAMPING)
+                    self._emit_status(self._ramp_status_line(sys_targets))
         elif self._state == OrchestratorState.STANDBY:
             if not self._standby_dispatched:
                 # Wait for whatever ramp was already in flight when SWEEPING
                 # ended, then call standby() exactly once and dispatch
                 # whatever targets it returns (e.g. ramp magnet to 0 T).
                 if self._station.check_ramps():
+                    self._emit_status("Sweep complete - closing data file")
                     if self._procedure and hasattr(self._procedure, "standby"):
                         sys_targ, meas_cmd, wait = self._procedure.standby()
                         self._dispatch_targets(sys_targ)
                         self._station.send_measurement_commands(meas_cmd)
+                        if sys_targ or meas_cmd:
+                            self._emit_status("Parking hardware")
+                            self._emit_setup_actions(sys_targ, meas_cmd, verb="Ramping")
                     self._standby_dispatched = True
             else:
                 # Wait for the ramp standby() itself just started (if any)
                 # before declaring the procedure finished.
                 if self._station.check_ramps():
+                    self._emit_status("Procedure finished")
                     self.procedure_finished.emit()
                     self._procedure = None
                     self._active_system_vis.clear()
@@ -586,3 +725,10 @@ class Orchestrator(QObject):
     def _error(self, message: str) -> None:
         logger.error(message)
         self.error_occurred.emit(message)
+        # Also surface in the concise status log as a persistent history line.
+        # logger.error above already wrote it to file, so emit the signal
+        # directly (bypassing _emit_status) to avoid double file logging.
+        try:
+            self.status_message.emit(message)
+        except Exception:  # noqa: BLE001 — status must never disrupt the run
+            logger.exception("status_message emit failed in _error")

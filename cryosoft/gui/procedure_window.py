@@ -6,8 +6,8 @@
 #   segments / CSV, with hysteresis) in the Sweep column instead of flat text
 #   fields — this file is the only GUI code sweep-shape support needs; new
 #   procedures never touch it. Fixed 2x2 quadrant grid (top-left params,
-#   top-right queue, bottom-left/right Plot 1/Plot 2), the same nested-
-#   QSplitter pattern as MonitorWindow. Sample info is read from
+#   top-right queue over a concise status log, bottom-left/right Plot 1/Plot 2),
+#   the same nested-QSplitter pattern as MonitorWindow. Sample info is read from
 #   MonitorWindow via callables.
 # entry_point: Not run directly. Opened via MonitorWindow Procedures menu.
 # dependencies:
@@ -40,6 +40,7 @@ from __future__ import annotations
 import importlib
 import logging
 import pkgutil
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -65,6 +66,7 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSplitter,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -101,6 +103,9 @@ _GEOMETRY_KEY = "ProcedureWindow/geometry"  # QSettings key for saved window geo
 # Max width (px) for the Sweep parameter column. Its inputs are narrow, so this
 # stops it expanding to an equal third and crowding out the Measurement column.
 _SWEEP_COLUMN_MAX_WIDTH = 260
+# Max lines kept in the concise Status log before old lines are trimmed
+# (matches the Monitor detailed log's cap; bounds a long run's memory use).
+_STATUS_MAX_LINES = 500
 
 
 @dataclass
@@ -150,8 +155,9 @@ class ProcedureWindow(QMainWindow):
     A fixed 2x2 quadrant grid, the same nested-QSplitter pattern as
     MonitorWindow: top-left is the procedure selector + full parameter form
     (Sweep/System/Measurement, filling the quadrant rather than capped at a
-    fixed height with empty space below), top-right is the Queue, and the
-    bottom row is Plot 1 (left) / Plot 2 (right). Every splitter boundary is
+    fixed height with empty space below), top-right is the Queue over a
+    concise Status log (a draggable vertical split), and the bottom row is
+    Plot 1 (left) / Plot 2 (right). Every splitter boundary is
     draggable; nothing in the grid can be closed or detached. A full-width
     progress bar and control buttons sit below the grid.
 
@@ -332,7 +338,11 @@ class ProcedureWindow(QMainWindow):
         return widget
 
     def _build_queue_quadrant(self) -> QWidget:
-        """Build the top-right quadrant: the Queue list with management buttons.
+        """Build the top-right quadrant: the Queue list over the concise Status log.
+
+        A vertical splitter stacks the Queue (list + management buttons) above
+        the Status log so the queue/status height ratio is draggable — the
+        quadrant has spare height that the status feed can use.
 
         Returns:
             QWidget containing the quadrant layout.
@@ -342,8 +352,46 @@ class ProcedureWindow(QMainWindow):
         col = QVBoxLayout(widget)
         col.setSpacing(0)
         col.setContentsMargins(4, 0, 0, 0)
-        col.addWidget(self._build_queue_section())
+
+        split = QSplitter(Qt.Orientation.Vertical)
+        split.setObjectName("queue_status_splitter")
+        split.setChildrenCollapsible(False)
+        queue = self._build_queue_section()
+        queue.setMinimumHeight(120)
+        split.addWidget(queue)
+        split.addWidget(self._build_status_section())
+        split.setStretchFactor(0, 3)
+        split.setStretchFactor(1, 2)
+        col.addWidget(split)
         return widget
+
+    def _build_status_section(self) -> QGroupBox:
+        """Build the concise procedure Status log shown below the Queue.
+
+        A read-only, timestamped, line-capped feed of procedure milestones
+        driven by the Orchestrator's ``status_message`` signal: start, ramp to
+        each setpoint, settle, measure each point, park, finish, plus
+        pause/abort/error. This is the concise counterpart to the Monitor
+        window's detailed per-tick log; it never carries raw instrument
+        traffic, so a user watching a slow field ramp sees what is happening
+        without reading GPIB detail.
+
+        Returns:
+            A QGroupBox containing the read-only status QTextEdit
+            (objectName ``status_log``).
+        """
+        box = QGroupBox("Status")
+        vlay = QVBoxLayout(box)
+        vlay.setContentsMargins(6, 6, 6, 6)
+        self._status_log = QTextEdit()
+        self._status_log.setObjectName("status_log")
+        self._status_log.setReadOnly(True)
+        self._status_log.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        self._status_log.setMinimumHeight(80)
+        vlay.addWidget(self._status_log)
+        return box
 
     def _build_param_form(self, cls: type[BaseProcedure]) -> QWidget:
         """Auto-generate a three-column parameter form from the procedure's parameter groups.
@@ -617,10 +665,29 @@ class ProcedureWindow(QMainWindow):
         self._orchestrator.action_blocked.connect(
             lambda msg: self._banner.show_message(msg, BANNER_SEVERITY_WARNING)
         )
+        self._orchestrator.status_message.connect(self._on_status_message)
 
     # ------------------------------------------------------------------
     # Slot handlers
     # ------------------------------------------------------------------
+
+    def _on_status_message(self, text: str) -> None:
+        """Append one timestamped milestone line to the concise Status log.
+
+        Trims to ``_STATUS_MAX_LINES`` so a long run cannot grow the log
+        without bound (same approach as the Monitor detailed log).
+
+        Args:
+            text: Milestone text from the Orchestrator's status_message signal.
+        """
+        self._status_log.append(f"{time.strftime('%H:%M:%S')}  {text}")
+        doc = self._status_log.document()
+        while doc.blockCount() > _STATUS_MAX_LINES:
+            cursor = self._status_log.textCursor()
+            cursor.movePosition(cursor.MoveOperation.Start)
+            cursor.select(cursor.SelectionType.BlockUnderCursor)
+            cursor.removeSelectedText()
+            cursor.deleteChar()
 
     def _on_procedure_selected(self, index: int) -> None:
         """Rebuild the parameter form and axis selectors when procedure changes.
