@@ -2,23 +2,29 @@
 # description: |
 #   BaseProcedure abstract base class for all CryoSoft measurement procedures.
 #   Defines the four-method interface (initiate, change_sweep_step, measure,
-#   standby) consumed by the Orchestrator state machine.
+#   standby) consumed by the Orchestrator state machine. Also defines the
+#   sweep_axis mechanism: a subclass that declares one SweepAxis gets a
+#   working _build_sweep_array() (linear / segments / CSV, with optional
+#   hysteresis) for free, with no override needed.
 # entry_point: Not run directly. Subclassed by concrete procedures.
 # dependencies:
 #   - cryosoft.core.station (Station)
 #   - cryosoft.core.data_manager (DataManager, created by subclasses)
+#   - cryosoft.core.sweep_builder (SweepAxis, sweep_axis_param_specs, build_axis_sweep)
 # input: |
 #   Constructor receives a Station, sample_info dict, data_directory string,
 #   and **param_values matching the procedure's parameters class attribute.
 #   Declared parameter defaults are merged in for any omitted param_values.
 # process: |
 #   _build_sweep_array() is called at construction to build the sweep points list.
+#   If the subclass declares sweep_axis, the default implementation delegates
+#   to sweep_builder.build_axis_sweep(); otherwise a subclass must override it.
 #   The Orchestrator calls initiate(), then alternates change_sweep_step() /
 #   measure() until done, then calls standby().
 # output: |
 #   initiate() and standby() return (system_targets, measurement_commands, wait_time).
 #   change_sweep_step() returns (system_targets, wait_time) or None when done.
-# last_updated: 2026-04-19
+# last_updated: 2026-07-12
 # ---
 
 """BaseProcedure — abstract base class for all CryoSoft procedures."""
@@ -29,6 +35,7 @@ import time
 from typing import Any
 
 from cryosoft.core.station import Station
+from cryosoft.core.sweep_builder import SweepAxis, build_axis_sweep, sweep_axis_param_specs
 
 
 class BaseProcedure:
@@ -41,8 +48,18 @@ class BaseProcedure:
     Class attributes:
         name: Human-readable display name (shown in GUI procedure browser).
         description: One-line description.
-        sweep_parameters: Parameters that define *what* to sweep over
-            (e.g. field_start, field_end, n_steps). The GUI renders these
+        sweep_axis: Optional ``SweepAxis`` declaring the one quantity this
+            procedure sweeps over (e.g. field, temperature). When set, its
+            hidden parameters (``{key}_mode``, ``{key}_start``, etc. — see
+            ``sweep_builder.sweep_axis_param_specs()``) are merged into
+            ``parameters`` automatically, ``_build_sweep_array()`` needs no
+            override, and the GUI renders a mode-selector widget (linear /
+            segments / CSV, with hysteresis) instead of flat text fields.
+            Most sweep procedures should use this instead of hand-writing
+            ``sweep_parameters`` + ``_build_sweep_array()``.
+        sweep_parameters: Parameters that define *what* to sweep over, for
+            procedures that are not using ``sweep_axis`` (or that need extra
+            sweep-related parameters alongside it). The GUI renders these
             in the Sweep column of the parameter form.
         system_parameters: Parameters that set system state during the sweep
             (e.g. temperature, ramp rates, wait times). Rendered in the
@@ -50,8 +67,10 @@ class BaseProcedure:
         measurement_parameters: Parameters that configure the measurement VI
             (e.g. current_A, compliance_A, readings_per_point). Rendered in
             the Measurement column.
-        parameters: Union of the three groups above, auto-built by
-            ``__init_subclass__``. Read-only — do not set directly.
+        parameters: Union of sweep_axis's hidden params (if any),
+            sweep_parameters, system_parameters, and measurement_parameters,
+            auto-built by ``__init_subclass__``. Read-only — do not set
+            directly.
 
     Each parameter value dict accepts keys: ``type``, ``default``,
     optionally ``unit``, ``min``, ``max``, ``description``.
@@ -61,17 +80,20 @@ class BaseProcedure:
         class FieldSweepIV(BaseProcedure):
             name = "Field Sweep IV"
             description = "Sweep magnetic field, measure IV at each point"
-            sweep_parameters = {
-                "field_start": {"type": float, "default": -1.0, "unit": "T"},
-            }
+            sweep_axis = SweepAxis(
+                key="field", unit="T", data_key="field_T",
+                description="Magnetic field",
+                default_start=-1.0, default_end=1.0, default_steps=101,
+            )
     """
 
     name: str = ""
     description: str = ""
 
-    # Parameter groups — define these three in every concrete subclass.
+    # Parameter groups — sweep_axis (optional) plus the three dicts below.
     # ``parameters`` is auto-built as their union by __init_subclass__ so
     # existing code that iterates cls.parameters continues to work.
+    sweep_axis: SweepAxis | None = None
     sweep_parameters: dict[str, dict] = {}
     system_parameters: dict[str, dict] = {}
     measurement_parameters: dict[str, dict] = {}
@@ -83,7 +105,9 @@ class BaseProcedure:
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         super().__init_subclass__(**kwargs)
+        axis_params = sweep_axis_param_specs(cls.sweep_axis) if cls.sweep_axis else {}
         cls.parameters = {
+            **axis_params,
             **cls.sweep_parameters,
             **cls.system_parameters,
             **cls.measurement_parameters,
@@ -127,11 +151,15 @@ class BaseProcedure:
     def _build_sweep_array(self) -> list:
         """Build the list of sweep points from ``self._params``.
 
-        Called once at construction. Override in every concrete subclass.
+        Called once at construction. If the subclass declares ``sweep_axis``,
+        this delegates to ``sweep_builder.build_axis_sweep()`` and needs no
+        override. A subclass without ``sweep_axis`` must override this.
 
         Returns:
             List of sweep point values (e.g. field values in tesla).
         """
+        if type(self).sweep_axis is not None:
+            return build_axis_sweep(type(self).sweep_axis, self._params)
         return []
 
     # ------------------------------------------------------------------

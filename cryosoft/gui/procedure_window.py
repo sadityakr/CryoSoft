@@ -2,8 +2,12 @@
 # description: |
 #   ProcedureWindow: PyQt6 window for building, queuing, and running measurement
 #   procedures. Auto-generates parameter forms from BaseProcedure.parameters dicts.
-#   Two-column top layout (params left, queue right) with two live pyqtgraph plots
-#   spanning full-width below. Sample info is read from MonitorWindow via callables.
+#   A procedure that declares sweep_axis gets a SweepAxisWidget (linear /
+#   segments / CSV, with hysteresis) in the Sweep column instead of flat text
+#   fields — this file is the only GUI code sweep-shape support needs; new
+#   procedures never touch it. Two-column top layout (params left, queue
+#   right) with two live pyqtgraph plots spanning full-width below. Sample
+#   info is read from MonitorWindow via callables.
 # entry_point: Not run directly. Opened via MonitorWindow Procedures menu.
 # dependencies:
 #   - PyQt6 >= 6.5
@@ -11,6 +15,7 @@
 #   - cryosoft.core.station (Station)
 #   - cryosoft.core.orchestrator (Orchestrator)
 #   - cryosoft.core.procedure (BaseProcedure)
+#   - cryosoft.gui.sweep_axis_widget (SweepAxisWidget)
 #   - cryosoft.procedures.* (auto-discovered subclasses)
 # input: |
 #   Station instance, Orchestrator instance, and two callables (get_sample_info,
@@ -18,11 +23,12 @@
 # process: |
 #   _discover_procedures() imports all modules in cryosoft/procedures/ and collects
 #   BaseProcedure subclasses. The selected procedure's parameters dict drives form
-#   generation. Queued procedures are stored as (cls, params) tuples. Execution
-#   goes through orchestrator.run_procedure().
+#   generation; sweep_axis (if declared) drives a SweepAxisWidget instead of flat
+#   fields for its hidden parameters. Queued procedures are stored as (cls, params)
+#   tuples. Execution goes through orchestrator.run_procedure().
 # output: |
 #   A QMainWindow. Two live plots update via orchestrator.measurement_ready.
-# last_updated: 2026-04-19
+# last_updated: 2026-07-12
 # ---
 
 """ProcedureWindow — procedure builder, queue, and live-data monitor."""
@@ -65,6 +71,7 @@ from cryosoft.core.station import Station
 from cryosoft.gui import app_settings  # import the module (not the function) so tests can monkeypatch the factory
 from cryosoft.gui.live_plot_panel import LivePlotPanel
 from cryosoft.gui.notification_banner import NotificationBanner
+from cryosoft.gui.sweep_axis_widget import SweepAxisWidget
 from cryosoft.gui.theme import (
     BANNER_SEVERITY_ERROR,
     BANNER_SEVERITY_WARNING,
@@ -142,6 +149,8 @@ class ProcedureWindow(QMainWindow):
         self._queue: list[tuple[type[BaseProcedure], dict, dict, str]] = []
         # Widgets for the parameter form (rebuilt on procedure selection)
         self._param_inputs: dict[str, QLineEdit] = {}
+        # Sweep-axis editor for the selected procedure, if it declares one
+        self._axis_widget: SweepAxisWidget | None = None
         # Active procedure reference (set on run)
         self._active_procedure: BaseProcedure | None = None
         # Live plot: full datapoint history (each entry is the enriched dict from measurement_ready)
@@ -277,7 +286,10 @@ class ProcedureWindow(QMainWindow):
 
         Renders sweep_parameters, system_parameters, and measurement_parameters
         in side-by-side QGroupBox panels so users can distinguish the different
-        kinds of input at a glance.
+        kinds of input at a glance. If ``cls`` declares ``sweep_axis``, the
+        Sweep column renders a ``SweepAxisWidget`` (linear / segments / CSV,
+        with hysteresis) instead of — or alongside, if ``sweep_parameters`` is
+        also non-empty — flat text fields.
 
         Args:
             cls: The BaseProcedure subclass to introspect.
@@ -290,28 +302,52 @@ class ProcedureWindow(QMainWindow):
         hbox.setSpacing(8)
         hbox.setContentsMargins(0, 0, 0, 0)
         self._param_inputs.clear()
+        self._axis_widget = None
 
-        groups = [
-            ("Sweep", cls.sweep_parameters),
+        sweep_box = QGroupBox("Sweep")
+        sweep_col = QVBoxLayout(sweep_box)
+        sweep_col.setSpacing(4)
+        if cls.sweep_axis is not None:
+            self._axis_widget = SweepAxisWidget(cls.sweep_axis)
+            sweep_col.addWidget(self._axis_widget)
+        if cls.sweep_parameters:
+            sweep_col.addLayout(self._build_flat_form(cls.sweep_parameters))
+        sweep_col.addStretch()
+        hbox.addWidget(sweep_box)
+
+        for group_title, group_params in [
             ("System", cls.system_parameters),
             ("Measurement", cls.measurement_parameters),
-        ]
-
-        for group_title, group_params in groups:
+        ]:
             box = QGroupBox(group_title)
-            form = QFormLayout(box)
-            form.setSpacing(4)
-            for param_name, spec in group_params.items():
-                unit = spec.get("unit", "")
-                desc = spec.get("description", param_name)
-                label_text = f"{desc} ({unit}):" if unit else f"{desc}:"
-                field = QLineEdit(str(spec.get("default", "")))
-                field.setObjectName(f"param_{param_name}_input")
-                self._param_inputs[param_name] = field
-                form.addRow(label_text, field)
+            box.setLayout(self._build_flat_form(group_params))
             hbox.addWidget(box)
 
         return container
+
+    def _build_flat_form(self, group_params: dict[str, dict]) -> QFormLayout:
+        """Build a QFormLayout of flat QLineEdit fields for one parameter group.
+
+        Registers each field in ``self._param_inputs`` keyed by parameter name,
+        the same lookup ``_collect_params`` reads from.
+
+        Args:
+            group_params: A parameter-group dict (name -> spec).
+
+        Returns:
+            The populated QFormLayout (not yet attached to a parent widget).
+        """
+        form = QFormLayout()
+        form.setSpacing(4)
+        for param_name, spec in group_params.items():
+            unit = spec.get("unit", "")
+            desc = spec.get("description", param_name)
+            label_text = f"{desc} ({unit}):" if unit else f"{desc}:"
+            field = QLineEdit(str(spec.get("default", "")))
+            field.setObjectName(f"param_{param_name}_input")
+            self._param_inputs[param_name] = field
+            form.addRow(label_text, field)
+        return form
 
     def _build_queue_section(self) -> QGroupBox:
         """Build the queue group with list + reorder/remove buttons.
@@ -477,8 +513,12 @@ class ProcedureWindow(QMainWindow):
             return None
         cls = self._procedures[index]
 
+        axis_keys = self._axis_widget.param_keys() if self._axis_widget is not None else set()
+
         param_values: dict[str, Any] = {}
         for param_name, spec in cls.parameters.items():
+            if param_name in axis_keys:
+                continue
             raw = self._param_inputs[param_name].text().strip()
             param_type = spec.get("type", str)
             try:
@@ -489,6 +529,13 @@ class ProcedureWindow(QMainWindow):
                     "Invalid Parameter",
                     f"Cannot parse '{raw}' as {param_type.__name__} for parameter '{param_name}'.",
                 )
+                return None
+
+        if self._axis_widget is not None:
+            try:
+                param_values.update(self._axis_widget.get_params())
+            except ValueError as exc:
+                QMessageBox.warning(self, "Invalid Sweep Parameters", str(exc))
                 return None
 
         sample_info = self._get_sample_info()
@@ -537,8 +584,7 @@ class ProcedureWindow(QMainWindow):
 
         self._queue.append((cls, param_values, sample_info, data_dir))
 
-        sweep_keys = list(cls.sweep_parameters.keys()) or list(cls.parameters.keys())
-        summary_parts = [f"{k}={param_values[k]}" for k in sweep_keys[:3]]
+        summary_parts = self._queue_summary_parts(cls, param_values)
         summary = f"{cls.name} ({', '.join(summary_parts)})"
         item = QListWidgetItem(f"{len(self._queue)}. {summary}")
         self._queue_list.addItem(item)
@@ -674,10 +720,37 @@ class ProcedureWindow(QMainWindow):
         """Rebuild the QListWidget from self._queue."""
         self._queue_list.clear()
         for idx, (cls, params, _sample, _dir) in enumerate(self._queue):
-            sweep_keys = list(cls.sweep_parameters.keys()) or list(cls.parameters.keys())
-            summary_parts = [f"{k}={params[k]}" for k in sweep_keys[:3]]
+            summary_parts = self._queue_summary_parts(cls, params)
             summary = f"{cls.name} ({', '.join(summary_parts)})"
             self._queue_list.addItem(f"{idx + 1}. {summary}")
+
+    @staticmethod
+    def _queue_summary_parts(cls: type[BaseProcedure], params: dict) -> list[str]:
+        """Build a short "key=value" summary of a procedure's sweep for the queue list.
+
+        A sweep_axis-declaring procedure gets a mode-aware one-liner (e.g.
+        ``field=-1.0->1.0`` or ``field=segments(3)``) instead of dumping the
+        raw hidden parameter names.
+
+        Args:
+            cls: The procedure class.
+            params: Its collected parameter values.
+
+        Returns:
+            A list of up to 3 "key=value" strings.
+        """
+        if cls.sweep_axis is not None:
+            k = cls.sweep_axis.key
+            mode = params.get(f"{k}_mode", "linear")
+            if mode == "segments":
+                n = len(params.get(f"{k}_segments", []))
+                return [f"{k}=segments({n})"]
+            if mode == "csv":
+                return [f"{k}=csv"]
+            return [f"{k}={params[f'{k}_start']}->{params[f'{k}_end']}"]
+
+        sweep_keys = list(cls.sweep_parameters.keys()) or list(cls.parameters.keys())
+        return [f"{k}={params[k]}" for k in sweep_keys[:3]]
 
     # ------------------------------------------------------------------
     # Window geometry + lifecycle

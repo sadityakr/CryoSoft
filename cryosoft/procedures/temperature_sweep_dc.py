@@ -1,32 +1,36 @@
 # ---
 # description: |
-#   TemperatureSweepDC procedure: sweeps temperature from temp_start to temp_end
-#   through n_points steps, measuring DC resistance at each stable temperature via
-#   DCMeasurementVI (Keithley 6221 + 2182A). The ramp rate between steps is set
-#   per-sweep so it can be changed without editing the YAML config.
+#   TemperatureSweepDC procedure: sweeps temperature (linear, piecewise-
+#   segmented with a fine sub-range, or a custom CSV list — see sweep_axis),
+#   measuring DC resistance at each stable temperature via DCMeasurementVI
+#   (Keithley 6221 + 2182A). The ramp rate between steps is set per-sweep so
+#   it can be changed without editing the YAML config.
 # entry_point: Not run directly. Instantiated via GUI or tests.
 # dependencies:
-#   - numpy
 #   - cryosoft.core.procedure (BaseProcedure)
 #   - cryosoft.core.data_manager (DataManager)
+#   - cryosoft.core.sweep_builder (SweepAxis) — sweep-shape construction is
+#     handled entirely by BaseProcedure's default _build_sweep_array()
 #   - Station must have: temperature_vti (system VI), magnet_x (system VI),
 #     magnet_y (system VI), dc_measurement (measurement VI with initiate()
 #     and take_reading()).
 # input: |
 #   station, sample_info, data_directory, and keyword params matching the
-#   parameters dict: temp_start, temp_end, n_points, ramp_rate_K_per_min,
-#   field_x, field_y, current_A, compliance_A, voltmeter_range_V,
-#   readings_per_point, point_wait.
+#   parameters dict: ramp_rate_K_per_min, field_x, field_y, current_A,
+#   compliance_A, voltmeter_range_V, readings_per_point, point_wait, plus the
+#   sweep_axis-generated temperature_mode/temperature_start/temperature_end/
+#   temperature_steps/temperature_segments/temperature_csv_path/
+#   temperature_hysteresis (see core.sweep_builder.sweep_axis_param_specs()).
 # process: |
-#   initiate() ramps temperature_vti to temp_start, magnet_x to field_x, and
-#   magnet_y to field_y simultaneously, then arms dc_measurement.
+#   initiate() ramps temperature_vti to the first sweep point, magnet_x to
+#   field_x, and magnet_y to field_y simultaneously, then arms dc_measurement.
 #   change_sweep_step() ramps only temperature_vti to the next step.
 #   measure() calls take_reading() and saves via DataManager.
 #   standby() closes the data file; temperature holds at last set point.
 # output: |
 #   HDF5 file with /data/temperature_K[N], /data/voltage_V[N,M],
 #   /data/current_A[N,M], /data/timestamp[N], /snapshots/ and /metadata/.
-# last_updated: 2026-04-19
+# last_updated: 2026-07-12
 # ---
 
 """TemperatureSweepDC — temperature sweep with DC resistance measurement."""
@@ -35,10 +39,9 @@ from __future__ import annotations
 
 import logging
 
-import numpy as np
-
 from cryosoft.core.data_manager import DataManager
 from cryosoft.core.procedure import BaseProcedure
+from cryosoft.core.sweep_builder import SweepAxis
 
 logger = logging.getLogger(__name__)
 
@@ -65,30 +68,18 @@ class TemperatureSweepDC(BaseProcedure):
 
     name = "Temperature Sweep DC"
     description = "Sweep temperature, measure DC resistance at each stable point"
-    sweep_data_keys = ["temperature_K"]
+    sweep_axis = SweepAxis(
+        key="temperature",
+        unit="K",
+        data_key="temperature_K",
+        description="Sample temperature",
+        default_start=10.0,
+        default_end=300.0,
+        default_steps=30,
+    )
+    sweep_data_keys = [sweep_axis.data_key]
     measurement_data_keys = ["voltage_V", "current_A"]
-    default_x_key = "temperature_K"
-
-    sweep_parameters = {
-        "temp_start": {
-            "type": float,
-            "default": 10.0,
-            "unit": "K",
-            "description": "Starting temperature",
-        },
-        "temp_end": {
-            "type": float,
-            "default": 300.0,
-            "unit": "K",
-            "description": "Final temperature",
-        },
-        "n_points": {
-            "type": int,
-            "default": 30,
-            "min": 2,
-            "description": "Number of temperature steps",
-        },
-    }
+    default_x_key = sweep_axis.data_key
 
     system_parameters = {
         "field_x": {
@@ -144,12 +135,9 @@ class TemperatureSweepDC(BaseProcedure):
         },
     }
 
-    def _build_sweep_array(self) -> list:
-        return np.linspace(
-            self._params["temp_start"],
-            self._params["temp_end"],
-            int(self._params["n_points"]),
-        ).tolist()
+    # _build_sweep_array() is not overridden here: BaseProcedure's default
+    # implementation delegates to sweep_builder.build_axis_sweep() using the
+    # sweep_axis declared above (linear / segments / CSV, with hysteresis).
 
     def _temp_target(self, index: int) -> dict:
         """Build a system_targets entry for temperature_vti at *index*."""
@@ -186,7 +174,7 @@ class TemperatureSweepDC(BaseProcedure):
 
         n = int(self._params["readings_per_point"])
         base_config: dict = {
-            "sweep_columns": {"temperature_K": "float"},
+            "sweep_columns": {type(self).sweep_axis.data_key: "float"},
             "measurement_arrays": {
                 "voltage_V": n,
                 "current_A": n,
@@ -209,8 +197,8 @@ class TemperatureSweepDC(BaseProcedure):
             "TemperatureSweepDC.initiate(): %d steps from %.1f K to %.1f K "
             "at %.2f K/min, Bx=%.3f T, By=%.3f T",
             len(self._sweep),
-            self._params["temp_start"],
-            self._params["temp_end"],
+            self._sweep[0],
+            self._sweep[-1],
             self._params["ramp_rate_K_per_min"],
             self._params["field_x"],
             self._params["field_y"],
@@ -243,13 +231,13 @@ class TemperatureSweepDC(BaseProcedure):
 
         n = int(self._params["readings_per_point"])
         measured_data: dict = self._station.dc_measurement.take_reading(n_points=n)
-        measured_data["temperature_K"] = self._station.temperature_vti.temperature()
+        measured_data[type(self).sweep_axis.data_key] = self._station.temperature_vti.temperature()
         self._save_datapoint(measured_data)
 
         logger.debug(
             "TemperatureSweepDC.measure(): index=%d, T=%.3f K",
             self._index,
-            measured_data["temperature_K"],
+            measured_data[type(self).sweep_axis.data_key],
         )
 
     def standby(self) -> tuple[dict, dict, float]:

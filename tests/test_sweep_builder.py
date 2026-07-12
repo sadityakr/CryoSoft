@@ -1,17 +1,22 @@
 # ---
 # description: |
 #   Unit tests for cryosoft.core.sweep_builder: piecewise segmented sweeps,
-#   custom CSV sweep loading, and hysteresis (forward+backward) extension.
-# last_updated: 2026-07-11
+#   custom CSV sweep loading, hysteresis (forward+backward) extension, and
+#   the SweepAxis / sweep_axis_param_specs / build_axis_sweep declarative
+#   sweep-shape framework used by BaseProcedure.
+# last_updated: 2026-07-12
 # ---
 
 import pytest
 
 from cryosoft.core.sweep_builder import (
+    SweepAxis,
     SweepSegment,
     apply_hysteresis,
+    build_axis_sweep,
     build_piecewise_sweep,
     load_custom_sweep_csv,
+    sweep_axis_param_specs,
 )
 
 
@@ -154,3 +159,97 @@ def test_apply_hysteresis_composes_with_piecewise_sweep():
     assert looped[: len(base)] == pytest.approx(base)
     assert looped[len(base)] == pytest.approx(base[-2])
     assert looped[-1] == pytest.approx(base[0])
+
+
+# ── SweepAxis / sweep_axis_param_specs ─────────────────────────────────────────
+
+
+@pytest.fixture
+def field_axis():
+    return SweepAxis(
+        key="field",
+        unit="T",
+        data_key="field_T",
+        description="Magnetic field",
+        default_start=-1.0,
+        default_end=1.0,
+        default_steps=101,
+    )
+
+
+def test_sweep_axis_param_specs_keys(field_axis):
+    specs = sweep_axis_param_specs(field_axis)
+    assert set(specs) == {
+        "field_mode",
+        "field_start",
+        "field_end",
+        "field_steps",
+        "field_segments",
+        "field_csv_path",
+        "field_hysteresis",
+    }
+
+
+def test_sweep_axis_param_specs_defaults(field_axis):
+    specs = sweep_axis_param_specs(field_axis)
+    assert specs["field_mode"]["default"] == "linear"
+    assert specs["field_start"]["default"] == pytest.approx(-1.0)
+    assert specs["field_end"]["default"] == pytest.approx(1.0)
+    assert specs["field_steps"]["default"] == 101
+    assert specs["field_segments"]["default"] == []
+    assert specs["field_csv_path"]["default"] == ""
+    assert specs["field_hysteresis"]["default"] is False
+
+
+# ── build_axis_sweep ─────────────────────────────────────────────────────────
+
+
+def test_build_axis_sweep_defaults_to_linear(field_axis):
+    params = {"field_start": -0.2, "field_end": 0.2, "field_steps": 3}
+    assert build_axis_sweep(field_axis, params) == pytest.approx([-0.2, 0.0, 0.2])
+
+
+def test_build_axis_sweep_linear_single_step(field_axis):
+    params = {"field_mode": "linear", "field_start": 0.5, "field_end": 1.5, "field_steps": 1}
+    assert build_axis_sweep(field_axis, params) == pytest.approx([0.5])
+
+
+def test_build_axis_sweep_segments_mode(field_axis):
+    params = {
+        "field_mode": "segments",
+        "field_segments": [
+            {"start": 0.0, "end": 0.1, "step": 0.05},
+            {"start": 0.1, "end": 0.2, "step": 0.1},
+        ],
+    }
+    assert build_axis_sweep(field_axis, params) == pytest.approx([0.0, 0.05, 0.1, 0.2])
+
+
+def test_build_axis_sweep_segments_normalizes_sweepsegment_instances_in_place(field_axis):
+    """SweepSegment instances in params["field_segments"] are replaced with
+    plain dicts (JSON-serializable for HDF5 metadata) as a side effect."""
+    params = {
+        "field_mode": "segments",
+        "field_segments": [SweepSegment(start=0.0, end=1.0, step=0.5)],
+    }
+    build_axis_sweep(field_axis, params)
+    assert params["field_segments"] == [{"start": 0.0, "end": 1.0, "step": 0.5}]
+
+
+def test_build_axis_sweep_csv_mode(field_axis, tmp_path):
+    csv_file = tmp_path / "fields.csv"
+    csv_file.write_text("1.0\n0.0\n-1.0\n")
+    params = {"field_mode": "csv", "field_csv_path": str(csv_file)}
+    assert build_axis_sweep(field_axis, params) == pytest.approx([1.0, 0.0, -1.0])
+
+
+def test_build_axis_sweep_hysteresis_applies_regardless_of_mode(field_axis):
+    params = {
+        "field_start": -0.1,
+        "field_end": 0.1,
+        "field_steps": 3,
+        "field_hysteresis": True,
+    }
+    assert build_axis_sweep(field_axis, params) == pytest.approx(
+        [-0.1, 0.0, 0.1, 0.0, -0.1]
+    )

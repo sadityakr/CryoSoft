@@ -55,8 +55,9 @@ def test_field_voltage_sweep_full_orchestrator_loop(station, tmp_path, qtbot):
         station=station,
         sample_info=SAMPLE_INFO,
         data_directory=str(tmp_path),
-        sweep_segments=segments,
-        sweep_hysteresis=True,
+        field_mode="segments",
+        field_segments=segments,
+        field_hysteresis=True,
         temperature=300.0,  # sim VTI driver starts at 300 K -> instant settle
         current=1e-6,
         n_readings=3,

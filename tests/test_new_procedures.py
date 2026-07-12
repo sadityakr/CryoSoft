@@ -4,7 +4,7 @@
 #   set_ramp_rate @control on ITC503TemperatureVI and the rate-forwarding in
 #   Station.process_system_targets.
 # entry_point: pytest tests/test_new_procedures.py -v
-# last_updated: 2026-04-18
+# last_updated: 2026-07-12
 # ---
 
 
@@ -38,9 +38,9 @@ FAST_FIELD_PARAMS = {
 }
 
 FAST_TEMP_PARAMS = {
-    "temp_start": 300.0,
-    "temp_end": 300.0,  # Same start/end → instant ramp settle in sim
-    "n_points": 3,
+    "temperature_start": 300.0,
+    "temperature_end": 300.0,  # Same start/end → instant ramp settle in sim
+    "temperature_steps": 3,
     "ramp_rate_K_per_min": 6000.0,
     "current_A": 1e-6,
     "compliance_A": 1e-3,
