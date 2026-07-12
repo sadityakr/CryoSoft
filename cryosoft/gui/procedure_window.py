@@ -41,6 +41,7 @@ import importlib
 import logging
 import pkgutil
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -73,6 +74,14 @@ from cryosoft.core.station import Station
 from cryosoft.gui import app_settings  # import the module (not the function) so tests can monkeypatch the factory
 from cryosoft.gui.live_plot_panel import LivePlotPanel
 from cryosoft.gui.notification_banner import NotificationBanner
+from cryosoft.gui.session import (
+    STATUS_DONE,
+    STATUS_FAILED,
+    STATUS_PENDING,
+    STATUS_RUNNING,
+    QueueItemState,
+    SessionState,
+)
 from cryosoft.gui.sweep_axis_widget import SweepAxisWidget
 from cryosoft.gui.theme import (
     BANNER_SEVERITY_ERROR,
@@ -88,6 +97,25 @@ from cryosoft.gui.theme import (
 logger = logging.getLogger(__name__)
 
 _GEOMETRY_KEY = "ProcedureWindow/geometry"  # QSettings key for saved window geometry
+
+
+@dataclass
+class _QueueEntry:
+    """One row of the run queue, held in memory by the ProcedureWindow.
+
+    Pairs the procedure spec with its captured parameters, filename prefix, and
+    a lifecycle ``status``. The built ``proc`` instance is kept for pending
+    entries so the Orchestrator queue can be rebuilt from the GUI's entries
+    without re-reading the form; it is ``None`` for entries restored as done.
+    """
+
+    cls: type[BaseProcedure]
+    params: dict[str, Any]
+    sample_info: dict[str, str]
+    data_dir: str
+    file_prefix: str = ""
+    status: str = STATUS_PENDING
+    proc: BaseProcedure | None = field(default=None, repr=False)
 
 
 def _discover_procedures() -> list[type[BaseProcedure]]:
@@ -141,6 +169,7 @@ class ProcedureWindow(QMainWindow):
         get_sample_info: Callable[[], dict[str, str]],
         get_data_dir: Callable[[], str],
         parent: QWidget | None = None,
+        initial_session: SessionState | None = None,
     ) -> None:
         super().__init__(parent)
         self._station = station
@@ -149,8 +178,14 @@ class ProcedureWindow(QMainWindow):
         self._get_data_dir = get_data_dir
 
         self._procedures: list[type[BaseProcedure]] = _discover_procedures()
-        # Queue items: list of (procedure_class, params_dict, sample_info_dict, data_dir, file_prefix)
-        self._queue: list[tuple[type[BaseProcedure], dict, dict, str, str]] = []
+        # Run queue as _QueueEntry objects (spec + params + prefix + status).
+        self._queue: list[_QueueEntry] = []
+        # Per-procedure last-typed flat parameter text, keyed by procedure name.
+        self._procedure_params: dict[str, dict[str, str]] = {}
+        self._current_procedure_name: str = ""
+        # True while a queued run is executing, so procedure_finished advances
+        # the queue's per-item status.
+        self._queue_running = False
         # Widgets for the parameter form (rebuilt on procedure selection)
         self._param_inputs: dict[str, QLineEdit] = {}
         # Sweep-axis editor for the selected procedure, if it declares one
@@ -168,6 +203,9 @@ class ProcedureWindow(QMainWindow):
 
         if self._procedures:
             self._on_procedure_selected(0)
+
+        if initial_session is not None:
+            self._restore_session(initial_session)
 
     # ------------------------------------------------------------------
     # UI construction
@@ -471,7 +509,7 @@ class ProcedureWindow(QMainWindow):
         run_queue_btn.setProperty("class", BTN_CLASS_PRIMARY)
         run_queue_btn.setIcon(qta.icon("fa5s.forward", color=TEXT_ON_ACCENT))
         run_queue_btn.setToolTip("Run all queued procedures in order")
-        run_queue_btn.clicked.connect(self._orchestrator.run_queue)
+        run_queue_btn.clicked.connect(self._on_run_queue)
         btn_row.addWidget(up_btn)
         btn_row.addWidget(down_btn)
         btn_row.addWidget(remove_btn)
@@ -580,10 +618,15 @@ class ProcedureWindow(QMainWindow):
         """
         if index < 0 or index >= len(self._procedures):
             return
+        # Preserve the outgoing procedure's typed values before rebuilding.
+        self._cache_current_params()
         cls = self._procedures[index]
         param_widget = self._build_param_form(cls)
         self._param_scroll.setWidget(param_widget)
         self._populate_axis_selectors(cls)
+        self._current_procedure_name = getattr(cls, "name", cls.__name__)
+        # Re-apply any previously-typed flat values for the incoming procedure.
+        self._apply_cached_params(self._current_procedure_name)
 
     def _collect_params(self) -> tuple[dict, dict, str, str] | None:
         """Read and validate all form inputs.
@@ -668,17 +711,21 @@ class ProcedureWindow(QMainWindow):
         index = self._proc_selector.currentIndex()
         cls = self._procedures[index]
 
-        self._queue.append((cls, param_values, sample_info, data_dir, file_prefix))
-
-        summary_parts = self._queue_summary_parts(cls, param_values)
-        label = f"[{file_prefix}] {cls.name}" if file_prefix else cls.name
-        summary = f"{label} ({', '.join(summary_parts)})"
-        item = QListWidgetItem(f"{len(self._queue)}. {summary}")
-        self._queue_list.addItem(item)
-
         # Construct through the shared _build_procedure_instance path (reusing the
         # params we already collected) instead of re-implementing cls(...) here.
         proc = self._build_procedure_instance(result)
+        entry = _QueueEntry(
+            cls=cls,
+            params=param_values,
+            sample_info=sample_info,
+            data_dir=data_dir,
+            file_prefix=file_prefix,
+            status=STATUS_PENDING,
+            proc=proc,
+        )
+        self._queue.append(entry)
+        self._refresh_queue_list()
+
         if proc is not None:
             self._orchestrator.queue_procedure(proc)
 
@@ -699,6 +746,10 @@ class ProcedureWindow(QMainWindow):
             "Abort the running procedure? The data file will be saved as-is.",
         )
         if answer == QMessageBox.StandardButton.Yes:
+            # Record the aborted queue item as failed (abort_procedure does not
+            # emit procedure_finished; it goes IDLE and auto-runs the next item).
+            if self._queue_running:
+                self._advance_queue_status(STATUS_FAILED)
             self._orchestrator.abort_procedure()
 
     def _on_progress(self, fraction: float) -> None:
@@ -720,9 +771,13 @@ class ProcedureWindow(QMainWindow):
         self._plot2.redraw(self._datapoints)
 
     def _on_procedure_finished(self) -> None:
-        """Reset progress bar and clear the active procedure reference."""
+        """Reset progress bar, clear the active procedure, advance the queue."""
         self._progress_bar.setValue(100)
         self._active_procedure = None
+        # A queued run finished cleanly: mark it done and promote the next item
+        # (the Orchestrator auto-chains run_queue() right after this signal).
+        if self._queue_running:
+            self._advance_queue_status(STATUS_DONE)
 
     def _on_state_changed(self, state_name: str) -> None:
         """Show/hide the emergency-acknowledge button based on state.
@@ -776,12 +831,60 @@ class ProcedureWindow(QMainWindow):
     # Queue management helpers
     # ------------------------------------------------------------------
 
+    def _on_run_queue(self) -> None:
+        """Start the queue run, marking the first pending item as running.
+
+        Wraps ``Orchestrator.run_queue`` so the queue's per-item status reflects
+        execution: the first pending entry becomes ``running`` and, from here on,
+        ``procedure_finished`` advances the status (see ``_advance_queue_status``).
+        """
+        first_pending = next(
+            (e for e in self._queue if e.status == STATUS_PENDING), None
+        )
+        if first_pending is None:
+            return
+        self._queue_running = True
+        first_pending.status = STATUS_RUNNING
+        self._refresh_queue_list()
+        self._orchestrator.run_queue()
+
+    def _advance_queue_status(self, final_status: str) -> None:
+        """Finalise the running entry and promote the next pending one."""
+        for entry in self._queue:
+            if entry.status == STATUS_RUNNING:
+                entry.status = final_status
+                break
+        next_pending = next(
+            (e for e in self._queue if e.status == STATUS_PENDING), None
+        )
+        if next_pending is not None:
+            next_pending.status = STATUS_RUNNING
+        else:
+            self._queue_running = False
+        self._refresh_queue_list()
+
+    def _resync_orchestrator_queue(self) -> None:
+        """Rebuild the Orchestrator's pending queue from this window's entries.
+
+        The GUI queue is the source of truth. After a reorder or removal, the
+        Orchestrator's not-yet-started queue is rebuilt in-place from the pending
+        entries (each holds its built ``proc``), so it always matches the GUI —
+        removing the old index-alignment fragility. The currently-running item
+        was already popped by ``run_queue`` and is not re-added.
+        """
+        self._orchestrator._procedure_queue[:] = [
+            entry.proc
+            for entry in self._queue
+            if entry.status == STATUS_PENDING and entry.proc is not None
+        ]
+
     def _queue_move_up(self) -> None:
         """Move the selected queue item up by one position."""
         row = self._queue_list.currentRow()
         if row <= 0:
             return
         self._queue[row - 1], self._queue[row] = self._queue[row], self._queue[row - 1]
+        self._resync_orchestrator_queue()
         self._refresh_queue_list()
         self._queue_list.setCurrentRow(row - 1)
 
@@ -791,6 +894,7 @@ class ProcedureWindow(QMainWindow):
         if row < 0 or row >= len(self._queue) - 1:
             return
         self._queue[row], self._queue[row + 1] = self._queue[row + 1], self._queue[row]
+        self._resync_orchestrator_queue()
         self._refresh_queue_list()
         self._queue_list.setCurrentRow(row + 1)
 
@@ -800,17 +904,23 @@ class ProcedureWindow(QMainWindow):
         if row < 0 or row >= len(self._queue):
             return
         self._queue.pop(row)
-        self._orchestrator._procedure_queue.pop(row)
+        self._resync_orchestrator_queue()
         self._refresh_queue_list()
 
+    def _entry_summary(self, entry: _QueueEntry) -> str:
+        """Return the one-line queue summary for a queue entry (prefix-aware)."""
+        summary_parts = self._queue_summary_parts(entry.cls, entry.params)
+        label = f"[{entry.file_prefix}] {entry.cls.name}" if entry.file_prefix else entry.cls.name
+        return f"{label} ({', '.join(summary_parts)})"
+
     def _refresh_queue_list(self) -> None:
-        """Rebuild the QListWidget from self._queue."""
+        """Rebuild the QListWidget from self._queue, annotating non-pending status."""
         self._queue_list.clear()
-        for idx, (cls, params, _sample, _dir, file_prefix) in enumerate(self._queue):
-            summary_parts = self._queue_summary_parts(cls, params)
-            label = f"[{file_prefix}] {cls.name}" if file_prefix else cls.name
-            summary = f"{label} ({', '.join(summary_parts)})"
-            self._queue_list.addItem(f"{idx + 1}. {summary}")
+        for idx, entry in enumerate(self._queue):
+            label = f"{idx + 1}. {self._entry_summary(entry)}"
+            if entry.status != STATUS_PENDING:
+                label = f"{label}  — {entry.status}"
+            self._queue_list.addItem(QListWidgetItem(label))
 
     @staticmethod
     def _queue_summary_parts(cls: type[BaseProcedure], params: dict) -> list[str]:
@@ -841,6 +951,144 @@ class ProcedureWindow(QMainWindow):
         return [f"{k}={params[k]}" for k in sweep_keys[:3]]
 
     # ------------------------------------------------------------------
+    # Session persistence (procedure selection, params, queue)
+    # ------------------------------------------------------------------
+
+    def _cache_current_params(self) -> None:
+        """Store the current form's raw flat-field text under the procedure name.
+
+        Raw text (not validated values) is cached so persistence never triggers
+        the "Invalid Parameter" dialog. Sweep-axis widget state is not cached to
+        the form (queue entries preserve full params); only the flat
+        ``_param_inputs`` are restored to the live form.
+        """
+        if self._current_procedure_name and self._param_inputs:
+            self._procedure_params[self._current_procedure_name] = {
+                name: field.text() for name, field in self._param_inputs.items()
+            }
+
+    def _apply_cached_params(self, procedure_name: str) -> None:
+        """Fill the current form's flat fields with cached values, if any."""
+        cached = self._procedure_params.get(procedure_name)
+        if not cached:
+            return
+        for name, value in cached.items():
+            field = self._param_inputs.get(name)
+            if field is not None:
+                field.setText(str(value))
+
+    def _procedure_by_name(self, name: str) -> type[BaseProcedure] | None:
+        """Return the discovered procedure class whose name matches, or None."""
+        for cls in self._procedures:
+            if getattr(cls, "name", cls.__name__) == name:
+                return cls
+        return None
+
+    def _select_procedure_by_name(self, name: str) -> None:
+        """Select ``name`` in the dropdown and rebuild its form."""
+        for i, cls in enumerate(self._procedures):
+            if getattr(cls, "name", cls.__name__) == name:
+                if self._proc_selector.currentIndex() == i:
+                    self._on_procedure_selected(i)  # signal won't fire; rebuild directly
+                else:
+                    self._proc_selector.setCurrentIndex(i)  # fires _on_procedure_selected
+                return
+
+    def _build_entry_procedure(self, entry: _QueueEntry) -> BaseProcedure | None:
+        """Build a procedure instance from a queue entry's stored values."""
+        try:
+            return entry.cls(
+                station=self._station,
+                sample_info=entry.sample_info,
+                data_directory=entry.data_dir,
+                file_prefix=entry.file_prefix,
+                **entry.params,
+            )
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "session: could not rebuild queued %s: %s", entry.cls.name, exc
+            )
+            return None
+
+    def _restore_queue(self, items: list[QueueItemState]) -> None:
+        """Rebuild the queue from persisted items, re-arming pending ones."""
+        self._queue.clear()
+        self._orchestrator._procedure_queue.clear()
+        for item in items:
+            cls = self._procedure_by_name(item.procedure)
+            if cls is None:
+                logger.warning(
+                    "session: unknown procedure %r in saved queue; skipping",
+                    item.procedure,
+                )
+                continue
+            # A "running" item never finished (app closed mid-run) — treat as pending.
+            status = (
+                STATUS_PENDING
+                if item.status in (STATUS_PENDING, STATUS_RUNNING)
+                else item.status
+            )
+            entry = _QueueEntry(
+                cls=cls,
+                params=dict(item.params),
+                sample_info=dict(item.sample_info),
+                data_dir=item.data_dir,
+                file_prefix=item.file_prefix,
+                status=status,
+            )
+            if status == STATUS_PENDING:
+                entry.proc = self._build_entry_procedure(entry)
+                if entry.proc is not None:
+                    self._orchestrator.queue_procedure(entry.proc)
+            self._queue.append(entry)
+        self._refresh_queue_list()
+
+    def _restore_session(self, session_state: SessionState) -> None:
+        """Apply a loaded session to the procedure form and queue."""
+        self._procedure_params = {
+            name: dict(values)
+            for name, values in session_state.procedure_params.items()
+        }
+        # Suppress caching the current default values over the restored ones
+        # while we switch the selector.
+        self._current_procedure_name = ""
+        if session_state.selected_procedure:
+            self._select_procedure_by_name(session_state.selected_procedure)
+        else:
+            self._on_procedure_selected(self._proc_selector.currentIndex())
+        self._restore_queue(session_state.queue)
+
+    def export_session_state(self, state: SessionState) -> None:
+        """Write this window's selection, params, and queue into ``state``."""
+        self._cache_current_params()
+        state.selected_procedure = self._current_procedure_name
+        state.procedure_params = {
+            name: dict(values) for name, values in self._procedure_params.items()
+        }
+        state.queue = [
+            QueueItemState(
+                procedure=getattr(entry.cls, "name", entry.cls.__name__),
+                params=entry.params,
+                sample_info=entry.sample_info,
+                data_dir=entry.data_dir,
+                file_prefix=entry.file_prefix,
+                status=entry.status,
+            )
+            for entry in self._queue
+        ]
+
+    def reset_session(self) -> None:
+        """Clear the queue and cached params, resetting the form to defaults."""
+        self._queue.clear()
+        self._orchestrator._procedure_queue.clear()
+        self._queue_running = False
+        self._procedure_params.clear()
+        self._current_procedure_name = ""  # suppress caching stale values
+        self._refresh_queue_list()
+        if self._procedures:
+            self._on_procedure_selected(self._proc_selector.currentIndex())
+
+    # ------------------------------------------------------------------
     # Window geometry + lifecycle
     # ------------------------------------------------------------------
 
@@ -853,12 +1101,29 @@ class ProcedureWindow(QMainWindow):
         """
         settings = app_settings.get_settings()
         saved = settings.value(_GEOMETRY_KEY)
-        if saved is not None and self.restoreGeometry(saved):
+        if saved is not None and self.restoreGeometry(saved) and self._geometry_on_screen():
             return
+        # Fall back when there is no saved geometry, restore fails, or the
+        # geometry landed off-screen (monitor no longer attached).
         screen = QApplication.primaryScreen()
         if screen is not None:
             available = screen.availableGeometry()
-            self.resize(int(available.width() * 0.7), int(available.height() * 0.7))
+            width = int(available.width() * 0.7)
+            height = int(available.height() * 0.7)
+            self.resize(width, height)
+            self.move(
+                available.x() + (available.width() - width) // 2,
+                available.y() + (available.height() - height) // 2,
+            )
+
+    def _geometry_on_screen(self) -> bool:
+        """Return True if the window frame overlaps an attached screen enough to see."""
+        frame = self.frameGeometry()
+        for screen in QApplication.screens():
+            overlap = screen.availableGeometry().intersected(frame)
+            if overlap.width() >= 100 and overlap.height() >= 100:
+                return True
+        return False
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 (Qt override)
         """Persist the window geometry before the window closes.

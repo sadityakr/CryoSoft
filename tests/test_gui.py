@@ -15,6 +15,7 @@ config with no hardware. All 121 prior tests must pass before this file is run.
 """
 
 import logging
+from pathlib import Path
 
 import pytest
 from PyQt6.QtCore import Qt, QSettings
@@ -23,14 +24,18 @@ from PyQt6.QtWidgets import (
     QFormLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSplitter,
     QStackedWidget,
 )
 
+from cryosoft.core.config_catalog import ConfigCatalog
 from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 from cryosoft.core.station import build_station
+from cryosoft.gui import app_settings as _app_settings
+from cryosoft.gui import session as session_store
 from cryosoft.gui.instrument_panel import InstrumentPanel
 from cryosoft.gui.monitor_window import MonitorWindow
 from cryosoft.gui.notification_banner import NotificationBanner
@@ -72,6 +77,11 @@ def isolated_settings(tmp_path, monkeypatch):
         return QSettings(str(ini_path), QSettings.Format.IniFormat)
 
     monkeypatch.setattr(app_settings, "get_settings", _fake_get_settings)
+
+    # Same seam for the JSON session file: redirect it into tmp_path so a pytest
+    # run never reads or overwrites the user's real last_session.json in AppData.
+    session_path = tmp_path / "last_session.json"
+    monkeypatch.setattr(app_settings, "session_file_path", lambda: session_path)
     return ini_path
 
 
@@ -442,7 +452,7 @@ def test_add_to_queue_captures_current_file_prefix(procedure_win, qtbot):
     procedure_win._file_prefix_input.setText("run_b")
     qtbot.mouseClick(add_btn, Qt.MouseButton.LeftButton)
 
-    prefixes = [entry[4] for entry in procedure_win._queue]
+    prefixes = [entry.file_prefix for entry in procedure_win._queue]
     assert prefixes[-2:] == ["run_a", "run_b"]
     assert "run_a" in procedure_win._queue_list.item(len(prefixes) - 2).text()
     assert "run_b" in procedure_win._queue_list.item(len(prefixes) - 1).text()
@@ -456,10 +466,10 @@ def test_blank_file_prefix_omitted_from_queue_label(procedure_win, qtbot):
     procedure_win._file_prefix_input.setText("")
     qtbot.mouseClick(add_btn, Qt.MouseButton.LeftButton)
 
-    cls, _params, _sample, _dir, file_prefix = procedure_win._queue[-1]
-    assert file_prefix == ""
+    entry = procedure_win._queue[-1]
+    assert entry.file_prefix == ""
     assert "[" not in procedure_win._queue_list.item(procedure_win._queue_list.count() - 1).text()
-    assert cls.name in procedure_win._queue_list.item(procedure_win._queue_list.count() - 1).text()
+    assert entry.cls.name in procedure_win._queue_list.item(procedure_win._queue_list.count() - 1).text()
 
 
 def test_run_now_passes_file_prefix_to_procedure_instance(procedure_win, qtbot):
@@ -523,9 +533,14 @@ def test_monitor_default_trend_panels_exist_and_gridded(monitor_win):
 
 
 def test_monitor_has_no_view_menu(monitor_win):
-    """Nothing in the fixed quadrant layout can be hidden/closed, so there is no View menu."""
+    """Nothing in the fixed quadrant layout can be hidden/closed, so there is no View menu.
+
+    The Session menu (state management) is a separate, always-present menu; the
+    point preserved here is that the dock-era View menu stays gone.
+    """
     menu_titles = {action.text() for action in monitor_win.menuBar().actions()}
-    assert menu_titles == {"Procedures"}
+    assert "View" not in menu_titles
+    assert "Procedures" in menu_titles
 
 
 def test_monitor_trends_grid_arranges_in_ceil_sqrt_grid(monitor_win):
@@ -908,3 +923,271 @@ def test_status_bar_label_effective_color_flips(themed_app, station, orchestrato
 
     orchestrator.state_changed.emit(OrchestratorState.IDLE.value)
     assert win._state_label.palette().windowText().color().name() == TEXT_PRIMARY
+
+
+# ── Session persistence tests ──────────────────────────────────────────────────
+# The autouse isolated_settings fixture redirects both QSettings and the JSON
+# session file into tmp_path, so these never touch the user's real AppData.
+
+
+def _sample_stub():
+    return lambda: {"sample_name": "s", "sample_id": "id", "comments": ""}
+
+
+def _data_dir_stub():
+    return lambda: "C:/CryoData"
+
+
+def test_monitor_window_has_session_menu(monitor_win):
+    """The menu bar has a leftmost 'Session' menu."""
+    titles = [a.text() for a in monitor_win.menuBar().actions()]
+    assert "Session" in titles
+    assert titles[0] == "Session"
+
+
+def test_monitor_restores_sample_fields_from_session(station, orchestrator, qtbot, tmp_path):
+    """Sample Info fields are populated from a saved session on open."""
+    session_store.save(
+        session_store.SessionState(
+            sample_name="Si_001", sample_id="S2024-01",
+            comments="cooldown 2", data_dir="D:/runs",
+        ),
+        tmp_path / "last_session.json",
+    )
+    win = MonitorWindow(station, orchestrator)
+    qtbot.addWidget(win)
+    assert win._sample_name_input.text() == "Si_001"
+    assert win._sample_id_input.text() == "S2024-01"
+    assert win._comments_input.toPlainText() == "cooldown 2"
+    assert win._data_dir_input.text() == "D:/runs"
+
+
+def test_monitor_saves_session_on_close(monitor_win, tmp_path):
+    """Closing the window persists the current Sample Info to the session file."""
+    monitor_win._sample_name_input.setText("SampleZ")
+    monitor_win._data_dir_input.setText("E:/data")
+    monitor_win.close()
+    loaded = session_store.load(tmp_path / "last_session.json")
+    assert loaded.sample_name == "SampleZ"
+    assert loaded.data_dir == "E:/data"
+
+
+def test_new_session_clears_fields(monitor_win, monkeypatch):
+    """New Session (confirmed) resets the Sample Info fields to defaults."""
+    monitor_win._sample_name_input.setText("ToClear")
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes
+    )
+    monitor_win._on_new_session()
+    assert monitor_win._sample_name_input.text() == ""
+    assert monitor_win._data_dir_input.text() == "C:/CryoData"
+
+
+def test_procedure_window_restores_selection_and_params(station, orchestrator, qtbot):
+    """A ProcedureWindow built with a session restores its selection and params."""
+    info, ddir = _sample_stub(), _data_dir_stub()
+    win = ProcedureWindow(station, orchestrator, info, ddir)
+    qtbot.addWidget(win)
+    proc_name = win._current_procedure_name
+    param_key = next(iter(win._param_inputs))
+    win._param_inputs[param_key].setText("42")
+
+    state = session_store.SessionState()
+    win.export_session_state(state)
+    assert state.selected_procedure == proc_name
+    assert state.procedure_params[proc_name][param_key] == "42"
+
+    win2 = ProcedureWindow(station, orchestrator, info, ddir, initial_session=state)
+    qtbot.addWidget(win2)
+    assert win2._proc_selector.currentText() == proc_name
+    assert win2._param_inputs[param_key].text() == "42"
+
+
+def test_procedure_window_exports_and_restores_queue(station, orchestrator, qtbot):
+    """A queued procedure round-trips through a session and is re-armed on restore."""
+    info, ddir = _sample_stub(), _data_dir_stub()
+    win = ProcedureWindow(station, orchestrator, info, ddir)
+    qtbot.addWidget(win)
+    win._on_add_to_queue()
+    assert win._queue_list.count() == 1, "default form params should be valid to queue"
+
+    state = session_store.SessionState()
+    win.export_session_state(state)
+    assert len(state.queue) == 1
+
+    win2 = ProcedureWindow(station, orchestrator, info, ddir, initial_session=state)
+    qtbot.addWidget(win2)
+    assert win2._queue_list.count() == 1
+    assert len(orchestrator._procedure_queue) == 1
+
+
+def test_procedure_window_skips_unknown_procedure_in_queue(station, orchestrator, qtbot):
+    """A saved queue item for an unknown procedure is skipped, not fatal."""
+    info, ddir = _sample_stub(), _data_dir_stub()
+    state = session_store.SessionState(
+        queue=[session_store.QueueItemState(procedure="NoSuchProcedure")]
+    )
+    win = ProcedureWindow(station, orchestrator, info, ddir, initial_session=state)
+    qtbot.addWidget(win)
+    assert win._queue_list.count() == 0
+
+
+def test_run_queue_marks_running_then_done(station, orchestrator, qtbot, monkeypatch):
+    """Running the queue marks items running, then done as each finishes."""
+    info, ddir = _sample_stub(), _data_dir_stub()
+    win = ProcedureWindow(station, orchestrator, info, ddir)
+    qtbot.addWidget(win)
+    win._on_add_to_queue()
+    win._on_add_to_queue()
+    assert [e.status for e in win._queue] == ["pending", "pending"]
+
+    # Stub the actual run: exercise only the GUI's per-item status logic.
+    monkeypatch.setattr(orchestrator, "run_queue", lambda: None)
+    win._on_run_queue()
+    assert win._queue[0].status == "running"
+    assert win._queue_running is True
+
+    orchestrator.procedure_finished.emit()
+    assert win._queue[0].status == "done"
+    assert win._queue[1].status == "running"
+
+    orchestrator.procedure_finished.emit()
+    assert win._queue[1].status == "done"
+    assert win._queue_running is False
+
+
+def test_abort_marks_running_item_failed(station, orchestrator, qtbot, monkeypatch):
+    """Aborting a queued run marks that item failed and promotes the next."""
+    info, ddir = _sample_stub(), _data_dir_stub()
+    win = ProcedureWindow(station, orchestrator, info, ddir)
+    qtbot.addWidget(win)
+    win._on_add_to_queue()
+    win._on_add_to_queue()
+    monkeypatch.setattr(orchestrator, "run_queue", lambda: None)
+    monkeypatch.setattr(orchestrator, "abort_procedure", lambda: None)
+    win._on_run_queue()
+    assert win._queue[0].status == "running"
+
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes
+    )
+    win._on_abort()
+    assert win._queue[0].status == "failed"
+    assert win._queue[1].status == "running"
+
+
+def test_queue_remove_resyncs_orchestrator(station, orchestrator, qtbot):
+    """Removing a pending queue item keeps the Orchestrator queue in sync."""
+    info, ddir = _sample_stub(), _data_dir_stub()
+    win = ProcedureWindow(station, orchestrator, info, ddir)
+    qtbot.addWidget(win)
+    win._on_add_to_queue()
+    win._on_add_to_queue()
+    assert len(orchestrator._procedure_queue) == 2
+    win._queue_list.setCurrentRow(0)
+    win._queue_remove()
+    assert win._queue_list.count() == 1
+    assert len(orchestrator._procedure_queue) == 1
+
+
+# ── Config management + geometry tests ─────────────────────────────────────────
+
+def _catalog(tmp_path):
+    return ConfigCatalog(_app_settings.shipped_config_dir(), tmp_path / "user")
+
+
+def test_monitor_no_config_menu_without_catalog(monitor_win):
+    """Without a catalog, no Config menu appears (backward compatible)."""
+    titles = [a.text() for a in monitor_win.menuBar().actions()]
+    assert "Config" not in titles
+
+
+def test_monitor_has_config_menu_with_catalog(station, orchestrator, qtbot, tmp_path):
+    """A catalog wires in a Config menu listing the shipped configs."""
+    win = MonitorWindow(station, orchestrator, catalog=_catalog(tmp_path))
+    qtbot.addWidget(win)
+    titles = [a.text() for a in win.menuBar().actions()]
+    assert "Config" in titles
+
+
+def test_select_config_confirmed_triggers_restart(station, orchestrator, qtbot, tmp_path, monkeypatch):
+    """Confirming a config switch persists it and calls the restart callback."""
+    restarted = []
+    catalog = _catalog(tmp_path)
+    win = MonitorWindow(
+        station, orchestrator, catalog=catalog,
+        active_config_path="/nowhere/active",
+        restart_callback=lambda: restarted.append(True),
+    )
+    qtbot.addWidget(win)
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes
+    )
+    target = str(catalog.list_configs()[0].path)
+    win._on_select_config(target)
+    assert restarted == [True]
+    assert Path(_app_settings.config_active_path()).resolve() == Path(target).resolve()
+
+
+def test_select_config_cancelled_does_not_restart(station, orchestrator, qtbot, tmp_path, monkeypatch):
+    """Declining the switch warning does not restart."""
+    restarted = []
+    catalog = _catalog(tmp_path)
+    win = MonitorWindow(
+        station, orchestrator, catalog=catalog,
+        active_config_path="/nowhere/active",
+        restart_callback=lambda: restarted.append(True),
+    )
+    qtbot.addWidget(win)
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.No
+    )
+    win._on_select_config(str(catalog.list_configs()[0].path))
+    assert restarted == []
+
+
+def test_startup_candidates_end_with_sim_and_dedup(tmp_path, monkeypatch):
+    """The candidate chain always ends with sim_cryostat and has no duplicates."""
+    from cryosoft import main as app_main
+
+    catalog = _catalog(tmp_path)
+    monkeypatch.setattr(_app_settings, "config_active_path", lambda: None)
+    candidates = app_main._startup_candidates(catalog)
+    assert Path(candidates[-1]).name == "sim_cryostat"
+    assert len(candidates) == len(set(candidates))
+
+
+def test_startup_candidates_inserts_shipped_baseline_for_user_config(tmp_path, monkeypatch):
+    """An active user config is followed by its shipped baseline, then sim."""
+    from cryosoft import main as app_main
+
+    catalog = _catalog(tmp_path)
+    entry = catalog.fork_shipped("sim_cryostat", "sim_cryostat")
+    monkeypatch.setattr(_app_settings, "config_active_path", lambda: str(entry.path))
+    candidates = app_main._startup_candidates(catalog)
+    assert candidates[0] == str(entry.path)
+    shipped_sim = str(_app_settings.shipped_config_dir() / "sim_cryostat")
+    assert shipped_sim in candidates
+
+
+def test_startup_warning_shown_in_banner(station, orchestrator, qtbot, tmp_path):
+    """A startup fallback warning is surfaced in the notification banner."""
+    win = MonitorWindow(
+        station, orchestrator, catalog=_catalog(tmp_path),
+        startup_warning="active config was invalid",
+    )
+    qtbot.addWidget(win)
+    assert not win._banner.isHidden()
+
+
+def test_offscreen_saved_geometry_recenters(station, orchestrator, qtbot):
+    """A saved geometry that lands off-screen is discarded for a centered one."""
+    win = MonitorWindow(station, orchestrator)
+    qtbot.addWidget(win)
+    win.move(-10000, -10000)
+    assert not win._geometry_on_screen()
+    _app_settings.get_settings().setValue("MonitorWindow/geometry", win.saveGeometry())
+
+    win2 = MonitorWindow(station, orchestrator)
+    qtbot.addWidget(win2)
+    assert win2._geometry_on_screen()

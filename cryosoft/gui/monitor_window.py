@@ -40,10 +40,12 @@ from __future__ import annotations
 import json
 import logging
 import math
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 import qtawesome as qta
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QAction, QCloseEvent
+from PyQt6.QtGui import QAction, QActionGroup, QCloseEvent
 from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -54,6 +56,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -68,6 +71,7 @@ from PyQt6.QtWidgets import (
 from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 from cryosoft.core.station import Station
 from cryosoft.gui import app_settings  # import the module (not the function) so tests can monkeypatch the factory
+from cryosoft.gui import session as session_store  # module import keeps save/load monkeypatchable
 from cryosoft.gui.instrument_panel import InstrumentPanel
 from cryosoft.gui.lifecycle_toggle import LifecycleToggleButton
 from cryosoft.gui.monitor_history import MonitorHistory
@@ -86,6 +90,11 @@ from cryosoft.gui.theme import (
     TEXT_PRIMARY,
 )
 from cryosoft.gui.trend_plot_panel import TrendPlotPanel
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from cryosoft.core.config_catalog import ConfigCatalog
 
 logger = logging.getLogger(__name__)
 
@@ -197,16 +206,37 @@ class MonitorWindow(QMainWindow):
         station: Station,
         orchestrator: Orchestrator,
         parent: QWidget | None = None,
+        catalog: ConfigCatalog | None = None,
+        active_config_path: str | None = None,
+        restart_callback: Callable[[], None] | None = None,
+        startup_warning: str | None = None,
     ) -> None:
         super().__init__(parent)
         self._station = station
         self._orchestrator = orchestrator
         self._procedure_window = None  # lazily created
 
+        # Config management (optional — absent in unit tests that build the
+        # window without a catalog). The Config menu is only built when a
+        # catalog is provided.
+        self._catalog = catalog
+        self._active_config_path = active_config_path
+        self._restart_callback = restart_callback
+        self._startup_warning = startup_warning
+        self._config_menu = None
+        self._config_editor = None
+
+        # Persistent session *content* (sample metadata, procedure params, run
+        # queue) — a second persistence tier separate from the QSettings window
+        # state. Loaded here and applied to the fields once they exist; re-saved
+        # on close and by the Session menu.
+        self._session = session_store.load(app_settings.session_file_path())
+
         self.setWindowTitle("CryoSoft — Monitor")
         self._restore_geometry()
 
         self._build_ui()
+        self._apply_session_fields()
         self._build_menu()
         self._connect_signals()
         self._restore_monitor_state()
@@ -220,6 +250,13 @@ class MonitorWindow(QMainWindow):
         if self._log_handler not in cryosoft_logger.handlers:
             cryosoft_logger.addHandler(self._log_handler)
 
+        # Surface a startup config fallback (a bad active config was skipped).
+        if self._startup_warning:
+            self._banner.show_message(
+                f"Config fallback in effect — {self._startup_warning}",
+                BANNER_SEVERITY_WARNING,
+            )
+
     # ------------------------------------------------------------------
     # Menu bar
     # ------------------------------------------------------------------
@@ -232,6 +269,25 @@ class MonitorWindow(QMainWindow):
         via the button inside the Trends quadrant itself.
         """
         menu_bar = self.menuBar()
+
+        # Session menu is added first so it sits leftmost (menu order follows
+        # addMenu() call order).
+        session_menu = menu_bar.addMenu("Session")
+        new_session_action = QAction("New Session", self)
+        new_session_action.setToolTip(
+            "Clear sample info, parameters, and queue and start a fresh session"
+        )
+        new_session_action.triggered.connect(self._on_new_session)
+        session_menu.addAction(new_session_action)
+        save_session_action = QAction("Save Session Now", self)
+        save_session_action.setToolTip("Write the current session to disk immediately")
+        save_session_action.triggered.connect(self._save_session)
+        session_menu.addAction(save_session_action)
+
+        # Config menu (only when config management is wired in).
+        if self._catalog is not None:
+            self._config_menu = menu_bar.addMenu("Config")
+            self._populate_config_menu()
 
         proc_menu = menu_bar.addMenu("Procedures")
         open_action = QAction("Open Procedures…", self)
@@ -248,6 +304,7 @@ class MonitorWindow(QMainWindow):
                 self._orchestrator,
                 get_sample_info=self.get_sample_info,
                 get_data_dir=self.get_data_dir,
+                initial_session=self._session,
             )
         self._procedure_window.show()
         self._procedure_window.raise_()
@@ -846,6 +903,144 @@ class MonitorWindow(QMainWindow):
         return self._data_dir_input.text().strip() or "C:/CryoData"
 
     # ------------------------------------------------------------------
+    # Session persistence (content tier: sample info, procedure params, queue)
+    # ------------------------------------------------------------------
+
+    def _apply_session_fields(self) -> None:
+        """Populate the Sample Info fields from the loaded session.
+
+        Called once after ``_build_ui()`` (the fields must exist). Only the
+        MonitorWindow-owned fields are applied here; the procedure selection,
+        parameters, and queue held in ``self._session`` are applied by the
+        ProcedureWindow when it opens.
+        """
+        state = self._session
+        self._sample_name_input.setText(state.sample_name)
+        self._sample_id_input.setText(state.sample_id)
+        self._comments_input.setPlainText(state.comments)
+        self._data_dir_input.setText(state.data_dir or "C:/CryoData")
+
+    def _collect_session_state(self) -> session_store.SessionState:
+        """Build a SessionState from the current UI, preserving procedure data.
+
+        The Sample Info fields are read live. The procedure selection,
+        parameters, and queue come from the open ProcedureWindow if there is
+        one; otherwise the values loaded at startup are preserved unchanged.
+        """
+        info = self.get_sample_info()
+        state = session_store.SessionState(
+            sample_name=info["sample_name"],
+            sample_id=info["sample_id"],
+            comments=info["comments"],
+            data_dir=self.get_data_dir(),
+            selected_procedure=self._session.selected_procedure,
+            procedure_params=self._session.procedure_params,
+            queue=self._session.queue,
+        )
+        if self._procedure_window is not None:
+            self._procedure_window.export_session_state(state)
+        return state
+
+    def _save_session(self) -> None:
+        """Persist the current session to disk, tolerating write failures."""
+        self._session = self._collect_session_state()
+        try:
+            session_store.save(self._session, app_settings.session_file_path())
+        except OSError as exc:
+            logger.warning("MonitorWindow: could not save session: %s", exc)
+
+    def _on_new_session(self) -> None:
+        """Clear the session to defaults after user confirmation."""
+        reply = QMessageBox.question(
+            self,
+            "New Session",
+            "Clear the current session (sample info, parameters, and queue) "
+            "and start fresh?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._session = session_store.SessionState()
+        self._apply_session_fields()
+        if self._procedure_window is not None:
+            self._procedure_window.reset_session()
+        self._save_session()
+
+    # ------------------------------------------------------------------
+    # Config management (menu + selection + restart)
+    # ------------------------------------------------------------------
+
+    def _populate_config_menu(self) -> None:
+        """(Re)build the Config menu: a checkable list plus the editor entry."""
+        if self._config_menu is None or self._catalog is None:
+            return
+        self._config_menu.clear()
+        group = QActionGroup(self)
+        group.setExclusive(True)
+        active = self._active_config_path
+        for entry in self._catalog.list_configs():
+            label = entry.name + ("  (read-only)" if entry.read_only else "")
+            action = QAction(label, self, checkable=True)
+            path_str = str(entry.path)
+            if active and Path(path_str).resolve() == Path(active).resolve():
+                action.setChecked(True)
+            action.triggered.connect(
+                lambda _checked, p=path_str: self._on_select_config(p)
+            )
+            group.addAction(action)
+            self._config_menu.addAction(action)
+
+        self._config_menu.addSeparator()
+        editor_action = QAction("Open Config Editor…", self)
+        editor_action.setToolTip("Edit device/instrument configs with validation")
+        editor_action.triggered.connect(self._on_open_config_editor)
+        self._config_menu.addAction(editor_action)
+
+    def _on_select_config(self, path: str) -> None:
+        """Switch the active config to ``path`` after a warning, then restart."""
+        if self._active_config_path and (
+            Path(path).resolve() == Path(self._active_config_path).resolve()
+        ):
+            return
+        reply = QMessageBox.question(
+            self,
+            "Switch Config",
+            f"Switch to config '{Path(path).name}'?\n\n"
+            "CryoSoft will save the current session and restart to load it.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            self._populate_config_menu()  # revert the radio selection
+            return
+        self._apply_active_config(path)
+
+    def _apply_active_config(self, path: str) -> None:
+        """Persist ``path`` as active, save the session, and request a restart."""
+        self._save_session()
+        app_settings.set_config_active_path(path)
+        if self._restart_callback is not None:
+            self._restart_callback()
+
+    def _on_open_config_editor(self) -> None:
+        """Open the config editor window (lazily created)."""
+        if self._catalog is None:
+            return
+        from cryosoft.gui.config_editor import ConfigEditorWindow
+
+        if self._config_editor is None:
+            self._config_editor = ConfigEditorWindow(
+                self._catalog,
+                active_config_path=self._active_config_path,
+                apply_callback=self._apply_active_config,
+                parent=self,
+            )
+        self._config_editor.show()
+        self._config_editor.raise_()
+        self._config_editor.activateWindow()
+
+    # ------------------------------------------------------------------
     # Internal slots
     # ------------------------------------------------------------------
 
@@ -987,8 +1182,12 @@ class MonitorWindow(QMainWindow):
         """
         settings = app_settings.get_settings()
         saved = settings.value(_GEOMETRY_KEY)
-        if saved is not None and self.restoreGeometry(saved):
+        if saved is not None and self.restoreGeometry(saved) and self._geometry_on_screen():
             return
+        # No saved geometry, a restore failure, or geometry that landed
+        # off-screen (e.g. saved on a monitor that is no longer attached — the
+        # usual cause of a window that "does not appear") all fall back to a
+        # centered default sized to the primary screen.
         screen = QApplication.primaryScreen()
         if screen is not None:
             available = screen.availableGeometry()
@@ -998,6 +1197,21 @@ class MonitorWindow(QMainWindow):
             x = available.x() + (available.width() - width) // 2
             y = available.y() + (available.height() - height) // 2
             self.move(x, y)
+
+    def _geometry_on_screen(self) -> bool:
+        """Return True if the window frame overlaps an attached screen enough to see.
+
+        ``restoreGeometry`` reports success even when it places the window on a
+        screen that no longer exists, so this guards against an invisible
+        window: it requires at least a 100x100 overlap with some screen's
+        available area.
+        """
+        frame = self.frameGeometry()
+        for screen in QApplication.screens():
+            overlap = screen.availableGeometry().intersected(frame)
+            if overlap.width() >= 100 and overlap.height() >= 100:
+                return True
+        return False
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 (Qt override)
         """Detach the log handler and persist geometry/splitter/trend state before closing.
@@ -1012,6 +1226,7 @@ class MonitorWindow(QMainWindow):
         Args:
             event: The Qt close event.
         """
+        self._save_session()
         logging.getLogger("cryosoft").removeHandler(self._log_handler)
         settings = app_settings.get_settings()
         settings.setValue(_GEOMETRY_KEY, self.saveGeometry())
