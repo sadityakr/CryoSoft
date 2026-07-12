@@ -151,6 +151,18 @@ class Orchestrator(QObject):
         stopped) and the Orchestrator degrades to ERROR instead of crashing
         the application.
         """
+        # A magnet in manual persistent mode means the user is driving its
+        # switch heater / PSU by hand; a procedure must not run over that.
+        persistent_magnets = self._station.persistent_mode_magnets()
+        if persistent_magnets:
+            msg = (
+                "Cannot start a procedure while a magnet is in persistent mode "
+                f"({', '.join(persistent_magnets)}). Disable persistent mode first."
+            )
+            logger.info("Blocked run_procedure: %s", msg)
+            self.action_blocked.emit(msg)
+            return
+
         manual_ramping = (
             self._state == OrchestratorState.RAMPING and self._procedure is None
         )

@@ -106,6 +106,24 @@ class Station:
         """
         return self._vi_registry[vi_name]
 
+    def persistent_mode_magnets(self) -> list[str]:
+        """Return the names of magnet VIs currently in manual persistent mode.
+
+        Persistent mode means the user is driving that magnet's switch heater
+        and PSU by hand, so the Orchestrator refuses to start a procedure while
+        any magnet is in it. VIs without the ``persistent_mode_enabled``
+        accessor (every non-persistent VI) are skipped.
+        """
+        names: list[str] = []
+        for vi_name, vi in self._virtual_instruments.items():
+            checker = getattr(vi, "persistent_mode_enabled", None)
+            try:
+                if callable(checker) and checker():
+                    names.append(vi_name)
+            except Exception:  # noqa: BLE001 — a flaky VI must not block the check
+                continue
+        return names
+
     def __getattr__(self, name: str) -> BaseVirtualInstrument:
         """Attribute-style access to VIs: ``station.magnet_x``.
 

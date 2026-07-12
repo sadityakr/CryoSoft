@@ -447,3 +447,29 @@ def test_queue_procedures(orchestrator, station, qtbot):
     assert orchestrator._procedure == proc2
     assert orchestrator._state != OrchestratorState.IDLE
     orchestrator.abort_procedure()
+
+
+def test_run_procedure_refused_when_magnet_in_persistent_mode(qtbot):
+    """A magnet left in manual persistent mode blocks a procedure from starting:
+    action_blocked fires, the Orchestrator stays IDLE, nothing is dispatched."""
+    # sim_real_cryostat has a persistent (switch-heater) magnet.
+    station = build_station("cryosoft/configs/sim_real_cryostat")
+    station.magnet_x.enable_persistent_mode()
+    orch = Orchestrator(station, tick_interval_ms=10)
+
+    blocked: list[str] = []
+    orch.action_blocked.connect(blocked.append)
+
+    procedure = MockProcedure(station)
+    orch.run_procedure(procedure)
+
+    assert orch._state == OrchestratorState.IDLE
+    assert orch._procedure is None
+    assert blocked and "persistent mode" in blocked[0]
+
+    # With the magnet returned to normal mode, the procedure starts.
+    station.magnet_x.switch_heater_on()
+    station.magnet_x.disable_persistent_mode()
+    orch.run_procedure(procedure)
+    assert orch._procedure is procedure
+    orch.abort_procedure()

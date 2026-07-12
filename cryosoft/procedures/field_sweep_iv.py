@@ -128,10 +128,10 @@ class FieldSweepIV(BaseProcedure):
         n_readings = int(self._params["n_readings"])
 
         system_targets = {
-            # persistent=False: keep the switch heater energised across the
-            # whole sweep (paid once here) instead of re-heating/re-cooling
-            # it on every sweep point. See standby() for the final park.
-            "magnet_x": {"target": self._sweep[0], "persistent": False},
+            # In normal (non-persistent) mode the magnet VI energises the switch
+            # heater once and keeps it on across the whole sweep, so the ramps
+            # here are plain field targets — no per-point re-heat/re-cool.
+            "magnet_x": {"target": self._sweep[0]},
             "temperature_vti": {"target": self._params["temperature"]},
         }
 
@@ -180,15 +180,15 @@ class FieldSweepIV(BaseProcedure):
         """Advance to the next field step.
 
         Returns:
-            ``({"magnet_x": {"target": next_field, "persistent": False}},
-            step_wait)`` or ``None`` when all sweep points have been measured.
+            ``({"magnet_x": {"target": next_field}}, step_wait)`` or ``None``
+            when all sweep points have been measured.
         """
         self._index += 1
         if self._index >= len(self._sweep):
             return None
 
         system_targets = {
-            "magnet_x": {"target": self._sweep[self._index], "persistent": False},
+            "magnet_x": {"target": self._sweep[self._index]},
         }
         return system_targets, float(self._params["step_wait"])
 
@@ -215,10 +215,10 @@ class FieldSweepIV(BaseProcedure):
     def standby(self) -> tuple[dict, dict, float]:
         """Close data file and park magnet at 0 T.
 
-        No ``"persistent"`` key here, so this ramp uses the default
-        (``persistent=True``): switch heater cools and the PSU parks at zero
-        once the field reaches 0 T, matching the old script's end-of-run
-        cleanup (zero field, then switch heater off).
+        Runs in normal mode, so the field ramps to 0 T with the switch heater
+        left on (procedures never enter persistent mode — that is a manual
+        Monitor-window action). The magnet ends at zero field, ready for the
+        next run.
 
         Returns:
             ``(system_targets, measurement_commands, 0.0)``

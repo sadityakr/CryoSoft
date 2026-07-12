@@ -53,8 +53,8 @@ virtual_instruments:
         - {max_current_A: 76.0,  rate_A_per_min: 6.0}
         - {max_current_A: 84.0,  rate_A_per_min: 2.4}
         - {max_current_A: 90.0,  rate_A_per_min: 1.2}
-      switch_heater_warmup_ticks: 60
-      switch_heater_cooldown_ticks: 60
+      switch_heater_warmup_s: 60
+      switch_heater_cooldown_s: 60
 
   temperature_vti:
     class: cryosoft.virtual_instruments.temperature.vti_temperature_controller.VTITemperatureControllerVI
