@@ -136,6 +136,8 @@ def build_param_tooltip(spec: ParamSpec) -> str:
 
 def build_form_layout(
     params: Mapping[str, ParamSpec],
+    label_overrides: Mapping[str, str] | None = None,
+    wrap: bool = False,
 ) -> tuple[QFormLayout, dict[str, QWidget]]:
     """Build a ``QFormLayout`` of input rows for a name -> ``ParamSpec`` mapping.
 
@@ -150,19 +152,44 @@ def build_form_layout(
     field and its form label. Each field's ``objectName`` is
     ``f"param_{param_name}_input"``.
 
+    ``label_overrides`` lets the caller show a *prettier* visible label than the
+    canonical parameter name WITHOUT changing the name the value is collected
+    under (or its HDF5 metadata key). The ProcedureWindow uses this for the
+    scanner/mux column, where the parameter names are ``mux_<route>`` (kept
+    prefixed so route names cannot collide with measurement/system params) but
+    the visible row label is the bare ``<route>``. Only the label changes; the
+    ``objectName``, the collected key, and the metadata key stay ``mux_<route>``.
+
     Args:
         params: A parameter-group mapping (name -> ``ParamSpec``).
+        label_overrides: Optional ``{param_name: visible_label}`` map; a param
+            present here uses ``visible_label`` (plus its unit) instead of its
+            canonical name for the row label. The unit suffix is still appended.
+        wrap: When True, sets ``WrapLongRows`` so a row too wide for its column
+            drops its field beneath the label (lowering the column's minimum
+            width). Default False keeps every row inline.
 
     Returns:
         ``(form, widgets)``: the populated ``QFormLayout`` (not yet attached to a
         parent widget) and a ``{param_name: QWidget}`` registry of its inputs.
     """
+    overrides = label_overrides or {}
     form = QFormLayout()
     form.setSpacing(4)
+    if wrap:
+        # WrapLongRows drops a row's field beneath its label only when the row
+        # is too narrow to fit both side by side. It leaves short rows inline
+        # but lowers the layout's minimum width to ~max(label, field) instead of
+        # label+field — letting a capped column compress without a horizontal
+        # scrollbar, and letting a wrapped field use the column's full width
+        # (so long values are no longer clipped). Used for the Measurement /
+        # scanner columns, which the ProcedureWindow must fit four-across.
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
     widgets: dict[str, QWidget] = {}
     for param_name, spec in params.items():
         unit = spec.unit
-        label_text = f"{param_name} ({unit}):" if unit else f"{param_name}:"
+        display_name = overrides.get(param_name, param_name)
+        label_text = f"{display_name} ({unit}):" if unit else f"{display_name}:"
         field = build_param_widget(param_name, spec)
         field.setObjectName(f"param_{param_name}_input")
         tooltip = build_param_tooltip(spec)
@@ -175,7 +202,9 @@ def build_form_layout(
     return form, widgets
 
 
-def build_group_box(group: ParamGroup) -> tuple[QGroupBox, dict[str, QWidget]]:
+def build_group_box(
+    group: ParamGroup, wrap: bool = False
+) -> tuple[QGroupBox, dict[str, QWidget]]:
     """Build one titled ``QGroupBox`` panel for a ``ParamGroup``.
 
     The box title is ``group.title``; its layout is the ``QFormLayout`` produced
@@ -183,13 +212,14 @@ def build_group_box(group: ParamGroup) -> tuple[QGroupBox, dict[str, QWidget]]:
 
     Args:
         group: The ``ParamGroup`` to render.
+        wrap: Forwarded to ``build_form_layout`` (WrapLongRows when True).
 
     Returns:
         ``(box, widgets)``: the ``QGroupBox`` and its ``{param_name: QWidget}``
         input registry (so the caller can read the fields back on collect).
     """
     box = QGroupBox(group.title)
-    form, widgets = build_form_layout(group.params)
+    form, widgets = build_form_layout(group.params, wrap=wrap)
     box.setLayout(form)
     return box, widgets
 

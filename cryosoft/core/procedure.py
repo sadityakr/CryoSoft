@@ -695,12 +695,17 @@ class SweepMeasureProcedure(BaseProcedure):
         # Static Sweep/System groups (Measurement is empty for a generic proc).
         groups = super().get_param_groups(station, selections)
 
-        # (a) The measurement-method selector. Labels carry the VI's display
-        # label; the collected/mapped value is the bare VI name.
+        # (a) The measurement-method selector. Labels are the VI's SHORT
+        # selector_label (keeps the drop-down / column narrow); the
+        # collected/mapped value is the bare VI name. The GUI carries the
+        # vi_name in a per-item tooltip for disambiguation when two VIs share a
+        # label. Falls back to the VI name if two selector labels collide (a
+        # dict key would otherwise be lost).
         choices: dict[str, str] = {}
         for name in names:
-            label = station.measurement_label(name)
-            choices[f"{name} — {label}" if label and label != name else name] = name
+            label = station.measurement_selector_label(name)
+            key = label if label and label not in choices else name
+            choices[key] = name
         select_spec = ParamSpec(
             type=str,
             default=selected,

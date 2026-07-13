@@ -583,6 +583,13 @@ def test_measurement_vi_self_description(vi_cls: type) -> None:
         f"arrays take_reading() returns"
     )
 
+    # selector_label is optional (falls back to display_label in the GUI) but,
+    # when declared, must be a plain string — it labels the method drop-down.
+    assert isinstance(vi_cls.selector_label, str), (
+        f"{vi_cls.__name__}.selector_label must be a str (the short "
+        f"method-selection drop-down label), got {vi_cls.selector_label!r}"
+    )
+
     for name, dtype in vi_cls.measurement_scalar_columns.items():
         assert dtype in ("float", "int"), (
             f"{vi_cls.__name__}.measurement_scalar_columns['{name}'] dtype "

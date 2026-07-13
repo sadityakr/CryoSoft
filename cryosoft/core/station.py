@@ -209,6 +209,28 @@ class Station:
         vi = self._virtual_instruments.get(vi_name)
         return getattr(vi, "display_label", "") or vi_name
 
+    def measurement_selector_label(self, vi_name: str) -> str:
+        """Return the SHORT method-selection label for a measurement VI.
+
+        Used for the GUI method-selection drop-down, where a terse name keeps
+        the column narrow. Falls back to ``display_label`` (the longer
+        status-line label) and then the VI name when ``selector_label`` is empty
+        or the VI is unknown. See ``MeasurementInstrumentBase.selector_label``.
+
+        Args:
+            vi_name: The measurement VI's registered name.
+
+        Returns:
+            The VI's ``selector_label`` if set, else its ``display_label``, else
+            ``vi_name``.
+        """
+        vi = self._virtual_instruments.get(vi_name)
+        return (
+            getattr(vi, "selector_label", "")
+            or getattr(vi, "display_label", "")
+            or vi_name
+        )
+
     def __getattr__(self, name: str) -> BaseVirtualInstrument:
         """Attribute-style access to VIs: ``station.magnet_x``.
 

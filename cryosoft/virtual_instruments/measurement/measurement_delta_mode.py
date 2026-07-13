@@ -71,6 +71,7 @@ class DeltaModeMeasurementVI(MeasurementInstrumentBase):
     """
 
     display_label: str = "delta-mode resistance"
+    selector_label: ClassVar[str] = "Delta mode (6221 + 2182A)"
 
     measurement_data_keys: ClassVar[list[str]] = ["voltage_V", "current_A"]
     measurement_scalar_columns: ClassVar[dict[str, str]] = {"n_valid": "int"}

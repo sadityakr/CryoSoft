@@ -67,7 +67,7 @@ class SwitchMatrixVI(BaseVirtualInstrument):
     """
 
     vi_type: str = "switch"
-    display_label: str = "switch matrix"
+    display_label: str = "Scanner (mux)"
 
     def __init__(self, drivers: dict[str, object], **init_params: Any) -> None:
         """Validate the route table and settle time from config.

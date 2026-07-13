@@ -26,7 +26,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 
 from cryosoft.core.decorators import control
 from cryosoft.virtual_instruments.base import DCMeasurementBase
@@ -59,6 +59,10 @@ class DCSingleInstrumentVI(DCMeasurementBase):
     * ``get_voltage() -> float``     — return measured voltage in Volts
     * ``get_idn() -> str``           — instrument identification string
     """
+
+    # Short drop-down name: a single SMU (Keithley 2400) does the whole DC
+    # measurement, versus the separate source+meter of DCSeparateMeasurementVI.
+    selector_label: ClassVar[str] = "DC (2400 SMU)"
 
     def __init__(self, drivers: dict[str, object], **init_params: Any) -> None:
         super().__init__(drivers, **init_params)

@@ -57,6 +57,8 @@ from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QFormLayout,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -109,6 +111,10 @@ _GEOMETRY_KEY = "ProcedureWindow/geometry"  # QSettings key for saved window geo
 # Max width (px) for the Sweep parameter column. Its inputs are narrow, so this
 # stops it expanding to an equal third and crowding out the Measurement column.
 _SWEEP_COLUMN_MAX_WIDTH = 260
+# Max width (px) for the scanner/mux column. Its content is a short list of
+# route checkboxes, so cap it narrow (like the Sweep column) — it should hug the
+# checkbox labels and leave the horizontal room to the Measurement column.
+_MUX_COLUMN_MAX_WIDTH = 170
 # Max lines kept in the concise Status log before old lines are trimmed
 # (matches the Monitor detailed log's cap; bounds a long run's memory use).
 _STATUS_MAX_LINES = 500
@@ -239,6 +245,16 @@ class ProcedureWindow(QMainWindow):
         self._current_groups: list[ParamGroup] = []
         self._group_boxes: dict[str, QGroupBox] = {}
         self._param_hbox: QHBoxLayout | None = None
+        # The composite "Measurement" column: the method drop-down on top and
+        # the selected VI's parameter sub-form below it, inside ONE QGroupBox
+        # (rather than a box per group). On a method change only the sub-form
+        # container is rebuilt; the box and the drop-down keep their instances.
+        # Kept separate from _group_boxes, which holds the independent columns
+        # (System, mux, any generic group).
+        self._measurement_box: QGroupBox | None = None
+        self._measurement_params_layout: QVBoxLayout | None = None
+        self._measurement_params_container: QWidget | None = None
+        self._measurement_params_key: str | None = None
         # Sweep-axis editor for the selected procedure, if it declares one
         self._axis_widget: SweepAxisWidget | None = None
         # Active procedure reference (set on run)
@@ -297,7 +313,11 @@ class ProcedureWindow(QMainWindow):
         self._main_splitter.setChildrenCollapsible(False)
         self._main_splitter.addWidget(self._left_splitter)
         self._main_splitter.addWidget(self._right_splitter)
-        self._main_splitter.setSizes([720, 480])
+        # The left pane carries the four-column parameter form (Sweep, System,
+        # Measurement, scanner), which needs more width than the queue/plot-2
+        # pane; bias the initial split left so all four columns are visible
+        # without a horizontal scrollbar at a ~1280 px window. Still draggable.
+        self._main_splitter.setSizes([880, 380])
 
         root.addWidget(self._main_splitter, stretch=1)
 
@@ -435,27 +455,32 @@ class ProcedureWindow(QMainWindow):
         return box
 
     def _build_param_form(self, cls: type[BaseProcedure]) -> QWidget:
-        """Auto-generate the three-column parameter form from the procedure's ParamGroups.
+        """Auto-generate the parameter columns from the procedure's ParamGroups.
 
-        Reads the ordered groups from ``cls.get_param_groups(station)`` (Sweep /
-        System / Measurement by default, empty ones skipped) and renders each
-        non-sweep group as its own ``QGroupBox`` via
-        ``param_form.build_group_box``. The Sweep column is special: it always
-        hosts the ``SweepAxisWidget`` (linear / segments / CSV, with hysteresis)
-        when ``cls`` declares a ``sweep_axis``, and the flat ``sweep`` group's
-        fields (if any) are added beneath it in the same capped-width column —
-        exactly as before this became ParamSpec-driven.
+        Reads the ordered groups from ``cls.get_param_groups(station)`` and lays
+        them out as side-by-side columns. Three group-key conventions are
+        composed specially so the form fits on screen without horizontal scroll:
 
-        Widget construction, labels, and tooltips all come from
-        ``cryosoft.gui.param_form`` (the one place that maps a ``ParamSpec`` to a
-        Qt widget); this method only arranges the resulting boxes and records
-        each input in ``self._param_inputs`` for ``_collect_params`` to read.
+        * ``sweep`` — the capped-width Sweep column, always hosting the
+          ``SweepAxisWidget`` (linear / segments / CSV, with hysteresis) when
+          ``cls`` declares a ``sweep_axis``, plus any flat ``sweep`` fields.
+        * ``measurement_select`` + ``measurement:<vi>`` — folded into ONE
+          "Measurement" column (method drop-down on top, the selected VI's
+          parameter sub-form below), instead of two separate columns that would
+          overflow off-screen. See ``_build_measurement_box``.
+        * ``mux`` — a narrow scanner column of route checkboxes.
+
+        Any OTHER group key becomes its own generic column (so future procedures
+        are not constrained by these conventions). Widget construction, labels,
+        and tooltips all come from ``cryosoft.gui.param_form`` (the one place
+        that maps a ``ParamSpec`` to a Qt widget); this method only arranges the
+        boxes and records each input in ``self._param_inputs``.
 
         Args:
             cls: The BaseProcedure subclass to introspect.
 
         Returns:
-            A QWidget containing the three-column form.
+            A QWidget containing the columns.
         """
         container = QWidget()
         hbox = QHBoxLayout(container)
@@ -463,6 +488,10 @@ class ProcedureWindow(QMainWindow):
         hbox.setContentsMargins(0, 0, 0, 0)
         self._param_inputs.clear()
         self._group_boxes = {}
+        self._measurement_box = None
+        self._measurement_params_layout = None
+        self._measurement_params_container = None
+        self._measurement_params_key = None
         self._param_hbox = hbox
         self._axis_widget = None
 
@@ -490,23 +519,139 @@ class ProcedureWindow(QMainWindow):
             self._register_group_widgets(sweep_group, widgets)
             sweep_col.addLayout(form)
         sweep_col.addStretch()
-        # The sweep box is always at layout index 0; the non-sweep group boxes
-        # follow it in get_param_groups order (index 1, 2, ...), which
-        # _rerender_groups relies on to insert a rebuilt group at the right spot.
         hbox.addWidget(sweep_box)
 
-        # Every remaining group (System, the Measurement-method selector, the
-        # selected VI's params, and any a subclass adds) becomes its own box, in
-        # the order get_param_groups returned them.
+        # Remaining groups, in get_param_groups order. The measurement pair is
+        # emitted once (at the measurement_select position) as the composite
+        # Measurement column; its measurement:<vi> partner is skipped.
         for group in groups:
-            if group.key == "sweep":
+            key = group.key
+            if key == "sweep" or key.startswith("measurement:"):
                 continue
-            box, widgets = param_form.build_group_box(group)
-            self._register_group_widgets(group, widgets)
+            if key == "measurement_select":
+                params_group = next(
+                    (g for g in groups if g.key.startswith("measurement:")), None
+                )
+                hbox.addWidget(self._build_measurement_box(group, params_group))
+                continue
+            if key == "mux":
+                box = self._build_mux_box(group)
+            else:
+                # System / generic columns wrap long rows too, so all four
+                # columns compress to fit the params quadrant without a
+                # horizontal scrollbar.
+                box, widgets = param_form.build_group_box(group, wrap=True)
+                self._register_group_widgets(group, widgets)
             hbox.addWidget(box)
-            self._group_boxes[group.key] = box
+            self._group_boxes[key] = box
 
         return container
+
+    def _build_measurement_box(
+        self, select_group: ParamGroup, params_group: ParamGroup | None
+    ) -> QGroupBox:
+        """Build the composite "Measurement" column (selector on top, params below).
+
+        The method drop-down (labelled "Method:") sits at the top, a separator
+        beneath it, then the selected VI's parameter sub-form. Only the sub-form
+        is rebuilt on a method change (see ``_rerender_groups``); the box and the
+        drop-down keep their instances. The drop-down keeps the objectName
+        ``param_measurement_vi_input`` so collection and tests still find it.
+
+        Args:
+            select_group: The ``measurement_select`` group (the ``measurement_vi``
+                selector spec).
+            params_group: The ``measurement:<vi>`` group for the currently
+                selected VI, or ``None`` if that VI declares no parameters.
+
+        Returns:
+            The "Measurement" ``QGroupBox``.
+        """
+        box = QGroupBox("Measurement")
+        vbox = QVBoxLayout(box)
+        vbox.setSpacing(6)
+
+        spec = select_group.params["measurement_vi"]
+        combo = param_form.build_param_widget("measurement_vi", spec)
+        combo.setObjectName("param_measurement_vi_input")
+        combo.setToolTip(param_form.build_param_tooltip(spec))
+        if isinstance(combo, QComboBox):
+            # Let the combo shrink so the longest method label does not force the
+            # whole column wide (the pre-fix bug), and carry the vi_name in a
+            # per-item tooltip so two VIs sharing a selector_label stay
+            # distinguishable. The collected value is still the vi_name.
+            combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            # Pin a small minimum so the widest method label does not floor the
+            # whole column's width (Expanding still lets it grow to fill the
+            # column); the full label is always readable once dropped down.
+            combo.setMinimumWidth(90)
+            for i in range(combo.count()):
+                vi_name = spec.choices.get(combo.itemText(i))
+                if vi_name:
+                    combo.setItemData(i, vi_name, Qt.ItemDataRole.ToolTipRole)
+        method_form = QFormLayout()
+        method_form.setSpacing(4)
+        method_form.addRow("Method:", combo)
+        self._register_group_widgets(select_group, {"measurement_vi": combo})
+        vbox.addLayout(method_form)
+
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setFrameShadow(QFrame.Shadow.Sunken)
+        vbox.addWidget(line)
+
+        self._measurement_params_layout = QVBoxLayout()
+        self._measurement_params_layout.setContentsMargins(0, 0, 0, 0)
+        vbox.addLayout(self._measurement_params_layout)
+        if params_group is not None:
+            self._install_measurement_params(params_group)
+        vbox.addStretch()
+
+        self._measurement_box = box
+        return box
+
+    def _install_measurement_params(self, params_group: ParamGroup) -> None:
+        """Render the selected VI's parameter sub-form into the Measurement column.
+
+        Records the sub-form's container and its group key so a later method
+        change can remove exactly this sub-form and drop its widgets from the
+        registry, leaving the rest of the Measurement column untouched.
+
+        Args:
+            params_group: The ``measurement:<vi>`` group to render.
+        """
+        assert self._measurement_params_layout is not None
+        self._measurement_params_key = params_group.key
+        form, widgets = param_form.build_form_layout(params_group.params, wrap=True)
+        self._register_group_widgets(params_group, widgets)
+        container = QWidget()
+        container.setLayout(form)
+        self._measurement_params_container = container
+        self._measurement_params_layout.addWidget(container)
+
+    def _build_mux_box(self, group: ParamGroup) -> QGroupBox:
+        """Build the narrow scanner/mux column of route checkboxes.
+
+        Titled from the switch VI's ``display_label`` (e.g. "Scanner (mux)").
+        Each checkbox row shows the bare route name; the parameter key stays
+        ``mux_<route>`` (so route names cannot collide with measurement/system
+        params, and the HDF5 metadata key is unchanged) via ``label_overrides``
+        — only the visible label is prettified.
+
+        Args:
+            group: The ``mux`` group (one ``mux_<route>`` bool per route).
+
+        Returns:
+            The capped-width scanner ``QGroupBox``.
+        """
+        box = QGroupBox(group.title)
+        box.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
+        box.setMaximumWidth(_MUX_COLUMN_MAX_WIDTH)
+        label_overrides = {name: name.removeprefix("mux_") for name in group.params}
+        form, widgets = param_form.build_form_layout(group.params, label_overrides, wrap=True)
+        self._register_group_widgets(group, widgets)
+        box.setLayout(form)
+        return box
 
     # ------------------------------------------------------------------
     # Structural re-render (a structural param changes which groups exist)
@@ -584,9 +729,47 @@ class ProcedureWindow(QMainWindow):
         old_by_key = {group.key: group for group in self._current_groups}
         new_groups = cls.get_param_groups(self._station, selections)
         new_by_key = {group.key: group for group in new_groups}
-        new_nonsweep_keys = [g.key for g in new_groups if g.key != "sweep"]
 
-        # Remove boxes whose key is gone; drop their widgets from the registry.
+        # (1) Measurement sub-form: swap the selected VI's params IN PLACE inside
+        # the Measurement column. The box, the method drop-down, and every other
+        # column keep their widget instances — this is the diff that makes
+        # switching the method (Delta ↔ DC) cheap and non-destructive.
+        new_meas_key = next(
+            (k for k in new_by_key if k.startswith("measurement:")), None
+        )
+        if (
+            self._measurement_box is not None
+            and new_meas_key != self._measurement_params_key
+        ):
+            if self._measurement_params_key is not None:
+                old_group = old_by_key.get(self._measurement_params_key)
+                if old_group is not None:
+                    for name in old_group.params:
+                        self._param_inputs.pop(name, None)
+            if (
+                self._measurement_params_container is not None
+                and self._measurement_params_layout is not None
+            ):
+                self._measurement_params_layout.removeWidget(
+                    self._measurement_params_container
+                )
+                self._measurement_params_container.setParent(None)
+                self._measurement_params_container.deleteLater()
+                self._measurement_params_container = None
+            self._measurement_params_key = None
+            if new_meas_key is not None:
+                self._install_measurement_params(new_by_key[new_meas_key])
+
+        # (2) Independent columns (System, mux, any generic group) diff by key.
+        # The measurement_select / measurement:* keys are NOT here — they live in
+        # the Measurement column handled above.
+        def _is_column_key(key: str) -> bool:
+            return (
+                key != "sweep"
+                and key != "measurement_select"
+                and not key.startswith("measurement:")
+            )
+
         for key in list(self._group_boxes):
             if key not in new_by_key:
                 box = self._group_boxes.pop(key)
@@ -599,15 +782,21 @@ class ProcedureWindow(QMainWindow):
                 box.setParent(None)
                 box.deleteLater()
 
-        # Add boxes for newly-present keys at their position (sweep box is 0).
-        for pos, key in enumerate(new_nonsweep_keys):
-            if key in self._group_boxes:
+        # A newly-appearing independent column is appended at the end of the row.
+        # (Only structural params re-render the form; none of the shipped
+        # procedures add/remove an independent column this way, so exact
+        # re-insertion order is not exercised — the Measurement swap above is.)
+        for key in new_by_key:
+            if not _is_column_key(key) or key in self._group_boxes:
                 continue
             group = new_by_key[key]
-            box, widgets = param_form.build_group_box(group)
-            self._register_group_widgets(group, widgets)
+            if key == "mux":
+                box = self._build_mux_box(group)
+            else:
+                box, widgets = param_form.build_group_box(group, wrap=True)
+                self._register_group_widgets(group, widgets)
             if self._param_hbox is not None:
-                self._param_hbox.insertWidget(1 + pos, box)
+                self._param_hbox.addWidget(box)
             self._group_boxes[key] = box
 
         self._current_groups = new_groups

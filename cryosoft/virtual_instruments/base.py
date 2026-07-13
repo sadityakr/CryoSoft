@@ -337,6 +337,13 @@ class MeasurementInstrumentBase(BaseVirtualInstrument):
 
     Self-description (class attributes)
     -----------------------------------
+    * ``selector_label: ClassVar[str]`` — the SHORT human name shown in the GUI
+      method-selection drop-down (e.g. "Delta mode (6221 + 2182A)"). Optional:
+      when empty, the drop-down falls back to ``display_label``. Keep it terse —
+      the combo's width tracks its longest label. This is distinct from
+      ``display_label``, which is the longer status-line label ("delta-mode
+      resistance") and is unchanged by this attribute. ``tests/test_conformance``
+      checks it is a ``str``.
     * ``measurement_parameters: ClassVar[dict[str, ParamSpec]]`` — the VI's
       GUI-facing knobs, one ``ParamSpec`` per parameter. This is the single
       owner of those specs (procedures will stop duplicating them in a later
@@ -381,6 +388,9 @@ class MeasurementInstrumentBase(BaseVirtualInstrument):
     vi_type: str = "measurement"
     # Human label for status lines like "Arming DC resistance measurement".
     display_label: str = "measurement"
+    # SHORT human name for the GUI method-selection drop-down; falls back to
+    # display_label when empty (see the "Self-description" section above).
+    selector_label: ClassVar[str] = ""
 
     # Self-description — overridden (non-empty) by every concrete VI.
     measurement_parameters: ClassVar[dict[str, ParamSpec]] = {}

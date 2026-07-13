@@ -27,7 +27,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 
 from cryosoft.core.decorators import control
 from cryosoft.virtual_instruments.base import DCMeasurementBase
@@ -64,6 +64,10 @@ class DCSeparateMeasurementVI(DCMeasurementBase):
     * ``set_range(float)``
     * ``get_idn() -> str``
     """
+
+    # Short drop-down name: separate current source + nanovoltmeter, versus the
+    # single-SMU DCSingleInstrumentVI.
+    selector_label: ClassVar[str] = "DC (6221 + 2182A)"
 
     def __init__(self, drivers: dict[str, object], **init_params: Any) -> None:
         super().__init__(drivers, **init_params)

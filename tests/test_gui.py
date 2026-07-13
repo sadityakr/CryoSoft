@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 from PyQt6.QtCore import Qt, QSettings
 from PyQt6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QFormLayout,
@@ -437,11 +438,39 @@ def _select_measurement(win, vi_name):
     pytest.fail(f"measurement VI {vi_name!r} not in the selector")
 
 
+def _settle_at_width(win, width=1280, height=800):
+    """Resize the window to *width* x *height* and let the layout settle."""
+    win.resize(width, height)
+    win.show()
+    QApplication.processEvents()
+
+
+def _fully_inside_param_viewport(win, widget) -> bool:
+    """Return True if *widget* is visible AND fully inside the param scroll viewport.
+
+    Maps the widget's rectangle into the parameter scroll area's viewport
+    coordinates; a widget scrolled off the right edge (the pre-fix overflow bug)
+    maps to an x beyond the viewport width and fails this check. This is the
+    geometry assertion that mere ``findChild`` existence checks did not catch.
+    """
+    if not widget.isVisible():
+        return False
+    viewport = win._param_scroll.viewport()
+    top_left = widget.mapTo(viewport, widget.rect().topLeft())
+    bottom_right = widget.mapTo(viewport, widget.rect().bottomRight())
+    return (
+        top_left.x() >= 0
+        and bottom_right.x() <= viewport.width()
+        and bottom_right.x() > top_left.x()
+    )
+
+
 def test_generic_field_sweep_renders_measurement_select_and_default_group(procedure_win):
     """The form shows the measurement-method combo + the default VI's param group.
 
     The default measurement VI is the first registered one (keithley_delta_mode
-    in the sim config), so its delta-mode parameters render.
+    in the sim config), so its delta-mode parameters render inside the single
+    composite "Measurement" column.
     """
     from cryosoft.procedures.field_sweep import FieldSweep
 
@@ -452,8 +481,38 @@ def test_generic_field_sweep_renders_measurement_select_and_default_group(proced
     # The default VI's params render (delta-mode).
     assert procedure_win.findChild(QComboBox, "param_voltmeter_range_V_input") is not None
     assert procedure_win.findChild(QLineEdit, "param_n_readings_input") is not None
-    # A group box for the selected VI exists.
-    assert "measurement:keithley_delta_mode" in procedure_win._group_boxes
+    # The selector + params live in ONE Measurement box (not a per-group column);
+    # the composite box exists and the params key tracks the selected VI.
+    assert procedure_win._measurement_box is not None
+    assert procedure_win._measurement_params_key == "measurement:keithley_delta_mode"
+    # The Measurement box is NOT registered as an independent column.
+    assert "measurement:keithley_delta_mode" not in procedure_win._group_boxes
+
+
+def test_generic_field_sweep_all_four_columns_visible_no_hscroll(procedure_win):
+    """At 1280 px, Sweep/System/Measurement/mux all fit with no horizontal scroll.
+
+    This is the geometry regression for the reported bug: the measurement params
+    and mux panel used to overflow off the right edge behind a horizontal
+    scrollbar. Assert the actual on-screen geometry, not just widget existence.
+    """
+    from cryosoft.procedures.field_sweep import FieldSweep
+
+    _select_procedure(procedure_win, FieldSweep.name)
+    _settle_at_width(procedure_win, 1280, 800)
+
+    # No horizontal scrollbar is needed for the parameter form.
+    assert procedure_win._param_scroll.horizontalScrollBar().maximum() == 0
+
+    # The selected VI's first parameter widget is fully inside the viewport.
+    first_param = procedure_win.findChild(QLineEdit, "param_n_readings_input")
+    assert first_param is not None
+    assert _fully_inside_param_viewport(procedure_win, first_param)
+
+    # The first mux checkbox is fully inside the viewport (not off-screen right).
+    first_mux = procedure_win.findChild(QCheckBox, "param_mux_Mux-Ch1_input")
+    assert first_mux is not None
+    assert _fully_inside_param_viewport(procedure_win, first_mux)
 
 
 def test_generic_field_sweep_switching_vi_swaps_only_measurement_group(procedure_win):
@@ -462,10 +521,13 @@ def test_generic_field_sweep_switching_vi_swaps_only_measurement_group(procedure
 
     _select_procedure(procedure_win, FieldSweep.name)
 
-    # Capture the sweep axis widget and a system input BEFORE switching.
+    # Capture the sweep axis widget, the System input, and the composite
+    # Measurement box + method drop-down BEFORE switching.
     axis_before = procedure_win._axis_widget
     temp_before = procedure_win.findChild(QLineEdit, "param_temperature_input")
-    assert temp_before is not None
+    box_before = procedure_win._measurement_box
+    combo_before = _measurement_combo(procedure_win)
+    assert temp_before is not None and box_before is not None
 
     _select_measurement(procedure_win, "dc_measurement")
 
@@ -474,10 +536,12 @@ def test_generic_field_sweep_switching_vi_swaps_only_measurement_group(procedure
     assert procedure_win.findChild(QLineEdit, "param_n_readings_input") is None
     assert procedure_win.findChild(QComboBox, "param_voltmeter_range_V_input") is None  # dc's is a line edit
     assert procedure_win.findChild(QLineEdit, "param_voltmeter_range_V_input") is not None
-    assert "measurement:dc_measurement" in procedure_win._group_boxes
-    assert "measurement:keithley_delta_mode" not in procedure_win._group_boxes
+    assert procedure_win._measurement_params_key == "measurement:dc_measurement"
 
-    # The sweep axis widget and the System input are the SAME instances (untouched).
+    # Only the params sub-form was rebuilt: the Measurement box, its method
+    # drop-down, the sweep axis widget, and the System input are SAME instances.
+    assert procedure_win._measurement_box is box_before
+    assert _measurement_combo(procedure_win) is combo_before
     assert procedure_win._axis_widget is axis_before
     assert procedure_win.findChild(QLineEdit, "param_temperature_input") is temp_before
 
@@ -548,6 +612,62 @@ def test_generic_field_sweep_collect_returns_mux_bools(procedure_win):
     assert values["mux_Mux-Ch2"] is False
     assert values["mux_Mux-Ch3"] is True
     assert values["mux_Mux-Ch4"] is False
+
+
+def test_generic_field_sweep_method_combo_shows_selector_labels(procedure_win, station):
+    """The method drop-down shows the SHORT selector_labels, vi_name in a tooltip.
+
+    The combo used to show "vi_name — display_label" (too long; it forced the
+    column wide). It now shows each VI's ``selector_label`` and carries the bare
+    ``vi_name`` as a per-item tooltip; the collected value is still the vi_name.
+    """
+    from cryosoft.procedures.field_sweep import FieldSweep
+
+    _select_procedure(procedure_win, FieldSweep.name)
+    combo = _measurement_combo(procedure_win)
+
+    items = [combo.itemText(i) for i in range(combo.count())]
+    expected = [
+        station.measurement_selector_label(n)
+        for n in station.measurement_vi_names()
+    ]
+    assert items == expected
+    assert items == ["Delta mode (6221 + 2182A)", "DC (6221 + 2182A)"]
+
+    # Each item carries its vi_name as a tooltip (disambiguation).
+    tips = [
+        combo.itemData(i, Qt.ItemDataRole.ToolTipRole)
+        for i in range(combo.count())
+    ]
+    assert tips == station.measurement_vi_names()
+
+    # The collected value stays the vi_name, not the label.
+    values, *_ = procedure_win._collect_params()
+    assert values["measurement_vi"] == "keithley_delta_mode"
+
+
+def test_generic_field_sweep_mux_row_label_strips_prefix(procedure_win):
+    """The mux checkbox row label is the bare route; the collected key keeps mux_.
+
+    Only the visible label is prettified — the parameter key (and thus the HDF5
+    metadata key) remains ``mux_<route>`` so route names stay namespaced.
+    """
+    from cryosoft.procedures.field_sweep import FieldSweep
+
+    _select_procedure(procedure_win, FieldSweep.name)
+
+    checkbox = procedure_win.findChild(QCheckBox, "param_mux_Mux-Ch1_input")
+    assert checkbox is not None
+    form = checkbox.parent().layout()
+    assert isinstance(form, QFormLayout)
+    row_label = form.labelForField(checkbox)
+    assert isinstance(row_label, QLabel)
+    assert row_label.text() == "Mux-Ch1:"  # route name, no "mux_" prefix
+
+    checkbox.setChecked(True)
+    values, *_ = procedure_win._collect_params()
+    assert values["mux_Mux-Ch1"] is True   # prefixed key kept for metadata
+    assert "Mux-Ch1" not in values         # the bare route is not a param key
 
 
 def test_param_form_renders_all_widget_kinds_and_round_trips(qtbot):
