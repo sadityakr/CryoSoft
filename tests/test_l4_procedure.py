@@ -12,6 +12,7 @@ import h5py
 import numpy as np
 import pytest
 
+from cryosoft.core.plan import Command, PhasePlan, StepPlan, Target
 from cryosoft.core.procedure import BaseProcedure
 from cryosoft.core.station import build_station
 from cryosoft.core.sweep_builder import SweepAxis, SweepSegment
@@ -213,21 +214,46 @@ def test_initial_progress(procedure):
 # ── initiate() ────────────────────────────────────────────────────────────────
 
 def test_initiate_returns_correct_structure(procedure, tmp_path):
-    """initiate() returns (system_targets, measurement_commands, wait_time)."""
-    sys_targets, meas_cmds, wait = procedure.initiate()
+    """initiate() returns a PhasePlan with typed targets and commands."""
+    plan = procedure.initiate()
     procedure.standby()  # Close file
 
-    assert "magnet_x" in sys_targets
-    assert "target" in sys_targets["magnet_x"]
-    assert sys_targets["magnet_x"]["target"] == pytest.approx(-0.1)
+    assert isinstance(plan, PhasePlan)
 
-    assert "temperature_vti" in sys_targets
-    assert sys_targets["temperature_vti"]["target"] == pytest.approx(300.0)
+    assert "magnet_x" in plan.targets
+    assert isinstance(plan.targets["magnet_x"], Target)
+    assert plan.targets["magnet_x"].target == pytest.approx(-0.1)
 
-    assert "keithley_delta_mode" in meas_cmds
-    assert "configure" in meas_cmds["keithley_delta_mode"]
+    assert "temperature_vti" in plan.targets
+    assert plan.targets["temperature_vti"].target == pytest.approx(300.0)
 
-    assert wait == pytest.approx(0.0)
+    configure = next(c for c in plan.commands if c.vi_name == "keithley_delta_mode")
+    assert configure.method == "configure"
+
+    assert plan.wait_s == pytest.approx(0.0)
+
+
+def test_initiate_full_phaseplan_content_and_command_order(procedure, tmp_path):
+    """initiate() returns the complete, exact PhasePlan (incl. command order)."""
+    plan = procedure.initiate()
+    procedure.standby()  # Close file
+
+    # Exactly the two system targets, both plain field/temperature targets.
+    assert set(plan.targets) == {"magnet_x", "temperature_vti"}
+    assert plan.targets["magnet_x"] == Target(-0.1)
+    assert plan.targets["temperature_vti"] == Target(300.0)
+
+    # Exactly one command: arm the delta-mode measurement, first in order.
+    assert len(plan.commands) == 1
+    cmd = plan.commands[0]
+    assert isinstance(cmd, Command)
+    assert cmd.vi_name == "keithley_delta_mode"
+    assert cmd.method == "configure"
+    assert cmd.kwargs["method"] == "delta_mode"
+    assert cmd.kwargs["current"] == pytest.approx(1e-6)
+    assert cmd.kwargs["n_readings"] == 5
+
+    assert plan.wait_s == pytest.approx(0.0)
 
 
 def test_initiate_creates_hdf5_file(procedure, tmp_path):
@@ -277,15 +303,15 @@ def test_initiate_uses_custom_file_prefix(station, tmp_path):
 # ── change_sweep_step() ───────────────────────────────────────────────────────
 
 def test_change_sweep_step_returns_targets(procedure, tmp_path):
-    """change_sweep_step() returns (system_targets, wait_time) for each step."""
+    """change_sweep_step() returns a StepPlan for each step."""
     procedure.initiate()
 
-    result = procedure.change_sweep_step()
-    assert result is not None
-    targets, wait = result
-    assert "magnet_x" in targets
-    assert targets["magnet_x"]["target"] == pytest.approx(0.0)
-    assert wait == pytest.approx(0.0)
+    step = procedure.change_sweep_step()
+    assert step is not None
+    assert isinstance(step, StepPlan)
+    assert "magnet_x" in step.targets
+    assert step.targets["magnet_x"].target == pytest.approx(0.0)
+    assert step.wait_s == pytest.approx(0.0)
 
     procedure.standby()
 
@@ -368,14 +394,15 @@ def test_measure_stores_snapshot(procedure, tmp_path):
 # ── standby() ─────────────────────────────────────────────────────────────────
 
 def test_standby_returns_correct_structure(procedure, tmp_path):
-    """standby() returns (system_targets, measurement_commands, 0.0)."""
+    """standby() returns a PhasePlan parking the magnet and disarming the meas VI."""
     procedure.initiate()
-    sys_targets, meas_cmds, wait = procedure.standby()
+    plan = procedure.standby()
 
-    assert "magnet_x" in sys_targets
-    assert sys_targets["magnet_x"]["target"] == pytest.approx(0.0)
-    assert "keithley_delta_mode" in meas_cmds
-    assert wait == pytest.approx(0.0)
+    assert isinstance(plan, PhasePlan)
+    assert "magnet_x" in plan.targets
+    assert plan.targets["magnet_x"].target == pytest.approx(0.0)
+    assert any(c.vi_name == "keithley_delta_mode" for c in plan.commands)
+    assert plan.wait_s == pytest.approx(0.0)
 
 
 def test_standby_closes_data_file(procedure, tmp_path):

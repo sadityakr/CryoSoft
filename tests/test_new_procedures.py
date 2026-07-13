@@ -12,6 +12,7 @@ import h5py
 import numpy as np
 import pytest
 
+from cryosoft.core.plan import Command, PhasePlan, StepPlan, Target
 from cryosoft.core.station import build_station
 from cryosoft.procedures.field_sweep_dc import FieldSweepDC
 from cryosoft.procedures.temperature_sweep_dc import TemperatureSweepDC
@@ -95,7 +96,7 @@ def test_process_system_targets_forwards_rate(station):
     vi = station.temperature_vti
     vi._default_ramp_rate = 1.0  # base rate
     station.process_system_targets({
-        "temperature_vti": {"target": 300.0, "rate": 500.0}
+        "temperature_vti": Target(300.0, rate=500.0)
     })
     # The ramp generator was started with 500 K/min; _default_ramp_rate unchanged
     assert vi._default_ramp_rate == pytest.approx(1.0)  # not mutated
@@ -112,14 +113,36 @@ def test_field_dc_sweep_array(field_proc):
 
 
 def test_field_dc_initiate_structure(field_proc, tmp_path):
-    sys_targets, meas_cmds, wait = field_proc.initiate()
+    plan = field_proc.initiate()
     field_proc.standby()
 
-    assert "magnet_x" in sys_targets
-    assert "temperature_vti" in sys_targets
-    assert "dc_measurement" in meas_cmds
-    assert "initiate" in meas_cmds["dc_measurement"]
-    assert wait == pytest.approx(0.0)
+    assert isinstance(plan, PhasePlan)
+    assert "magnet_x" in plan.targets
+    assert "temperature_vti" in plan.targets
+    cmd = next(c for c in plan.commands if c.vi_name == "dc_measurement")
+    assert cmd.method == "initiate"
+    assert plan.wait_s == pytest.approx(0.0)
+
+
+def test_field_dc_initiate_full_phaseplan_content(field_proc, tmp_path):
+    """FieldSweepDC.initiate() returns the exact PhasePlan, command order included."""
+    plan = field_proc.initiate()
+    field_proc.standby()
+
+    assert set(plan.targets) == {"magnet_x", "temperature_vti"}
+    assert plan.targets["magnet_x"] == Target(-0.1)
+    assert plan.targets["temperature_vti"] == Target(300.0)
+
+    assert len(plan.commands) == 1
+    cmd = plan.commands[0]
+    assert isinstance(cmd, Command)
+    assert cmd.vi_name == "dc_measurement"
+    assert cmd.method == "initiate"
+    assert cmd.kwargs["current_A"] == pytest.approx(1e-6)
+    assert cmd.kwargs["compliance_A"] == pytest.approx(1e-3)
+    assert cmd.kwargs["voltmeter_range_V"] == pytest.approx(0.1)
+
+    assert plan.wait_s == pytest.approx(0.0)
 
 
 def test_field_dc_initiate_creates_hdf5(field_proc, tmp_path):
@@ -131,22 +154,23 @@ def test_field_dc_initiate_creates_hdf5(field_proc, tmp_path):
 
 
 def test_field_dc_initiate_measurement_params(field_proc, tmp_path):
-    _, meas_cmds, _ = field_proc.initiate()
+    plan = field_proc.initiate()
     field_proc.standby()
-    init_params = meas_cmds["dc_measurement"]["initiate"]
-    assert init_params["current_A"] == pytest.approx(1e-6)
-    assert init_params["compliance_A"] == pytest.approx(1e-3)
-    assert init_params["voltmeter_range_V"] == pytest.approx(0.1)
+    cmd = next(c for c in plan.commands if c.vi_name == "dc_measurement")
+    assert cmd.method == "initiate"
+    assert cmd.kwargs["current_A"] == pytest.approx(1e-6)
+    assert cmd.kwargs["compliance_A"] == pytest.approx(1e-3)
+    assert cmd.kwargs["voltmeter_range_V"] == pytest.approx(0.1)
 
 
 def test_field_dc_change_sweep_step(field_proc, tmp_path):
     field_proc.initiate()
-    result = field_proc.change_sweep_step()
-    assert result is not None
-    targets, wait = result
-    assert "magnet_x" in targets
-    assert targets["magnet_x"]["target"] == pytest.approx(0.0)
-    assert wait == pytest.approx(0.0)
+    step = field_proc.change_sweep_step()
+    assert step is not None
+    assert isinstance(step, StepPlan)
+    assert "magnet_x" in step.targets
+    assert step.targets["magnet_x"].target == pytest.approx(0.0)
+    assert step.wait_s == pytest.approx(0.0)
     field_proc.standby()
 
 
@@ -175,11 +199,11 @@ def test_field_dc_measure_saves_data(field_proc, tmp_path):
 
 def test_field_dc_standby_structure(field_proc, tmp_path):
     field_proc.initiate()
-    sys_targets, meas_cmds, wait = field_proc.standby()
-    assert sys_targets["magnet_x"]["target"] == pytest.approx(0.0)
-    assert "dc_measurement" in meas_cmds
-    assert "standby" in meas_cmds["dc_measurement"]
-    assert wait == pytest.approx(0.0)
+    plan = field_proc.standby()
+    assert plan.targets["magnet_x"].target == pytest.approx(0.0)
+    cmd = next(c for c in plan.commands if c.vi_name == "dc_measurement")
+    assert cmd.method == "standby"
+    assert plan.wait_s == pytest.approx(0.0)
 
 
 def test_field_dc_standby_closes_file(field_proc, tmp_path):
@@ -225,19 +249,40 @@ def test_temp_dc_sweep_array(temp_proc):
 
 
 def test_temp_dc_initiate_structure(temp_proc, tmp_path):
-    sys_targets, meas_cmds, wait = temp_proc.initiate()
+    plan = temp_proc.initiate()
     temp_proc.standby()
 
-    assert "temperature_vti" in sys_targets
-    assert "dc_measurement" in meas_cmds
-    assert "initiate" in meas_cmds["dc_measurement"]
-    assert wait == pytest.approx(0.0)
+    assert isinstance(plan, PhasePlan)
+    assert "temperature_vti" in plan.targets
+    cmd = next(c for c in plan.commands if c.vi_name == "dc_measurement")
+    assert cmd.method == "initiate"
+    assert plan.wait_s == pytest.approx(0.0)
+
+
+def test_temp_dc_initiate_full_phaseplan_content(temp_proc, tmp_path):
+    """TemperatureSweepDC.initiate() returns the exact PhasePlan (rate + command)."""
+    plan = temp_proc.initiate()
+    temp_proc.standby()
+
+    # temperature_vti carries the per-sweep ramp rate; magnet_x present at 0 T
+    # (sim_cryostat has magnet_x; field_x/field_y default to 0.0).
+    assert plan.targets["temperature_vti"] == Target(300.0, rate=6000.0)
+    assert plan.targets["magnet_x"] == Target(0.0)
+
+    assert len(plan.commands) == 1
+    cmd = plan.commands[0]
+    assert isinstance(cmd, Command)
+    assert cmd.vi_name == "dc_measurement"
+    assert cmd.method == "initiate"
+    assert cmd.kwargs["current_A"] == pytest.approx(1e-6)
+
+    assert plan.wait_s == pytest.approx(0.0)
 
 
 def test_temp_dc_initiate_includes_ramp_rate(temp_proc, tmp_path):
-    sys_targets, _, _ = temp_proc.initiate()
+    plan = temp_proc.initiate()
     temp_proc.standby()
-    assert sys_targets["temperature_vti"]["rate"] == pytest.approx(6000.0)
+    assert plan.targets["temperature_vti"].rate == pytest.approx(6000.0)
 
 
 def test_temp_dc_initiate_creates_hdf5(temp_proc, tmp_path):
@@ -249,12 +294,11 @@ def test_temp_dc_initiate_creates_hdf5(temp_proc, tmp_path):
 
 def test_temp_dc_change_sweep_step_includes_rate(temp_proc, tmp_path):
     temp_proc.initiate()
-    result = temp_proc.change_sweep_step()
-    assert result is not None
-    targets, wait = result
-    assert "temperature_vti" in targets
-    assert "rate" in targets["temperature_vti"]
-    assert targets["temperature_vti"]["rate"] == pytest.approx(6000.0)
+    step = temp_proc.change_sweep_step()
+    assert step is not None
+    assert isinstance(step, StepPlan)
+    assert "temperature_vti" in step.targets
+    assert step.targets["temperature_vti"].rate == pytest.approx(6000.0)
     temp_proc.standby()
 
 
@@ -282,11 +326,11 @@ def test_temp_dc_measure_saves_data(temp_proc, tmp_path):
 
 
 def test_temp_dc_standby_empty_system_targets(temp_proc, tmp_path):
-    """standby() returns empty system_targets — temperature holds at last point."""
+    """standby() returns empty targets — temperature holds at last point."""
     temp_proc.initiate()
-    sys_targets, meas_cmds, wait = temp_proc.standby()
-    assert sys_targets == {}
-    assert "dc_measurement" in meas_cmds
+    plan = temp_proc.standby()
+    assert plan.targets == {}
+    assert any(c.vi_name == "dc_measurement" for c in plan.commands)
 
 
 def test_temp_dc_full_orchestrator_loop(station, tmp_path, qtbot):
@@ -333,10 +377,10 @@ def test_temp_dc_missing_magnet_with_zero_field_is_skipped(tmp_path):
         data_directory=str(tmp_path),
         **FAST_TEMP_PARAMS,  # field_x / field_y default to 0.0
     )
-    targets, _, _ = proc.initiate()
-    assert "magnet_y" not in targets
-    assert "magnet_x" in targets
-    assert "temperature_vti" in targets
+    plan = proc.initiate()
+    assert "magnet_y" not in plan.targets
+    assert "magnet_x" in plan.targets
+    assert "temperature_vti" in plan.targets
     proc.standby()  # close the HDF5 file
 
 

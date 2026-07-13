@@ -25,26 +25,40 @@ Each procedure receives at construction time:
 
 ## Exit (what goes out)
 
-The Orchestrator calls four methods in sequence:
+The Orchestrator calls four methods in sequence. They return the typed plan
+objects from `cryosoft.core.plan` (`Target`, `Command`, `PhasePlan`,
+`StepPlan`), not bare dicts/tuples:
 
 | Method | Returns | Called when |
 |--------|---------|-------------|
-| `initiate()` | `(system_targets, measurement_commands, wait_time)` | Procedure starts |
-| `change_sweep_step()` | `(system_targets, wait_time)` or `None` | After each measurement |
+| `initiate()` | `PhasePlan` | Procedure starts |
+| `change_sweep_step()` | `StepPlan` or `None` | After each measurement |
 | `measure()` | nothing (writes to HDF5) | System is stable at current point |
-| `standby()` | `(system_targets, measurement_commands, wait_time)` | Sweep complete or aborted |
+| `standby()` | `PhasePlan` | Sweep complete or aborted |
+| `abort()` | `tuple[Command, ...]` | User abort / ERROR / EMERGENCY |
 
-**Dict formats:**
+**Plan formats:**
 
 ```python
-# system_targets — what the cryostat should be (Orchestrator ramps to these)
-{"magnet_x": {"target": 0.5}, "temperature_vti": {"target": 10.0}}
+from cryosoft.core.plan import Command, PhasePlan, StepPlan, Target
 
-# measurement_commands — how to configure measurement VIs
-{"iv_measurement": {"configure": {"method": "delta_mode", "current": 1e-6, "n_readings": 100}}}
+# PhasePlan — targets to reach, ordered measurement commands, settle time.
+PhasePlan(
+    targets={"magnet_x": Target(0.5), "temperature_vti": Target(10.0)},
+    commands=(Command("iv_measurement", "configure",
+                      {"method": "delta_mode", "current": 1e-6, "n_readings": 100}),),
+    wait_s=300.0,
+)
+
+# StepPlan — targets for the next sweep point, plus its settle time.
+StepPlan(targets={"magnet_x": Target(0.55)}, wait_s=5.0)
 ```
 
-No ramp rates in `system_targets` — rates come from YAML config in the VI.
+A `Target` carries an optional `rate` (ramp rate, forwarded to the VI's
+`start_ramp()` only when not `None`) and `persistent` flag; `Command.commands`
+order is meaningful and is never reordered. Each `Target`/`Command`/plan
+validates eagerly at construction, so a malformed plan fails at the procedure
+boundary rather than deep in the tick loop.
 
 ## Interface contract
 
@@ -67,10 +81,11 @@ class MyProcedure(BaseProcedure):
     }
 
     def _build_sweep_array(self) -> list: ...
-    def initiate(self) -> tuple[dict, dict, float]: ...
-    def change_sweep_step(self) -> tuple[dict, float] | None: ...
+    def initiate(self) -> PhasePlan: ...
+    def change_sweep_step(self) -> StepPlan | None: ...
     def measure(self) -> None: ...
-    def standby(self) -> tuple[dict, dict, float]: ...
+    def standby(self) -> PhasePlan: ...
+    def abort(self) -> tuple[Command, ...]: ...
 ```
 
 **Rules:**

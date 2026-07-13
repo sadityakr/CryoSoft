@@ -50,12 +50,14 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections.abc import Sequence
 from enum import Enum
 from typing import Any
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
 from cryosoft.core.operational_status import build_operational_status
+from cryosoft.core.plan import Command, Target
 from cryosoft.core.station import Station
 from cryosoft.core.watchdog import WatchdogConfig, WatchdogState, apply_watchdog
 # Procedures will be imported/type-checked but for now we expect a BaseProcedure mock.
@@ -146,7 +148,7 @@ class Orchestrator(QObject):
         self._paused_wait_elapsed = 0.0
         # Last targets dispatched to the Station — re-dispatched on resume,
         # because pause_procedure() holds the hardware (which forgets its ramp).
-        self._last_system_targets: dict[str, dict] = {}
+        self._last_system_targets: dict[str, Target] = {}
 
         self._timer = QTimer(self)
         self._timer.setInterval(tick_interval_ms)
@@ -194,25 +196,28 @@ class Orchestrator(QObject):
         self._standby_dispatched = False
         self._wait_started = False
         try:
-            system_targets, meas_commands, wait_time = self._procedure.initiate()
+            plan = self._procedure.initiate()
+            # The frozen-dataclass repr is the permanent record of exactly what
+            # the procedure requested — logged once, at INFO, on receipt.
+            logger.info("Procedure plan (initiate): %r", plan)
 
             # Track active system VIs for stale monitoring
-            self._active_system_vis = set(system_targets.keys())
+            self._active_system_vis = set(plan.targets.keys())
 
-            self._dispatch_targets(system_targets)
-            self._station.send_measurement_commands(meas_commands)
-            self._current_wait_time = wait_time
+            self._dispatch_targets(plan.targets)
+            self._station.send_measurement_commands(plan.commands)
+            self._current_wait_time = plan.wait_s
 
             self._change_state(OrchestratorState.INITIATING)
-            self._emit_initiation_status(system_targets, meas_commands)
+            self._emit_initiation_status(plan.targets, plan.commands)
         except Exception as exc:
             logger.exception("run_procedure() failed during setup")
             self._fail_to_error(f"Could not start procedure: {exc}")
 
-    def _dispatch_targets(self, system_targets: dict[str, dict]) -> None:
+    def _dispatch_targets(self, targets: dict[str, Target]) -> None:
         """Forward targets to the Station, remembering them for resume."""
-        self._last_system_targets = dict(system_targets)
-        self._station.process_system_targets(system_targets)
+        self._last_system_targets = dict(targets)
+        self._station.process_system_targets(targets)
 
     def queue_procedure(self, procedure: Any) -> None:
         """Add procedure to queue."""
@@ -436,7 +441,7 @@ class Orchestrator(QObject):
         except Exception:  # noqa: BLE001 — status must never disrupt the run
             logger.exception("status_message emit failed")
 
-    def _describe_system_target(self, vi_name: str, params: dict, *, verb: str) -> str:
+    def _describe_system_target(self, vi_name: str, target: Target, *, verb: str) -> str:
         """Compose "<verb> <label> to <value> <unit>" for one system ramp target.
 
         Label and unit come from the VI's declarative setpoint metadata via the
@@ -446,41 +451,47 @@ class Orchestrator(QObject):
         """
         try:
             label, unit = self._station.system_setpoint_meta(vi_name)
-            value = float(params.get("target"))
+            value = float(target.target)
             unit_suffix = f" {unit}" if unit else ""
             return f"{verb} {label} to {value:g}{unit_suffix}"
         except Exception:  # noqa: BLE001 — degrade, never raise into the tick
             return f"{verb} {vi_name}"
 
-    def _describe_measurement_command(self, vi_name: str, spec: dict) -> str | None:
-        """Compose "Arming/Disarming <label> measurement" for one measurement command.
+    def _describe_measurement_command(self, command: Command) -> str | None:
+        """Compose "Arming/Disarming <label> measurement" for one ``Command``.
 
-        Returns None if the command cannot be described. ``spec`` is the
-        ``{method: kwargs}`` mapping a procedure returns per measurement VI.
+        Returns None if the command cannot be described.
         """
         try:
-            label = self._station.measurement_label(vi_name)
-            method = next(iter(spec), "")
-            if method in ("standby", "disarm"):
+            label = self._station.measurement_label(command.vi_name)
+            if command.method in ("standby", "disarm"):
                 return f"Disarming {label} measurement"
             return f"Arming {label} measurement"
         except Exception:  # noqa: BLE001
             return None
 
-    def _emit_setup_actions(self, system_targets: dict, meas_commands: dict, *, verb: str) -> None:
+    def _emit_setup_actions(
+        self,
+        system_targets: dict[str, Target],
+        commands: Sequence[Command],
+        *,
+        verb: str,
+    ) -> None:
         """Emit one status line per distinct setup action (ramps, then measurement).
 
         Used for both initiation and standby/parking so each thing being done
         (set temperature, ramp field, arm the measurement) shows separately.
         """
-        for vi_name, params in system_targets.items():
-            self._emit_status(self._describe_system_target(vi_name, params, verb=verb))
-        for vi_name, spec in meas_commands.items():
-            line = self._describe_measurement_command(vi_name, spec)
+        for vi_name, target in system_targets.items():
+            self._emit_status(self._describe_system_target(vi_name, target, verb=verb))
+        for command in commands:
+            line = self._describe_measurement_command(command)
             if line:
                 self._emit_status(line)
 
-    def _emit_initiation_status(self, system_targets: dict, meas_commands: dict) -> None:
+    def _emit_initiation_status(
+        self, system_targets: dict[str, Target], commands: Sequence[Command]
+    ) -> None:
         """Emit the initiation header plus one line per distinct setup action.
 
         Initiation is a distinct, often slow phase: the procedure brings the
@@ -496,9 +507,9 @@ class Orchestrator(QObject):
             self._emit_status(f'Initiating "{name}" ({n} points)')
         except Exception:  # noqa: BLE001
             self._emit_status("Initiating procedure")
-        self._emit_setup_actions(system_targets, meas_commands, verb="Ramping")
+        self._emit_setup_actions(system_targets, commands, verb="Ramping")
 
-    def _ramp_status_line(self, system_targets: dict) -> str:
+    def _ramp_status_line(self, system_targets: dict[str, Target]) -> str:
         """Compose "Point i/n: ramping <label> -> <value> <unit>" for a sweep step.
 
         Describes the (usually single) target the sweep step ramps, using the
@@ -507,10 +518,10 @@ class Orchestrator(QObject):
         try:
             i, n = self._procedure.get_sweep_position()
             parts = []
-            for vi_name, params in system_targets.items():
+            for vi_name, target in system_targets.items():
                 label, unit = self._station.system_setpoint_meta(vi_name)
                 unit_suffix = f" {unit}" if unit else ""
-                parts.append(f"{label} -> {float(params.get('target')):g}{unit_suffix}")
+                parts.append(f"{label} -> {float(target.target):g}{unit_suffix}")
             detail = "; ".join(parts) if parts else "next setpoint"
             return f"Point {i}/{n}: ramping {detail}"
         except Exception:  # noqa: BLE001 — degrade, never raise into the tick
@@ -640,16 +651,16 @@ class Orchestrator(QObject):
             self._change_state(OrchestratorState.SWEEPING)
         elif self._state == OrchestratorState.SWEEPING:
             if self._procedure:
-                sys_targ_wait = self._procedure.change_sweep_step()
-                if sys_targ_wait is None:
+                step_plan = self._procedure.change_sweep_step()
+                if step_plan is None:
                     # done, go to standby
                     self._change_state(OrchestratorState.STANDBY)
                 else:
-                    sys_targets, wait_time = sys_targ_wait
-                    self._dispatch_targets(sys_targets)
-                    self._current_wait_time = wait_time
+                    logger.info("Procedure plan (step): %r", step_plan)
+                    self._dispatch_targets(step_plan.targets)
+                    self._current_wait_time = step_plan.wait_s
                     self._change_state(OrchestratorState.RAMPING)
-                    self._emit_status(self._ramp_status_line(sys_targets))
+                    self._emit_status(self._ramp_status_line(step_plan.targets))
         elif self._state == OrchestratorState.STANDBY:
             if not self._standby_dispatched:
                 # Wait for whatever ramp was already in flight when SWEEPING
@@ -658,12 +669,13 @@ class Orchestrator(QObject):
                 if self._station.check_ramps():
                     self._emit_status("Sweep complete - closing data file")
                     if self._procedure and hasattr(self._procedure, "standby"):
-                        sys_targ, meas_cmd, wait = self._procedure.standby()
-                        self._dispatch_targets(sys_targ)
-                        self._station.send_measurement_commands(meas_cmd)
-                        if sys_targ or meas_cmd:
+                        plan = self._procedure.standby()
+                        logger.info("Procedure plan (standby): %r", plan)
+                        self._dispatch_targets(plan.targets)
+                        self._station.send_measurement_commands(plan.commands)
+                        if plan.targets or plan.commands:
                             self._emit_status("Parking hardware")
-                            self._emit_setup_actions(sys_targ, meas_cmd, verb="Ramping")
+                            self._emit_setup_actions(plan.targets, plan.commands, verb="Ramping")
                     self._standby_dispatched = True
             else:
                 # Wait for the ramp standby() itself just started (if any)
@@ -699,9 +711,9 @@ class Orchestrator(QObject):
         procedure = self._procedure
         if procedure is not None and hasattr(procedure, "abort"):
             try:
-                meas_commands = procedure.abort()
-                if meas_commands:
-                    self._station.send_measurement_commands(meas_commands)
+                commands = procedure.abort()
+                if commands:
+                    self._station.send_measurement_commands(commands)
             except Exception:
                 logger.exception("Procedure abort cleanup failed")
         try:

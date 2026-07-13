@@ -8,6 +8,7 @@
 from pathlib import Path
 
 import pytest
+from cryosoft.core.plan import Target
 from cryosoft.core.station import Station, build_station
 
 
@@ -96,7 +97,7 @@ def test_get_ramp_status_covers_system_rampables(sim_station: Station):
 
 def test_get_ramp_status_reports_active_target(sim_station: Station):
     """After a system VI starts ramping, its live target shows up in the aggregate."""
-    sim_station.process_system_targets({"magnet_x": {"target": 1.0}})
+    sim_station.process_system_targets({"magnet_x": Target(1.0)})
     ramps = sim_station.get_ramp_status()
     assert ramps["magnet_x"]["ramp_status"] == "RAMPING"
     assert ramps["magnet_x"]["target"] == pytest.approx(1.0)
@@ -151,30 +152,30 @@ def test_process_system_targets_forwards_persistent_key(sim_station: Station):
     'persistent' in a magnet target regardless of which magnet VI flavor a
     config wires up.
     """
-    sim_station.process_system_targets({"magnet_x": {"target": 1.0, "persistent": False}})
+    sim_station.process_system_targets({"magnet_x": Target(1.0, persistent=False)})
     assert sim_station.magnet_x.ramp_status() == "RAMPING"
 
 
 def test_process_system_targets_dispatch(sim_station: Station):
     """process_system_targets dispatches to correct VIs only."""
     targets = {
-        "magnet_x": {"target": 1.0},
-        "temperature_vti": {"target": 150.0}
+        "magnet_x": Target(1.0),
+        "temperature_vti": Target(150.0)
     }
 
     sim_station.process_system_targets(targets)
-    
+
     # Verify that the ramps have started
     assert sim_station.magnet_x.ramp_status() == "RAMPING"
     assert sim_station.temperature_vti.ramp_status() == "RAMPING"
-    
+
     # Verify that un-targeted system VIs are NOT ramping
     assert sim_station.magnet_y.ramp_status() == "IDLE"
     assert sim_station.temperature_sample.ramp_status() == "IDLE"
 
     # process_system_targets should raise if we pass a non-system VI
     with pytest.raises(ValueError):
-        sim_station.process_system_targets({"level_meter": {"target": 10.0}})
+        sim_station.process_system_targets({"level_meter": Target(10.0)})
 
 
 def test_check_ramps(sim_station: Station):
@@ -183,8 +184,8 @@ def test_check_ramps(sim_station: Station):
     assert sim_station.check_ramps() is True
     
     # Start a ramp
-    sim_station.process_system_targets({"magnet_x": {"target": 1.0}})
-    
+    sim_station.process_system_targets({"magnet_x": Target(1.0)})
+
     # While ramping, should return False
     assert sim_station.check_ramps() is False
     

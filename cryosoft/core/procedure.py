@@ -10,6 +10,7 @@
 # dependencies:
 #   - cryosoft.core.station (Station)
 #   - cryosoft.core.data_manager (DataManager, created by subclasses)
+#   - cryosoft.core.plan (Command, PhasePlan, StepPlan — the typed currency)
 #   - cryosoft.core.sweep_builder (SweepAxis, sweep_axis_param_specs, build_axis_sweep)
 # input: |
 #   Constructor receives a Station, sample_info dict, data_directory string,
@@ -24,9 +25,10 @@
 #   EMERGENCY entry it calls abort() instead, which closes the data file
 #   (default implementation) and returns measurement safe-off commands.
 # output: |
-#   initiate() and standby() return (system_targets, measurement_commands, wait_time).
-#   change_sweep_step() returns (system_targets, wait_time) or None when done.
-# last_updated: 2026-07-12
+#   initiate() and standby() return a PhasePlan (targets, commands, wait_s).
+#   change_sweep_step() returns a StepPlan (targets, wait_s) or None when done.
+#   abort() returns a tuple[Command, ...] of measurement safe-off commands.
+# last_updated: 2026-07-13
 # ---
 
 """BaseProcedure — abstract base class for all CryoSoft procedures."""
@@ -36,6 +38,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from cryosoft.core.plan import Command, PhasePlan, StepPlan
 from cryosoft.core.station import Station
 from cryosoft.core.sweep_builder import SweepAxis, build_axis_sweep, sweep_axis_param_specs
 
@@ -45,7 +48,9 @@ class BaseProcedure:
 
     Procedures declare *what* the system should do; the Orchestrator handles
     *how* it executes. A procedure never calls driver or VI methods directly
-    during ramping — it returns dicts and the Orchestrator dispatches them.
+    during ramping — it returns typed plans (``PhasePlan`` / ``StepPlan``,
+    built from ``Target`` and ``Command`` objects from ``cryosoft.core.plan``)
+    and the Orchestrator dispatches them.
 
     Class attributes:
         name: Human-readable display name (shown in GUI procedure browser).
@@ -295,8 +300,8 @@ class BaseProcedure:
     # Four-method procedure interface — must override in subclass
     # ------------------------------------------------------------------
 
-    def initiate(self) -> tuple[dict, dict, float]:
-        """Set up the experiment and return initial targets.
+    def initiate(self) -> PhasePlan:
+        """Set up the experiment and return the initial plan.
 
         Jobs:
         1. Create the DataManager and HDF5 file.
@@ -305,25 +310,24 @@ class BaseProcedure:
         4. Return the wait time (seconds) after reaching initial targets.
 
         Returns:
-            ``(system_targets, measurement_commands, wait_time)``
-
-            * system_targets: ``{"vi_name": {"target": value}, ...}``
-            * measurement_commands: ``{"vi_name": {"method": kwargs}, ...}``
-            * wait_time: seconds to wait after targets reached
+            A ``PhasePlan`` bundling ``targets`` (a ``{"vi_name": Target(...)}``
+            mapping), ``commands`` (an ordered ``tuple[Command, ...]`` of
+            measurement-VI calls), and ``wait_s`` (seconds to settle after the
+            targets are reached).
 
         Raises:
             NotImplementedError: If not overridden in subclass.
         """
         raise NotImplementedError(f"{type(self).__name__} must implement initiate()")
 
-    def change_sweep_step(self) -> tuple[dict, float] | None:
-        """Advance the sweep index and return the next targets.
+    def change_sweep_step(self) -> StepPlan | None:
+        """Advance the sweep index and return the next plan.
 
         Called by the Orchestrator in SWEEPING state.
 
         Returns:
-            ``(system_targets, wait_time)`` for the next sweep point, or
-            ``None`` when the sweep is complete.
+            A ``StepPlan`` (``targets`` mapping plus ``wait_s``) for the next
+            sweep point, or ``None`` when the sweep is complete.
 
         Raises:
             NotImplementedError: If not overridden in subclass.
@@ -343,14 +347,15 @@ class BaseProcedure:
         """
         raise NotImplementedError(f"{type(self).__name__} must implement measure()")
 
-    def standby(self) -> tuple[dict, dict, float]:
-        """Close the data file and return safe parking targets.
+    def standby(self) -> PhasePlan:
+        """Close the data file and return the safe-parking plan.
 
         Called by the Orchestrator in STANDBY state after the sweep completes
         (or after an abort).
 
         Returns:
-            ``(system_targets, measurement_commands, wait_time)``
+            A ``PhasePlan`` (``targets`` mapping, ordered ``commands`` tuple,
+            and ``wait_s``) describing where to park the system.
 
         Raises:
             NotImplementedError: If not overridden in subclass.
@@ -361,7 +366,7 @@ class BaseProcedure:
     # Abort — has a working default; override to add measurement safe-off
     # ------------------------------------------------------------------
 
-    def abort(self) -> dict:
+    def abort(self) -> tuple[Command, ...]:
         """Clean up after an abort: close the data file, keep partial data.
 
         Called by the Orchestrator on user abort and on ERROR/EMERGENCY
@@ -370,16 +375,16 @@ class BaseProcedure:
 
         Subclasses should extend this to also safe their measurement VI::
 
-            def abort(self) -> dict:
+            def abort(self) -> tuple[Command, ...]:
                 super().abort()
-                return {"dc_measurement": {"standby": {}}}
+                return (Command("dc_measurement", "standby", {}),)
 
         Returns:
-            ``measurement_commands`` dict (``{vi_name: {method: kwargs}}``)
-            the Orchestrator dispatches to safe the measurement hardware.
-            The base implementation returns ``{}``.
+            An ordered ``tuple[Command, ...]`` the Orchestrator dispatches to
+            safe the measurement hardware. The base implementation returns an
+            empty tuple ``()``.
         """
         if self._data_manager is not None:
             self._data_manager.close()
             self._data_manager = None
-        return {}
+        return ()

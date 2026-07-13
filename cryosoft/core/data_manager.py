@@ -62,7 +62,7 @@ class DataManager:
         sample_info: dict,
         instrument_state: dict,
         system_targets: dict,
-        measurement_commands: dict,
+        measurement_commands: dict | list,
         data_config: dict,
         n_sweep_points: int,
         file_prefix: str = "",
@@ -90,7 +90,10 @@ class DataManager:
         system_targets:
             Physical targets (field, temperature …) for this run.
         measurement_commands:
-            Dict describing the measurement commands used.
+            JSON-serialisable description of the measurement commands used.
+            Since the typed-plan cutover this is an ordered list of Command
+            dicts (``[{"vi_name": ..., "method": ..., "kwargs": {...}}, ...]``);
+            a plain dict is still accepted (older files / direct callers).
         data_config:
             Specifies datasets.  Expected format::
 
@@ -155,7 +158,7 @@ class DataManager:
         sample_info: dict,
         instrument_state: dict,
         system_targets: dict,
-        measurement_commands: dict,
+        measurement_commands: dict | list,
         data_config: dict,
     ) -> None:
         """Write all metadata to `/metadata/` as JSON-encoded HDF5 attributes."""

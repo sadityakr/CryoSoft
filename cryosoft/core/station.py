@@ -10,6 +10,7 @@
 # entry_point: Not run directly; used by Orchestrator and GUI.
 # dependencies:
 #   - cryosoft.core.exceptions
+#   - cryosoft.core.plan (Command, Target — the typed dispatch currency)
 #   - cryosoft.virtual_instruments.base (BaseVirtualInstrument)
 #   - cryosoft.virtual_instruments.rampable (RampableVI)
 #   - ruamel.yaml >= 0.18
@@ -22,7 +23,7 @@
 #   After max_errors consecutive failures, _disconnected=True is added.
 # output: |
 #   Full station state dict {vi_name: {field: value, ...}} every poll cycle.
-# last_updated: 2026-04-06
+# last_updated: 2026-07-13
 # ---
 
 """Station class — runtime registry of all Virtual Instruments.
@@ -37,10 +38,12 @@ from __future__ import annotations
 
 import importlib
 import logging
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 from cryosoft.core.exceptions import CryoSoftCommunicationError, CryoSoftConfigError
+from cryosoft.core.plan import Command, Target
 from cryosoft.virtual_instruments.base import BaseVirtualInstrument
 from cryosoft.virtual_instruments.rampable import RampableVI
 
@@ -261,22 +264,21 @@ class Station:
     # Ramp management
     # ------------------------------------------------------------------
 
-    def process_system_targets(self, system_targets: dict[str, dict]) -> None:
+    def process_system_targets(self, system_targets: dict[str, Target]) -> None:
         """Dispatch ramp targets to system VIs.
 
-        Only VIs whose ``vi_type == "system"`` are valid ramp targets.
-        Each entry in *system_targets* must be ``{vi_name: {"target": float}}``,
-        optionally with a ``"rate"`` and/or ``"persistent"`` key — both are
-        forwarded to ``start_ramp()`` only if present, so VIs that do not
-        accept them (most VIs do not) are unaffected.
+        Only VIs whose ``vi_type == "system"`` are valid ramp targets. Each
+        value is a ``Target``; its ``rate`` and ``persistent`` attributes are
+        forwarded to ``start_ramp()`` only when not ``None``, so VIs that do
+        not accept them (most VIs do not) are unaffected.
 
         Args:
-            system_targets: Mapping of VI name → target dict.
+            system_targets: Mapping of VI name → ``Target``.
 
         Raises:
             ValueError: If a named VI is not registered or not a system VI.
         """
-        for vi_name, params in system_targets.items():
+        for vi_name, tgt in system_targets.items():
             if vi_name not in self._virtual_instruments:
                 raise ValueError(f"process_system_targets: unknown VI '{vi_name}'")
             if self._vi_registry[vi_name] != "system":
@@ -289,12 +291,12 @@ class Station:
                 raise ValueError(
                     f"process_system_targets: VI '{vi_name}' does not implement RampableVI"
                 )
-            target = float(params["target"])
+            target = tgt.target
             kwargs: dict[str, Any] = {}
-            if params.get("rate") is not None:
-                kwargs["rate"] = float(params["rate"])
-            if "persistent" in params:
-                kwargs["persistent"] = bool(params["persistent"])
+            if tgt.rate is not None:
+                kwargs["rate"] = tgt.rate
+            if tgt.persistent is not None:
+                kwargs["persistent"] = bool(tgt.persistent)
             logger.info("Starting ramp on '%s' to target=%s", vi_name, target)
             vi.start_ramp(target, **kwargs)  # type: ignore[call-arg]
 
@@ -432,28 +434,32 @@ class Station:
     # Measurement command dispatch
     # ------------------------------------------------------------------
 
-    def send_measurement_commands(self, measurement_commands: dict[str, dict]) -> None:
-        """Dispatch method calls to measurement VIs.
+    def send_measurement_commands(self, commands: Sequence[Command]) -> None:
+        """Dispatch an ordered sequence of ``Command`` calls to VIs.
+
+        Commands are dispatched in order (order is semantically meaningful —
+        e.g. a switch heater must settle before a source arms). An unknown VI
+        or an unknown method is logged at WARNING and skipped; an exception
+        raised by the VI method itself propagates to the caller.
 
         Args:
-            measurement_commands: ``{vi_name: {method_name: kwargs}}``.
+            commands: Ordered sequence of ``Command`` objects to dispatch.
         """
-        for vi_name, commands in measurement_commands.items():
-            if vi_name not in self._virtual_instruments:
-                logger.warning("send_measurement_commands: unknown VI '%s'", vi_name)
+        for cmd in commands:
+            if cmd.vi_name not in self._virtual_instruments:
+                logger.warning("send_measurement_commands: unknown VI '%s'", cmd.vi_name)
                 continue
-            vi = self._virtual_instruments[vi_name]
-            for method_name, kwargs in commands.items():
-                method = getattr(vi, method_name, None)
-                if method is None:
-                    logger.warning(
-                        "send_measurement_commands: VI '%s' has no method '%s'",
-                        vi_name,
-                        method_name,
-                    )
-                    continue
-                logger.debug("Calling %s.%s(%s)", vi_name, method_name, kwargs)
-                method(**kwargs)
+            vi = self._virtual_instruments[cmd.vi_name]
+            method = getattr(vi, cmd.method, None)
+            if method is None:
+                logger.warning(
+                    "send_measurement_commands: VI '%s' has no method '%s'",
+                    cmd.vi_name,
+                    cmd.method,
+                )
+                continue
+            logger.debug("Calling %s.%s(%s)", cmd.vi_name, cmd.method, cmd.kwargs)
+            method(**cmd.kwargs)
 
     # ------------------------------------------------------------------
     # VI action dispatch

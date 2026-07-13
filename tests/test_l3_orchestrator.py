@@ -10,13 +10,14 @@ import pytest
 
 
 from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
+from cryosoft.core.plan import PhasePlan, StepPlan, Target
 from cryosoft.core.station import build_station
 
 
 class MockProcedure:
     """Minimal procedure for testing the Orchestrator state machine."""
     name = "Mock Sweep"
-    
+
     def __init__(self, station):
         self._station = station
         self._sweep = [1.0, 2.0, 3.0]
@@ -24,23 +25,23 @@ class MockProcedure:
         self.measure_called = 0
 
     def initiate(self):
-        return (
-            {"magnet_x": {"target": self._sweep[0]}},  # system_targets
-            {},                                          # meas_commands
-            0.0,                                         # wait_time (instant)
+        return PhasePlan(
+            targets={"magnet_x": Target(self._sweep[0])},
+            commands=(),
+            wait_s=0.0,  # instant
         )
 
     def change_sweep_step(self):
         self._index += 1
         if self._index >= len(self._sweep):
             return None
-        return {"magnet_x": {"target": self._sweep[self._index]}}, 0.0
+        return StepPlan(targets={"magnet_x": Target(self._sweep[self._index])}, wait_s=0.0)
 
     def measure(self):
         self.measure_called += 1
 
     def standby(self):
-        return {"magnet_x": {"target": 0.0}}, {}, 0.0
+        return PhasePlan(targets={"magnet_x": Target(0.0)}, commands=(), wait_s=0.0)
 
     def get_progress(self):
         return self._index / len(self._sweep)
@@ -84,7 +85,7 @@ def test_operational_status_populated_after_tick(orchestrator, qtbot):
 
 def test_operational_status_reports_live_ramp_target(orchestrator, station, qtbot):
     """During a ramp, the record shows the VI's live target and a gap."""
-    station.process_system_targets({"magnet_x": {"target": 1.0}})
+    station.process_system_targets({"magnet_x": Target(1.0)})
     orchestrator._tick()
     status = orchestrator.get_operational_status()
     magnet = next(v for v in status["vis"] if v["vi_name"] == "magnet_x")
@@ -191,8 +192,10 @@ def test_wait_time_respected(orchestrator, station, qtbot):
     
     # Override initiate to add wait time
     def delayed_initiate():
-        return ({"magnet_x": {"target": 1.0}}, {}, 0.1) # 100ms wait
-        
+        return PhasePlan(
+            targets={"magnet_x": Target(1.0)}, commands=(), wait_s=0.1
+        )  # 100ms wait
+
     procedure.initiate = delayed_initiate
     station.magnet_x._default_ramp_rate = 6000.0
     station.magnet_x._ramp_segments = []
@@ -416,7 +419,7 @@ class RecordingProcedure(MockProcedure):
 
     def abort(self):
         self.abort_called += 1
-        return {}
+        return ()
 
 
 def test_abort_calls_procedure_abort_and_holds_magnet(orchestrator, station, qtbot):
@@ -475,6 +478,29 @@ def test_run_procedure_setup_failure_degrades_to_error(orchestrator, station):
             raise ValueError("bad parameters")
 
     proc = BadInit(station)
+    orchestrator.run_procedure(proc)
+
+    assert orchestrator._state == OrchestratorState.ERROR
+    assert orchestrator._procedure is None
+    orchestrator.recover_from_error()
+    assert orchestrator._state == OrchestratorState.IDLE
+
+
+def test_malformed_initiate_return_fails_loudly(orchestrator, station):
+    """initiate() returning the OLD tuple (not a PhasePlan) must fail loudly.
+
+    The Wave-2 currency is typed: the Orchestrator consumes ``plan.targets`` /
+    ``plan.commands`` / ``plan.wait_s``. A procedure that returns the legacy
+    ``(system_targets, measurement_commands, wait)`` tuple has no ``.targets``
+    attribute, so setup must contain the AttributeError to ERROR rather than
+    silently mis-dispatching.
+    """
+    class LegacyReturn(RecordingProcedure):
+        def initiate(self):
+            # The pre-Wave-2 shape — a bare tuple, not a PhasePlan.
+            return ({"magnet_x": {"target": 1.0}}, {}, 0.0)
+
+    proc = LegacyReturn(station)
     orchestrator.run_procedure(proc)
 
     assert orchestrator._state == OrchestratorState.ERROR

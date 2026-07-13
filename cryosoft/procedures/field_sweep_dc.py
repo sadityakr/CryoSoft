@@ -8,6 +8,7 @@
 # dependencies:
 #   - cryosoft.core.procedure (BaseProcedure)
 #   - cryosoft.core.data_manager (DataManager)
+#   - cryosoft.core.plan (Command, PhasePlan, StepPlan, Target)
 #   - cryosoft.core.sweep_builder (SweepAxis) — sweep-shape construction is
 #     handled entirely by BaseProcedure's default _build_sweep_array()
 #   - Station must have: magnet_x (system VI), temperature_vti (system VI),
@@ -24,18 +25,22 @@
 #   change_sweep_step() steps through fields. measure() calls take_reading()
 #   and saves via DataManager. standby() parks magnet at 0 T.
 # output: |
-#   HDF5 file with /data/field_T[N], /data/voltage_V[N,M],
-#   /data/current_A[N,M], /data/timestamp[N], /snapshots/ and /metadata/.
-# last_updated: 2026-07-12
+#   initiate()/standby() return a PhasePlan, change_sweep_step() a StepPlan|None,
+#   abort() a tuple[Command, ...]. Side effect: an HDF5 file with /data/field_T[N],
+#   /data/voltage_V[N,M], /data/current_A[N,M], /data/timestamp[N], /snapshots/
+#   and /metadata/.
+# last_updated: 2026-07-13
 # ---
 
 """FieldSweepDC — magnetic field sweep with DC resistance measurement."""
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 
 from cryosoft.core.data_manager import DataManager
+from cryosoft.core.plan import Command, PhasePlan, StepPlan, Target
 from cryosoft.core.procedure import BaseProcedure
 from cryosoft.core.sweep_builder import SweepAxis
 
@@ -128,26 +133,29 @@ class FieldSweepDC(BaseProcedure):
     # implementation delegates to sweep_builder.build_axis_sweep() using the
     # sweep_axis declared above (linear / segments / CSV, with hysteresis).
 
-    def initiate(self) -> tuple[dict, dict, float]:
+    def initiate(self) -> PhasePlan:
         """Ramp to initial field and temperature, arm dc_measurement.
 
         Returns:
-            ``(system_targets, measurement_commands, init_wait)``
+            A ``PhasePlan`` with the initial field/temperature ``targets``, the
+            ``dc_measurement`` arming ``Command``, and ``wait_s=init_wait``.
         """
-        system_targets = {
-            "magnet_x": {"target": self._sweep[0]},
-            "temperature_vti": {"target": self._params["temperature"]},
+        targets = {
+            "magnet_x": Target(self._sweep[0]),
+            "temperature_vti": Target(self._params["temperature"]),
         }
 
-        measurement_commands = {
-            "dc_measurement": {
-                "initiate": {
+        commands = (
+            Command(
+                "dc_measurement",
+                "initiate",
+                {
                     "current_A": self._params["current_A"],
                     "compliance_A": self._params["compliance_A"],
                     "voltmeter_range_V": self._params["voltmeter_range_V"],
-                }
-            }
-        }
+                },
+            ),
+        )
 
         n = int(self._params["readings_per_point"])
         base_config: dict = {
@@ -165,8 +173,10 @@ class FieldSweepDC(BaseProcedure):
             procedure_params=self._params,
             sample_info=self._sample_info,
             instrument_state=self._station.get_state(),
-            system_targets=system_targets,
-            measurement_commands=measurement_commands,
+            # DataManager stays dict-based (contract C7): convert the typed plan
+            # to plain JSON-ready dicts at this call-site boundary only.
+            system_targets={name: dataclasses.asdict(t) for name, t in targets.items()},
+            measurement_commands=[dataclasses.asdict(c) for c in commands],
             data_config=self._build_data_config(base_config),
             n_sweep_points=len(self._sweep),
         )
@@ -179,21 +189,26 @@ class FieldSweepDC(BaseProcedure):
             self._params["temperature"],
         )
 
-        return system_targets, measurement_commands, float(self._params["init_wait"])
+        return PhasePlan(
+            targets=targets, commands=commands, wait_s=float(self._params["init_wait"])
+        )
 
-    def change_sweep_step(self) -> tuple[dict, float] | None:
+    def change_sweep_step(self) -> StepPlan | None:
         """Advance to the next field step.
 
         Returns:
-            ``({"magnet_x": {"target": next_field}}, step_wait)`` or ``None``
-            when all sweep points have been measured.
+            A ``StepPlan`` ramping ``magnet_x`` to the next field with
+            ``wait_s=step_wait``, or ``None`` when all sweep points have been
+            measured.
         """
         self._index += 1
         if self._index >= len(self._sweep):
             return None
 
-        system_targets = {"magnet_x": {"target": self._sweep[self._index]}}
-        return system_targets, float(self._params["step_wait"])
+        return StepPlan(
+            targets={"magnet_x": Target(self._sweep[self._index])},
+            wait_s=float(self._params["step_wait"]),
+        )
 
     def measure(self) -> None:
         """Take a DC reading, snapshot station state, save to HDF5.
@@ -215,25 +230,28 @@ class FieldSweepDC(BaseProcedure):
             measured_data[type(self).sweep_axis.data_key],
         )
 
-    def standby(self) -> tuple[dict, dict, float]:
+    def standby(self) -> PhasePlan:
         """Close data file, park magnet at 0 T, disarm dc_measurement.
 
         Returns:
-            ``(system_targets, measurement_commands, 0.0)``
+            A ``PhasePlan`` ramping ``magnet_x`` to 0 T, disarming
+            ``dc_measurement``, with ``wait_s=0.0``.
         """
         if self._data_manager is not None:
             self._data_manager.close()
             self._data_manager = None
 
-        system_targets = {"magnet_x": {"target": 0.0}}
-        measurement_commands = {"dc_measurement": {"standby": {}}}
-        return system_targets, measurement_commands, 0.0
+        return PhasePlan(
+            targets={"magnet_x": Target(0.0)},
+            commands=(Command("dc_measurement", "standby", {}),),
+            wait_s=0.0,
+        )
 
-    def abort(self) -> dict:
+    def abort(self) -> tuple[Command, ...]:
         """Close the data file and zero the DC source (no ramping).
 
         Returns:
             Measurement safe-off commands for the Orchestrator to dispatch.
         """
         super().abort()
-        return {"dc_measurement": {"standby": {}}}
+        return (Command("dc_measurement", "standby", {}),)

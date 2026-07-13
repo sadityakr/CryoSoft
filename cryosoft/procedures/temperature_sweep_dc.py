@@ -9,6 +9,7 @@
 # dependencies:
 #   - cryosoft.core.procedure (BaseProcedure)
 #   - cryosoft.core.data_manager (DataManager)
+#   - cryosoft.core.plan (Command, PhasePlan, StepPlan, Target)
 #   - cryosoft.core.sweep_builder (SweepAxis) — sweep-shape construction is
 #     handled entirely by BaseProcedure's default _build_sweep_array()
 #   - Station must have: temperature_vti (system VI) and dc_measurement
@@ -29,20 +30,24 @@
 #   measure() calls take_reading() and saves via DataManager.
 #   standby() closes the data file; temperature holds at last set point.
 # output: |
-#   HDF5 file with /data/temperature_K[N], /data/voltage_V[N,M],
-#   /data/current_A[N,M], /data/timestamp[N], /snapshots/ and /metadata/.
-# last_updated: 2026-07-12
+#   initiate()/standby() return a PhasePlan, change_sweep_step() a StepPlan|None,
+#   abort() a tuple[Command, ...]. Side effect: an HDF5 file with
+#   /data/temperature_K[N], /data/voltage_V[N,M], /data/current_A[N,M],
+#   /data/timestamp[N], /snapshots/ and /metadata/.
+# last_updated: 2026-07-13
 # ---
 
 """TemperatureSweepDC — temperature sweep with DC resistance measurement."""
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from typing import Any
 
 from cryosoft.core.data_manager import DataManager
 from cryosoft.core.exceptions import CryoSoftConfigError
+from cryosoft.core.plan import Command, PhasePlan, StepPlan, Target
 from cryosoft.core.procedure import BaseProcedure
 from cryosoft.core.sweep_builder import SweepAxis
 
@@ -154,11 +159,11 @@ class TemperatureSweepDC(BaseProcedure):
         0.5 T would corrupt a dataset without anyone noticing.
         """
         super().__init__(*args, **kwargs)
-        self._magnet_targets: dict[str, dict] = {}
+        self._magnet_targets: dict[str, Target] = {}
         for magnet, param in (("magnet_x", "field_x"), ("magnet_y", "field_y")):
             field = float(self._params[param])
             if self._station.has_vi(magnet):
-                self._magnet_targets[magnet] = {"target": field}
+                self._magnet_targets[magnet] = Target(field)
             elif field != 0.0:
                 raise CryoSoftConfigError(
                     f"{param}={field} T requested, but this station has no "
@@ -170,37 +175,41 @@ class TemperatureSweepDC(BaseProcedure):
                     "(%s=0).", magnet, param,
                 )
 
-    def _temp_target(self, index: int) -> dict:
-        """Build a system_targets entry for temperature_vti at *index*."""
-        return {
-            "target": self._sweep[index],
-            "rate": self._params["ramp_rate_K_per_min"],
-        }
+    def _temp_target(self, index: int) -> Target:
+        """Build the temperature_vti ``Target`` at *index* (with ramp rate)."""
+        return Target(
+            self._sweep[index],
+            rate=self._params["ramp_rate_K_per_min"],
+        )
 
     # ------------------------------------------------------------------
     # Four-method interface
     # ------------------------------------------------------------------
 
-    def initiate(self) -> tuple[dict, dict, float]:
+    def initiate(self) -> PhasePlan:
         """Ramp to initial temperature, arm dc_measurement.
 
         Returns:
-            ``(system_targets, measurement_commands, point_wait)``
+            A ``PhasePlan`` ramping ``temperature_vti`` (and any present
+            magnets) to their targets, arming ``dc_measurement``, with
+            ``wait_s=point_wait``.
         """
-        system_targets = {
+        targets = {
             "temperature_vti": self._temp_target(0),
             **self._magnet_targets,  # only magnets the station actually has
         }
 
-        measurement_commands = {
-            "dc_measurement": {
-                "initiate": {
+        commands = (
+            Command(
+                "dc_measurement",
+                "initiate",
+                {
                     "current_A": self._params["current_A"],
                     "compliance_A": self._params["compliance_A"],
                     "voltmeter_range_V": self._params["voltmeter_range_V"],
-                }
-            }
-        }
+                },
+            ),
+        )
 
         n = int(self._params["readings_per_point"])
         base_config: dict = {
@@ -218,8 +227,10 @@ class TemperatureSweepDC(BaseProcedure):
             procedure_params=self._params,
             sample_info=self._sample_info,
             instrument_state=self._station.get_state(),
-            system_targets=system_targets,
-            measurement_commands=measurement_commands,
+            # DataManager stays dict-based (contract C7): convert the typed plan
+            # to plain JSON-ready dicts at this call-site boundary only.
+            system_targets={name: dataclasses.asdict(t) for name, t in targets.items()},
+            measurement_commands=[dataclasses.asdict(c) for c in commands],
             data_config=self._build_data_config(base_config),
             n_sweep_points=len(self._sweep),
         )
@@ -235,21 +246,26 @@ class TemperatureSweepDC(BaseProcedure):
             self._params["field_y"],
         )
 
-        return system_targets, measurement_commands, float(self._params["point_wait"])
+        return PhasePlan(
+            targets=targets, commands=commands, wait_s=float(self._params["point_wait"])
+        )
 
-    def change_sweep_step(self) -> tuple[dict, float] | None:
+    def change_sweep_step(self) -> StepPlan | None:
         """Ramp to the next temperature step.
 
         Returns:
-            ``({"temperature_vti": {"target": T, "rate": R}}, point_wait)``
-            or ``None`` when all points have been measured.
+            A ``StepPlan`` ramping ``temperature_vti`` to the next temperature
+            (with ramp rate) and ``wait_s=point_wait``, or ``None`` when all
+            points have been measured.
         """
         self._index += 1
         if self._index >= len(self._sweep):
             return None
 
-        system_targets = {"temperature_vti": self._temp_target(self._index)}
-        return system_targets, float(self._params["point_wait"])
+        return StepPlan(
+            targets={"temperature_vti": self._temp_target(self._index)},
+            wait_s=float(self._params["point_wait"]),
+        )
 
     def measure(self) -> None:
         """Take a DC reading at the current temperature, save to HDF5.
@@ -271,24 +287,28 @@ class TemperatureSweepDC(BaseProcedure):
             measured_data[type(self).sweep_axis.data_key],
         )
 
-    def standby(self) -> tuple[dict, dict, float]:
+    def standby(self) -> PhasePlan:
         """Close data file. Temperature holds at last set point.
 
         Returns:
-            ``(system_targets, measurement_commands, 0.0)``
+            A ``PhasePlan`` with no system targets (temperature holds where it
+            is), disarming ``dc_measurement``, with ``wait_s=0.0``.
         """
         if self._data_manager is not None:
             self._data_manager.close()
             self._data_manager = None
 
-        measurement_commands = {"dc_measurement": {"standby": {}}}
-        return {}, measurement_commands, 0.0
+        return PhasePlan(
+            targets={},
+            commands=(Command("dc_measurement", "standby", {}),),
+            wait_s=0.0,
+        )
 
-    def abort(self) -> dict:
+    def abort(self) -> tuple[Command, ...]:
         """Close the data file and zero the DC source (no ramping).
 
         Returns:
             Measurement safe-off commands for the Orchestrator to dispatch.
         """
         super().abort()
-        return {"dc_measurement": {"standby": {}}}
+        return (Command("dc_measurement", "standby", {}),)
