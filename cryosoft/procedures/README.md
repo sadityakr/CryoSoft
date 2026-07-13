@@ -108,20 +108,59 @@ class MyProcedure(BaseProcedure):
   `parameters`) — no hardcoded values in logic.
 - SI units everywhere: tesla, kelvin, amperes, volts, seconds.
 
+## Generic sweep procedures (the common case)
+
+Most measurement procedures are **generic sweep procedures** built on
+`core.procedure.SweepMeasureProcedure`: ONE procedure per sweep axis that runs
+ANY measurement VI the station exposes, chosen in the GUI. `FieldSweep` and
+`TemperatureSweep` are the two shipped today.
+
+The base owns everything that does not depend on the swept quantity:
+
+- **Measurement-VI selection.** `get_param_groups(station, selections)` builds a
+  "Measurement method" group whose single `measurement_vi` parameter is a
+  `structural` `ParamSpec` (its `choices` are the station's measurement VIs),
+  plus a group carrying the *selected* VI's own `measurement_parameters`. The
+  GUI re-renders the measurement group when the selection changes.
+- **Construction.** `__init__` resolves the selected VI, merges its parameter
+  defaults, and records the selection + the instance's live-plot keys.
+- **The four-method loop.** `initiate()` assembles a `DataSchema` (axis column +
+  system columns + the VI's arrays/scalars) and arms the VI; `measure()` reads
+  the VI, tags on the axis read-back, and saves (the schema is validated per
+  datapoint); `standby()` / `abort()` disarm the VI.
+
+**So the everyday extension is a measurement method, not a procedure.** To make
+a new measurement runnable by both sweeps, add a measurement VI (subclass
+`MeasurementInstrumentBase`, declare its self-description, implement the
+lifecycle) and register it in the config with `vi_type: measurement` — no
+procedure change at all.
+
 ## How to add a new procedure
 
-1. Create `procedures/your_procedure.py` with the front-matter block (Workspace Rule 1).
-2. Subclass `BaseProcedure` and implement all five required methods.
-3. Declare all user-facing parameters as `ParamSpec`s in the `sweep_parameters` /
-   `system_parameters` / `measurement_parameters` group dicts.
-4. Build the sweep array in `_build_sweep_array()` from `self._params`.
-5. Create a `DataManager` in `initiate()` with the correct `data_config`.
-6. Write tests in `tests/test_l4_procedure.py` (or a new file for the new procedure).
-7. Add the file to this README's file list below.
+Adding a *procedure* is only needed for a new **sweep axis** (a new swept
+quantity). Subclass `SweepMeasureProcedure` and supply just the axis specifics:
+
+1. Create `procedures/your_sweep.py` with the front-matter block (Workspace Rule 1).
+2. Subclass `SweepMeasureProcedure`; set `name`, `description`, a `sweep_axis`
+   (gives `_build_sweep_array()` and the GUI mode-selector for free),
+   `sweep_data_keys`, `default_x_key`, and any `system_parameters`.
+3. Implement the axis hooks: `_initial_system_targets`, `_step_targets`,
+   `_standby_targets`, `_axis_readback`, `_initiate_wait_s`, `_step_wait_s`.
+   The measurement selection, `DataSchema`, DataManager, and the four-method
+   loop are all inherited — do NOT re-declare `measurement_parameters` or
+   override `initiate`/`measure`/`standby`/`abort` unless the axis truly needs it.
+4. Write tests (see `tests/test_new_procedures.py`), parametrized over the
+   measurement VIs the sweep should support.
+5. Add the file to this README's file list below.
+
+A procedure with a bespoke (non sweep-and-measure) shape can still subclass
+`BaseProcedure` directly and implement the four methods and a `DataManager` by
+hand; the `SweepMeasureProcedure` route is the recommended default.
 
 ## Files
 
 | File | Description |
 |------|-------------|
 | `__init__.py` | Package marker (empty) |
-| `field_sweep_iv.py` | `FieldSweepIV` — sweeps magnetic field (magnet_x), measures IV via delta-mode (Keithley 6221 + 2182A). Requires: magnet_x, temperature_vti, iv_measurement VIs in Station. |
+| `field_sweep.py` | `FieldSweep` ("Field Sweep") — sweeps magnetic field (magnet_x, temperature_vti held), runs the GUI-selected measurement VI at each point. Requires: magnet_x, temperature_vti, and ≥1 measurement VI. |
+| `temperature_sweep.py` | `TemperatureSweep` ("Temperature Sweep") — sweeps temperature (temperature_vti, optional magnet_x/magnet_y held fields), runs the GUI-selected measurement VI at each stable point. Requires: temperature_vti and ≥1 measurement VI; magnets optional. |

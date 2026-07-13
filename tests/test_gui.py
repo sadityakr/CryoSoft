@@ -301,39 +301,31 @@ def test_procedure_window_opens(procedure_win):
 
 
 def test_procedure_selector_populated(procedure_win):
-    """Procedure selector has at least one entry (FieldSweepIV)."""
+    """Procedure selector has at least one entry (FieldSweep / TemperatureSweep)."""
     assert procedure_win._proc_selector.count() >= 1
 
 
 def test_procedure_param_inputs_exist(procedure_win):
     """Parameter form inputs are created for the selected procedure.
 
-    FieldSweepIV declares sweep_axis, so its hidden axis parameters
-    (field_mode, field_start, ...) are handled by the SweepAxisWidget instead
-    of a flat QLineEdit — those are skipped here and checked separately.
+    FieldSweep declares sweep_axis, so its hidden axis parameters (field_mode,
+    field_start, ...) are handled by the SweepAxisWidget, not a flat QLineEdit.
+    Its measurement parameters are station-dependent (from the selected
+    measurement VI), rendered under the "Measurement method" selector.
     """
-    from cryosoft.procedures.field_sweep_iv import FieldSweepIV
+    from cryosoft.procedures.field_sweep import FieldSweep
 
-    # Select FieldSweepIV by its exact name. A substring match ("Field Sweep")
-    # is ambiguous with Field Sweep DC, and procedure discovery order depends
-    # on import order across the test session — this made the test flaky.
-    for i in range(procedure_win._proc_selector.count()):
-        if procedure_win._proc_selector.itemText(i) == FieldSweepIV.name:
-            procedure_win._proc_selector.setCurrentIndex(i)
-            break
-    else:
-        pytest.fail("FieldSweepIV not found in procedure selector")
+    _select_procedure(procedure_win, FieldSweep.name)
 
     assert procedure_win._axis_widget is not None
-    axis_keys = procedure_win._axis_widget.param_keys()
 
-    for param_name in FieldSweepIV.parameters:
-        if param_name in axis_keys:
-            continue
-        # Widget type varies (QLineEdit / QComboBox / QCheckBox), so look the
-        # input up by its shared objectName rather than a concrete class.
+    # System params (temperature, init_wait, step_wait) render as flat inputs.
+    for param_name in FieldSweep.system_parameters:
         field = procedure_win.findChild(QWidget, f"param_{param_name}_input")
         assert field is not None, f"Missing input for parameter '{param_name}'"
+
+    # The measurement-method selector renders (a structural combobox).
+    assert procedure_win.findChild(QComboBox, "param_measurement_vi_input") is not None
 
 
 def test_procedure_param_label_and_tooltip(procedure_win):
@@ -343,21 +335,16 @@ def test_procedure_param_label_and_tooltip(procedure_win):
     HDF5 output (see BaseProcedure), not prose. The prose description lives in
     a tooltip on both the input field and its form label.
 
-    Uses FieldSweepIV's ``temperature`` system_parameter rather than one of
+    Uses FieldSweep's ``temperature`` system_parameter rather than one of
     its sweep_axis-generated fields (e.g. field_start): those are rendered by
     SweepAxisWidget, not a flat QLineEdit + QFormLayout row, so they are not a
     valid target for this label/tooltip check.
     """
-    from cryosoft.procedures.field_sweep_iv import FieldSweepIV
+    from cryosoft.procedures.field_sweep import FieldSweep
 
-    for i in range(procedure_win._proc_selector.count()):
-        if procedure_win._proc_selector.itemText(i) == FieldSweepIV.name:
-            procedure_win._proc_selector.setCurrentIndex(i)
-            break
-    else:
-        pytest.fail("FieldSweepIV not found in procedure selector")
+    _select_procedure(procedure_win, FieldSweep.name)
 
-    spec = FieldSweepIV.system_parameters["temperature"]
+    spec = FieldSweep.system_parameters["temperature"]
     field = procedure_win.findChild(QLineEdit, "param_temperature_input")
     assert field is not None, "Missing input for parameter 'temperature'"
 
@@ -386,12 +373,13 @@ def _select_procedure(procedure_win, name):
 def test_procedure_enum_and_bool_widgets_render(procedure_win):
     """A 'choices' param renders a combobox of labels; a bool param a checkbox.
 
-    Covers the delta-mode parameters added to FieldSweepIV: voltmeter_range_V
+    Covers the delta-mode measurement parameters of the default measurement VI
+    (keithley_delta_mode, first in the sim config): voltmeter_range_V
     (enumerated 2182A range) and the compliance_abort / cold_switch booleans.
     """
-    from cryosoft.procedures.field_sweep_iv import FieldSweepIV
+    from cryosoft.procedures.field_sweep import FieldSweep
 
-    _select_procedure(procedure_win, FieldSweepIV.name)
+    _select_procedure(procedure_win, FieldSweep.name)
 
     combo = procedure_win.findChild(QComboBox, "param_voltmeter_range_V_input")
     assert combo is not None, "voltmeter_range_V should render as a combobox"
@@ -409,9 +397,9 @@ def test_procedure_enum_and_bool_widgets_render(procedure_win):
 
 def test_procedure_enum_and_bool_values_collected(procedure_win):
     """_collect_params maps a combobox label to its value and reads checkboxes."""
-    from cryosoft.procedures.field_sweep_iv import FieldSweepIV
+    from cryosoft.procedures.field_sweep import FieldSweep
 
-    _select_procedure(procedure_win, FieldSweepIV.name)
+    _select_procedure(procedure_win, FieldSweep.name)
 
     procedure_win.findChild(QComboBox, "param_voltmeter_range_V_input").setCurrentText("1 V")
     procedure_win.findChild(QCheckBox, "param_compliance_abort_input").setChecked(False)
@@ -424,6 +412,113 @@ def test_procedure_enum_and_bool_values_collected(procedure_win):
     assert param_values["voltmeter_range_V"] == pytest.approx(1.0)
     assert param_values["compliance_abort"] is False
     assert param_values["cold_switch"] is True
+
+
+# ── Generic sweep procedure: structural measurement-VI re-render ──────────────
+
+def _measurement_combo(win):
+    """Return the measurement-method QComboBox on the current form."""
+    combo = win.findChild(QComboBox, "param_measurement_vi_input")
+    assert combo is not None, "measurement-method selector should be rendered"
+    return combo
+
+
+def _select_measurement(win, vi_name):
+    """Set the measurement combobox to the label whose mapped value is *vi_name*."""
+    combo = _measurement_combo(win)
+    for group in win._current_groups:
+        spec = group.params.get("measurement_vi")
+        if spec is None:
+            continue
+        for label, value in spec.choices.items():
+            if value == vi_name:
+                combo.setCurrentText(str(label))
+                return
+    pytest.fail(f"measurement VI {vi_name!r} not in the selector")
+
+
+def test_generic_field_sweep_renders_measurement_select_and_default_group(procedure_win):
+    """The form shows the measurement-method combo + the default VI's param group.
+
+    The default measurement VI is the first registered one (keithley_delta_mode
+    in the sim config), so its delta-mode parameters render.
+    """
+    from cryosoft.procedures.field_sweep import FieldSweep
+
+    _select_procedure(procedure_win, FieldSweep.name)
+
+    combo = _measurement_combo(procedure_win)
+    assert combo.count() == 2  # keithley_delta_mode + dc_measurement
+    # The default VI's params render (delta-mode).
+    assert procedure_win.findChild(QComboBox, "param_voltmeter_range_V_input") is not None
+    assert procedure_win.findChild(QLineEdit, "param_n_readings_input") is not None
+    # A group box for the selected VI exists.
+    assert "measurement:keithley_delta_mode" in procedure_win._group_boxes
+
+
+def test_generic_field_sweep_switching_vi_swaps_only_measurement_group(procedure_win):
+    """Switching the measurement VI swaps the measurement widgets, preserving the rest."""
+    from cryosoft.procedures.field_sweep import FieldSweep
+
+    _select_procedure(procedure_win, FieldSweep.name)
+
+    # Capture the sweep axis widget and a system input BEFORE switching.
+    axis_before = procedure_win._axis_widget
+    temp_before = procedure_win.findChild(QLineEdit, "param_temperature_input")
+    assert temp_before is not None
+
+    _select_measurement(procedure_win, "dc_measurement")
+
+    # The DC VI's params are now present; the delta-only params are gone.
+    assert procedure_win.findChild(QLineEdit, "param_readings_per_point_input") is not None
+    assert procedure_win.findChild(QLineEdit, "param_n_readings_input") is None
+    assert procedure_win.findChild(QComboBox, "param_voltmeter_range_V_input") is None  # dc's is a line edit
+    assert procedure_win.findChild(QLineEdit, "param_voltmeter_range_V_input") is not None
+    assert "measurement:dc_measurement" in procedure_win._group_boxes
+    assert "measurement:keithley_delta_mode" not in procedure_win._group_boxes
+
+    # The sweep axis widget and the System input are the SAME instances (untouched).
+    assert procedure_win._axis_widget is axis_before
+    assert procedure_win.findChild(QLineEdit, "param_temperature_input") is temp_before
+
+
+def test_generic_field_sweep_collect_merges_params_for_both_selections(procedure_win):
+    """_collect_params returns the right merged params for each measurement VI."""
+    from cryosoft.procedures.field_sweep import FieldSweep
+
+    _select_procedure(procedure_win, FieldSweep.name)
+
+    # Default (delta) selection.
+    values, *_ = procedure_win._collect_params()
+    assert values["measurement_vi"] == "keithley_delta_mode"
+    assert "n_readings" in values and "current" in values
+    assert "temperature" in values  # system param present too
+
+    # Switch to DC and collect again.
+    _select_measurement(procedure_win, "dc_measurement")
+    values2, *_ = procedure_win._collect_params()
+    assert values2["measurement_vi"] == "dc_measurement"
+    assert "readings_per_point" in values2 and "current_A" in values2
+    assert "n_readings" not in values2  # delta-only param is gone
+
+
+def test_generic_field_sweep_typed_values_survive_selection_round_trip(procedure_win):
+    """A value typed under one measurement VI is restored after switching away and back."""
+    from cryosoft.procedures.field_sweep import FieldSweep
+
+    _select_procedure(procedure_win, FieldSweep.name)
+
+    # Type a distinctive value into the delta VI's n_readings field.
+    n_field = procedure_win.findChild(QLineEdit, "param_n_readings_input")
+    n_field.setText("37")
+
+    # Switch to DC, then back to delta.
+    _select_measurement(procedure_win, "dc_measurement")
+    _select_measurement(procedure_win, "keithley_delta_mode")
+
+    restored = procedure_win.findChild(QLineEdit, "param_n_readings_input")
+    assert restored is not None
+    assert restored.text() == "37"
 
 
 def test_param_form_renders_all_widget_kinds_and_round_trips(qtbot):
@@ -1126,13 +1221,18 @@ def test_procedure_window_restores_selection_and_params(station, orchestrator, q
     win = ProcedureWindow(station, orchestrator, info, ddir)
     qtbot.addWidget(win)
     proc_name = win._current_procedure_name
-    param_key = next(iter(win._param_inputs))
+    # Pick a plain text field (a QLineEdit) to type into.
+    param_key = next(
+        name for name, w in win._param_inputs.items() if isinstance(w, QLineEdit)
+    )
     win._param_inputs[param_key].setText("42")
 
     state = session_store.SessionState()
     win.export_session_state(state)
     assert state.selected_procedure == proc_name
-    assert state.procedure_params[proc_name][param_key] == "42"
+    # The cache is keyed by "{group.key}::{param}", so the typed value lands
+    # under one composite key — assert it round-trips regardless of the prefix.
+    assert "42" in state.procedure_params[proc_name].values()
 
     win2 = ProcedureWindow(station, orchestrator, info, ddir, initial_session=state)
     qtbot.addWidget(win2)

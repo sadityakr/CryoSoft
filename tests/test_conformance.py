@@ -355,9 +355,20 @@ def test_procedure_constructs_from_defaults(proc_cls: type, tmp_path) -> None:
     BaseProcedure merges declared defaults into the params dict, so a complete
     default set means agents and scripts can always instantiate a procedure
     without reproducing the GUI's parameter form.
+
+    A generic sweep procedure (``requires_measurement_vi``) resolves its
+    measurement VI and that VI's parameters from the station, so it cannot be
+    built from an empty ``Station``; it is handed a populated sim station
+    instead. This does not weaken the check for static procedures — they still
+    build from an empty station — it only supplies the one thing a
+    station-dependent procedure legitimately needs.
     """
+    if getattr(proc_cls, "requires_measurement_vi", False):
+        station = build_station("cryosoft/configs/sim_cryostat")
+    else:
+        station = Station()
     proc = proc_cls(
-        station=Station(),
+        station=station,
         sample_info={"sample_name": "conformance", "sample_id": "T0", "comments": ""},
         data_directory=str(tmp_path),
     )

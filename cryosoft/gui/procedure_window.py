@@ -55,6 +55,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QCloseEvent
 from PyQt6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QGroupBox,
     QHBoxLayout,
@@ -75,6 +76,7 @@ from PyQt6.QtWidgets import (
 )
 
 from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
+from cryosoft.core.plan import ParamGroup, ParamSpec
 from cryosoft.core.procedure import BaseProcedure
 from cryosoft.core.station import Station
 from cryosoft.gui import app_settings  # import the module (not the function) so tests can monkeypatch the factory
@@ -131,11 +133,33 @@ class _QueueEntry:
     proc: BaseProcedure | None = field(default=None, repr=False)
 
 
+def _all_subclasses(cls: type) -> list[type]:
+    """Return every transitive subclass of *cls* (depth-first, deduplicated).
+
+    ``type.__subclasses__()`` lists only *direct* subclasses, so it would miss a
+    concrete procedure sitting under an intermediate base such as
+    ``SweepMeasureProcedure``. This walks the whole tree.
+    """
+    result: list[type] = []
+    seen: set[type] = set()
+    for sub in cls.__subclasses__():
+        if sub not in seen:
+            seen.add(sub)
+            result.append(sub)
+        result.extend(_all_subclasses(sub))
+    return result
+
+
 def _discover_procedures() -> list[type[BaseProcedure]]:
-    """Import all modules in cryosoft.procedures and return BaseProcedure subclasses.
+    """Import all modules in cryosoft.procedures and return concrete procedures.
+
+    Returns every named ``BaseProcedure`` subclass at any depth (so a procedure
+    under an intermediate base like ``SweepMeasureProcedure`` is found), skipping
+    unnamed intermediate bases.
 
     Returns:
-        List of concrete BaseProcedure subclasses (not the base class itself).
+        List of concrete BaseProcedure subclasses (not the base or intermediate
+        bases, which carry no ``name``).
     """
     import cryosoft.procedures as _pkg
 
@@ -147,8 +171,10 @@ def _discover_procedures() -> list[type[BaseProcedure]]:
             logger.exception("ProcedureWindow: failed to import cryosoft.procedures.%s", module_name)
 
     subclasses: list[type[BaseProcedure]] = []
-    for cls in BaseProcedure.__subclasses__():
-        if cls is not BaseProcedure and getattr(cls, "name", ""):
+    seen: set[type] = set()
+    for cls in _all_subclasses(BaseProcedure):
+        if getattr(cls, "name", "") and cls not in seen:
+            seen.add(cls)
             subclasses.append(cls)
     return subclasses
 
@@ -205,6 +231,14 @@ class ProcedureWindow(QMainWindow):
         # spec: QLineEdit (plain number/text), QComboBox (enumerated choices),
         # or QCheckBox (bool). Built and read via cryosoft.gui.param_form.
         self._param_inputs: dict[str, QWidget] = {}
+        # The parameter groups currently rendered (from get_param_groups), the
+        # non-sweep group boxes keyed by ParamGroup.key, and the container's
+        # horizontal layout — together they let a structural change re-render
+        # only the group(s) that changed and leave the rest (and the axis
+        # widget) untouched.
+        self._current_groups: list[ParamGroup] = []
+        self._group_boxes: dict[str, QGroupBox] = {}
+        self._param_hbox: QHBoxLayout | None = None
         # Sweep-axis editor for the selected procedure, if it declares one
         self._axis_widget: SweepAxisWidget | None = None
         # Active procedure reference (set on run)
@@ -428,9 +462,12 @@ class ProcedureWindow(QMainWindow):
         hbox.setSpacing(8)
         hbox.setContentsMargins(0, 0, 0, 0)
         self._param_inputs.clear()
+        self._group_boxes = {}
+        self._param_hbox = hbox
         self._axis_widget = None
 
-        groups = cls.get_param_groups(self._station)
+        groups = cls.get_param_groups(self._station, self._current_selections())
+        self._current_groups = groups
         groups_by_key = {group.key: group for group in groups}
 
         sweep_box = QGroupBox("Sweep")
@@ -450,21 +487,130 @@ class ProcedureWindow(QMainWindow):
         sweep_group = groups_by_key.get("sweep")
         if sweep_group is not None:
             form, widgets = param_form.build_form_layout(sweep_group.params)
-            self._param_inputs.update(widgets)
+            self._register_group_widgets(sweep_group, widgets)
             sweep_col.addLayout(form)
         sweep_col.addStretch()
+        # The sweep box is always at layout index 0; the non-sweep group boxes
+        # follow it in get_param_groups order (index 1, 2, ...), which
+        # _rerender_groups relies on to insert a rebuilt group at the right spot.
         hbox.addWidget(sweep_box)
 
-        # Every remaining group (System, Measurement, and any a Wave-5 subclass
-        # adds) becomes its own box, in the order get_param_groups returned them.
+        # Every remaining group (System, the Measurement-method selector, the
+        # selected VI's params, and any a subclass adds) becomes its own box, in
+        # the order get_param_groups returned them.
         for group in groups:
             if group.key == "sweep":
                 continue
             box, widgets = param_form.build_group_box(group)
-            self._param_inputs.update(widgets)
+            self._register_group_widgets(group, widgets)
             hbox.addWidget(box)
+            self._group_boxes[group.key] = box
 
         return container
+
+    # ------------------------------------------------------------------
+    # Structural re-render (a structural param changes which groups exist)
+    # ------------------------------------------------------------------
+
+    def _register_group_widgets(
+        self, group: ParamGroup, widgets: dict[str, QWidget]
+    ) -> None:
+        """Record a group's input widgets and wire up any structural ones.
+
+        Args:
+            group: The ``ParamGroup`` the widgets belong to.
+            widgets: ``{param_name: QWidget}`` from ``param_form``.
+        """
+        for name, widget in widgets.items():
+            self._param_inputs[name] = widget
+            if group.params[name].structural:
+                self._connect_structural(widget, group.params[name])
+
+    def _connect_structural(self, widget: QWidget, spec: ParamSpec) -> None:
+        """Connect a structural param widget's change signal to a re-render."""
+        if isinstance(widget, QComboBox):
+            widget.currentIndexChanged.connect(self._on_structural_changed)
+        elif isinstance(widget, QCheckBox):
+            widget.stateChanged.connect(self._on_structural_changed)
+        elif isinstance(widget, QLineEdit):
+            widget.editingFinished.connect(self._on_structural_changed)
+
+    def _current_selections(self) -> dict[str, Any]:
+        """Return the current values of every rendered structural parameter.
+
+        Fed back into ``get_param_groups`` so the form re-derives from the user's
+        structural choices (e.g. which measurement VI is selected).
+        """
+        selections: dict[str, Any] = {}
+        for group in self._current_groups:
+            for name, spec in group.params.items():
+                if not spec.structural:
+                    continue
+                widget = self._param_inputs.get(name)
+                if widget is None:
+                    continue
+                try:
+                    selections[name] = param_form.collect_value(widget, spec)
+                except (ValueError, TypeError):
+                    pass
+        return selections
+
+    def _on_structural_changed(self, *_args: Any) -> None:
+        """Re-derive the form after a structural parameter changed.
+
+        Caches the currently-typed values, re-derives the groups from the new
+        selections, rebuilds ONLY the group boxes whose key changed (leaving the
+        sweep/system boxes and the axis widget as the same widget instances),
+        then re-applies cached values and refreshes the plot axis selectors.
+        """
+        index = self._proc_selector.currentIndex()
+        if index < 0 or index >= len(self._procedures):
+            return
+        cls = self._procedures[index]
+        self._cache_current_params()
+        self._rerender_groups(cls, self._current_selections())
+        self._apply_cached_params(self._current_procedure_name)
+        self._populate_axis_selectors(cls)
+
+    def _rerender_groups(
+        self, cls: type[BaseProcedure], selections: dict[str, Any]
+    ) -> None:
+        """Diff current vs new groups by key; rebuild only the boxes that changed.
+
+        Args:
+            cls: The selected procedure class.
+            selections: Current structural-parameter values.
+        """
+        old_by_key = {group.key: group for group in self._current_groups}
+        new_groups = cls.get_param_groups(self._station, selections)
+        new_by_key = {group.key: group for group in new_groups}
+        new_nonsweep_keys = [g.key for g in new_groups if g.key != "sweep"]
+
+        # Remove boxes whose key is gone; drop their widgets from the registry.
+        for key in list(self._group_boxes):
+            if key not in new_by_key:
+                box = self._group_boxes.pop(key)
+                old_group = old_by_key.get(key)
+                if old_group is not None:
+                    for name in old_group.params:
+                        self._param_inputs.pop(name, None)
+                if self._param_hbox is not None:
+                    self._param_hbox.removeWidget(box)
+                box.setParent(None)
+                box.deleteLater()
+
+        # Add boxes for newly-present keys at their position (sweep box is 0).
+        for pos, key in enumerate(new_nonsweep_keys):
+            if key in self._group_boxes:
+                continue
+            group = new_by_key[key]
+            box, widgets = param_form.build_group_box(group)
+            self._register_group_widgets(group, widgets)
+            if self._param_hbox is not None:
+                self._param_hbox.insertWidget(1 + pos, box)
+            self._group_boxes[key] = box
+
+        self._current_groups = new_groups
 
     def _build_queue_section(self) -> QGroupBox:
         """Build the queue group with list + reorder/remove buttons.
@@ -650,28 +796,34 @@ class ProcedureWindow(QMainWindow):
         index = self._proc_selector.currentIndex()
         if index < 0 or index >= len(self._procedures):
             return None
-        cls = self._procedures[index]
 
         axis_keys = self._axis_widget.param_keys() if self._axis_widget is not None else set()
 
         param_values: dict[str, Any] = {}
-        for param_name, spec in cls.parameters.items():
-            if param_name in axis_keys:
-                continue
-            widget = self._param_inputs[param_name]
-            try:
-                # param_form owns the ParamSpec -> value mapping (choices ->
-                # mapped value, bool -> checkbox, else parse text by spec.type).
-                param_values[param_name] = param_form.collect_value(widget, spec)
-            except (ValueError, TypeError):
-                # Only a text field can fail to parse; choices/bool never raise.
-                raw = widget.text().strip()
-                QMessageBox.warning(
-                    self,
-                    "Invalid Parameter",
-                    f"Cannot parse '{raw}' as {spec.type.__name__} for parameter '{param_name}'.",
-                )
-                return None
+        # Gather across ALL currently-rendered groups (Sweep flat params, System,
+        # the measurement-method selector, and the selected VI's params), rather
+        # than cls.parameters — a generic procedure's measurement params are
+        # station-dependent and never appear in the class's static parameters.
+        for group in self._current_groups:
+            for param_name, spec in group.params.items():
+                if param_name in axis_keys:
+                    continue
+                widget = self._param_inputs.get(param_name)
+                if widget is None:
+                    continue
+                try:
+                    # param_form owns the ParamSpec -> value mapping (choices ->
+                    # mapped value, bool -> checkbox, else parse text by spec.type).
+                    param_values[param_name] = param_form.collect_value(widget, spec)
+                except (ValueError, TypeError):
+                    # Only a text field can fail to parse; choices/bool never raise.
+                    raw = widget.text().strip() if hasattr(widget, "text") else ""
+                    QMessageBox.warning(
+                        self,
+                        "Invalid Parameter",
+                        f"Cannot parse '{raw}' as {spec.type.__name__} for parameter '{param_name}'.",
+                    )
+                    return None
 
         if self._axis_widget is not None:
             try:
@@ -828,7 +980,12 @@ class ProcedureWindow(QMainWindow):
             cls: The BaseProcedure subclass currently selected.
         """
         system_keys = list(self._station.last_state_flat().keys())
-        keys = ["unix_time"] + cls.sweep_data_keys + system_keys + cls.measurement_data_keys
+        # Measurement columns are instance/selection-dependent for a generic
+        # procedure (they come from the chosen measurement VI), so ask the class
+        # for them given the current structural selections rather than reading a
+        # static class attribute.
+        meas_keys = cls.live_plot_measurement_keys(self._station, self._current_selections())
+        keys = ["unix_time"] + list(cls.sweep_data_keys) + system_keys + meas_keys
         if not keys:
             return
 
@@ -978,28 +1135,71 @@ class ProcedureWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _cache_current_params(self) -> None:
-        """Store the current form's raw flat-field text under the procedure name.
+        """Store the current form's raw field text, keyed by (group, param).
 
         Raw text (not validated values) is cached so persistence never triggers
-        the "Invalid Parameter" dialog. Sweep-axis widget state is not cached to
-        the form (queue entries preserve full params); only the flat
-        ``_param_inputs`` are restored to the live form.
+        the "Invalid Parameter" dialog. Keys are ``"{group.key}::{param_name}"``
+        so a parameter that exists in more than one structural variant (e.g.
+        ``voltmeter_range_V``, a drop-down under the delta VI but a text field
+        under the DC VI) is cached separately per variant — switching Delta → DC
+        → Delta restores each side's typed value. The cache accumulates across
+        selections (entries are never dropped), so a value typed under one
+        measurement VI survives switching away and back. The ``measurement_vi``
+        selection itself is cached the same way. Sweep-axis widget state is not
+        cached to the form (queue entries preserve full params).
         """
-        if self._current_procedure_name and self._param_inputs:
-            self._procedure_params[self._current_procedure_name] = {
-                name: param_form.get_widget_raw(field)
-                for name, field in self._param_inputs.items()
-            }
+        if not (self._current_procedure_name and self._param_inputs):
+            return
+        cache = self._procedure_params.setdefault(self._current_procedure_name, {})
+        for group in self._current_groups:
+            for name in group.params:
+                widget = self._param_inputs.get(name)
+                if widget is not None:
+                    cache[f"{group.key}::{name}"] = param_form.get_widget_raw(widget)
 
     def _apply_cached_params(self, procedure_name: str) -> None:
-        """Fill the current form's flat fields with cached values, if any."""
+        """Fill the current form's fields with cached values, keyed by (group, param).
+
+        Restores structural selections first (with signals blocked) and
+        re-derives the groups once, so a cached ``measurement_vi`` selects the
+        right measurement group before its parameter values are restored —
+        without a recursive signal cascade that could cross-contaminate a
+        shared parameter name (e.g. ``voltmeter_range_V``) between variants.
+        """
         cached = self._procedure_params.get(procedure_name)
         if not cached:
             return
-        for name, value in cached.items():
-            field = self._param_inputs.get(name)
-            if field is not None:
-                param_form.set_widget_raw(field, str(value))
+
+        # 1. Restore structural values (signals blocked), then re-render once so
+        #    the correct variant groups are present.
+        restored_structural = False
+        for group in self._current_groups:
+            for name, spec in group.params.items():
+                if not spec.structural:
+                    continue
+                widget = self._param_inputs.get(name)
+                raw = cached.get(f"{group.key}::{name}")
+                if widget is not None and raw is not None:
+                    widget.blockSignals(True)
+                    param_form.set_widget_raw(widget, str(raw))
+                    widget.blockSignals(False)
+                    restored_structural = True
+        if restored_structural:
+            index = self._proc_selector.currentIndex()
+            if 0 <= index < len(self._procedures):
+                self._rerender_groups(
+                    self._procedures[index], self._current_selections()
+                )
+
+        # 2. Restore all values on the now-final set of groups.
+        for group in self._current_groups:
+            for name in group.params:
+                widget = self._param_inputs.get(name)
+                raw = cached.get(f"{group.key}::{name}")
+                if widget is not None and raw is not None:
+                    widget.blockSignals(True)
+                    param_form.set_widget_raw(widget, str(raw))
+                    widget.blockSignals(False)
 
     def _procedure_by_name(self, name: str) -> type[BaseProcedure] | None:
         """Return the discovered procedure class whose name matches, or None."""

@@ -1,17 +1,23 @@
 # ---
 # description: |
-#   BaseProcedure abstract base class for all CryoSoft measurement procedures.
-#   Defines the four-method interface (initiate, change_sweep_step, measure,
-#   standby) consumed by the Orchestrator state machine. Also defines the
-#   sweep_axis mechanism: a subclass that declares one SweepAxis gets a
-#   working _build_sweep_array() (linear / segments / CSV, with optional
-#   hysteresis) for free, with no override needed.
+#   BaseProcedure abstract base class for all CryoSoft measurement procedures,
+#   plus SweepMeasureProcedure, the generic "sweep one axis, run any selected
+#   measurement VI" intermediate base. BaseProcedure defines the four-method
+#   interface (initiate, change_sweep_step, measure, standby) consumed by the
+#   Orchestrator, the sweep_axis mechanism (a SweepAxis declaration gets a
+#   working _build_sweep_array() for free), and per-datapoint DataSchema
+#   validation in _save_datapoint. SweepMeasureProcedure adds measurement-VI
+#   selection (a structural ``measurement_vi`` parameter whose choices come from
+#   the station), station-driven measurement-parameter merging, DataSchema
+#   assembly, and the shared four-method loop; a concrete axis procedure supplies
+#   only the ramp targets, the axis read-back, and the settle times.
 # entry_point: Not run directly. Subclassed by concrete procedures.
 # dependencies:
 #   - cryosoft.core.station (Station)
-#   - cryosoft.core.data_manager (DataManager, created by subclasses)
-#   - cryosoft.core.plan (Command, PhasePlan, StepPlan — the typed currency;
-#     ParamSpec, ParamGroup — the typed parameter declarations)
+#   - cryosoft.core.data_manager (DataManager)
+#   - cryosoft.core.exceptions (CryoSoftConfigError)
+#   - cryosoft.core.plan (Command, Target, PhasePlan, StepPlan — the typed
+#     currency; ParamSpec, ParamGroup, DataSchema — typed declarations/layout)
 #   - cryosoft.core.sweep_builder (SweepAxis, sweep_axis_param_specs, build_axis_sweep)
 # input: |
 #   Constructor receives a Station, sample_info dict, data_directory string,
@@ -36,13 +42,27 @@
 
 from __future__ import annotations
 
+import dataclasses
+import logging
 import time
 from collections.abc import Mapping
 from typing import Any
 
-from cryosoft.core.plan import Command, ParamGroup, ParamSpec, PhasePlan, StepPlan
+from cryosoft.core.data_manager import DataManager
+from cryosoft.core.exceptions import CryoSoftConfigError
+from cryosoft.core.plan import (
+    Command,
+    DataSchema,
+    ParamGroup,
+    ParamSpec,
+    PhasePlan,
+    StepPlan,
+    Target,
+)
 from cryosoft.core.station import Station
 from cryosoft.core.sweep_builder import SweepAxis, build_axis_sweep, sweep_axis_param_specs
+
+logger = logging.getLogger(__name__)
 
 
 class BaseProcedure:
@@ -133,6 +153,13 @@ class BaseProcedure:
     measurement_data_keys: list[str] = []  # measurement array columns (e.g. voltage_V, current_A)
     default_x_key: str = ""                # default X axis for live plots
 
+    # Whether this procedure resolves its measurement VI (and that VI's
+    # parameters) from the Station at construction, so it CANNOT be built from
+    # an empty Station. Static procedures leave this False; the generic sweep
+    # procedures (``SweepMeasureProcedure``) set it True. The conformance tests
+    # read it to decide whether to hand the procedure a populated sim Station.
+    requires_measurement_vi: bool = False
+
     def __init_subclass__(cls, **kwargs: object) -> None:
         super().__init_subclass__(**kwargs)
         axis_params = sweep_axis_param_specs(cls.sweep_axis) if cls.sweep_axis else {}
@@ -182,6 +209,29 @@ class BaseProcedure:
             if params
         ]
 
+    @classmethod
+    def live_plot_measurement_keys(
+        cls, station: Station, selections: Mapping[str, Any] | None = None
+    ) -> list[str]:
+        """Return the measurement array/scalar keys available for live-plot axes.
+
+        The GUI populates its plot axis selectors before a run starts, so it
+        needs the measurement columns without an instance. The default returns
+        the static ``measurement_data_keys`` class attribute. A procedure whose
+        measurement columns depend on a station-selected VI overrides this to
+        read them from that VI (see ``SweepMeasureProcedure``).
+
+        Args:
+            station: The active Station (unused by the default).
+            selections: Current structural-parameter values, or ``None``
+                (unused by the default).
+
+        Returns:
+            Ordered list of measurement column names for the plot selectors.
+        """
+        _ = (station, selections)
+        return list(cls.measurement_data_keys)
+
     def __init__(
         self,
         station: Station,
@@ -218,6 +268,11 @@ class BaseProcedure:
         merged_params.update(param_values)
         self._params: dict[str, Any] = merged_params
         self._data_manager = None
+        # Optional declared HDF5 layout. A procedure that assembles a DataSchema
+        # in initiate() (the generic sweep procedures do) stores it here, and
+        # _save_datapoint() then validates every datapoint against it. Left None
+        # by hand-written procedures, which keep working unvalidated.
+        self._data_schema: DataSchema | None = None
         self._sweep: list = self._build_sweep_array()
         self._index: int = 0
 
@@ -278,6 +333,10 @@ class BaseProcedure:
 
         Raises:
             RuntimeError: If called before ``initiate()`` (data_manager is None).
+            DataSchemaError: If a ``self._data_schema`` is set and the enriched
+                datapoint does not match it (missing/extra columns or a
+                wrong-length array). Propagates so the Orchestrator contains the
+                run to ERROR before any malformed datapoint is written.
         """
         if self._data_manager is None:
             raise RuntimeError("_save_datapoint() called before initiate()")
@@ -286,6 +345,10 @@ class BaseProcedure:
             **self._station.last_state_flat(),
             **measured_data,
         }
+        # Validate BEFORE writing: on a mismatch nothing is saved and the
+        # DataSchemaError propagates. Skipped when no schema was declared.
+        if self._data_schema is not None:
+            self._data_schema.validate(enriched)
         self._data_manager.save_datapoint(
             sweep_index=self._index,
             measured_data=enriched,
@@ -436,3 +499,369 @@ class BaseProcedure:
             self._data_manager.close()
             self._data_manager = None
         return ()
+
+
+class SweepMeasureProcedure(BaseProcedure):
+    """Generic base for "sweep one axis, run any measurement method" procedures.
+
+    This is the heart of the modular-procedure design: ONE procedure per sweep
+    axis (field, temperature) that can run ANY measurement VI the station
+    exposes, chosen in the GUI at build time. It owns every part that is the
+    same across sweep axes:
+
+    * **Measurement-VI selection.** ``get_param_groups()`` builds a
+      "Measurement method" group whose single ``measurement_vi`` parameter is a
+      ``ParamSpec(type=str, structural=True, choices=<station measurement VIs>)``
+      plus a group carrying the *selected* VI's own ``measurement_parameters``.
+      Because the choices depend on the station, the class declares NO static
+      measurement parameters.
+    * **Construction.** ``__init__`` resolves the selected VI, merges its
+      parameter defaults (``BaseProcedure`` only merges class-declared params),
+      and records the selection + the instance-aware live-plot keys.
+    * **The four-method loop.** ``initiate`` assembles a ``DataSchema`` (sweep
+      axis column + system columns + the VI's arrays and scalar columns),
+      derives the DataManager ``data_config`` from it, and arms the VI.
+      ``measure`` reads the VI, tags on the axis read-back, and saves (the
+      schema is validated per datapoint by ``BaseProcedure._save_datapoint``).
+      ``standby`` / ``abort`` disarm the VI.
+
+    A concrete axis procedure (``FieldSweep``, ``TemperatureSweep``) subclasses
+    this and supplies only the axis-specific pieces via the hooks below:
+    ``_initial_system_targets`` / ``_step_targets`` / ``_standby_targets`` (the
+    ramp targets), ``_axis_readback`` (the value stored in the sweep column each
+    point), and ``_initiate_wait_s`` / ``_step_wait_s`` (settle times). It never
+    imports a VI (contract C6): all measurement self-description is read through
+    the ``Station`` instance.
+    """
+
+    # Generic sweep procedures resolve their measurement VI from the station at
+    # construction, so they need a populated Station (not an empty one).
+    requires_measurement_vi: bool = True
+
+    def __init__(
+        self,
+        station: Station,
+        sample_info: dict[str, str],
+        data_directory: str,
+        file_prefix: str = "",
+        **param_values: Any,
+    ) -> None:
+        """Resolve the selected measurement VI and merge its parameter defaults.
+
+        Args:
+            station: The active Station; must expose at least one measurement VI.
+            sample_info: ``{"sample_name", "sample_id", "comments"}``.
+            data_directory: Base directory for the HDF5 output file.
+            file_prefix: Optional filename prefix (see ``BaseProcedure``).
+            **param_values: Form values. ``measurement_vi`` selects the
+                measurement VI by name (defaults to the first registered one);
+                the remaining keys are the sweep/system params and the selected
+                VI's measurement params.
+
+        Raises:
+            CryoSoftConfigError: If the station has no measurement VIs, if
+                ``measurement_vi`` names a VI that is not a measurement VI, or if
+                a measurement param name collides with a sweep/system param.
+        """
+        names = station.measurement_vi_names()
+        if not names:
+            raise CryoSoftConfigError(
+                f"{type(self).name!r} needs a measurement VI, but this station "
+                f"has none. Add a measurement VI to the config."
+            )
+        selected = param_values.get("measurement_vi") or names[0]
+        if selected not in names:
+            raise CryoSoftConfigError(
+                f"{type(self).name!r}: measurement_vi={selected!r} is not a "
+                f"measurement VI on this station (have: {', '.join(names)})."
+            )
+        self._measurement_vi: str = selected
+
+        # BaseProcedure merges class-declared param defaults (axis + system) and
+        # builds the sweep array. It does NOT know the measurement params (those
+        # are the selected VI's, resolved below).
+        super().__init__(station, sample_info, data_directory, file_prefix, **param_values)
+
+        vi = station.get_vi(selected)
+        vi_specs: dict[str, ParamSpec] = vi.measurement_parameters
+        collisions = sorted(
+            (set(type(self).parameters) | {"measurement_vi"}) & set(vi_specs)
+        )
+        if collisions:
+            raise CryoSoftConfigError(
+                f"{type(self).name!r}: measurement VI {selected!r} parameter(s) "
+                f"{collisions} collide with the procedure's own sweep/system "
+                f"parameters. Rename the measurement VI parameter(s)."
+            )
+
+        # Merge the VI's parameter defaults with any caller-supplied values —
+        # this is the merge BaseProcedure could not do for dynamic params.
+        merged_meas: dict[str, Any] = {
+            name: spec.default for name, spec in vi_specs.items()
+        }
+        merged_meas.update(
+            {name: param_values[name] for name in vi_specs if name in param_values}
+        )
+        self._measurement_params: dict[str, Any] = merged_meas
+
+        # Record the resolved measurement selection + params in the params dict
+        # so the HDF5 metadata captures exactly what ran, and expose the
+        # selected VI's columns as this instance's live-plot keys.
+        self._params.update(merged_meas)
+        self._params["measurement_vi"] = selected
+        self.measurement_data_keys = list(vi.measurement_data_keys) + list(
+            vi.measurement_scalar_columns
+        )
+
+    # ------------------------------------------------------------------
+    # Parameter groups: measurement-method selection + selected VI's params
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def get_param_groups(
+        cls, station: Station, selections: Mapping[str, Any] | None = None
+    ) -> list[ParamGroup]:
+        """Build the form: the static Sweep/System groups + measurement select.
+
+        Appends two dynamic groups after the class's static groups: a
+        "Measurement method" group with the structural ``measurement_vi``
+        selector, and a group carrying the selected VI's own
+        ``measurement_parameters``.
+
+        Args:
+            station: The active Station (supplies the measurement VIs).
+            selections: Current structural-param values; ``measurement_vi`` picks
+                the VI whose parameters group is shown (defaults to the first).
+
+        Returns:
+            The ordered ``ParamGroup`` list the GUI renders.
+
+        Raises:
+            CryoSoftConfigError: If the station has no measurement VIs, or a
+                measurement param name collides with a procedure param.
+        """
+        names = station.measurement_vi_names()
+        if not names:
+            raise CryoSoftConfigError(
+                f"{cls.name!r} needs a measurement VI, but this station has none."
+            )
+        selections = selections or {}
+        selected = selections.get("measurement_vi")
+        if selected not in names:
+            selected = names[0]
+
+        # Static Sweep/System groups (Measurement is empty for a generic proc).
+        groups = super().get_param_groups(station, selections)
+
+        # (a) The measurement-method selector. Labels carry the VI's display
+        # label; the collected/mapped value is the bare VI name.
+        choices: dict[str, str] = {}
+        for name in names:
+            label = station.measurement_label(name)
+            choices[f"{name} — {label}" if label and label != name else name] = name
+        select_spec = ParamSpec(
+            type=str,
+            default=selected,
+            choices=choices,
+            structural=True,
+            description="Measurement method to run at each sweep point",
+        )
+        groups.append(
+            ParamGroup(
+                key="measurement_select",
+                title="Measurement method",
+                params={"measurement_vi": select_spec},
+            )
+        )
+
+        # (b) The selected VI's own parameters.
+        vi = station.get_vi(selected)
+        vi_specs: dict[str, ParamSpec] = dict(vi.measurement_parameters)
+        collisions = sorted(
+            (set(cls.parameters) | {"measurement_vi"}) & set(vi_specs)
+        )
+        if collisions:
+            raise CryoSoftConfigError(
+                f"{cls.name!r}: measurement VI {selected!r} parameter(s) "
+                f"{collisions} collide with the procedure's own parameters."
+            )
+        groups.append(
+            ParamGroup(
+                key=f"measurement:{selected}",
+                title=station.measurement_label(selected),
+                params=vi_specs,
+            )
+        )
+        return groups
+
+    @classmethod
+    def live_plot_measurement_keys(
+        cls, station: Station, selections: Mapping[str, Any] | None = None
+    ) -> list[str]:
+        """Return the selected measurement VI's array + scalar column names."""
+        names = station.measurement_vi_names()
+        if not names:
+            return []
+        selections = selections or {}
+        selected = selections.get("measurement_vi")
+        if selected not in names:
+            selected = names[0]
+        vi = station.get_vi(selected)
+        return list(vi.measurement_data_keys) + list(vi.measurement_scalar_columns)
+
+    # ------------------------------------------------------------------
+    # Axis-specific hooks — implemented by concrete axis procedures
+    # ------------------------------------------------------------------
+
+    def _initial_system_targets(self) -> dict[str, Target]:
+        """Return the system ramp targets for ``initiate()`` (first sweep point)."""
+        raise NotImplementedError
+
+    def _step_targets(self, index: int) -> dict[str, Target]:
+        """Return the system ramp targets for sweep point *index*."""
+        raise NotImplementedError
+
+    def _standby_targets(self) -> dict[str, Target]:
+        """Return the system ramp targets for ``standby()`` (park the system)."""
+        raise NotImplementedError
+
+    def _axis_readback(self) -> float:
+        """Return the measured value of the swept quantity at the current point."""
+        raise NotImplementedError
+
+    def _initiate_wait_s(self) -> float:
+        """Return the settle time (s) after the initial ramp."""
+        raise NotImplementedError
+
+    def _step_wait_s(self) -> float:
+        """Return the settle time (s) after each sweep-step ramp."""
+        raise NotImplementedError
+
+    # ------------------------------------------------------------------
+    # Shared four-method loop
+    # ------------------------------------------------------------------
+
+    def _build_data_schema(self, vi: Any) -> DataSchema:
+        """Assemble this run's ``DataSchema`` from the axis, station, and VI.
+
+        Sweep columns: ``unix_time`` + every system column
+        (``station.last_state_flat()``, populated by the ``get_state()`` poll in
+        ``initiate()``) + the axis data-key + the VI's scalar columns. Arrays:
+        the VI's ``data_arrays`` for the selected measurement params.
+
+        Args:
+            vi: The selected measurement VI instance.
+
+        Returns:
+            The declared HDF5 layout for this run.
+        """
+        sweep_columns: dict[str, str] = {"unix_time": "float"}
+        for key in self._station.last_state_flat():
+            sweep_columns[key] = "float"
+        sweep_columns[type(self).sweep_axis.data_key] = "float"
+        for name, dtype in vi.measurement_scalar_columns.items():
+            sweep_columns[name] = dtype
+        arrays = dict(vi.data_arrays(self._measurement_params))
+        return DataSchema(sweep_columns=sweep_columns, arrays=arrays)
+
+    def initiate(self) -> PhasePlan:
+        """Ramp to the first sweep point, arm the selected VI, open the file.
+
+        Returns:
+            A ``PhasePlan`` with the initial system ``targets``, the selected
+            VI's arming ``Command``, and ``wait_s`` from ``_initiate_wait_s()``.
+        """
+        vi = self._station.get_vi(self._measurement_vi)
+        targets = self._initial_system_targets()
+        commands = (
+            Command(self._measurement_vi, "initiate", dict(self._measurement_params)),
+        )
+
+        # Poll once so last_state_flat() is populated BEFORE the schema reads the
+        # system columns — otherwise the columns declared here would not match
+        # what measure() enriches with, and the per-point validate() would fail.
+        instrument_state = self._station.get_state()
+        self._data_schema = self._build_data_schema(vi)
+        data_config = {
+            "sweep_columns": dict(self._data_schema.sweep_columns),
+            "measurement_arrays": dict(self._data_schema.arrays),
+        }
+
+        self._data_manager = DataManager(
+            data_directory=self._data_directory,
+            procedure_name=self.name,
+            file_prefix=self._file_prefix,
+            procedure_params=self._params,
+            sample_info=self._sample_info,
+            instrument_state=instrument_state,
+            # DataManager stays dict-based (contract C7): convert the typed plan
+            # to plain JSON-ready dicts at this call-site boundary only.
+            system_targets={
+                name: dataclasses.asdict(t) for name, t in targets.items()
+            },
+            measurement_commands=[dataclasses.asdict(c) for c in commands],
+            data_config=data_config,
+            n_sweep_points=len(self._sweep),
+        )
+
+        logger.info(
+            "%s.initiate(): %d points, measurement=%s",
+            type(self).__name__,
+            len(self._sweep),
+            self._measurement_vi,
+        )
+        return PhasePlan(targets=targets, commands=commands, wait_s=self._initiate_wait_s())
+
+    def change_sweep_step(self) -> StepPlan | None:
+        """Advance to the next sweep point.
+
+        Returns:
+            A ``StepPlan`` ramping to the next point with ``_step_wait_s()``
+            settle, or ``None`` when the sweep is exhausted.
+        """
+        self._index += 1
+        if self._index >= len(self._sweep):
+            return None
+        return StepPlan(
+            targets=self._step_targets(self._index), wait_s=self._step_wait_s()
+        )
+
+    def measure(self) -> None:
+        """Read the measurement VI, tag on the axis read-back, and save.
+
+        Raises:
+            RuntimeError: If called before ``initiate()``.
+            DataSchemaError: If the datapoint does not match the declared schema
+                (raised by ``_save_datapoint``); nothing is written.
+        """
+        if self._data_manager is None:
+            raise RuntimeError("measure() called before initiate()")
+        vi = self._station.get_vi(self._measurement_vi)
+        measured_data: dict = vi.take_reading()
+        measured_data[type(self).sweep_axis.data_key] = self._axis_readback()
+        self._save_datapoint(measured_data)
+
+    def standby(self) -> PhasePlan:
+        """Close the data file and return the safe-parking plan.
+
+        Returns:
+            A ``PhasePlan`` with ``_standby_targets()``, disarming the selected
+            measurement VI, with ``wait_s=0.0``.
+        """
+        if self._data_manager is not None:
+            self._data_manager.close()
+            self._data_manager = None
+        return PhasePlan(
+            targets=self._standby_targets(),
+            commands=(Command(self._measurement_vi, "standby", {}),),
+            wait_s=0.0,
+        )
+
+    def abort(self) -> tuple[Command, ...]:
+        """Close the data file and disarm the selected measurement VI.
+
+        Returns:
+            The measurement safe-off command for the Orchestrator to dispatch.
+        """
+        super().abort()
+        return (Command(self._measurement_vi, "standby", {}),)

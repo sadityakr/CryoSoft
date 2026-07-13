@@ -76,6 +76,41 @@ def test_station_getattr(sim_station: Station):
     assert temp_vti.__class__.__name__ == "VTITemperatureControllerVI"
 
 
+def _registry_stub():
+    """A minimal VI-like stub for registry-only tests (never polled here)."""
+
+    class _Stub:
+        vi_name = ""
+
+        def get_state(self) -> dict:
+            return {}
+
+    return _Stub()
+
+
+def test_station_get_vi_returns_named_instance(sim_station: Station):
+    """get_vi(name) returns the same instance as attribute access."""
+    assert sim_station.get_vi("magnet_x") is sim_station.magnet_x
+    with pytest.raises(KeyError):
+        sim_station.get_vi("no_such_vi")
+
+
+def test_station_measurement_vi_names_registration_order(sim_station: Station):
+    """measurement_vi_names() returns only measurement VIs, in registration order.
+
+    sim_cryostat registers keithley_delta_mode before dc_measurement (both
+    vi_type=measurement); the system/level VIs are excluded.
+    """
+    assert sim_station.measurement_vi_names() == ["keithley_delta_mode", "dc_measurement"]
+
+
+def test_station_measurement_vi_names_empty_when_none_registered():
+    """A station with no measurement VIs reports an empty list."""
+    station = Station()
+    station.register_vi("magnet_x", _registry_stub(), "system")
+    assert station.measurement_vi_names() == []
+
+
 def test_get_ramp_status_covers_system_rampables(sim_station: Station):
     """get_ramp_status() returns a target/rate/ramp_status entry for every system
     VI that can ramp, excludes measurement VIs, and reports idle VIs as IDLE with

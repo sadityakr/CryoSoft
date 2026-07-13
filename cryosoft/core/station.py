@@ -91,6 +91,41 @@ class Station:
         """Return a list of all registered VI names."""
         return list(self._virtual_instruments.keys())
 
+    def get_vi(self, vi_name: str) -> BaseVirtualInstrument:
+        """Return the registered VI instance by name.
+
+        The named lookup counterpart to attribute access (``station.magnet_x``):
+        used when the name is only known at runtime, e.g. a procedure resolving
+        the measurement VI the user selected in the GUI.
+
+        Args:
+            vi_name: Name of the registered VI.
+
+        Returns:
+            The VI instance.
+
+        Raises:
+            KeyError: If no VI with that name is registered.
+        """
+        return self._virtual_instruments[vi_name]
+
+    def measurement_vi_names(self) -> list[str]:
+        """Return the names of all registered measurement VIs, in registration order.
+
+        A measurement VI is one registered with ``vi_type == "measurement"``.
+        The order is the order the VIs were registered (config order), so a GUI
+        or procedure that defaults to "the first measurement VI" gets a stable,
+        config-controlled choice.
+
+        Returns:
+            List of measurement VI names, registration order preserved.
+        """
+        return [
+            name
+            for name, vi_type in self._vi_registry.items()
+            if vi_type == "measurement"
+        ]
+
     def has_vi(self, vi_name: str) -> bool:
         """Return True if a VI with this name is registered."""
         return vi_name in self._virtual_instruments

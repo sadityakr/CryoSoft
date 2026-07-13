@@ -1,8 +1,8 @@
 # ---
 # description: |
 #   Integration tests for Layer 4 (Procedures). Tests BaseProcedure subclassing,
-#   FieldSweepIV method contracts, DataManager integration, and a full
-#   Orchestrator end-to-end loop with FieldSweepIV using simulated instruments.
+#   FieldSweep method contracts, DataManager integration, and a full
+#   Orchestrator end-to-end loop with FieldSweep using simulated instruments.
 # last_updated: 2026-07-13
 # ---
 
@@ -16,7 +16,7 @@ from cryosoft.core.plan import Command, ParamGroup, ParamSpec, PhasePlan, StepPl
 from cryosoft.core.procedure import BaseProcedure
 from cryosoft.core.station import build_station
 from cryosoft.core.sweep_builder import SweepAxis, SweepSegment
-from cryosoft.procedures.field_sweep_iv import FieldSweepIV
+from cryosoft.procedures.field_sweep import FieldSweep
 
 CONFIG_PATH = "cryosoft/configs/sim_cryostat"
 
@@ -26,8 +26,10 @@ SAMPLE_INFO = {
     "comments": "automated test",
 }
 
-# Minimal params that make the sweep fast in tests
+# Minimal params that make the sweep fast in tests. The generic FieldSweep runs
+# the delta-mode measurement VI here (current / n_readings are its parameters).
 FAST_PARAMS = {
+    "measurement_vi": "keithley_delta_mode",
     "field_start": -0.1,
     "field_end": 0.1,
     "field_steps": 3,
@@ -46,7 +48,7 @@ def station():
 
 @pytest.fixture
 def procedure(station, tmp_path):
-    return FieldSweepIV(
+    return FieldSweep(
         station=station,
         sample_info=SAMPLE_INFO,
         data_directory=str(tmp_path),
@@ -163,10 +165,10 @@ def test_get_param_groups_skips_empty_groups():
     assert [g.key for g in groups] == ["system", "measurement"]
 
 
-# ── FieldSweepIV instantiation ────────────────────────────────────────────────
+# ── FieldSweep instantiation ────────────────────────────────────────────────
 
 def test_instantiation(procedure):
-    """FieldSweepIV instantiates without error."""
+    """FieldSweep instantiates without error."""
     assert procedure is not None
 
 
@@ -196,7 +198,7 @@ def test_sweep_segments_override_take_precedence(station, tmp_path):
         {"start": -0.02, "end": 0.02, "step": 0.02},
         {"start": 0.02, "end": 0.1, "step": 0.04},
     ]
-    procedure = FieldSweepIV(
+    procedure = FieldSweep(
         station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path), **params
     )
     sweep = procedure.get_sweep_array()
@@ -212,7 +214,7 @@ def test_sweep_segments_accepts_sweepsegment_instances(station, tmp_path):
     params["field_segments"] = [
         SweepSegment(start=0.0, end=0.1, step=0.05),
     ]
-    procedure = FieldSweepIV(
+    procedure = FieldSweep(
         station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path), **params
     )
     assert procedure.get_sweep_array() == pytest.approx([0.0, 0.05, 0.1])
@@ -228,7 +230,7 @@ def test_sweep_csv_mode_ignores_segments(station, tmp_path):
     params["field_csv_path"] = str(csv_file)
     params["field_segments"] = [{"start": 0.0, "end": 1.0, "step": 0.5}]  # ignored: mode is csv
 
-    procedure = FieldSweepIV(
+    procedure = FieldSweep(
         station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path), **params
     )
     assert procedure.get_sweep_array() == pytest.approx([0.1, 0.0, -0.1])
@@ -242,7 +244,7 @@ def test_sweep_hysteresis_extends_linear_sweep(station, tmp_path):
     params["field_steps"] = 3
     params["field_hysteresis"] = True
 
-    procedure = FieldSweepIV(
+    procedure = FieldSweep(
         station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path), **params
     )
     assert procedure.get_sweep_array() == pytest.approx([-0.1, 0.0, 0.1, 0.0, -0.1])
@@ -316,7 +318,7 @@ def test_initiate_hdf5_metadata(procedure, tmp_path):
 
     with h5py.File(filepath, "r") as f:
         meta = f["metadata"].attrs
-        assert meta["procedure_name"] == "Field Sweep IV (Delta Mode)"
+        assert meta["procedure_name"] == "Field Sweep"
         params = json.loads(meta["procedure_params"])
         assert params["field_steps"] == 3
         si = json.loads(meta["sample_info"])
@@ -325,7 +327,7 @@ def test_initiate_hdf5_metadata(procedure, tmp_path):
 
 def test_initiate_uses_custom_file_prefix(station, tmp_path):
     """A procedure constructed with file_prefix names its HDF5 file accordingly."""
-    proc = FieldSweepIV(
+    proc = FieldSweep(
         station=station,
         sample_info=SAMPLE_INFO,
         data_directory=str(tmp_path),
@@ -339,7 +341,7 @@ def test_initiate_uses_custom_file_prefix(station, tmp_path):
     assert filepath.name.startswith("my_custom_run_")
     with h5py.File(filepath, "r") as f:
         # Metadata still records the real procedure name, independent of the filename.
-        assert f["metadata"].attrs["procedure_name"] == "Field Sweep IV (Delta Mode)"
+        assert f["metadata"].attrs["procedure_name"] == "Field Sweep"
 
 
 # ── change_sweep_step() ───────────────────────────────────────────────────────
@@ -469,7 +471,7 @@ def test_standby_double_call_safe(procedure, tmp_path):
 # ── Full Orchestrator loop ────────────────────────────────────────────────────
 
 def test_full_orchestrator_loop(station, tmp_path, qtbot):
-    """FieldSweepIV runs through a full Orchestrator cycle without errors."""
+    """FieldSweep runs through a full Orchestrator cycle without errors."""
     from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 
     # Fast ramp rates so the test completes quickly
@@ -477,7 +479,7 @@ def test_full_orchestrator_loop(station, tmp_path, qtbot):
     station.magnet_x._ramp_segments = []
     # temperature_vti starts at 300 K; target is also 300 K → instant settle
 
-    procedure = FieldSweepIV(
+    procedure = FieldSweep(
         station=station,
         sample_info=SAMPLE_INFO,
         data_directory=str(tmp_path),
@@ -503,4 +505,4 @@ def test_full_orchestrator_loop(station, tmp_path, qtbot):
     h5_files = list(tmp_path.glob("*.h5"))
     assert len(h5_files) == 1
     with h5py.File(h5_files[0], "r") as f:
-        assert f["metadata"].attrs["procedure_name"] == "Field Sweep IV (Delta Mode)"
+        assert f["metadata"].attrs["procedure_name"] == "Field Sweep"

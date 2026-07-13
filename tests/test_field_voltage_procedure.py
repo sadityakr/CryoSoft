@@ -1,7 +1,7 @@
 # ---
 # description: |
 #   End-to-end test of the CryoSoft port of the old field_voltage_logic.py
-#   script: FieldSweepIV run through a full Orchestrator loop against
+#   script: FieldSweep run through a full Orchestrator loop against
 #   configs/sim_real_cryostat — the simulated digital twin of
 #   a-sample-real-cryostat (Mercury iPS-M magnet + Keithley 6221/2182A delta
 #   mode + ILM 200 helium level). Exercises the switch-heater-aware
@@ -17,7 +17,7 @@ import pytest
 from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 from cryosoft.core.station import build_station
 from cryosoft.core.sweep_builder import SweepSegment
-from cryosoft.procedures.field_sweep_iv import FieldSweepIV
+from cryosoft.procedures.field_sweep import FieldSweep
 
 CONFIG_PATH = "cryosoft/configs/sim_real_cryostat"
 
@@ -41,7 +41,7 @@ def station():
 
 
 def test_field_voltage_sweep_full_orchestrator_loop(station, tmp_path, qtbot):
-    """FieldSweepIV runs a piecewise + hysteresis field sweep against the
+    """FieldSweep runs a piecewise + hysteresis field sweep against the
     simulated Mercury iPS-M / Keithley delta-mode setup, keeping the switch
     heater energised across all sweep points and correctly reporting field
     values throughout (regression coverage for both fixed bugs)."""
@@ -51,10 +51,11 @@ def test_field_voltage_sweep_full_orchestrator_loop(station, tmp_path, qtbot):
         SweepSegment(start=0.02, end=0.1, step=0.04),
     ]
 
-    procedure = FieldSweepIV(
+    procedure = FieldSweep(
         station=station,
         sample_info=SAMPLE_INFO,
         data_directory=str(tmp_path),
+        measurement_vi="keithley_delta_mode",
         field_mode="segments",
         field_segments=segments,
         field_hysteresis=True,
@@ -86,7 +87,7 @@ def test_field_voltage_sweep_full_orchestrator_loop(station, tmp_path, qtbot):
     h5_files = list(tmp_path.glob("*.h5"))
     assert len(h5_files) == 1
     with h5py.File(h5_files[0], "r") as f:
-        assert f["metadata"].attrs["procedure_name"] == "Field Sweep IV (Delta Mode)"
+        assert f["metadata"].attrs["procedure_name"] == "Field Sweep"
         field_T = f["data"]["field_T"][:]
         voltage_V = f["data"]["voltage_V"][:]
 

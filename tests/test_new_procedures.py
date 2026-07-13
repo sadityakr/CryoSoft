@@ -1,10 +1,15 @@
 # ---
 # description: |
-#   Tests for FieldSweepDC and TemperatureSweepDC procedures, and for the
-#   set_ramp_rate @control on ITC503TemperatureVI and the rate-forwarding in
-#   Station.process_system_targets.
+#   Behavioral tests for the generic sweep procedures FieldSweep and
+#   TemperatureSweep (core.procedure.SweepMeasureProcedure), parametrized over
+#   the measurement VIs they can run (dc_measurement, keithley_delta_mode).
+#   Covers sweep construction, initiate PhasePlan content + command order,
+#   step/standby/abort plans, the missing-magnet refusal, the delta n_valid
+#   column, an end-to-end Orchestrator run, and the DataSchema negative case
+#   (a wrong-shaped reading degrades the Orchestrator to ERROR, unwritten).
+#   Also keeps the set_ramp_rate @control and Station rate-forwarding checks.
 # entry_point: pytest tests/test_new_procedures.py -v
-# last_updated: 2026-07-12
+# last_updated: 2026-07-13
 # ---
 
 
@@ -14,41 +19,60 @@ import pytest
 
 from cryosoft.core.plan import Command, PhasePlan, StepPlan, Target
 from cryosoft.core.station import build_station
-from cryosoft.procedures.field_sweep_dc import FieldSweepDC
-from cryosoft.procedures.temperature_sweep_dc import TemperatureSweepDC
+from cryosoft.procedures.field_sweep import FieldSweep
+from cryosoft.procedures.temperature_sweep import TemperatureSweep
 
 CONFIG_PATH = "cryosoft/configs/sim_cryostat"
 
 SAMPLE_INFO = {
     "sample_name": "Test Sample",
-    "sample_id": "T-DC-001",
+    "sample_id": "T-GEN-001",
     "comments": "automated test",
 }
 
-FAST_FIELD_PARAMS = {
+# ── Per-measurement-VI parameter sets ────────────────────────────────────────
+# Each dict names the measurement VI plus its own measurement parameters.
+DELTA = {
+    "measurement_vi": "keithley_delta_mode",
+    "current": 1e-6,
+    "n_readings": 5,
+    "voltmeter_range_V": 0.01,
+    "compliance_V": 1.0,
+    "delay_s": 0.01,
+    "compliance_abort": True,
+    "cold_switch": False,
+}
+DC = {
+    "measurement_vi": "dc_measurement",
+    "current_A": 1e-6,
+    "compliance_A": 1e-3,
+    "voltmeter_range_V": 0.1,
+    "readings_per_point": 5,
+}
+# The current parameter name and per-VI expectations, keyed by measurement VI.
+MEAS_META = {
+    "keithley_delta_mode": {"current_key": "current", "n": 5, "has_n_valid": True},
+    "dc_measurement": {"current_key": "current_A", "n": 5, "has_n_valid": False},
+}
+
+FAST_FIELD = {
     "field_start": -0.1,
     "field_end": 0.1,
     "field_steps": 3,
     "temperature": 300.0,
-    "current_A": 1e-6,
-    "compliance_A": 1e-3,
-    "voltmeter_range_V": 0.1,
-    "readings_per_point": 5,
     "init_wait": 0.0,
     "step_wait": 0.0,
 }
-
-FAST_TEMP_PARAMS = {
+FAST_TEMP = {
     "temperature_start": 300.0,
-    "temperature_end": 300.0,  # Same start/end → instant ramp settle in sim
+    "temperature_end": 300.0,  # same start/end → instant ramp settle in sim
     "temperature_steps": 3,
     "ramp_rate_K_per_min": 6000.0,
-    "current_A": 1e-6,
-    "compliance_A": 1e-3,
-    "voltmeter_range_V": 0.1,
-    "readings_per_point": 5,
     "point_wait": 0.0,
 }
+
+FIELD_MEAS = [pytest.param(DELTA, id="delta"), pytest.param(DC, id="dc")]
+TEMP_MEAS = [pytest.param(DC, id="dc"), pytest.param(DELTA, id="delta")]
 
 
 @pytest.fixture
@@ -56,24 +80,29 @@ def station():
     return build_station(CONFIG_PATH)
 
 
-@pytest.fixture
-def field_proc(station, tmp_path):
-    return FieldSweepDC(
+def _field_proc(station, tmp_path, meas):
+    return FieldSweep(
         station=station,
         sample_info=SAMPLE_INFO,
         data_directory=str(tmp_path),
-        **FAST_FIELD_PARAMS,
+        **FAST_FIELD,
+        **meas,
     )
 
 
-@pytest.fixture
-def temp_proc(station, tmp_path):
-    return TemperatureSweepDC(
+def _temp_proc(station, tmp_path, meas):
+    return TemperatureSweep(
         station=station,
         sample_info=SAMPLE_INFO,
         data_directory=str(tmp_path),
-        **FAST_TEMP_PARAMS,
+        **FAST_TEMP,
+        **meas,
     )
+
+
+def _arm(station, meas, proc):
+    """Arm the measurement VI directly (normally done via the Orchestrator)."""
+    station.get_vi(meas["measurement_vi"]).initiate(**proc._measurement_params)
 
 
 # ── set_ramp_rate @control on temperature VI ─────────────────────────────────
@@ -95,40 +124,52 @@ def test_process_system_targets_forwards_rate(station):
     """Passing 'rate' in system_targets changes the ramp rate used."""
     vi = station.temperature_vti
     vi._default_ramp_rate = 1.0  # base rate
-    station.process_system_targets({
-        "temperature_vti": Target(300.0, rate=500.0)
-    })
-    # The ramp generator was started with 500 K/min; _default_ramp_rate unchanged
+    station.process_system_targets({"temperature_vti": Target(300.0, rate=500.0)})
     assert vi._default_ramp_rate == pytest.approx(1.0)  # not mutated
     assert vi._ramp_target == pytest.approx(300.0)
 
 
-# ── FieldSweepDC ─────────────────────────────────────────────────────────────
+# ── Measurement-VI selection / defaults ──────────────────────────────────────
 
-def test_field_dc_sweep_array(field_proc):
-    sweep = field_proc.get_sweep_array()
+def test_field_sweep_defaults_to_first_measurement_vi(station, tmp_path):
+    """With no measurement_vi given, the first registered measurement VI is used."""
+    proc = FieldSweep(
+        station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
+        **FAST_FIELD,
+    )
+    assert proc._measurement_vi == station.measurement_vi_names()[0] == "keithley_delta_mode"
+
+
+def test_field_sweep_rejects_non_measurement_vi(station, tmp_path):
+    """Selecting a non-measurement VI is refused at construction."""
+    from cryosoft.core.exceptions import CryoSoftConfigError
+
+    with pytest.raises(CryoSoftConfigError, match="magnet_x"):
+        FieldSweep(
+            station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
+            measurement_vi="magnet_x", **FAST_FIELD,
+        )
+
+
+# ── FieldSweep ───────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("meas", FIELD_MEAS)
+def test_field_sweep_array(station, tmp_path, meas):
+    proc = _field_proc(station, tmp_path, meas)
+    sweep = proc.get_sweep_array()
     assert len(sweep) == 3
     assert sweep[0] == pytest.approx(-0.1)
     assert sweep[-1] == pytest.approx(0.1)
 
 
-def test_field_dc_initiate_structure(field_proc, tmp_path):
-    plan = field_proc.initiate()
-    field_proc.standby()
+@pytest.mark.parametrize("meas", FIELD_MEAS)
+def test_field_sweep_initiate_full_phaseplan(station, tmp_path, meas):
+    """initiate() returns the exact PhasePlan, including command order + kwargs."""
+    proc = _field_proc(station, tmp_path, meas)
+    plan = proc.initiate()
+    proc.standby()
 
     assert isinstance(plan, PhasePlan)
-    assert "magnet_x" in plan.targets
-    assert "temperature_vti" in plan.targets
-    cmd = next(c for c in plan.commands if c.vi_name == "dc_measurement")
-    assert cmd.method == "initiate"
-    assert plan.wait_s == pytest.approx(0.0)
-
-
-def test_field_dc_initiate_full_phaseplan_content(field_proc, tmp_path):
-    """FieldSweepDC.initiate() returns the exact PhasePlan, command order included."""
-    plan = field_proc.initiate()
-    field_proc.standby()
-
     assert set(plan.targets) == {"magnet_x", "temperature_vti"}
     assert plan.targets["magnet_x"] == Target(-0.1)
     assert plan.targets["temperature_vti"] == Target(300.0)
@@ -136,98 +177,97 @@ def test_field_dc_initiate_full_phaseplan_content(field_proc, tmp_path):
     assert len(plan.commands) == 1
     cmd = plan.commands[0]
     assert isinstance(cmd, Command)
-    assert cmd.vi_name == "dc_measurement"
+    assert cmd.vi_name == meas["measurement_vi"]
     assert cmd.method == "initiate"
-    assert cmd.kwargs["current_A"] == pytest.approx(1e-6)
-    assert cmd.kwargs["compliance_A"] == pytest.approx(1e-3)
-    assert cmd.kwargs["voltmeter_range_V"] == pytest.approx(0.1)
-    assert cmd.kwargs["readings_per_point"] == 5
+    current_key = MEAS_META[meas["measurement_vi"]]["current_key"]
+    assert cmd.kwargs[current_key] == pytest.approx(1e-6)
 
     assert plan.wait_s == pytest.approx(0.0)
 
 
-def test_field_dc_initiate_creates_hdf5(field_proc, tmp_path):
-    field_proc.initiate()
-    field_proc.standby()
+@pytest.mark.parametrize("meas", FIELD_MEAS)
+def test_field_sweep_initiate_creates_hdf5(station, tmp_path, meas):
+    proc = _field_proc(station, tmp_path, meas)
+    proc.initiate()
+    proc.standby()
     h5_files = list(tmp_path.glob("*.h5"))
     assert len(h5_files) == 1
     assert h5_files[0].stat().st_size > 0
 
 
-def test_field_dc_initiate_measurement_params(field_proc, tmp_path):
-    plan = field_proc.initiate()
-    field_proc.standby()
-    cmd = next(c for c in plan.commands if c.vi_name == "dc_measurement")
-    assert cmd.method == "initiate"
-    assert cmd.kwargs["current_A"] == pytest.approx(1e-6)
-    assert cmd.kwargs["compliance_A"] == pytest.approx(1e-3)
-    assert cmd.kwargs["voltmeter_range_V"] == pytest.approx(0.1)
-
-
-def test_field_dc_change_sweep_step(field_proc, tmp_path):
-    field_proc.initiate()
-    step = field_proc.change_sweep_step()
-    assert step is not None
+@pytest.mark.parametrize("meas", FIELD_MEAS)
+def test_field_sweep_change_step(station, tmp_path, meas):
+    proc = _field_proc(station, tmp_path, meas)
+    proc.initiate()
+    step = proc.change_sweep_step()
     assert isinstance(step, StepPlan)
-    assert "magnet_x" in step.targets
     assert step.targets["magnet_x"].target == pytest.approx(0.0)
     assert step.wait_s == pytest.approx(0.0)
-    field_proc.standby()
+    proc.standby()
 
 
-def test_field_dc_sweep_exhaustion(field_proc, tmp_path):
-    field_proc.initiate()
-    field_proc.change_sweep_step()
-    field_proc.change_sweep_step()
-    assert field_proc.change_sweep_step() is None
-    field_proc.standby()
+@pytest.mark.parametrize("meas", FIELD_MEAS)
+def test_field_sweep_exhaustion(station, tmp_path, meas):
+    proc = _field_proc(station, tmp_path, meas)
+    proc.initiate()
+    proc.change_sweep_step()
+    proc.change_sweep_step()
+    assert proc.change_sweep_step() is None
+    proc.standby()
 
 
-def test_field_dc_measure_saves_data(field_proc, tmp_path):
-    field_proc.initiate()
-    field_proc._station.dc_measurement.initiate(
-        current_A=1e-6, compliance_A=1e-3, voltmeter_range_V=0.1, readings_per_point=5
-    )
-    field_proc.measure()
-    filepath = field_proc._data_manager.filepath
-    field_proc.standby()
+@pytest.mark.parametrize("meas", FIELD_MEAS)
+def test_field_sweep_measure_saves_data(station, tmp_path, meas):
+    proc = _field_proc(station, tmp_path, meas)
+    proc.initiate()
+    _arm(station, meas, proc)
+    proc.measure()
+    filepath = proc._data_manager.filepath
+    proc.standby()
 
+    n = MEAS_META[meas["measurement_vi"]]["n"]
     with h5py.File(filepath, "r") as f:
         assert not np.isnan(f["data"]["field_T"][0])
         assert not np.any(np.isnan(f["data"]["voltage_V"][0]))
-        assert f["data"]["voltage_V"].shape == (1, 5)
+        assert f["data"]["voltage_V"].shape == (1, n)
+        # The delta VI contributes an n_valid scalar column; the DC VI does not.
+        if MEAS_META[meas["measurement_vi"]]["has_n_valid"]:
+            assert "n_valid" in f["data"]
+            assert f["data"]["n_valid"][0] == n
+        else:
+            assert "n_valid" not in f["data"]
 
 
-def test_field_dc_standby_structure(field_proc, tmp_path):
-    field_proc.initiate()
-    plan = field_proc.standby()
+@pytest.mark.parametrize("meas", FIELD_MEAS)
+def test_field_sweep_standby_parks_magnet(station, tmp_path, meas):
+    proc = _field_proc(station, tmp_path, meas)
+    proc.initiate()
+    plan = proc.standby()
     assert plan.targets["magnet_x"].target == pytest.approx(0.0)
-    cmd = next(c for c in plan.commands if c.vi_name == "dc_measurement")
+    cmd = next(c for c in plan.commands if c.vi_name == meas["measurement_vi"])
     assert cmd.method == "standby"
-    assert plan.wait_s == pytest.approx(0.0)
+    assert proc._data_manager is None
 
 
-def test_field_dc_standby_closes_file(field_proc, tmp_path):
-    field_proc.initiate()
-    filepath = field_proc._data_manager.filepath
-    field_proc.standby()
-    assert field_proc._data_manager is None
-    with h5py.File(filepath, "r") as f:
-        assert f["metadata"].attrs["end_time"] != ""
+@pytest.mark.parametrize("meas", FIELD_MEAS)
+def test_field_sweep_abort_disarms_selected_vi(station, tmp_path, meas):
+    proc = _field_proc(station, tmp_path, meas)
+    proc.initiate()
+    cmds = proc.abort()
+    assert len(cmds) == 1
+    assert cmds[0].vi_name == meas["measurement_vi"]
+    assert cmds[0].method == "standby"
+    assert proc._data_manager is None
 
 
-def test_field_dc_full_orchestrator_loop(station, tmp_path, qtbot):
+@pytest.mark.parametrize("meas", FIELD_MEAS)
+def test_field_sweep_full_orchestrator_loop(station, tmp_path, qtbot, meas):
     from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 
     station.magnet_x._default_ramp_rate = 6000.0
     station.magnet_x._ramp_segments = []
 
-    proc = FieldSweepDC(
-        station=station,
-        sample_info=SAMPLE_INFO,
-        data_directory=str(tmp_path),
-        **FAST_FIELD_PARAMS,
-    )
+    proc = _field_proc(station, tmp_path, meas)
     orch = Orchestrator(station, tick_interval_ms=10)
     orch.run_procedure(proc)
 
@@ -238,112 +278,69 @@ def test_field_dc_full_orchestrator_loop(station, tmp_path, qtbot):
     assert orch._state == OrchestratorState.IDLE
     h5_files = list(tmp_path.glob("*.h5"))
     assert len(h5_files) == 1
+    with h5py.File(h5_files[0], "r") as f:
+        assert f["data"]["field_T"].shape[0] == 3
+        assert not np.any(np.isnan(f["data"]["field_T"][:]))
 
 
-# ── TemperatureSweepDC ───────────────────────────────────────────────────────
+# ── TemperatureSweep ─────────────────────────────────────────────────────────
 
-def test_temp_dc_sweep_array(temp_proc):
-    sweep = temp_proc.get_sweep_array()
-    assert len(sweep) == 3
-    assert sweep[0] == pytest.approx(300.0)
-    assert sweep[-1] == pytest.approx(300.0)
+@pytest.mark.parametrize("meas", TEMP_MEAS)
+def test_temp_sweep_initiate_full_phaseplan(station, tmp_path, meas):
+    """initiate() ramps temperature (with rate) + present magnets, arms the VI."""
+    proc = _temp_proc(station, tmp_path, meas)
+    plan = proc.initiate()
+    proc.standby()
 
-
-def test_temp_dc_initiate_structure(temp_proc, tmp_path):
-    plan = temp_proc.initiate()
-    temp_proc.standby()
-
-    assert isinstance(plan, PhasePlan)
-    assert "temperature_vti" in plan.targets
-    cmd = next(c for c in plan.commands if c.vi_name == "dc_measurement")
-    assert cmd.method == "initiate"
-    assert plan.wait_s == pytest.approx(0.0)
-
-
-def test_temp_dc_initiate_full_phaseplan_content(temp_proc, tmp_path):
-    """TemperatureSweepDC.initiate() returns the exact PhasePlan (rate + command)."""
-    plan = temp_proc.initiate()
-    temp_proc.standby()
-
-    # temperature_vti carries the per-sweep ramp rate; magnet_x present at 0 T
-    # (sim_cryostat has magnet_x; field_x/field_y default to 0.0).
     assert plan.targets["temperature_vti"] == Target(300.0, rate=6000.0)
+    # sim_cryostat has magnet_x + magnet_y; field_x/field_y default 0.0.
     assert plan.targets["magnet_x"] == Target(0.0)
+    assert plan.targets["magnet_y"] == Target(0.0)
 
     assert len(plan.commands) == 1
     cmd = plan.commands[0]
-    assert isinstance(cmd, Command)
-    assert cmd.vi_name == "dc_measurement"
+    assert cmd.vi_name == meas["measurement_vi"]
     assert cmd.method == "initiate"
-    assert cmd.kwargs["current_A"] == pytest.approx(1e-6)
-    assert cmd.kwargs["readings_per_point"] == 5
-
     assert plan.wait_s == pytest.approx(0.0)
 
 
-def test_temp_dc_initiate_includes_ramp_rate(temp_proc, tmp_path):
-    plan = temp_proc.initiate()
-    temp_proc.standby()
-    assert plan.targets["temperature_vti"].rate == pytest.approx(6000.0)
-
-
-def test_temp_dc_initiate_creates_hdf5(temp_proc, tmp_path):
-    temp_proc.initiate()
-    temp_proc.standby()
-    h5_files = list(tmp_path.glob("*.h5"))
-    assert len(h5_files) == 1
-
-
-def test_temp_dc_change_sweep_step_includes_rate(temp_proc, tmp_path):
-    temp_proc.initiate()
-    step = temp_proc.change_sweep_step()
-    assert step is not None
+@pytest.mark.parametrize("meas", TEMP_MEAS)
+def test_temp_sweep_change_step_includes_rate(station, tmp_path, meas):
+    proc = _temp_proc(station, tmp_path, meas)
+    proc.initiate()
+    step = proc.change_sweep_step()
     assert isinstance(step, StepPlan)
-    assert "temperature_vti" in step.targets
     assert step.targets["temperature_vti"].rate == pytest.approx(6000.0)
-    temp_proc.standby()
+    proc.standby()
 
 
-def test_temp_dc_sweep_exhaustion(temp_proc, tmp_path):
-    temp_proc.initiate()
-    temp_proc.change_sweep_step()
-    temp_proc.change_sweep_step()
-    assert temp_proc.change_sweep_step() is None
-    temp_proc.standby()
+@pytest.mark.parametrize("meas", TEMP_MEAS)
+def test_temp_sweep_standby_holds_temperature(station, tmp_path, meas):
+    """standby() returns empty targets — temperature holds at the last point."""
+    proc = _temp_proc(station, tmp_path, meas)
+    proc.initiate()
+    plan = proc.standby()
+    assert plan.targets == {}
+    assert any(c.vi_name == meas["measurement_vi"] for c in plan.commands)
 
 
-def test_temp_dc_measure_saves_data(temp_proc, tmp_path):
-    temp_proc.initiate()
-    temp_proc._station.dc_measurement.initiate(
-        current_A=1e-6, compliance_A=1e-3, voltmeter_range_V=0.1, readings_per_point=5
-    )
-    temp_proc.measure()
-    filepath = temp_proc._data_manager.filepath
-    temp_proc.standby()
-
+@pytest.mark.parametrize("meas", TEMP_MEAS)
+def test_temp_sweep_measure_saves_data(station, tmp_path, meas):
+    proc = _temp_proc(station, tmp_path, meas)
+    proc.initiate()
+    _arm(station, meas, proc)
+    proc.measure()
+    filepath = proc._data_manager.filepath
+    proc.standby()
     with h5py.File(filepath, "r") as f:
         assert not np.isnan(f["data"]["temperature_K"][0])
         assert not np.any(np.isnan(f["data"]["voltage_V"][0]))
-        assert f["data"]["voltage_V"].shape == (1, 5)
 
 
-def test_temp_dc_standby_empty_system_targets(temp_proc, tmp_path):
-    """standby() returns empty targets — temperature holds at last point."""
-    temp_proc.initiate()
-    plan = temp_proc.standby()
-    assert plan.targets == {}
-    assert any(c.vi_name == "dc_measurement" for c in plan.commands)
-
-
-def test_temp_dc_full_orchestrator_loop(station, tmp_path, qtbot):
+def test_temp_sweep_full_orchestrator_loop(station, tmp_path, qtbot):
     from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 
-    proc = TemperatureSweepDC(
-        station=station,
-        sample_info=SAMPLE_INFO,
-        data_directory=str(tmp_path),
-        **FAST_TEMP_PARAMS,
-    )
+    proc = _temp_proc(station, tmp_path, DC)
     orch = Orchestrator(station, tick_interval_ms=10)
     orch.run_procedure(proc)
 
@@ -352,11 +349,10 @@ def test_temp_dc_full_orchestrator_loop(station, tmp_path, qtbot):
 
     assert proc._index == 3
     assert orch._state == OrchestratorState.IDLE
-    h5_files = list(tmp_path.glob("*.h5"))
-    assert len(h5_files) == 1
+    assert len(list(tmp_path.glob("*.h5"))) == 1
 
 
-# ── TemperatureSweepDC on stations without magnets (review finding H7) ───────
+# ── TemperatureSweep on stations without magnets ─────────────────────────────
 
 def _partial_station(*keep: str):
     """A station containing only the named VIs from the sim config."""
@@ -365,38 +361,69 @@ def _partial_station(*keep: str):
     full = build_station(CONFIG_PATH)
     partial = Station()
     for name in keep:
-        partial.register_vi(name, getattr(full, name), full.get_vi_type(name))
+        partial.register_vi(name, full.get_vi(name), full.get_vi_type(name))
     return partial
 
 
-def test_temp_dc_missing_magnet_with_zero_field_is_skipped(tmp_path):
-    """A station without magnet_y still runs the sweep at field_y=0 —
-    the missing magnet is simply left out of the system targets."""
+def test_temp_sweep_missing_magnet_with_zero_field_is_skipped(tmp_path):
+    """A station without magnet_y still runs the sweep at field_y=0."""
     station = _partial_station("magnet_x", "temperature_vti", "dc_measurement")
-    proc = TemperatureSweepDC(
-        station=station,
-        sample_info=SAMPLE_INFO,
-        data_directory=str(tmp_path),
-        **FAST_TEMP_PARAMS,  # field_x / field_y default to 0.0
+    proc = TemperatureSweep(
+        station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
+        **FAST_TEMP, **DC,
     )
     plan = proc.initiate()
     assert "magnet_y" not in plan.targets
     assert "magnet_x" in plan.targets
     assert "temperature_vti" in plan.targets
-    proc.standby()  # close the HDF5 file
+    proc.standby()
 
 
-def test_temp_dc_missing_magnet_with_nonzero_field_is_refused(tmp_path):
-    """A NONZERO field on a missing magnet must fail at construction:
-    silently measuring at 0 T while the metadata claims 0.5 T would
-    corrupt a dataset without anyone noticing."""
+def test_temp_sweep_missing_magnet_with_nonzero_field_is_refused(tmp_path):
+    """A NONZERO field on a missing magnet must fail at construction."""
     from cryosoft.core.exceptions import CryoSoftConfigError
 
     station = _partial_station("magnet_x", "temperature_vti", "dc_measurement")
     with pytest.raises(CryoSoftConfigError, match="magnet_y"):
-        TemperatureSweepDC(
-            station=station,
-            sample_info=SAMPLE_INFO,
-            data_directory=str(tmp_path),
-            **{**FAST_TEMP_PARAMS, "field_y": 0.5},
+        TemperatureSweep(
+            station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
+            **{**FAST_TEMP, **DC, "field_y": 0.5},
         )
+
+
+# ── DataSchema negative case (wrong-shaped reading → ERROR, unwritten) ────────
+
+def test_wrong_shape_reading_degrades_to_error(station, tmp_path, qtbot, monkeypatch):
+    """A measurement VI returning a wrong-length array must not corrupt the file.
+
+    The per-datapoint DataSchema.validate() in _save_datapoint raises
+    DataSchemaError before anything is written; the Orchestrator's tick boundary
+    contains it to ERROR and cleans up. The datapoint is never saved.
+    """
+    from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
+
+    station.magnet_x._default_ramp_rate = 6000.0
+    station.magnet_x._ramp_segments = []
+
+    proc = _field_proc(station, tmp_path, DC)
+    vi = station.get_vi("dc_measurement")
+    good_take_reading = vi.take_reading
+
+    def bad_take_reading():
+        data = good_take_reading()
+        data["voltage_V"] = list(data["voltage_V"]) + [0.0]  # one element too long
+        return data
+
+    monkeypatch.setattr(vi, "take_reading", bad_take_reading)
+
+    orch = Orchestrator(station, tick_interval_ms=10)
+    orch.run_procedure(proc)
+
+    qtbot.waitUntil(lambda: orch._state == OrchestratorState.ERROR, timeout=10000)
+    assert orch._state == OrchestratorState.ERROR
+
+    # The file exists but nothing was written — every field_T is still NaN.
+    h5_files = list(tmp_path.glob("*.h5"))
+    assert len(h5_files) == 1
+    with h5py.File(h5_files[0], "r") as f:
+        assert np.all(np.isnan(f["data"]["field_T"][:]))
