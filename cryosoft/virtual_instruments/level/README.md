@@ -32,4 +32,9 @@ All classes here inherit `LevelMeterBase` from `virtual_instruments/base.py`.
 
 ## Files
 - `cryogen_level_meter.py` — `CryogenLevelMeterVI`: rolling-buffer helium low
-  detection, standardised 3-mode refresh rate interface.
+  detection, standardised 3-mode refresh rate interface. Key API:
+  `@monitored helium_level` / `nitrogen_level` / `get_refresh_rate`,
+  `@control set_refresh_rate`, `helium_low()`, `evaluate_safety()`. tests:
+  `tests/test_l1_new_vis.py` (`TestCryogenLevelMeterVI`),
+  `tests/test_l1_virtual_instruments.py`.
+- `__init__.py` — package marker. tests: none.

@@ -62,4 +62,7 @@ through the `Station` instance (contract C6).
 
 ## Files
 - `switch_matrix.py` — `SwitchMatrixVI`: exclusive-mux matrix switch over a
-  705-style scanner driver.
+  705-style scanner driver. Key API: `routes()`, `@control select_route` /
+  `open_all`, `standby()`, `ping()`, `@monitored active_route` /
+  `active_route_index`. tests: `tests/test_l1_switch_vi.py`.
+- `__init__.py` — package marker. tests: none.

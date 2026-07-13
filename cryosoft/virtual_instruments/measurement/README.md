@@ -69,9 +69,13 @@ every measurement VI automatically.
 
 ## Files
 - `dc_separate_measurement.py` — `DCSeparateMeasurementVI`: Keithley 6221 source +
-  2182A nanovoltmeter, simple DC mode.
+  2182A nanovoltmeter, simple DC mode. tests: `tests/test_measurement_dc_vi.py`,
+  `tests/test_l1_new_vis.py` (`TestDCSeparateMeasurementVI`).
 - `dc_single_instrument.py` — `DCSingleInstrumentVI`: Keithley 2400 SMU,
-  single-instrument DC mode with the same method contract.
+  single-instrument DC mode with the same method contract. tests:
+  `tests/test_l1_new_vis.py` (`TestDCSingleInstrumentVI`).
 - `measurement_delta_mode.py` — `DeltaModeMeasurementVI`: Keithley 6221 + 2182A in
   delta-mode (reverses current polarity each reading for offset cancellation).
-  Pads short delta returns to `n_readings` with NaN and reports `n_valid`.
+  Pads short delta returns to `n_readings` with NaN and reports `n_valid`. tests:
+  `tests/test_l1_virtual_instruments.py`.
+- `__init__.py` — package marker. tests: none.

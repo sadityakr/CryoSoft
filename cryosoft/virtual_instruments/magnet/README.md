@@ -45,9 +45,21 @@ and `virtual_instruments/rampable.py`).
 ## Files
 - `superconducting_magnet.py` — `SuperconductingMagnetVI`: status-driven field ramp,
   optional segment-based rate scheduling; aborts the sequence on a QUENCH status.
+  Key API: `@monitored get_field` / `magnet_current` / `magnet_status`,
+  `@control set_field`, the `RampableVI` methods, `evaluate_safety()`. tests:
+  `tests/test_l1_new_vis.py` (`TestSuperConductingMagnetVI`),
+  `tests/test_l1_virtual_instruments.py`.
 - `superconducting_magnet_persistent.py` — `SuperconductingMagnetPersistentVI`:
   extends above with switch heater control and the tick-count persistent-mode
   sequence. Quench-safe ordering: the PSU is ramped to match the coil current
   while the switch is still cold, and only then is the heater energised —
   heating across a mismatch would quench the magnet. The manual
-  `switch_heater_on` control enforces the same rule (refuses on mismatch).
+  `switch_heater_on` control enforces the same rule (refuses on mismatch). tests:
+  `tests/test_l1_new_vis.py` (`TestSuperConductingMagnetPersistentVI`),
+  `tests/test_switch_heater.py`.
+- `switch_heater.py` — `SwitchHeater`: wall-clock state object owned by
+  `SuperconductingMagnetPersistentVI` that tracks heater on/off plus warmup /
+  cooldown readiness in seconds (tick-rate independent). Key API: `turn_on`,
+  `turn_off`, `is_on`, `is_ready`, `is_cold`, `seconds_until_ready`. Not a VI.
+  tests: `tests/test_switch_heater.py`.
+- `__init__.py` — package marker. tests: none.

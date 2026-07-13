@@ -2,195 +2,122 @@
 
 ## Purpose
 
-The `procedures/` package contains concrete measurement procedures. Each procedure is a declarative class that describes *what* the experiment should do — which instruments to target, how to configure measurements, and how to step through a sweep. The `Orchestrator` handles *how* it executes (ramping, waiting, monitoring, data saving).
-
-Procedures are the primary extension point for new experiment types. Adding a new measurement type means adding one file here.
+`procedures/` holds the concrete measurement procedures: one thin subclass per
+**sweep axis** (the swept quantity). Each describes *what* the experiment does
+(which axis to sweep, which system VIs to hold); the `Orchestrator` decides
+*how* it runs (ramping, settling, monitoring, saving). The generic
+sweep-and-measure engine itself lives one layer down in
+`cryosoft.core.procedure.SweepMeasureProcedure`; the files here supply only the
+axis specifics.
 
 ## Architecture layer
 
-L4 — Procedures. Sits above L3 (Orchestrator) and L2 (Station). Depends on `DataManager` (L5) for HDF5 output.
+L4 (Procedures). Sits above L3 (Orchestrator) and L2 (Station); uses
+`DataManager` (L5) for HDF5 output.
 
 ```
-GUI → Orchestrator → Procedure → Station → Virtual Instruments → Drivers
-                              ↘ DataManager → HDF5
+GUI -> Orchestrator -> Procedure -> Station -> Virtual Instruments -> Drivers
+                              \-> DataManager -> HDF5
 ```
 
-## Entry (what comes in)
+## Entry (how control/data enters this folder)
 
-Each procedure receives at construction time:
-- `station`: the `Station` instance (access to all VIs).
-- `sample_info`: `{"sample_name": str, "sample_id": str, "comments": str}` — entered by the user in the GUI.
-- `data_directory`: path where the HDF5 file will be created.
-- `**param_values`: all procedure-specific parameters from the GUI form (must match `parameters` class attribute).
+Each procedure is constructed with:
 
-## Exit (what goes out)
+- `station`: the `Station` instance (the only path to any VI).
+- `sample_info`: `{"sample_name", "sample_id", "comments"}` from the GUI.
+- `data_directory`: where the HDF5 file is created.
+- `**param_values`: the GUI form values, matching the declared `ParamSpec`s
+  (declared defaults are merged in for any omitted key).
 
-The Orchestrator calls four methods in sequence. They return the typed plan
-objects from `cryosoft.core.plan` (`Target`, `Command`, `PhasePlan`,
-`StepPlan`), not bare dicts/tuples:
+## Exit (what it hands to other layers)
+
+The Orchestrator drives the lifecycle by calling these methods, which return the
+typed plan objects from `cryosoft.core.plan` (never bare dicts/tuples):
 
 | Method | Returns | Called when |
 |--------|---------|-------------|
 | `initiate()` | `PhasePlan` | Procedure starts |
 | `change_sweep_step()` | `StepPlan` or `None` | After each measurement |
-| `measure()` | nothing (writes to HDF5) | System is stable at current point |
+| `measure()` | nothing (writes HDF5) | System stable at current point |
 | `standby()` | `PhasePlan` | Sweep complete or aborted |
 | `abort()` | `tuple[Command, ...]` | User abort / ERROR / EMERGENCY |
 
-**Plan formats:**
-
-```python
-from cryosoft.core.plan import Command, PhasePlan, StepPlan, Target
-
-# PhasePlan — targets to reach, ordered measurement commands, settle time.
-PhasePlan(
-    targets={"magnet_x": Target(0.5), "temperature_vti": Target(10.0)},
-    commands=(Command("iv_measurement", "configure",
-                      {"method": "delta_mode", "current": 1e-6, "n_readings": 100}),),
-    wait_s=300.0,
-)
-
-# StepPlan — targets for the next sweep point, plus its settle time.
-StepPlan(targets={"magnet_x": Target(0.55)}, wait_s=5.0)
-```
-
-A `Target` carries an optional `rate` (ramp rate, forwarded to the VI's
-`start_ramp()` only when not `None`) and `persistent` flag; `Command.commands`
-order is meaningful and is never reordered. Each `Target`/`Command`/plan
-validates eagerly at construction, so a malformed plan fails at the procedure
-boundary rather than deep in the tick loop.
+A `PhasePlan` carries `targets` (VI name -> `Target`), ordered `commands`, and a
+`wait_s` settle time; a `StepPlan` carries the next point's `targets` and its
+`wait_s`. A `Target` carries an optional `rate` (forwarded to the VI's
+`start_ramp()` only when set) and a `persistent` flag; `Command` order is
+meaningful and never reordered. Every plan object validates at construction, so
+a malformed plan fails at the procedure boundary, not in the tick loop.
 
 ## Interface contract
 
-All procedures must subclass `BaseProcedure` from `cryosoft.core.procedure`:
+Every procedure subclasses `BaseProcedure` (from `cryosoft.core.procedure`); an
+axis procedure subclasses `SweepMeasureProcedure` and overrides nothing but the
+axis hooks.
 
-Parameters are declared as `ParamSpec` value objects (from
-`cryosoft.core.plan`), grouped into `sweep_parameters` / `system_parameters` /
-`measurement_parameters`. `ParamSpec` validates each declaration eagerly at
-class-definition time; the ParamSpec → Qt-widget mapping lives entirely in
-`cryosoft.gui.param_form`, so a procedure never names a widget class.
-
-```python
-from cryosoft.core.plan import ParamSpec
-from cryosoft.core.procedure import BaseProcedure
-
-class MyProcedure(BaseProcedure):
-    name = "My Procedure"
-    description = "One-line description"
-    system_parameters = {
-        # Plain field (GUI text box parsed by `type`):
-        "param_name": ParamSpec(type=float, default=1.0, unit="T", description="..."),
-    }
-    measurement_parameters = {
-        # Enumerated (GUI drop-down): choices is a label -> value dict. The
-        # collected value is the mapped value, so no translation in the procedure.
-        "range": ParamSpec(type=float, default=0.01,
-                           choices={"10 mV": 0.01, "1 V": 1.0}, description="..."),
-        # Boolean (GUI checkbox):
-        "enabled": ParamSpec(type=bool, default=True, description="..."),
-    }
-
-    def _build_sweep_array(self) -> list: ...
-    def initiate(self) -> PhasePlan: ...
-    def change_sweep_step(self) -> StepPlan | None: ...
-    def measure(self) -> None: ...
-    def standby(self) -> PhasePlan: ...
-    def abort(self) -> tuple[Command, ...]: ...
-```
-
-**Rules:**
-- Procedures never import from `drivers/` or `virtual_instruments/` directly.
-- Procedures access instruments only through `self._station` (VI methods).
-- `measure()` must create a `DataManager` in `initiate()` (stored as `self._data_manager`) and call `self._data_manager.save_datapoint()`.
-- `standby()` must call `self._data_manager.close()` to ensure data is flushed and trimmed.
-- All parameters must be declared as `ParamSpec`s in the `sweep_parameters` /
-  `system_parameters` / `measurement_parameters` group dicts (auto-unioned into
-  `parameters`) — no hardcoded values in logic.
+- Procedures never import from `drivers/` or `virtual_instruments/`; instruments
+  are reached only through `self._station` (contract C6).
+- Parameters are declared as `ParamSpec` value objects (from
+  `cryosoft.core.plan`), grouped into `sweep_parameters` / `system_parameters` /
+  `measurement_parameters` (auto-unioned into `parameters`). `ParamSpec`
+  supports plain fields, `choices` drop-downs (the collected value is the mapped
+  value, so no translation in the procedure), and `bool` checkboxes. The
+  ParamSpec -> Qt-widget mapping lives entirely in `cryosoft.gui.param_form`.
+- `get_param_groups(station, selections)` (classmethod) drives GUI form
+  generation. `SweepMeasureProcedure` uses it to add a structural
+  `measurement_vi` selector (choices are the station's measurement VIs) plus the
+  selected VI's own `measurement_parameters`, and, when a switch VI is present,
+  the multiplexing checkboxes.
 - SI units everywhere: tesla, kelvin, amperes, volts, seconds.
 
-## Generic sweep procedures (the common case)
+### Generic sweep and switch multiplexing (owned by the base, no per-procedure code)
 
-Most measurement procedures are **generic sweep procedures** built on
-`core.procedure.SweepMeasureProcedure`: ONE procedure per sweep axis that runs
-ANY measurement VI the station exposes, chosen in the GUI. `FieldSweep` and
-`TemperatureSweep` are the two shipped today.
+`SweepMeasureProcedure` runs ANY measurement VI the station exposes, chosen in
+the GUI, so a new *measurement method* is a new measurement VI, not a new
+procedure. `initiate()` assembles a `DataSchema` (axis column + system columns +
+the VI's arrays/scalars) and arms the VI; `measure()` reads the VI, tags on the
+axis read-back, validates per datapoint, and saves; `standby()` / `abort()`
+disarm the VI.
 
-The base owns everything that does not depend on the swept quantity:
+When the station exposes a switch VI (`vi_type: switch`), the base gains
+multiplexing with no procedure code: `get_param_groups()` appends one
+`mux_<route>` checkbox per route; with two or more routes selected, `measure()`
+connects each route in turn and every measurement array and per-point scalar is
+suffixed `{array}__{route}` (e.g. `voltage_V__Mux-Ch1`) via
+`DataSchema.multiplexed(...)`; the axis, system columns, and `unix_time` are
+never suffixed. `standby()` / `abort()` append a switch `open_all` when routes
+were used.
 
-- **Measurement-VI selection.** `get_param_groups(station, selections)` builds a
-  "Measurement method" group whose single `measurement_vi` parameter is a
-  `structural` `ParamSpec` (its `choices` are the station's measurement VIs),
-  plus a group carrying the *selected* VI's own `measurement_parameters`. The
-  GUI re-renders the measurement group when the selection changes.
-- **Construction.** `__init__` resolves the selected VI, merges its parameter
-  defaults, and records the selection + the instance's live-plot keys.
-- **The four-method loop.** `initiate()` assembles a `DataSchema` (axis column +
-  system columns + the VI's arrays/scalars) and arms the VI; `measure()` reads
-  the VI, tags on the axis read-back, and saves (the schema is validated per
-  datapoint); `standby()` / `abort()` disarm the VI.
+## How to add a new module
 
-**So the everyday extension is a measurement method, not a procedure.** To make
-a new measurement runnable by both sweeps, add a measurement VI (subclass
-`MeasurementInstrumentBase`, declare its self-description, implement the
-lifecycle) and register it in the config with `vi_type: measurement` — no
-procedure change at all.
+Add a procedure only for a new **sweep axis**. To add a new *measurement*
+instead, add a measurement VI and register it with `vi_type: measurement`; both
+shipped sweeps pick it up with zero procedure change.
 
-## Switch multiplexing (measuring several routes per point)
-
-When the station exposes a **Switch VI** (`vi_type: switch`, e.g. a Keithley 705
-matrix switch), a generic sweep procedure gains a **multiplexing** capability
-with no procedure code:
-
-- **How routes appear as checkboxes.** `get_param_groups()` appends a "mux"
-  group with one `bool` checkbox per switch route, labelled "Measure route
-  `<name>`". The form param is `mux_<route>` (the `mux_` prefix keeps route
-  names, which can collide with measurement/system params, in their own
-  namespace). No switch VI in the station -> no group, zero behaviour change.
-- **Command order at `initiate()`.** If any route is selected, the procedure
-  commands `select_route(first_route)` on the switch **before** arming the
-  measurement VI (the switch must be connected before the source arms).
-- **Per-datapoint loop.** With **two or more** routes selected, `measure()`
-  connects each route in turn (`switch.select_route(route)` via the Station) and
-  takes one reading per route. With exactly **one** route the switch is selected
-  once at `initiate()` and each point is a plain reading.
-- **Column naming `{array}__{route}`.** With two or more routes, every
-  measurement array and per-point scalar is suffixed per route, e.g.
-  `voltage_V__Mux-Ch1`, `current_A__Mux-Ch2`, `n_valid__Mux-Ch1`
-  (`DataSchema.multiplexed(routes, scalar_columns=...)`). The sweep axis, system
-  columns, and `unix_time` are never suffixed. With 0 or 1 route the columns are
-  unsuffixed, exactly as without a switch.
-- **Safe-off.** `standby()` and `abort()` append a switch `open_all` command
-  whenever routes were selected, so no route is left connected.
-
-The switch is reached only through the `Station` instance (contract C6); the
-exclusive-mux policy (one route connected at a time) lives in the Switch VI.
-
-## How to add a new procedure
-
-Adding a *procedure* is only needed for a new **sweep axis** (a new swept
-quantity). Subclass `SweepMeasureProcedure` and supply just the axis specifics:
-
-1. Create `procedures/your_sweep.py` with the front-matter block (Workspace Rule 1).
+1. Create `procedures/your_sweep.py` with the PEP 257 header docstring
+   (Workspace Rule 1).
 2. Subclass `SweepMeasureProcedure`; set `name`, `description`, a `sweep_axis`
-   (gives `_build_sweep_array()` and the GUI mode-selector for free),
+   (this gives `_build_sweep_array()` and the GUI mode selector for free),
    `sweep_data_keys`, `default_x_key`, and any `system_parameters`.
-3. Implement the axis hooks: `_initial_system_targets`, `_step_targets`,
-   `_standby_targets`, `_axis_readback`, `_initiate_wait_s`, `_step_wait_s`.
-   The measurement selection, `DataSchema`, DataManager, and the four-method
-   loop are all inherited — do NOT re-declare `measurement_parameters` or
-   override `initiate`/`measure`/`standby`/`abort` unless the axis truly needs it.
-4. Write tests (see `tests/test_new_procedures.py`), parametrized over the
+3. Implement the six axis hooks only: `_initial_system_targets`,
+   `_step_targets`, `_standby_targets`, `_axis_readback`, `_initiate_wait_s`,
+   `_step_wait_s`. Do NOT re-declare `measurement_parameters` or override
+   `initiate` / `measure` / `standby` / `abort` unless the axis truly needs it.
+4. Write tests in `tests/test_new_procedures.py`, parametrized over the
    measurement VIs the sweep should support.
-5. Add the file to this README's file list below.
+5. Add the file to the Files map below with its owning test file.
 
-A procedure with a bespoke (non sweep-and-measure) shape can still subclass
-`BaseProcedure` directly and implement the four methods and a `DataManager` by
-hand; the `SweepMeasureProcedure` route is the recommended default.
+A procedure with a non sweep-and-measure shape can subclass `BaseProcedure`
+directly and implement the five lifecycle methods and its own `DataManager`;
+`SweepMeasureProcedure` is the recommended default.
 
 ## Files
 
-| File | Description |
-|------|-------------|
-| `__init__.py` | Package marker (empty) |
-| `field_sweep.py` | `FieldSweep` ("Field Sweep") — sweeps magnetic field (magnet_x, temperature_vti held), runs the GUI-selected measurement VI at each point. Requires: magnet_x, temperature_vti, and ≥1 measurement VI. |
-| `temperature_sweep.py` | `TemperatureSweep` ("Temperature Sweep") — sweeps temperature (temperature_vti, optional magnet_x/magnet_y held fields), runs the GUI-selected measurement VI at each stable point. Requires: temperature_vti and ≥1 measurement VI; magnets optional. |
+Each row: responsibility, key public class, and the test file(s) in `tests/`.
+
+| File | Responsibility | Key public API | Tests |
+|------|----------------|----------------|-------|
+| `__init__.py` | Package marker | (none) | none |
+| `field_sweep.py` | Sweeps magnetic field (`magnet_x`), holding `temperature_vti`, running any selected measurement VI at each point; parks `magnet_x` at 0 T on standby. Requires `magnet_x`, `temperature_vti`, and at least one measurement VI. | `FieldSweep` (axis hooks over `SweepMeasureProcedure`) | `test_new_procedures.py`, `test_l4_procedure.py`, `test_field_voltage_procedure.py` |
+| `temperature_sweep.py` | Sweeps temperature (`temperature_vti`) at a per-sweep ramp rate, holding optional `magnet_x` / `magnet_y` fields, running any selected measurement VI at each stable point. Requires `temperature_vti` and at least one measurement VI; magnets optional (skipped at 0, refused at nonzero when absent). | `TemperatureSweep` (axis hooks over `SweepMeasureProcedure`) | `test_new_procedures.py` |

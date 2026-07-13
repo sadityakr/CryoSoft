@@ -38,6 +38,13 @@ All classes here extend `SampleTemperatureControllerVI` (itself inheriting from
 
 ## Files
 - `sample_temperature_controller.py` — `SampleTemperatureControllerVI`: time-based
-  ramp generator with tolerance-based settle detection.
+  ramp generator with tolerance-based settle detection. Key API:
+  `@monitored temperature` / `setpoint` / `heater_output`,
+  `@control set_temperature` / `set_ramp_rate`, the `RampableVI` methods. tests:
+  `tests/test_l1_new_vis.py` (`TestSampleTemperatureControllerVI`),
+  `tests/test_l1_virtual_instruments.py`.
 - `vti_temperature_controller.py` — `VTITemperatureControllerVI`: extends above with
-  needle valve `@monitored` and `@control` (same ITC503 auxiliary output).
+  needle valve `@monitored needle_valve` and `@control set_needle_valve` (same
+  ITC503 auxiliary output). tests: `tests/test_l1_new_vis.py`
+  (`TestVTITemperatureControllerVI`).
+- `__init__.py` — package marker. tests: none.
