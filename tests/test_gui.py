@@ -958,6 +958,55 @@ def test_monitor_other_devices_log_selector_switches_stack(monitor_win):
     assert monitor_win._devices_log_stack.currentIndex() == 0
 
 
+def test_monitor_other_devices_lists_switch_vi_with_display_label(monitor_win, station):
+    """The Other Devices section shows a display-only row for each switch VI.
+
+    The sim_cryostat config has one switch VI (switch_matrix, a Keithley-705
+    scanner behind SwitchMatrixVI). Its row must carry the VI's display_label
+    ("Scanner (mux)") and a connection dot, but no Check/lifecycle buttons —
+    it is monitored, not driven, from this section.
+    """
+    switch_vis = [n for n in station.get_vi_names() if station.get_vi_type(n) == "switch"]
+    assert switch_vis, "sim_cryostat should have at least one switch VI"
+
+    for vi_name in switch_vis:
+        row = monitor_win.findChild(QWidget, f"{vi_name}_switch_row")
+        assert row is not None, f"Missing switch row for {vi_name}"
+
+        label = monitor_win.findChild(QLabel, f"{vi_name}_display_label")
+        assert label is not None
+        assert label.text() == station.measurement_label(vi_name)
+
+        assert monitor_win.findChild(QLabel, f"{vi_name}_conn_dot") is not None
+        assert monitor_win.findChild(QLabel, f"{vi_name}_active_route") is not None
+        # Display-only: no Check button, no lifecycle toggle.
+        assert monitor_win.findChild(QPushButton, f"{vi_name}_check_btn") is None
+        assert monitor_win.findChild(QPushButton, f"{vi_name}_lifecycle_btn") is None
+
+
+def test_monitor_switch_row_active_route_updates_on_tick(monitor_win, station, orchestrator):
+    """A switch row's active-route label tracks the live route across a monitor tick.
+
+    Selecting a route on the sim station and emitting the resulting state
+    snapshot (as the Orchestrator tick does) must flip the label from the
+    no-route placeholder to the closed route's name, and mark the row
+    connected.
+    """
+    route_lbl = monitor_win.findChild(QLabel, "switch_matrix_active_route")
+    dot = monitor_win.findChild(QLabel, "switch_matrix_conn_dot")
+    assert route_lbl.text() == "Route: —"
+
+    station.switch_matrix.select_route("Mux-Ch2")
+    orchestrator.states_updated.emit(station.get_state())
+
+    assert route_lbl.text() == "Route: Mux-Ch2"
+    assert dot.property("status") == "connected"
+
+    station.switch_matrix.open_all()
+    orchestrator.states_updated.emit(station.get_state())
+    assert route_lbl.text() == "Route: —"
+
+
 def test_monitor_states_updated_feeds_history_and_trend_combos(monitor_win, orchestrator):
     """states_updated records into MonitorHistory and populates the trend Y combos."""
     fake_state = {"magnet_x": {"get_field": 0.25, "magnet_current": 12.0}}

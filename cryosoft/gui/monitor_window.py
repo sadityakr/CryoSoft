@@ -22,8 +22,9 @@
 #   Station instance and Orchestrator instance.
 # process: |
 #   Splits system/level VIs into a 2-column instrument grid (top-left) and
-#   measurement VIs into a compact Other Devices list (bottom-right, behind
-#   the selector). Trend plots (1-4, backed by a shared MonitorHistory) live
+#   measurement plus switch VIs into a compact Other Devices list
+#   (bottom-right, behind the selector; switch rows are display-only). Trend
+#   plots (1-4, backed by a shared MonitorHistory) live
 #   in a QGridLayout whose column count is ceil(sqrt(panel_count)),
 #   recomputed on every add/remove. Connects Orchestrator signals for the
 #   state-driven status bar, the notification banner (errors/blocked
@@ -328,6 +329,17 @@ class MonitorWindow(QMainWindow):
             n for n in self._station.get_vi_names()
             if self._station.get_vi_type(n) == "measurement"
         ]
+        switch_vis = [
+            n for n in self._station.get_vi_names()
+            if self._station.get_vi_type(n) == "switch"
+        ]
+
+        # Live-updated switch VI row labels, keyed by VI name and refreshed on
+        # every monitor tick by _on_states_updated_switches. Populated in
+        # _build_switch_status_row; empty when the station has no switch VIs.
+        self._switch_route_labels: dict[str, QLabel] = {}
+        self._switch_conn_dots: dict[str, QLabel] = {}
+        self._switch_conn_status: dict[str, QLabel] = {}
 
         # Shared ring-buffer history feeding all Trend plot panels. Qt-free
         # by design (see monitor_history.py), so it is created here rather
@@ -357,7 +369,7 @@ class MonitorWindow(QMainWindow):
         top_left = self._build_instruments_quadrant()
         top_right = self._build_trends_quadrant()
         bottom_left = self._build_sample_info_quadrant()
-        bottom_right = self._build_other_devices_log_quadrant(measurement_vis)
+        bottom_right = self._build_other_devices_log_quadrant(measurement_vis, switch_vis)
 
         self._left_splitter = QSplitter(Qt.Orientation.Vertical)
         self._left_splitter.setObjectName("left_splitter")
@@ -527,7 +539,9 @@ class MonitorWindow(QMainWindow):
         outer.addWidget(scroll)
         return container
 
-    def _build_other_devices_log_quadrant(self, measurement_vis: list[str]) -> QWidget:
+    def _build_other_devices_log_quadrant(
+        self, measurement_vis: list[str], switch_vis: list[str]
+    ) -> QWidget:
         """Build the bottom-right quadrant: Other Devices / Log behind a selector.
 
         A QComboBox picks which of the two always-built views is visible in
@@ -537,6 +551,7 @@ class MonitorWindow(QMainWindow):
 
         Args:
             measurement_vis: Names of measurement VIs to display in Other Devices.
+            switch_vis: Names of switch/scanner VIs to display (display-only rows).
 
         Returns:
             A QWidget containing the selector row and the QStackedWidget.
@@ -563,7 +578,9 @@ class MonitorWindow(QMainWindow):
         other_devices_scroll = QScrollArea()
         other_devices_scroll.setObjectName("other_devices_scroll")
         other_devices_scroll.setWidgetResizable(True)
-        other_devices_scroll.setWidget(self._build_other_devices_section(measurement_vis))
+        other_devices_scroll.setWidget(
+            self._build_other_devices_section(measurement_vis, switch_vis)
+        )
         self._devices_log_stack.addWidget(other_devices_scroll)
 
         self._devices_log_stack.addWidget(self._build_log_section())
@@ -609,42 +626,49 @@ class MonitorWindow(QMainWindow):
 
         return box
 
-    def _build_other_devices_section(self, vi_names: list[str]) -> QWidget:
-        """Build the compact Other Devices content: one row per measurement VI.
+    def _build_other_devices_section(
+        self, measurement_vis: list[str], switch_vis: list[str]
+    ) -> QWidget:
+        """Build the compact Other Devices content: one row per measurement/switch VI.
 
-        Each row is name + connection dot/status + a Check button and a
-        LifecycleToggleButton — no tall card boxes. Rows stack vertically for
-        up to three VIs; a tight 3-column grid is used beyond that so the
-        quadrant's natural height stays small regardless of how many
-        measurement VIs a station has.
+        Each measurement row is name + connection dot/status + a Check button
+        and a LifecycleToggleButton; each switch row is the display-only
+        analogue (name + display label + connection dot/status + live active
+        route, no buttons). Rows stack vertically for up to three VIs total; a
+        tight 3-column grid is used beyond that so the quadrant's natural height
+        stays small regardless of how many devices a station has.
 
         Args:
-            vi_names: Names of measurement VIs to display.
+            measurement_vis: Names of measurement VIs to display.
+            switch_vis: Names of switch/scanner VIs to display (display-only).
 
         Returns:
-            A QWidget holding one compact status row per measurement VI (or a
+            A QWidget holding one compact status row per device (or a
             placeholder label if there are none).
         """
         container = QWidget()
 
-        if not vi_names:
+        rows = [self._build_device_status_row(n) for n in measurement_vis]
+        rows += [self._build_switch_status_row(n) for n in switch_vis]
+
+        if not rows:
             layout = QVBoxLayout(container)
             layout.addWidget(QLabel("No other devices configured."))
             return container
 
-        if len(vi_names) > 3:
+        if len(rows) > 3:
             grid = QGridLayout(container)
             grid.setSpacing(6)
             columns = 3
-            for idx, vi_name in enumerate(vi_names):
+            for idx, row_widget in enumerate(rows):
                 row, col = divmod(idx, columns)
-                grid.addWidget(self._build_device_status_row(vi_name), row, col)
+                grid.addWidget(row_widget, row, col)
         else:
             vlay = QVBoxLayout(container)
             vlay.setSpacing(4)
             vlay.setContentsMargins(6, 6, 6, 6)
-            for vi_name in vi_names:
-                vlay.addWidget(self._build_device_status_row(vi_name))
+            for row_widget in rows:
+                vlay.addWidget(row_widget)
             vlay.addStretch()
 
         return container
@@ -725,6 +749,62 @@ class MonitorWindow(QMainWindow):
 
         row.addWidget(check_btn)
         row.addWidget(lifecycle)
+
+        return row_widget
+
+    def _build_switch_status_row(self, vi_name: str) -> QWidget:
+        """Build one display-only status row for a switch/scanner VI.
+
+        Same visual house style as :meth:`_build_device_status_row` (connection
+        dot + status text), but with no Check button and no lifecycle toggle —
+        a switch is monitored, not driven, from this section. Adds the VI's
+        ``display_label`` (e.g. "Scanner (mux)") and a live active-route label
+        that both refresh on the monitor tick via
+        :meth:`_on_states_updated_switches`.
+
+        Args:
+            vi_name: Registered switch VI name (e.g. ``"switch_matrix"``).
+
+        Returns:
+            A QWidget containing the assembled display-only row.
+        """
+        row_widget = QWidget()
+        row_widget.setObjectName(f"{vi_name}_switch_row")
+        row = QHBoxLayout(row_widget)
+        row.setContentsMargins(6, 2, 6, 2)
+        row.setSpacing(8)
+
+        # Connection dot: styled via the dynamic 'status' QSS property, same as
+        # the measurement rows. Refreshed live from the state cache, so it
+        # starts "unknown" until the first tick arrives.
+        dot = QLabel("●")
+        dot.setObjectName(f"{vi_name}_conn_dot")
+        dot.setProperty("class", "conn_dot")
+        dot.setProperty("status", "unknown")
+        row.addWidget(dot)
+
+        name_lbl = QLabel(vi_name)
+        row.addWidget(name_lbl)
+
+        label_lbl = QLabel(self._station.measurement_label(vi_name))
+        label_lbl.setObjectName(f"{vi_name}_display_label")
+        label_lbl.setProperty("class", "secondary_label")
+        row.addWidget(label_lbl)
+
+        row.addStretch()
+
+        status_lbl = QLabel("Unknown")
+        status_lbl.setObjectName(f"{vi_name}_conn_status")
+        status_lbl.setProperty("class", "secondary_label")
+        row.addWidget(status_lbl)
+
+        route_lbl = QLabel("Route: —")
+        route_lbl.setObjectName(f"{vi_name}_active_route")
+        row.addWidget(route_lbl)
+
+        self._switch_conn_dots[vi_name] = dot
+        self._switch_conn_status[vi_name] = status_lbl
+        self._switch_route_labels[vi_name] = route_lbl
 
         return row_widget
 
@@ -1068,6 +1148,10 @@ class MonitorWindow(QMainWindow):
         # (each panel connects itself in its constructor) — this slot only
         # feeds MonitorHistory and the Trend plots.
         self._orchestrator.states_updated.connect(self._on_states_updated_for_history)
+        # Refresh the display-only switch/scanner rows (connection + active
+        # route) from the same per-tick snapshot. No-op when there are no
+        # switch VIs (the label dicts are empty).
+        self._orchestrator.states_updated.connect(self._on_states_updated_switches)
 
     def _on_states_updated_for_history(self, state: dict) -> None:
         """Record a state snapshot into MonitorHistory and refresh trend panels.
@@ -1092,6 +1176,40 @@ class MonitorWindow(QMainWindow):
                 if keys:
                     panel.set_selected_key(self._pick_default_trend_key(hint, keys))
                     del self._default_trend_key_hints[panel_id]
+
+    def _on_states_updated_switches(self, state: dict) -> None:
+        """Refresh the display-only switch rows from a per-tick state snapshot.
+
+        Updates each switch VI's connection dot/status and live active-route
+        label. Connection is derived the same way the rest of the GUI reads
+        it: a ``_disconnected`` flag in the snapshot means "not reachable",
+        otherwise a present snapshot means "connected". The active route shows
+        the route name, or an em dash when no route is closed.
+
+        Args:
+            state: ``{vi_name: {field: value, ...}}`` from the Orchestrator.
+        """
+        for vi_name, route_lbl in self._switch_route_labels.items():
+            vi_state = state.get(vi_name)
+            if vi_state is None:
+                continue
+
+            route = vi_state.get("active_route", "")
+            route_lbl.setText(f"Route: {route}" if route else "Route: —")
+
+            dot = self._switch_conn_dots[vi_name]
+            status_lbl = self._switch_conn_status[vi_name]
+            if vi_state.get("_disconnected"):
+                new_status, text = "disconnected", "Not reachable"
+            else:
+                new_status, text = "connected", "Connected"
+            if dot.property("status") != new_status:
+                dot.setProperty("status", new_status)
+                # Qt re-evaluates property-based QSS selectors only after an
+                # unpolish/polish cycle (same pattern the Check button uses).
+                dot.style().unpolish(dot)
+                dot.style().polish(dot)
+            status_lbl.setText(text)
 
     def _pick_default_trend_key(self, hint: str, keys: list[str]) -> str:
         """Pick the best default trend key for a hint substring (e.g. "temperature").
