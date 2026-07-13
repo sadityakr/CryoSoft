@@ -37,12 +37,14 @@ from typing import Any
 
 import qtawesome as qta
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QBrush, QColor
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
+    QHeaderView,
     QLineEdit,
     QPushButton,
     QStackedWidget,
@@ -53,7 +55,7 @@ from PyQt6.QtWidgets import (
 )
 
 from cryosoft.core.sweep_builder import SweepAxis
-from cryosoft.gui.theme import TEXT_PRIMARY
+from cryosoft.gui.theme import BG_BASE, BG_ELEVATED, TEXT_MUTED, TEXT_PRIMARY
 
 # Row order matches the QComboBox item order; index <-> mode string.
 _MODES = ["linear", "segments", "csv"]
@@ -66,6 +68,13 @@ _SEGMENT_COLUMNS = ["Value", "Step to next"]
 # Max width (px) for the single-value Linear/CSV input fields, so a short
 # number doesn't stretch the Sweep column wide and leave it looking empty.
 _FIELD_MAX_WIDTH = 150
+# Width (px) of each Segments-table column. Values here are short numbers
+# (e.g. "-0.10"), so a narrow fixed width keeps the table compact instead of
+# defaulting to Qt's much wider 100px-per-column split.
+_SEGMENT_COLUMN_WIDTH = 70
+# Shown (as a tooltip and placeholder) on the last row's Step cell so its
+# disabled state reads as intentional rather than a broken/unresponsive field.
+_LAST_ROW_STEP_TOOLTIP = "No step: add another breakpoint to set this segment's step."
 
 
 class SweepAxisWidget(QWidget):
@@ -147,6 +156,14 @@ class SweepAxisWidget(QWidget):
         self._segments_table = QTableWidget(0, len(_SEGMENT_COLUMNS))
         self._segments_table.setObjectName(f"sweep_{k}_segments_table")
         self._segments_table.setHorizontalHeaderLabels(list(_SEGMENT_COLUMNS))
+        self._segments_table.verticalHeader().setVisible(False)
+        header = self._segments_table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        for column in range(len(_SEGMENT_COLUMNS)):
+            self._segments_table.setColumnWidth(column, _SEGMENT_COLUMN_WIDTH)
+        self._segments_table.setMaximumWidth(
+            len(_SEGMENT_COLUMNS) * _SEGMENT_COLUMN_WIDTH + 24
+        )
         self._segments_table.cellClicked.connect(self._on_segment_cell_clicked)
         col.addWidget(self._segments_table)
 
@@ -223,6 +240,8 @@ class SweepAxisWidget(QWidget):
 
         Every other row's Step cell is (re-)enabled, since a row that used to
         be last (and got disabled) may no longer be after an insert/remove.
+        The disabled cell also gets a muted color and a tooltip explaining why
+        it won't accept input, so it reads as intentional rather than broken.
         """
         last_row = self._segments_table.rowCount() - 1
         for row in range(self._segments_table.rowCount()):
@@ -232,8 +251,14 @@ class SweepAxisWidget(QWidget):
             if row == last_row:
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 item.setText("")
+                item.setToolTip(_LAST_ROW_STEP_TOOLTIP)
+                item.setBackground(QBrush(QColor(BG_BASE)))
+                item.setForeground(QBrush(QColor(TEXT_MUTED)))
             else:
                 item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
+                item.setToolTip("")
+                item.setBackground(QBrush(QColor(BG_ELEVATED)))
+                item.setForeground(QBrush(QColor(TEXT_PRIMARY)))
 
     def _on_browse_csv(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
