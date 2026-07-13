@@ -35,6 +35,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import qtawesome as qta
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -52,6 +53,7 @@ from PyQt6.QtWidgets import (
 )
 
 from cryosoft.core.sweep_builder import SweepAxis
+from cryosoft.gui.theme import TEXT_PRIMARY
 
 # Row order matches the QComboBox item order; index <-> mode string.
 _MODES = ["linear", "segments", "csv"]
@@ -145,14 +147,19 @@ class SweepAxisWidget(QWidget):
         self._segments_table = QTableWidget(0, len(_SEGMENT_COLUMNS))
         self._segments_table.setObjectName(f"sweep_{k}_segments_table")
         self._segments_table.setHorizontalHeaderLabels(list(_SEGMENT_COLUMNS))
+        self._segments_table.cellClicked.connect(self._on_segment_cell_clicked)
         col.addWidget(self._segments_table)
 
         btn_row = QHBoxLayout()
-        add_btn = QPushButton("Add breakpoint")
+        add_btn = QPushButton()
         add_btn.setObjectName(f"sweep_{k}_add_segment_btn")
+        add_btn.setIcon(qta.icon("fa5s.plus", color=TEXT_PRIMARY))
+        add_btn.setToolTip("Add breakpoint")
         add_btn.clicked.connect(self._add_segment_row)
-        remove_btn = QPushButton("Remove breakpoint")
+        remove_btn = QPushButton()
         remove_btn.setObjectName(f"sweep_{k}_remove_segment_btn")
+        remove_btn.setIcon(qta.icon("fa5s.minus", color=TEXT_PRIMARY))
+        remove_btn.setToolTip("Remove selected breakpoint")
         remove_btn.clicked.connect(self._remove_segment_row)
         btn_row.addWidget(add_btn)
         btn_row.addWidget(remove_btn)
@@ -180,6 +187,17 @@ class SweepAxisWidget(QWidget):
 
     def _on_mode_changed(self, index: int) -> None:
         self._stack.setCurrentIndex(index)
+
+    def _on_segment_cell_clicked(self, row: int, column: int) -> None:
+        """Open the clicked cell for editing on a single click, not just a double click.
+
+        Qt's default double-click-to-edit trigger has proven unreliable on a
+        cell's very first click in this environment, silently doing nothing.
+        A single click editing directly (like a spreadsheet) sidesteps that.
+        """
+        item = self._segments_table.item(row, column)
+        if item is not None and item.flags() & Qt.ItemFlag.ItemIsEditable:
+            self._segments_table.editItem(item)
 
     def _add_segment_row(self) -> None:
         """Append a blank breakpoint row (Value, Step to next).
