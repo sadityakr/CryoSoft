@@ -12,7 +12,8 @@ Exception tree:
     CryoSoftError
     ├── CryoSoftCommunicationError   — VISA / instrument communication failure
     ├── CryoSoftSafetyError          — safety condition violated
-    └── CryoSoftConfigError          — YAML config invalid or missing
+    ├── CryoSoftConfigError          — YAML config invalid or missing
+    └── DataSchemaError              — datapoint does not match its declared HDF5 schema
 """
 
 
@@ -43,4 +44,16 @@ class CryoSoftSafetyError(CryoSoftError):
 
 class CryoSoftConfigError(CryoSoftError):
     """Raised when YAML configuration is invalid or missing."""
+    pass
+
+
+class DataSchemaError(CryoSoftError):
+    """Raised when a datapoint does not conform to its declared ``DataSchema``.
+
+    Carried by ``DataSchema.validate()`` when a measurement datapoint is missing
+    declared keys, has undeclared extra keys, or has values of the wrong shape or
+    scalar type. The message lists *all* detected problems at once so the guilty
+    module surfaces the full mismatch in one traceback rather than one error per
+    fix-and-rerun cycle.
+    """
     pass
