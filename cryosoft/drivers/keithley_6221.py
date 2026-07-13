@@ -178,6 +178,8 @@ class Keithley6221:
         delay: float,
         compliance: float = 1.0,
         range_2182a: float = 0.01,
+        compliance_abort: bool = True,
+        cold_switch: bool = False,
     ) -> None:
         """Configure the 6221 for delta mode and start the measurement engine.
 
@@ -194,12 +196,19 @@ class Keithley6221:
             delay: Inter-transition delay (s); 0 uses hardware minimum (INF).
             compliance: Voltage compliance limit (V).
             range_2182a: 2182A measurement range (V), e.g. 0.01 for 10 mV.
+            compliance_abort: Abort the delta run if the source hits compliance
+                (``:SOUR:DELT:CAB``).
+            cold_switch: Enable cold-switching between current reversals
+                (``:SOUR:DELT:CSW``).
         """
         self._delta_high_current = high_current
         self._delta_n_readings = n_readings
         self._delta_delay = delay
 
-        self._program_delta_mode(high_current, n_readings, delay, compliance, range_2182a)
+        self._program_delta_mode(
+            high_current, n_readings, delay, compliance, range_2182a,
+            compliance_abort, cold_switch,
+        )
         self._arm_and_start()
 
     def acquire_delta_readings(
@@ -241,6 +250,8 @@ class Keithley6221:
         delay: float,
         compliance: float = 1.0,
         range_2182a: float = 0.01,
+        compliance_abort: bool = True,
+        cold_switch: bool = False,
     ) -> None:
         """Send the full delta-mode configuration SCPI sequence.
 
@@ -254,7 +265,7 @@ class Keithley6221:
         self._write(f":SOUR:DELT:HIGH {high_current:.9e}")
         self._write(f":SOUR:DELT:LOW  {low_current:.9e}")
         self._write(f":SOUR:CURR:COMP {compliance:.4e}")
-        self._write(":SOUR:DELT:UNIT V")
+        self._write(":SOUR:DELT:UNIT V")                        # delta reading units (pymeasure delta_unit)
 
         if delay == 0.0:
             self._write(":SOUR:DELT:DELay INF")
@@ -262,8 +273,8 @@ class Keithley6221:
             self._write(f":SOUR:DELT:DELay {delay:.6f}")
 
         self._write(":SOUR:DELT:COUN INF")                      # run continuously across sweep points
-        self._write(":SOUR:DELT:CAB ON")                        # compliance abort enabled
-        self._write(":SOUR:DELT:CSW OFF")                       # cold switch off
+        self._write(f":SOUR:DELT:CAB {'ON' if compliance_abort else 'OFF'}")  # compliance abort
+        self._write(f":SOUR:DELT:CSW {'ON' if cold_switch else 'OFF'}")       # cold switch
         self._write(":TRAC:POIN 65536")
         self._write(":TRAC:FEED:CONT NEXT")
 

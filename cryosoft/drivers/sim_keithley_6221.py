@@ -167,11 +167,14 @@ class SimKeithley6221:
         delay: float,
         compliance: float = 1.0,
         range_2182a: float = 0.01,
+        compliance_abort: bool = True,
+        cold_switch: bool = False,
     ) -> None:
         """Configure delta-mode and 'arm' the simulated engine.
 
         Stores all parameters; on the sim there is no hardware to arm.
-        Call acquire_delta_readings() to collect samples.
+        Call acquire_delta_readings() to collect samples. The signature must
+        mirror the real Keithley6221 driver exactly (conformance parity check).
 
         Args:
             high_current: Peak delta current magnitude (A).
@@ -179,10 +182,16 @@ class SimKeithley6221:
             delay: Delay between source transitions (s).
             compliance: Voltage compliance limit (V) — stored but unused in sim.
             range_2182a: 2182A range (V) — stored but unused in sim.
+            compliance_abort: Delta compliance-abort flag — stored but unused in sim.
+            cold_switch: Delta cold-switch flag — stored but unused in sim.
         """
         self._delta_high_current = float(high_current)
         self._delta_n_readings = int(n_readings)
         self._delta_delay = float(delay)
+        self._delta_compliance = float(compliance)
+        self._delta_range_2182a = float(range_2182a)
+        self._delta_compliance_abort = bool(compliance_abort)
+        self._delta_cold_switch = bool(cold_switch)
         self._delta_readings = []
 
     def acquire_delta_readings(

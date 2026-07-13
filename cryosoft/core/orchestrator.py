@@ -325,13 +325,37 @@ class Orchestrator(QObject):
         })
 
     def submit_global_action(self, action: str) -> None:
-        """Submit a global action like initiate_all or standby_all."""
-        if action == "standby_all":
-            if self._state not in (OrchestratorState.IDLE, OrchestratorState.ERROR, OrchestratorState.EMERGENCY):
-                self.abort_procedure()
-            self._station.standby_all()
-        elif action == "initiate_all":
-            self._station.initiate_all()
+        """Fan a global lifecycle action out into one queued action per VI.
+
+        ``"initiate_all"`` / ``"standby_all"`` enqueue an ``initiate`` /
+        ``standby`` for every registered VI onto the same GUI-action queue the
+        per-panel lifecycle toggles use. Each then runs on the tick (the single
+        hardware writer) and emits ``action_succeeded`` / ``action_failed`` —
+        the per-VI verdict that flips each InstrumentPanel's lifecycle toggle.
+
+        Calling ``station.initiate_all()`` / ``standby_all()`` directly here
+        (the previous behaviour) ran the methods but emitted no verdict, so the
+        toggles never updated and the click looked like it did nothing.
+
+        Args:
+            action: ``"initiate_all"`` or ``"standby_all"``. Anything else is
+                ignored.
+        """
+        method = {"initiate_all": "initiate", "standby_all": "standby"}.get(action)
+        if method is None:
+            return
+        # Standby is also a safety action: if a run is in flight, abort it first
+        # so the enqueued standby actions run once the Orchestrator is back in IDLE.
+        if action == "standby_all" and self._state not in (
+            OrchestratorState.IDLE,
+            OrchestratorState.ERROR,
+            OrchestratorState.EMERGENCY,
+        ):
+            self.abort_procedure()
+        for vi_name in self._station.get_vi_names():
+            self._gui_action_queue.append(
+                {"vi_name": vi_name, "method_name": method, "kwargs": {}}
+            )
 
     # ------------------------------------------------------------------
     # Private / internal

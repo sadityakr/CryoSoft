@@ -265,6 +265,44 @@ def test_action_succeeded_not_emitted_on_failed_gui_action(orchestrator, qtbot):
     assert received == []
 
 
+def test_submit_global_action_initiate_all_succeeds_for_every_vi(orchestrator, station, qtbot):
+    """'Initiate All' fans out to one queued initiate per VI.
+
+    Regression: the button used to call station.initiate_all() directly, which
+    ran initiate() on every VI but emitted no action_succeeded verdict, so the
+    per-panel lifecycle toggles never flipped and the click looked dead. Now it
+    enqueues per-VI actions that the tick executes and confirms, one signal per
+    VI — exactly what the InstrumentPanel toggles listen for.
+    """
+    expected = set(station.get_vi_names())
+    assert expected, "sim station should register at least one VI"
+
+    received: list[tuple[str, str]] = []
+    orchestrator.action_succeeded.connect(lambda vi, m: received.append((vi, m)))
+
+    orchestrator.submit_global_action("initiate_all")
+    # One queued action per VI, before any tick has processed them.
+    assert len(orchestrator._gui_action_queue) == len(expected)
+
+    qtbot.waitUntil(lambda: len(received) >= len(expected), timeout=2000)
+
+    assert {vi for vi, method in received} == expected
+    assert all(method == "initiate" for _, method in received)
+
+
+def test_submit_global_action_standby_all_succeeds_for_every_vi(orchestrator, station, qtbot):
+    """'Standby All' likewise confirms a standby for every VI (same toggle path)."""
+    expected = set(station.get_vi_names())
+    received: list[tuple[str, str]] = []
+    orchestrator.action_succeeded.connect(lambda vi, m: received.append((vi, m)))
+
+    orchestrator.submit_global_action("standby_all")
+    qtbot.waitUntil(lambda: len(received) >= len(expected), timeout=2000)
+
+    assert {vi for vi, method in received} == expected
+    assert all(method == "standby" for _, method in received)
+
+
 def test_action_failed_emitted_with_reason(orchestrator, qtbot):
     """A refused GUI action emits action_failed(vi, method, reason).
 

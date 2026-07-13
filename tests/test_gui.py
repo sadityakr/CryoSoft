@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 from PyQt6.QtCore import Qt, QSettings
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFormLayout,
     QLabel,
@@ -30,6 +31,7 @@ from PyQt6.QtWidgets import (
     QSplitter,
     QStackedWidget,
     QTextEdit,
+    QWidget,
 )
 
 from cryosoft.core.config_catalog import ConfigCatalog
@@ -328,7 +330,9 @@ def test_procedure_param_inputs_exist(procedure_win):
     for param_name in FieldSweepIV.parameters:
         if param_name in axis_keys:
             continue
-        field = procedure_win.findChild(QLineEdit, f"param_{param_name}_input")
+        # Widget type varies (QLineEdit / QComboBox / QCheckBox), so look the
+        # input up by its shared objectName rather than a concrete class.
+        field = procedure_win.findChild(QWidget, f"param_{param_name}_input")
         assert field is not None, f"Missing input for parameter '{param_name}'"
 
 
@@ -368,6 +372,58 @@ def test_procedure_param_label_and_tooltip(procedure_win):
     for tooltip in (field.toolTip(), row_label.toolTip()):
         assert tooltip, "Tooltip must be non-empty"
         assert spec["description"] in tooltip
+
+
+def _select_procedure(procedure_win, name):
+    """Select the procedure whose exact display name is *name*."""
+    for i in range(procedure_win._proc_selector.count()):
+        if procedure_win._proc_selector.itemText(i) == name:
+            procedure_win._proc_selector.setCurrentIndex(i)
+            return
+    pytest.fail(f"{name!r} not found in procedure selector")
+
+
+def test_procedure_enum_and_bool_widgets_render(procedure_win):
+    """A 'choices' param renders a combobox of labels; a bool param a checkbox.
+
+    Covers the delta-mode parameters added to FieldSweepIV: voltmeter_range_V
+    (enumerated 2182A range) and the compliance_abort / cold_switch booleans.
+    """
+    from cryosoft.procedures.field_sweep_iv import FieldSweepIV
+
+    _select_procedure(procedure_win, FieldSweepIV.name)
+
+    combo = procedure_win.findChild(QComboBox, "param_voltmeter_range_V_input")
+    assert combo is not None, "voltmeter_range_V should render as a combobox"
+    labels = [combo.itemText(i) for i in range(combo.count())]
+    assert labels == ["10 mV", "100 mV", "1 V", "10 V", "100 V"]
+    # Default 0.01 -> "10 mV" preselected.
+    assert combo.currentText() == "10 mV"
+
+    abort_box = procedure_win.findChild(QCheckBox, "param_compliance_abort_input")
+    cold_box = procedure_win.findChild(QCheckBox, "param_cold_switch_input")
+    assert abort_box is not None and cold_box is not None
+    assert abort_box.isChecked() is True   # default True
+    assert cold_box.isChecked() is False   # default False
+
+
+def test_procedure_enum_and_bool_values_collected(procedure_win):
+    """_collect_params maps a combobox label to its value and reads checkboxes."""
+    from cryosoft.procedures.field_sweep_iv import FieldSweepIV
+
+    _select_procedure(procedure_win, FieldSweepIV.name)
+
+    procedure_win.findChild(QComboBox, "param_voltmeter_range_V_input").setCurrentText("1 V")
+    procedure_win.findChild(QCheckBox, "param_compliance_abort_input").setChecked(False)
+    procedure_win.findChild(QCheckBox, "param_cold_switch_input").setChecked(True)
+
+    collected = procedure_win._collect_params()
+    assert collected is not None
+    param_values = collected[0]
+    # Combobox returns the *mapped* instrument value, not the label.
+    assert param_values["voltmeter_range_V"] == pytest.approx(1.0)
+    assert param_values["compliance_abort"] is False
+    assert param_values["cold_switch"] is True
 
 
 def test_monitor_sample_info_inputs_exist(monitor_win):

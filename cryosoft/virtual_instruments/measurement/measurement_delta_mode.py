@@ -12,7 +12,8 @@
 #   drivers = {"source": <K6221 driver>, "meter": <K2182A driver>}
 #   configure() must be called before read_datapoint().
 #   Supported methods: "delta_mode" with params current (A), n_readings (int),
-#   delay (s, default 0.01), compliance (V, default 1.0), range_2182a (V, default 0.01).
+#   delay (s, default 0.01), compliance (V, default 1.0), range_2182a (V, default 0.01),
+#   compliance_abort (bool, default True), cold_switch (bool, default False).
 # process: |
 #   configure() arms the delta engine via source.configure_and_start_delta().
 #   read_datapoint() calls source.acquire_delta_readings() to collect samples.
@@ -87,6 +88,8 @@ class DeltaModeMeasurementVI(MeasurementInstrumentBase):
                     - ``delay`` (float, optional): Inter-transition delay (s). Default 0.01.
                     - ``compliance`` (float, optional): Voltage compliance (V). Default 1.0.
                     - ``range_2182a`` (float, optional): 2182A range (V). Default 0.01.
+                    - ``compliance_abort`` (bool, optional): Abort on compliance. Default True.
+                    - ``cold_switch`` (bool, optional): Cold-switch reversals. Default False.
 
         Raises:
             ValueError: If *method* is not supported.
@@ -105,8 +108,11 @@ class DeltaModeMeasurementVI(MeasurementInstrumentBase):
             delay: float = float(params.get("delay", 0.01))
             compliance: float = float(params.get("compliance", 1.0))
             range_2182a: float = float(params.get("range_2182a", 0.01))
+            compliance_abort: bool = bool(params.get("compliance_abort", True))
+            cold_switch: bool = bool(params.get("cold_switch", False))
             self._source.configure_and_start_delta(  # type: ignore[attr-defined]
-                current, n_readings, delay, compliance, range_2182a
+                current, n_readings, delay, compliance, range_2182a,
+                compliance_abort, cold_switch,
             )
 
     # ------------------------------------------------------------------

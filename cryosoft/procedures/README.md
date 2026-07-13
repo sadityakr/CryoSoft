@@ -58,6 +58,12 @@ class MyProcedure(BaseProcedure):
     description = "One-line description"
     parameters = {
         "param_name": {"type": float, "default": 1.0, "unit": "T", "description": "..."},
+        # Enumerated (GUI drop-down): choices is a label -> value dict. The
+        # collected value is the mapped value, so no translation in the procedure.
+        "range": {"type": float, "default": 0.01,
+                  "choices": {"10 mV": 0.01, "1 V": 1.0}, "description": "..."},
+        # Boolean (GUI checkbox):
+        "enabled": {"type": bool, "default": True, "description": "..."},
     }
 
     def _build_sweep_array(self) -> list: ...

@@ -75,7 +75,22 @@ class BaseProcedure:
             directly.
 
     Each parameter value dict accepts keys: ``type``, ``default``,
-    optionally ``unit``, ``min``, ``max``, ``description``.
+    optionally ``unit``, ``min``, ``max``, ``description``, ``choices``.
+
+    Input-widget types (how the GUI renders a parameter):
+
+    * Plain number / text (default): any ``type`` (``float``, ``int``, ``str``)
+      without ``choices`` renders as a free-text field parsed by ``type``.
+    * Enumerated choice: declare ``"choices"`` as a **label -> value dict**,
+      e.g. ``{"10 mV": 0.01, "100 mV": 0.1}``. The GUI renders a drop-down
+      showing the labels; the collected value is the mapped value (``0.01``),
+      so the procedure never translates. ``default`` must be one of the
+      mapped values, and every value must be an instance of ``type``.
+    * Boolean toggle: declare ``"type": bool``. The GUI renders a checkbox;
+      the collected value is ``True`` / ``False``.
+
+    These are enforced by ``tests/test_conformance.py`` so every procedure
+    inherits the same declaration rules.
 
     Example::
 

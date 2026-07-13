@@ -51,6 +51,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QCloseEvent
 from PyQt6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QFormLayout,
     QGroupBox,
@@ -197,7 +198,10 @@ class ProcedureWindow(QMainWindow):
         # the queue's per-item status.
         self._queue_running = False
         # Widgets for the parameter form (rebuilt on procedure selection)
-        self._param_inputs: dict[str, QLineEdit] = {}
+        # Parameter widgets, keyed by parameter name. Type varies with the
+        # spec: QLineEdit (plain number/text), QComboBox (enumerated choices),
+        # or QCheckBox (bool). Read/write via _param_widget_raw helpers.
+        self._param_inputs: dict[str, QWidget] = {}
         # Sweep-axis editor for the selected procedure, if it declares one
         self._axis_widget: SweepAxisWidget | None = None
         # Active procedure reference (set on run)
@@ -455,7 +459,10 @@ class ProcedureWindow(QMainWindow):
         return container
 
     def _build_flat_form(self, group_params: dict[str, dict]) -> QFormLayout:
-        """Build a QFormLayout of flat QLineEdit fields for one parameter group.
+        """Build a QFormLayout of input widgets for one parameter group.
+
+        Each row's widget is chosen per parameter by ``_build_param_widget``:
+        a drop-down for ``choices``, a checkbox for ``bool``, else a text field.
 
         The label IS the canonical parameter name — the same key used in the
         procedure code and stored under ``/metadata/procedure_params`` in the
@@ -480,7 +487,7 @@ class ProcedureWindow(QMainWindow):
         for param_name, spec in group_params.items():
             unit = spec.get("unit", "")
             label_text = f"{param_name} ({unit}):" if unit else f"{param_name}:"
-            field = QLineEdit(str(spec.get("default", "")))
+            field = self._build_param_widget(param_name, spec)
             field.setObjectName(f"param_{param_name}_input")
             tooltip = self._build_param_tooltip(spec)
             field.setToolTip(tooltip)
@@ -490,6 +497,79 @@ class ProcedureWindow(QMainWindow):
             if row_label is not None:
                 row_label.setToolTip(tooltip)
         return form
+
+    @staticmethod
+    def _build_param_widget(param_name: str, spec: dict) -> QWidget:
+        """Create the input widget for one parameter, chosen by its spec.
+
+        * ``choices`` (label -> value dict) -> ``QComboBox`` of the labels,
+          preselected to the label whose value equals ``default``.
+        * ``type is bool`` -> ``QCheckBox``, checked to ``default``.
+        * otherwise -> ``QLineEdit`` seeded with ``str(default)``.
+
+        Args:
+            param_name: The parameter name (used only for error context).
+            spec: The parameter spec dict.
+
+        Returns:
+            The constructed widget (not yet registered or laid out).
+        """
+        choices = spec.get("choices")
+        if choices:
+            combo = QComboBox()
+            for label in choices:
+                combo.addItem(str(label))
+            default = spec.get("default")
+            for label, value in choices.items():
+                if value == default:
+                    combo.setCurrentText(str(label))
+                    break
+            return combo
+        if spec.get("type") is bool:
+            check = QCheckBox()
+            check.setChecked(bool(spec.get("default", False)))
+            return check
+        return QLineEdit(str(spec.get("default", "")))
+
+    @staticmethod
+    def _param_widget_raw(widget: QWidget) -> str:
+        """Read a parameter widget's display value as a string (for caching).
+
+        Uniform string form so session persistence never has to branch on the
+        concrete widget type: combobox -> current label, checkbox -> ``"True"``/
+        ``"False"``, line-edit -> its text.
+
+        Args:
+            widget: A parameter widget created by ``_build_param_widget``.
+
+        Returns:
+            The widget's current value as a string.
+        """
+        if isinstance(widget, QComboBox):
+            return widget.currentText()
+        if isinstance(widget, QCheckBox):
+            return str(widget.isChecked())
+        return widget.text() if isinstance(widget, QLineEdit) else ""
+
+    @staticmethod
+    def _set_param_widget_raw(widget: QWidget, raw: str) -> None:
+        """Restore a parameter widget from a cached display string.
+
+        Inverse of ``_param_widget_raw``; a value that no longer matches any
+        combobox item (or an unparseable checkbox string) is ignored so a
+        stale cache can never crash form restoration.
+
+        Args:
+            widget: A parameter widget created by ``_build_param_widget``.
+            raw: The cached string previously returned by ``_param_widget_raw``.
+        """
+        if isinstance(widget, QComboBox):
+            if raw in (widget.itemText(i) for i in range(widget.count())):
+                widget.setCurrentText(raw)
+        elif isinstance(widget, QCheckBox):
+            widget.setChecked(raw == "True")
+        elif isinstance(widget, QLineEdit):
+            widget.setText(raw)
 
     @staticmethod
     def _build_param_tooltip(spec: dict) -> str:
@@ -725,7 +805,16 @@ class ProcedureWindow(QMainWindow):
         for param_name, spec in cls.parameters.items():
             if param_name in axis_keys:
                 continue
-            raw = self._param_inputs[param_name].text().strip()
+            widget = self._param_inputs[param_name]
+            choices = spec.get("choices")
+            if choices:
+                # Combobox can only hold valid labels, so the lookup is safe.
+                param_values[param_name] = choices[widget.currentText()]
+                continue
+            if spec.get("type") is bool:
+                param_values[param_name] = widget.isChecked()
+                continue
+            raw = widget.text().strip()
             param_type = spec.get("type", str)
             try:
                 param_values[param_name] = param_type(raw)
@@ -1051,7 +1140,8 @@ class ProcedureWindow(QMainWindow):
         """
         if self._current_procedure_name and self._param_inputs:
             self._procedure_params[self._current_procedure_name] = {
-                name: field.text() for name, field in self._param_inputs.items()
+                name: self._param_widget_raw(field)
+                for name, field in self._param_inputs.items()
             }
 
     def _apply_cached_params(self, procedure_name: str) -> None:
@@ -1062,7 +1152,7 @@ class ProcedureWindow(QMainWindow):
         for name, value in cached.items():
             field = self._param_inputs.get(name)
             if field is not None:
-                field.setText(str(value))
+                self._set_param_widget_raw(field, str(value))
 
     def _procedure_by_name(self, name: str) -> type[BaseProcedure] | None:
         """Return the discovered procedure class whose name matches, or None."""

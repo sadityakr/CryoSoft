@@ -248,7 +248,7 @@ def test_initiate_hdf5_metadata(procedure, tmp_path):
 
     with h5py.File(filepath, "r") as f:
         meta = f["metadata"].attrs
-        assert meta["procedure_name"] == "Field Sweep IV"
+        assert meta["procedure_name"] == "Field Sweep IV (Delta Mode)"
         params = json.loads(meta["procedure_params"])
         assert params["field_steps"] == 3
         si = json.loads(meta["sample_info"])
@@ -271,7 +271,7 @@ def test_initiate_uses_custom_file_prefix(station, tmp_path):
     assert filepath.name.startswith("my_custom_run_")
     with h5py.File(filepath, "r") as f:
         # Metadata still records the real procedure name, independent of the filename.
-        assert f["metadata"].attrs["procedure_name"] == "Field Sweep IV"
+        assert f["metadata"].attrs["procedure_name"] == "Field Sweep IV (Delta Mode)"
 
 
 # ── change_sweep_step() ───────────────────────────────────────────────────────
@@ -434,4 +434,4 @@ def test_full_orchestrator_loop(station, tmp_path, qtbot):
     h5_files = list(tmp_path.glob("*.h5"))
     assert len(h5_files) == 1
     with h5py.File(h5_files[0], "r") as f:
-        assert f["metadata"].attrs["procedure_name"] == "Field Sweep IV"
+        assert f["metadata"].attrs["procedure_name"] == "Field Sweep IV (Delta Mode)"

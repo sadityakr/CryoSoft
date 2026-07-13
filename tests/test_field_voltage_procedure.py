@@ -86,7 +86,7 @@ def test_field_voltage_sweep_full_orchestrator_loop(station, tmp_path, qtbot):
     h5_files = list(tmp_path.glob("*.h5"))
     assert len(h5_files) == 1
     with h5py.File(h5_files[0], "r") as f:
-        assert f["metadata"].attrs["procedure_name"] == "Field Sweep IV"
+        assert f["metadata"].attrs["procedure_name"] == "Field Sweep IV (Delta Mode)"
         field_T = f["data"]["field_T"][:]
         voltage_V = f["data"]["voltage_V"][:]
 
