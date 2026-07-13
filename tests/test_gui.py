@@ -1199,10 +1199,10 @@ def test_select_config_confirmed_triggers_restart(station, orchestrator, qtbot, 
     monkeypatch.setattr(
         QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes
     )
-    target = str(catalog.list_configs()[0].path)
-    win._on_select_config(target)
+    entry = catalog.list_configs()[0]
+    win._on_select_config(str(entry.path))
     assert restarted == [True]
-    assert Path(_app_settings.config_active_path()).resolve() == Path(target).resolve()
+    assert _app_settings.config_active() == (entry.name, entry.source)
 
 
 def test_select_config_cancelled_does_not_restart(station, orchestrator, qtbot, tmp_path, monkeypatch):
@@ -1222,13 +1222,12 @@ def test_select_config_cancelled_does_not_restart(station, orchestrator, qtbot, 
     assert restarted == []
 
 
-def test_startup_candidates_end_with_sim_and_dedup(tmp_path, monkeypatch):
+def test_startup_candidates_end_with_sim_and_dedup(monkeypatch):
     """The candidate chain always ends with sim_cryostat and has no duplicates."""
     from cryosoft import main as app_main
 
-    catalog = _catalog(tmp_path)
-    monkeypatch.setattr(_app_settings, "config_active_path", lambda: None)
-    candidates = app_main._startup_candidates(catalog)
+    monkeypatch.setattr(_app_settings, "config_active", lambda: None)
+    candidates = app_main._startup_candidates()
     assert Path(candidates[-1]).name == "sim_cryostat"
     assert len(candidates) == len(set(candidates))
 
@@ -1239,8 +1238,11 @@ def test_startup_candidates_inserts_shipped_baseline_for_user_config(tmp_path, m
 
     catalog = _catalog(tmp_path)
     entry = catalog.fork_shipped("sim_cryostat", "sim_cryostat")
-    monkeypatch.setattr(_app_settings, "config_active_path", lambda: str(entry.path))
-    candidates = app_main._startup_candidates(catalog)
+    monkeypatch.setattr(_app_settings, "user_config_dir", lambda: tmp_path / "user")
+    monkeypatch.setattr(
+        _app_settings, "config_active", lambda: (entry.name, entry.source)
+    )
+    candidates = app_main._startup_candidates()
     assert candidates[0] == str(entry.path)
     shipped_sim = str(_app_settings.shipped_config_dir() / "sim_cryostat")
     assert shipped_sim in candidates

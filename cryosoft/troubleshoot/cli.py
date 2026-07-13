@@ -61,11 +61,13 @@ from cryosoft.troubleshoot.engine import (
 logger = logging.getLogger(__name__)
 
 # Mirrors cryosoft/gui/app_settings.py (_ORGANISATION/_APPLICATION/
-# _ACTIVE_CONFIG_KEY). Duplicated because contract C10 keeps this package
-# out of cryosoft.gui — if app_settings changes these, change them here too.
+# _ACTIVE_CONFIG_NAME_KEY/_ACTIVE_CONFIG_SOURCE_KEY). Duplicated because
+# contract C10 keeps this package out of cryosoft.gui — if app_settings
+# changes these, change them here too.
 _QSETTINGS_ORG = "CryoSoft"
 _QSETTINGS_APP = "CryoSoft"
-_ACTIVE_CONFIG_KEY = "ActiveConfig/path"
+_ACTIVE_CONFIG_NAME_KEY = "ActiveConfig/name"
+_ACTIVE_CONFIG_SOURCE_KEY = "ActiveConfig/source"
 
 # Test seam: tests monkeypatch these two module attributes.
 _rm_factory = engine.open_resource_manager
@@ -91,13 +93,23 @@ def _user_config_dir() -> Path:
 
 
 def _read_active_config() -> str | None:
-    """Return the app's saved active-config path, or None if unavailable."""
+    """Return the app's saved active-config directory, or None if unavailable.
+
+    Resolved from the saved ``(name, source)`` identity rather than a stored
+    path, so it stays correct across clones/worktrees (see app_settings.py
+    ``config_active``/``set_config_active`` for the rationale).
+    """
     try:
         from PyQt6.QtCore import QSettings
     except ImportError:
         return None
-    value = QSettings(_QSETTINGS_ORG, _QSETTINGS_APP).value(_ACTIVE_CONFIG_KEY)
-    return str(value) if value else None
+    settings = QSettings(_QSETTINGS_ORG, _QSETTINGS_APP)
+    name = settings.value(_ACTIVE_CONFIG_NAME_KEY)
+    source = settings.value(_ACTIVE_CONFIG_SOURCE_KEY)
+    if not name or not source:
+        return None
+    base_dir = _user_config_dir() if str(source) == "user" else _shipped_config_dir()
+    return str(base_dir / str(name))
 
 
 def resolve_config(value: str | None) -> str:

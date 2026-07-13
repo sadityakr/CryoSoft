@@ -38,7 +38,8 @@ _ORGANISATION = "CryoSoft"
 _APPLICATION = "CryoSoft"
 
 _SESSION_FILENAME = "last_session.json"
-_ACTIVE_CONFIG_KEY = "ActiveConfig/path"
+_ACTIVE_CONFIG_NAME_KEY = "ActiveConfig/name"
+_ACTIVE_CONFIG_SOURCE_KEY = "ActiveConfig/source"
 
 
 def get_settings() -> QSettings:
@@ -100,23 +101,35 @@ def shipped_config_dir() -> Path:
     return Path(__file__).resolve().parents[1] / "configs"
 
 
-def config_active_path() -> str | None:
-    """Return the saved active-config directory path, or None if unset.
+def config_active() -> tuple[str, str] | None:
+    """Return the saved active config's ``(name, source)`` identity, or None.
 
     The active config is machine-level (which cryostat this install controls),
-    so it lives in QSettings rather than the per-session JSON file.
+    so it lives in QSettings rather than the per-session JSON file. Identity
+    (name + source) is stored rather than a resolved absolute path, so the
+    saved selection stays valid across clones/worktrees: the caller re-derives
+    the actual directory via ``shipped_config_dir()``/``user_config_dir()`` at
+    load time instead of trusting a path that may no longer exist.
 
     Returns:
-        The stored path string, or None when no config has been selected yet.
+        A ``(name, source)`` tuple (``source`` is ``"shipped"`` or ``"user"``),
+        or None when no config has been selected yet.
     """
-    value = get_settings().value(_ACTIVE_CONFIG_KEY)
-    return str(value) if value else None
+    settings = get_settings()
+    name = settings.value(_ACTIVE_CONFIG_NAME_KEY)
+    source = settings.value(_ACTIVE_CONFIG_SOURCE_KEY)
+    if not name or not source:
+        return None
+    return (str(name), str(source))
 
 
-def set_config_active_path(path: str) -> None:
-    """Persist ``path`` as the active-config directory for the next launch.
+def set_config_active(name: str, source: str) -> None:
+    """Persist a config's ``(name, source)`` identity as active for next launch.
 
     Args:
-        path: The config directory to load on the next start.
+        name: The config's directory name (``ConfigEntry.name``).
+        source: ``"shipped"`` or ``"user"`` (``ConfigEntry.source``).
     """
-    get_settings().setValue(_ACTIVE_CONFIG_KEY, path)
+    settings = get_settings()
+    settings.setValue(_ACTIVE_CONFIG_NAME_KEY, name)
+    settings.setValue(_ACTIVE_CONFIG_SOURCE_KEY, source)

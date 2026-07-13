@@ -12,9 +12,10 @@
 #   - cryosoft.core.logging_config (setup_logging)
 #   - cryosoft.gui.monitor_window (MonitorWindow)
 # input: |
-#   No CLI arguments. The active config directory is read from QSettings
-#   (ActiveConfig/path); if unset, invalid, or unloadable, the startup fallback
-#   chain lands on the always-safe sim_cryostat config.
+#   No CLI arguments. The active config's (name, source) identity is read from
+#   QSettings (ActiveConfig/name, ActiveConfig/source) and re-resolved to a
+#   directory at startup; if unset, invalid, or unloadable, the startup
+#   fallback chain lands on the always-safe sim_cryostat config.
 # process: |
 #   Initialises logging, creates QApplication, builds the ConfigCatalog, resolves
 #   the Station via build_station_with_fallback(), persists the config that
@@ -46,26 +47,28 @@ from cryosoft.gui.theme import PLOT_AXIS, PLOT_BG, build_stylesheet
 logger = logging.getLogger(__name__)
 
 
-def _startup_candidates(catalog: ConfigCatalog) -> list[str]:
+def _startup_candidates() -> list[str]:
     """Return the ordered config candidates for startup, safest last.
 
     The saved active config is tried first; if it is a user copy, its shipped
     namesake (the never-edited baseline) is tried next; the always-loadable
     ``sim_cryostat`` is the final guarantee. Order-preserving de-dup.
 
-    Args:
-        catalog: The config catalog (to classify the active config).
-
     Returns:
         A list of config directory paths, most-preferred first.
     """
     candidates: list[str] = []
-    active = app_settings.config_active_path()
-    if active:
-        candidates.append(active)
-        entry = catalog.get_by_path(active)
-        if entry is not None and entry.source == "user":
-            shipped_baseline = app_settings.shipped_config_dir() / entry.name
+    active = app_settings.config_active()
+    if active is not None:
+        name, source = active
+        base_dir = (
+            app_settings.user_config_dir()
+            if source == "user"
+            else app_settings.shipped_config_dir()
+        )
+        candidates.append(str(base_dir / name))
+        if source == "user":
+            shipped_baseline = app_settings.shipped_config_dir() / name
             if shipped_baseline.is_dir():
                 candidates.append(str(shipped_baseline))
     candidates.append(str(app_settings.shipped_config_dir() / "sim_cryostat"))
@@ -103,11 +106,12 @@ def main() -> None:
     catalog = ConfigCatalog(
         app_settings.shipped_config_dir(), app_settings.user_config_dir()
     )
-    station, used_path, warnings = build_station_with_fallback(
-        _startup_candidates(catalog)
-    )
-    # Persist the config that actually loaded so the next launch starts there.
-    app_settings.set_config_active_path(used_path)
+    station, used_path, warnings = build_station_with_fallback(_startup_candidates())
+    # Persist the config that actually loaded (by identity, not path) so the
+    # next launch starts there even from a different clone/worktree.
+    used_entry = catalog.get_by_path(used_path)
+    if used_entry is not None:
+        app_settings.set_config_active(used_entry.name, used_entry.source)
     if warnings:
         for warning in warnings:
             logger.warning("Startup config fallback: %s", warning)

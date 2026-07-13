@@ -1017,9 +1017,11 @@ class MonitorWindow(QMainWindow):
         self._apply_active_config(path)
 
     def _apply_active_config(self, path: str) -> None:
-        """Persist ``path`` as active, save the session, and request a restart."""
+        """Persist the config at ``path`` as active, save the session, restart."""
         self._save_session()
-        app_settings.set_config_active_path(path)
+        entry = self._catalog.get_by_path(path) if self._catalog is not None else None
+        if entry is not None:
+            app_settings.set_config_active(entry.name, entry.source)
         if self._restart_callback is not None:
             self._restart_callback()
 
