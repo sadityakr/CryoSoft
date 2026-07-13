@@ -575,26 +575,42 @@ class DataSchema:
         object.__setattr__(self, "sweep_columns", dict(self.sweep_columns))
         object.__setattr__(self, "arrays", dict(self.arrays))
 
-    def multiplexed(self, routes: Sequence[str]) -> DataSchema:
-        """Return a new schema with every array expanded once per route.
+    def multiplexed(
+        self, routes: Sequence[str], scalar_columns: Sequence[str] = ()
+    ) -> DataSchema:
+        """Return a new schema with every array (and named scalars) per route.
 
         Each array ``name`` becomes ``f"{name}__{route}"`` for each route. The
         resulting ``arrays`` dict is ordered arrays-outer, routes-inner: all
         route variants of the first array appear first (in route order), then
-        all variants of the second, and so on. ``sweep_columns`` is unchanged.
+        all variants of the second, and so on.
+
+        By default ``sweep_columns`` is unchanged. The optional
+        ``scalar_columns`` argument names sweep columns that are *also* expanded
+        per route (e.g. a per-route ``n_valid`` becomes ``n_valid__Mux-Ch1``,
+        ``n_valid__Mux-Ch2``, … and the original ``n_valid`` is removed). Each
+        expanded scalar keeps the position it had among ``sweep_columns``; every
+        other sweep column is passed through unchanged. Passing the default
+        empty ``scalar_columns`` leaves ``sweep_columns`` byte-identical to this
+        schema's, so existing single-array multiplexing is unaffected.
 
         Args:
             routes: Ordered, non-empty sequence of unique route names. Each must
                 be a non-empty string containing neither "__" (the reserved
                 array/route separator) nor "/" (illegal in an HDF5 dataset name).
+            scalar_columns: Names of existing ``sweep_columns`` to expand once
+                per route as well (same suffix rule as the arrays). Every name
+                must already be a sweep column. Defaults to ``()`` (no scalar
+                expansion — the historical behaviour).
 
         Returns:
-            A new ``DataSchema`` with the expanded arrays.
+            A new ``DataSchema`` with the expanded arrays (and expanded scalars).
 
         Raises:
             TypeError: If a route is not a string.
             ValueError: If ``routes`` is empty, a route is empty, contains "__"
-                or "/", or the routes are not unique.
+                or "/", the routes are not unique, or a name in
+                ``scalar_columns`` is not one of this schema's sweep columns.
         """
         routes = list(routes)
         if not routes:
@@ -619,11 +635,28 @@ class DataSchema:
                 raise ValueError(f"DataSchema route {route!r} is duplicated")
             seen.add(route)
 
+        scalar_names = list(scalar_columns)
+        for col in scalar_names:
+            if col not in self.sweep_columns:
+                raise ValueError(
+                    f"DataSchema.multiplexed scalar column {col!r} is not one of "
+                    f"the sweep columns {list(self.sweep_columns)}"
+                )
+        scalar_set = set(scalar_names)
+
+        expanded_columns: dict[str, str] = {}
+        for name, dtype in self.sweep_columns.items():
+            if name in scalar_set:
+                for route in routes:
+                    expanded_columns[f"{name}__{route}"] = dtype
+            else:
+                expanded_columns[name] = dtype
+
         expanded: dict[str, int] = {}
         for name, length in self.arrays.items():
             for route in routes:
                 expanded[f"{name}__{route}"] = length
-        return DataSchema(sweep_columns=dict(self.sweep_columns), arrays=expanded)
+        return DataSchema(sweep_columns=expanded_columns, arrays=expanded)
 
     def validate(self, datapoint: Mapping[str, Any]) -> None:
         """Check one datapoint against this schema, reporting every problem.

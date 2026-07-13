@@ -67,7 +67,7 @@ VI_BASE_MODULES = {
 
 # Registry types accepted by Station.register_vi via config (distinct from a VI
 # class's own vi_type like "magnet" — see GLOSSARY.md).
-CONFIG_VI_TYPES = {"system", "measurement", "level"}
+CONFIG_VI_TYPES = {"system", "measurement", "level", "switch"}
 
 
 # ── Discovery helpers ─────────────────────────────────────────────────────────

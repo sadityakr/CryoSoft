@@ -521,6 +521,35 @@ def test_generic_field_sweep_typed_values_survive_selection_round_trip(procedure
     assert restored.text() == "37"
 
 
+def test_generic_field_sweep_renders_mux_checkboxes(procedure_win):
+    """The mux group renders one checkbox per switch route for the sim station."""
+    from cryosoft.procedures.field_sweep import FieldSweep
+
+    _select_procedure(procedure_win, FieldSweep.name)
+
+    assert "mux" in procedure_win._group_boxes
+    for route in ("Mux-Ch1", "Mux-Ch2", "Mux-Ch3", "Mux-Ch4"):
+        box = procedure_win.findChild(QCheckBox, f"param_mux_{route}_input")
+        assert box is not None, f"mux checkbox for {route} should render"
+        assert box.isChecked() is False  # default False
+
+
+def test_generic_field_sweep_collect_returns_mux_bools(procedure_win):
+    """_collect_params returns the mux_<route> bools reflecting the checkboxes."""
+    from cryosoft.procedures.field_sweep import FieldSweep
+
+    _select_procedure(procedure_win, FieldSweep.name)
+
+    procedure_win.findChild(QCheckBox, "param_mux_Mux-Ch1_input").setChecked(True)
+    procedure_win.findChild(QCheckBox, "param_mux_Mux-Ch3_input").setChecked(True)
+
+    values, *_ = procedure_win._collect_params()
+    assert values["mux_Mux-Ch1"] is True
+    assert values["mux_Mux-Ch2"] is False
+    assert values["mux_Mux-Ch3"] is True
+    assert values["mux_Mux-Ch4"] is False
+
+
 def test_param_form_renders_all_widget_kinds_and_round_trips(qtbot):
     """param_form maps each ParamSpec kind to the right widget and round-trips values.
 

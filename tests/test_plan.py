@@ -428,6 +428,43 @@ def test_multiplexed_duplicate_route():
         s.multiplexed(["r1", "r1"])
 
 
+def test_multiplexed_scalar_columns_expanded_per_route():
+    """Named scalar columns are expanded per route; the original is removed."""
+    s = DataSchema(
+        sweep_columns={"field_T": "float", "n_valid": "int"},
+        arrays={"voltage_V": 10},
+    )
+    out = s.multiplexed(["Mux-Ch1", "Mux-Ch2"], scalar_columns=["n_valid"])
+    # Arrays expanded as before.
+    assert list(out.arrays.keys()) == ["voltage_V__Mux-Ch1", "voltage_V__Mux-Ch2"]
+    # n_valid expanded per route, dtype preserved, original removed; the
+    # unnamed field_T column passes through unchanged and keeps its position.
+    assert out.sweep_columns == {
+        "field_T": "float",
+        "n_valid__Mux-Ch1": "int",
+        "n_valid__Mux-Ch2": "int",
+    }
+    assert "n_valid" not in out.sweep_columns
+
+
+def test_multiplexed_unknown_scalar_column_rejected():
+    """A scalar_columns name absent from sweep_columns raises ValueError."""
+    s = DataSchema(sweep_columns={"field_T": "float"}, arrays={"a": 1})
+    with pytest.raises(ValueError, match="nope"):
+        s.multiplexed(["r1", "r2"], scalar_columns=["nope"])
+
+
+def test_multiplexed_default_scalar_columns_unchanged():
+    """The default (no scalar_columns) leaves sweep_columns byte-identical."""
+    s = DataSchema(
+        sweep_columns={"field_T": "float", "n_valid": "int"},
+        arrays={"voltage_V": 3},
+    )
+    out = s.multiplexed(["r1", "r2"])
+    assert out.sweep_columns == {"field_T": "float", "n_valid": "int"}
+    assert list(out.arrays.keys()) == ["voltage_V__r1", "voltage_V__r2"]
+
+
 # ── DataSchema.validate ───────────────────────────────────────────────────────
 
 

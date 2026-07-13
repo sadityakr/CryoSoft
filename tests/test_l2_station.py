@@ -111,6 +111,18 @@ def test_station_measurement_vi_names_empty_when_none_registered():
     assert station.measurement_vi_names() == []
 
 
+def test_station_switch_vi_names_registration_order(sim_station: Station):
+    """switch_vi_names() returns only switch VIs (sim_cryostat has switch_matrix)."""
+    assert sim_station.switch_vi_names() == ["switch_matrix"]
+
+
+def test_station_switch_vi_names_empty_when_none_registered():
+    """A station with no switch VIs reports an empty list."""
+    station = Station()
+    station.register_vi("magnet_x", _registry_stub(), "system")
+    assert station.switch_vi_names() == []
+
+
 def test_get_ramp_status_covers_system_rampables(sim_station: Station):
     """get_ramp_status() returns a target/rate/ramp_status entry for every system
     VI that can ramp, excludes measurement VIs, and reports idle VIs as IDLE with

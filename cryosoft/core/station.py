@@ -126,6 +126,24 @@ class Station:
             if vi_type == "measurement"
         ]
 
+    def switch_vi_names(self) -> list[str]:
+        """Return the names of all registered switch VIs, in registration order.
+
+        A switch VI is one registered with ``vi_type == "switch"`` (a
+        matrix-switch / scanner that multiplexes measurement channels by route).
+        The order is config order, so a procedure that defaults to "the first
+        switch VI" gets a stable, config-controlled choice — mirroring
+        ``measurement_vi_names()``.
+
+        Returns:
+            List of switch VI names, registration order preserved.
+        """
+        return [
+            name
+            for name, vi_type in self._vi_registry.items()
+            if vi_type == "switch"
+        ]
+
     def has_vi(self, vi_name: str) -> bool:
         """Return True if a VI with this name is registered."""
         return vi_name in self._virtual_instruments

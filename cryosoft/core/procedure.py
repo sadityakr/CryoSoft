@@ -609,9 +609,51 @@ class SweepMeasureProcedure(BaseProcedure):
         # selected VI's columns as this instance's live-plot keys.
         self._params.update(merged_meas)
         self._params["measurement_vi"] = selected
-        self.measurement_data_keys = list(vi.measurement_data_keys) + list(
-            vi.measurement_scalar_columns
-        )
+
+        # ── Switch / multiplexing resolution ──────────────────────────────────
+        # A switch VI is optional. When the station exposes one, the form carries
+        # a per-route "mux_<route>" bool (see get_param_groups); here we resolve
+        # which routes the user selected. No switch VI -> no mux, zero behaviour
+        # change. (Multiple switch VIs are out of scope: the first is used.)
+        self._switch_vi: str | None = None
+        self._selected_routes: list[str] = []
+        switch_names = station.switch_vi_names()
+        if switch_names:
+            self._switch_vi = switch_names[0]
+            switch = station.get_vi(self._switch_vi)
+            routes = switch.routes()
+            valid_route_names = set(routes)
+            # A mux_<route> naming a route the switch does not have is a config /
+            # form error — fail loudly rather than silently dropping it.
+            for key, value in param_values.items():
+                if key.startswith("mux_") and value:
+                    route_name = key[len("mux_") :]
+                    if route_name not in valid_route_names:
+                        raise CryoSoftConfigError(
+                            f"{type(self).name!r}: selected route {route_name!r} "
+                            f"is not a route of switch VI {self._switch_vi!r} "
+                            f"(have: {', '.join(routes)})."
+                        )
+            # Merge mux defaults (all False) with the supplied selections and
+            # record them so the HDF5 metadata captures the routing.
+            mux_params: dict[str, Any] = {f"mux_{r}": False for r in routes}
+            mux_params.update(
+                {key: param_values[key] for key in mux_params if key in param_values}
+            )
+            self._params.update(mux_params)
+            self._selected_routes = [r for r in routes if mux_params[f"mux_{r}"]]
+
+        # Live-plot / data keys: suffix per route only when multiplexing (>=2
+        # routes). 0 or 1 route keeps the plain measurement columns.
+        base_keys = list(vi.measurement_data_keys) + list(vi.measurement_scalar_columns)
+        if len(self._selected_routes) >= 2:
+            self.measurement_data_keys = [
+                f"{key}__{route}"
+                for key in base_keys
+                for route in self._selected_routes
+            ]
+        else:
+            self.measurement_data_keys = base_keys
 
     # ------------------------------------------------------------------
     # Parameter groups: measurement-method selection + selected VI's params
@@ -692,6 +734,31 @@ class SweepMeasureProcedure(BaseProcedure):
                 params=vi_specs,
             )
         )
+
+        # (c) Multiplexing: when the station has a switch VI, one checkbox per
+        # route. The "mux_" prefix keeps route names (which can collide with
+        # measurement/system parameter names) in their own namespace. No switch
+        # VI -> no group, zero behaviour change. (Multiple switches out of
+        # scope: the first switch VI is used.)
+        switch_names = station.switch_vi_names()
+        if switch_names:
+            switch = station.get_vi(switch_names[0])
+            mux_specs = {
+                f"mux_{route}": ParamSpec(
+                    type=bool,
+                    default=False,
+                    description=f"Measure route {route}",
+                )
+                for route in switch.routes()
+            }
+            if mux_specs:
+                groups.append(
+                    ParamGroup(
+                        key="mux",
+                        title=getattr(switch, "display_label", "") or switch_names[0],
+                        params=mux_specs,
+                    )
+                )
         return groups
 
     @classmethod
@@ -762,7 +829,18 @@ class SweepMeasureProcedure(BaseProcedure):
         for name, dtype in vi.measurement_scalar_columns.items():
             sweep_columns[name] = dtype
         arrays = dict(vi.data_arrays(self._measurement_params))
-        return DataSchema(sweep_columns=sweep_columns, arrays=arrays)
+        base = DataSchema(sweep_columns=sweep_columns, arrays=arrays)
+
+        # Multiplex only when two or more routes are selected: every array (and
+        # the VI's per-point scalar columns, e.g. n_valid) is expanded per route
+        # into "<name>__<route>". With 0 or 1 route the schema is unsuffixed,
+        # exactly as before Wave 6.
+        if len(self._selected_routes) >= 2:
+            return base.multiplexed(
+                self._selected_routes,
+                scalar_columns=tuple(vi.measurement_scalar_columns.keys()),
+            )
+        return base
 
     def initiate(self) -> PhasePlan:
         """Ramp to the first sweep point, arm the selected VI, open the file.
@@ -773,9 +851,25 @@ class SweepMeasureProcedure(BaseProcedure):
         """
         vi = self._station.get_vi(self._measurement_vi)
         targets = self._initial_system_targets()
-        commands = (
-            Command(self._measurement_vi, "initiate", dict(self._measurement_params)),
+        arm_command = Command(
+            self._measurement_vi, "initiate", dict(self._measurement_params)
         )
+        # When routes are selected, connect the FIRST route before arming the
+        # measurement VI (command order is semantically meaningful). With >=2
+        # routes, measure() re-selects each route per datapoint; with exactly 1
+        # route this single select at initiate is the whole story.
+        if self._selected_routes:
+            assert self._switch_vi is not None  # set whenever routes are selected
+            commands = (
+                Command(
+                    self._switch_vi,
+                    "select_route",
+                    {"route": self._selected_routes[0]},
+                ),
+                arm_command,
+            )
+        else:
+            commands = (arm_command,)
 
         # Poll once so last_state_flat() is populated BEFORE the schema reads the
         # system columns — otherwise the columns declared here would not match
@@ -837,7 +931,22 @@ class SweepMeasureProcedure(BaseProcedure):
         if self._data_manager is None:
             raise RuntimeError("measure() called before initiate()")
         vi = self._station.get_vi(self._measurement_vi)
-        measured_data: dict = vi.take_reading()
+
+        if len(self._selected_routes) >= 2:
+            # Multiplexed datapoint: connect each route in turn, take one reading
+            # per route, and suffix every returned key with "__<route>". The
+            # switch is reached only through the Station (contract C6).
+            switch = self._station.get_vi(self._switch_vi)
+            measured_data: dict = {}
+            for route in self._selected_routes:
+                switch.select_route(route)
+                for key, value in vi.take_reading().items():
+                    measured_data[f"{key}__{route}"] = value
+        else:
+            # 0 routes: plain path, no switch calls. 1 route: the switch was
+            # already selected at initiate(), so a plain reading is correct.
+            measured_data = vi.take_reading()
+
         measured_data[type(self).sweep_axis.data_key] = self._axis_readback()
         self._save_datapoint(measured_data)
 
@@ -853,15 +962,33 @@ class SweepMeasureProcedure(BaseProcedure):
             self._data_manager = None
         return PhasePlan(
             targets=self._standby_targets(),
-            commands=(Command(self._measurement_vi, "standby", {}),),
+            commands=self._safe_off_commands(),
             wait_s=0.0,
         )
 
     def abort(self) -> tuple[Command, ...]:
-        """Close the data file and disarm the selected measurement VI.
+        """Close the data file and disarm the measurement VI (+ open the switch).
 
         Returns:
-            The measurement safe-off command for the Orchestrator to dispatch.
+            The measurement safe-off command(s) for the Orchestrator to
+            dispatch, plus a switch ``open_all`` when routes were selected.
         """
         super().abort()
-        return (Command(self._measurement_vi, "standby", {}),)
+        return self._safe_off_commands()
+
+    def _safe_off_commands(self) -> tuple[Command, ...]:
+        """Return the measurement standby command, plus switch open_all if muxed.
+
+        Shared by ``standby()`` and ``abort()``: disarm the measurement VI and,
+        when any route was selected, open every switch channel so no route is
+        left connected.
+
+        Returns:
+            Ordered ``tuple[Command, ...]`` — the measurement ``standby`` first,
+            then a switch ``open_all`` when routes were selected.
+        """
+        commands = [Command(self._measurement_vi, "standby", {})]
+        if self._selected_routes:
+            assert self._switch_vi is not None  # set whenever routes are selected
+            commands.append(Command(self._switch_vi, "open_all", {}))
+        return tuple(commands)

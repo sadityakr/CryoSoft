@@ -135,6 +135,36 @@ a new measurement runnable by both sweeps, add a measurement VI (subclass
 lifecycle) and register it in the config with `vi_type: measurement` — no
 procedure change at all.
 
+## Switch multiplexing (measuring several routes per point)
+
+When the station exposes a **Switch VI** (`vi_type: switch`, e.g. a Keithley 705
+matrix switch), a generic sweep procedure gains a **multiplexing** capability
+with no procedure code:
+
+- **How routes appear as checkboxes.** `get_param_groups()` appends a "mux"
+  group with one `bool` checkbox per switch route, labelled "Measure route
+  `<name>`". The form param is `mux_<route>` (the `mux_` prefix keeps route
+  names, which can collide with measurement/system params, in their own
+  namespace). No switch VI in the station -> no group, zero behaviour change.
+- **Command order at `initiate()`.** If any route is selected, the procedure
+  commands `select_route(first_route)` on the switch **before** arming the
+  measurement VI (the switch must be connected before the source arms).
+- **Per-datapoint loop.** With **two or more** routes selected, `measure()`
+  connects each route in turn (`switch.select_route(route)` via the Station) and
+  takes one reading per route. With exactly **one** route the switch is selected
+  once at `initiate()` and each point is a plain reading.
+- **Column naming `{array}__{route}`.** With two or more routes, every
+  measurement array and per-point scalar is suffixed per route, e.g.
+  `voltage_V__Mux-Ch1`, `current_A__Mux-Ch2`, `n_valid__Mux-Ch1`
+  (`DataSchema.multiplexed(routes, scalar_columns=...)`). The sweep axis, system
+  columns, and `unix_time` are never suffixed. With 0 or 1 route the columns are
+  unsuffixed, exactly as without a switch.
+- **Safe-off.** `standby()` and `abort()` append a switch `open_all` command
+  whenever routes were selected, so no route is left connected.
+
+The switch is reached only through the `Station` instance (contract C6); the
+exclusive-mux policy (one route connected at a time) lives in the Switch VI.
+
 ## How to add a new procedure
 
 Adding a *procedure* is only needed for a new **sweep axis** (a new swept

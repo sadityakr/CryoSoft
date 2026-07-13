@@ -427,3 +427,160 @@ def test_wrong_shape_reading_degrades_to_error(station, tmp_path, qtbot, monkeyp
     assert len(h5_files) == 1
     with h5py.File(h5_files[0], "r") as f:
         assert np.all(np.isnan(f["data"]["field_T"][:]))
+
+
+# ── Switch multiplexing (Wave 6) ─────────────────────────────────────────────
+
+MUX2 = {"mux_Mux-Ch1": True, "mux_Mux-Ch2": True}   # two routes -> multiplexed
+MUX1 = {"mux_Mux-Ch1": True}                          # one route -> unsuffixed
+
+
+def _field_proc_mux(station, tmp_path, meas, mux):
+    return FieldSweep(
+        station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
+        **FAST_FIELD, **meas, **mux,
+    )
+
+
+def test_mux_two_routes_initiate_command_order(station, tmp_path):
+    """With 2 routes, initiate() selects the FIRST route BEFORE arming the VI."""
+    proc = _field_proc_mux(station, tmp_path, DELTA, MUX2)
+    assert proc._selected_routes == ["Mux-Ch1", "Mux-Ch2"]
+    plan = proc.initiate()
+    proc.standby()
+
+    assert len(plan.commands) == 2
+    assert plan.commands[0].vi_name == "switch_matrix"
+    assert plan.commands[0].method == "select_route"
+    assert plan.commands[0].kwargs == {"route": "Mux-Ch1"}
+    assert plan.commands[1].vi_name == "keithley_delta_mode"
+    assert plan.commands[1].method == "initiate"
+
+
+def test_mux_two_routes_schema_has_suffixed_arrays_and_scalars(station, tmp_path):
+    """The DataSchema arrays AND scalar columns are expanded per route."""
+    proc = _field_proc_mux(station, tmp_path, DELTA, MUX2)
+    proc.initiate()
+    schema = proc._data_schema
+    proc.standby()
+
+    assert set(schema.arrays) == {
+        "voltage_V__Mux-Ch1", "voltage_V__Mux-Ch2",
+        "current_A__Mux-Ch1", "current_A__Mux-Ch2",
+    }
+    # The delta VI's n_valid scalar is expanded per route; the bare name is gone.
+    assert "n_valid" not in schema.sweep_columns
+    assert "n_valid__Mux-Ch1" in schema.sweep_columns
+    assert "n_valid__Mux-Ch2" in schema.sweep_columns
+    # Non-mux system columns (e.g. field_T) are NOT suffixed.
+    assert "field_T" in schema.sweep_columns
+
+
+def test_mux_two_routes_measure_writes_suffixed_keys(station, tmp_path):
+    """measure() loops the routes and writes per-route suffixed datasets."""
+    proc = _field_proc_mux(station, tmp_path, DELTA, MUX2)
+    proc.initiate()
+    station.get_vi("keithley_delta_mode").initiate(**proc._measurement_params)
+    proc.measure()
+    filepath = proc._data_manager.filepath
+    proc.standby()
+
+    with h5py.File(filepath, "r") as f:
+        assert f["data"]["voltage_V__Mux-Ch1"].shape == (1, 5)
+        assert f["data"]["voltage_V__Mux-Ch2"].shape == (1, 5)
+        assert not np.any(np.isnan(f["data"]["voltage_V__Mux-Ch1"][0]))
+        assert f["data"]["n_valid__Mux-Ch1"][0] == 5
+        assert f["data"]["n_valid__Mux-Ch2"][0] == 5
+
+
+def test_mux_two_routes_standby_and_abort_open_all(station, tmp_path):
+    """standby() and abort() both append a switch open_all command."""
+    proc = _field_proc_mux(station, tmp_path, DELTA, MUX2)
+    proc.initiate()
+    standby_plan = proc.standby()
+    open_cmds = [
+        c for c in standby_plan.commands
+        if c.vi_name == "switch_matrix" and c.method == "open_all"
+    ]
+    assert len(open_cmds) == 1
+
+    proc2 = _field_proc_mux(station, tmp_path, DELTA, MUX2)
+    proc2.initiate()
+    abort_cmds = proc2.abort()
+    assert any(
+        c.vi_name == "switch_matrix" and c.method == "open_all" for c in abort_cmds
+    )
+    assert any(
+        c.vi_name == "keithley_delta_mode" and c.method == "standby" for c in abort_cmds
+    )
+
+
+def test_mux_one_route_unsuffixed_schema_and_select_at_initiate(station, tmp_path):
+    """One route: schema is unsuffixed, switch selected once at initiate only."""
+    proc = _field_proc_mux(station, tmp_path, DELTA, MUX1)
+    assert proc._selected_routes == ["Mux-Ch1"]
+    plan = proc.initiate()
+    schema = proc._data_schema
+
+    # Switch is selected at initiate (before arming), but the schema is plain.
+    assert plan.commands[0].vi_name == "switch_matrix"
+    assert plan.commands[0].method == "select_route"
+    assert set(schema.arrays) == {"voltage_V", "current_A"}
+    assert "n_valid" in schema.sweep_columns
+
+    # measure() takes a plain reading (no per-route re-selection, no suffix).
+    station.get_vi("keithley_delta_mode").initiate(**proc._measurement_params)
+    proc.measure()
+    filepath = proc._data_manager.filepath
+    proc.standby()
+    with h5py.File(filepath, "r") as f:
+        assert "voltage_V" in f["data"]
+        assert "voltage_V__Mux-Ch1" not in f["data"]
+
+
+def test_mux_zero_routes_is_unchanged(station, tmp_path):
+    """No route selected: behaviour is identical to pre-Wave-6 (no switch calls)."""
+    proc = _field_proc_mux(station, tmp_path, DELTA, {})
+    assert proc._selected_routes == []
+    plan = proc.initiate()
+    proc.standby()
+    # Only the measurement initiate command — no switch select_route.
+    assert len(plan.commands) == 1
+    assert plan.commands[0].vi_name == "keithley_delta_mode"
+    assert set(proc._data_schema.arrays) == {"voltage_V", "current_A"}
+
+
+def test_mux_unknown_route_selection_refused(station, tmp_path):
+    """A mux_ selection naming a route the switch lacks fails at construction."""
+    from cryosoft.core.exceptions import CryoSoftConfigError
+
+    with pytest.raises(CryoSoftConfigError, match="Mux-Ch9"):
+        FieldSweep(
+            station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
+            **FAST_FIELD, **DELTA, **{"mux_Mux-Ch9": True},
+        )
+
+
+def test_mux_full_orchestrator_loop_two_routes(station, tmp_path, qtbot):
+    """A 2-route mux sweep completes to IDLE with per-route datasets written."""
+    from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
+
+    station.magnet_x._default_ramp_rate = 6000.0
+    station.magnet_x._ramp_segments = []
+
+    proc = _field_proc_mux(station, tmp_path, DELTA, MUX2)
+    orch = Orchestrator(station, tick_interval_ms=10)
+    orch.run_procedure(proc)
+
+    with qtbot.waitSignal(orch.procedure_finished, timeout=10000):
+        pass
+
+    assert proc._index == 3
+    assert orch._state == OrchestratorState.IDLE
+    h5_files = list(tmp_path.glob("*.h5"))
+    assert len(h5_files) == 1
+    with h5py.File(h5_files[0], "r") as f:
+        assert f["data"]["field_T"].shape[0] == 3
+        assert f["data"]["voltage_V__Mux-Ch1"].shape == (3, 5)
+        assert f["data"]["voltage_V__Mux-Ch2"].shape == (3, 5)
+        assert not np.any(np.isnan(f["data"]["voltage_V__Mux-Ch1"][:]))

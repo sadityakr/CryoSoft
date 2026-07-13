@@ -23,6 +23,9 @@ real_drivers:
   keithley_2182a:
     class: cryosoft.drivers.sim_keithley_2182a.SimKeithley2182A
     address: "SIM::K2182A"
+  k705:
+    class: cryosoft.drivers.sim_keithley_705.SimKeithley705
+    address: "SIM::K705"
 
 virtual_instruments:
   magnet_x:
@@ -86,3 +89,14 @@ virtual_instruments:
     drivers: {source: keithley_6221, meter: keithley_2182a}
     vi_type: measurement
     init_params: {}
+  switch_matrix:
+    class: cryosoft.virtual_instruments.switch.switch_matrix.SwitchMatrixVI
+    drivers: {main: k705}
+    vi_type: switch
+    init_params:
+      routes:
+        Mux-Ch1: ["1!1"]
+        Mux-Ch2: ["1!2"]
+        Mux-Ch3: ["1!3"]
+        Mux-Ch4: ["1!4"]
+      settle_time_s: 0.0
