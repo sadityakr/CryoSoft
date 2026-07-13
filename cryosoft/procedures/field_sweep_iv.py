@@ -43,7 +43,7 @@ import dataclasses
 import logging
 
 from cryosoft.core.data_manager import DataManager
-from cryosoft.core.plan import Command, PhasePlan, StepPlan, Target
+from cryosoft.core.plan import Command, ParamSpec, PhasePlan, StepPlan, Target
 from cryosoft.core.procedure import BaseProcedure
 from cryosoft.core.sweep_builder import SweepAxis
 
@@ -82,74 +82,74 @@ class FieldSweepIV(BaseProcedure):
     default_x_key = sweep_axis.data_key
 
     system_parameters = {
-        "temperature": {
-            "type": float,
-            "default": 10.0,
-            "unit": "K",
-            "description": "Sample temperature",
-        },
-        "init_wait": {
-            "type": float,
-            "default": 300.0,
-            "unit": "s",
-            "description": "Wait after initial ramp (thermal equilibration)",
-        },
-        "step_wait": {
-            "type": float,
-            "default": 5.0,
-            "unit": "s",
-            "description": "Wait between sweep points",
-        },
+        "temperature": ParamSpec(
+            type=float,
+            default=10.0,
+            unit="K",
+            description="Sample temperature",
+        ),
+        "init_wait": ParamSpec(
+            type=float,
+            default=300.0,
+            unit="s",
+            description="Wait after initial ramp (thermal equilibration)",
+        ),
+        "step_wait": ParamSpec(
+            type=float,
+            default=5.0,
+            unit="s",
+            description="Wait between sweep points",
+        ),
     }
 
     measurement_parameters = {
-        "current": {
-            "type": float,
-            "default": 1e-6,
-            "unit": "A",
-            "description": "Peak delta current (±I, reversed each cycle)",
-        },
-        "n_readings": {
-            "type": int,
-            "default": 100,
-            "min": 1,
-            "description": "Readings per point (delta mode)",
-        },
-        "voltmeter_range_V": {
-            "type": float,
-            "default": 0.01,
-            "unit": "V",
-            "choices": {
+        "current": ParamSpec(
+            type=float,
+            default=1e-6,
+            unit="A",
+            description="Peak delta current (±I, reversed each cycle)",
+        ),
+        "n_readings": ParamSpec(
+            type=int,
+            default=100,
+            min=1,
+            description="Readings per point (delta mode)",
+        ),
+        "voltmeter_range_V": ParamSpec(
+            type=float,
+            default=0.01,
+            unit="V",
+            choices={
                 "10 mV": 0.01,
                 "100 mV": 0.1,
                 "1 V": 1.0,
                 "10 V": 10.0,
                 "100 V": 100.0,
             },
-            "description": "Keithley 2182A voltmeter measurement range",
-        },
-        "compliance_V": {
-            "type": float,
-            "default": 1.0,
-            "unit": "V",
-            "description": "Source voltage compliance limit",
-        },
-        "delay_s": {
-            "type": float,
-            "default": 0.01,
-            "unit": "s",
-            "description": "Delta inter-transition delay (0 = hardware minimum)",
-        },
-        "compliance_abort": {
-            "type": bool,
-            "default": True,
-            "description": "Abort the delta run if the source reaches compliance",
-        },
-        "cold_switch": {
-            "type": bool,
-            "default": False,
-            "description": "Cold-switch between current reversals (lower thermal EMF)",
-        },
+            description="Keithley 2182A voltmeter measurement range",
+        ),
+        "compliance_V": ParamSpec(
+            type=float,
+            default=1.0,
+            unit="V",
+            description="Source voltage compliance limit",
+        ),
+        "delay_s": ParamSpec(
+            type=float,
+            default=0.01,
+            unit="s",
+            description="Delta inter-transition delay (0 = hardware minimum)",
+        ),
+        "compliance_abort": ParamSpec(
+            type=bool,
+            default=True,
+            description="Abort the delta run if the source reaches compliance",
+        ),
+        "cold_switch": ParamSpec(
+            type=bool,
+            default=False,
+            description="Cold-switch between current reversals (lower thermal EMF)",
+        ),
     }
 
     # ------------------------------------------------------------------

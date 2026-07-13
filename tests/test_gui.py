@@ -5,7 +5,7 @@
 #   that InstrumentPanel widgets are auto-generated for all registered VIs,
 #   and that Orchestrator signals (state_changed, procedure_progress,
 #   measurement_ready) update the GUI correctly.
-# last_updated: 2026-07-12
+# last_updated: 2026-07-13
 # ---
 
 """GUI smoke tests — Layer 6.
@@ -361,7 +361,7 @@ def test_procedure_param_label_and_tooltip(procedure_win):
     field = procedure_win.findChild(QLineEdit, "param_temperature_input")
     assert field is not None, "Missing input for parameter 'temperature'"
 
-    assert field.text() == str(spec["default"])
+    assert field.text() == str(spec.default)
 
     form = field.parent().layout()
     assert isinstance(form, QFormLayout)
@@ -371,7 +371,7 @@ def test_procedure_param_label_and_tooltip(procedure_win):
 
     for tooltip in (field.toolTip(), row_label.toolTip()):
         assert tooltip, "Tooltip must be non-empty"
-        assert spec["description"] in tooltip
+        assert spec.description in tooltip
 
 
 def _select_procedure(procedure_win, name):
@@ -424,6 +424,67 @@ def test_procedure_enum_and_bool_values_collected(procedure_win):
     assert param_values["voltmeter_range_V"] == pytest.approx(1.0)
     assert param_values["compliance_abort"] is False
     assert param_values["cold_switch"] is True
+
+
+def test_param_form_renders_all_widget_kinds_and_round_trips(qtbot):
+    """param_form maps each ParamSpec kind to the right widget and round-trips values.
+
+    Exercises cryosoft.gui.param_form directly (no ProcedureWindow) on a
+    synthetic ParamGroup covering the four shapes: plain float, bounded int,
+    enumerated choices, and bool.
+    """
+    from cryosoft.core.plan import ParamGroup, ParamSpec
+    from cryosoft.gui import param_form
+
+    group = ParamGroup(
+        key="demo",
+        title="Demo",
+        params={
+            "amp": ParamSpec(type=float, default=1.5, unit="V", description="Amplitude"),
+            "count": ParamSpec(type=int, default=4, min=1, max=10, description="Count"),
+            "range": ParamSpec(
+                type=float,
+                default=0.1,
+                choices={"0.1 V": 0.1, "1 V": 1.0},
+                description="Range",
+            ),
+            "enabled": ParamSpec(type=bool, default=True, description="Enabled"),
+        },
+    )
+    box, widgets = param_form.build_group_box(group)
+    qtbot.addWidget(box)
+
+    assert box.title() == "Demo"
+    assert isinstance(widgets["amp"], QLineEdit)
+    assert isinstance(widgets["count"], QLineEdit)
+    assert isinstance(widgets["range"], QComboBox)
+    assert isinstance(widgets["enabled"], QCheckBox)
+
+    # objectName convention preserved (findChild API relied on by other tests).
+    assert widgets["amp"].objectName() == "param_amp_input"
+
+    # Defaults are seeded onto the widgets.
+    assert widgets["amp"].text() == "1.5"
+    assert widgets["range"].currentText() == "0.1 V"   # label whose value is 0.1
+    assert widgets["enabled"].isChecked() is True
+
+    # collect_value reverses the mapping on the seeded defaults.
+    assert param_form.collect_value(widgets["amp"], group.params["amp"]) == pytest.approx(1.5)
+    assert param_form.collect_value(widgets["count"], group.params["count"]) == 4
+    assert param_form.collect_value(widgets["range"], group.params["range"]) == pytest.approx(0.1)
+    assert param_form.collect_value(widgets["enabled"], group.params["enabled"]) is True
+
+    # Change values, re-collect: text parses by type, combobox maps label->value.
+    widgets["count"].setText("7")
+    widgets["range"].setCurrentText("1 V")
+    widgets["enabled"].setChecked(False)
+    assert param_form.collect_value(widgets["count"], group.params["count"]) == 7
+    assert param_form.collect_value(widgets["range"], group.params["range"]) == pytest.approx(1.0)
+    assert param_form.collect_value(widgets["enabled"], group.params["enabled"]) is False
+
+    # Raw string round-trip used by the session cache.
+    param_form.set_widget_raw(widgets["amp"], "2.5")
+    assert param_form.get_widget_raw(widgets["amp"]) == "2.5"
 
 
 def test_monitor_sample_info_inputs_exist(monitor_win):

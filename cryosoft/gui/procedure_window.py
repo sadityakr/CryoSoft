@@ -1,7 +1,9 @@
 # ---
 # description: |
 #   ProcedureWindow: PyQt6 window for building, queuing, and running measurement
-#   procedures. Auto-generates parameter forms from BaseProcedure.parameters dicts.
+#   procedures. Auto-generates parameter forms from a procedure's ParamGroups
+#   (BaseProcedure.get_param_groups()), mapping each ParamSpec to a Qt input via
+#   cryosoft.gui.param_form (the one place that names widget classes).
 #   A procedure that declares sweep_axis gets a SweepAxisWidget (linear /
 #   segments / CSV, with hysteresis) in the Sweep column instead of flat text
 #   fields — this file is the only GUI code sweep-shape support needs; new
@@ -16,6 +18,7 @@
 #   - cryosoft.core.station (Station)
 #   - cryosoft.core.orchestrator (Orchestrator)
 #   - cryosoft.core.procedure (BaseProcedure)
+#   - cryosoft.gui.param_form (ParamSpec -> Qt widget mapping)
 #   - cryosoft.gui.sweep_axis_widget (SweepAxisWidget)
 #   - cryosoft.procedures.* (auto-discovered subclasses)
 # input: |
@@ -23,8 +26,9 @@
 #   get_data_dir) provided by MonitorWindow.
 # process: |
 #   _discover_procedures() imports all modules in cryosoft/procedures/ and collects
-#   BaseProcedure subclasses. The selected procedure's parameters dict drives form
-#   generation; sweep_axis (if declared) drives a SweepAxisWidget instead of flat
+#   BaseProcedure subclasses. The selected procedure's ParamGroups (from
+#   get_param_groups()) drive form generation via cryosoft.gui.param_form;
+#   sweep_axis (if declared) drives a SweepAxisWidget instead of flat
 #   fields for its hidden parameters. A filename-prefix field above the form is
 #   captured per queue entry, so each queued procedure can save under a different
 #   filename. Queued procedures are stored as (cls, params, sample_info, data_dir,
@@ -51,9 +55,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QCloseEvent
 from PyQt6.QtWidgets import (
     QApplication,
-    QCheckBox,
     QComboBox,
-    QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -76,6 +78,7 @@ from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 from cryosoft.core.procedure import BaseProcedure
 from cryosoft.core.station import Station
 from cryosoft.gui import app_settings  # import the module (not the function) so tests can monkeypatch the factory
+from cryosoft.gui import param_form
 from cryosoft.gui.live_plot_panel import LivePlotPanel
 from cryosoft.gui.notification_banner import NotificationBanner
 from cryosoft.gui.session import (
@@ -200,7 +203,7 @@ class ProcedureWindow(QMainWindow):
         # Widgets for the parameter form (rebuilt on procedure selection)
         # Parameter widgets, keyed by parameter name. Type varies with the
         # spec: QLineEdit (plain number/text), QComboBox (enumerated choices),
-        # or QCheckBox (bool). Read/write via _param_widget_raw helpers.
+        # or QCheckBox (bool). Built and read via cryosoft.gui.param_form.
         self._param_inputs: dict[str, QWidget] = {}
         # Sweep-axis editor for the selected procedure, if it declares one
         self._axis_widget: SweepAxisWidget | None = None
@@ -398,23 +401,21 @@ class ProcedureWindow(QMainWindow):
         return box
 
     def _build_param_form(self, cls: type[BaseProcedure]) -> QWidget:
-        """Auto-generate a three-column parameter form from the procedure's parameter groups.
+        """Auto-generate the three-column parameter form from the procedure's ParamGroups.
 
-        Renders sweep_parameters, system_parameters, and measurement_parameters
-        in side-by-side QGroupBox panels so users can distinguish the different
-        kinds of input at a glance. If ``cls`` declares ``sweep_axis``, the
-        Sweep column renders a ``SweepAxisWidget`` (linear / segments / CSV,
-        with hysteresis) instead of — or alongside, if ``sweep_parameters`` is
-        also non-empty — flat text fields.
+        Reads the ordered groups from ``cls.get_param_groups(station)`` (Sweep /
+        System / Measurement by default, empty ones skipped) and renders each
+        non-sweep group as its own ``QGroupBox`` via
+        ``param_form.build_group_box``. The Sweep column is special: it always
+        hosts the ``SweepAxisWidget`` (linear / segments / CSV, with hysteresis)
+        when ``cls`` declares a ``sweep_axis``, and the flat ``sweep`` group's
+        fields (if any) are added beneath it in the same capped-width column —
+        exactly as before this became ParamSpec-driven.
 
-        The label IS the canonical parameter name — the same key used in the
-        procedure code and stored under ``/metadata/procedure_params`` in the
-        HDF5 output — plus its unit: ``f"{param_name} ({unit}):"`` when the
-        spec declares a non-empty ``unit``, else ``f"{param_name}:"``. The
-        prose ``description`` (plus default and min/max range, when present)
-        moves into a tooltip set on both the input field and its form label,
-        so the human-readable explanation is one hover away without cluttering
-        the form or diverging from the name actually written to disk.
+        Widget construction, labels, and tooltips all come from
+        ``cryosoft.gui.param_form`` (the one place that maps a ``ParamSpec`` to a
+        Qt widget); this method only arranges the resulting boxes and records
+        each input in ``self._param_inputs`` for ``_collect_params`` to read.
 
         Args:
             cls: The BaseProcedure subclass to introspect.
@@ -428,6 +429,9 @@ class ProcedureWindow(QMainWindow):
         hbox.setContentsMargins(0, 0, 0, 0)
         self._param_inputs.clear()
         self._axis_widget = None
+
+        groups = cls.get_param_groups(self._station)
+        groups_by_key = {group.key: group for group in groups}
 
         sweep_box = QGroupBox("Sweep")
         # The sweep inputs are narrow (single values / a compact 2-col table),
@@ -443,175 +447,24 @@ class ProcedureWindow(QMainWindow):
         if cls.sweep_axis is not None:
             self._axis_widget = SweepAxisWidget(cls.sweep_axis)
             sweep_col.addWidget(self._axis_widget)
-        if cls.sweep_parameters:
-            sweep_col.addLayout(self._build_flat_form(cls.sweep_parameters))
+        sweep_group = groups_by_key.get("sweep")
+        if sweep_group is not None:
+            form, widgets = param_form.build_form_layout(sweep_group.params)
+            self._param_inputs.update(widgets)
+            sweep_col.addLayout(form)
         sweep_col.addStretch()
         hbox.addWidget(sweep_box)
 
-        for group_title, group_params in [
-            ("System", cls.system_parameters),
-            ("Measurement", cls.measurement_parameters),
-        ]:
-            box = QGroupBox(group_title)
-            box.setLayout(self._build_flat_form(group_params))
+        # Every remaining group (System, Measurement, and any a Wave-5 subclass
+        # adds) becomes its own box, in the order get_param_groups returned them.
+        for group in groups:
+            if group.key == "sweep":
+                continue
+            box, widgets = param_form.build_group_box(group)
+            self._param_inputs.update(widgets)
             hbox.addWidget(box)
 
         return container
-
-    def _build_flat_form(self, group_params: dict[str, dict]) -> QFormLayout:
-        """Build a QFormLayout of input widgets for one parameter group.
-
-        Each row's widget is chosen per parameter by ``_build_param_widget``:
-        a drop-down for ``choices``, a checkbox for ``bool``, else a text field.
-
-        The label IS the canonical parameter name — the same key used in the
-        procedure code and stored under ``/metadata/procedure_params`` in the
-        HDF5 output — plus its unit: ``f"{param_name} ({unit}):"`` when the
-        spec declares a non-empty ``unit``, else ``f"{param_name}:"``. The
-        prose ``description`` (plus default and min/max range, when present)
-        moves into a tooltip set on both the input field and its form label,
-        so the human-readable explanation is one hover away without cluttering
-        the form or diverging from the name actually written to disk.
-
-        Registers each field in ``self._param_inputs`` keyed by parameter name,
-        the same lookup ``_collect_params`` reads from.
-
-        Args:
-            group_params: A parameter-group dict (name -> spec).
-
-        Returns:
-            The populated QFormLayout (not yet attached to a parent widget).
-        """
-        form = QFormLayout()
-        form.setSpacing(4)
-        for param_name, spec in group_params.items():
-            unit = spec.get("unit", "")
-            label_text = f"{param_name} ({unit}):" if unit else f"{param_name}:"
-            field = self._build_param_widget(param_name, spec)
-            field.setObjectName(f"param_{param_name}_input")
-            tooltip = self._build_param_tooltip(spec)
-            field.setToolTip(tooltip)
-            self._param_inputs[param_name] = field
-            form.addRow(label_text, field)
-            row_label = form.labelForField(field)
-            if row_label is not None:
-                row_label.setToolTip(tooltip)
-        return form
-
-    @staticmethod
-    def _build_param_widget(param_name: str, spec: dict) -> QWidget:
-        """Create the input widget for one parameter, chosen by its spec.
-
-        * ``choices`` (label -> value dict) -> ``QComboBox`` of the labels,
-          preselected to the label whose value equals ``default``.
-        * ``type is bool`` -> ``QCheckBox``, checked to ``default``.
-        * otherwise -> ``QLineEdit`` seeded with ``str(default)``.
-
-        Args:
-            param_name: The parameter name (used only for error context).
-            spec: The parameter spec dict.
-
-        Returns:
-            The constructed widget (not yet registered or laid out).
-        """
-        choices = spec.get("choices")
-        if choices:
-            combo = QComboBox()
-            for label in choices:
-                combo.addItem(str(label))
-            default = spec.get("default")
-            for label, value in choices.items():
-                if value == default:
-                    combo.setCurrentText(str(label))
-                    break
-            return combo
-        if spec.get("type") is bool:
-            check = QCheckBox()
-            check.setChecked(bool(spec.get("default", False)))
-            return check
-        return QLineEdit(str(spec.get("default", "")))
-
-    @staticmethod
-    def _param_widget_raw(widget: QWidget) -> str:
-        """Read a parameter widget's display value as a string (for caching).
-
-        Uniform string form so session persistence never has to branch on the
-        concrete widget type: combobox -> current label, checkbox -> ``"True"``/
-        ``"False"``, line-edit -> its text.
-
-        Args:
-            widget: A parameter widget created by ``_build_param_widget``.
-
-        Returns:
-            The widget's current value as a string.
-        """
-        if isinstance(widget, QComboBox):
-            return widget.currentText()
-        if isinstance(widget, QCheckBox):
-            return str(widget.isChecked())
-        return widget.text() if isinstance(widget, QLineEdit) else ""
-
-    @staticmethod
-    def _set_param_widget_raw(widget: QWidget, raw: str) -> None:
-        """Restore a parameter widget from a cached display string.
-
-        Inverse of ``_param_widget_raw``; a value that no longer matches any
-        combobox item (or an unparseable checkbox string) is ignored so a
-        stale cache can never crash form restoration.
-
-        Args:
-            widget: A parameter widget created by ``_build_param_widget``.
-            raw: The cached string previously returned by ``_param_widget_raw``.
-        """
-        if isinstance(widget, QComboBox):
-            if raw in (widget.itemText(i) for i in range(widget.count())):
-                widget.setCurrentText(raw)
-        elif isinstance(widget, QCheckBox):
-            widget.setChecked(raw == "True")
-        elif isinstance(widget, QLineEdit):
-            widget.setText(raw)
-
-    @staticmethod
-    def _build_param_tooltip(spec: dict) -> str:
-        """Build the hover-tooltip text for one parameter spec.
-
-        Assembles, in order and skipping any part whose source data is absent:
-        the ``description`` sentence (a period is appended if missing), then
-        ``Default: {default} {unit}.``, then a ``Range: ...`` line built from
-        ``min``/``max`` (one-sided phrasing — ``Min: ...`` / ``Max: ...`` — when
-        only one bound is declared).
-
-        Args:
-            spec: A single parameter's spec dict (``type``, ``default``, and
-                optionally ``unit``, ``min``, ``max``, ``description``).
-
-        Returns:
-            A single plain-text string, parts joined with a space.
-        """
-        unit = spec.get("unit", "")
-        parts: list[str] = []
-
-        description = spec.get("description")
-        if description:
-            parts.append(description if description.endswith(".") else f"{description}.")
-
-        if "default" in spec:
-            unit_suffix = f" {unit}" if unit else ""
-            parts.append(f"Default: {spec['default']}{unit_suffix}.")
-
-        has_min = "min" in spec
-        has_max = "max" in spec
-        if has_min and has_max:
-            unit_suffix = f" {unit}" if unit else ""
-            parts.append(f"Range: {spec['min']} to {spec['max']}{unit_suffix}.")
-        elif has_min:
-            unit_suffix = f" {unit}" if unit else ""
-            parts.append(f"Min: {spec['min']}{unit_suffix}.")
-        elif has_max:
-            unit_suffix = f" {unit}" if unit else ""
-            parts.append(f"Max: {spec['max']}{unit_suffix}.")
-
-        return " ".join(parts)
 
     def _build_queue_section(self) -> QGroupBox:
         """Build the queue group with list + reorder/remove buttons.
@@ -806,23 +659,17 @@ class ProcedureWindow(QMainWindow):
             if param_name in axis_keys:
                 continue
             widget = self._param_inputs[param_name]
-            choices = spec.get("choices")
-            if choices:
-                # Combobox can only hold valid labels, so the lookup is safe.
-                param_values[param_name] = choices[widget.currentText()]
-                continue
-            if spec.get("type") is bool:
-                param_values[param_name] = widget.isChecked()
-                continue
-            raw = widget.text().strip()
-            param_type = spec.get("type", str)
             try:
-                param_values[param_name] = param_type(raw)
+                # param_form owns the ParamSpec -> value mapping (choices ->
+                # mapped value, bool -> checkbox, else parse text by spec.type).
+                param_values[param_name] = param_form.collect_value(widget, spec)
             except (ValueError, TypeError):
+                # Only a text field can fail to parse; choices/bool never raise.
+                raw = widget.text().strip()
                 QMessageBox.warning(
                     self,
                     "Invalid Parameter",
-                    f"Cannot parse '{raw}' as {param_type.__name__} for parameter '{param_name}'.",
+                    f"Cannot parse '{raw}' as {spec.type.__name__} for parameter '{param_name}'.",
                 )
                 return None
 
@@ -1140,7 +987,7 @@ class ProcedureWindow(QMainWindow):
         """
         if self._current_procedure_name and self._param_inputs:
             self._procedure_params[self._current_procedure_name] = {
-                name: self._param_widget_raw(field)
+                name: param_form.get_widget_raw(field)
                 for name, field in self._param_inputs.items()
             }
 
@@ -1152,7 +999,7 @@ class ProcedureWindow(QMainWindow):
         for name, value in cached.items():
             field = self._param_inputs.get(name)
             if field is not None:
-                self._set_param_widget_raw(field, str(value))
+                param_form.set_widget_raw(field, str(value))
 
     def _procedure_by_name(self, name: str) -> type[BaseProcedure] | None:
         """Return the discovered procedure class whose name matches, or None."""

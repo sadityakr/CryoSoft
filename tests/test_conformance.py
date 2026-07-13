@@ -278,14 +278,17 @@ def test_vi_contract(vi_cls: type) -> None:
 
 @pytest.mark.parametrize("proc_cls", _all_procedure_classes(), ids=lambda c: c.__name__)
 def test_procedure_declaration(proc_cls: type) -> None:
-    """Every procedure names itself and declares type + default for each parameter."""
+    """Every procedure names itself and declares each parameter as a ParamSpec."""
     assert proc_cls.name, f"{proc_cls.__name__} must set the 'name' class attribute"
     assert proc_cls.parameters, f"{proc_cls.__name__} declares no parameters"
     for param_name, spec in proc_cls.parameters.items():
-        assert "type" in spec, f"{proc_cls.__name__}.{param_name} spec lacks 'type'"
-        assert "default" in spec, (
-            f"{proc_cls.__name__}.{param_name} spec lacks 'default' — every "
-            f"parameter needs a default so the procedure runs unattended"
+        # Parameters are ParamSpec now (Wave 4). The old "spec has 'type' and
+        # 'default'" checks moved INTO the type: ParamSpec.__post_init__ requires
+        # both (and validates choices / bounds) at construction, so a value being
+        # a ParamSpec instance is exactly that guarantee — and every parameter
+        # still carries a default, so the procedure runs unattended.
+        assert isinstance(spec, ParamSpec), (
+            f"{proc_cls.__name__}.{param_name} must be a ParamSpec, got {spec!r}"
         )
     valid_x_keys = (
         ["unix_time"] + list(proc_cls.sweep_data_keys) + list(proc_cls.measurement_data_keys)
@@ -311,7 +314,9 @@ def test_procedure_parameter_has_description(proc_cls: type) -> None:
     for group_name in ("sweep_parameters", "system_parameters", "measurement_parameters"):
         group_params = getattr(proc_cls, group_name)
         for param_name, spec in group_params.items():
-            description = spec.get("description")
+            # ParamSpec allows an empty description; a *non-empty* one is a
+            # procedure-level rule ParamSpec does NOT enforce, so it stays tested.
+            description = spec.description
             assert isinstance(description, str) and description.strip(), (
                 f"{proc_cls.__name__}.{group_name}['{param_name}'] lacks a "
                 f"non-empty 'description' — add a one-sentence physics-appropriate "
@@ -325,29 +330,21 @@ def test_procedure_choices_spec(proc_cls: type) -> None:
 
     A parameter that declares 'choices' renders as a GUI drop-down and its
     collected value is the *mapped* value (see BaseProcedure docstring and
-    ProcedureWindow._build_param_widget). For that contract to hold:
-      * choices must be a non-empty dict (label -> value);
-      * every value must be an instance of the declared 'type' (so the value
-        the procedure receives matches what it expects); and
-      * 'default' must be one of the mapped values (so the drop-down has a
-        valid initial selection and unattended runs get a legal value).
+    cryosoft.gui.param_form.build_param_widget). The three invariants this test
+    used to assert one by one — choices is a non-empty label->value dict, every
+    value is an instance of the declared 'type', and 'default' is one of the
+    mapped values — have moved INTO the type: ParamSpec.__post_init__ enforces
+    all of them at construction. So the class simply importing (which
+    _all_procedure_classes already did) proves them. Here we only re-affirm that
+    a choices-declaring parameter is a ParamSpec carrying a non-empty choices
+    dict; the deeper enforcement is exercised by the ParamSpec unit tests.
     """
     for param_name, spec in proc_cls.parameters.items():
-        if "choices" not in spec:
+        if not (isinstance(spec, ParamSpec) and spec.choices):
             continue
-        choices = spec["choices"]
         ctx = f"{proc_cls.__name__}.{param_name}"
-        assert isinstance(choices, dict) and choices, (
+        assert isinstance(spec.choices, dict) and spec.choices, (
             f"{ctx} 'choices' must be a non-empty label->value dict"
-        )
-        param_type = spec["type"]
-        for label, value in choices.items():
-            assert isinstance(value, param_type), (
-                f"{ctx} choice {label!r} maps to {value!r}, not a {param_type.__name__}"
-            )
-        assert spec["default"] in choices.values(), (
-            f"{ctx} default {spec['default']!r} is not one of the choice values "
-            f"{list(choices.values())}"
         )
 
 

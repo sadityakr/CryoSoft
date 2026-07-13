@@ -40,7 +40,7 @@ import dataclasses
 import logging
 
 from cryosoft.core.data_manager import DataManager
-from cryosoft.core.plan import Command, PhasePlan, StepPlan, Target
+from cryosoft.core.plan import Command, ParamSpec, PhasePlan, StepPlan, Target
 from cryosoft.core.procedure import BaseProcedure
 from cryosoft.core.sweep_builder import SweepAxis
 
@@ -79,51 +79,51 @@ class FieldSweepDC(BaseProcedure):
     default_x_key = sweep_axis.data_key
 
     system_parameters = {
-        "temperature": {
-            "type": float,
-            "default": 10.0,
-            "unit": "K",
-            "description": "Sample temperature",
-        },
-        "init_wait": {
-            "type": float,
-            "default": 300.0,
-            "unit": "s",
-            "description": "Wait after initial ramp (thermal equilibration)",
-        },
-        "step_wait": {
-            "type": float,
-            "default": 5.0,
-            "unit": "s",
-            "description": "Wait between field steps",
-        },
+        "temperature": ParamSpec(
+            type=float,
+            default=10.0,
+            unit="K",
+            description="Sample temperature",
+        ),
+        "init_wait": ParamSpec(
+            type=float,
+            default=300.0,
+            unit="s",
+            description="Wait after initial ramp (thermal equilibration)",
+        ),
+        "step_wait": ParamSpec(
+            type=float,
+            default=5.0,
+            unit="s",
+            description="Wait between field steps",
+        ),
     }
 
     measurement_parameters = {
-        "current_A": {
-            "type": float,
-            "default": 1e-6,
-            "unit": "A",
-            "description": "DC source current",
-        },
-        "compliance_A": {
-            "type": float,
-            "default": 1e-3,
-            "unit": "A",
-            "description": "Current compliance on voltmeter",
-        },
-        "voltmeter_range_V": {
-            "type": float,
-            "default": 0.1,
-            "unit": "V",
-            "description": "Voltmeter full-scale range",
-        },
-        "readings_per_point": {
-            "type": int,
-            "default": 10,
-            "min": 1,
-            "description": "DC voltage readings averaged per field point",
-        },
+        "current_A": ParamSpec(
+            type=float,
+            default=1e-6,
+            unit="A",
+            description="DC source current",
+        ),
+        "compliance_A": ParamSpec(
+            type=float,
+            default=1e-3,
+            unit="A",
+            description="Current compliance on voltmeter",
+        ),
+        "voltmeter_range_V": ParamSpec(
+            type=float,
+            default=0.1,
+            unit="V",
+            description="Voltmeter full-scale range",
+        ),
+        "readings_per_point": ParamSpec(
+            type=int,
+            default=10,
+            min=1,
+            description="DC voltage readings averaged per field point",
+        ),
     }
 
     # ------------------------------------------------------------------

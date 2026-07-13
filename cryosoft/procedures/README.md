@@ -64,20 +64,30 @@ boundary rather than deep in the tick loop.
 
 All procedures must subclass `BaseProcedure` from `cryosoft.core.procedure`:
 
+Parameters are declared as `ParamSpec` value objects (from
+`cryosoft.core.plan`), grouped into `sweep_parameters` / `system_parameters` /
+`measurement_parameters`. `ParamSpec` validates each declaration eagerly at
+class-definition time; the ParamSpec → Qt-widget mapping lives entirely in
+`cryosoft.gui.param_form`, so a procedure never names a widget class.
+
 ```python
+from cryosoft.core.plan import ParamSpec
 from cryosoft.core.procedure import BaseProcedure
 
 class MyProcedure(BaseProcedure):
     name = "My Procedure"
     description = "One-line description"
-    parameters = {
-        "param_name": {"type": float, "default": 1.0, "unit": "T", "description": "..."},
+    system_parameters = {
+        # Plain field (GUI text box parsed by `type`):
+        "param_name": ParamSpec(type=float, default=1.0, unit="T", description="..."),
+    }
+    measurement_parameters = {
         # Enumerated (GUI drop-down): choices is a label -> value dict. The
         # collected value is the mapped value, so no translation in the procedure.
-        "range": {"type": float, "default": 0.01,
-                  "choices": {"10 mV": 0.01, "1 V": 1.0}, "description": "..."},
+        "range": ParamSpec(type=float, default=0.01,
+                           choices={"10 mV": 0.01, "1 V": 1.0}, description="..."),
         # Boolean (GUI checkbox):
-        "enabled": {"type": bool, "default": True, "description": "..."},
+        "enabled": ParamSpec(type=bool, default=True, description="..."),
     }
 
     def _build_sweep_array(self) -> list: ...
@@ -93,14 +103,17 @@ class MyProcedure(BaseProcedure):
 - Procedures access instruments only through `self._station` (VI methods).
 - `measure()` must create a `DataManager` in `initiate()` (stored as `self._data_manager`) and call `self._data_manager.save_datapoint()`.
 - `standby()` must call `self._data_manager.close()` to ensure data is flushed and trimmed.
-- All parameters must be declared in `parameters` — no hardcoded values in logic.
+- All parameters must be declared as `ParamSpec`s in the `sweep_parameters` /
+  `system_parameters` / `measurement_parameters` group dicts (auto-unioned into
+  `parameters`) — no hardcoded values in logic.
 - SI units everywhere: tesla, kelvin, amperes, volts, seconds.
 
 ## How to add a new procedure
 
 1. Create `procedures/your_procedure.py` with the front-matter block (Workspace Rule 1).
 2. Subclass `BaseProcedure` and implement all five required methods.
-3. Declare all user-facing parameters in the `parameters` class attribute.
+3. Declare all user-facing parameters as `ParamSpec`s in the `sweep_parameters` /
+   `system_parameters` / `measurement_parameters` group dicts.
 4. Build the sweep array in `_build_sweep_array()` from `self._params`.
 5. Create a `DataManager` in `initiate()` with the correct `data_config`.
 6. Write tests in `tests/test_l4_procedure.py` (or a new file for the new procedure).

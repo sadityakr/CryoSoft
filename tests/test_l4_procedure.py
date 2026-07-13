@@ -3,7 +3,7 @@
 #   Integration tests for Layer 4 (Procedures). Tests BaseProcedure subclassing,
 #   FieldSweepIV method contracts, DataManager integration, and a full
 #   Orchestrator end-to-end loop with FieldSweepIV using simulated instruments.
-# last_updated: 2026-07-12
+# last_updated: 2026-07-13
 # ---
 
 import json
@@ -12,7 +12,7 @@ import h5py
 import numpy as np
 import pytest
 
-from cryosoft.core.plan import Command, PhasePlan, StepPlan, Target
+from cryosoft.core.plan import Command, ParamGroup, ParamSpec, PhasePlan, StepPlan, Target
 from cryosoft.core.procedure import BaseProcedure
 from cryosoft.core.station import build_station
 from cryosoft.core.sweep_builder import SweepAxis, SweepSegment
@@ -118,7 +118,49 @@ def test_base_procedure_sweep_axis_merges_hidden_params():
 
     assert "voltage_mode" in AxisProc.parameters
     assert "voltage_start" in AxisProc.parameters
-    assert "voltage_segments" in AxisProc.parameters
+    assert "voltage_csv_path" in AxisProc.parameters
+    # voltage_segments is not a merged param: a list of segment dicts can't be a
+    # scalar ParamSpec, so the SweepAxisWidget owns it directly (see
+    # sweep_axis_param_specs). Everything merged is a typed ParamSpec.
+    assert "voltage_segments" not in AxisProc.parameters
+    assert all(isinstance(spec, ParamSpec) for spec in AxisProc.parameters.values())
+
+
+def test_get_param_groups_default_returns_declared_groups_in_order():
+    """The default get_param_groups yields Sweep/System/Measurement, skipping empty ones."""
+    class ThreeGroupProc(BaseProcedure):
+        sweep_parameters = {
+            "sweep_a": ParamSpec(type=float, default=1.0, description="a"),
+        }
+        system_parameters = {
+            "sys_a": ParamSpec(type=float, default=2.0, description="b"),
+        }
+        measurement_parameters = {
+            "meas_a": ParamSpec(type=int, default=3, description="c"),
+        }
+
+    groups = ThreeGroupProc.get_param_groups(station=None)
+    assert [g.key for g in groups] == ["sweep", "system", "measurement"]
+    assert [g.title for g in groups] == ["Sweep", "System", "Measurement"]
+    assert all(isinstance(g, ParamGroup) for g in groups)
+    assert set(groups[0].params) == {"sweep_a"}
+    assert set(groups[2].params) == {"meas_a"}
+
+
+def test_get_param_groups_skips_empty_groups():
+    """A group with no declared parameters is omitted (here: no sweep_parameters)."""
+    class TwoGroupProc(BaseProcedure):
+        system_parameters = {
+            "sys_a": ParamSpec(type=float, default=2.0, description="b"),
+        }
+        measurement_parameters = {
+            "meas_a": ParamSpec(type=int, default=3, description="c"),
+        }
+
+    groups = TwoGroupProc.get_param_groups(station=None)
+    # sweep_parameters is empty (this proc uses no flat sweep params), so the
+    # Sweep group is skipped entirely — System and Measurement remain, in order.
+    assert [g.key for g in groups] == ["system", "measurement"]
 
 
 # ── FieldSweepIV instantiation ────────────────────────────────────────────────

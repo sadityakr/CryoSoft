@@ -4,11 +4,12 @@
 #   custom CSV sweep loading, hysteresis (forward+backward) extension, and
 #   the SweepAxis / sweep_axis_param_specs / build_axis_sweep declarative
 #   sweep-shape framework used by BaseProcedure.
-# last_updated: 2026-07-12
+# last_updated: 2026-07-13
 # ---
 
 import pytest
 
+from cryosoft.core.plan import ParamSpec
 from cryosoft.core.sweep_builder import (
     SweepAxis,
     SweepSegment,
@@ -179,26 +180,34 @@ def field_axis():
 
 def test_sweep_axis_param_specs_keys(field_axis):
     specs = sweep_axis_param_specs(field_axis)
+    # field_segments is intentionally absent: it holds a list of segment dicts,
+    # which ParamSpec (a scalar float/int/str/bool declaration) cannot represent.
+    # The SweepAxisWidget still owns/emits the {key}_segments runtime value, and
+    # build_axis_sweep reads it with a [] fallback, so nothing rendered or run
+    # changes — see sweep_axis_param_specs' docstring.
     assert set(specs) == {
         "field_mode",
         "field_start",
         "field_end",
         "field_steps",
-        "field_segments",
         "field_csv_path",
         "field_hysteresis",
     }
 
 
+def test_sweep_axis_param_specs_are_paramspecs(field_axis):
+    specs = sweep_axis_param_specs(field_axis)
+    assert all(isinstance(spec, ParamSpec) for spec in specs.values())
+
+
 def test_sweep_axis_param_specs_defaults(field_axis):
     specs = sweep_axis_param_specs(field_axis)
-    assert specs["field_mode"]["default"] == "linear"
-    assert specs["field_start"]["default"] == pytest.approx(-1.0)
-    assert specs["field_end"]["default"] == pytest.approx(1.0)
-    assert specs["field_steps"]["default"] == 101
-    assert specs["field_segments"]["default"] == []
-    assert specs["field_csv_path"]["default"] == ""
-    assert specs["field_hysteresis"]["default"] is False
+    assert specs["field_mode"].default == "linear"
+    assert specs["field_start"].default == pytest.approx(-1.0)
+    assert specs["field_end"].default == pytest.approx(1.0)
+    assert specs["field_steps"].default == 101
+    assert specs["field_csv_path"].default == ""
+    assert specs["field_hysteresis"].default is False
 
 
 # ── build_axis_sweep ─────────────────────────────────────────────────────────

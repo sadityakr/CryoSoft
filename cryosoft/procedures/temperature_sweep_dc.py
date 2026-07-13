@@ -47,7 +47,7 @@ from typing import Any
 
 from cryosoft.core.data_manager import DataManager
 from cryosoft.core.exceptions import CryoSoftConfigError
-from cryosoft.core.plan import Command, PhasePlan, StepPlan, Target
+from cryosoft.core.plan import Command, ParamSpec, PhasePlan, StepPlan, Target
 from cryosoft.core.procedure import BaseProcedure
 from cryosoft.core.sweep_builder import SweepAxis
 
@@ -92,57 +92,57 @@ class TemperatureSweepDC(BaseProcedure):
     default_x_key = sweep_axis.data_key
 
     system_parameters = {
-        "field_x": {
-            "type": float,
-            "default": 0.0,
-            "unit": "T",
-            "description": "Applied field (magnet X, held constant)",
-        },
-        "field_y": {
-            "type": float,
-            "default": 0.0,
-            "unit": "T",
-            "description": "Applied field (magnet Y, held constant)",
-        },
-        "ramp_rate_K_per_min": {
-            "type": float,
-            "default": 2.0,
-            "unit": "K/min",
-            "description": "Temperature ramp rate between steps",
-        },
-        "point_wait": {
-            "type": float,
-            "default": 60.0,
-            "unit": "s",
-            "description": "Wait after reaching each temperature (thermal equilibration)",
-        },
+        "field_x": ParamSpec(
+            type=float,
+            default=0.0,
+            unit="T",
+            description="Applied field (magnet X, held constant)",
+        ),
+        "field_y": ParamSpec(
+            type=float,
+            default=0.0,
+            unit="T",
+            description="Applied field (magnet Y, held constant)",
+        ),
+        "ramp_rate_K_per_min": ParamSpec(
+            type=float,
+            default=2.0,
+            unit="K/min",
+            description="Temperature ramp rate between steps",
+        ),
+        "point_wait": ParamSpec(
+            type=float,
+            default=60.0,
+            unit="s",
+            description="Wait after reaching each temperature (thermal equilibration)",
+        ),
     }
 
     measurement_parameters = {
-        "current_A": {
-            "type": float,
-            "default": 1e-6,
-            "unit": "A",
-            "description": "DC source current",
-        },
-        "compliance_A": {
-            "type": float,
-            "default": 1e-3,
-            "unit": "A",
-            "description": "Current compliance on voltmeter",
-        },
-        "voltmeter_range_V": {
-            "type": float,
-            "default": 0.1,
-            "unit": "V",
-            "description": "Voltmeter full-scale range",
-        },
-        "readings_per_point": {
-            "type": int,
-            "default": 10,
-            "min": 1,
-            "description": "DC voltage readings per temperature point",
-        },
+        "current_A": ParamSpec(
+            type=float,
+            default=1e-6,
+            unit="A",
+            description="DC source current",
+        ),
+        "compliance_A": ParamSpec(
+            type=float,
+            default=1e-3,
+            unit="A",
+            description="Current compliance on voltmeter",
+        ),
+        "voltmeter_range_V": ParamSpec(
+            type=float,
+            default=0.1,
+            unit="V",
+            description="Voltmeter full-scale range",
+        ),
+        "readings_per_point": ParamSpec(
+            type=int,
+            default=10,
+            min=1,
+            description="DC voltage readings per temperature point",
+        ),
     }
 
     # _build_sweep_array() is not overridden here: BaseProcedure's default

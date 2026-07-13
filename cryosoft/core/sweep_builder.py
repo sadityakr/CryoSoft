@@ -11,7 +11,8 @@
 #   optional hysteresis) with no override at all — see core/procedure.py.
 #   This module never touches a Station, VI, or the GUI.
 # entry_point: Not run directly; imported by Procedure subclasses.
-# dependencies: none beyond the standard library.
+# dependencies:
+#   - cryosoft.core.plan (ParamSpec — the typed sweep-axis parameter declarations)
 # input: |
 #   build_piecewise_sweep() takes a list of SweepSegment(start, end, step).
 #   load_custom_sweep_csv() takes a path to a single-column CSV of numbers.
@@ -28,7 +29,7 @@
 # output: |
 #   All functions return a plain list[float] sweep array, suitable to assign
 #   directly to a Procedure's self._sweep.
-# last_updated: 2026-07-12
+# last_updated: 2026-07-13
 # ---
 
 """sweep_builder — piecewise, CSV-custom, and hysteresis sweep construction."""
@@ -38,6 +39,8 @@ from __future__ import annotations
 import csv
 from dataclasses import dataclass
 from typing import Any
+
+from cryosoft.core.plan import ParamSpec
 
 
 @dataclass
@@ -210,46 +213,56 @@ class SweepAxis:
     default_steps: int = 101
 
 
-def sweep_axis_param_specs(axis: SweepAxis) -> dict[str, dict]:
-    """Build the hidden parameter-spec dict for a ``SweepAxis``.
+def sweep_axis_param_specs(axis: SweepAxis) -> dict[str, ParamSpec]:
+    """Build the hidden ``ParamSpec`` declarations for a ``SweepAxis``.
 
     These are merged into a Procedure's ``cls.parameters`` (alongside
     ``sweep_parameters``/``system_parameters``/``measurement_parameters``) so
     ``BaseProcedure.__init__`` fills in defaults exactly like any other
     declared parameter. The GUI renders them via a single ``SweepAxisWidget``
-    instead of the usual flat text fields — see ``gui/sweep_axis_widget.py``.
+    instead of the usual flat text fields — see ``gui/sweep_axis_widget.py`` —
+    so none of these are ever built into a flat form widget.
+
+    ``{key}_segments`` is deliberately absent: it holds a *list* of segment
+    dicts, which ``ParamSpec`` (a scalar float/int/str/bool declaration) cannot
+    represent. The ``SweepAxisWidget`` still owns and emits the ``{key}_segments``
+    runtime value via its ``param_keys()`` / ``get_params()`` (its 2-column
+    breakpoint table), and ``build_axis_sweep()`` reads it defensively with a
+    ``[]`` fallback, so dropping it from the declared specs changes no rendered
+    or runtime behavior — it only means a linear-mode run constructed purely
+    from defaults no longer carries an unused empty ``{key}_segments`` entry.
 
     Args:
         axis: The Procedure's declared sweep axis.
 
     Returns:
-        Dict of ``{param_name: spec}`` for the seven hidden axis parameters.
+        Dict of ``{param_name: ParamSpec}`` for the six scalar hidden axis
+        parameters (mode, start, end, steps, csv_path, hysteresis).
     """
     k = axis.key
     lower_desc = axis.description[0].lower() + axis.description[1:]
     return {
-        f"{k}_mode": {"type": str, "default": "linear"},
-        f"{k}_start": {
-            "type": float,
-            "default": axis.default_start,
-            "unit": axis.unit,
-            "description": f"Starting {lower_desc}",
-        },
-        f"{k}_end": {
-            "type": float,
-            "default": axis.default_end,
-            "unit": axis.unit,
-            "description": f"Ending {lower_desc}",
-        },
-        f"{k}_steps": {
-            "type": int,
-            "default": axis.default_steps,
-            "min": 2,
-            "description": f"Number of {lower_desc} steps",
-        },
-        f"{k}_segments": {"type": list, "default": []},
-        f"{k}_csv_path": {"type": str, "default": ""},
-        f"{k}_hysteresis": {"type": bool, "default": False},
+        f"{k}_mode": ParamSpec(type=str, default="linear"),
+        f"{k}_start": ParamSpec(
+            type=float,
+            default=axis.default_start,
+            unit=axis.unit,
+            description=f"Starting {lower_desc}",
+        ),
+        f"{k}_end": ParamSpec(
+            type=float,
+            default=axis.default_end,
+            unit=axis.unit,
+            description=f"Ending {lower_desc}",
+        ),
+        f"{k}_steps": ParamSpec(
+            type=int,
+            default=axis.default_steps,
+            min=2,
+            description=f"Number of {lower_desc} steps",
+        ),
+        f"{k}_csv_path": ParamSpec(type=str, default=""),
+        f"{k}_hysteresis": ParamSpec(type=bool, default=False),
     }
 
 
@@ -285,7 +298,7 @@ def build_axis_sweep(axis: SweepAxis, params: dict[str, Any]) -> list[float]:
     elif mode == "segments":
         segments = [
             seg if isinstance(seg, SweepSegment) else SweepSegment(**seg)
-            for seg in params[f"{k}_segments"]
+            for seg in params.get(f"{k}_segments", [])
         ]
         params[f"{k}_segments"] = [
             {"start": s.start, "end": s.end, "step": s.step} for s in segments

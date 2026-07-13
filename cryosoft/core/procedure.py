@@ -10,7 +10,8 @@
 # dependencies:
 #   - cryosoft.core.station (Station)
 #   - cryosoft.core.data_manager (DataManager, created by subclasses)
-#   - cryosoft.core.plan (Command, PhasePlan, StepPlan — the typed currency)
+#   - cryosoft.core.plan (Command, PhasePlan, StepPlan — the typed currency;
+#     ParamSpec, ParamGroup — the typed parameter declarations)
 #   - cryosoft.core.sweep_builder (SweepAxis, sweep_axis_param_specs, build_axis_sweep)
 # input: |
 #   Constructor receives a Station, sample_info dict, data_directory string,
@@ -36,9 +37,10 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
 from typing import Any
 
-from cryosoft.core.plan import Command, PhasePlan, StepPlan
+from cryosoft.core.plan import Command, ParamGroup, ParamSpec, PhasePlan, StepPlan
 from cryosoft.core.station import Station
 from cryosoft.core.sweep_builder import SweepAxis, build_axis_sweep, sweep_axis_param_specs
 
@@ -79,23 +81,29 @@ class BaseProcedure:
             auto-built by ``__init_subclass__``. Read-only — do not set
             directly.
 
-    Each parameter value dict accepts keys: ``type``, ``default``,
-    optionally ``unit``, ``min``, ``max``, ``description``, ``choices``.
+    Each parameter is declared as a ``ParamSpec`` (see ``cryosoft.core.plan``):
+    ``type`` and ``default`` are required; ``unit``, ``min``, ``max``,
+    ``description``, ``choices`` are optional. ``ParamSpec`` validates the
+    declaration eagerly at construction (choices non-empty and correctly typed,
+    default among the choices / within the bounds), so a malformed parameter
+    fails when the class body runs rather than at form-render time.
 
     Input-widget types (how the GUI renders a parameter):
 
     * Plain number / text (default): any ``type`` (``float``, ``int``, ``str``)
       without ``choices`` renders as a free-text field parsed by ``type``.
-    * Enumerated choice: declare ``"choices"`` as a **label -> value dict**,
+    * Enumerated choice: set ``choices`` to a **label -> value dict**,
       e.g. ``{"10 mV": 0.01, "100 mV": 0.1}``. The GUI renders a drop-down
       showing the labels; the collected value is the mapped value (``0.01``),
       so the procedure never translates. ``default`` must be one of the
       mapped values, and every value must be an instance of ``type``.
-    * Boolean toggle: declare ``"type": bool``. The GUI renders a checkbox;
-      the collected value is ``True`` / ``False``.
+    * Boolean toggle: set ``type=bool``. The GUI renders a checkbox; the
+      collected value is ``True`` / ``False``.
 
-    These are enforced by ``tests/test_conformance.py`` so every procedure
-    inherits the same declaration rules.
+    The ParamSpec -> Qt-widget mapping lives entirely in
+    ``cryosoft.gui.param_form``; a procedure never names a widget class.
+    ``tests/test_conformance.py`` checks every procedure declares ParamSpecs so
+    they all inherit the same rules.
 
     Example::
 
@@ -116,10 +124,10 @@ class BaseProcedure:
     # ``parameters`` is auto-built as their union by __init_subclass__ so
     # existing code that iterates cls.parameters continues to work.
     sweep_axis: SweepAxis | None = None
-    sweep_parameters: dict[str, dict] = {}
-    system_parameters: dict[str, dict] = {}
-    measurement_parameters: dict[str, dict] = {}
-    parameters: dict[str, dict] = {}
+    sweep_parameters: dict[str, ParamSpec] = {}
+    system_parameters: dict[str, ParamSpec] = {}
+    measurement_parameters: dict[str, ParamSpec] = {}
+    parameters: dict[str, ParamSpec] = {}
 
     sweep_data_keys: list[str] = []        # procedure's own scalar sweep columns (e.g. field_T)
     measurement_data_keys: list[str] = []  # measurement array columns (e.g. voltage_V, current_A)
@@ -134,6 +142,45 @@ class BaseProcedure:
             **cls.system_parameters,
             **cls.measurement_parameters,
         }
+
+    @classmethod
+    def get_param_groups(
+        cls, station: Station, selections: Mapping[str, Any] | None = None
+    ) -> list[ParamGroup]:
+        """Return the ordered ``ParamGroup`` list the GUI renders for this procedure.
+
+        This is the hook the GUI form builder calls instead of reading the three
+        class dicts directly. The default implementation returns the static
+        Sweep / System / Measurement groups, in that order, SKIPPING any that
+        declare no parameters. The ``sweep_axis`` hidden parameters are
+        deliberately NOT in any group: the GUI renders them through the separate
+        ``SweepAxisWidget`` (linear / segments / CSV), exactly as before.
+
+        ``station`` and ``selections`` are unused by this default, but are part
+        of the signature so a Wave-5 subclass can override this method to
+        compute its groups dynamically — e.g. deriving measurement groups from
+        the station's configured measurement VI, or re-deriving the whole form
+        from a ``structural`` selection the user has changed (hence
+        ``selections``, the current values of any structural parameters).
+
+        Args:
+            station: The active Station instance (unused by the default).
+            selections: Current values of the form's structural parameters, or
+                ``None`` before any have been chosen (unused by the default).
+
+        Returns:
+            The non-empty parameter groups, in Sweep, System, Measurement order.
+        """
+        candidates = (
+            ("sweep", "Sweep", cls.sweep_parameters),
+            ("system", "System", cls.system_parameters),
+            ("measurement", "Measurement", cls.measurement_parameters),
+        )
+        return [
+            ParamGroup(key=key, title=title, params=params)
+            for key, title, params in candidates
+            if params
+        ]
 
     def __init__(
         self,
@@ -162,10 +209,11 @@ class BaseProcedure:
         self._sample_info = sample_info
         self._data_directory = data_directory
         self._file_prefix = file_prefix
+        # Every ParamSpec carries a default (enforced at ParamSpec construction),
+        # so the merge is unconditional — no "default present?" guard needed.
         merged_params: dict[str, Any] = {
-            param_name: spec["default"]
+            param_name: spec.default
             for param_name, spec in type(self).parameters.items()
-            if "default" in spec
         }
         merged_params.update(param_values)
         self._params: dict[str, Any] = merged_params
