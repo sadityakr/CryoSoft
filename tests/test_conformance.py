@@ -4,7 +4,7 @@
 #   These tests iterate over the drivers, virtual_instruments, procedures, and
 #   configs packages themselves, so any NEW module an agent adds is checked
 #   automatically — no test needs to be written for it to be covered.
-# last_updated: 2026-07-11
+# last_updated: 2026-07-13
 # ---
 
 """Interface-conformance tests: every driver, VI, procedure, and config obeys its contract.
@@ -23,6 +23,12 @@ import-linter, see pyproject.toml [tool.importlinter]):
   a real driver and its ``sim_``-twin expose identical public APIs.
 * Virtual instruments: subclass BaseVirtualInstrument, set ``vi_type``, and use
   the mandated ``__init__(self, drivers, **init_params)`` signature.
+* Measurement methods (MeasurementInstrumentBase subclasses): declare the
+  self-describing class attributes (``measurement_parameters`` of ParamSpec,
+  ``measurement_data_keys``, valid ``measurement_scalar_columns`` dtypes),
+  implement the ``data_arrays`` / ``initiate`` / ``take_reading`` / ``standby``
+  lifecycle, and round-trip against their sim drivers so the returned keys and
+  array lengths match what they declare.
 * Procedures: subclass BaseProcedure, have a name, declare a default for every
   parameter, and are constructible from defaults alone.
 * Configs: every ``cryosoft/configs/<name>/`` directory has a loadable
@@ -43,9 +49,13 @@ import cryosoft.drivers
 import cryosoft.procedures
 import cryosoft.virtual_instruments
 from cryosoft.core.exceptions import CryoSoftSafetyError
+from cryosoft.core.plan import ParamSpec
 from cryosoft.core.procedure import BaseProcedure
 from cryosoft.core.station import Station, _import_class, build_station
-from cryosoft.virtual_instruments.base import BaseVirtualInstrument
+from cryosoft.virtual_instruments.base import (
+    BaseVirtualInstrument,
+    MeasurementInstrumentBase,
+)
 
 CONFIGS_DIR = Path(cryosoft.__file__).parent / "configs"
 
@@ -507,3 +517,131 @@ def test_declared_finite_limits_reject_out_of_range(config_dir: Path) -> None:
         f"{config_dir.name}: no finite limits were exercised — expected at "
         f"least one limited @control method"
     )
+
+
+# ── Measurement-method standard ───────────────────────────────────────────────
+# See MeasurementInstrumentBase: every concrete measurement VI is self-describing
+# (measurement_parameters / measurement_data_keys / measurement_scalar_columns)
+# and implements one uniform lifecycle (data_arrays / initiate / take_reading /
+# standby). These tests make that standard binding for every future measurement
+# VI the moment its file exists.
+
+# Superset of sim drivers covering every role any measurement VI asks for. Each
+# VI picks the roles it needs (e.g. "source"+"meter" or "main") and ignores the
+# rest, so one dict builds every measurement VI without per-class knowledge. Add
+# a role here when a new measurement VI introduces a new instrument.
+_SIM_MEASUREMENT_DRIVER_CLASSES = {
+    "source": "cryosoft.drivers.sim_keithley_6221.SimKeithley6221",
+    "meter": "cryosoft.drivers.sim_keithley_2182a.SimKeithley2182A",
+    "main": "cryosoft.drivers.sim_keithley_2400.SimKeithley2400",
+}
+
+
+def _all_measurement_vi_classes() -> list[type]:
+    """Every concrete measurement-method VI class."""
+    return [
+        cls
+        for cls in _all_vi_classes()
+        if issubclass(cls, MeasurementInstrumentBase)
+    ]
+
+
+def _build_sim_measurement_drivers() -> dict[str, object]:
+    """Fresh sim-driver instances for every role a measurement VI may use."""
+    return {
+        role: _import_class(dotted)("SIM::CONFORMANCE")
+        for role, dotted in _SIM_MEASUREMENT_DRIVER_CLASSES.items()
+    }
+
+
+@pytest.mark.parametrize(
+    "vi_cls", _all_measurement_vi_classes(), ids=lambda c: c.__name__
+)
+def test_measurement_vi_self_description(vi_cls: type) -> None:
+    """Every measurement VI declares valid self-describing class attributes."""
+    params = vi_cls.measurement_parameters
+    assert params, (
+        f"{vi_cls.__name__} declares no measurement_parameters — a measurement "
+        f"method must own its GUI-facing knobs as ParamSpecs"
+    )
+    for name, spec in params.items():
+        assert isinstance(spec, ParamSpec), (
+            f"{vi_cls.__name__}.measurement_parameters['{name}'] must be a "
+            f"ParamSpec, got {spec!r}"
+        )
+
+    assert vi_cls.measurement_data_keys, (
+        f"{vi_cls.__name__} declares no measurement_data_keys — it must name the "
+        f"arrays take_reading() returns"
+    )
+
+    for name, dtype in vi_cls.measurement_scalar_columns.items():
+        assert dtype in ("float", "int"), (
+            f"{vi_cls.__name__}.measurement_scalar_columns['{name}'] dtype "
+            f"{dtype!r} must be 'float' or 'int'"
+        )
+
+
+@pytest.mark.parametrize(
+    "vi_cls", _all_measurement_vi_classes(), ids=lambda c: c.__name__
+)
+def test_measurement_vi_lifecycle_methods(vi_cls: type) -> None:
+    """Every measurement VI implements the lifecycle; take_reading takes no args."""
+    for method_name in ("data_arrays", "initiate", "take_reading", "standby"):
+        assert callable(getattr(vi_cls, method_name, None)), (
+            f"{vi_cls.__name__} lacks the '{method_name}' lifecycle method"
+        )
+
+    required = [
+        p
+        for p in inspect.signature(vi_cls.take_reading).parameters.values()
+        if p.name != "self"
+        and p.default is inspect.Parameter.empty
+        and p.kind not in (p.VAR_POSITIONAL, p.VAR_KEYWORD)
+    ]
+    assert not required, (
+        f"{vi_cls.__name__}.take_reading() must take no required arguments "
+        f"(everything is fixed at initiate()), got {[p.name for p in required]}"
+    )
+
+
+@pytest.mark.parametrize(
+    "vi_cls", _all_measurement_vi_classes(), ids=lambda c: c.__name__
+)
+def test_measurement_vi_round_trip(vi_cls: type) -> None:
+    """Built from sim drivers, a measurement VI returns exactly what it declares.
+
+    initiate(**defaults) then take_reading() must yield exactly
+    measurement_data_keys (each with the length data_arrays declared) plus every
+    measurement_scalar_columns key — the machine check that a measurement method
+    is plug-compatible the day its file exists.
+    """
+    vi = vi_cls(_build_sim_measurement_drivers())
+    defaults = {name: spec.default for name, spec in vi_cls.measurement_parameters.items()}
+
+    vi.initiate(**defaults)
+    data = vi.take_reading()
+
+    expected_keys = set(vi_cls.measurement_data_keys) | set(vi_cls.measurement_scalar_columns)
+    assert set(data) == expected_keys, (
+        f"{vi_cls.__name__}.take_reading() returned keys {sorted(data)}, "
+        f"expected {sorted(expected_keys)}"
+    )
+
+    arrays = vi.data_arrays(defaults)
+    assert set(arrays) == set(vi_cls.measurement_data_keys), (
+        f"{vi_cls.__name__}.data_arrays() keys {sorted(arrays)} != "
+        f"measurement_data_keys {sorted(vi_cls.measurement_data_keys)}"
+    )
+    for name, length in arrays.items():
+        assert len(data[name]) == length, (
+            f"{vi_cls.__name__}.take_reading()['{name}'] has length "
+            f"{len(data[name])}, but data_arrays declared {length}"
+        )
+
+    for name in vi_cls.measurement_scalar_columns:
+        value = data[name]
+        assert isinstance(value, (int, float)) and not isinstance(value, bool), (
+            f"{vi_cls.__name__}.take_reading()['{name}'] must be a real-number "
+            f"scalar, got {value!r}"
+        )

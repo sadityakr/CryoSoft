@@ -14,7 +14,7 @@
 #   - cryosoft.core.sweep_builder (SweepAxis) — sweep-shape construction is
 #     handled entirely by BaseProcedure's default _build_sweep_array()
 #   - Station must have: magnet_x (system VI), temperature_vti (system VI),
-#     keithley_delta_mode (measurement VI with configure() and read_datapoint()).
+#     keithley_delta_mode (measurement VI with initiate() and take_reading()).
 # input: |
 #   station, sample_info, data_directory, and keyword params matching the
 #   parameters dict: temperature, init_wait, step_wait; delta-mode measurement
@@ -30,8 +30,8 @@
 # output: |
 #   initiate()/standby() return a PhasePlan, change_sweep_step() a StepPlan|None,
 #   abort() a tuple[Command, ...]. Side effect: an HDF5 file with /data/field_T[N],
-#   /data/voltage_V[N,M], /data/current_A[N,M], /data/timestamp[N], /snapshots/
-#   and /metadata/.
+#   /data/voltage_V[N,M], /data/current_A[N,M], /data/n_valid[N] (real samples
+#   per point before NaN padding), /data/timestamp[N], /snapshots/ and /metadata/.
 # last_updated: 2026-07-13
 # ---
 
@@ -182,14 +182,13 @@ class FieldSweepIV(BaseProcedure):
         commands = (
             Command(
                 "keithley_delta_mode",
-                "configure",
+                "initiate",
                 {
-                    "method": "delta_mode",
                     "current": self._params["current"],
                     "n_readings": n_readings,
-                    "delay": self._params["delay_s"],
-                    "compliance": self._params["compliance_V"],
-                    "range_2182a": self._params["voltmeter_range_V"],
+                    "voltmeter_range_V": self._params["voltmeter_range_V"],
+                    "compliance_V": self._params["compliance_V"],
+                    "delay_s": self._params["delay_s"],
                     "compliance_abort": self._params["compliance_abort"],
                     "cold_switch": self._params["cold_switch"],
                 },
@@ -197,7 +196,10 @@ class FieldSweepIV(BaseProcedure):
         )
 
         base_config: dict = {
-            "sweep_columns": {type(self).sweep_axis.data_key: "float"},
+            # n_valid: the delta engine can return fewer than n_readings samples;
+            # the measurement VI pads to n_readings and reports the true count in
+            # this scalar column (its measurement_scalar_columns declaration).
+            "sweep_columns": {type(self).sweep_axis.data_key: "float", "n_valid": "int"},
             "measurement_arrays": {
                 "voltage_V": n_readings,
                 "current_A": n_readings,
@@ -251,14 +253,14 @@ class FieldSweepIV(BaseProcedure):
     def measure(self) -> None:
         """Read IV data, snapshot station state, save to HDF5.
 
-        Reads from ``keithley_delta_mode.read_datapoint()`` (must have been
-        configured via ``initiate()``). Also reads the current field from
+        Reads from ``keithley_delta_mode.take_reading()`` (must have been armed
+        via ``initiate()``). Also reads the current field from
         ``magnet_x.get_field()`` and saves it as the sweep column.
         """
         if self._data_manager is None:
             raise RuntimeError("measure() called before initiate()")
 
-        measured_data: dict = self._station.keithley_delta_mode.read_datapoint()
+        measured_data: dict = self._station.keithley_delta_mode.take_reading()
         measured_data[type(self).sweep_axis.data_key] = self._station.magnet_x.get_field()
         self._save_datapoint(measured_data)
 

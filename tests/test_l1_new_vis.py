@@ -710,8 +710,8 @@ class TestDCSeparateMeasurementVI:
 
     def test_initiate_and_take_reading(self, source_driver, meter_driver):
         vi = self._make_vi(source_driver, meter_driver)
-        vi.initiate(current_A=1e-6, compliance_A=1e-3, voltmeter_range_V=0.1)
-        data = vi.take_reading(n_points=5)
+        vi.initiate(current_A=1e-6, compliance_A=1e-3, voltmeter_range_V=0.1, readings_per_point=5)
+        data = vi.take_reading()
         assert "voltage_V" in data
         assert "current_A" in data
         assert len(data["voltage_V"]) == 5
@@ -719,8 +719,8 @@ class TestDCSeparateMeasurementVI:
 
     def test_current_constant_across_readings(self, source_driver, meter_driver):
         vi = self._make_vi(source_driver, meter_driver)
-        vi.initiate(current_A=2e-6)
-        data = vi.take_reading(n_points=10)
+        vi.initiate(current_A=2e-6, readings_per_point=10)
+        data = vi.take_reading()
         assert all(abs(c - 2e-6) < 1e-12 for c in data["current_A"])
 
     def test_take_reading_without_initiate_raises(self, source_driver, meter_driver):
@@ -764,8 +764,8 @@ class TestDCSingleInstrumentVI:
 
     def test_initiate_and_take_reading(self, smu_driver):
         vi = self._make_vi(smu_driver)
-        vi.initiate(current_A=1e-6, compliance_A=1e-3, voltmeter_range_V=0.1)
-        data = vi.take_reading(n_points=5)
+        vi.initiate(current_A=1e-6, compliance_A=1e-3, voltmeter_range_V=0.1, readings_per_point=5)
+        data = vi.take_reading()
         assert "voltage_V" in data
         assert "current_A" in data
         assert len(data["voltage_V"]) == 5
@@ -773,8 +773,8 @@ class TestDCSingleInstrumentVI:
 
     def test_current_constant_across_readings(self, smu_driver):
         vi = self._make_vi(smu_driver)
-        vi.initiate(current_A=3e-6)
-        data = vi.take_reading(n_points=10)
+        vi.initiate(current_A=3e-6, readings_per_point=10)
+        data = vi.take_reading()
         assert all(abs(c - 3e-6) < 1e-12 for c in data["current_A"])
 
     def test_take_reading_without_initiate_raises(self, smu_driver):
@@ -809,7 +809,7 @@ class TestDCSingleInstrumentVI:
         vi_smu.vi_name = "dc_smu"
 
         for vi in (vi_sep, vi_smu):
-            vi.initiate(current_A=1e-6, compliance_A=1e-3, voltmeter_range_V=0.1)
-            data = vi.take_reading(n_points=3)
+            vi.initiate(current_A=1e-6, compliance_A=1e-3, voltmeter_range_V=0.1, readings_per_point=3)
+            data = vi.take_reading()
             assert set(data.keys()) == {"voltage_V", "current_A"}
             assert len(data["voltage_V"]) == 3

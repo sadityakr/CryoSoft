@@ -10,15 +10,16 @@
 #   - cryosoft.core.decorators (control)
 # input: |
 #   drivers = {"main": <SMU driver instance, e.g. Keithley 2400>}
-#   initiate(current_A, compliance_A, voltmeter_range_V) must be called before
-#   take_reading().
+#   initiate(current_A, compliance_A, voltmeter_range_V, readings_per_point)
+#   must be called before the argument-less take_reading().
 # process: |
-#   initiate() programs the SMU with source current, compliance, and range.
-#   take_reading(n_points) reads voltage N times at constant current and returns
-#   arrays of voltages and currents.
+#   initiate() programs the SMU with source current, compliance and range and
+#   stores readings_per_point. take_reading() reads voltage that many times at
+#   constant current and returns arrays of voltages and currents.
 # output: |
-#   {"voltage_V": list[float], "current_A": list[float]} with length n_points.
-# last_updated: 2026-04-19
+#   {"voltage_V": list[float], "current_A": list[float]} of length
+#   readings_per_point.
+# last_updated: 2026-07-13
 # ---
 
 """DCSingleInstrumentVI — DC measurement with a single SMU (e.g. Keithley 2400)."""
@@ -40,8 +41,9 @@ class DCSingleInstrumentVI(DCMeasurementBase):
 
     Workflow::
 
-        vi.initiate(current_A=1e-6, compliance_A=1e-3, voltmeter_range_V=0.1)
-        data = vi.take_reading(n_points=50)
+        vi.initiate(current_A=1e-6, compliance_A=1e-3, voltmeter_range_V=0.1,
+                    readings_per_point=50)
+        data = vi.take_reading()
         # data = {"voltage_V": list[float](50,), "current_A": list[float](50,)}
 
     To swap to a two-instrument setup, replace this VI with
@@ -65,6 +67,7 @@ class DCSingleInstrumentVI(DCMeasurementBase):
         self._current_A: object = _NOT_INITIATED
         self._compliance_A: float = 1e-3
         self._voltmeter_range_V: float = 0.1
+        self._readings_per_point: int = 10
 
     # ------------------------------------------------------------------
     # DCMeasurementBase implementation
@@ -76,6 +79,7 @@ class DCSingleInstrumentVI(DCMeasurementBase):
         current_A: float = 1e-6,
         compliance_A: float = 1e-3,
         voltmeter_range_V: float = 0.1,
+        readings_per_point: int = 10,
     ) -> None:
         """Arm the SMU and configure measurement parameters.
 
@@ -83,24 +87,25 @@ class DCSingleInstrumentVI(DCMeasurementBase):
             current_A: DC source current in Amperes.
             compliance_A: Compliance voltage limit in Volts.
             voltmeter_range_V: Full-scale voltage measurement range in Volts.
+            readings_per_point: Number of voltage samples ``take_reading()``
+                collects per datapoint.
         """
         self._current_A = float(current_A)
         self._compliance_A = float(compliance_A)
         self._voltmeter_range_V = float(voltmeter_range_V)
+        self._readings_per_point = int(readings_per_point)
 
         instr = self._instrument  # type: ignore[attr-defined]
         instr.set_compliance(self._compliance_A)
         instr.set_current(self._current_A)
         instr.set_range(self._voltmeter_range_V)
 
-    def take_reading(self, n_points: int = 10) -> dict[str, list[float]]:
-        """Acquire *n_points* voltage measurements at the configured current.
-
-        Args:
-            n_points: Number of samples to collect.
+    def take_reading(self) -> dict[str, list[float]]:
+        """Acquire ``readings_per_point`` voltage samples at the fixed current.
 
         Returns:
-            ``{"voltage_V": list[float], "current_A": list[float]}``
+            ``{"voltage_V": list[float], "current_A": list[float]}`` of length
+            ``readings_per_point`` (fixed at ``initiate()``).
 
         Raises:
             RuntimeError: If ``initiate()`` has not been called first.
@@ -113,7 +118,7 @@ class DCSingleInstrumentVI(DCMeasurementBase):
 
         voltages: list[float] = []
         currents: list[float] = []
-        for _ in range(int(n_points)):
+        for _ in range(self._readings_per_point):
             voltages.append(float(instr.get_voltage()))
             currents.append(current)
         return {"voltage_V": voltages, "current_A": currents}

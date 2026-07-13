@@ -8,11 +8,15 @@
 #   any hardware command). Also get_state() auto-build, evaluate_safety() hook,
 #   and typed sub-bases for each VI category (MagnetBase,
 #   TemperatureControllerBase, LevelMeterBase, MeasurementInstrumentBase,
-#   DCMeasurementBase).
+#   DCMeasurementBase). MeasurementInstrumentBase also defines the
+#   self-describing measurement-method standard (measurement_parameters /
+#   measurement_data_keys / measurement_scalar_columns class attrs plus the
+#   data_arrays / initiate / take_reading / standby lifecycle).
 # entry_point: Not run directly; imported by all concrete VI modules.
 # dependencies:
 #   - cryosoft.core.exceptions
 #   - cryosoft.core.decorators
+#   - cryosoft.core.plan (ParamSpec)
 # input: |
 #   Subclasses receive drivers dict and arbitrary init_params from Station
 #   factory. All @monitored and @control methods are auto-discovered.
@@ -22,7 +26,7 @@
 #   methods via get_monitored_methods() helper and returns a flat dict.
 # output: |
 #   Logged method calls (DEBUG/ERROR), structured state dicts from get_state().
-# last_updated: 2026-04-06
+# last_updated: 2026-07-13
 # ---
 
 """BaseVirtualInstrument and category base classes.
@@ -39,13 +43,15 @@ from __future__ import annotations
 import functools
 import inspect
 import logging
-from typing import Any
+from collections.abc import Mapping
+from typing import Any, ClassVar
 
 from cryosoft.core.exceptions import (
     CryoSoftCommunicationError,
     CryoSoftConfigError,
     CryoSoftSafetyError,
 )
+from cryosoft.core.plan import ParamSpec
 
 
 class BaseVirtualInstrument:
@@ -320,11 +326,94 @@ class LevelMeterBase(BaseVirtualInstrument):
 
 
 class MeasurementInstrumentBase(BaseVirtualInstrument):
-    """Base class for all measurement-instrument VIs."""
+    """Base class and self-describing standard for all measurement-method VIs.
+
+    A *measurement method* (see GLOSSARY.md) is a measurement VI that describes
+    its own GUI knobs and output shape and implements one uniform lifecycle, so
+    a generic procedure can run any of them without knowing which instrument or
+    protocol is behind it. Every concrete measurement VI MUST honour this
+    standard; ``tests/test_conformance.py`` enforces it the moment the file
+    exists.
+
+    Self-description (class attributes)
+    -----------------------------------
+    * ``measurement_parameters: ClassVar[dict[str, ParamSpec]]`` — the VI's
+      GUI-facing knobs, one ``ParamSpec`` per parameter. This is the single
+      owner of those specs (procedures will stop duplicating them in a later
+      wave). Must be non-empty on a concrete VI.
+    * ``measurement_data_keys: ClassVar[list[str]]`` — the array names
+      ``take_reading()`` returns (e.g. ``["voltage_V", "current_A"]``). Must be
+      non-empty on a concrete VI.
+    * ``measurement_scalar_columns: ClassVar[dict[str, str]]`` — optional extra
+      *per-point scalar* columns the VI contributes, mapping name → dtype
+      ("float" or "int"). Use this for a VI whose instrument can legitimately
+      return fewer readings than requested: it pads the arrays to the declared
+      length with ``float("nan")`` and reports the true count via a scalar such
+      as ``n_valid``. Empty (the default) means the VI adds no scalars.
+
+    Uniform lifecycle (methods)
+    ---------------------------
+    * ``data_arrays(params) -> dict[str, int]`` — declared array name → its
+      per-point length, computed from the SAME ``params`` mapping ``initiate()``
+      will receive. Lets a procedure size its HDF5 layout before arming the
+      hardware. Base raises ``NotImplementedError``.
+    * ``initiate(**params) -> None`` — arm / configure the hardware. Accepts the
+      ``measurement_parameters`` keys as keyword arguments, each with a default
+      (so ``initiate()`` with no arguments is valid, e.g. for a bulk
+      Initiate-All). Concrete VIs keep the ``@control`` decoration where the VI
+      exposes arming to the GUI.
+    * ``take_reading() -> dict[str, list[float]]`` — take ONE datapoint. Takes
+      NO arguments: everything it needs was fixed at ``initiate()``. It MUST
+      return exactly ``measurement_data_keys`` (plus every
+      ``measurement_scalar_columns`` key) and each array MUST have exactly the
+      length ``data_arrays(params)`` declared for the same ``params`` — always.
+      A VI whose instrument may return fewer points pads with ``float("nan")``
+      to the declared length and reports the true count in its scalar column.
+      This fixed-shape guarantee is the contract that prevents HDF5 layout
+      mismatches mid-run.
+    * ``standby() -> None`` — put the instrument in a safe-off idle state.
+
+    Adding a new measurement method: subclass this base (or ``DCMeasurementBase``
+    for a DC-resistance method), declare the three class attributes, and
+    implement ``data_arrays`` / ``initiate`` / ``take_reading`` / ``standby``.
+    """
 
     vi_type: str = "measurement"
     # Human label for status lines like "Arming DC resistance measurement".
     display_label: str = "measurement"
+
+    # Self-description — overridden (non-empty) by every concrete VI.
+    measurement_parameters: ClassVar[dict[str, ParamSpec]] = {}
+    measurement_data_keys: ClassVar[list[str]] = []
+    measurement_scalar_columns: ClassVar[dict[str, str]] = {}
+
+    def data_arrays(self, params: Mapping[str, Any]) -> dict[str, int]:
+        """Return declared array name → per-point length for these *params*.
+
+        Args:
+            params: The same parameter mapping ``initiate()`` will be called
+                with (the ``measurement_parameters`` keys).
+
+        Returns:
+            ``{array_name: length}`` for every name in ``measurement_data_keys``.
+
+        Raises:
+            NotImplementedError: If not overridden by a concrete VI.
+        """
+        raise NotImplementedError
+
+    def take_reading(self) -> dict[str, list[float]]:
+        """Acquire one datapoint at the configuration fixed by ``initiate()``.
+
+        Returns:
+            A dict containing exactly ``measurement_data_keys`` (arrays sized as
+            ``data_arrays`` declared) plus every ``measurement_scalar_columns``
+            key.
+
+        Raises:
+            NotImplementedError: If not overridden by a concrete VI.
+        """
+        raise NotImplementedError
 
     def ping(self) -> bool:
         """Send IDN queries to all drivers and return True if all respond.
@@ -340,42 +429,84 @@ class MeasurementInstrumentBase(BaseVirtualInstrument):
 
 
 class DCMeasurementBase(MeasurementInstrumentBase):
-    """Base class for all DC resistance measurement VIs.
+    """Base class for DC resistance measurement methods (defers to the standard).
 
-    Documents the shared method contract that allows procedures to swap between
+    Folds the shared DC-resistance self-description into one place so
     DCSeparateMeasurementVI (Keithley 6221 + 2182A) and DCSingleInstrumentVI
-    (Keithley 2400 SMU) by changing only the YAML config.
+    (Keithley 2400 SMU) are interchangeable via the YAML config alone. Both
+    inherit the ``measurement_parameters`` / ``measurement_data_keys`` /
+    ``data_arrays`` declared here and implement only ``initiate()`` /
+    ``take_reading()`` / ``standby()``.
 
-    Subclasses must implement ``initiate()`` and ``take_reading()`` with these
-    exact signatures.  The base raises NotImplementedError so that a missing
-    implementation fails loudly at first use rather than silently.
+    The full lifecycle contract is documented on ``MeasurementInstrumentBase``;
+    this class adds nothing new, it only fixes the DC-resistance shape
+    (``readings_per_point`` samples of ``voltage_V`` and ``current_A``). The
+    ``initiate`` / ``take_reading`` stubs raise ``NotImplementedError`` so a
+    missing implementation fails loudly at first use.
     """
 
     display_label: str = "DC resistance"
+
+    measurement_data_keys: ClassVar[list[str]] = ["voltage_V", "current_A"]
+    measurement_parameters: ClassVar[dict[str, ParamSpec]] = {
+        "current_A": ParamSpec(
+            type=float, default=1e-6, unit="A", description="DC source current"
+        ),
+        "compliance_A": ParamSpec(
+            type=float,
+            default=1e-3,
+            unit="A",
+            description="Current compliance on voltmeter",
+        ),
+        "voltmeter_range_V": ParamSpec(
+            type=float,
+            default=0.1,
+            unit="V",
+            description="Voltmeter full-scale range",
+        ),
+        "readings_per_point": ParamSpec(
+            type=int,
+            default=10,
+            min=1,
+            description="DC voltage readings averaged per point",
+        ),
+    }
+
+    def data_arrays(self, params: Mapping[str, Any]) -> dict[str, int]:
+        """Return ``{"voltage_V": n, "current_A": n}`` with n = readings_per_point.
+
+        Args:
+            params: Parameter mapping containing ``readings_per_point``.
+
+        Returns:
+            Per-point length for each DC data array.
+        """
+        n = int(params["readings_per_point"])
+        return {"voltage_V": n, "current_A": n}
 
     def initiate(
         self,
         current_A: float = 1e-6,
         compliance_A: float = 1e-3,
         voltmeter_range_V: float = 0.1,
+        readings_per_point: int = 10,
     ) -> None:
-        """Arm the measurement hardware with fixed DC current and range.
+        """Arm the measurement hardware with fixed DC current, range and count.
 
         Args:
             current_A: DC source current in Amperes.
             compliance_A: Compliance / protection limit in Amperes.
             voltmeter_range_V: Full-scale voltage measurement range in Volts.
+            readings_per_point: Number of voltage samples ``take_reading()``
+                collects per datapoint.
         """
         raise NotImplementedError
 
-    def take_reading(self, n_points: int = 10) -> dict[str, list[float]]:
-        """Acquire *n_points* voltage measurements at the configured current.
-
-        Args:
-            n_points: Number of samples to collect.
+    def take_reading(self) -> dict[str, list[float]]:
+        """Acquire ``readings_per_point`` voltage samples at the fixed current.
 
         Returns:
-            ``{"voltage_V": list[float], "current_A": list[float]}``
-            with length *n_points*.
+            ``{"voltage_V": list[float], "current_A": list[float]}`` with length
+            ``readings_per_point`` (fixed at ``initiate()``).
         """
         raise NotImplementedError

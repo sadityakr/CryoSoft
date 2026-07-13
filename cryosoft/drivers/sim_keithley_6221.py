@@ -14,7 +14,9 @@
 #   SimKeithley2182A meter if set, or returns zeros with noise otherwise.
 # output: |
 #   Returns bool source state, float current, and list[float] delta readings.
-# last_updated: 2026-04-19
+#   A private _delta_return_count test hook forces a short acquire_delta_readings
+#   return to exercise the delta VI's NaN-padding + n_valid contract.
+# last_updated: 2026-07-13
 # ---
 
 """Simulated Keithley 6221 AC/DC Current Source driver."""
@@ -64,6 +66,12 @@ class SimKeithley6221:
 
         # Test control flags
         self._simulate_error: bool = False
+        # When set (int), acquire_delta_readings() returns only this many
+        # samples instead of the full n_readings — models the real 6221's
+        # short-return path (compliance abort / repeated read failures) so
+        # tests can exercise the VI's NaN-padding + n_valid contract. Private,
+        # so it is not part of the public API parity check.
+        self._delta_return_count: int | None = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -211,8 +219,13 @@ class SimKeithley6221:
         """
         import random
 
+        count = n_readings
+        if self._delta_return_count is not None:
+            # Model an early-terminated acquisition (returns fewer samples).
+            count = min(int(self._delta_return_count), n_readings)
+
         readings: list[float] = []
-        for _ in range(n_readings):
+        for _ in range(count):
             if self._paired_meter is not None:
                 readings.append(self._paired_meter.get_voltage())  # type: ignore[attr-defined]
             else:

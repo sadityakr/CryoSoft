@@ -207,6 +207,7 @@ class TemperatureSweepDC(BaseProcedure):
                     "current_A": self._params["current_A"],
                     "compliance_A": self._params["compliance_A"],
                     "voltmeter_range_V": self._params["voltmeter_range_V"],
+                    "readings_per_point": int(self._params["readings_per_point"]),
                 },
             ),
         )
@@ -276,8 +277,7 @@ class TemperatureSweepDC(BaseProcedure):
         if self._data_manager is None:
             raise RuntimeError("measure() called before initiate()")
 
-        n = int(self._params["readings_per_point"])
-        measured_data: dict = self._station.dc_measurement.take_reading(n_points=n)
+        measured_data: dict = self._station.dc_measurement.take_reading()
         measured_data[type(self).sweep_axis.data_key] = self._station.temperature_vti.temperature()
         self._save_datapoint(measured_data)
 

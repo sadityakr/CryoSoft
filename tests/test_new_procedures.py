@@ -141,6 +141,7 @@ def test_field_dc_initiate_full_phaseplan_content(field_proc, tmp_path):
     assert cmd.kwargs["current_A"] == pytest.approx(1e-6)
     assert cmd.kwargs["compliance_A"] == pytest.approx(1e-3)
     assert cmd.kwargs["voltmeter_range_V"] == pytest.approx(0.1)
+    assert cmd.kwargs["readings_per_point"] == 5
 
     assert plan.wait_s == pytest.approx(0.0)
 
@@ -185,7 +186,7 @@ def test_field_dc_sweep_exhaustion(field_proc, tmp_path):
 def test_field_dc_measure_saves_data(field_proc, tmp_path):
     field_proc.initiate()
     field_proc._station.dc_measurement.initiate(
-        current_A=1e-6, compliance_A=1e-3, voltmeter_range_V=0.1
+        current_A=1e-6, compliance_A=1e-3, voltmeter_range_V=0.1, readings_per_point=5
     )
     field_proc.measure()
     filepath = field_proc._data_manager.filepath
@@ -275,6 +276,7 @@ def test_temp_dc_initiate_full_phaseplan_content(temp_proc, tmp_path):
     assert cmd.vi_name == "dc_measurement"
     assert cmd.method == "initiate"
     assert cmd.kwargs["current_A"] == pytest.approx(1e-6)
+    assert cmd.kwargs["readings_per_point"] == 5
 
     assert plan.wait_s == pytest.approx(0.0)
 
@@ -313,7 +315,7 @@ def test_temp_dc_sweep_exhaustion(temp_proc, tmp_path):
 def test_temp_dc_measure_saves_data(temp_proc, tmp_path):
     temp_proc.initiate()
     temp_proc._station.dc_measurement.initiate(
-        current_A=1e-6, compliance_A=1e-3, voltmeter_range_V=0.1
+        current_A=1e-6, compliance_A=1e-3, voltmeter_range_V=0.1, readings_per_point=5
     )
     temp_proc.measure()
     filepath = temp_proc._data_manager.filepath

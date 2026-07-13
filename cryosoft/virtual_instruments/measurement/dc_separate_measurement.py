@@ -2,23 +2,25 @@
 # description: |
 #   DCSeparateMeasurementVI: behavior-based VI for DC resistance measurements
 #   using a dedicated current source and a separate voltmeter.
-#   initiate() arms the source with a fixed current, compliance, and voltmeter
-#   range. take_reading() collects N voltage samples at that fixed current.
+#   initiate() arms the source with a fixed current, compliance, voltmeter
+#   range and readings-per-point. take_reading() collects that many voltage
+#   samples at the fixed current.
 # entry_point: Not run directly; instantiated by Station factory.
 # dependencies:
 #   - cryosoft.virtual_instruments.base (DCMeasurementBase)
 #   - cryosoft.core.decorators (control)
 # input: |
 #   drivers = {"source": <current source driver>, "meter": <voltmeter driver>}
-#   initiate(current_A, compliance_A, voltmeter_range_V) must be called before
-#   take_reading().
+#   initiate(current_A, compliance_A, voltmeter_range_V, readings_per_point)
+#   must be called before the argument-less take_reading().
 # process: |
 #   initiate() stores measurement parameters and programs both instruments.
-#   take_reading(n_points) acquires n_points voltage samples and returns them
+#   take_reading() acquires readings_per_point voltage samples and returns them
 #   alongside a constant current array.
 # output: |
-#   {"voltage_V": list[float], "current_A": list[float]} with length n_points.
-# last_updated: 2026-04-19
+#   {"voltage_V": list[float], "current_A": list[float]} of length
+#   readings_per_point.
+# last_updated: 2026-07-13
 # ---
 
 """DCSeparateMeasurementVI — DC measurement with separate current source + voltmeter."""
@@ -42,8 +44,9 @@ class DCSeparateMeasurementVI(DCMeasurementBase):
 
     Workflow::
 
-        vi.initiate(current_A=1e-6, compliance_A=1e-3, voltmeter_range_V=0.1)
-        data = vi.take_reading(n_points=50)
+        vi.initiate(current_A=1e-6, compliance_A=1e-3, voltmeter_range_V=0.1,
+                    readings_per_point=50)
+        data = vi.take_reading()
         # data = {"voltage_V": list[float](50,), "current_A": list[float](50,)}
 
     To swap to a single-instrument SMU, replace this VI with
@@ -70,6 +73,7 @@ class DCSeparateMeasurementVI(DCMeasurementBase):
         self._current_A: object = _NOT_INITIATED
         self._compliance_A: float = 1e-3
         self._voltmeter_range_V: float = 0.1
+        self._readings_per_point: int = 10
 
     # ------------------------------------------------------------------
     # DCMeasurementBase implementation
@@ -81,6 +85,7 @@ class DCSeparateMeasurementVI(DCMeasurementBase):
         current_A: float = 1e-6,
         compliance_A: float = 1e-3,
         voltmeter_range_V: float = 0.1,
+        readings_per_point: int = 10,
     ) -> None:
         """Arm both instruments and configure measurement parameters.
 
@@ -88,10 +93,13 @@ class DCSeparateMeasurementVI(DCMeasurementBase):
             current_A: DC source current in Amperes.
             compliance_A: Current compliance in Amperes.
             voltmeter_range_V: Full-scale voltage range in Volts.
+            readings_per_point: Number of voltage samples ``take_reading()``
+                collects per datapoint.
         """
         self._current_A = float(current_A)
         self._compliance_A = float(compliance_A)
         self._voltmeter_range_V = float(voltmeter_range_V)
+        self._readings_per_point = int(readings_per_point)
 
         source = self._source  # type: ignore[attr-defined]
         meter = self._meter    # type: ignore[attr-defined]
@@ -99,14 +107,12 @@ class DCSeparateMeasurementVI(DCMeasurementBase):
         source.set_current(self._current_A)
         meter.set_range(self._voltmeter_range_V)
 
-    def take_reading(self, n_points: int = 10) -> dict[str, list[float]]:
-        """Acquire *n_points* DC voltage measurements at the configured current.
-
-        Args:
-            n_points: Number of voltage samples to collect.
+    def take_reading(self) -> dict[str, list[float]]:
+        """Acquire ``readings_per_point`` DC voltage samples at the fixed current.
 
         Returns:
-            ``{"voltage_V": list[float], "current_A": list[float]}``
+            ``{"voltage_V": list[float], "current_A": list[float]}`` of length
+            ``readings_per_point`` (fixed at ``initiate()``).
 
         Raises:
             RuntimeError: If ``initiate()`` has not been called first.
@@ -119,7 +125,7 @@ class DCSeparateMeasurementVI(DCMeasurementBase):
 
         voltages: list[float] = []
         currents: list[float] = []
-        for _ in range(int(n_points)):
+        for _ in range(self._readings_per_point):
             voltages.append(float(meter.get_voltage()))
             currents.append(current)
         return {"voltage_V": voltages, "current_A": currents}

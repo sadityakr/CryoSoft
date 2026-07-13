@@ -2,42 +2,51 @@
 # description: |
 #   DeltaModeMeasurementVI: multi-driver Virtual Instrument pairing a Keithley
 #   6221 current source with a Keithley 2182A nanovoltmeter for delta-mode
-#   resistance measurements.  read_datapoint() is NOT @monitored — called only
-#   by Procedure objects.
+#   resistance measurements. Implements the self-describing measurement-method
+#   standard (see MeasurementInstrumentBase): initiate() arms the delta engine
+#   and take_reading() collects one datapoint. take_reading() is NOT @monitored
+#   — it is long-running and only driven by the Procedure layer.
 # entry_point: Not run directly; instantiated by Station factory.
 # dependencies:
 #   - cryosoft.virtual_instruments.base (MeasurementInstrumentBase)
 #   - cryosoft.core.decorators (control)
+#   - cryosoft.core.plan (ParamSpec)
 # input: |
 #   drivers = {"source": <K6221 driver>, "meter": <K2182A driver>}
-#   configure() must be called before read_datapoint().
-#   Supported methods: "delta_mode" with params current (A), n_readings (int),
-#   delay (s, default 0.01), compliance (V, default 1.0), range_2182a (V, default 0.01),
-#   compliance_abort (bool, default True), cold_switch (bool, default False).
+#   initiate() must be called before take_reading(). Parameters (all keyword,
+#   all defaulted): current (A), n_readings (int), voltmeter_range_V (V,
+#   enumerated 2182A range), compliance_V (V), delay_s (s), compliance_abort
+#   (bool), cold_switch (bool).
 # process: |
-#   configure() arms the delta engine via source.configure_and_start_delta().
-#   read_datapoint() calls source.acquire_delta_readings() to collect samples.
+#   initiate() arms the delta engine via source.configure_and_start_delta().
+#   take_reading() calls source.acquire_delta_readings() to collect samples;
+#   the delta engine can return FEWER than n_readings values (compliance abort
+#   / repeated read failures), so the arrays are padded with NaN to n_readings
+#   and the true count reported in the n_valid scalar column.
 #   standby() calls source.stop_delta_mode() to abort the running engine.
 # output: |
-#   {"voltage_V": list[float], "current_A": list[float]} with length n_readings.
-# last_updated: 2026-04-19
+#   {"voltage_V": list[float](n_readings,), "current_A": list[float](n_readings,),
+#    "n_valid": int} — arrays always exactly n_readings long.
+# last_updated: 2026-07-13
 # ---
 
 """DeltaModeMeasurementVI — Keithley 6221 + 2182A delta-mode measurement VI."""
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Mapping
+from typing import Any, ClassVar
 
 from cryosoft.core.decorators import control
+from cryosoft.core.plan import ParamSpec
 from cryosoft.virtual_instruments.base import MeasurementInstrumentBase
 
-# Sentinel to detect unconfigured state.
-_NOT_CONFIGURED = object()
+# Sentinel to detect the un-armed state.
+_NOT_INITIATED = object()
 
 
 class DeltaModeMeasurementVI(MeasurementInstrumentBase):
-    """Virtual Instrument for delta-mode resistance measurements.
+    """Measurement method for delta-mode resistance measurements.
 
     Uses two drivers:
     * ``"source"`` — Keithley 6221 current source.
@@ -45,131 +54,190 @@ class DeltaModeMeasurementVI(MeasurementInstrumentBase):
 
     Workflow (always run by a Procedure, never the GUI directly)::
 
-        vi.configure("delta_mode", current=1e-6, n_readings=100)
-        data = vi.read_datapoint()
-        # data = {"voltage_V": ndarray(100,), "current_A": ndarray(100,)}
+        vi.initiate(current=1e-6, n_readings=100)
+        data = vi.take_reading()
+        # data = {"voltage_V": list(100,), "current_A": list(100,), "n_valid": int}
 
-    ``read_datapoint()`` is deliberately **not** tagged ``@monitored`` or
-    ``@control`` because it is long-running and should only be triggered by
-    the Procedure layer.
+    Implements the self-describing measurement-method standard documented on
+    ``MeasurementInstrumentBase``. The delta engine can legitimately return
+    fewer than ``n_readings`` samples (a compliance abort, or repeated read
+    failures on the real 6221), so ``take_reading()`` pads both arrays with
+    ``float("nan")`` up to ``n_readings`` and reports the real sample count in
+    the ``n_valid`` scalar column — the fixed-shape guarantee the HDF5 layout
+    depends on.
+
+    ``take_reading()`` is deliberately **not** tagged ``@monitored`` because it
+    is long-running and should only be triggered by the Procedure layer.
     """
 
-    SUPPORTED_METHODS = ("delta_mode",)
     display_label: str = "delta-mode resistance"
+
+    measurement_data_keys: ClassVar[list[str]] = ["voltage_V", "current_A"]
+    measurement_scalar_columns: ClassVar[dict[str, str]] = {"n_valid": "int"}
+    measurement_parameters: ClassVar[dict[str, ParamSpec]] = {
+        "current": ParamSpec(
+            type=float,
+            default=1e-6,
+            unit="A",
+            description="Peak delta current (±I, reversed each cycle)",
+        ),
+        "n_readings": ParamSpec(
+            type=int,
+            default=100,
+            min=1,
+            description="Readings per point (delta mode)",
+        ),
+        "voltmeter_range_V": ParamSpec(
+            type=float,
+            default=0.01,
+            unit="V",
+            choices={
+                "10 mV": 0.01,
+                "100 mV": 0.1,
+                "1 V": 1.0,
+                "10 V": 10.0,
+                "100 V": 100.0,
+            },
+            description="Keithley 2182A voltmeter measurement range",
+        ),
+        "compliance_V": ParamSpec(
+            type=float,
+            default=1.0,
+            unit="V",
+            description="Source voltage compliance limit",
+        ),
+        "delay_s": ParamSpec(
+            type=float,
+            default=0.01,
+            unit="s",
+            description="Delta inter-transition delay (0 = hardware minimum)",
+        ),
+        "compliance_abort": ParamSpec(
+            type=bool,
+            default=True,
+            description="Abort the delta run if the source reaches compliance",
+        ),
+        "cold_switch": ParamSpec(
+            type=bool,
+            default=False,
+            description="Cold-switch between current reversals (lower thermal EMF)",
+        ),
+    }
 
     def __init__(self, drivers: dict[str, object], **init_params: Any) -> None:
         super().__init__(drivers, **init_params)
         self._source = drivers["source"]
         self._meter = drivers["meter"]
 
-        # Configuration state — set by configure().
-        self._method: object = _NOT_CONFIGURED
-        self._meas_params: dict[str, Any] = {}
+        # Configuration state — set by initiate().
+        self._armed: object = _NOT_INITIATED
+        self._current: float = 1e-6
+        self._n_readings: int = 100
+        self._delay_s: float = 0.01
 
     # ------------------------------------------------------------------
-    # @control — configure the measurement
+    # Self-description
+    # ------------------------------------------------------------------
+
+    def data_arrays(self, params: Mapping[str, Any]) -> dict[str, int]:
+        """Return ``{"voltage_V": n, "current_A": n}`` with n = n_readings.
+
+        Args:
+            params: Parameter mapping containing ``n_readings``.
+
+        Returns:
+            Per-point length for each delta-mode data array.
+        """
+        n = int(params["n_readings"])
+        return {"voltage_V": n, "current_A": n}
+
+    # ------------------------------------------------------------------
+    # @control — arm the measurement
     # ------------------------------------------------------------------
 
     @control
-    def configure(self, method: str, **params: Any) -> None:
-        """Configure the measurement method and arm the delta engine.
+    def initiate(
+        self,
+        current: float = 1e-6,
+        n_readings: int = 100,
+        voltmeter_range_V: float = 0.01,
+        compliance_V: float = 1.0,
+        delay_s: float = 0.01,
+        compliance_abort: bool = True,
+        cold_switch: bool = False,
+    ) -> None:
+        """Arm the delta engine so ``take_reading()`` can deliver on demand.
 
-        Must be called before ``read_datapoint()``. For ``"delta_mode"`` this
-        calls ``source.configure_and_start_delta()`` immediately so the
-        instrument is armed and ready to deliver readings on demand.
+        Calls ``source.configure_and_start_delta()`` immediately so the
+        instrument is armed and ready. The driver call sequence is unchanged
+        from the previous ``configure()`` interface.
 
         Args:
-            method: Measurement method name. Supported: ``"delta_mode"``.
-            **params: Method-specific parameters.
-
-                For ``"delta_mode"``:
-                    - ``current`` (float): Peak delta current in Amperes.
-                    - ``n_readings`` (int): Readings per acquisition call.
-                    - ``delay`` (float, optional): Inter-transition delay (s). Default 0.01.
-                    - ``compliance`` (float, optional): Voltage compliance (V). Default 1.0.
-                    - ``range_2182a`` (float, optional): 2182A range (V). Default 0.01.
-                    - ``compliance_abort`` (bool, optional): Abort on compliance. Default True.
-                    - ``cold_switch`` (bool, optional): Cold-switch reversals. Default False.
-
-        Raises:
-            ValueError: If *method* is not supported.
+            current: Peak delta current in Amperes (low level = -current).
+            n_readings: Readings per ``take_reading()`` acquisition.
+            voltmeter_range_V: Keithley 2182A measurement range in Volts.
+            compliance_V: Source voltage compliance limit in Volts.
+            delay_s: Inter-transition delay in seconds (0 = hardware minimum).
+            compliance_abort: Abort the delta run if the source hits compliance.
+            cold_switch: Cold-switch between current reversals.
         """
-        if method not in self.SUPPORTED_METHODS:
-            raise ValueError(
-                f"Unsupported measurement method: {method!r}. "
-                f"Supported: {self.SUPPORTED_METHODS}"
-            )
-        self._method = method
-        self._meas_params = dict(params)
+        self._armed = True
+        self._current = float(current)
+        self._n_readings = int(n_readings)
+        self._delay_s = float(delay_s)
 
-        if method == "delta_mode":
-            current: float = float(params.get("current", 1e-6))
-            n_readings: int = int(params.get("n_readings", 100))
-            delay: float = float(params.get("delay", 0.01))
-            compliance: float = float(params.get("compliance", 1.0))
-            range_2182a: float = float(params.get("range_2182a", 0.01))
-            compliance_abort: bool = bool(params.get("compliance_abort", True))
-            cold_switch: bool = bool(params.get("cold_switch", False))
-            self._source.configure_and_start_delta(  # type: ignore[attr-defined]
-                current, n_readings, delay, compliance, range_2182a,
-                compliance_abort, cold_switch,
-            )
-
-    # ------------------------------------------------------------------
-    # read_datapoint — NOT @monitored, NOT @control (Procedure-only)
-    # ------------------------------------------------------------------
-
-    def read_datapoint(self) -> dict[str, list[float]]:
-        """Acquire a measurement datapoint.
-
-        Returns a flat dict of equal-length arrays.
-
-        Returns:
-            ``{"voltage_V": list, "current_A": list}``
-            Arrays have length equal to *n_readings* from ``configure()``.
-
-        Raises:
-            RuntimeError: If ``configure()`` has not been called first.
-        """
-        if self._method is _NOT_CONFIGURED:
-            raise RuntimeError(
-                "configure() must be called before read_datapoint()."
-            )
-
-        if self._method == "delta_mode":
-            return self._read_delta_mode()
-
-        # Unreachable after configure() validation, but defensive:
-        raise RuntimeError(f"Unknown method state: {self._method!r}")
-
-    # ------------------------------------------------------------------
-    # Internal acquisition logic
-    # ------------------------------------------------------------------
-
-    def _read_delta_mode(self) -> dict[str, list[float]]:
-        """Collect readings from the already-armed delta engine.
-
-        The engine was started in configure(). This call polls
-        ``source.acquire_delta_readings()`` for the configured number of
-        samples and packages them alongside the nominal current array.
-
-        Returns:
-            ``{"voltage_V": list, "current_A": list}``
-        """
-        current_A: float = float(self._meas_params.get("current", 1e-6))
-        n_readings: int = int(self._meas_params.get("n_readings", 100))
-        delay: float = float(self._meas_params.get("delay", 0.01))
-
-        voltages: list[float] = self._source.acquire_delta_readings(  # type: ignore[attr-defined]
-            n_readings, delay
+        self._source.configure_and_start_delta(  # type: ignore[attr-defined]
+            float(current),
+            int(n_readings),
+            float(delay_s),
+            float(compliance_V),
+            float(voltmeter_range_V),
+            bool(compliance_abort),
+            bool(cold_switch),
         )
 
-        # current_A array mirrors the number of readings actually returned.
-        currents: list[float] = [current_A] * len(voltages)
+    # ------------------------------------------------------------------
+    # take_reading — NOT @monitored, NOT @control (Procedure-only)
+    # ------------------------------------------------------------------
+
+    def take_reading(self) -> dict[str, list[float]]:
+        """Collect one delta-mode datapoint from the armed engine.
+
+        Polls ``source.acquire_delta_readings()`` for up to ``n_readings``
+        samples. The engine can return fewer, so both arrays are padded with
+        ``float("nan")`` to exactly ``n_readings`` and the real count reported
+        as ``n_valid``.
+
+        Returns:
+            ``{"voltage_V": list(n_readings,), "current_A": list(n_readings,),
+            "n_valid": int}``. Padded (invalid) positions are ``NaN`` in both
+            arrays.
+
+        Raises:
+            RuntimeError: If ``initiate()`` has not been called first.
+        """
+        if self._armed is _NOT_INITIATED:
+            raise RuntimeError("initiate() must be called before take_reading().")
+
+        n = self._n_readings
+        raw: list[float] = self._source.acquire_delta_readings(  # type: ignore[attr-defined]
+            n, self._delay_s
+        )
+
+        voltages: list[float] = [float(v) for v in raw[:n]]
+        n_valid = len(voltages)
+        currents: list[float] = [self._current] * n_valid
+
+        pad = n - n_valid
+        if pad > 0:
+            nan = float("nan")
+            voltages.extend([nan] * pad)
+            currents.extend([nan] * pad)
 
         return {
             "voltage_V": voltages,
             "current_A": currents,
+            "n_valid": n_valid,
         }
 
     # ------------------------------------------------------------------
@@ -189,15 +257,10 @@ class DeltaModeMeasurementVI(MeasurementInstrumentBase):
         except Exception:
             return False
 
-    def initiate(self) -> None:
-        """Initialise both instruments to a known safe state."""
-        self._source.set_current(0.0)   # type: ignore[attr-defined]
-
     def standby(self) -> None:
         """Abort the delta engine, turn off outputs, and reset state."""
         try:
             self._source.stop_delta_mode()   # type: ignore[attr-defined]
         except Exception:
             pass
-        self._method = _NOT_CONFIGURED
-        self._meas_params = {}
+        self._armed = _NOT_INITIATED

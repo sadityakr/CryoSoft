@@ -175,21 +175,22 @@ def test_delta_mode_vi():
     source._paired_meter = meter
     
     vi = DeltaModeMeasurementVI({"source": source, "meter": meter})
-    
-    with pytest.raises(RuntimeError):
-        vi.read_datapoint()
-        
-    vi.configure("delta_mode", current=1e-6, n_readings=10, delay=0.001)
 
-    data = vi.read_datapoint()
+    with pytest.raises(RuntimeError):
+        vi.take_reading()
+
+    vi.initiate(current=1e-6, n_readings=10, delay_s=0.001)
+
+    data = vi.take_reading()
     assert "voltage_V" in data
     assert "current_A" in data
     assert len(data["voltage_V"]) == 10
     assert len(data["current_A"]) == 10
+    assert data["n_valid"] == 10
 
 
 def test_delta_mode_vi_forwards_all_config_params():
-    """configure() forwards the full delta parameter set to the source driver.
+    """initiate() forwards the full delta parameter set to the source driver.
 
     Regression guard: compliance, range, compliance_abort and cold_switch must
     reach configure_and_start_delta() (a wrong/skipped delta command errors on
@@ -202,13 +203,12 @@ def test_delta_mode_vi_forwards_all_config_params():
     source._paired_meter = meter
     vi = DeltaModeMeasurementVI({"source": source, "meter": meter})
 
-    vi.configure(
-        "delta_mode",
+    vi.initiate(
         current=2e-6,
         n_readings=5,
-        delay=0.002,
-        compliance=3.0,
-        range_2182a=0.1,
+        delay_s=0.002,
+        compliance_V=3.0,
+        voltmeter_range_V=0.1,
         compliance_abort=False,
         cold_switch=True,
     )
@@ -218,3 +218,34 @@ def test_delta_mode_vi_forwards_all_config_params():
     assert source._delta_range_2182a == pytest.approx(0.1)
     assert source._delta_compliance_abort is False
     assert source._delta_cold_switch is True
+
+
+def test_delta_mode_short_return_is_nan_padded():
+    """A short delta acquisition is padded to n_readings with NaN + n_valid.
+
+    The real Keithley 6221 can return fewer than n_readings samples (compliance
+    abort / repeated read failures). The VI must always return arrays of exactly
+    n_readings, padding the missing tail with NaN, and report the true count in
+    the n_valid scalar column — the fixed-shape contract the HDF5 layout needs.
+    """
+    import math
+
+    from cryosoft.virtual_instruments.measurement.measurement_delta_mode import DeltaModeMeasurementVI
+
+    source = SimKeithley6221("SIM")
+    meter = SimKeithley2182A("SIM")
+    source._paired_meter = meter
+    # Force the sim engine to return only 3 of the 10 requested samples.
+    source._delta_return_count = 3
+
+    vi = DeltaModeMeasurementVI({"source": source, "meter": meter})
+    vi.initiate(current=1e-6, n_readings=10, delay_s=0.001)
+    data = vi.take_reading()
+
+    assert len(data["voltage_V"]) == 10
+    assert len(data["current_A"]) == 10
+    assert data["n_valid"] == 3
+    # First 3 are real; the padded tail is NaN in both arrays.
+    assert all(not math.isnan(v) for v in data["voltage_V"][:3])
+    assert all(math.isnan(v) for v in data["voltage_V"][3:])
+    assert all(math.isnan(c) for c in data["current_A"][3:])

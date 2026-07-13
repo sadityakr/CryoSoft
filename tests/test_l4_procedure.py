@@ -227,8 +227,8 @@ def test_initiate_returns_correct_structure(procedure, tmp_path):
     assert "temperature_vti" in plan.targets
     assert plan.targets["temperature_vti"].target == pytest.approx(300.0)
 
-    configure = next(c for c in plan.commands if c.vi_name == "keithley_delta_mode")
-    assert configure.method == "configure"
+    arm = next(c for c in plan.commands if c.vi_name == "keithley_delta_mode")
+    assert arm.method == "initiate"
 
     assert plan.wait_s == pytest.approx(0.0)
 
@@ -248,10 +248,10 @@ def test_initiate_full_phaseplan_content_and_command_order(procedure, tmp_path):
     cmd = plan.commands[0]
     assert isinstance(cmd, Command)
     assert cmd.vi_name == "keithley_delta_mode"
-    assert cmd.method == "configure"
-    assert cmd.kwargs["method"] == "delta_mode"
+    assert cmd.method == "initiate"
     assert cmd.kwargs["current"] == pytest.approx(1e-6)
     assert cmd.kwargs["n_readings"] == 5
+    assert cmd.kwargs["voltmeter_range_V"] == pytest.approx(0.01)
 
     assert plan.wait_s == pytest.approx(0.0)
 
@@ -359,9 +359,9 @@ def test_measure_without_initiate_raises(procedure):
 def test_measure_saves_datapoint(procedure, tmp_path):
     """measure() writes data to the HDF5 file at the correct sweep index."""
     procedure.initiate()
-    # Configure the measurement VI (normally done via station.send_measurement_commands)
-    procedure._station.keithley_delta_mode.configure(
-        method="delta_mode", current=1e-6, n_readings=5
+    # Arm the measurement VI (normally done via station.send_measurement_commands)
+    procedure._station.keithley_delta_mode.initiate(
+        current=1e-6, n_readings=5
     )
 
     procedure.measure()
@@ -378,8 +378,8 @@ def test_measure_saves_datapoint(procedure, tmp_path):
 def test_measure_stores_snapshot(procedure, tmp_path):
     """measure() stores a JSON station snapshot."""
     procedure.initiate()
-    procedure._station.keithley_delta_mode.configure(
-        method="delta_mode", current=1e-6, n_readings=5
+    procedure._station.keithley_delta_mode.initiate(
+        current=1e-6, n_readings=5
     )
     procedure.measure()
     filepath = procedure._data_manager.filepath
@@ -444,9 +444,9 @@ def test_full_orchestrator_loop(station, tmp_path, qtbot):
 
     orch = Orchestrator(station, tick_interval_ms=10)
 
-    # Pre-configure keithley_delta_mode (normally done by orchestrator via station)
+    # Pre-arm keithley_delta_mode (normally done by orchestrator via station)
     # The Orchestrator calls station.send_measurement_commands from run_procedure,
-    # which dispatches configure(). That happens inside run_procedure → initiate().
+    # which dispatches initiate(). That happens inside run_procedure → initiate().
     orch.run_procedure(procedure)
 
     with qtbot.waitSignal(orch.procedure_finished, timeout=10000):
