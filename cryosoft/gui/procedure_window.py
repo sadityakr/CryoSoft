@@ -650,6 +650,9 @@ class ProcedureWindow(QMainWindow):
         label_overrides = {name: name.removeprefix("mux_") for name in group.params}
         form, widgets = param_form.build_form_layout(group.params, label_overrides, wrap=True)
         self._register_group_widgets(group, widgets)
+        for widget in widgets.values():
+            if isinstance(widget, QCheckBox):
+                widget.stateChanged.connect(self._refresh_route_selectors)
         box.setLayout(form)
         return box
 
@@ -699,6 +702,54 @@ class ProcedureWindow(QMainWindow):
                 except (ValueError, TypeError):
                     pass
         return selections
+
+    def _current_mux_routes(self) -> list[str]:
+        """Return the route names whose mux_<route> checkboxes are currently checked.
+
+        Scans the "mux" ParamGroup (if it exists) for enabled checkboxes. Returns
+        an empty list if no mux group exists (no switch VI on the station), or if
+        the mux group exists but no routes are checked (scanner available but off).
+
+        Returns:
+            List of route names corresponding to checked mux checkboxes, in group order.
+            Empty list if no mux group exists OR no routes are selected.
+        """
+        mux_group = next(
+            (g for g in self._current_groups if g.key == "mux"), None
+        )
+        if mux_group is None:
+            return []
+
+        selected: list[str] = []
+        for name, spec in mux_group.params.items():
+            widget = self._param_inputs.get(name)
+            if widget is None:
+                continue
+            try:
+                if param_form.collect_value(widget, spec):
+                    route_name = name.removeprefix("mux_")
+                    selected.append(route_name)
+            except (ValueError, TypeError):
+                pass
+        return selected
+
+    def _has_mux_group(self) -> bool:
+        """Return True if the station has a switch VI (mux group exists)."""
+        return any(g.key == "mux" for g in self._current_groups)
+
+    def _refresh_route_selectors(self) -> None:
+        """Update plot route selectors with currently-selected routes.
+
+        Checks if a mux group exists (scanner VI present) and which routes are
+        checked; passes that to both plot panels' ``set_available_routes()``.
+        If no scanner VI exists, passes None to hide the selector.
+        """
+        if self._has_mux_group():
+            routes = self._current_mux_routes()
+        else:
+            routes = None
+        self._plot1.set_available_routes(routes)
+        self._plot2.set_available_routes(routes)
 
     def _on_structural_changed(self, *_args: Any) -> None:
         """Re-derive the form after a structural parameter changed.
@@ -864,12 +915,14 @@ class ProcedureWindow(QMainWindow):
             "Plot 1", PLOT_SERIES[0],
             x_selector_name="x1_axis_selector",
             y_selector_name="y_axis_selector",
+            route_selector_name="route1_selector",
             plot_object_name="live_plot",
         )
         self._plot2 = LivePlotPanel(
             "Plot 2", PLOT_SERIES[1],
             x_selector_name="x2_axis_selector",
             y_selector_name="y2_axis_selector",
+            route_selector_name="route2_selector",
             plot_object_name="live_plot_2",
         )
         for panel in (self._plot1, self._plot2):
@@ -1183,6 +1236,9 @@ class ProcedureWindow(QMainWindow):
         # Per-panel Y defaults: Plot 1 → voltage, Plot 2 → current.
         self._plot1.set_available_keys(keys, default_x, "voltage_V")
         self._plot2.set_available_keys(keys, default_x, "current_A")
+
+        # Refresh route selectors based on currently-selected routes (if any).
+        self._refresh_route_selectors()
 
     def _reset_plot(self, proc: BaseProcedure) -> None:
         """Clear datapoints and refresh axis selectors for a new run.
