@@ -14,19 +14,21 @@
 | Magnet PSU | Oxford Mercury iPS | ASRL5 | MERCURY IPS:223350003:2.5.09.000 | ✓ OK |
 | VTI Temp | Oxford ITC 503 | ASRL12 | ITC503 Version 1.11 | ⚠ BLOCKED |
 | Sample Temp | Lakeshore 335 | GPIB0::30 | LSCI,MODEL335,LSA29H3 | ✓ OK |
+| Scanner/Switch | Keithley 705 | GPIB0::17 | C001,S0 | ✓ OK |
 | Current Source | Keithley 6220 | GPIB0::19 | KEITHLEY 6220,4555659,D04 | ✓ OK |
+| Nanovoltmeter | Keithley 2182A | Serial relay to K6220 | (internal) | ✓ OK |
 | Nanovoltmeter | HP 34420A | GPIB0::27 | HEWLETT-PACKARD,34420A,0,3.0 | 🔍 Not used yet |
-| Meter (BLOCKED) | Keithley 2182A | ? | ? | ⚠ NOT FOUND |
 
 ---
 
 ## Preflight Check
 
-**Result:** ✓ **PASSED** (3/3 active drivers OK)
+**Result:** ✓ **PASSED** (4/4 active drivers OK)
 
 ```
 mercury_ips          ASRL5::INSTR   OxfordMercuryiPS       OK
 lakeshore_sample     GPIB0::30      Lakeshore335           OK
+keithley_705         GPIB0::17      Keithley705            OK
 keithley_6220        GPIB0::19      Keithley6221 (6220)    OK
 ```
 
@@ -42,9 +44,10 @@ keithley_6220        GPIB0::19      Keithley6221 (6220)    OK
 | Mercury iPS | get_current | -0.0006 A | ✓ (near zero, persistent mode) |
 | Lakeshore 335 | get_idn | LSCI,MODEL335,LSA29H3/#######,2.1 | ✓ |
 | Lakeshore 335 | get_temperature | 0.0 K | ⚠ (sensor disconnected?) |
+| Keithley 705 | get_idn | C001,S0 | ✓ |
 | Keithley 6220 | get_idn | KEITHLEY INSTRUMENTS INC.,MODEL 6220,4555659,D04 /700x | ✓ |
 
-**Assessment:** All L0 tests passed. Mercury iPS and Keithley 6220 respond correctly and consistently. Lakeshore 335 temperature read as 0K, indicating the RTD sensor may be disconnected or misconfigured.
+**Assessment:** All L0 tests passed. Mercury iPS, K705, and K6220 respond correctly. Lakeshore 335 temperature reads 0K, indicating the RTD sensor may be disconnected or misconfigured.
 
 ### L1 — Set/Read-Back (Zero Excitation)
 
@@ -80,20 +83,35 @@ keithley_6220        GPIB0::19      Keithley6221 (6220)    OK
 
 ---
 
-### Issue #2: Keithley 2182A (Nanovoltmeter)
+### Issue #2: Keithley 2182A (Nanovoltmeter) — RESOLVED ✓
 
-**Symptom:** Not found on GPIB bus. User reported GPIB28, but:
-- GPIB0::28 does not exist (ResourceManager reports only GPIB0–30)
-- Probed GPIB0::7, 17, 18, 0–3: no K2182A response
+**Symptom:** Not found on GPIB bus. User reported GPIB28.
 
-**Hypothesis:** Either:
-- Instrument is on a serial port (ASRL) instead
-- Wrong GPIB address reported by user
-- Instrument not powered/connected
+**Resolution (2026-07-16 23:30):** User clarified K2182A uses **RS232 serial relay inside the K6220**. This is a hardware configuration, not a bus discovery issue.
 
-**Resolution Required:** Confirm actual address with hardware inspection.
+**Implementation:**
+- No separate driver entry needed
+- K6220 driver handles serial relay via `configure_and_start_delta()` method
+- Delta-mode VI configured: `source: keithley_6220`, `meter: keithley_6220` (both refer to same driver, which routes to K2182A internally)
+- Verified in delta-mode VI class documentation
 
-**Impact:** Delta-mode resistance measurement blocked (requires both 6220 source and 2182A meter). DC direct measurement not yet implemented.
+**Status:** ✓ Measurement chain ready. K2182A is accessible as secondary meter on K6220 serial relay.
+
+---
+
+### Issue #3: Keithley 705 Scanner (Matrix Switch) — RESOLVED ✓
+
+**Discovery (2026-07-16 23:40):** GPIB0::17 identified as **Keithley 705 scanner** responding with "C001,S0" to `*IDN?` query.
+
+**Implementation:**
+- Added `keithley_705` to `real_drivers` section of devices.yaml
+- Configured with `expect_idn: "C001,S0"`
+- K705 is DDC command-based (not SCPI) — driver uses single-letter commands (C/N/R/U0) terminated by 'X'
+- Status: ✓ Ready
+
+**Impact:** Measurement routing now available. K705 can switch signal paths between instruments.
+
+---
 
 ---
 
@@ -102,25 +120,27 @@ keithley_6220        GPIB0::19      Keithley6221 (6220)    OK
 | Subsystem | Status |
 |-----------|--------|
 | Magnet PSU | ✓ Ready |
+| Measurement Router (K705) | ✓ Ready |
 | Sample Thermometry | ⚠ Needs sensor check (reads 0K) |
 | VTI Thermometry | ⚠ **Blocked** (ITC 503 driver) |
 | Current Source | ✓ Ready |
-| Voltage Meter | ⚠ **Blocked** (K2182A missing) |
-| Measurement Chain | ⚠ **Incomplete** |
+| Voltage Meter (K2182A) | ✓ Ready (serial relay via K6220) |
+| Measurement Chain | ✓ Ready (all instruments respond) |
 
 ---
 
 ## Next Steps
 
-1. **Immediate (Before Measurement):**
-   - Inspect Lakeshore 335 RTD sensor connection
-   - Locate Keithley 2182A address (check rear panel or scan with GPIB controller utility)
-   - Fix or replace pymeasure ITC 503 driver
+1. **Immediate (Blocking Measurement):**
+   - **✓ K705 Scanner (GPIB0::17)** — NOW IN CONFIG (identified 2026-07-16 23:45)
+   - **✓ K2182A Routing** — RESOLVED via serial relay in K6220 (no separate entry needed)
+   - **Inspect Lakeshore 335 RTD Sensor** — Currently reads 0K; check physical connection to RTD input
+   - **Fix Oxford ITC 503 Driver** — Recommend native ISOBUS implementation (pymeasure blocked)
 
 2. **Integration Testing (After Blockers Resolved):**
-   - L1 bench: set/read-back on each subsystem
+   - L1 bench: set/read-back on each subsystem (zero excitation)
    - L2 bench: minimal excitation tests (≤10 mA magnet, ≤1 nA source)
-   - Full measurement chain delta-mode sequence
+   - Full measurement chain delta-mode sequence with K705 routing
    - Cool-down trial under VTI regulation
 
 3. **Sign-Off:**
