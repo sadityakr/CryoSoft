@@ -33,6 +33,11 @@ real_drivers:
     address: "GPIB0::19::INSTR"
     expect_idn: "KEITHLEY INSTRUMENTS INC.,MODEL 6220"
   
+  keithley_705:
+    class: cryosoft.drivers.keithley_705.Keithley705
+    address: "GPIB0::17::INSTR"
+    expect_idn: "C001,S0"
+  
   # NOTE: Keithley 2182A is connected via RS232 serial to the K6220.
   # Delta mode uses the internal serial relay in K6220.configure_and_start_delta().
   # No separate driver entry needed — K6220 driver handles both instruments.
