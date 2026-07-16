@@ -1,0 +1,85 @@
+# Configuration for the 12T-Cryo setup
+# Instruments: Oxford Mercury iPS (magnet), Oxford ITC 503 (VTI temperature),
+# Lakeshore 335 (sample temperature), Keithley 6220 (source), Keithley 2182A (meter).
+#
+# Calibration:
+#   TESLA_TO_AMPERE = 7.954  A/T
+#   Mercury iPS: ±90 A = ±12 T max
+#   Magnet currently in persistent mode (not energized during commissioning)
+
+# Default data directory (outside CryoSoft folder)
+data_directory: "C:/CryoData"
+
+real_drivers:
+  mercury_ips:
+    class: cryosoft.drivers.oxford_mercury_ips.OxfordMercuryiPS
+    address: "ASRL5::INSTR"
+    expect_idn: "MERCURY IPS"
+  
+  # BLOCKED: OxfordITC503 pymeasure integration issue (C3 command fails)
+  # Requires investigation into pymeasure serial parameters
+  # itc_vti:
+  #   class: cryosoft.drivers.oxford_itc503.OxfordITC503
+  #   address: "ASRL12::INSTR"
+  #   expect_idn: "ITC503"
+  
+  lakeshore_sample:
+    class: cryosoft.drivers.lakeshore_335.Lakeshore335
+    address: "GPIB0::30::INSTR"
+    expect_idn: "LSCI,MODEL335"
+  
+  keithley_6220:
+    class: cryosoft.drivers.keithley_6221.Keithley6221
+    address: "GPIB0::19::INSTR"
+    expect_idn: "KEITHLEY INSTRUMENTS INC.,MODEL 6220"
+  
+  # NOTE: Keithley 2182A is connected via RS232 serial to the K6220.
+  # Delta mode uses the internal serial relay in K6220.configure_and_start_delta().
+  # No separate driver entry needed — K6220 driver handles both instruments.
+
+virtual_instruments:
+  magnet_x:
+    class: cryosoft.virtual_instruments.magnet.superconducting_magnet_persistent.SuperconductingMagnetPersistentVI
+    drivers: {main: mercury_ips}
+    vi_type: system
+    init_params:
+      amperes_per_tesla: 7.954
+      max_current: 90.0
+      min_current: -90.0
+      default_ramp_rate: 1.2
+      ramp_segments:
+        - {max_current_A: 44.0,  rate_A_per_min: 12.0}
+        - {max_current_A: 76.0,  rate_A_per_min: 6.0}
+        - {max_current_A: 84.0,  rate_A_per_min: 2.4}
+        - {max_current_A: 90.0,  rate_A_per_min: 1.2}
+      switch_heater_warmup_s: 60
+      switch_heater_cooldown_s: 60
+
+  # BLOCKED: Requires itc_vti driver (pymeasure issue)
+  # temperature_vti:
+  #   class: cryosoft.virtual_instruments.temperature.vti_temperature_controller.VTITemperatureControllerVI
+  #   drivers: {main: itc_vti}
+  #   vi_type: system
+  #   init_params:
+  #     default_ramp_rate: 2.0
+  #     tolerance: 0.5
+  #     min_temperature_K: 1.4
+  #     max_temperature_K: 320.0
+  #     max_ramp_rate_K_per_min: 20.0
+
+  temperature_sample:
+    class: cryosoft.virtual_instruments.temperature.sample_temperature_controller.SampleTemperatureControllerVI
+    drivers: {main: lakeshore_sample}
+    vi_type: system
+    init_params:
+      default_ramp_rate: 1.0
+      tolerance: 0.3
+      min_temperature_K: 1.4
+      max_temperature_K: 320.0
+      max_ramp_rate_K_per_min: 20.0
+
+  keithley_delta_mode:
+    class: cryosoft.virtual_instruments.measurement.measurement_delta_mode.DeltaModeMeasurementVI
+    drivers: {source: keithley_6220, meter: keithley_6220}  # serial relay to K2182A
+    vi_type: measurement
+    init_params: {}
