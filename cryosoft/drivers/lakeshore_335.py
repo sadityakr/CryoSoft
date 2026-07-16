@@ -298,6 +298,41 @@ class Lakeshore335:
             raw = self._query("OUTMODE? 1")
             self._write(f"OUTMODE 1,{raw}")
 
+    def get_sensor_curve(self, sensor_input: str = "A") -> int:
+        """Return the curve number assigned to the sensor input.
+
+        Args:
+            sensor_input: Sensor input channel ('A' or 'B', default 'A').
+
+        Returns:
+            The assigned curve number.
+        """
+        ch = str(sensor_input).upper()
+        if ch not in ("A", "B"):
+            raise ValueError(f"Sensor input must be 'A' or 'B', got {sensor_input}")
+        raw = self._query(f"INCRV? {ch}")
+        try:
+            return int(raw)
+        except ValueError as exc:
+            raise CryoSoftCommunicationError(
+                f"Lakeshore 335: cannot parse curve from {raw!r}: {exc}",
+                vi_name="Lakeshore335",
+            ) from exc
+
+    def set_sensor_curve(self, curve: int, sensor_input: str = "A") -> None:
+        """Assign a temperature sensor curve to a sensor input.
+
+        Args:
+            curve: Curve number (0 = None, 1-20 = Standard, 21-59 = User).
+            sensor_input: Sensor input channel ('A' or 'B', default 'A').
+        """
+        ch = str(sensor_input).upper()
+        if ch not in ("A", "B"):
+            raise ValueError(f"Sensor input must be 'A' or 'B', got {sensor_input}")
+        if not (0 <= curve <= 59):
+            raise ValueError(f"Curve number must be in [0, 59], got {curve}")
+        self._write(f"INCRV {ch},{curve}")
+
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------

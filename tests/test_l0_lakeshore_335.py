@@ -113,3 +113,22 @@ def test_error_injection():
         d.get_temperature()
     with pytest.raises(CryoSoftCommunicationError):
         d.get_idn()
+
+
+def test_sensor_curve_selection():
+    d = SimLakeshore335("SIM")
+    assert d.get_sensor_curve("A") == 22
+    assert d.get_sensor_curve("B") == 2
+    
+    d.set_sensor_curve(21, "A")
+    assert d.get_sensor_curve("A") == 21
+    
+    d.set_sensor_curve(23, "B")
+    assert d.get_sensor_curve("B") == 23
+    
+    with pytest.raises(ValueError):
+        d.set_sensor_curve(60, "A")
+    with pytest.raises(ValueError):
+        d.set_sensor_curve(-1, "A")
+    with pytest.raises(ValueError):
+        d.set_sensor_curve(21, "C")

@@ -48,6 +48,7 @@ class SimLakeshore335:
         self._integral_action_time: float = 50.0
         self._derivative_action_time: float = 0.0
         self._auto_pid: bool = False
+        self._sensor_curves: dict[str, int] = {"A": 22, "B": 2}
         
         # Simulation physics
         self._last_update: float = time.time()
@@ -151,6 +152,24 @@ class SimLakeshore335:
         """Return simulated identification string."""
         self._check_error()
         return "LSCI,MODEL335,SIM,1.0"
+
+    def get_sensor_curve(self, sensor_input: str = "A") -> int:
+        """Return the curve number assigned to the sensor input."""
+        self._check_error()
+        ch = str(sensor_input).upper()
+        if ch not in ("A", "B"):
+            raise ValueError(f"Sensor input must be 'A' or 'B', got {sensor_input}")
+        return self._sensor_curves[ch]
+
+    def set_sensor_curve(self, curve: int, sensor_input: str = "A") -> None:
+        """Assign a temperature sensor curve to a sensor input."""
+        self._check_error()
+        ch = str(sensor_input).upper()
+        if ch not in ("A", "B"):
+            raise ValueError(f"Sensor input must be 'A' or 'B', got {sensor_input}")
+        if not (0 <= curve <= 59):
+            raise ValueError(f"Curve number must be in [0, 59], got {curve}")
+        self._sensor_curves[ch] = int(curve)
 
     # ------------------------------------------------------------------
     # Simulation & Internal helpers
