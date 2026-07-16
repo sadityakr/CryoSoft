@@ -18,7 +18,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from diagnostic_utils import enumerate_gpib_devices, enumerate_serial_ports, try_visa_query, query_serial_device
+from diagnostic_utils import (
+    enumerate_gpib_devices,
+    enumerate_serial_ports,
+    try_visa_query,
+    query_serial_device,
+    discover_oxford_instrument,
+)
 
 
 def main():
@@ -99,6 +105,17 @@ def main():
 
         elif is_serial:
             query_result = query_serial_device(address, "*IDN?", baudrate=9600, timeout_ms=1000)
+            if not query_result["success"]:
+                oxford_info = discover_oxford_instrument(address, timeout_ms=1000)
+                if oxford_info:
+                    status["instruments"][address] = {
+                        "connected": True,
+                        "identity": f"{oxford_info['instrument_type']}: {oxford_info['parsed']}",
+                        "type": "Serial",
+                    }
+                    status["summary"]["connected"] += 1
+                    continue
+
             if query_result["success"]:
                 status["instruments"][address] = {
                     "connected": True,
