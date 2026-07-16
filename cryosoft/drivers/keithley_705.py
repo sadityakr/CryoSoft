@@ -159,6 +159,31 @@ class Keithley705:
         """
         return sorted(self._closed)
 
+    def set_four_point_mode(self) -> None:
+        """Set the scanner to 4-pole (4-point) mode."""
+        self._write("A3X")
+
+    def close_channel(self, channel: str) -> None:
+        """Open all channels first (exclusive mux) and close a single channel.
+
+        Args:
+            channel: Channel specification string (e.g. "1").
+        """
+        ch = str(channel)
+        self._write(f"R{_CMD_CLOSE_PREFIX}{ch}{_CMD_EXECUTE}")
+        self._closed.clear()
+        self._closed.add(ch)
+
+    def open_channel(self, channel: str) -> None:
+        """Open (disconnect) a single channel.
+
+        Args:
+            channel: Channel specification string (e.g. "1").
+        """
+        ch = str(channel)
+        self._write(f"{_CMD_OPEN_PREFIX}{ch}{_CMD_EXECUTE}")
+        self._closed.discard(ch)
+
     # ------------------------------------------------------------------
     # Private VISA helpers
     # ------------------------------------------------------------------
