@@ -113,6 +113,8 @@ class Lakeshore335:
         if setpoint < 0.0:
             raise ValueError(f"Setpoint must be >= 0 K, got {setpoint}")
         self._write(f"SETP 1,{setpoint:.4f}")
+        import time
+        time.sleep(0.05)  # Allow instrument to process setpoint update
 
     def get_heater_output(self) -> float:
         """Return the heater output for output 1 as a percentage (0–100 %).
