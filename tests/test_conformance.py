@@ -49,7 +49,7 @@ import cryosoft.drivers
 import cryosoft.procedures
 import cryosoft.virtual_instruments
 from cryosoft.core.exceptions import CryoSoftSafetyError
-from cryosoft.core.plan import ParamSpec, ReadingVariant
+from cryosoft.core.plan import ParamSpec
 from cryosoft.core.procedure import BaseProcedure
 from cryosoft.core.station import Station, _import_class, build_station
 from cryosoft.virtual_instruments.base import (
@@ -662,97 +662,72 @@ def test_measurement_vi_round_trip(vi_cls: type) -> None:
         )
 
 
-def _variant_param_sets(vi_cls: type) -> list[dict]:
-    """Defaults, plus defaults with each bool parameter flipped in turn.
+@pytest.mark.parametrize(
+    "vi_cls", _all_measurement_vi_classes(), ids=lambda c: c.__name__
+)
+def test_measurement_vi_reading_setters_contract(vi_cls: type) -> None:
+    """reading_setters obeys the reading-loop standard.
 
-    Reading variants are typically switched by a bool parameter (e.g.
-    ``bipolar``), so checking the defaults alone would never exercise the
-    variant path. Flipping one bool at a time keeps the sweep linear.
+    Every key names an existing, non-bool measurement parameter; every value
+    names a real method of the VI whose signature accepts the parameter under
+    its own name. See MeasurementInstrumentBase's "reading loop" section.
     """
+    for param_name, setter_name in vi_cls.reading_setters.items():
+        spec = vi_cls.measurement_parameters.get(param_name)
+        assert spec is not None, (
+            f"{vi_cls.__name__}.reading_setters key {param_name!r} is not a "
+            f"measurement parameter"
+        )
+        assert spec.type is not bool, (
+            f"{vi_cls.__name__}.reading_setters key {param_name!r} is a bool — "
+            f"a bool cannot be looped over a value list"
+        )
+        setter = getattr(vi_cls, setter_name, None)
+        assert callable(setter), (
+            f"{vi_cls.__name__}.reading_setters[{param_name!r}] names method "
+            f"{setter_name!r}, which the VI does not have"
+        )
+        sig_params = inspect.signature(setter).parameters
+        accepts = param_name in sig_params or any(
+            p.kind is p.VAR_KEYWORD for p in sig_params.values()
+        )
+        assert accepts, (
+            f"{vi_cls.__name__}.{setter_name}() must accept the looped "
+            f"parameter as a keyword named {param_name!r}"
+        )
+
+
+@pytest.mark.parametrize(
+    "vi_cls", _all_measurement_vi_classes(), ids=lambda c: c.__name__
+)
+def test_measurement_vi_reading_setter_round_trip(vi_cls: type) -> None:
+    """Every reading setter reconfigures the reading, never its shape.
+
+    Built from sim drivers and armed with defaults, calling each declared
+    setter (with the parameter's default value, as one reading-loop iteration
+    would) must leave take_reading() returning exactly the declared keys and
+    lengths.
+    """
+    if not vi_cls.reading_setters:
+        pytest.skip(f"{vi_cls.__name__} declares no reading_setters")
+    vi = vi_cls(_build_sim_measurement_drivers())
     defaults = {
         name: spec.default for name, spec in vi_cls.measurement_parameters.items()
     }
-    param_sets = [dict(defaults)]
-    for name, spec in vi_cls.measurement_parameters.items():
-        if spec.type is bool:
-            param_sets.append({**defaults, name: not defaults[name]})
-    return param_sets
-
-
-@pytest.mark.parametrize(
-    "vi_cls", _all_measurement_vi_classes(), ids=lambda c: c.__name__
-)
-def test_measurement_vi_reading_variants_contract(vi_cls: type) -> None:
-    """reading_variants() obeys the reading-loop standard for every param set.
-
-    For the defaults and each single-bool toggle: the hook returns a tuple of
-    ReadingVariant, never exactly one, with unique keys, and every command
-    targets the given vi_name and names a real method of the VI. See
-    MeasurementInstrumentBase's "reading loop" section.
-    """
-    vi = vi_cls(_build_sim_measurement_drivers())
-    for params in _variant_param_sets(vi_cls):
-        variants = vi.reading_variants("meas_vi", params)
-        assert isinstance(variants, tuple), (
-            f"{vi_cls.__name__}.reading_variants() must return a tuple, "
-            f"got {type(variants).__name__}"
+    vi.initiate(**defaults)
+    arrays = vi.data_arrays(defaults)
+    expected_keys = (
+        set(vi_cls.measurement_data_keys) | set(vi_cls.measurement_scalar_columns)
+    )
+    for param_name, setter_name in vi_cls.reading_setters.items():
+        getattr(vi, setter_name)(**{param_name: defaults[param_name]})
+        data = vi.take_reading()
+        assert set(data) == expected_keys, (
+            f"{vi_cls.__name__}: after {setter_name}(), take_reading() returned "
+            f"{sorted(data)}, expected {sorted(expected_keys)}"
         )
-        assert len(variants) != 1, (
-            f"{vi_cls.__name__}.reading_variants() returned exactly one variant "
-            f"for {params} — return () (single plain reading) or two or more"
-        )
-        keys = [v.key for v in variants]
-        assert len(set(keys)) == len(keys), (
-            f"{vi_cls.__name__}.reading_variants() declared duplicate keys {keys}"
-        )
-        for variant in variants:
-            assert isinstance(variant, ReadingVariant), (
-                f"{vi_cls.__name__}.reading_variants() must return "
-                f"ReadingVariant objects, got {variant!r}"
+        for name, length in arrays.items():
+            assert len(data[name]) == length, (
+                f"{vi_cls.__name__}: after {setter_name}(), '{name}' has length "
+                f"{len(data[name])}, declared {length}"
             )
-            for cmd in variant.commands:
-                assert cmd.vi_name == "meas_vi", (
-                    f"{vi_cls.__name__} variant {variant.key!r} commands VI "
-                    f"{cmd.vi_name!r} — a VI's variants may only configure itself"
-                )
-                assert callable(getattr(vi_cls, cmd.method, None)), (
-                    f"{vi_cls.__name__} variant {variant.key!r} names method "
-                    f"{cmd.method!r}, which the VI does not have"
-                )
-
-
-@pytest.mark.parametrize(
-    "vi_cls", _all_measurement_vi_classes(), ids=lambda c: c.__name__
-)
-def test_measurement_vi_reading_variant_round_trip(vi_cls: type) -> None:
-    """Every declared variant keeps the fixed reading shape after its commands.
-
-    For each param set whose reading_variants() are non-empty: arm the VI,
-    apply each variant's commands (as the generic sweep procedure would, in
-    order), and check take_reading() still returns exactly the declared keys
-    and lengths — variants reconfigure the reading, never its shape.
-    """
-    for params in _variant_param_sets(vi_cls):
-        vi = vi_cls(_build_sim_measurement_drivers())
-        variants = vi.reading_variants("meas_vi", params)
-        if not variants:
-            continue
-        vi.initiate(**params)
-        arrays = vi.data_arrays(params)
-        for variant in variants:
-            for cmd in variant.commands:
-                getattr(vi, cmd.method)(**cmd.kwargs)
-            data = vi.take_reading()
-            expected_keys = (
-                set(vi_cls.measurement_data_keys)
-                | set(vi_cls.measurement_scalar_columns)
-            )
-            assert set(data) == expected_keys, (
-                f"{vi_cls.__name__} variant {variant.key!r}: take_reading() "
-                f"returned {sorted(data)}, expected {sorted(expected_keys)}"
-            )
-            for name, length in arrays.items():
-                assert len(data[name]) == length, (
-                    f"{vi_cls.__name__} variant {variant.key!r}: '{name}' has "
-                    f"length {len(data[name])}, declared {length}"
-                )

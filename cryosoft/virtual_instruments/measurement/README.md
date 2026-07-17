@@ -42,15 +42,17 @@ Uniform lifecycle (methods)
   mismatches mid-run.
 - `standby() → None` — safe-off idle state.
 - `ping() → bool` — IDN check on all drivers.
-- `reading_variants(vi_name, params) → tuple[ReadingVariant, ...]` — OPTIONAL
-  reading-loop hook (default `()`). Return two or more `ReadingVariant`s (a
-  suffix `key` + the `Command`s to run before that reading, all targeting
-  `vi_name`) to make the generic sweep procedure take one reading per variant
-  at every sweep point, columns suffixed `{name}__{key}` (composing with switch
-  routes as `{name}__{key}__{route}`). Variants never change the reading's
-  shape. A parameter whose value changes the variants (e.g. a `bipolar`
-  checkbox) must be declared `structural=True` so the GUI re-derives the
-  live-plot keys. Full contract in `MeasurementInstrumentBase`'s docstring.
+- `reading_setters: dict[str, str]` — OPTIONAL reading-loop declaration
+  (default `{}`): maps a `measurement_parameters` name to the cheap setter
+  method that reprograms just that quantity between readings without
+  re-arming (e.g. `{"current_A": "set_source_current"}`). One entry is all a
+  VI declares — the generic sweep procedure auto-renders a "Reading loop"
+  form group where the user enters a comma-separated value list, dispatches
+  the setter before each value's reading, suffixes columns `{name}__L{i}`
+  (composing with switch routes as `{name}__L{i}__{route}`), and stores the
+  label -> value map in the HDF5 metadata. Setters must accept the parameter
+  under its own name and never change the reading's shape. Full contract in
+  `MeasurementInstrumentBase`'s docstring.
 
 ## Interface contract
 DC measurement classes inherit `DCMeasurementBase` (which fixes the DC-resistance
@@ -70,9 +72,9 @@ every measurement VI automatically.
 3. Implement `data_arrays(params)`, `initiate(**params)`, `take_reading()`,
    `standby()` (and `ping()`). Keep `@control` on `initiate()` if the GUI should
    be able to arm it. Pad short returns to the declared length with
-   `float("nan")` and report the true count in a scalar column. Override
-   `reading_variants(vi_name, params)` only if a point needs several readings
-   under different configurations (see the Exit section above).
+   `float("nan")` and report the true count in a scalar column. Declare a
+   `reading_setters` entry (parameter → setter method) for any parameter the
+   reading loop should be able to vary per point (see the Exit section above).
 4. If the VI needs a driver role not already in
    `tests/test_conformance.py::_SIM_MEASUREMENT_DRIVER_CLASSES`, add its sim
    driver there so the round-trip conformance test can build it.
@@ -80,11 +82,12 @@ every measurement VI automatically.
 
 ## Files
 - `dc_separate_measurement.py` — `DCSeparateMeasurementVI`: Keithley 6221 source +
-  2182A nanovoltmeter, simple DC mode. Its `bipolar` parameter is the reference
-  `reading_variants` implementation: each sweep point measured at +current and
-  -current (`set_source_current` commands, columns `__pos` / `__neg`). tests:
-  `tests/test_measurement_dc_vi.py`, `tests/test_l1_new_vis.py`
-  (`TestDCSeparateMeasurementVI`), `tests/test_new_procedures.py` (reading loop).
+  2182A nanovoltmeter, simple DC mode. Declares the reference `reading_setters`
+  entry `{"current_A": "set_source_current"}`, so the reading loop can measure
+  a user-entered current list (e.g. `1e-6, -1e-6`) at every sweep point
+  (columns `__L1` / `__L2`). tests: `tests/test_measurement_dc_vi.py`,
+  `tests/test_l1_new_vis.py` (`TestDCSeparateMeasurementVI`),
+  `tests/test_new_procedures.py` (reading loop).
 - `dc_single_instrument.py` — `DCSingleInstrumentVI`: Keithley 2400 SMU,
   single-instrument DC mode with the same method contract. tests:
   `tests/test_l1_new_vis.py` (`TestDCSingleInstrumentVI`).

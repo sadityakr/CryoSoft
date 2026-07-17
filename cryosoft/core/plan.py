@@ -172,23 +172,25 @@ class Command:
 class ReadingVariant:
     """One alternative measurement configuration read at every sweep point.
 
-    The currency of the *reading loop* (see GLOSSARY.md): a measurement VI may
-    declare that each sweep point comprises several readings under different
-    configurations — e.g. one at +I and one at -I source current — by returning
-    an ordered tuple of ``ReadingVariant`` from its ``reading_variants()`` hook.
-    The generic sweep procedure then loops the variants at every sweep point,
-    dispatching each variant's ``commands`` (through the Station, the same
-    channel every other measurement command uses) before that variant's
-    ``take_reading()``, and suffixing the returned columns ``__{key}``.
+    The internal currency of the *reading loop* (see GLOSSARY.md): the generic
+    sweep procedure builds one ``ReadingVariant`` per user-entered loop value —
+    the user picks a loopable measurement parameter (declared by the VI's
+    ``reading_setters``) in the GUI's Reading loop group and enters a
+    comma-separated value list; value *i* becomes the variant with index label
+    ``L{i}`` and a single setter ``Command``. At every sweep point the
+    procedure dispatches each variant's ``commands`` (through the Station, the
+    same channel every other measurement command uses) before that variant's
+    ``take_reading()``, and suffixes the returned columns ``__{key}``.
 
     ``key`` obeys the same naming rules as a switch **route** (no ``__``, no
     ``/``), because both are expanded into HDF5 column suffixes by
     ``DataSchema.multiplexed()`` and compose as ``{name}__{key}__{route}``.
 
     Attributes:
-        key: Short suffix label naming this variant (e.g. ``"pos"``, ``"neg"``).
-            Non-empty string containing neither ``__`` (the reserved column
-            separator) nor ``/`` (illegal in an HDF5 dataset name).
+        key: Short suffix label naming this variant (index labels ``"L1"``,
+            ``"L2"``, … when built from the GUI loop). Non-empty string
+            containing neither ``__`` (the reserved column separator) nor
+            ``/`` (illegal in an HDF5 dataset name).
         commands: Ordered ``Command`` tuple dispatched before this variant's
             reading. Normalised to a tuple; may be empty (a plain re-read).
     """

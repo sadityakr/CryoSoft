@@ -10,9 +10,11 @@
 #   selection (a structural ``measurement_vi`` parameter whose choices come from
 #   the station), station-driven measurement-parameter merging, DataSchema
 #   assembly, the shared four-method loop, and the reading loop (per-datapoint
-#   iteration over switch routes x the VI's reading variants, suffixing columns
-#   {name}__{variant}__{route}); a concrete axis procedure supplies only the
-#   ramp targets, the axis read-back, and the settle times.
+#   iteration over switch routes x a user-entered value list for one loopable
+#   measurement parameter, declared via the VI's reading_setters; columns are
+#   suffixed {name}__L{i}__{route} and the label->value map is stored in the
+#   HDF5 metadata); a concrete axis procedure supplies only the ramp targets,
+#   the axis read-back, and the settle times.
 # entry_point: Not run directly. Subclassed by concrete procedures.
 # dependencies:
 #   - cryosoft.core.station (Station)
@@ -59,6 +61,7 @@ from cryosoft.core.plan import (
     ParamGroup,
     ParamSpec,
     PhasePlan,
+    ReadingVariant,
     StepPlan,
     Target,
 )
@@ -534,6 +537,13 @@ class BaseProcedure:
         return ()
 
 
+# Form-parameter names the generic sweep procedure owns structurally (they are
+# never a measurement VI's own knobs, so a VI param may not shadow them).
+_STRUCTURAL_PARAM_NAMES = frozenset(
+    {"measurement_vi", "loop_parameter", "loop_values"}
+)
+
+
 class SweepMeasureProcedure(BaseProcedure):
     """Generic base for "sweep one axis, run any measurement method" procedures.
 
@@ -560,13 +570,18 @@ class SweepMeasureProcedure(BaseProcedure):
     * **The reading loop.** One datapoint may comprise several readings, taken
       by two nested, independently optional levels inside ``measure()``:
       switch **routes** (outer — the channels the user ticked when the station
-      has a switch VI and the scanner is enabled) and the VI's **reading
-      variants** (inner — alternative configurations like +I / -I, declared by
-      the VI's ``reading_variants()`` hook). Each looping level suffixes the
-      measurement columns with its label, composing as
-      ``{name}__{variant}__{route}``; a level that does not loop (no variants,
-      0 or 1 route) adds no suffix and no commands. All per-reading setup is
-      dispatched as ``Command``s through the Station, never by direct VI calls.
+      has a switch VI and the scanner is enabled) and a **looped parameter
+      value list** (inner — the user picks ONE loopable measurement parameter,
+      declared by the VI's ``reading_setters``, and enters a comma-separated
+      list of values, e.g. ``"1e-6, -1e-6"`` for +/- current). The form's
+      "Reading loop" group renders automatically for any VI that declares
+      setters. Value *i* is measured under index label ``L{i}``; each looping
+      level suffixes the measurement columns with its label, composing as
+      ``{name}__L{i}__{route}``, and the label -> value map is stored in the
+      HDF5 metadata (``procedure_params["loop_labels"]``). A level that does
+      not loop (loop off, 0 or 1 route) adds no suffix and no commands. All
+      per-reading setup is dispatched as ``Command``s through the Station,
+      never by direct VI calls.
 
     A concrete axis procedure (``FieldSweep``, ``TemperatureSweep``) subclasses
     this and supplies only the axis-specific pieces via the hooks below:
@@ -598,8 +613,10 @@ class SweepMeasureProcedure(BaseProcedure):
             file_prefix: Optional filename prefix (see ``BaseProcedure``).
             **param_values: Form values. ``measurement_vi`` selects the
                 measurement VI by name (defaults to the first registered one);
-                the remaining keys are the sweep/system params and the selected
-                VI's measurement params.
+                ``loop_parameter`` / ``loop_values`` define the optional
+                reading loop (a loopable parameter of the selected VI and its
+                comma-separated value list); the remaining keys are the
+                sweep/system params and the selected VI's measurement params.
 
         Raises:
             CryoSoftConfigError: If the station has no measurement VIs, if
@@ -628,7 +645,7 @@ class SweepMeasureProcedure(BaseProcedure):
         vi = station.get_vi(selected)
         vi_specs: dict[str, ParamSpec] = vi.measurement_parameters
         collisions = sorted(
-            (set(type(self).parameters) | {"measurement_vi"}) & set(vi_specs)
+            (set(type(self).parameters) | _STRUCTURAL_PARAM_NAMES) & set(vi_specs)
         )
         if collisions:
             raise CryoSoftConfigError(
@@ -686,37 +703,55 @@ class SweepMeasureProcedure(BaseProcedure):
             self._params.update(mux_params)
             self._selected_routes = [r for r in routes if mux_params[f"mux_{r}"]]
 
-        # ── Reading-variant resolution (the reading loop's inner level) ───────
-        # The selected VI may declare that every sweep point comprises several
-        # readings under different configurations (e.g. +I / -I). Resolve and
-        # validate its variants once, here, so a bad declaration fails at the
-        # procedure boundary and never inside the tick loop.
-        variants = tuple(
-            vi.reading_variants(self._measurement_vi, self._measurement_params)
-        )
-        if len(variants) == 1:
-            raise CryoSoftConfigError(
-                f"{type(self).name!r}: measurement VI {selected!r} returned "
-                f"exactly one reading variant ({variants[0].key!r}); "
-                f"reading_variants() must return none (a single plain reading) "
-                f"or two or more."
+        # ── Reading-loop resolution (the loop's inner level: a value list) ────
+        # The user may loop ONE loopable measurement parameter — declared by
+        # the VI's ``reading_setters`` — over a comma-separated value list;
+        # value i is measured under index label "L{i}" at every sweep point.
+        # Resolved and validated here so a bad selection fails at the
+        # procedure boundary and never inside the tick loop. With
+        # loop_parameter unset (""), any lingering loop_values text is ignored
+        # (the form always renders both fields).
+        loop_parameter = str(param_values.get("loop_parameter") or "")
+        loop_values_text = str(param_values.get("loop_values") or "")
+        loop_values: list = []
+        variants: tuple[ReadingVariant, ...] = ()
+        if loop_parameter:
+            setters = dict(vi.reading_setters)
+            if loop_parameter not in setters:
+                raise CryoSoftConfigError(
+                    f"{type(self).name!r}: loop_parameter={loop_parameter!r} is "
+                    f"not a loopable parameter of measurement VI {selected!r} "
+                    f"(loopable: {', '.join(setters) or 'none'})."
+                )
+            loop_values = self._parse_loop_values(
+                loop_parameter, vi_specs[loop_parameter], loop_values_text
             )
-        variant_keys = [v.key for v in variants]
-        if len(set(variant_keys)) != len(variant_keys):
-            raise CryoSoftConfigError(
-                f"{type(self).name!r}: measurement VI {selected!r} declared "
-                f"duplicate reading-variant keys {variant_keys}."
+            if len(loop_values) < 2:
+                raise CryoSoftConfigError(
+                    f"{type(self).name!r}: the reading loop over "
+                    f"{loop_parameter!r} needs at least two comma-separated "
+                    f"values, got {loop_values_text!r}."
+                )
+            setter = setters[loop_parameter]
+            variants = tuple(
+                ReadingVariant(
+                    key=f"L{i}",
+                    commands=(
+                        Command(
+                            self._measurement_vi, setter, {loop_parameter: value}
+                        ),
+                    ),
+                )
+                for i, value in enumerate(loop_values, start=1)
             )
-        for variant in variants:
-            for cmd in variant.commands:
-                if cmd.vi_name != self._measurement_vi:
-                    raise CryoSoftConfigError(
-                        f"{type(self).name!r}: reading variant "
-                        f"{variant.key!r} commands VI {cmd.vi_name!r}; a "
-                        f"measurement VI's variants may only configure the VI "
-                        f"itself ({self._measurement_vi!r})."
-                    )
         self._reading_variants: tuple = variants
+        # Record the loop in the run's params so the HDF5 metadata
+        # (procedure_params) carries the selection and the label -> value map.
+        self._params["loop_parameter"] = loop_parameter
+        self._params["loop_values"] = list(loop_values)
+        self._params["loop_labels"] = {
+            f"L{i}": value for i, value in enumerate(loop_values, start=1)
+        }
 
         # Live-plot / data keys: suffix per reading level only when that level
         # loops — per variant with >=2 variants, per route with >=2 routes.
@@ -734,6 +769,65 @@ class SweepMeasureProcedure(BaseProcedure):
         self.measurement_data_keys = keys
 
     # ------------------------------------------------------------------
+    # Reading-loop value parsing (shared by __init__ and the live-plot keys)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _parse_loop_values(param_name: str, spec: ParamSpec, text: str) -> list:
+        """Parse a comma-separated loop-value list against a parameter's spec.
+
+        Each entry is converted with the spec's ``type`` and checked against
+        its ``min``/``max`` bounds or ``choices``, so a loop value obeys
+        exactly the constraints the single-value form field would enforce.
+
+        Args:
+            param_name: The looped parameter's name (for error messages).
+            spec: The looped parameter's ``ParamSpec``.
+            text: The user-entered comma-separated list (e.g. ``"1e-6, -1e-6"``).
+
+        Returns:
+            The parsed values, in entry order (empty for blank *text*).
+
+        Raises:
+            CryoSoftConfigError: If the parameter is a bool (not loopable), an
+                entry does not parse as the spec's type, or a parsed value
+                violates the spec's bounds/choices.
+        """
+        if spec.type is bool:
+            raise CryoSoftConfigError(
+                f"reading loop: parameter {param_name!r} is a bool and cannot "
+                f"be looped over a value list."
+            )
+        values: list = []
+        for entry in (e.strip() for e in text.split(",")):
+            if not entry:
+                continue
+            try:
+                value = spec.type(entry)
+            except (TypeError, ValueError) as exc:
+                raise CryoSoftConfigError(
+                    f"reading loop: {entry!r} is not a valid "
+                    f"{spec.type.__name__} for parameter {param_name!r}."
+                ) from exc
+            if spec.choices is not None and value not in spec.choices.values():
+                raise CryoSoftConfigError(
+                    f"reading loop: {value!r} is not one of {param_name!r}'s "
+                    f"allowed choices {list(spec.choices.values())}."
+                )
+            if spec.min is not None and value < spec.min:
+                raise CryoSoftConfigError(
+                    f"reading loop: {value!r} is below {param_name!r}'s "
+                    f"minimum {spec.min!r}."
+                )
+            if spec.max is not None and value > spec.max:
+                raise CryoSoftConfigError(
+                    f"reading loop: {value!r} is above {param_name!r}'s "
+                    f"maximum {spec.max!r}."
+                )
+            values.append(value)
+        return values
+
+    # ------------------------------------------------------------------
     # Parameter groups: measurement-method selection + selected VI's params
     # ------------------------------------------------------------------
 
@@ -743,15 +837,19 @@ class SweepMeasureProcedure(BaseProcedure):
     ) -> list[ParamGroup]:
         """Build the form: the static Sweep/System groups + measurement select.
 
-        Appends two dynamic groups after the class's static groups: a
+        Appends the dynamic groups after the class's static groups: a
         "Measurement method" group with the structural ``measurement_vi``
-        selector, and a group carrying the selected VI's own
-        ``measurement_parameters``.
+        selector, a "Reading loop" group (only when the selected VI declares
+        ``reading_setters``) with the structural ``loop_parameter`` /
+        ``loop_values`` pair, a group carrying the selected VI's own
+        ``measurement_parameters``, and the mux route checkboxes (only when
+        the station has an enabled switch VI).
 
         Args:
             station: The active Station (supplies the measurement VIs).
             selections: Current structural-param values; ``measurement_vi`` picks
-                the VI whose parameters group is shown (defaults to the first).
+                the VI whose parameters group is shown (defaults to the first),
+                ``loop_parameter``/``loop_values`` carry the reading loop.
 
         Returns:
             The ordered ``ParamGroup`` list the GUI renders.
@@ -798,12 +896,57 @@ class SweepMeasureProcedure(BaseProcedure):
                 params={"measurement_vi": select_spec},
             )
         )
-
-        # (b) The selected VI's own parameters.
         vi = station.get_vi(selected)
+
+        # (b) The reading loop, rendered ABOVE the VI's own parameter group:
+        # when the selected VI declares loopable parameters (reading_setters),
+        # the user picks one and enters a comma-separated value list measured
+        # at every sweep point (columns suffixed __L1, __L2, ...). Both params
+        # are structural: changing either changes which live-plot columns the
+        # run produces. No setters -> no group, zero behaviour change.
+        setters = dict(vi.reading_setters)
+        if setters:
+            selected_loop = selections.get("loop_parameter")
+            if selected_loop not in setters:
+                selected_loop = ""
+            loop_choices: dict[str, str] = {"Off": ""}
+            for param_name in setters:
+                unit = vi.measurement_parameters[param_name].unit
+                label = f"{param_name} ({unit})" if unit else param_name
+                loop_choices[label] = param_name
+            loop_spec = ParamSpec(
+                type=str,
+                default=selected_loop,
+                choices=loop_choices,
+                structural=True,
+                description=(
+                    "Measurement parameter repeated at every sweep point"
+                ),
+            )
+            values_spec = ParamSpec(
+                type=str,
+                default=str(selections.get("loop_values") or ""),
+                structural=True,
+                description=(
+                    "Comma-separated values, measured as L1, L2, ... at "
+                    "every sweep point"
+                ),
+            )
+            groups.append(
+                ParamGroup(
+                    key="reading_loop",
+                    title="Reading loop",
+                    params={
+                        "loop_parameter": loop_spec,
+                        "loop_values": values_spec,
+                    },
+                )
+            )
+
+        # (c) The selected VI's own parameters.
         vi_specs: dict[str, ParamSpec] = dict(vi.measurement_parameters)
         collisions = sorted(
-            (set(cls.parameters) | {"measurement_vi"}) & set(vi_specs)
+            (set(cls.parameters) | _STRUCTURAL_PARAM_NAMES) & set(vi_specs)
         )
         if collisions:
             raise CryoSoftConfigError(
@@ -818,7 +961,7 @@ class SweepMeasureProcedure(BaseProcedure):
             )
         )
 
-        # (c) Multiplexing: when the station has a switch VI, one checkbox per
+        # (d) Multiplexing: when the station has a switch VI, one checkbox per
         # route. The "mux_" prefix keeps route names (which can collide with
         # measurement/system parameter names) in their own namespace. No switch
         # VI -> no group, zero behaviour change. (Multiple switches out of
@@ -850,13 +993,15 @@ class SweepMeasureProcedure(BaseProcedure):
     ) -> list[str]:
         """Return the selected measurement VI's array + scalar column names.
 
-        When the VI declares reading variants for the current selections, the
-        keys are expanded per variant (``{key}__{variant}``) so the plot axis
-        selectors offer the columns the run will actually produce. This is why
-        a variant-driving measurement parameter must be ``structural=True``:
-        only structural values reach ``selections``, and only their changes
-        re-derive the selectors. Route suffixes are NOT applied here — the
-        GUI's per-plot route selector composes them at draw time.
+        When the current selections define a reading loop (a loopable
+        ``loop_parameter`` plus two or more parseable ``loop_values``), the
+        keys are expanded per index label (``{key}__L1``, ``{key}__L2``, …) so
+        the plot axis selectors offer the columns the run will actually
+        produce. Both loop params are ``structural=True`` precisely so their
+        values reach ``selections`` and their changes re-derive the selectors.
+        An un-parseable value list is treated as no loop here (construction
+        will refuse it loudly). Route suffixes are NOT applied — the GUI's
+        per-plot route selector composes them at draw time.
         """
         names = station.measurement_vi_names()
         if not names:
@@ -867,11 +1012,21 @@ class SweepMeasureProcedure(BaseProcedure):
             selected = names[0]
         vi = station.get_vi(selected)
         keys = list(vi.measurement_data_keys) + list(vi.measurement_scalar_columns)
-        params = {name: spec.default for name, spec in vi.measurement_parameters.items()}
-        params.update({k: v for k, v in selections.items() if k in params})
-        variants = tuple(vi.reading_variants(selected, params))
-        if len(variants) >= 2:
-            keys = [f"{key}__{v.key}" for key in keys for v in variants]
+        loop_parameter = selections.get("loop_parameter") or ""
+        if loop_parameter in vi.reading_setters:
+            spec = vi.measurement_parameters.get(loop_parameter)
+            try:
+                values = cls._parse_loop_values(
+                    loop_parameter, spec, str(selections.get("loop_values") or "")
+                ) if spec is not None else []
+            except CryoSoftConfigError:
+                values = []
+            if len(values) >= 2:
+                keys = [
+                    f"{key}__L{i}"
+                    for key in keys
+                    for i in range(1, len(values) + 1)
+                ]
         return keys
 
     # ------------------------------------------------------------------

@@ -4,24 +4,23 @@
 #   using a dedicated current source and a separate voltmeter.
 #   initiate() arms the source with a fixed current, compliance, voltmeter
 #   range and readings-per-point. take_reading() collects that many voltage
-#   samples at the fixed current. The bipolar measurement parameter expands,
-#   via the reading_variants() reading-loop hook, every sweep point into a
-#   +current and a -current reading (set_source_current commands, columns
-#   suffixed "__pos" / "__neg") for thermal-offset cancellation.
+#   samples at the fixed current. Declares reading_setters
+#   {"current_A": "set_source_current"} so the generic sweep procedure's
+#   reading loop can measure a user-entered list of currents (e.g. +/- pairs
+#   for thermal-offset cancellation) at every sweep point.
 # entry_point: Not run directly; instantiated by Station factory.
 # dependencies:
 #   - cryosoft.virtual_instruments.base (DCMeasurementBase)
 #   - cryosoft.core.decorators (control)
-#   - cryosoft.core.plan (Command, ParamSpec, ReadingVariant)
 # input: |
 #   drivers = {"source": <current source driver>, "meter": <voltmeter driver>}
-#   initiate(current_A, compliance_A, voltmeter_range_V, readings_per_point,
-#   bipolar) must be called before the argument-less take_reading().
+#   initiate(current_A, compliance_A, voltmeter_range_V, readings_per_point)
+#   must be called before the argument-less take_reading().
 # process: |
 #   initiate() stores measurement parameters and programs both instruments.
 #   take_reading() acquires readings_per_point voltage samples and returns them
 #   alongside a constant current array. set_source_current() reprograms only
-#   the source current between readings (the bipolar variants' setup command).
+#   the source current between readings (the reading loop's setter command).
 # output: |
 #   {"voltage_V": list[float], "current_A": list[float]} of length
 #   readings_per_point.
@@ -32,11 +31,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import Any, ClassVar
 
 from cryosoft.core.decorators import control
-from cryosoft.core.plan import Command, ParamSpec, ReadingVariant
 from cryosoft.virtual_instruments.base import DCMeasurementBase
 
 _NOT_INITIATED = object()
@@ -76,23 +73,11 @@ class DCSeparateMeasurementVI(DCMeasurementBase):
     # single-SMU DCSingleInstrumentVI.
     selector_label: ClassVar[str] = "DC (6221 + 2182A)"
 
-    # The DC-resistance knobs from DCMeasurementBase plus the bipolar toggle:
-    # when on, reading_variants() expands every sweep point into a +current_A
-    # and a -current_A reading (columns "__pos" / "__neg") for thermal-offset
-    # cancellation without delta-mode hardware. Structural, because toggling it
-    # changes which live-plot columns the run produces.
-    measurement_parameters: ClassVar[dict[str, ParamSpec]] = {
-        **DCMeasurementBase.measurement_parameters,
-        "bipolar": ParamSpec(
-            type=bool,
-            default=False,
-            structural=True,
-            description=(
-                "Measure each point at +current and -current "
-                "(thermal-offset cancellation)"
-            ),
-        ),
-    }
+    # Reading-loop declaration: the source current can be reprogrammed between
+    # readings without re-arming, so the generic sweep procedure lets the user
+    # loop a list of currents (e.g. "1e-6, -1e-6" for +/- offset cancellation)
+    # at every sweep point.
+    reading_setters: ClassVar[dict[str, str]] = {"current_A": "set_source_current"}
 
     def __init__(self, drivers: dict[str, object], **init_params: Any) -> None:
         super().__init__(drivers, **init_params)
@@ -115,7 +100,6 @@ class DCSeparateMeasurementVI(DCMeasurementBase):
         compliance_A: float = 1e-3,
         voltmeter_range_V: float = 0.1,
         readings_per_point: int = 10,
-        bipolar: bool = False,
     ) -> None:
         """Arm both instruments and configure measurement parameters.
 
@@ -125,12 +109,7 @@ class DCSeparateMeasurementVI(DCMeasurementBase):
             voltmeter_range_V: Full-scale voltage range in Volts.
             readings_per_point: Number of voltage samples ``take_reading()``
                 collects per datapoint.
-            bipolar: Accepted for parameter-set completeness; the +/- expansion
-                itself is driven by ``reading_variants()`` (the generic sweep
-                procedure dispatches a ``set_source_current`` command before
-                each polarity's reading). Arming always starts at +current_A.
         """
-        _ = bipolar
         self._current_A = float(current_A)
         self._compliance_A = float(compliance_A)
         self._voltmeter_range_V = float(voltmeter_range_V)
@@ -169,10 +148,10 @@ class DCSeparateMeasurementVI(DCMeasurementBase):
     def set_source_current(self, current_A: float) -> None:
         """Reprogram the source current without re-arming the measurement.
 
-        The per-reading configuration step behind the bipolar reading
-        variants: keeps compliance, voltmeter range and readings-per-point as
-        armed and changes only the source current (sign included). Subsequent
-        ``take_reading()`` calls report the new current in ``current_A``.
+        The per-reading setter behind ``reading_setters["current_A"]``: keeps
+        compliance, voltmeter range and readings-per-point as armed and changes
+        only the source current (sign included). Subsequent ``take_reading()``
+        calls report the new current in ``current_A``.
 
         Args:
             current_A: New DC source current in Amperes (may be negative).
@@ -184,39 +163,6 @@ class DCSeparateMeasurementVI(DCMeasurementBase):
             raise RuntimeError("initiate() must be called before set_source_current().")
         self._current_A = float(current_A)
         self._source.set_current(self._current_A)  # type: ignore[attr-defined]
-
-    def reading_variants(
-        self, vi_name: str, params: Mapping[str, Any]
-    ) -> tuple[ReadingVariant, ...]:
-        """Expand ``bipolar=True`` into a +current and a -current reading.
-
-        Args:
-            vi_name: This VI's station-registered name (targeted by the
-                returned commands).
-            params: Resolved measurement parameters (``bipolar``, ``current_A``).
-
-        Returns:
-            ``()`` when ``bipolar`` is off (single plain reading), else the
-            ``pos`` / ``neg`` variants, each setting the source current before
-            its reading.
-        """
-        if not params.get("bipolar"):
-            return ()
-        current = float(params["current_A"])
-        return (
-            ReadingVariant(
-                key="pos",
-                commands=(
-                    Command(vi_name, "set_source_current", {"current_A": current}),
-                ),
-            ),
-            ReadingVariant(
-                key="neg",
-                commands=(
-                    Command(vi_name, "set_source_current", {"current_A": -current}),
-                ),
-            ),
-        )
 
     # ------------------------------------------------------------------
     # Lifecycle

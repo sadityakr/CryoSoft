@@ -8,11 +8,12 @@
 #   column, an end-to-end Orchestrator run, and the DataSchema negative case
 #   (a wrong-shaped reading degrades the Orchestrator to ERROR, unwritten).
 #   Also keeps the set_ramp_rate @control and Station rate-forwarding checks.
-#   The reading-loop section covers VI reading variants (the DC VI's bipolar
-#   +/- current expansion): suffixed schema/columns, command dispatch through
-#   the Station, composition with switch routes ({name}__{variant}__{route}),
-#   construction-time refusals, live-plot key expansion, and an end-to-end
-#   Orchestrator run.
+#   The reading-loop section covers the user-entered value list (looping the
+#   DC VI's current_A over "1e-6, -1e-6" via reading_setters): L-label
+#   schema/columns, the HDF5 loop_labels metadata, command dispatch through
+#   the Station, composition with switch routes ({name}__L{i}__{route}),
+#   construction-time refusals, the auto-rendered Reading loop form group,
+#   live-plot key expansion, and an end-to-end Orchestrator run.
 # entry_point: pytest tests/test_new_procedures.py -v
 # last_updated: 2026-07-17
 # ---
@@ -644,39 +645,42 @@ def test_mux_full_orchestrator_loop_two_routes(station, tmp_path, qtbot):
         assert not np.any(np.isnan(f["data"]["voltage_V__Mux-Ch1"][:]))
 
 
-# ── The reading loop: VI reading variants (± current), alone and with mux ────
+# ── The reading loop: user-entered value list (± current), alone and with mux ─
 
-BIPOLAR = {**DC, "bipolar": True}
+LOOP = {**DC, "loop_parameter": "current_A", "loop_values": "1e-6, -1e-6"}
 
 
-def test_variants_construction_and_suffixed_keys(station, tmp_path):
-    """bipolar=True resolves pos/neg variants and suffixes the data keys."""
-    proc = _field_proc(station, tmp_path, BIPOLAR)
-    assert [v.key for v in proc._reading_variants] == ["pos", "neg"]
+def test_loop_construction_labels_and_suffixed_keys(station, tmp_path):
+    """A two-value current loop resolves L1/L2 variants and suffixes the keys."""
+    proc = _field_proc(station, tmp_path, LOOP)
+    assert [v.key for v in proc._reading_variants] == ["L1", "L2"]
     assert proc.measurement_data_keys == [
-        "voltage_V__pos", "voltage_V__neg",
-        "current_A__pos", "current_A__neg",
+        "voltage_V__L1", "voltage_V__L2",
+        "current_A__L1", "current_A__L2",
     ]
+    # The label -> value map is recorded for the HDF5 metadata.
+    assert proc._params["loop_parameter"] == "current_A"
+    assert proc._params["loop_labels"] == {"L1": 1e-6, "L2": -1e-6}
 
 
-def test_variants_schema_expanded_per_variant_only(station, tmp_path):
-    """The DataSchema arrays are expanded per variant; other columns untouched."""
-    proc = _field_proc(station, tmp_path, BIPOLAR)
+def test_loop_schema_expanded_per_label_only(station, tmp_path):
+    """The DataSchema arrays are expanded per label; other columns untouched."""
+    proc = _field_proc(station, tmp_path, LOOP)
     proc.initiate()
     schema = proc._data_schema
     proc.standby()
 
     assert set(schema.arrays) == {
-        "voltage_V__pos", "voltage_V__neg",
-        "current_A__pos", "current_A__neg",
+        "voltage_V__L1", "voltage_V__L2",
+        "current_A__L1", "current_A__L2",
     }
     assert "field_T" in schema.sweep_columns
     assert "unix_time" in schema.sweep_columns
 
 
-def test_variants_measure_writes_suffixed_keys_with_signed_current(station, tmp_path):
-    """measure() loops the variants; the __neg reading carries -current_A."""
-    proc = _field_proc(station, tmp_path, BIPOLAR)
+def test_loop_measure_writes_suffixed_keys_with_signed_current(station, tmp_path):
+    """measure() loops the values; the L2 reading carries -current_A."""
+    proc = _field_proc(station, tmp_path, LOOP)
     proc.initiate()
     _arm(station, DC, proc)
     proc.measure()
@@ -684,15 +688,31 @@ def test_variants_measure_writes_suffixed_keys_with_signed_current(station, tmp_
     proc.standby()
 
     with h5py.File(filepath, "r") as f:
-        assert f["data"]["voltage_V__pos"].shape == (1, 5)
-        assert f["data"]["voltage_V__neg"].shape == (1, 5)
-        assert np.allclose(f["data"]["current_A__pos"][0], 1e-6)
-        assert np.allclose(f["data"]["current_A__neg"][0], -1e-6)
+        assert f["data"]["voltage_V__L1"].shape == (1, 5)
+        assert f["data"]["voltage_V__L2"].shape == (1, 5)
+        assert np.allclose(f["data"]["current_A__L1"][0], 1e-6)
+        assert np.allclose(f["data"]["current_A__L2"][0], -1e-6)
 
 
-def test_variants_dispatched_as_commands(station, tmp_path):
-    """Variant setup goes through send_measurement_commands, never direct calls."""
-    proc = _field_proc(station, tmp_path, BIPOLAR)
+def test_loop_metadata_carries_label_map(station, tmp_path):
+    """The HDF5 metadata's procedure_params records the loop and its labels."""
+    import json
+
+    proc = _field_proc(station, tmp_path, LOOP)
+    proc.initiate()
+    filepath = proc._data_manager.filepath
+    proc.standby()
+
+    with h5py.File(filepath, "r") as f:
+        params = json.loads(f["metadata"].attrs["procedure_params"])
+    assert params["loop_parameter"] == "current_A"
+    assert params["loop_values"] == [1e-6, -1e-6]
+    assert params["loop_labels"] == {"L1": 1e-6, "L2": -1e-6}
+
+
+def test_loop_setter_dispatched_as_commands(station, tmp_path):
+    """Per-value setup goes through send_measurement_commands, never direct calls."""
+    proc = _field_proc(station, tmp_path, LOOP)
     proc.initiate()
     _arm(station, DC, proc)
 
@@ -710,24 +730,24 @@ def test_variants_dispatched_as_commands(station, tmp_path):
         station.send_measurement_commands = original
         proc.standby()
 
-    variant_calls = [
+    setter_calls = [
         c for batch in calls for c in batch
         if c.vi_name == "dc_measurement" and c.method == "set_source_current"
     ]
-    assert [c.kwargs["current_A"] for c in variant_calls] == [1e-6, -1e-6]
+    assert [c.kwargs["current_A"] for c in setter_calls] == [1e-6, -1e-6]
 
 
-def test_variants_compose_with_mux_routes(station, tmp_path):
-    """Variants (inner) x routes (outer): columns {name}__{variant}__{route}."""
-    proc = _field_proc_mux(station, tmp_path, BIPOLAR, MUX2)
+def test_loop_composes_with_mux_routes(station, tmp_path):
+    """Value list (inner) x routes (outer): columns {name}__L{i}__{route}."""
+    proc = _field_proc_mux(station, tmp_path, LOOP, MUX2)
     proc.initiate()
     schema = proc._data_schema
     _arm(station, DC, proc)
 
     assert set(schema.arrays) == {
-        f"{name}__{variant}__{route}"
+        f"{name}__{label}__{route}"
         for name in ("voltage_V", "current_A")
-        for variant in ("pos", "neg")
+        for label in ("L1", "L2")
         for route in ("Mux-Ch1", "Mux-Ch2")
     }
 
@@ -747,7 +767,7 @@ def test_variants_compose_with_mux_routes(station, tmp_path):
     filepath = proc._data_manager.filepath
     proc.standby()
 
-    # Per point: route is the outer (slow) loop, variants the inner one.
+    # Per point: route is the outer (slow) loop, the value list the inner one.
     flat = [
         (c.method, c.kwargs.get("route") or c.kwargs.get("current_A"))
         for batch in calls for c in batch
@@ -760,80 +780,102 @@ def test_variants_compose_with_mux_routes(station, tmp_path):
     ]
 
     with h5py.File(filepath, "r") as f:
-        assert f["data"]["voltage_V__pos__Mux-Ch1"].shape == (1, 5)
-        assert np.allclose(f["data"]["current_A__neg__Mux-Ch2"][0], -1e-6)
+        assert f["data"]["voltage_V__L1__Mux-Ch1"].shape == (1, 5)
+        assert np.allclose(f["data"]["current_A__L2__Mux-Ch2"][0], -1e-6)
 
 
-def test_variants_off_keeps_plain_columns(station, tmp_path):
-    """bipolar=False (the default) leaves schema and keys exactly as before."""
-    proc = _field_proc(station, tmp_path, DC)
+def test_loop_off_keeps_plain_columns(station, tmp_path):
+    """Loop off (the default) leaves schema and keys exactly as before; a
+    lingering loop_values text without a loop_parameter is ignored."""
+    proc = _field_proc(station, tmp_path, {**DC, "loop_values": "1e-6, -1e-6"})
     assert proc._reading_variants == ()
     proc.initiate()
     assert set(proc._data_schema.arrays) == {"voltage_V", "current_A"}
     proc.standby()
 
 
-def test_single_variant_refused(station, tmp_path):
-    """A VI returning exactly one variant fails loudly at construction."""
+def test_loop_non_loopable_parameter_refused(station, tmp_path):
+    """Looping a parameter the VI declared no setter for fails at construction."""
     from cryosoft.core.exceptions import CryoSoftConfigError
-    from cryosoft.core.plan import ReadingVariant
 
-    vi = station.get_vi("dc_measurement")
-    vi.reading_variants = lambda name, params: (ReadingVariant(key="only"),)
-    with pytest.raises(CryoSoftConfigError, match="exactly one reading variant"):
-        _field_proc(station, tmp_path, DC)
+    with pytest.raises(CryoSoftConfigError, match="voltmeter_range_V"):
+        _field_proc(
+            station, tmp_path,
+            {**DC, "loop_parameter": "voltmeter_range_V", "loop_values": "0.1, 1.0"},
+        )
 
 
-def test_variant_commanding_other_vi_refused(station, tmp_path):
-    """A variant whose command targets another VI fails loudly at construction."""
+def test_loop_bad_value_refused(station, tmp_path):
+    """An entry that does not parse as the parameter's type fails loudly."""
     from cryosoft.core.exceptions import CryoSoftConfigError
-    from cryosoft.core.plan import ReadingVariant
 
-    vi = station.get_vi("dc_measurement")
-    vi.reading_variants = lambda name, params: (
-        ReadingVariant(key="a", commands=(Command("magnet_x", "get_field", {}),)),
-        ReadingVariant(key="b"),
+    with pytest.raises(CryoSoftConfigError, match="abc"):
+        _field_proc(
+            station, tmp_path,
+            {**DC, "loop_parameter": "current_A", "loop_values": "1e-6, abc"},
+        )
+
+
+def test_loop_single_value_refused(station, tmp_path):
+    """A loop needs at least two values (one value is just the plain param)."""
+    from cryosoft.core.exceptions import CryoSoftConfigError
+
+    with pytest.raises(CryoSoftConfigError, match="at least two"):
+        _field_proc(
+            station, tmp_path,
+            {**DC, "loop_parameter": "current_A", "loop_values": "1e-6"},
+        )
+
+
+def test_loop_group_rendered_only_for_vis_with_setters(station):
+    """The Reading loop group auto-renders for VIs declaring reading_setters."""
+    groups = FieldSweep.get_param_groups(
+        station, {"measurement_vi": "dc_measurement"}
     )
-    with pytest.raises(CryoSoftConfigError, match="magnet_x"):
-        _field_proc(station, tmp_path, DC)
+    loop_groups = [g for g in groups if g.key == "reading_loop"]
+    assert len(loop_groups) == 1
+    params = loop_groups[0].params
+    assert params["loop_parameter"].structural is True
+    assert params["loop_values"].structural is True
+    assert "current_A (A)" in params["loop_parameter"].choices
+    # The loop group sits ABOVE the selected VI's own parameter group.
+    keys = [g.key for g in groups]
+    assert keys.index("reading_loop") < keys.index("measurement:dc_measurement")
 
-
-def test_duplicate_variant_keys_refused(station, tmp_path):
-    """Two variants sharing a key fail loudly at construction."""
-    from cryosoft.core.exceptions import CryoSoftConfigError
-    from cryosoft.core.plan import ReadingVariant
-
-    vi = station.get_vi("dc_measurement")
-    vi.reading_variants = lambda name, params: (
-        ReadingVariant(key="same"), ReadingVariant(key="same"),
+    # A VI with no reading_setters gets no loop group.
+    delta_groups = FieldSweep.get_param_groups(
+        station, {"measurement_vi": "keithley_delta_mode"}
     )
-    with pytest.raises(CryoSoftConfigError, match="duplicate"):
-        _field_proc(station, tmp_path, DC)
+    assert not any(g.key == "reading_loop" for g in delta_groups)
 
 
-def test_live_plot_keys_expand_per_variant(station):
-    """live_plot_measurement_keys() offers the variant-suffixed columns."""
-    selections = {"measurement_vi": "dc_measurement", "bipolar": True}
+def test_live_plot_keys_expand_per_label(station):
+    """live_plot_measurement_keys() offers the label-suffixed columns."""
+    selections = {
+        "measurement_vi": "dc_measurement",
+        "loop_parameter": "current_A",
+        "loop_values": "1e-6, -1e-6",
+    }
     keys = FieldSweep.live_plot_measurement_keys(station, selections)
     assert keys == [
-        "voltage_V__pos", "voltage_V__neg",
-        "current_A__pos", "current_A__neg",
+        "voltage_V__L1", "voltage_V__L2",
+        "current_A__L1", "current_A__L2",
     ]
-    # Without the toggle the keys are plain — routes are a GUI selector concern.
+    # Without a loop the keys are plain — routes are a GUI selector concern.
     plain = FieldSweep.live_plot_measurement_keys(
         station, {"measurement_vi": "dc_measurement"}
     )
     assert plain == ["voltage_V", "current_A"]
 
 
-def test_variants_full_orchestrator_loop(station, tmp_path, qtbot):
-    """A bipolar field sweep completes to IDLE with per-variant datasets."""
+def test_loop_full_orchestrator_run(station, tmp_path, qtbot):
+    """A +/- current field sweep completes to IDLE with per-label datasets."""
     from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 
     station.magnet_x._default_ramp_rate = 6000.0
     station.magnet_x._ramp_segments = []
 
-    proc = _field_proc(station, tmp_path, BIPOLAR)
+    proc = _field_proc(station, tmp_path, LOOP)
     orch = Orchestrator(station, tick_interval_ms=10)
     orch.run_procedure(proc)
 
@@ -845,5 +887,5 @@ def test_variants_full_orchestrator_loop(station, tmp_path, qtbot):
     assert len(h5_files) == 1
     with h5py.File(h5_files[0], "r") as f:
         assert f["data"]["field_T"].shape[0] == 3
-        assert f["data"]["voltage_V__pos"].shape == (3, 5)
-        assert np.allclose(f["data"]["current_A__neg"][:], -1e-6)
+        assert f["data"]["voltage_V__L1"].shape == (3, 5)
+        assert np.allclose(f["data"]["current_A__L2"][:], -1e-6)

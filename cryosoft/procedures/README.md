@@ -91,17 +91,27 @@ that reading's columns via `DataSchema.multiplexed(...)`:
   `measure()` connects each route in turn and suffixes `{name}__{route}`
   (e.g. `voltage_V__Mux-Ch1`). `standby()` / `abort()` append a switch
   `open_all` when routes were used.
-- **Reading variants (inner level — reading settings).** The selected
-  measurement VI may declare, via its `reading_variants(vi_name, params)` hook,
-  that every point comprises several readings under different configurations
-  (e.g. the DC VI's `bipolar` checkbox expands into `pos` / `neg` +/- current
-  variants). Each variant's commands run before its reading and its columns
-  are suffixed `{name}__{variant}`. Adding per-point reading settings is
-  therefore a measurement-VI change, never a procedure change.
+- **Value list (inner level — reading settings).** When the selected
+  measurement VI declares loopable parameters (its `reading_setters` class
+  attribute maps a parameter to the cheap setter that reprograms it between
+  readings, e.g. `{"current_A": "set_source_current"}`), `get_param_groups()`
+  auto-renders a **Reading loop** group above the VI's parameter group: a
+  structural `loop_parameter` drop-down and a `loop_values` comma-separated
+  text field (e.g. `1e-6, -1e-6` for +/- current). Value *i* is measured under
+  index label `L{i}`: the setter is dispatched before each value's reading and
+  its columns are suffixed `{name}__L{i}`; the label -> value map is stored in
+  the HDF5 metadata (`procedure_params["loop_labels"]`). Values are validated
+  against the parameter's own `ParamSpec` (type, bounds, choices) at
+  construction. Making a parameter loopable is therefore a one-line
+  measurement-VI declaration, never procedure or GUI code.
 
-Suffixes compose inner level first: `{name}__{variant}__{route}`. A level that
-does not loop (no variants, 0 or 1 route) adds no suffix and no commands; the
-axis, system columns, and `unix_time` are never suffixed.
+Suffixes compose inner level first: `{name}__L{i}__{route}`. The loop is
+capped at these two levels (channels x one looped parameter). A level that
+does not loop (loop off, 0 or 1 route) adds no suffix and no commands; the
+axis, system columns, and `unix_time` are never suffixed. Live-plot axis
+selectors follow the same two levels: with the loop on they offer the
+`{name}__L{i}` keys, and the per-plot route selector composes the route
+suffix at draw time.
 
 ## How to add a new module
 
