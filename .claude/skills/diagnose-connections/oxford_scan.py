@@ -151,7 +151,7 @@ def main():
     if args.json:
         print(json.dumps(results, indent=2))
     else:
-        print(f"\nOxford Instruments Scan Results")
+        print("\nOxford Instruments Scan Results")
         print("=" * 60)
         print(f"Ports scanned: {len(results['scanned_ports'])}")
         print(f"Devices found: {len(results['found_devices'])}\n")
