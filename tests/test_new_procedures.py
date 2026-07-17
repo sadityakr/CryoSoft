@@ -617,7 +617,12 @@ def test_scanner_disabled_behaves_as_no_switch_vi(station, tmp_path):
     assert plan.commands[0].vi_name == "keithley_delta_mode"
 
     groups = FieldSweep.get_param_groups(station)
-    assert not any(g.key == "mux" for g in groups)
+    # Scanner disabled + default VI (delta, no reading_setters): the Reading
+    # loop group carries no route checkboxes — for delta it does not exist.
+    assert not any(
+        name.startswith("mux_") for g in groups for name in g.params
+    )
+    assert not any(g.key == "reading_loop" for g in groups)
 
 
 def test_mux_full_orchestrator_loop_two_routes(station, tmp_path, qtbot):
@@ -842,11 +847,33 @@ def test_loop_group_rendered_only_for_vis_with_setters(station):
     keys = [g.key for g in groups]
     assert keys.index("reading_loop") < keys.index("measurement:dc_measurement")
 
-    # A VI with no reading_setters gets no loop group.
+    # A VI with no reading_setters (and no scanner) gets no loop group at all.
     delta_groups = FieldSweep.get_param_groups(
         station, {"measurement_vi": "keithley_delta_mode"}
     )
     assert not any(g.key == "reading_loop" for g in delta_groups)
+
+
+def test_reading_loop_group_merges_channels_and_value_list(station):
+    """One Reading loop group carries both levels: mux checkboxes + value list."""
+    station.set_scanner_enabled(True)
+    groups = FieldSweep.get_param_groups(
+        station, {"measurement_vi": "dc_measurement"}
+    )
+    loop = next(g for g in groups if g.key == "reading_loop")
+    names = list(loop.params)
+    # Channel checkboxes first (outer level), then the value-list pair (inner).
+    assert [n for n in names if n.startswith("mux_")] == names[: len(names) - 2]
+    assert names[-2:] == ["loop_parameter", "loop_values"]
+    # There is no separate mux group anymore.
+    assert not any(g.key == "mux" for g in groups)
+
+    # A VI with no setters still gets the channel checkboxes — alone.
+    delta_groups = FieldSweep.get_param_groups(
+        station, {"measurement_vi": "keithley_delta_mode"}
+    )
+    delta_loop = next(g for g in delta_groups if g.key == "reading_loop")
+    assert all(n.startswith("mux_") for n in delta_loop.params)
 
 
 def test_live_plot_keys_expand_per_label(station):

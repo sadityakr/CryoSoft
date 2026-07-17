@@ -115,6 +115,9 @@ _SWEEP_COLUMN_MAX_WIDTH = 260
 # route checkboxes, so cap it narrow (like the Sweep column) — it should hug the
 # checkbox labels and leave the horizontal room to the Measurement column.
 _MUX_COLUMN_MAX_WIDTH = 170
+# Wider cap for the Reading loop column when it also carries the value-list
+# fields (loop_parameter drop-down + loop_values text) beside the checkboxes.
+_READING_LOOP_COLUMN_MAX_WIDTH = 320
 # Max lines kept in the concise Status log before old lines are trimmed
 # (matches the Monitor detailed log's cap; bounds a long run's memory use).
 _STATUS_MAX_LINES = 500
@@ -534,8 +537,8 @@ class ProcedureWindow(QMainWindow):
                 )
                 hbox.addWidget(self._build_measurement_box(group, params_group))
                 continue
-            if key == "mux":
-                box = self._build_mux_box(group)
+            if key == "reading_loop":
+                box = self._build_reading_loop_box(group)
             else:
                 # System / generic columns wrap long rows too, so all four
                 # columns compress to fit the params quadrant without a
@@ -629,25 +632,36 @@ class ProcedureWindow(QMainWindow):
         self._measurement_params_container = container
         self._measurement_params_layout.addWidget(container)
 
-    def _build_mux_box(self, group: ParamGroup) -> QGroupBox:
-        """Build the narrow scanner/mux column of route checkboxes.
+    def _build_reading_loop_box(self, group: ParamGroup) -> QGroupBox:
+        """Build the Reading loop column: channel checkboxes + value-list loop.
 
-        Titled from the switch VI's ``display_label`` (e.g. "Scanner (mux)").
-        Each checkbox row shows the bare route name; the parameter key stays
-        ``mux_<route>`` (so route names cannot collide with measurement/system
-        params, and the HDF5 metadata key is unchanged) via ``label_overrides``
-        — only the visible label is prettified.
+        One box for both reading-loop levels. Each ``mux_<route>`` checkbox
+        row shows the bare route name (the parameter key stays ``mux_<route>``
+        so route names cannot collide with measurement/system params, and the
+        HDF5 metadata key is unchanged) via ``label_overrides`` — only the
+        visible label is prettified. The ``loop_parameter`` / ``loop_values``
+        pair (present only when the selected measurement VI declares
+        ``reading_setters``) renders as ordinary form rows below them; their
+        structural wiring comes from ``_register_group_widgets``.
 
         Args:
-            group: The ``mux`` group (one ``mux_<route>`` bool per route).
+            group: The ``reading_loop`` group.
 
         Returns:
-            The capped-width scanner ``QGroupBox``.
+            The capped-width ``QGroupBox`` (narrow when it holds only
+            checkboxes, wider when the value-list fields are present).
         """
         box = QGroupBox(group.title)
         box.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
-        box.setMaximumWidth(_MUX_COLUMN_MAX_WIDTH)
-        label_overrides = {name: name.removeprefix("mux_") for name in group.params}
+        checkboxes_only = all(name.startswith("mux_") for name in group.params)
+        box.setMaximumWidth(
+            _MUX_COLUMN_MAX_WIDTH if checkboxes_only else _READING_LOOP_COLUMN_MAX_WIDTH
+        )
+        label_overrides = {
+            name: name.removeprefix("mux_")
+            for name in group.params
+            if name.startswith("mux_")
+        }
         form, widgets = param_form.build_form_layout(group.params, label_overrides, wrap=True)
         self._register_group_widgets(group, widgets)
         for widget in widgets.values():
@@ -706,22 +720,25 @@ class ProcedureWindow(QMainWindow):
     def _current_mux_routes(self) -> list[str]:
         """Return the route names whose mux_<route> checkboxes are currently checked.
 
-        Scans the "mux" ParamGroup (if it exists) for enabled checkboxes. Returns
-        an empty list if no mux group exists (no switch VI on the station), or if
-        the mux group exists but no routes are checked (scanner available but off).
+        Scans the "reading_loop" ParamGroup (if it exists) for checked
+        ``mux_<route>`` checkboxes. Returns an empty list if the group carries
+        no route checkboxes (no switch VI / scanner disabled), or if none are
+        checked (scanner available but off).
 
         Returns:
             List of route names corresponding to checked mux checkboxes, in group order.
-            Empty list if no mux group exists OR no routes are selected.
+            Empty list if no route checkboxes exist OR no routes are selected.
         """
-        mux_group = next(
-            (g for g in self._current_groups if g.key == "mux"), None
+        loop_group = next(
+            (g for g in self._current_groups if g.key == "reading_loop"), None
         )
-        if mux_group is None:
+        if loop_group is None:
             return []
 
         selected: list[str] = []
-        for name, spec in mux_group.params.items():
+        for name, spec in loop_group.params.items():
+            if not name.startswith("mux_"):
+                continue
             widget = self._param_inputs.get(name)
             if widget is None:
                 continue
@@ -734,8 +751,12 @@ class ProcedureWindow(QMainWindow):
         return selected
 
     def _has_mux_group(self) -> bool:
-        """Return True if the station has a switch VI (mux group exists)."""
-        return any(g.key == "mux" for g in self._current_groups)
+        """Return True if the form carries route checkboxes (enabled switch VI)."""
+        return any(
+            name.startswith("mux_")
+            for g in self._current_groups
+            for name in g.params
+        )
 
     def _refresh_route_selectors(self) -> None:
         """Update plot route selectors with currently-selected routes.
@@ -811,9 +832,10 @@ class ProcedureWindow(QMainWindow):
             if new_meas_key is not None:
                 self._install_measurement_params(new_by_key[new_meas_key])
 
-        # (2) Independent columns (System, mux, any generic group) diff by key.
-        # The measurement_select / measurement:* keys are NOT here — they live in
-        # the Measurement column handled above.
+        # (2) Independent columns (System, Reading loop, any generic group)
+        # diff by key AND parameter set. The measurement_select /
+        # measurement:* keys are NOT here — they live in the Measurement
+        # column handled above.
         def _is_column_key(key: str) -> bool:
             return (
                 key != "sweep"
@@ -822,9 +844,18 @@ class ProcedureWindow(QMainWindow):
             )
 
         for key in list(self._group_boxes):
-            if key not in new_by_key:
+            old_group = old_by_key.get(key)
+            # A column is stale when its key vanished OR its key persists but
+            # its parameter set changed (e.g. the Reading loop group gains or
+            # loses the loop_parameter/loop_values fields when the selected
+            # measurement VI's reading_setters differ). A changed column is
+            # dropped here and rebuilt by the append loop below.
+            stale = key not in new_by_key or (
+                old_group is not None
+                and set(old_group.params) != set(new_by_key[key].params)
+            )
+            if stale:
                 box = self._group_boxes.pop(key)
-                old_group = old_by_key.get(key)
                 if old_group is not None:
                     for name in old_group.params:
                         self._param_inputs.pop(name, None)
@@ -841,8 +872,8 @@ class ProcedureWindow(QMainWindow):
             if not _is_column_key(key) or key in self._group_boxes:
                 continue
             group = new_by_key[key]
-            if key == "mux":
-                box = self._build_mux_box(group)
+            if key == "reading_loop":
+                box = self._build_reading_loop_box(group)
             else:
                 box, widgets = param_form.build_group_box(group, wrap=True)
                 self._register_group_widgets(group, widgets)

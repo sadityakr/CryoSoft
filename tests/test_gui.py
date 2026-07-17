@@ -591,13 +591,13 @@ def test_generic_field_sweep_typed_values_survive_selection_round_trip(procedure
 
 
 def test_generic_field_sweep_renders_mux_checkboxes(procedure_win, station):
-    """The mux group renders one checkbox per switch route for the sim station."""
+    """The Reading loop group renders one checkbox per switch route."""
     from cryosoft.procedures.field_sweep import FieldSweep
 
     station.set_scanner_enabled(True)
     procedure_win._select_procedure_by_name(FieldSweep.name)
 
-    assert "mux" in procedure_win._group_boxes
+    assert "reading_loop" in procedure_win._group_boxes
     for route in ("Mux-Ch1", "Mux-Ch2", "Mux-Ch3", "Mux-Ch4"):
         box = procedure_win.findChild(QCheckBox, f"param_mux_{route}_input")
         assert box is not None, f"mux checkbox for {route} should render"

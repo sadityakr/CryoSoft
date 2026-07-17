@@ -86,11 +86,12 @@ its setup as `Command`s through the Station before every reading and suffixing
 that reading's columns via `DataSchema.multiplexed(...)`:
 
 - **Routes (outer level — channels).** When the station exposes a switch VI
-  (`vi_type: switch`) and the scanner is enabled, `get_param_groups()` appends
-  one `mux_<route>` checkbox per route; with two or more routes selected,
-  `measure()` connects each route in turn and suffixes `{name}__{route}`
-  (e.g. `voltage_V__Mux-Ch1`). `standby()` / `abort()` append a switch
-  `open_all` when routes were used.
+  (`vi_type: switch`) and the scanner is enabled, the **Reading loop** group
+  carries one `mux_<route>` checkbox per route (channels are loop parameters,
+  so they live in the same group as the value list); with two or more routes
+  selected, `measure()` connects each route in turn and suffixes
+  `{name}__{route}` (e.g. `voltage_V__Mux-Ch1`). `standby()` / `abort()`
+  append a switch `open_all` when routes were used.
 - **Value list (inner level — reading settings).** When the selected
   measurement VI declares loopable parameters (its `reading_setters` class
   attribute maps a parameter to the cheap setter that reprograms it between

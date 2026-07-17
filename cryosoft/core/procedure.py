@@ -839,11 +839,13 @@ class SweepMeasureProcedure(BaseProcedure):
 
         Appends the dynamic groups after the class's static groups: a
         "Measurement method" group with the structural ``measurement_vi``
-        selector, a "Reading loop" group (only when the selected VI declares
-        ``reading_setters``) with the structural ``loop_parameter`` /
-        ``loop_values`` pair, a group carrying the selected VI's own
-        ``measurement_parameters``, and the mux route checkboxes (only when
-        the station has an enabled switch VI).
+        selector, a single "Reading loop" group holding BOTH loop levels —
+        the switch's ``mux_<route>`` channel checkboxes (when the station has
+        an enabled switch VI) and the structural ``loop_parameter`` /
+        ``loop_values`` pair (when the selected VI declares
+        ``reading_setters``) — and a group carrying the selected VI's own
+        ``measurement_parameters``. With no switch and no setters there is no
+        Reading loop group at all.
 
         Args:
             station: The active Station (supplies the measurement VIs).
@@ -898,12 +900,26 @@ class SweepMeasureProcedure(BaseProcedure):
         )
         vi = station.get_vi(selected)
 
-        # (b) The reading loop, rendered ABOVE the VI's own parameter group:
-        # when the selected VI declares loopable parameters (reading_setters),
-        # the user picks one and enters a comma-separated value list measured
-        # at every sweep point (columns suffixed __L1, __L2, ...). Both params
-        # are structural: changing either changes which live-plot columns the
-        # run produces. No setters -> no group, zero behaviour change.
+        # (b) The reading loop, rendered ABOVE the VI's own parameter group.
+        # ONE group carries BOTH loop levels, because channels and value lists
+        # are the same concept — parameters of the reading loop:
+        #   * outer level — the switch's channels: one "mux_<route>" checkbox
+        #     per route, when the station has an enabled switch VI;
+        #   * inner level — the value list: the structural loop_parameter /
+        #     loop_values pair, when the selected VI declares loopable
+        #     parameters (reading_setters). Both are structural: changing
+        #     either changes which live-plot columns the run produces.
+        # Nothing to loop (no switch, no setters) -> no group, zero change.
+        loop_group_params: dict[str, ParamSpec] = {}
+        switch_names = station.switch_vi_names() if station.scanner_enabled() else []
+        if switch_names:
+            switch = station.get_vi(switch_names[0])
+            for route in switch.routes():
+                loop_group_params[f"mux_{route}"] = ParamSpec(
+                    type=bool,
+                    default=False,
+                    description=f"Measure route {route}",
+                )
         setters = dict(vi.reading_setters)
         if setters:
             selected_loop = selections.get("loop_parameter")
@@ -914,7 +930,7 @@ class SweepMeasureProcedure(BaseProcedure):
                 unit = vi.measurement_parameters[param_name].unit
                 label = f"{param_name} ({unit})" if unit else param_name
                 loop_choices[label] = param_name
-            loop_spec = ParamSpec(
+            loop_group_params["loop_parameter"] = ParamSpec(
                 type=str,
                 default=selected_loop,
                 choices=loop_choices,
@@ -923,7 +939,7 @@ class SweepMeasureProcedure(BaseProcedure):
                     "Measurement parameter repeated at every sweep point"
                 ),
             )
-            values_spec = ParamSpec(
+            loop_group_params["loop_values"] = ParamSpec(
                 type=str,
                 default=str(selections.get("loop_values") or ""),
                 structural=True,
@@ -932,14 +948,12 @@ class SweepMeasureProcedure(BaseProcedure):
                     "every sweep point"
                 ),
             )
+        if loop_group_params:
             groups.append(
                 ParamGroup(
                     key="reading_loop",
                     title="Reading loop",
-                    params={
-                        "loop_parameter": loop_spec,
-                        "loop_values": values_spec,
-                    },
+                    params=loop_group_params,
                 )
             )
 
@@ -961,30 +975,6 @@ class SweepMeasureProcedure(BaseProcedure):
             )
         )
 
-        # (d) Multiplexing: when the station has a switch VI, one checkbox per
-        # route. The "mux_" prefix keeps route names (which can collide with
-        # measurement/system parameter names) in their own namespace. No switch
-        # VI -> no group, zero behaviour change. (Multiple switches out of
-        # scope: the first switch VI is used.)
-        switch_names = station.switch_vi_names() if station.scanner_enabled() else []
-        if switch_names:
-            switch = station.get_vi(switch_names[0])
-            mux_specs = {
-                f"mux_{route}": ParamSpec(
-                    type=bool,
-                    default=False,
-                    description=f"Measure route {route}",
-                )
-                for route in switch.routes()
-            }
-            if mux_specs:
-                groups.append(
-                    ParamGroup(
-                        key="mux",
-                        title=getattr(switch, "display_label", "") or switch_names[0],
-                        params=mux_specs,
-                    )
-                )
         return groups
 
     @classmethod
