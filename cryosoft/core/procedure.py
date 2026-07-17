@@ -9,12 +9,13 @@
 #   validation in _save_datapoint. SweepMeasureProcedure adds measurement-VI
 #   selection (a structural ``measurement_vi`` parameter whose choices come from
 #   the station), station-driven measurement-parameter merging, DataSchema
-#   assembly, the shared four-method loop, and the reading loop (per-datapoint
-#   iteration over switch routes x a user-entered value list for one loopable
-#   measurement parameter, declared via the VI's reading_setters; columns are
-#   suffixed {name}__L{i}__{route} and the label->value map is stored in the
-#   HDF5 metadata); a concrete axis procedure supplies only the ramp targets,
-#   the axis read-back, and the settle times.
+#   assembly, the shared four-method loop, and the reading loop (up to two
+#   generic slots, each a loopable parameter any reading-path VI advertises
+#   via reading_setters — the switch's route and a source's current alike —
+#   with a user-entered value list; columns are suffixed {name}__A{i}__B{j}
+#   and the label->value map is stored in the HDF5 metadata); a concrete axis
+#   procedure supplies only the ramp targets, the axis read-back, and the
+#   settle times.
 # entry_point: Not run directly. Subclassed by concrete procedures.
 # dependencies:
 #   - cryosoft.core.station (Station)
@@ -61,7 +62,6 @@ from cryosoft.core.plan import (
     ParamGroup,
     ParamSpec,
     PhasePlan,
-    ReadingVariant,
     StepPlan,
     Target,
 )
@@ -241,16 +241,17 @@ class BaseProcedure:
     @classmethod
     def live_plot_loop_labels(
         cls, station: Station, selections: Mapping[str, Any] | None = None
-    ) -> dict[str, str] | None:
-        """Return the reading-loop labels for the plot panels' Loop selector.
+    ) -> tuple[dict[str, str] | None, dict[str, str] | None]:
+        """Return the label maps for the plot panels' two Loop selectors.
 
-        The GUI mirrors its per-plot route selector with a Loop selector that
-        picks WHICH loop reading of a datapoint is plotted. The default (no
-        reading loop concept) returns ``None`` — selector hidden. A procedure
-        with a reading loop overrides this (see ``SweepMeasureProcedure``) to
-        return ``{}`` (loop possible but off — selector visible, disabled) or
-        an ordered ``{suffix_label: display_text}`` map (e.g.
-        ``{"L1": "L1 = 1e-06", ...}`` — selector enabled).
+        The GUI gives every plot a "Loop 1" and a "Loop 2" selector that pick
+        WHICH reading of a datapoint is plotted, one per reading-loop slot.
+        The default (no reading loop concept) returns ``(None, None)`` — both
+        selectors hidden. A procedure with a reading loop overrides this (see
+        ``SweepMeasureProcedure``) to return, per slot, ``{}`` (slot off /
+        static — selector visible, disabled) or an ordered
+        ``{suffix_label: display_text}`` map (e.g.
+        ``{"A1": "A1 = Mux-Ch1", ...}`` — selector enabled).
 
         Args:
             station: The active Station (unused by the default).
@@ -258,10 +259,10 @@ class BaseProcedure:
                 (unused by the default).
 
         Returns:
-            ``None`` by default.
+            ``(None, None)`` by default.
         """
         _ = (station, selections)
-        return None
+        return (None, None)
 
     def __init__(
         self,
@@ -563,9 +564,16 @@ class BaseProcedure:
 
 
 # Form-parameter names the generic sweep procedure owns structurally (they are
-# never a measurement VI's own knobs, so a VI param may not shadow them).
+# never a measurement VI's own knobs, so a VI param may not shadow them). The
+# dynamic per-choice pick checkboxes live in the "loopN_pick_" namespace.
 _STRUCTURAL_PARAM_NAMES = frozenset(
-    {"measurement_vi", "loop_parameter", "loop_values"}
+    {
+        "measurement_vi",
+        "loop1_parameter",
+        "loop1_values",
+        "loop2_parameter",
+        "loop2_values",
+    }
 )
 
 
@@ -592,21 +600,22 @@ class SweepMeasureProcedure(BaseProcedure):
       ``measure`` runs the reading loop (below), tags on the axis read-back,
       and saves (the schema is validated per datapoint by
       ``BaseProcedure._save_datapoint``). ``standby`` / ``abort`` disarm the VI.
-    * **The reading loop.** One datapoint may comprise several readings, taken
-      by two nested, independently optional levels inside ``measure()``:
-      switch **routes** (outer — the channels the user ticked when the station
-      has a switch VI and the scanner is enabled) and a **looped parameter
-      value list** (inner — the user picks ONE loopable measurement parameter,
-      declared by the VI's ``reading_setters``, and enters a comma-separated
-      list of values, e.g. ``"1e-6, -1e-6"`` for +/- current). The form's
-      "Reading loop" group renders automatically for any VI that declares
-      setters. Value *i* is measured under index label ``L{i}``; each looping
-      level suffixes the measurement columns with its label, composing as
-      ``{name}__L{i}__{route}``, and the label -> value map is stored in the
-      HDF5 metadata (``procedure_params["loop_labels"]``). A level that does
-      not loop (loop off, 0 or 1 route) adds no suffix and no commands. All
-      per-reading setup is dispatched as ``Command``s through the Station,
-      never by direct VI calls.
+    * **The reading loop.** One datapoint may comprise several readings,
+      taken by up to TWO generic loop slots nested inside ``measure()`` (slot
+      1 outer, slot 2 inner). A slot is a loopable parameter — anything a
+      reading-path VI advertises via ``reading_setters``: the switch VI's
+      ``route`` and a measurement VI's ``current_A`` are the same concept —
+      plus an ordered value list from the auto-rendered "Reading loop" form
+      group (checkboxes for an enumerated parameter, comma-separated text
+      otherwise). A slot with ONE value is a static setting (dispatched once
+      at ``initiate()``, no suffix); with two or more it loops: value *i* is
+      measured under index label ``A{i}`` / ``B{i}``, columns compose as
+      ``{name}__A{i}__B{j}``, and the label -> value map is stored in the
+      HDF5 metadata (``procedure_params["loop_labels"]``). All per-reading
+      setup is dispatched as ``Command``s through the Station, never by
+      direct VI calls; participating non-measurement VIs get their
+      ``reading_safe_off`` (e.g. the switch's ``open_all``) at
+      standby/abort.
 
     A concrete axis procedure (``FieldSweep``, ``TemperatureSweep``) subclasses
     this and supplies only the axis-specific pieces via the hooks below:
@@ -695,107 +704,149 @@ class SweepMeasureProcedure(BaseProcedure):
         self._params.update(merged_meas)
         self._params["measurement_vi"] = selected
 
-        # ── Switch / multiplexing resolution ──────────────────────────────────
-        # A switch VI is optional. When the station exposes one, the form carries
-        # a per-route "mux_<route>" bool (see get_param_groups); here we resolve
-        # which routes the user selected. No switch VI -> no mux, zero behaviour
-        # change. (Multiple switch VIs are out of scope: the first is used.)
-        self._switch_vi: str | None = None
-        self._selected_routes: list[str] = []
-        switch_names = station.switch_vi_names() if station.scanner_enabled() else []
-        if switch_names:
-            self._switch_vi = switch_names[0]
-            switch = station.get_vi(self._switch_vi)
-            routes = switch.routes()
-            valid_route_names = set(routes)
-            # A mux_<route> naming a route the switch does not have is a config /
-            # form error — fail loudly rather than silently dropping it.
-            for key, value in param_values.items():
-                if key.startswith("mux_") and value:
-                    route_name = key[len("mux_") :]
-                    if route_name not in valid_route_names:
+        # ── Reading-loop resolution: up to two generic slots ─────────────────
+        # Every loop level is the SAME thing: a loopable parameter (advertised
+        # by a VI's reading_setters — the switch's route and a source's
+        # current alike) plus an ordered value list. Slot 1 (labels A1, A2, …)
+        # is the outer level, slot 2 (labels B1, B2, …) the inner one. A slot
+        # with a single value is a STATIC setting (its setter is dispatched
+        # once at initiate, no loop, no suffix); with two or more values it
+        # loops and suffixes the columns. Resolved and validated here so a bad
+        # selection fails at the procedure boundary, never in the tick loop.
+        registry = self._loopable_registry(station, selected)
+        self._loop_slots: list[dict[str, Any]] = []
+        used_qualified: set[str] = set()
+        for slot, prefix in (("loop1", "A"), ("loop2", "B")):
+            qualified = str(param_values.get(f"{slot}_parameter") or "")
+            self._params[f"{slot}_parameter"] = qualified
+            if not qualified:
+                self._params[f"{slot}_values"] = []
+                continue
+            entry = registry.get(qualified)
+            if entry is None:
+                raise CryoSoftConfigError(
+                    f"{type(self).name!r}: {slot}_parameter={qualified!r} is "
+                    f"not a loopable parameter of this station "
+                    f"(loopable: {', '.join(registry) or 'none'})."
+                )
+            if qualified in used_qualified:
+                raise CryoSoftConfigError(
+                    f"{type(self).name!r}: {qualified!r} is selected in both "
+                    f"loop slots; each parameter may be looped once."
+                )
+            used_qualified.add(qualified)
+            slot_vi_name, param_name, spec, setter = entry
+            if spec.choices is not None:
+                # Enumerated parameter: values come from the pick checkboxes,
+                # kept in choices order. An unknown pick is a form/config
+                # error — fail loudly rather than silently dropping it.
+                valid_picks = {
+                    f"{slot}_pick_{value}" for value in spec.choices.values()
+                }
+                for key, value in param_values.items():
+                    if key.startswith(f"{slot}_pick_") and value and key not in valid_picks:
                         raise CryoSoftConfigError(
-                            f"{type(self).name!r}: selected route {route_name!r} "
-                            f"is not a route of switch VI {self._switch_vi!r} "
-                            f"(have: {', '.join(routes)})."
+                            f"{type(self).name!r}: {key!r} does not name a "
+                            f"choice of {qualified!r} "
+                            f"(have: {', '.join(map(str, spec.choices.values()))})."
                         )
-            # Merge mux defaults (all False) with the supplied selections and
-            # record them so the HDF5 metadata captures the routing.
-            mux_params: dict[str, Any] = {f"mux_{r}": False for r in routes}
-            mux_params.update(
-                {key: param_values[key] for key in mux_params if key in param_values}
+                values = [
+                    value
+                    for value in spec.choices.values()
+                    if param_values.get(f"{slot}_pick_{value}")
+                ]
+                self._params.update(
+                    {
+                        f"{slot}_pick_{value}": (value in values)
+                        for value in spec.choices.values()
+                    }
+                )
+            else:
+                values = self._parse_loop_values(
+                    param_name, spec, str(param_values.get(f"{slot}_values") or "")
+                )
+            if not values:
+                raise CryoSoftConfigError(
+                    f"{type(self).name!r}: the reading loop over {qualified!r} "
+                    f"has no values selected."
+                )
+            labels = (
+                [f"{prefix}{i}" for i in range(1, len(values) + 1)]
+                if len(values) >= 2
+                else []
             )
-            self._params.update(mux_params)
-            self._selected_routes = [r for r in routes if mux_params[f"mux_{r}"]]
+            self._loop_slots.append(
+                {
+                    "qualified": qualified,
+                    "vi_name": slot_vi_name,
+                    "param": param_name,
+                    "setter": setter,
+                    "values": values,
+                    "labels": labels,
+                }
+            )
+            self._params[f"{slot}_values"] = list(values)
 
-        # ── Reading-loop resolution (the loop's inner level: a value list) ────
-        # The user may loop ONE loopable measurement parameter — declared by
-        # the VI's ``reading_setters`` — over a comma-separated value list;
-        # value i is measured under index label "L{i}" at every sweep point.
-        # Resolved and validated here so a bad selection fails at the
-        # procedure boundary and never inside the tick loop. With
-        # loop_parameter unset (""), any lingering loop_values text is ignored
-        # (the form always renders both fields).
-        loop_parameter = str(param_values.get("loop_parameter") or "")
-        loop_values_text = str(param_values.get("loop_values") or "")
-        loop_values: list = []
-        variants: tuple[ReadingVariant, ...] = ()
-        if loop_parameter:
-            setters = dict(vi.reading_setters)
-            if loop_parameter not in setters:
-                raise CryoSoftConfigError(
-                    f"{type(self).name!r}: loop_parameter={loop_parameter!r} is "
-                    f"not a loopable parameter of measurement VI {selected!r} "
-                    f"(loopable: {', '.join(setters) or 'none'})."
-                )
-            loop_values = self._parse_loop_values(
-                loop_parameter, vi_specs[loop_parameter], loop_values_text
-            )
-            if len(loop_values) < 2:
-                raise CryoSoftConfigError(
-                    f"{type(self).name!r}: the reading loop over "
-                    f"{loop_parameter!r} needs at least two comma-separated "
-                    f"values, got {loop_values_text!r}."
-                )
-            setter = setters[loop_parameter]
-            variants = tuple(
-                ReadingVariant(
-                    key=f"L{i}",
-                    commands=(
-                        Command(
-                            self._measurement_vi, setter, {loop_parameter: value}
-                        ),
-                    ),
-                )
-                for i, value in enumerate(loop_values, start=1)
-            )
-        self._reading_variants: tuple = variants
-        # Record the loop in the run's params so the HDF5 metadata
-        # (procedure_params) carries the selection and the label -> value map.
-        self._params["loop_parameter"] = loop_parameter
-        self._params["loop_values"] = list(loop_values)
+        # The levels that actually loop (>=2 values), in slot order.
+        self._loop_levels: list[dict[str, Any]] = [
+            s for s in self._loop_slots if s["labels"]
+        ]
+        # Label -> value map for the HDF5 metadata (procedure_params).
         self._params["loop_labels"] = {
-            f"L{i}": value for i, value in enumerate(loop_values, start=1)
+            label: value
+            for level in self._loop_levels
+            for label, value in zip(level["labels"], level["values"])
         }
 
-        # Live-plot / data keys: suffix per reading level only when that level
-        # loops — per variant with >=2 variants, per route with >=2 routes.
-        # Suffixes compose inner level (variant) first: {key}__{variant}__{route}.
-        # No variants and 0 or 1 route keeps the plain measurement columns.
+        # Live-plot / data keys: each looping level suffixes the measurement
+        # columns with its index labels, slot 1 (outer) first:
+        # {key}__A{i}__B{j}. No looping level keeps the plain columns.
         keys = list(vi.measurement_data_keys) + list(vi.measurement_scalar_columns)
-        if len(self._reading_variants) >= 2:
-            keys = [f"{key}__{v.key}" for key in keys for v in self._reading_variants]
-        if len(self._selected_routes) >= 2:
-            keys = [
-                f"{key}__{route}"
-                for key in keys
-                for route in self._selected_routes
-            ]
+        for level in self._loop_levels:
+            keys = [f"{key}__{label}" for key in keys for label in level["labels"]]
         self.measurement_data_keys = keys
 
     # ------------------------------------------------------------------
-    # Reading-loop value parsing (shared by __init__ and the live-plot keys)
+    # Reading-loop plumbing (shared by __init__, the form, and the plots)
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _loopable_registry(
+        station: Station, measurement_vi_name: str
+    ) -> dict[str, tuple[str, str, ParamSpec, str]]:
+        """Collect every loopable parameter the station's reading path offers.
+
+        A loopable parameter is any ``reading_setters`` entry of a VI in the
+        reading path: the station's switch VI (when the scanner is enabled —
+        its ``route`` is a loopable parameter like any other) and the selected
+        measurement VI. Switch parameters come first, matching the typical
+        outer-level use. A setup with no switch and a measurement VI without
+        setters yields an empty registry — no Reading loop group, no loop.
+
+        Args:
+            station: The active Station.
+            measurement_vi_name: The selected measurement VI's name.
+
+        Returns:
+            Ordered ``{"vi_name.param": (vi_name, param, spec, setter)}``.
+        """
+        switch_names = station.switch_vi_names() if station.scanner_enabled() else []
+        vi_names = ([switch_names[0]] if switch_names else []) + [measurement_vi_name]
+        registry: dict[str, tuple[str, str, ParamSpec, str]] = {}
+        for vi_name in vi_names:
+            vi = station.get_vi(vi_name)
+            specs = vi.reading_parameters
+            for param_name, setter in vi.reading_setters.items():
+                spec = specs.get(param_name)
+                if spec is None:  # e.g. a switch configured with no routes
+                    continue
+                registry[f"{vi_name}.{param_name}"] = (
+                    vi_name,
+                    param_name,
+                    spec,
+                    setter,
+                )
+        return registry
 
     @staticmethod
     def _parse_loop_values(param_name: str, spec: ParamSpec, text: str) -> list:
@@ -864,19 +915,19 @@ class SweepMeasureProcedure(BaseProcedure):
 
         Appends the dynamic groups after the class's static groups: a
         "Measurement method" group with the structural ``measurement_vi``
-        selector, a single "Reading loop" group holding BOTH loop levels —
-        the switch's ``mux_<route>`` channel checkboxes (when the station has
-        an enabled switch VI) and the structural ``loop_parameter`` /
-        ``loop_values`` pair (when the selected VI declares
-        ``reading_setters``) — and a group carrying the selected VI's own
-        ``measurement_parameters``. With no switch and no setters there is no
-        Reading loop group at all.
+        selector, a single "Reading loop" group holding the two generic loop
+        slots (each a ``{slot}_parameter`` drop-down over every loopable
+        parameter the station's reading path advertises, plus that
+        parameter's values input — per-choice ``{slot}_pick_{value}``
+        checkboxes when enumerated, a ``{slot}_values`` text field otherwise),
+        and a group carrying the selected VI's own ``measurement_parameters``.
+        Nothing loopable on this station means no Reading loop group at all.
 
         Args:
             station: The active Station (supplies the measurement VIs).
             selections: Current structural-param values; ``measurement_vi`` picks
                 the VI whose parameters group is shown (defaults to the first),
-                ``loop_parameter``/``loop_values`` carry the reading loop.
+                the ``loopN_*`` values carry the reading loop.
 
         Returns:
             The ordered ``ParamGroup`` list the GUI renders.
@@ -926,54 +977,62 @@ class SweepMeasureProcedure(BaseProcedure):
         vi = station.get_vi(selected)
 
         # (b) The reading loop, rendered ABOVE the VI's own parameter group.
-        # ONE group carries BOTH loop levels, because channels and value lists
-        # are the same concept — parameters of the reading loop:
-        #   * outer level — the switch's channels: one "mux_<route>" checkbox
-        #     per route, when the station has an enabled switch VI;
-        #   * inner level — the value list: the structural loop_parameter /
-        #     loop_values pair, when the selected VI declares loopable
-        #     parameters (reading_setters). Both are structural: changing
-        #     either changes which live-plot columns the run produces.
-        # Nothing to loop (no switch, no setters) -> no group, zero change.
-        loop_group_params: dict[str, ParamSpec] = {}
-        switch_names = station.switch_vi_names() if station.scanner_enabled() else []
-        if switch_names:
-            switch = station.get_vi(switch_names[0])
-            for route in switch.routes():
-                loop_group_params[f"mux_{route}"] = ParamSpec(
-                    type=bool,
-                    default=False,
-                    description=f"Measure route {route}",
+        # Two generic slots, each a loopable parameter (anything the station's
+        # reading path advertises via reading_setters — the switch's route and
+        # the measurement VI's parameters alike) plus its values input. The
+        # values input is spec-driven: an enumerated parameter renders one
+        # checkbox per choice ("{slot}_pick_{value}"), a free parameter a
+        # comma-separated text field ("{slot}_values"). Everything here is
+        # structural — changing any of it changes which columns the run
+        # produces. Nothing loopable on this station -> no group, zero change.
+        registry = cls._loopable_registry(station, selected)
+        if registry:
+            loop_group_params: dict[str, ParamSpec] = {}
+            slot_choices: dict[str, str] = {"Off": ""}
+            for qualified, (slot_vi, param_name, spec, _setter) in registry.items():
+                display = (
+                    f"{param_name} ({spec.unit})"
+                    if spec.unit
+                    else f"{param_name} ({slot_vi})"
                 )
-        setters = dict(vi.reading_setters)
-        if setters:
-            selected_loop = selections.get("loop_parameter")
-            if selected_loop not in setters:
-                selected_loop = ""
-            loop_choices: dict[str, str] = {"Off": ""}
-            for param_name in setters:
-                unit = vi.measurement_parameters[param_name].unit
-                label = f"{param_name} ({unit})" if unit else param_name
-                loop_choices[label] = param_name
-            loop_group_params["loop_parameter"] = ParamSpec(
-                type=str,
-                default=selected_loop,
-                choices=loop_choices,
-                structural=True,
-                description=(
-                    "Measurement parameter repeated at every sweep point"
-                ),
-            )
-            loop_group_params["loop_values"] = ParamSpec(
-                type=str,
-                default=str(selections.get("loop_values") or ""),
-                structural=True,
-                description=(
-                    "Comma-separated values, measured as L1, L2, ... at "
-                    "every sweep point"
-                ),
-            )
-        if loop_group_params:
+                if display in slot_choices:
+                    display = qualified
+                slot_choices[display] = qualified
+            for slot, ordinal in (("loop1", "1"), ("loop2", "2")):
+                selected_slot = selections.get(f"{slot}_parameter")
+                if selected_slot not in registry:
+                    selected_slot = ""
+                loop_group_params[f"{slot}_parameter"] = ParamSpec(
+                    type=str,
+                    default=selected_slot,
+                    choices=dict(slot_choices),
+                    structural=True,
+                    description=(
+                        f"Loop {ordinal} parameter, repeated at every sweep "
+                        f"point (slot 1 is the outer level)"
+                    ),
+                )
+                if not selected_slot:
+                    continue
+                _vi_name, param_name, spec, _setter = registry[selected_slot]
+                if spec.choices is not None:
+                    for choice_label, value in spec.choices.items():
+                        loop_group_params[f"{slot}_pick_{value}"] = ParamSpec(
+                            type=bool,
+                            default=bool(selections.get(f"{slot}_pick_{value}")),
+                            structural=True,
+                            description=f"Include {choice_label}",
+                        )
+                else:
+                    loop_group_params[f"{slot}_values"] = ParamSpec(
+                        type=str,
+                        default=str(selections.get(f"{slot}_values") or ""),
+                        structural=True,
+                        description=(
+                            "Comma-separated values; one value sets it once, "
+                            "two or more loop it at every sweep point"
+                        ),
+                    )
             groups.append(
                 ParamGroup(
                     key="reading_loop",
@@ -1026,50 +1085,67 @@ class SweepMeasureProcedure(BaseProcedure):
     @classmethod
     def live_plot_loop_labels(
         cls, station: Station, selections: Mapping[str, Any] | None = None
-    ) -> dict[str, str] | None:
-        """Return the Loop-selector labels for the current selections.
+    ) -> tuple[dict[str, str] | None, dict[str, str] | None]:
+        """Return the two Loop-selector label maps for the current selections.
 
-        ``None`` when the selected measurement VI declares no
-        ``reading_setters`` (no loop possible — selector hidden); ``{}`` when
-        a loop is possible but off or its value list is empty/invalid
-        (selector visible, disabled; construction will refuse a bad list
-        loudly); otherwise an ordered ``{label: display}`` map like
-        ``{"L1": "L1 = 1e-06", "L2": "L2 = -1e-06"}``. Both loop params are
-        ``structural=True`` precisely so their values reach ``selections``
-        and their changes re-derive the selectors.
+        One entry per loop slot, in slot order. ``(None, None)`` when the
+        station's reading path offers nothing loopable (selectors hidden).
+        Per slot: ``{}`` when the slot is off, static (one value), or its
+        values are empty/invalid (selector visible, disabled; construction
+        refuses a bad list loudly); otherwise an ordered ``{label: display}``
+        map like ``{"A1": "A1 = Mux-Ch1", ...}`` / ``{"B1": "B1 = 1e-06",
+        ...}``. All loop params are ``structural=True`` precisely so their
+        values reach ``selections`` and their changes re-derive the selectors.
         """
         names = station.measurement_vi_names()
         if not names:
-            return None
+            return (None, None)
         selections = selections or {}
         selected = selections.get("measurement_vi")
         if selected not in names:
             selected = names[0]
-        vi = station.get_vi(selected)
-        if not vi.reading_setters:
-            return None
-        loop_parameter = selections.get("loop_parameter") or ""
-        if loop_parameter not in vi.reading_setters:
-            return {}
-        spec = vi.measurement_parameters.get(loop_parameter)
-        if spec is None:
-            return {}
-        try:
-            values = cls._parse_loop_values(
-                loop_parameter, spec, str(selections.get("loop_values") or "")
+        registry = cls._loopable_registry(station, selected)
+        if not registry:
+            return (None, None)
+
+        maps: list[dict[str, str]] = []
+        for slot, prefix in (("loop1", "A"), ("loop2", "B")):
+            qualified = selections.get(f"{slot}_parameter") or ""
+            entry = registry.get(qualified)
+            if entry is None:
+                maps.append({})
+                continue
+            _vi_name, param_name, spec, _setter = entry
+            if spec.choices is not None:
+                values = [
+                    value
+                    for value in spec.choices.values()
+                    if selections.get(f"{slot}_pick_{value}")
+                ]
+            else:
+                try:
+                    values = cls._parse_loop_values(
+                        param_name,
+                        spec,
+                        str(selections.get(f"{slot}_values") or ""),
+                    )
+                except CryoSoftConfigError:
+                    values = []
+            if len(values) < 2:
+                maps.append({})
+                continue
+            maps.append(
+                {
+                    f"{prefix}{i}": (
+                        f"{prefix}{i} = {value:g}"
+                        if isinstance(value, (int, float))
+                        and not isinstance(value, bool)
+                        else f"{prefix}{i} = {value}"
+                    )
+                    for i, value in enumerate(values, start=1)
+                }
             )
-        except CryoSoftConfigError:
-            return {}
-        if len(values) < 2:
-            return {}
-        return {
-            f"L{i}": (
-                f"L{i} = {value:g}"
-                if isinstance(value, (int, float))
-                else f"L{i} = {value}"
-            )
-            for i, value in enumerate(values, start=1)
-        }
+        return (maps[0], maps[1])
 
     # ------------------------------------------------------------------
     # Axis-specific hooks — implemented by concrete axis procedures
@@ -1126,22 +1202,18 @@ class SweepMeasureProcedure(BaseProcedure):
         arrays = dict(vi.data_arrays(self._measurement_params))
         base = DataSchema(sweep_columns=sweep_columns, arrays=arrays)
 
-        # The reading loop expands the schema once per looping level, inner
-        # level (reading variants) first, so suffixes compose as
-        # "<name>__<variant>__<route>". Each level expands every measurement
-        # array and the VI's per-point scalar columns (e.g. n_valid). A level
-        # that does not loop (no variants / 0 or 1 route) leaves the schema
-        # untouched, exactly as before that level existed.
+        # The reading loop expands the schema once per looping level, slot 1
+        # (outer) first, so suffixes compose as "<name>__A<i>__B<j>". Each
+        # level expands every measurement array and the VI's per-point scalar
+        # columns (e.g. n_valid). A slot that is off or static leaves the
+        # schema untouched, exactly as before that level existed.
         scalar_names = tuple(vi.measurement_scalar_columns.keys())
-        if len(self._reading_variants) >= 2:
-            variant_keys = [v.key for v in self._reading_variants]
-            base = base.multiplexed(variant_keys, scalar_columns=scalar_names)
+        for level in self._loop_levels:
+            base = base.multiplexed(level["labels"], scalar_columns=scalar_names)
             scalar_names = tuple(
-                f"{name}__{key}" for name in scalar_names for key in variant_keys
-            )
-        if len(self._selected_routes) >= 2:
-            base = base.multiplexed(
-                self._selected_routes, scalar_columns=scalar_names
+                f"{name}__{label}"
+                for name in scalar_names
+                for label in level["labels"]
             )
         return base
 
@@ -1157,22 +1229,26 @@ class SweepMeasureProcedure(BaseProcedure):
         arm_command = Command(
             self._measurement_vi, "initiate", dict(self._measurement_params)
         )
-        # When routes are selected, connect the FIRST route before arming the
-        # measurement VI (command order is semantically meaningful). With >=2
-        # routes, measure() re-selects each route per datapoint; with exactly 1
-        # route this single select at initiate is the whole story.
-        if self._selected_routes:
-            assert self._switch_vi is not None  # set whenever routes are selected
-            commands = (
-                Command(
-                    self._switch_vi,
-                    "select_route",
-                    {"route": self._selected_routes[0]},
-                ),
-                arm_command,
+        # Loop-slot setup around the arm (command order is semantically
+        # meaningful). Slots on OTHER VIs (e.g. the switch's route) dispatch
+        # their first value BEFORE the measurement VI arms, so arming happens
+        # with the channel connected — with a static (1-value) slot that
+        # single dispatch is the whole story, with a looping slot measure()
+        # re-dispatches per reading. Static slots on the measurement VI itself
+        # dispatch AFTER the arm (their setters require an armed instrument);
+        # looping measurement-VI slots need nothing here because measure()
+        # sets the value before every reading.
+        pre_arm: list[Command] = []
+        post_arm: list[Command] = []
+        for slot in self._loop_slots:
+            command = Command(
+                slot["vi_name"], slot["setter"], {slot["param"]: slot["values"][0]}
             )
-        else:
-            commands = (arm_command,)
+            if slot["vi_name"] != self._measurement_vi:
+                pre_arm.append(command)
+            elif not slot["labels"]:
+                post_arm.append(command)
+        commands = (*pre_arm, arm_command, *post_arm)
 
         # Poll once so last_state_flat() is populated BEFORE the schema reads the
         # system columns — otherwise the columns declared here would not match
@@ -1226,15 +1302,14 @@ class SweepMeasureProcedure(BaseProcedure):
     def measure(self) -> None:
         """Run the reading loop, tag on the axis read-back, and save.
 
-        The reading loop takes every reading of one datapoint: routes (outer
-        level, switch re-selection is the slow operation) x reading variants
-        (inner level). Each level that loops suffixes the returned columns with
-        its label, composing as ``{name}__{variant}__{route}``; a level that
-        does not loop adds no suffix and no commands, so with no variants and
-        0 or 1 route this is a single plain ``take_reading()``. All setup
-        commands (route selection, variant configuration) are dispatched as
-        ``Command``s through the Station — the same channel ``initiate()`` and
-        the Orchestrator use — never as direct calls on another VI.
+        The reading loop takes every reading of one datapoint by nesting the
+        looping slots: slot 1 (outer) x slot 2 (inner). Before each reading it
+        dispatches the level's setter (as a ``Command`` through the Station —
+        the same channel ``initiate()`` and the Orchestrator use, never a
+        direct call on another VI) and suffixes the returned columns with the
+        level's index labels, composing as ``{name}__A{i}__B{j}``. A slot
+        that is off or static contributes no level, so with no looping slots
+        this is a single plain ``take_reading()``.
 
         Raises:
             RuntimeError: If called before ``initiate()``.
@@ -1244,34 +1319,33 @@ class SweepMeasureProcedure(BaseProcedure):
         if self._data_manager is None:
             raise RuntimeError("measure() called before initiate()")
         vi = self._station.get_vi(self._measurement_vi)
-
-        # Outer level: loop routes only when multiplexing (>=2 selected). With
-        # exactly 1 route the switch was already selected at initiate(); with 0
-        # routes there is no switch involvement at all.
-        route_loop: list[str | None] = (
-            list(self._selected_routes)
-            if len(self._selected_routes) >= 2
-            else [None]
-        )
-        # Inner level: loop variants only when the VI declared any (0 or >=2 by
-        # construction).
-        variant_loop: tuple = self._reading_variants or (None,)
-
         measured_data: dict = {}
-        for route in route_loop:
-            if route is not None:
-                assert self._switch_vi is not None  # set whenever routes are selected
-                self._station.send_measurement_commands(
-                    (Command(self._switch_vi, "select_route", {"route": route}),)
-                )
-            for variant in variant_loop:
-                if variant is not None:
-                    self._station.send_measurement_commands(variant.commands)
-                suffix = "" if variant is None else f"__{variant.key}"
-                if route is not None:
-                    suffix += f"__{route}"
-                for key, value in vi.take_reading().items():
-                    measured_data[f"{key}{suffix}"] = value
+
+        def _dispatch(level: dict[str, Any], value: Any) -> None:
+            self._station.send_measurement_commands(
+                (Command(level["vi_name"], level["setter"], {level["param"]: value}),)
+            )
+
+        def _read(suffix: str) -> None:
+            for key, value in vi.take_reading().items():
+                measured_data[f"{key}{suffix}"] = value
+
+        levels = self._loop_levels
+        if not levels:
+            _read("")
+        else:
+            outer = levels[0]
+            inner = levels[1] if len(levels) > 1 else None
+            for outer_label, outer_value in zip(outer["labels"], outer["values"]):
+                _dispatch(outer, outer_value)
+                if inner is None:
+                    _read(f"__{outer_label}")
+                else:
+                    for inner_label, inner_value in zip(
+                        inner["labels"], inner["values"]
+                    ):
+                        _dispatch(inner, inner_value)
+                        _read(f"__{outer_label}__{inner_label}")
 
         measured_data[type(self).sweep_axis.data_key] = self._axis_readback()
         self._save_datapoint(measured_data)
@@ -1293,28 +1367,35 @@ class SweepMeasureProcedure(BaseProcedure):
         )
 
     def abort(self) -> tuple[Command, ...]:
-        """Close the data file and disarm the measurement VI (+ open the switch).
+        """Close the data file and disarm the measurement VI (+ loop safe-offs).
 
         Returns:
             The measurement safe-off command(s) for the Orchestrator to
-            dispatch, plus a switch ``open_all`` when routes were selected.
+            dispatch, plus each participating loop VI's ``reading_safe_off``.
         """
         super().abort()
         return self._safe_off_commands()
 
     def _safe_off_commands(self) -> tuple[Command, ...]:
-        """Return the measurement standby command, plus switch open_all if muxed.
+        """Return the measurement standby command plus the loop VIs' safe-offs.
 
-        Shared by ``standby()`` and ``abort()``: disarm the measurement VI and,
-        when any route was selected, open every switch channel so no route is
-        left connected.
+        Shared by ``standby()`` and ``abort()``: disarm the measurement VI
+        and, for every OTHER VI that took part in a loop slot (static or
+        looping) and declares a ``reading_safe_off`` method (e.g. the switch's
+        ``open_all``), dispatch it so nothing is left connected.
 
         Returns:
-            Ordered ``tuple[Command, ...]`` — the measurement ``standby`` first,
-            then a switch ``open_all`` when routes were selected.
+            Ordered ``tuple[Command, ...]`` — the measurement ``standby``
+            first, then one safe-off per participating loop VI.
         """
         commands = [Command(self._measurement_vi, "standby", {})]
-        if self._selected_routes:
-            assert self._switch_vi is not None  # set whenever routes are selected
-            commands.append(Command(self._switch_vi, "open_all", {}))
+        seen: set[str] = set()
+        for slot in self._loop_slots:
+            slot_vi = slot["vi_name"]
+            if slot_vi == self._measurement_vi or slot_vi in seen:
+                continue
+            seen.add(slot_vi)
+            safe_off = self._station.get_vi(slot_vi).reading_safe_off
+            if safe_off:
+                commands.append(Command(slot_vi, safe_off, {}))
         return tuple(commands)

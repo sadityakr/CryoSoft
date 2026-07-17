@@ -114,9 +114,8 @@ _SWEEP_COLUMN_MAX_WIDTH = 260
 # Max width (px) for the scanner/mux column. Its content is a short list of
 # route checkboxes, so cap it narrow (like the Sweep column) — it should hug the
 # checkbox labels and leave the horizontal room to the Measurement column.
-_MUX_COLUMN_MAX_WIDTH = 170
-# Wider cap for the Reading loop column when it also carries the value-list
-# fields (loop_parameter drop-down + loop_values text) beside the checkboxes.
+# Width cap for the Reading loop column (two slot drop-downs plus their
+# values inputs — pick checkboxes or a comma-separated text field).
 _READING_LOOP_COLUMN_MAX_WIDTH = 320
 # Max lines kept in the concise Status log before old lines are trimmed
 # (matches the Monitor detailed log's cap; bounds a long run's memory use).
@@ -633,40 +632,32 @@ class ProcedureWindow(QMainWindow):
         self._measurement_params_layout.addWidget(container)
 
     def _build_reading_loop_box(self, group: ParamGroup) -> QGroupBox:
-        """Build the Reading loop column: channel checkboxes + value-list loop.
+        """Build the Reading loop column: the two generic loop slots.
 
-        One box for both reading-loop levels. Each ``mux_<route>`` checkbox
-        row shows the bare route name (the parameter key stays ``mux_<route>``
-        so route names cannot collide with measurement/system params, and the
-        HDF5 metadata key is unchanged) via ``label_overrides`` — only the
-        visible label is prettified. The ``loop_parameter`` / ``loop_values``
-        pair (present only when the selected measurement VI declares
-        ``reading_setters``) renders as ordinary form rows below them; their
-        structural wiring comes from ``_register_group_widgets``.
+        Each slot is a ``{slot}_parameter`` drop-down plus its values input —
+        per-choice ``{slot}_pick_{value}`` checkboxes for an enumerated
+        parameter (each row label prettified to the bare choice via
+        ``label_overrides``; the parameter key keeps its namespaced name for
+        collection and HDF5 metadata) or a ``{slot}_values`` text field
+        otherwise. All widgets are structural, so their wiring comes from
+        ``_register_group_widgets``.
 
         Args:
             group: The ``reading_loop`` group.
 
         Returns:
-            The capped-width ``QGroupBox`` (narrow when it holds only
-            checkboxes, wider when the value-list fields are present).
+            The capped-width ``QGroupBox``.
         """
         box = QGroupBox(group.title)
         box.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
-        checkboxes_only = all(name.startswith("mux_") for name in group.params)
-        box.setMaximumWidth(
-            _MUX_COLUMN_MAX_WIDTH if checkboxes_only else _READING_LOOP_COLUMN_MAX_WIDTH
-        )
+        box.setMaximumWidth(_READING_LOOP_COLUMN_MAX_WIDTH)
         label_overrides = {
-            name: name.removeprefix("mux_")
+            name: name.split("_pick_", 1)[1]
             for name in group.params
-            if name.startswith("mux_")
+            if "_pick_" in name
         }
         form, widgets = param_form.build_form_layout(group.params, label_overrides, wrap=True)
         self._register_group_widgets(group, widgets)
-        for widget in widgets.values():
-            if isinstance(widget, QCheckBox):
-                widget.stateChanged.connect(self._refresh_route_selectors)
         box.setLayout(form)
         return box
 
@@ -717,70 +708,14 @@ class ProcedureWindow(QMainWindow):
                     pass
         return selections
 
-    def _current_mux_routes(self) -> list[str]:
-        """Return the route names whose mux_<route> checkboxes are currently checked.
-
-        Scans the "reading_loop" ParamGroup (if it exists) for checked
-        ``mux_<route>`` checkboxes. Returns an empty list if the group carries
-        no route checkboxes (no switch VI / scanner disabled), or if none are
-        checked (scanner available but off).
-
-        Returns:
-            List of route names corresponding to checked mux checkboxes, in group order.
-            Empty list if no route checkboxes exist OR no routes are selected.
-        """
-        loop_group = next(
-            (g for g in self._current_groups if g.key == "reading_loop"), None
-        )
-        if loop_group is None:
-            return []
-
-        selected: list[str] = []
-        for name, spec in loop_group.params.items():
-            if not name.startswith("mux_"):
-                continue
-            widget = self._param_inputs.get(name)
-            if widget is None:
-                continue
-            try:
-                if param_form.collect_value(widget, spec):
-                    route_name = name.removeprefix("mux_")
-                    selected.append(route_name)
-            except (ValueError, TypeError):
-                pass
-        return selected
-
-    def _has_mux_group(self) -> bool:
-        """Return True if the form carries route checkboxes (enabled switch VI)."""
-        return any(
-            name.startswith("mux_")
-            for g in self._current_groups
-            for name in g.params
-        )
-
-    def _refresh_route_selectors(self) -> None:
-        """Update plot route selectors with currently-selected routes.
-
-        Checks whether the form carries route checkboxes (enabled switch VI)
-        and which routes are checked; passes that to both plot panels'
-        ``set_available_routes()``. No route checkboxes passes None to hide
-        the selector.
-        """
-        if self._has_mux_group():
-            routes = self._current_mux_routes()
-        else:
-            routes = None
-        self._plot1.set_available_routes(routes)
-        self._plot2.set_available_routes(routes)
-
     def _refresh_loop_selectors(self) -> None:
-        """Update plot Loop selectors from the current reading-loop selections.
+        """Update the plots' two Loop selectors from the reading-loop selections.
 
-        Asks the selected procedure class for the loop labels
-        (``live_plot_loop_labels``: None = no loop possible, {} = loop off,
-        map = active loop) and passes them to both plot panels'
-        ``set_available_loop_labels()`` — the Loop selector mirrors the route
-        selector, picking which loop reading of a datapoint is plotted.
+        Asks the selected procedure class for the per-slot label maps
+        (``live_plot_loop_labels``: None = no loop possible, {} = slot
+        off/static, map = looping slot) and passes them to both plot panels'
+        ``set_available_loop_labels()`` — each Loop selector picks which
+        reading of a datapoint is plotted.
         """
         index = self._proc_selector.currentIndex()
         if index < 0 or index >= len(self._procedures):
@@ -964,17 +899,17 @@ class ProcedureWindow(QMainWindow):
             "Plot 1", PLOT_SERIES[0],
             x_selector_name="x1_axis_selector",
             y_selector_name="y_axis_selector",
-            route_selector_name="route1_selector",
             plot_object_name="live_plot",
-            loop_selector_name="loop1_selector",
+            loop1_selector_name="plot1_loop1_selector",
+            loop2_selector_name="plot1_loop2_selector",
         )
         self._plot2 = LivePlotPanel(
             "Plot 2", PLOT_SERIES[1],
             x_selector_name="x2_axis_selector",
             y_selector_name="y2_axis_selector",
-            route_selector_name="route2_selector",
             plot_object_name="live_plot_2",
-            loop_selector_name="loop2_selector",
+            loop1_selector_name="plot2_loop1_selector",
+            loop2_selector_name="plot2_loop2_selector",
         )
         for panel in (self._plot1, self._plot2):
             panel.setMinimumWidth(250)
@@ -1288,8 +1223,7 @@ class ProcedureWindow(QMainWindow):
         self._plot1.set_available_keys(keys, default_x, "voltage_V")
         self._plot2.set_available_keys(keys, default_x, "current_A")
 
-        # Refresh route + loop selectors based on the current selections.
-        self._refresh_route_selectors()
+        # Refresh the loop selectors based on the current selections.
         self._refresh_loop_selectors()
 
     def _reset_plot(self, proc: BaseProcedure) -> None:

@@ -11,8 +11,7 @@
 #   - cryosoft.core.exceptions (DataSchemaError)
 # input: |
 #   Constructor arguments only. Procedures build Target / Command / PhasePlan /
-#   StepPlan objects; measurement VIs declare ReadingVariant objects (the
-#   reading-loop currency); the GUI reads ParamSpec / ParamGroup; the data
+#   StepPlan objects; the GUI reads ParamSpec / ParamGroup; the data
 #   manager builds and checks DataSchema objects.
 # process: |
 #   Every dataclass is frozen and validates in __post_init__, raising ValueError
@@ -21,8 +20,8 @@
 #   leak into an already-constructed, notionally immutable plan.
 # output: |
 #   Immutable value objects. DataSchema additionally offers multiplexed() (derive
-#   a per-suffix schema, used for both switch routes and reading-variant keys)
-#   and validate() (check one datapoint, raising DataSchemaError listing every
+#   a per-suffix schema, used once per reading-loop level with its index
+#   labels) and validate() (check one datapoint, raising DataSchemaError listing every
 #   problem at once).
 # last_updated: 2026-07-17
 # ---
@@ -41,7 +40,6 @@ from cryosoft.core.exceptions import DataSchemaError
 __all__ = [
     "Target",
     "Command",
-    "ReadingVariant",
     "PhasePlan",
     "StepPlan",
     "ParamSpec",
@@ -166,67 +164,6 @@ class Command:
         if not isinstance(self.kwargs, dict):
             raise TypeError(f"Command.kwargs must be a dict, got {self.kwargs!r}")
         object.__setattr__(self, "kwargs", dict(self.kwargs))
-
-
-@dataclass(frozen=True)
-class ReadingVariant:
-    """One alternative measurement configuration read at every sweep point.
-
-    The internal currency of the *reading loop* (see GLOSSARY.md): the generic
-    sweep procedure builds one ``ReadingVariant`` per user-entered loop value —
-    the user picks a loopable measurement parameter (declared by the VI's
-    ``reading_setters``) in the GUI's Reading loop group and enters a
-    comma-separated value list; value *i* becomes the variant with index label
-    ``L{i}`` and a single setter ``Command``. At every sweep point the
-    procedure dispatches each variant's ``commands`` (through the Station, the
-    same channel every other measurement command uses) before that variant's
-    ``take_reading()``, and suffixes the returned columns ``__{key}``.
-
-    ``key`` obeys the same naming rules as a switch **route** (no ``__``, no
-    ``/``), because both are expanded into HDF5 column suffixes by
-    ``DataSchema.multiplexed()`` and compose as ``{name}__{key}__{route}``.
-
-    Attributes:
-        key: Short suffix label naming this variant (index labels ``"L1"``,
-            ``"L2"``, … when built from the GUI loop). Non-empty string
-            containing neither ``__`` (the reserved column separator) nor
-            ``/`` (illegal in an HDF5 dataset name).
-        commands: Ordered ``Command`` tuple dispatched before this variant's
-            reading. Normalised to a tuple; may be empty (a plain re-read).
-    """
-
-    key: str
-    commands: tuple[Command, ...] = ()
-
-    def __post_init__(self) -> None:
-        """Validate the fields and normalise ``commands``.
-
-        Raises:
-            TypeError: If ``key`` is not a string or a command is not a
-                ``Command``.
-            ValueError: If ``key`` is empty, contains ``__``, or contains ``/``.
-        """
-        if not isinstance(self.key, str):
-            raise TypeError(f"ReadingVariant.key must be a str, got {self.key!r}")
-        if not self.key:
-            raise ValueError("ReadingVariant.key must be a non-empty str")
-        if "__" in self.key:
-            raise ValueError(
-                f"ReadingVariant.key {self.key!r} must not contain '__' "
-                "(the reserved column separator)"
-            )
-        if "/" in self.key:
-            raise ValueError(
-                f"ReadingVariant.key {self.key!r} must not contain '/' "
-                "(illegal in an HDF5 dataset name)"
-            )
-        commands = tuple(self.commands)
-        for i, cmd in enumerate(commands):
-            if not isinstance(cmd, Command):
-                raise TypeError(
-                    f"ReadingVariant.commands[{i}] must be a Command, got {cmd!r}"
-                )
-        object.__setattr__(self, "commands", commands)
 
 
 def _validate_targets(targets: Any, owner: str) -> dict[str, Target]:
@@ -579,9 +516,9 @@ class DataSchema:
 
     Assembled at ``initiate()`` by composition: the sweep axis contributes its
     sweep column, the station its system columns, the measurement VI its arrays,
-    and each level of the reading loop suffixes the arrays per label — once per
-    reading-variant key, once per switch route (see ``multiplexed``, applied
-    once per level; suffixes compose as ``{name}__{variant}__{route}``). This
+    and each looping level of the reading loop suffixes the arrays with its
+    index labels (see ``multiplexed``, applied once per level, slot 1 first;
+    suffixes compose as ``{name}__A{i}__B{j}``). This
     is the single owner of the run's shape contract, the thing that catches
     "HDF5 expected a different format" mismatches before any data is written.
     Both dicts are defensively copied.
@@ -646,10 +583,10 @@ class DataSchema:
     ) -> DataSchema:
         """Return a new schema with every array (and named scalars) per route.
 
-        ``routes`` is any ordered set of suffix labels — switch route names or
-        reading-variant keys; both levels of the reading loop reuse this one
-        expansion (applied once per level, inner level first, so suffixes
-        compose as ``{name}__{variant}__{route}``).
+        ``routes`` is any ordered set of suffix labels — each looping level of
+        the reading loop reuses this one expansion with its index labels
+        (applied once per level, slot 1 first, so suffixes compose as
+        ``{name}__A{i}__B{j}``).
 
         Each array ``name`` becomes ``f"{name}__{route}"`` for each route. The
         resulting ``arrays`` dict is ordered arrays-outer, routes-inner: all

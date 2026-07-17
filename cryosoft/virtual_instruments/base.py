@@ -102,6 +102,35 @@ class BaseVirtualInstrument:
     # See "Control-validation standard" in the class docstring.
     control_limits: dict[str, dict[str, str]] = {}
 
+    # ── Reading-loop participation (see GLOSSARY "Reading loop") ──────────
+    # A VI in the reading path may declare parameters the generic sweep
+    # procedure can loop at every sweep point: ``reading_setters`` maps a
+    # parameter name to the cheap setter method that reprograms just that
+    # quantity between readings (the setter accepts the parameter under its
+    # own name); ``reading_parameters`` supplies each such parameter's
+    # ParamSpec (enumerated specs render as checkboxes in the Reading loop
+    # form group, free specs as a comma-separated value list); and
+    # ``reading_safe_off`` optionally names a method the procedure dispatches
+    # at standby/abort when this (non-measurement) VI took part in the loop
+    # (e.g. a switch's ``open_all``). Defaults: no participation.
+    reading_setters: ClassVar[dict[str, str]] = {}
+    reading_safe_off: ClassVar[str] = ""
+
+    @property
+    def reading_parameters(self) -> dict[str, ParamSpec]:
+        """Return ``{name: ParamSpec}`` for every ``reading_setters`` parameter.
+
+        The base implementation returns ``{}`` (no loopable parameters). A VI
+        that declares ``reading_setters`` must override this so the generic
+        sweep procedure can render and validate the loop values; a
+        measurement VI inherits an implementation reading its own
+        ``measurement_parameters`` (see ``MeasurementInstrumentBase``).
+
+        Returns:
+            Mapping of loopable parameter name to its ``ParamSpec``.
+        """
+        return {}
+
     # ------------------------------------------------------------------
     # __init_subclass__: auto-wrap @monitored / @control methods
     # ------------------------------------------------------------------
@@ -431,6 +460,21 @@ class MeasurementInstrumentBase(BaseVirtualInstrument):
     # Reading-loop declaration: parameter name -> per-reading setter method.
     # Empty (the default) means no parameter of this VI can be looped.
     reading_setters: ClassVar[dict[str, str]] = {}
+
+    @property
+    def reading_parameters(self) -> dict[str, ParamSpec]:
+        """Return the ``ParamSpec`` of every loopable measurement parameter.
+
+        A measurement VI's loopable parameters are, by definition, a subset of
+        its ``measurement_parameters``, so this reads their specs from there.
+
+        Returns:
+            ``{name: measurement_parameters[name]}`` for every
+            ``reading_setters`` key.
+        """
+        return {
+            name: self.measurement_parameters[name] for name in self.reading_setters
+        }
 
     def data_arrays(self, params: Mapping[str, Any]) -> dict[str, int]:
         """Return declared array name → per-point length for these *params*.

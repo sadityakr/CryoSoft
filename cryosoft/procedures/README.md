@@ -67,8 +67,8 @@ axis hooks.
 - `get_param_groups(station, selections)` (classmethod) drives GUI form
   generation. `SweepMeasureProcedure` uses it to add a structural
   `measurement_vi` selector (choices are the station's measurement VIs) plus the
-  selected VI's own `measurement_parameters`, and, when a switch VI is present,
-  the multiplexing checkboxes.
+  selected VI's own `measurement_parameters`, and, when anything is loopable,
+  the Reading loop slot group (see below).
 - SI units everywhere: tesla, kelvin, amperes, volts, seconds.
 
 ### Generic sweep and the reading loop (owned by the base, no per-procedure code)
@@ -81,39 +81,30 @@ the VI's arrays/scalars) and arms the VI; `measure()` runs the **reading loop**
 `standby()` / `abort()` disarm the VI.
 
 The reading loop is the standard for taking multiple readings at a single
-sweep point. It has two nested, independently optional levels, each dispatching
-its setup as `Command`s through the Station before every reading and suffixing
-that reading's columns via `DataSchema.multiplexed(...)`:
+sweep point. It has up to TWO generic slots, each a **loopable parameter** —
+anything a reading-path VI advertises via its `reading_setters` class
+attribute: the switch VI's `route` (setter `select_route`, safe-off
+`open_all`) and the DC measurement VI's `current_A` (setter
+`set_source_current`) are the *same concept*, so a setup with no scanner
+simply has one fewer loopable parameter and no special case anywhere. Slot 1
+(index labels `A1, A2, …`) is the outer level, slot 2 (`B1, B2, …`) the inner
+one.
 
-- **Routes (outer level — channels).** When the station exposes a switch VI
-  (`vi_type: switch`) and the scanner is enabled, the **Reading loop** group
-  carries one `mux_<route>` checkbox per route (channels are loop parameters,
-  so they live in the same group as the value list); with two or more routes
-  selected, `measure()` connects each route in turn and suffixes
-  `{name}__{route}` (e.g. `voltage_V__Mux-Ch1`). `standby()` / `abort()`
-  append a switch `open_all` when routes were used.
-- **Value list (inner level — reading settings).** When the selected
-  measurement VI declares loopable parameters (its `reading_setters` class
-  attribute maps a parameter to the cheap setter that reprograms it between
-  readings, e.g. `{"current_A": "set_source_current"}`), `get_param_groups()`
-  auto-renders a **Reading loop** group above the VI's parameter group: a
-  structural `loop_parameter` drop-down and a `loop_values` comma-separated
-  text field (e.g. `1e-6, -1e-6` for +/- current). Value *i* is measured under
-  index label `L{i}`: the setter is dispatched before each value's reading and
-  its columns are suffixed `{name}__L{i}`; the label -> value map is stored in
-  the HDF5 metadata (`procedure_params["loop_labels"]`). Values are validated
-  against the parameter's own `ParamSpec` (type, bounds, choices) at
-  construction. Making a parameter loopable is therefore a one-line
-  measurement-VI declaration, never procedure or GUI code.
-
-Suffixes compose inner level first: `{name}__L{i}__{route}`. The loop is
-capped at these two levels (channels x one looped parameter). A level that
-does not loop (loop off, 0 or 1 route) adds no suffix and no commands; the
-axis, system columns, and `unix_time` are never suffixed. The live plots
-mirror both levels with per-plot selectors: axis keys stay the plain column
-names, the Route selector picks the channel, and the Loop selector (fed by
-`live_plot_loop_labels()`, items like "L1 = 1e-06") picks the loop reading;
-the panel composes `{key}__L{i}__{route}` at draw time.
+The **Reading loop** form group renders automatically whenever anything is
+loopable: one `{slot}_parameter` drop-down per slot plus that parameter's
+values input — per-choice `{slot}_pick_{value}` checkboxes when the ParamSpec
+is enumerated (tick the channels), a `{slot}_values` comma-separated text
+field otherwise (e.g. `1e-6, -1e-6`), each value validated against the
+parameter's own spec at construction. A slot with ONE value is a static
+setting (dispatched once at `initiate()`, no suffix); with two or more it
+loops: the setter is dispatched as a `Command` through the Station before
+every reading and columns compose as `{name}__A{i}__B{j}`. The label -> value
+map is stored in the HDF5 metadata (`procedure_params["loop_labels"]`);
+participating non-measurement VIs get their `reading_safe_off` at
+standby/abort. The live plots mirror the slots with per-plot Loop 1 / Loop 2
+selectors (fed by `live_plot_loop_labels()`, items like "A1 = Mux-Ch1"); axis
+keys stay the plain column names and the panel composes the suffix at draw
+time.
 
 ## How to add a new module
 
