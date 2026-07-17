@@ -40,6 +40,7 @@ from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 from cryosoft.core.station import build_station
 from cryosoft.gui import app_settings as _app_settings
 from cryosoft.gui import session as session_store
+from cryosoft.gui import window_geometry
 from cryosoft.gui.instrument_panel import InstrumentPanel
 from cryosoft.gui.monitor_window import MonitorWindow
 from cryosoft.gui.notification_banner import NotificationBanner
@@ -303,7 +304,7 @@ def test_procedure_window_opens(procedure_win):
 
 def test_procedure_selector_populated(procedure_win):
     """Procedure selector has at least one entry (FieldSweep / TemperatureSweep)."""
-    assert procedure_win._proc_selector.count() >= 1
+    assert procedure_win._params_panel._proc_selector.count() >= 1
 
 
 def test_procedure_param_inputs_exist(procedure_win):
@@ -318,7 +319,7 @@ def test_procedure_param_inputs_exist(procedure_win):
 
     _select_procedure(procedure_win, FieldSweep.name)
 
-    assert procedure_win._axis_widget is not None
+    assert procedure_win._params_panel._axis_widget is not None
 
     # System params (temperature, init_wait, step_wait) render as flat inputs.
     for param_name in FieldSweep.system_parameters:
@@ -364,9 +365,9 @@ def test_procedure_param_label_and_tooltip(procedure_win):
 
 def _select_procedure(procedure_win, name):
     """Select the procedure whose exact display name is *name*."""
-    for i in range(procedure_win._proc_selector.count()):
-        if procedure_win._proc_selector.itemText(i) == name:
-            procedure_win._proc_selector.setCurrentIndex(i)
+    for i in range(procedure_win._params_panel._proc_selector.count()):
+        if procedure_win._params_panel._proc_selector.itemText(i) == name:
+            procedure_win._params_panel._proc_selector.setCurrentIndex(i)
             return
     pytest.fail(f"{name!r} not found in procedure selector")
 
@@ -427,7 +428,7 @@ def _measurement_combo(win):
 def _select_measurement(win, vi_name):
     """Set the measurement combobox to the label whose mapped value is *vi_name*."""
     combo = _measurement_combo(win)
-    for group in win._current_groups:
+    for group in win._params_panel._current_groups:
         spec = group.params.get("measurement_vi")
         if spec is None:
             continue
@@ -455,7 +456,7 @@ def _fully_inside_param_viewport(win, widget) -> bool:
     """
     if not widget.isVisible():
         return False
-    viewport = win._param_scroll.viewport()
+    viewport = win._params_panel._param_scroll.viewport()
     top_left = widget.mapTo(viewport, widget.rect().topLeft())
     bottom_right = widget.mapTo(viewport, widget.rect().bottomRight())
     return (
@@ -483,10 +484,10 @@ def test_generic_field_sweep_renders_measurement_select_and_default_group(proced
     assert procedure_win.findChild(QLineEdit, "param_n_readings_input") is not None
     # The selector + params live in ONE Measurement box (not a per-group column);
     # the composite box exists and the params key tracks the selected VI.
-    assert procedure_win._measurement_box is not None
-    assert procedure_win._measurement_params_key == "measurement:keithley_delta_mode"
+    assert procedure_win._params_panel._measurement_box is not None
+    assert procedure_win._params_panel._measurement_params_key == "measurement:keithley_delta_mode"
     # The Measurement box is NOT registered as an independent column.
-    assert "measurement:keithley_delta_mode" not in procedure_win._group_boxes
+    assert "measurement:keithley_delta_mode" not in procedure_win._params_panel._group_boxes
 
 
 def test_generic_field_sweep_all_four_columns_visible_no_hscroll(procedure_win):
@@ -502,7 +503,7 @@ def test_generic_field_sweep_all_four_columns_visible_no_hscroll(procedure_win):
     _settle_at_width(procedure_win, 1280, 800)
 
     # No horizontal scrollbar is needed for the parameter form.
-    assert procedure_win._param_scroll.horizontalScrollBar().maximum() == 0
+    assert procedure_win._params_panel._param_scroll.horizontalScrollBar().maximum() == 0
 
     # The selected VI's first parameter widget is fully inside the viewport.
     first_param = procedure_win.findChild(QLineEdit, "param_n_readings_input")
@@ -523,9 +524,9 @@ def test_generic_field_sweep_switching_vi_swaps_only_measurement_group(procedure
 
     # Capture the sweep axis widget, the System input, and the composite
     # Measurement box + method drop-down BEFORE switching.
-    axis_before = procedure_win._axis_widget
+    axis_before = procedure_win._params_panel._axis_widget
     temp_before = procedure_win.findChild(QLineEdit, "param_temperature_input")
-    box_before = procedure_win._measurement_box
+    box_before = procedure_win._params_panel._measurement_box
     combo_before = _measurement_combo(procedure_win)
     assert temp_before is not None and box_before is not None
 
@@ -536,13 +537,13 @@ def test_generic_field_sweep_switching_vi_swaps_only_measurement_group(procedure
     assert procedure_win.findChild(QLineEdit, "param_n_readings_input") is None
     assert procedure_win.findChild(QComboBox, "param_voltmeter_range_V_input") is None  # dc's is a line edit
     assert procedure_win.findChild(QLineEdit, "param_voltmeter_range_V_input") is not None
-    assert procedure_win._measurement_params_key == "measurement:dc_measurement"
+    assert procedure_win._params_panel._measurement_params_key == "measurement:dc_measurement"
 
     # Only the params sub-form was rebuilt: the Measurement box, its method
     # drop-down, the sweep axis widget, and the System input are SAME instances.
-    assert procedure_win._measurement_box is box_before
+    assert procedure_win._params_panel._measurement_box is box_before
     assert _measurement_combo(procedure_win) is combo_before
-    assert procedure_win._axis_widget is axis_before
+    assert procedure_win._params_panel._axis_widget is axis_before
     assert procedure_win.findChild(QLineEdit, "param_temperature_input") is temp_before
 
 
@@ -591,7 +592,7 @@ def test_generic_field_sweep_renders_mux_checkboxes(procedure_win):
 
     _select_procedure(procedure_win, FieldSweep.name)
 
-    assert "mux" in procedure_win._group_boxes
+    assert "mux" in procedure_win._params_panel._group_boxes
     for route in ("Mux-Ch1", "Mux-Ch2", "Mux-Ch3", "Mux-Ch4"):
         box = procedure_win.findChild(QCheckBox, f"param_mux_{route}_input")
         assert box is not None, f"mux checkbox for {route} should render"
@@ -733,15 +734,15 @@ def test_param_form_renders_all_widget_kinds_and_round_trips(qtbot):
 
 def test_monitor_sample_info_inputs_exist(monitor_win):
     """Sample name, ID, and comments fields are present in MonitorWindow."""
-    assert monitor_win._sample_name_input is not None
-    assert monitor_win._sample_id_input is not None
-    assert monitor_win._comments_input is not None
+    assert monitor_win._sample_info._sample_name_input is not None
+    assert monitor_win._sample_info._sample_id_input is not None
+    assert monitor_win._sample_info._comments_input is not None
 
 
 def test_monitor_data_dir_input_exists(monitor_win):
     """Data directory input is in MonitorWindow and has a default value."""
-    assert monitor_win._data_dir_input is not None
-    assert monitor_win._data_dir_input.text() != ""
+    assert monitor_win._sample_info._data_dir_input is not None
+    assert monitor_win._sample_info._data_dir_input.text() != ""
 
 
 def test_monitor_get_sample_info(monitor_win):
@@ -788,12 +789,12 @@ def test_progress_bar_updates(procedure_win, orchestrator):
 
 def test_add_to_queue_appends_item(procedure_win, qtbot):
     """Add to Queue populates the queue list widget."""
-    initial_count = procedure_win._queue_list.count()
+    initial_count = procedure_win._queue_panel._queue_list.count()
     qtbot.mouseClick(
         procedure_win.findChild(QPushButton, "add_to_queue_btn"),
         __import__("PyQt6.QtCore", fromlist=["Qt"]).Qt.MouseButton.LeftButton,
     )
-    assert procedure_win._queue_list.count() == initial_count + 1
+    assert procedure_win._queue_panel._queue_list.count() == initial_count + 1
 
 
 def test_file_prefix_input_exists(procedure_win):
@@ -808,16 +809,16 @@ def test_add_to_queue_captures_current_file_prefix(procedure_win, qtbot):
     add_btn = procedure_win.findChild(QPushButton, "add_to_queue_btn")
     Qt = __import__("PyQt6.QtCore", fromlist=["Qt"]).Qt
 
-    procedure_win._file_prefix_input.setText("run_a")
+    procedure_win._params_panel._file_prefix_input.setText("run_a")
     qtbot.mouseClick(add_btn, Qt.MouseButton.LeftButton)
 
-    procedure_win._file_prefix_input.setText("run_b")
+    procedure_win._params_panel._file_prefix_input.setText("run_b")
     qtbot.mouseClick(add_btn, Qt.MouseButton.LeftButton)
 
-    prefixes = [entry.file_prefix for entry in procedure_win._queue]
+    prefixes = [entry.file_prefix for entry in procedure_win._queue_panel._queue]
     assert prefixes[-2:] == ["run_a", "run_b"]
-    assert "run_a" in procedure_win._queue_list.item(len(prefixes) - 2).text()
-    assert "run_b" in procedure_win._queue_list.item(len(prefixes) - 1).text()
+    assert "run_a" in procedure_win._queue_panel._queue_list.item(len(prefixes) - 2).text()
+    assert "run_b" in procedure_win._queue_panel._queue_list.item(len(prefixes) - 1).text()
 
 
 def test_blank_file_prefix_omitted_from_queue_label(procedure_win, qtbot):
@@ -825,18 +826,18 @@ def test_blank_file_prefix_omitted_from_queue_label(procedure_win, qtbot):
     add_btn = procedure_win.findChild(QPushButton, "add_to_queue_btn")
     Qt = __import__("PyQt6.QtCore", fromlist=["Qt"]).Qt
 
-    procedure_win._file_prefix_input.setText("")
+    procedure_win._params_panel._file_prefix_input.setText("")
     qtbot.mouseClick(add_btn, Qt.MouseButton.LeftButton)
 
-    entry = procedure_win._queue[-1]
+    entry = procedure_win._queue_panel._queue[-1]
     assert entry.file_prefix == ""
-    assert "[" not in procedure_win._queue_list.item(procedure_win._queue_list.count() - 1).text()
-    assert entry.cls.name in procedure_win._queue_list.item(procedure_win._queue_list.count() - 1).text()
+    assert "[" not in procedure_win._queue_panel._queue_list.item(procedure_win._queue_panel._queue_list.count() - 1).text()
+    assert entry.cls.name in procedure_win._queue_panel._queue_list.item(procedure_win._queue_panel._queue_list.count() - 1).text()
 
 
 def test_run_now_passes_file_prefix_to_procedure_instance(procedure_win, qtbot):
     """Run Now builds a procedure carrying the current file-prefix field value."""
-    procedure_win._file_prefix_input.setText("live_run")
+    procedure_win._params_panel._file_prefix_input.setText("live_run")
     proc = procedure_win._build_procedure_instance()
     assert proc is not None
     assert proc._file_prefix == "live_run"
@@ -884,14 +885,14 @@ def test_monitor_fixed_quadrants_exist_with_expected_content(monitor_win):
     stack = monitor_win.findChild(QStackedWidget, "devices_log_stack")
     assert stack is not None
     assert stack.count() == 2
-    assert stack.widget(1) is monitor_win._log_widget
+    assert stack.widget(1) is monitor_win._log_panel
 
 
 def test_monitor_default_trend_panels_exist_and_gridded(monitor_win):
     """Two trend panels exist by default, each placed in the trends QGridLayout."""
-    assert len(monitor_win._trend_panels) == 2
-    for panel in monitor_win._trend_panels.values():
-        assert monitor_win._trends_grid.indexOf(panel) != -1
+    assert len(monitor_win._trends._trend_panels) == 2
+    for panel in monitor_win._trends._trend_panels.values():
+        assert monitor_win._trends._trends_grid.indexOf(panel) != -1
 
 
 def test_monitor_has_no_view_menu(monitor_win):
@@ -907,46 +908,46 @@ def test_monitor_has_no_view_menu(monitor_win):
 
 def test_monitor_trends_grid_arranges_in_ceil_sqrt_grid(monitor_win):
     """Adding trend plots up to the cap of 4 arranges them in a 2x2 grid, not a stack."""
-    monitor_win._add_trend_panel()  # 3rd panel: ceil(sqrt(3)) = 2 columns
-    monitor_win._add_trend_panel()  # 4th panel: ceil(sqrt(4)) = 2 columns
-    assert len(monitor_win._trend_panels) == 4
+    monitor_win._trends._add_trend_panel()  # 3rd panel: ceil(sqrt(3)) = 2 columns
+    monitor_win._trends._add_trend_panel()  # 4th panel: ceil(sqrt(4)) = 2 columns
+    assert len(monitor_win._trends._trend_panels) == 4
 
     positions = {
-        monitor_win._trends_grid.getItemPosition(i)[:2]
-        for i in range(monitor_win._trends_grid.count())
+        monitor_win._trends._trends_grid.getItemPosition(i)[:2]
+        for i in range(monitor_win._trends._trends_grid.count())
     }
     assert positions == {(0, 0), (0, 1), (1, 0), (1, 1)}
 
 
 def test_monitor_add_trend_plot_button_caps_at_four(monitor_win):
     """The Trends quadrant's Add button adds panels up to 4, then disables and stays inert."""
-    assert len(monitor_win._trend_panels) == 2
-    assert monitor_win._add_trend_btn.isEnabled()
+    assert len(monitor_win._trends._trend_panels) == 2
+    assert monitor_win._trends._add_trend_btn.isEnabled()
 
-    monitor_win._add_trend_btn.click()
-    assert len(monitor_win._trend_panels) == 3
-    monitor_win._add_trend_btn.click()
-    assert len(monitor_win._trend_panels) == 4
-    assert not monitor_win._add_trend_btn.isEnabled()
+    monitor_win._trends._add_trend_btn.click()
+    assert len(monitor_win._trends._trend_panels) == 3
+    monitor_win._trends._add_trend_btn.click()
+    assert len(monitor_win._trends._trend_panels) == 4
+    assert not monitor_win._trends._add_trend_btn.isEnabled()
 
-    monitor_win._add_trend_btn.click()
-    assert len(monitor_win._trend_panels) == 4
+    monitor_win._trends._add_trend_btn.click()
+    assert len(monitor_win._trends._trend_panels) == 4
 
 
 def test_monitor_trend_remove_button_drops_panel_never_below_one(monitor_win):
     """The panel's own remove button destroys the panel, stopping at a floor of 1."""
-    assert len(monitor_win._trend_panels) == 2
-    first_id = next(iter(monitor_win._trend_panels))
+    assert len(monitor_win._trends._trend_panels) == 2
+    first_id = next(iter(monitor_win._trends._trend_panels))
 
-    monitor_win._on_trend_remove_requested(first_id)
-    assert len(monitor_win._trend_panels) == 1
-    assert first_id not in monitor_win._trend_panels
+    monitor_win._trends._on_trend_remove_requested(first_id)
+    assert len(monitor_win._trends._trend_panels) == 1
+    assert first_id not in monitor_win._trends._trend_panels
 
-    remaining_id = next(iter(monitor_win._trend_panels))
-    monitor_win._on_trend_remove_requested(remaining_id)
-    assert len(monitor_win._trend_panels) == 1  # floor holds
+    remaining_id = next(iter(monitor_win._trends._trend_panels))
+    monitor_win._trends._on_trend_remove_requested(remaining_id)
+    assert len(monitor_win._trends._trend_panels) == 1  # floor holds
 
-    assert monitor_win._add_trend_btn.isEnabled()
+    assert monitor_win._trends._add_trend_btn.isEnabled()
 
 
 def test_monitor_other_devices_log_selector_switches_stack(monitor_win):
@@ -1012,7 +1013,7 @@ def test_monitor_states_updated_feeds_history_and_trend_combos(monitor_win, orch
     fake_state = {"magnet_x": {"get_field": 0.25, "magnet_current": 12.0}}
     orchestrator.states_updated.emit(fake_state)
 
-    assert "magnet_x_get_field" in monitor_win._history.keys()
+    assert "magnet_x_get_field" in monitor_win._trends._history.keys()
 
     panels = monitor_win.findChildren(TrendPlotPanel)
     assert len(panels) == 2
@@ -1038,8 +1039,8 @@ def test_monitor_default_trend_key_hints_prefer_readings_over_settings(monitor_w
     }
     orchestrator.states_updated.emit(fake_state)
 
-    trend_0 = monitor_win._trend_panels["trend_0"]
-    trend_1 = monitor_win._trend_panels["trend_1"]
+    trend_0 = monitor_win._trends._trend_panels["trend_0"]
+    trend_1 = monitor_win._trends._trend_panels["trend_1"]
     assert trend_0.selected_key().endswith("_temperature")
     assert trend_1.selected_key().endswith(("_helium_level", "_nitrogen_level"))
 
@@ -1060,8 +1061,8 @@ def test_monitor_persistence_roundtrip_splitters_and_trends(
     qtbot.addWidget(win1)
     win1.show()
 
-    third_id = win1._add_trend_panel()
-    third_panel = win1._trend_panels[third_id]
+    third_id = win1._trends._add_trend_panel()
+    third_panel = win1._trends._trend_panels[third_id]
 
     # Feed history AFTER the third panel exists so its refresh() (triggered by
     # this emit) populates its Y combo with a real key to select.
@@ -1070,7 +1071,7 @@ def test_monitor_persistence_roundtrip_splitters_and_trends(
     third_panel.set_selected_key("magnet_x_get_field")
     third_panel.set_selected_window_s(21600.0)  # "6 h"
 
-    assert len(win1._trend_panels) == 3
+    assert len(win1._trends._trend_panels) == 3
 
     win1._main_splitter.setSizes([300, 900])
     win1.close()  # persists geometry + splitter state via closeEvent
@@ -1079,7 +1080,7 @@ def test_monitor_persistence_roundtrip_splitters_and_trends(
     qtbot.addWidget(win2)
     win2.show()
 
-    assert len(win2._trend_panels) == 3
+    assert len(win2._trends._trend_panels) == 3
     # Splitter proportions were restored, not left at the [600, 600] default.
     assert win2._main_splitter.sizes() != [600, 600]
 
@@ -1087,8 +1088,8 @@ def test_monitor_persistence_roundtrip_splitters_and_trends(
     # selection, held pending, can actually be applied.
     orchestrator.states_updated.emit(fake_state)
 
-    third_id_2 = list(win2._trend_panels.keys())[2]
-    third_panel_2 = win2._trend_panels[third_id_2]
+    third_id_2 = list(win2._trends._trend_panels.keys())[2]
+    third_panel_2 = win2._trends._trend_panels[third_id_2]
     assert third_panel_2.selected_key() == "magnet_x_get_field"
     assert third_panel_2.selected_window_s() == 21600.0
 
@@ -1098,7 +1099,7 @@ def test_monitor_default_layout_when_settings_empty(monitor_win, station):
     system_vis = [
         n for n in station.get_vi_names() if station.get_vi_type(n) in {"system", "level"}
     ]
-    assert len(monitor_win._trend_panels) == 2
+    assert len(monitor_win._trends._trend_panels) == 2
     assert len(monitor_win._panels) == len(system_vis)  # instrument panels were built and placed
     # setSizes([600, 600]) is a proportional hint, not exact pixels once shown
     # at the real window width — check the default is an even 50/50 split.
@@ -1146,7 +1147,7 @@ def test_procedure_quadrant_splitters_correctly_oriented(procedure_win):
 
 def test_procedure_param_scroll_has_no_height_cap(procedure_win):
     """The parameter scroll area fills its quadrant instead of being capped at a fixed height."""
-    assert procedure_win._param_scroll.maximumHeight() >= 16777215  # Qt's QWIDGETSIZE_MAX default (uncapped)
+    assert procedure_win._params_panel._param_scroll.maximumHeight() >= 16777215  # Qt's QWIDGETSIZE_MAX default (uncapped)
 
 
 def test_monitor_central_widget_not_scroll_area(monitor_win):
@@ -1159,7 +1160,7 @@ def test_log_handler_removed_on_close(station, orchestrator, qtbot):
     """Closing MonitorWindow detaches its log handler from the cryosoft logger."""
     win = MonitorWindow(station, orchestrator)
     qtbot.addWidget(win)
-    handler = win._log_handler
+    handler = win._log_panel.handler
     cryosoft_logger = logging.getLogger("cryosoft")
     assert handler in cryosoft_logger.handlers
 
@@ -1386,16 +1387,16 @@ def test_monitor_restores_sample_fields_from_session(station, orchestrator, qtbo
     )
     win = MonitorWindow(station, orchestrator)
     qtbot.addWidget(win)
-    assert win._sample_name_input.text() == "Si_001"
-    assert win._sample_id_input.text() == "S2024-01"
-    assert win._comments_input.toPlainText() == "cooldown 2"
-    assert win._data_dir_input.text() == "D:/runs"
+    assert win._sample_info._sample_name_input.text() == "Si_001"
+    assert win._sample_info._sample_id_input.text() == "S2024-01"
+    assert win._sample_info._comments_input.toPlainText() == "cooldown 2"
+    assert win._sample_info._data_dir_input.text() == "D:/runs"
 
 
 def test_monitor_saves_session_on_close(monitor_win, tmp_path):
     """Closing the window persists the current Sample Info to the session file."""
-    monitor_win._sample_name_input.setText("SampleZ")
-    monitor_win._data_dir_input.setText("E:/data")
+    monitor_win._sample_info._sample_name_input.setText("SampleZ")
+    monitor_win._sample_info._data_dir_input.setText("E:/data")
     monitor_win.close()
     loaded = session_store.load(tmp_path / "last_session.json")
     assert loaded.sample_name == "SampleZ"
@@ -1404,13 +1405,13 @@ def test_monitor_saves_session_on_close(monitor_win, tmp_path):
 
 def test_new_session_clears_fields(monitor_win, monkeypatch):
     """New Session (confirmed) resets the Sample Info fields to defaults."""
-    monitor_win._sample_name_input.setText("ToClear")
+    monitor_win._sample_info._sample_name_input.setText("ToClear")
     monkeypatch.setattr(
         QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes
     )
     monitor_win._on_new_session()
-    assert monitor_win._sample_name_input.text() == ""
-    assert monitor_win._data_dir_input.text() == "C:/CryoData"
+    assert monitor_win._sample_info._sample_name_input.text() == ""
+    assert monitor_win._sample_info._data_dir_input.text() == "C:/CryoData"
 
 
 def test_procedure_window_restores_selection_and_params(station, orchestrator, qtbot):
@@ -1418,12 +1419,12 @@ def test_procedure_window_restores_selection_and_params(station, orchestrator, q
     info, ddir = _sample_stub(), _data_dir_stub()
     win = ProcedureWindow(station, orchestrator, info, ddir)
     qtbot.addWidget(win)
-    proc_name = win._current_procedure_name
+    proc_name = win._params_panel._current_procedure_name
     # Pick a plain text field (a QLineEdit) to type into.
     param_key = next(
-        name for name, w in win._param_inputs.items() if isinstance(w, QLineEdit)
+        name for name, w in win._params_panel._param_inputs.items() if isinstance(w, QLineEdit)
     )
-    win._param_inputs[param_key].setText("42")
+    win._params_panel._param_inputs[param_key].setText("42")
 
     state = session_store.SessionState()
     win.export_session_state(state)
@@ -1434,8 +1435,8 @@ def test_procedure_window_restores_selection_and_params(station, orchestrator, q
 
     win2 = ProcedureWindow(station, orchestrator, info, ddir, initial_session=state)
     qtbot.addWidget(win2)
-    assert win2._proc_selector.currentText() == proc_name
-    assert win2._param_inputs[param_key].text() == "42"
+    assert win2._params_panel._proc_selector.currentText() == proc_name
+    assert win2._params_panel._param_inputs[param_key].text() == "42"
 
 
 def test_procedure_window_exports_and_restores_queue(station, orchestrator, qtbot):
@@ -1444,7 +1445,7 @@ def test_procedure_window_exports_and_restores_queue(station, orchestrator, qtbo
     win = ProcedureWindow(station, orchestrator, info, ddir)
     qtbot.addWidget(win)
     win._on_add_to_queue()
-    assert win._queue_list.count() == 1, "default form params should be valid to queue"
+    assert win._queue_panel._queue_list.count() == 1, "default form params should be valid to queue"
 
     state = session_store.SessionState()
     win.export_session_state(state)
@@ -1452,7 +1453,7 @@ def test_procedure_window_exports_and_restores_queue(station, orchestrator, qtbo
 
     win2 = ProcedureWindow(station, orchestrator, info, ddir, initial_session=state)
     qtbot.addWidget(win2)
-    assert win2._queue_list.count() == 1
+    assert win2._queue_panel._queue_list.count() == 1
     assert len(orchestrator._procedure_queue) == 1
 
 
@@ -1464,7 +1465,7 @@ def test_procedure_window_skips_unknown_procedure_in_queue(station, orchestrator
     )
     win = ProcedureWindow(station, orchestrator, info, ddir, initial_session=state)
     qtbot.addWidget(win)
-    assert win._queue_list.count() == 0
+    assert win._queue_panel._queue_list.count() == 0
 
 
 def test_run_queue_marks_running_then_done(station, orchestrator, qtbot, monkeypatch):
@@ -1474,21 +1475,21 @@ def test_run_queue_marks_running_then_done(station, orchestrator, qtbot, monkeyp
     qtbot.addWidget(win)
     win._on_add_to_queue()
     win._on_add_to_queue()
-    assert [e.status for e in win._queue] == ["pending", "pending"]
+    assert [e.status for e in win._queue_panel._queue] == ["pending", "pending"]
 
     # Stub the actual run: exercise only the GUI's per-item status logic.
     monkeypatch.setattr(orchestrator, "run_queue", lambda: None)
-    win._on_run_queue()
-    assert win._queue[0].status == "running"
-    assert win._queue_running is True
+    win._queue_panel._on_run_queue()
+    assert win._queue_panel._queue[0].status == "running"
+    assert win._queue_panel._queue_running is True
 
     orchestrator.procedure_finished.emit()
-    assert win._queue[0].status == "done"
-    assert win._queue[1].status == "running"
+    assert win._queue_panel._queue[0].status == "done"
+    assert win._queue_panel._queue[1].status == "running"
 
     orchestrator.procedure_finished.emit()
-    assert win._queue[1].status == "done"
-    assert win._queue_running is False
+    assert win._queue_panel._queue[1].status == "done"
+    assert win._queue_panel._queue_running is False
 
 
 def test_abort_marks_running_item_failed(station, orchestrator, qtbot, monkeypatch):
@@ -1500,15 +1501,15 @@ def test_abort_marks_running_item_failed(station, orchestrator, qtbot, monkeypat
     win._on_add_to_queue()
     monkeypatch.setattr(orchestrator, "run_queue", lambda: None)
     monkeypatch.setattr(orchestrator, "abort_procedure", lambda: None)
-    win._on_run_queue()
-    assert win._queue[0].status == "running"
+    win._queue_panel._on_run_queue()
+    assert win._queue_panel._queue[0].status == "running"
 
     monkeypatch.setattr(
         QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes
     )
     win._on_abort()
-    assert win._queue[0].status == "failed"
-    assert win._queue[1].status == "running"
+    assert win._queue_panel._queue[0].status == "failed"
+    assert win._queue_panel._queue[1].status == "running"
 
 
 def test_queue_remove_resyncs_orchestrator(station, orchestrator, qtbot):
@@ -1519,9 +1520,9 @@ def test_queue_remove_resyncs_orchestrator(station, orchestrator, qtbot):
     win._on_add_to_queue()
     win._on_add_to_queue()
     assert len(orchestrator._procedure_queue) == 2
-    win._queue_list.setCurrentRow(0)
-    win._queue_remove()
-    assert win._queue_list.count() == 1
+    win._queue_panel._queue_list.setCurrentRow(0)
+    win._queue_panel._queue_remove()
+    assert win._queue_panel._queue_list.count() == 1
     assert len(orchestrator._procedure_queue) == 1
 
 
@@ -1559,7 +1560,7 @@ def test_select_config_confirmed_triggers_restart(station, orchestrator, qtbot, 
         QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes
     )
     entry = catalog.list_configs()[0]
-    win._on_select_config(str(entry.path))
+    win._config_controller._on_select_config(str(entry.path))
     assert restarted == [True]
     assert _app_settings.config_active() == (entry.name, entry.source)
 
@@ -1577,7 +1578,7 @@ def test_select_config_cancelled_does_not_restart(station, orchestrator, qtbot, 
     monkeypatch.setattr(
         QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.No
     )
-    win._on_select_config(str(catalog.list_configs()[0].path))
+    win._config_controller._on_select_config(str(catalog.list_configs()[0].path))
     assert restarted == []
 
 
@@ -1622,9 +1623,9 @@ def test_offscreen_saved_geometry_recenters(station, orchestrator, qtbot):
     win = MonitorWindow(station, orchestrator)
     qtbot.addWidget(win)
     win.move(-10000, -10000)
-    assert not win._geometry_on_screen()
+    assert not window_geometry.geometry_on_screen(win)
     _app_settings.get_settings().setValue("MonitorWindow/geometry", win.saveGeometry())
 
     win2 = MonitorWindow(station, orchestrator)
     qtbot.addWidget(win2)
-    assert win2._geometry_on_screen()
+    assert window_geometry.geometry_on_screen(win2)

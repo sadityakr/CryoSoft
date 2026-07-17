@@ -16,13 +16,29 @@ one allowed exception). CI runs `make lint + make contracts + make test`.
 | File | Role |
 |------|------|
 | `cryosoft/gui/theme.py` | ALL colors and QSS live here (tokens + `build_stylesheet()`) |
-| `cryosoft/gui/monitor_window.py` | Main window: panels grid, banner, log, sample info, status bar |
-| `cryosoft/gui/procedure_window.py` | Procedure builder, queue, two `LivePlotPanel`s |
+| `cryosoft/gui/monitor_window.py` | Main window (composition shell): quadrant splitters, banner, status bar, menus, signal wiring |
+| `cryosoft/gui/trends_quadrant.py` | Trends quadrant: TrendPlotPanel grid + MonitorHistory + persistence |
+| `cryosoft/gui/sample_info_panel.py` | Sample Info quadrant (name/ID/comments/data dir) |
+| `cryosoft/gui/other_devices.py` | Other Devices rows (measurement check rows, display-only switch rows) |
+| `cryosoft/gui/log_panel.py` | Log widget + `QtLogHandler` (attach/detach lifecycle) |
+| `cryosoft/gui/config_menu.py` | Config menu controller (select/switch/restart, editor launcher) |
+| `cryosoft/gui/procedure_window.py` | Procedure window (composition shell): quadrants, run/queue/abort flows, two `LivePlotPanel`s |
+| `cryosoft/gui/procedure_params_panel.py` | Procedure selector + parameter form + param cache (the params quadrant) |
+| `cryosoft/gui/queue_panel.py` | Run-queue list, per-item status, Orchestrator queue sync |
+| `cryosoft/gui/procedure_discovery.py` | Qt-free BaseProcedure auto-discovery |
+| `cryosoft/gui/window_geometry.py` | Shared geometry restore/save helpers for both windows |
 | `cryosoft/gui/instrument_panel.py` | Auto-generated per-VI panel (from decorator metadata) |
 | `cryosoft/gui/live_plot_panel.py` | Reusable X/Y live plot widget |
 | `cryosoft/gui/notification_banner.py` | Non-modal warning/error strip |
 | `cryosoft/gui/app_settings.py` | QSettings factory — the test seam |
 | `tests/test_gui.py` | pytest-qt suite; run with `-p no:randomly` when run alone |
+
+Destruction-order rule: Orchestrator signals that feed child panels (e.g.
+`states_updated` → Trends / Other Devices) must connect to a WINDOW slot that
+forwards to the panels, never to the panel directly — Qt severs a receiver's
+connections at the start of its own destruction, so the window-as-receiver
+topology is what stops a live tick from reaching a partially destroyed child
+tree (RuntimeError/segfault on a deleted plot curve under pytest-qt).
 
 ## Styling rules
 

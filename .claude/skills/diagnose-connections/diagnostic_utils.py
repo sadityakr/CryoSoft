@@ -8,8 +8,7 @@ Includes Oxford Instruments-specific command handling for IPS, ITC, and Mercury 
 """
 
 import logging
-from typing import Optional, Dict
-import json
+from typing import Optional
 
 logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger(__name__)
