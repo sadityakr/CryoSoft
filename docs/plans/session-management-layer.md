@@ -1,6 +1,8 @@
 # Plan: the Session Management layer (L6)
 
-**Status:** proposal — no code yet.
+**Status:** proposal — no code yet. The phasing in §7 is superseded by
+the interleaved roadmap in `agent-native-architecture.md` §8 (the record
+model, store, and eLab content here are unchanged).
 **Scope:** a new top layer that manages complete experiments: who is measuring,
 which sample, which runs belong together, what came out of them — and pushes
 the findings into an electronic lab notebook (eLab) from templates.
