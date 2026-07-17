@@ -8,8 +8,13 @@
 #   column, an end-to-end Orchestrator run, and the DataSchema negative case
 #   (a wrong-shaped reading degrades the Orchestrator to ERROR, unwritten).
 #   Also keeps the set_ramp_rate @control and Station rate-forwarding checks.
+#   The reading-loop section covers VI reading variants (the DC VI's bipolar
+#   +/- current expansion): suffixed schema/columns, command dispatch through
+#   the Station, composition with switch routes ({name}__{variant}__{route}),
+#   construction-time refusals, live-plot key expansion, and an end-to-end
+#   Orchestrator run.
 # entry_point: pytest tests/test_new_procedures.py -v
-# last_updated: 2026-07-13
+# last_updated: 2026-07-17
 # ---
 
 
@@ -637,3 +642,208 @@ def test_mux_full_orchestrator_loop_two_routes(station, tmp_path, qtbot):
         assert f["data"]["voltage_V__Mux-Ch1"].shape == (3, 5)
         assert f["data"]["voltage_V__Mux-Ch2"].shape == (3, 5)
         assert not np.any(np.isnan(f["data"]["voltage_V__Mux-Ch1"][:]))
+
+
+# ── The reading loop: VI reading variants (± current), alone and with mux ────
+
+BIPOLAR = {**DC, "bipolar": True}
+
+
+def test_variants_construction_and_suffixed_keys(station, tmp_path):
+    """bipolar=True resolves pos/neg variants and suffixes the data keys."""
+    proc = _field_proc(station, tmp_path, BIPOLAR)
+    assert [v.key for v in proc._reading_variants] == ["pos", "neg"]
+    assert proc.measurement_data_keys == [
+        "voltage_V__pos", "voltage_V__neg",
+        "current_A__pos", "current_A__neg",
+    ]
+
+
+def test_variants_schema_expanded_per_variant_only(station, tmp_path):
+    """The DataSchema arrays are expanded per variant; other columns untouched."""
+    proc = _field_proc(station, tmp_path, BIPOLAR)
+    proc.initiate()
+    schema = proc._data_schema
+    proc.standby()
+
+    assert set(schema.arrays) == {
+        "voltage_V__pos", "voltage_V__neg",
+        "current_A__pos", "current_A__neg",
+    }
+    assert "field_T" in schema.sweep_columns
+    assert "unix_time" in schema.sweep_columns
+
+
+def test_variants_measure_writes_suffixed_keys_with_signed_current(station, tmp_path):
+    """measure() loops the variants; the __neg reading carries -current_A."""
+    proc = _field_proc(station, tmp_path, BIPOLAR)
+    proc.initiate()
+    _arm(station, DC, proc)
+    proc.measure()
+    filepath = proc._data_manager.filepath
+    proc.standby()
+
+    with h5py.File(filepath, "r") as f:
+        assert f["data"]["voltage_V__pos"].shape == (1, 5)
+        assert f["data"]["voltage_V__neg"].shape == (1, 5)
+        assert np.allclose(f["data"]["current_A__pos"][0], 1e-6)
+        assert np.allclose(f["data"]["current_A__neg"][0], -1e-6)
+
+
+def test_variants_dispatched_as_commands(station, tmp_path):
+    """Variant setup goes through send_measurement_commands, never direct calls."""
+    proc = _field_proc(station, tmp_path, BIPOLAR)
+    proc.initiate()
+    _arm(station, DC, proc)
+
+    calls = []
+    original = station.send_measurement_commands
+
+    def spy(commands):
+        calls.append(list(commands))
+        return original(commands)
+
+    station.send_measurement_commands = spy
+    try:
+        proc.measure()
+    finally:
+        station.send_measurement_commands = original
+        proc.standby()
+
+    variant_calls = [
+        c for batch in calls for c in batch
+        if c.vi_name == "dc_measurement" and c.method == "set_source_current"
+    ]
+    assert [c.kwargs["current_A"] for c in variant_calls] == [1e-6, -1e-6]
+
+
+def test_variants_compose_with_mux_routes(station, tmp_path):
+    """Variants (inner) x routes (outer): columns {name}__{variant}__{route}."""
+    proc = _field_proc_mux(station, tmp_path, BIPOLAR, MUX2)
+    proc.initiate()
+    schema = proc._data_schema
+    _arm(station, DC, proc)
+
+    assert set(schema.arrays) == {
+        f"{name}__{variant}__{route}"
+        for name in ("voltage_V", "current_A")
+        for variant in ("pos", "neg")
+        for route in ("Mux-Ch1", "Mux-Ch2")
+    }
+
+    calls = []
+    original = station.send_measurement_commands
+
+    def spy(commands):
+        calls.append(list(commands))
+        return original(commands)
+
+    station.send_measurement_commands = spy
+    try:
+        proc.measure()
+    finally:
+        station.send_measurement_commands = original
+
+    filepath = proc._data_manager.filepath
+    proc.standby()
+
+    # Per point: route is the outer (slow) loop, variants the inner one.
+    flat = [
+        (c.method, c.kwargs.get("route") or c.kwargs.get("current_A"))
+        for batch in calls for c in batch
+    ]
+    assert flat == [
+        ("select_route", "Mux-Ch1"),
+        ("set_source_current", 1e-6), ("set_source_current", -1e-6),
+        ("select_route", "Mux-Ch2"),
+        ("set_source_current", 1e-6), ("set_source_current", -1e-6),
+    ]
+
+    with h5py.File(filepath, "r") as f:
+        assert f["data"]["voltage_V__pos__Mux-Ch1"].shape == (1, 5)
+        assert np.allclose(f["data"]["current_A__neg__Mux-Ch2"][0], -1e-6)
+
+
+def test_variants_off_keeps_plain_columns(station, tmp_path):
+    """bipolar=False (the default) leaves schema and keys exactly as before."""
+    proc = _field_proc(station, tmp_path, DC)
+    assert proc._reading_variants == ()
+    proc.initiate()
+    assert set(proc._data_schema.arrays) == {"voltage_V", "current_A"}
+    proc.standby()
+
+
+def test_single_variant_refused(station, tmp_path):
+    """A VI returning exactly one variant fails loudly at construction."""
+    from cryosoft.core.exceptions import CryoSoftConfigError
+    from cryosoft.core.plan import ReadingVariant
+
+    vi = station.get_vi("dc_measurement")
+    vi.reading_variants = lambda name, params: (ReadingVariant(key="only"),)
+    with pytest.raises(CryoSoftConfigError, match="exactly one reading variant"):
+        _field_proc(station, tmp_path, DC)
+
+
+def test_variant_commanding_other_vi_refused(station, tmp_path):
+    """A variant whose command targets another VI fails loudly at construction."""
+    from cryosoft.core.exceptions import CryoSoftConfigError
+    from cryosoft.core.plan import ReadingVariant
+
+    vi = station.get_vi("dc_measurement")
+    vi.reading_variants = lambda name, params: (
+        ReadingVariant(key="a", commands=(Command("magnet_x", "get_field", {}),)),
+        ReadingVariant(key="b"),
+    )
+    with pytest.raises(CryoSoftConfigError, match="magnet_x"):
+        _field_proc(station, tmp_path, DC)
+
+
+def test_duplicate_variant_keys_refused(station, tmp_path):
+    """Two variants sharing a key fail loudly at construction."""
+    from cryosoft.core.exceptions import CryoSoftConfigError
+    from cryosoft.core.plan import ReadingVariant
+
+    vi = station.get_vi("dc_measurement")
+    vi.reading_variants = lambda name, params: (
+        ReadingVariant(key="same"), ReadingVariant(key="same"),
+    )
+    with pytest.raises(CryoSoftConfigError, match="duplicate"):
+        _field_proc(station, tmp_path, DC)
+
+
+def test_live_plot_keys_expand_per_variant(station):
+    """live_plot_measurement_keys() offers the variant-suffixed columns."""
+    selections = {"measurement_vi": "dc_measurement", "bipolar": True}
+    keys = FieldSweep.live_plot_measurement_keys(station, selections)
+    assert keys == [
+        "voltage_V__pos", "voltage_V__neg",
+        "current_A__pos", "current_A__neg",
+    ]
+    # Without the toggle the keys are plain — routes are a GUI selector concern.
+    plain = FieldSweep.live_plot_measurement_keys(
+        station, {"measurement_vi": "dc_measurement"}
+    )
+    assert plain == ["voltage_V", "current_A"]
+
+
+def test_variants_full_orchestrator_loop(station, tmp_path, qtbot):
+    """A bipolar field sweep completes to IDLE with per-variant datasets."""
+    from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
+
+    station.magnet_x._default_ramp_rate = 6000.0
+    station.magnet_x._ramp_segments = []
+
+    proc = _field_proc(station, tmp_path, BIPOLAR)
+    orch = Orchestrator(station, tick_interval_ms=10)
+    orch.run_procedure(proc)
+
+    with qtbot.waitSignal(orch.procedure_finished, timeout=10000):
+        pass
+
+    assert orch._state == OrchestratorState.IDLE
+    h5_files = list(tmp_path.glob("*.h5"))
+    assert len(h5_files) == 1
+    with h5py.File(h5_files[0], "r") as f:
+        assert f["data"]["field_T"].shape[0] == 3
+        assert f["data"]["voltage_V__pos"].shape == (3, 5)
+        assert np.allclose(f["data"]["current_A__neg"][:], -1e-6)

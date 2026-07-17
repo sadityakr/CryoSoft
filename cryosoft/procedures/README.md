@@ -71,23 +71,37 @@ axis hooks.
   the multiplexing checkboxes.
 - SI units everywhere: tesla, kelvin, amperes, volts, seconds.
 
-### Generic sweep and switch multiplexing (owned by the base, no per-procedure code)
+### Generic sweep and the reading loop (owned by the base, no per-procedure code)
 
 `SweepMeasureProcedure` runs ANY measurement VI the station exposes, chosen in
 the GUI, so a new *measurement method* is a new measurement VI, not a new
 procedure. `initiate()` assembles a `DataSchema` (axis column + system columns +
-the VI's arrays/scalars) and arms the VI; `measure()` reads the VI, tags on the
-axis read-back, validates per datapoint, and saves; `standby()` / `abort()`
-disarm the VI.
+the VI's arrays/scalars) and arms the VI; `measure()` runs the **reading loop**
+(below), tags on the axis read-back, validates per datapoint, and saves;
+`standby()` / `abort()` disarm the VI.
 
-When the station exposes a switch VI (`vi_type: switch`), the base gains
-multiplexing with no procedure code: `get_param_groups()` appends one
-`mux_<route>` checkbox per route; with two or more routes selected, `measure()`
-connects each route in turn and every measurement array and per-point scalar is
-suffixed `{array}__{route}` (e.g. `voltage_V__Mux-Ch1`) via
-`DataSchema.multiplexed(...)`; the axis, system columns, and `unix_time` are
-never suffixed. `standby()` / `abort()` append a switch `open_all` when routes
-were used.
+The reading loop is the standard for taking multiple readings at a single
+sweep point. It has two nested, independently optional levels, each dispatching
+its setup as `Command`s through the Station before every reading and suffixing
+that reading's columns via `DataSchema.multiplexed(...)`:
+
+- **Routes (outer level — channels).** When the station exposes a switch VI
+  (`vi_type: switch`) and the scanner is enabled, `get_param_groups()` appends
+  one `mux_<route>` checkbox per route; with two or more routes selected,
+  `measure()` connects each route in turn and suffixes `{name}__{route}`
+  (e.g. `voltage_V__Mux-Ch1`). `standby()` / `abort()` append a switch
+  `open_all` when routes were used.
+- **Reading variants (inner level — reading settings).** The selected
+  measurement VI may declare, via its `reading_variants(vi_name, params)` hook,
+  that every point comprises several readings under different configurations
+  (e.g. the DC VI's `bipolar` checkbox expands into `pos` / `neg` +/- current
+  variants). Each variant's commands run before its reading and its columns
+  are suffixed `{name}__{variant}`. Adding per-point reading settings is
+  therefore a measurement-VI change, never a procedure change.
+
+Suffixes compose inner level first: `{name}__{variant}__{route}`. A level that
+does not loop (no variants, 0 or 1 route) adds no suffix and no commands; the
+axis, system columns, and `unix_time` are never suffixed.
 
 ## How to add a new module
 

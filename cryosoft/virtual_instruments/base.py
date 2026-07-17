@@ -11,12 +11,13 @@
 #   DCMeasurementBase). MeasurementInstrumentBase also defines the
 #   self-describing measurement-method standard (measurement_parameters /
 #   measurement_data_keys / measurement_scalar_columns class attrs plus the
-#   data_arrays / initiate / take_reading / standby lifecycle).
+#   data_arrays / initiate / take_reading / standby lifecycle and the optional
+#   reading_variants reading-loop hook).
 # entry_point: Not run directly; imported by all concrete VI modules.
 # dependencies:
 #   - cryosoft.core.exceptions
 #   - cryosoft.core.decorators
-#   - cryosoft.core.plan (ParamSpec)
+#   - cryosoft.core.plan (ParamSpec, ReadingVariant)
 # input: |
 #   Subclasses receive drivers dict and arbitrary init_params from Station
 #   factory. All @monitored and @control methods are auto-discovered.
@@ -26,7 +27,7 @@
 #   methods via get_monitored_methods() helper and returns a flat dict.
 # output: |
 #   Logged method calls (DEBUG/ERROR), structured state dicts from get_state().
-# last_updated: 2026-07-13
+# last_updated: 2026-07-17
 # ---
 
 """BaseVirtualInstrument and category base classes.
@@ -51,7 +52,7 @@ from cryosoft.core.exceptions import (
     CryoSoftConfigError,
     CryoSoftSafetyError,
 )
-from cryosoft.core.plan import ParamSpec
+from cryosoft.core.plan import ParamSpec, ReadingVariant
 
 
 class BaseVirtualInstrument:
@@ -379,10 +380,40 @@ class MeasurementInstrumentBase(BaseVirtualInstrument):
       This fixed-shape guarantee is the contract that prevents HDF5 layout
       mismatches mid-run.
     * ``standby() -> None`` — put the instrument in a safe-off idle state.
+    * ``reading_variants(vi_name, params) -> tuple[ReadingVariant, ...]`` — the
+      OPTIONAL reading-loop hook (see below). The base returns ``()``: one
+      plain reading per sweep point, no behaviour change.
+
+    The reading loop (optional)
+    ---------------------------
+    A VI may declare that every sweep point comprises SEVERAL readings under
+    different configurations — e.g. one at +I and one at -I source current for
+    thermal-offset cancellation — by overriding ``reading_variants()``. The
+    generic sweep procedure calls it once at construction with the VI's
+    station-registered name and the resolved measurement params, then at every
+    sweep point dispatches each variant's ``commands`` (via the Station) before
+    that variant's ``take_reading()`` and suffixes the returned columns
+    ``__{key}`` (composing with switch routes as ``{name}__{key}__{route}``).
+
+    Contract (machine-enforced by ``tests/test_conformance.py``):
+
+    * Return ``()`` (single plain reading — the default) or TWO OR MORE
+      ``ReadingVariant`` objects; exactly one is a declaration error.
+    * Variant ``key``s must be unique within the returned tuple.
+    * Every command must target ``vi_name`` (a VI configures only itself) and
+      name a real method of the VI.
+    * Variants must not change the reading's shape: every variant's
+      ``take_reading()`` still returns exactly ``measurement_data_keys`` with
+      the lengths ``data_arrays(params)`` declared.
+    * A measurement parameter whose value changes what ``reading_variants()``
+      returns (e.g. a ``bipolar`` checkbox) must be declared
+      ``structural=True`` so the GUI re-derives the live-plot keys when it
+      changes.
 
     Adding a new measurement method: subclass this base (or ``DCMeasurementBase``
     for a DC-resistance method), declare the three class attributes, and
-    implement ``data_arrays`` / ``initiate`` / ``take_reading`` / ``standby``.
+    implement ``data_arrays`` / ``initiate`` / ``take_reading`` / ``standby``
+    (plus ``reading_variants`` only if the method needs per-point variants).
     """
 
     vi_type: str = "measurement"
@@ -424,6 +455,31 @@ class MeasurementInstrumentBase(BaseVirtualInstrument):
             NotImplementedError: If not overridden by a concrete VI.
         """
         raise NotImplementedError
+
+    def reading_variants(
+        self, vi_name: str, params: Mapping[str, Any]
+    ) -> tuple[ReadingVariant, ...]:
+        """Return the ordered reading variants for these *params*, or ``()``.
+
+        The reading-loop hook (see the class docstring for the full contract).
+        The generic sweep procedure calls this once at construction; a
+        non-empty return makes it take one reading per variant at every sweep
+        point, dispatching the variant's commands first and suffixing that
+        reading's columns ``__{key}``.
+
+        Args:
+            vi_name: This VI's station-registered name — the ``vi_name`` every
+                returned command must target (a VI configures only itself).
+            params: The resolved measurement parameters, the same mapping
+                ``initiate()`` receives.
+
+        Returns:
+            ``()`` for a single plain reading per sweep point (the default), or
+            an ordered tuple of two or more ``ReadingVariant`` objects with
+            unique keys.
+        """
+        _ = (vi_name, params)
+        return ()
 
     def ping(self) -> bool:
         """Send IDN queries to all drivers and return True if all respond.

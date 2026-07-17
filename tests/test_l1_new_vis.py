@@ -744,6 +744,43 @@ class TestDCSeparateMeasurementVI:
         vi = self._make_vi(source_driver, meter_driver)
         assert vi.vi_type == "measurement"
 
+    # ── Bipolar reading variants (the reading-loop standard) ─────────────────
+
+    def test_set_source_current_before_initiate_raises(self, source_driver, meter_driver):
+        vi = self._make_vi(source_driver, meter_driver)
+        with pytest.raises(RuntimeError):
+            vi.set_source_current(1e-6)
+
+    def test_set_source_current_changes_reported_current(self, source_driver, meter_driver):
+        vi = self._make_vi(source_driver, meter_driver)
+        vi.initiate(current_A=1e-6, readings_per_point=4)
+        vi.set_source_current(-1e-6)
+        data = vi.take_reading()
+        assert all(abs(c + 1e-6) < 1e-12 for c in data["current_A"])
+        assert len(data["voltage_V"]) == 4
+
+    def test_reading_variants_off_by_default(self, source_driver, meter_driver):
+        vi = self._make_vi(source_driver, meter_driver)
+        params = {"bipolar": False, "current_A": 1e-6}
+        assert vi.reading_variants("dc_measurement", params) == ()
+
+    def test_reading_variants_bipolar_expands_pos_neg(self, source_driver, meter_driver):
+        vi = self._make_vi(source_driver, meter_driver)
+        params = {"bipolar": True, "current_A": 2e-6}
+        variants = vi.reading_variants("dc_measurement", params)
+        assert [v.key for v in variants] == ["pos", "neg"]
+        (pos_cmd,) = variants[0].commands
+        (neg_cmd,) = variants[1].commands
+        assert pos_cmd.vi_name == "dc_measurement"
+        assert pos_cmd.method == "set_source_current"
+        assert pos_cmd.kwargs == {"current_A": 2e-6}
+        assert neg_cmd.kwargs == {"current_A": -2e-6}
+
+    def test_bipolar_param_is_structural(self, source_driver, meter_driver):
+        """Variant-driving params must be structural so plot keys re-derive."""
+        vi = self._make_vi(source_driver, meter_driver)
+        assert vi.measurement_parameters["bipolar"].structural is True
+
 
 # ---------------------------------------------------------------------------
 # DCSingleInstrumentVI

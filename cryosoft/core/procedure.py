@@ -9,8 +9,10 @@
 #   validation in _save_datapoint. SweepMeasureProcedure adds measurement-VI
 #   selection (a structural ``measurement_vi`` parameter whose choices come from
 #   the station), station-driven measurement-parameter merging, DataSchema
-#   assembly, and the shared four-method loop; a concrete axis procedure supplies
-#   only the ramp targets, the axis read-back, and the settle times.
+#   assembly, the shared four-method loop, and the reading loop (per-datapoint
+#   iteration over switch routes x the VI's reading variants, suffixing columns
+#   {name}__{variant}__{route}); a concrete axis procedure supplies only the
+#   ramp targets, the axis read-back, and the settle times.
 # entry_point: Not run directly. Subclassed by concrete procedures.
 # dependencies:
 #   - cryosoft.core.station (Station)
@@ -35,7 +37,7 @@
 #   initiate() and standby() return a PhasePlan (targets, commands, wait_s).
 #   change_sweep_step() returns a StepPlan (targets, wait_s) or None when done.
 #   abort() returns a tuple[Command, ...] of measurement safe-off commands.
-# last_updated: 2026-07-13
+# last_updated: 2026-07-17
 # ---
 
 """BaseProcedure — abstract base class for all CryoSoft procedures."""
@@ -552,9 +554,19 @@ class SweepMeasureProcedure(BaseProcedure):
     * **The four-method loop.** ``initiate`` assembles a ``DataSchema`` (sweep
       axis column + system columns + the VI's arrays and scalar columns),
       derives the DataManager ``data_config`` from it, and arms the VI.
-      ``measure`` reads the VI, tags on the axis read-back, and saves (the
-      schema is validated per datapoint by ``BaseProcedure._save_datapoint``).
-      ``standby`` / ``abort`` disarm the VI.
+      ``measure`` runs the reading loop (below), tags on the axis read-back,
+      and saves (the schema is validated per datapoint by
+      ``BaseProcedure._save_datapoint``). ``standby`` / ``abort`` disarm the VI.
+    * **The reading loop.** One datapoint may comprise several readings, taken
+      by two nested, independently optional levels inside ``measure()``:
+      switch **routes** (outer — the channels the user ticked when the station
+      has a switch VI and the scanner is enabled) and the VI's **reading
+      variants** (inner — alternative configurations like +I / -I, declared by
+      the VI's ``reading_variants()`` hook). Each looping level suffixes the
+      measurement columns with its label, composing as
+      ``{name}__{variant}__{route}``; a level that does not loop (no variants,
+      0 or 1 route) adds no suffix and no commands. All per-reading setup is
+      dispatched as ``Command``s through the Station, never by direct VI calls.
 
     A concrete axis procedure (``FieldSweep``, ``TemperatureSweep``) subclasses
     this and supplies only the axis-specific pieces via the hooks below:
@@ -674,17 +686,52 @@ class SweepMeasureProcedure(BaseProcedure):
             self._params.update(mux_params)
             self._selected_routes = [r for r in routes if mux_params[f"mux_{r}"]]
 
-        # Live-plot / data keys: suffix per route only when multiplexing (>=2
-        # routes). 0 or 1 route keeps the plain measurement columns.
-        base_keys = list(vi.measurement_data_keys) + list(vi.measurement_scalar_columns)
+        # ── Reading-variant resolution (the reading loop's inner level) ───────
+        # The selected VI may declare that every sweep point comprises several
+        # readings under different configurations (e.g. +I / -I). Resolve and
+        # validate its variants once, here, so a bad declaration fails at the
+        # procedure boundary and never inside the tick loop.
+        variants = tuple(
+            vi.reading_variants(self._measurement_vi, self._measurement_params)
+        )
+        if len(variants) == 1:
+            raise CryoSoftConfigError(
+                f"{type(self).name!r}: measurement VI {selected!r} returned "
+                f"exactly one reading variant ({variants[0].key!r}); "
+                f"reading_variants() must return none (a single plain reading) "
+                f"or two or more."
+            )
+        variant_keys = [v.key for v in variants]
+        if len(set(variant_keys)) != len(variant_keys):
+            raise CryoSoftConfigError(
+                f"{type(self).name!r}: measurement VI {selected!r} declared "
+                f"duplicate reading-variant keys {variant_keys}."
+            )
+        for variant in variants:
+            for cmd in variant.commands:
+                if cmd.vi_name != self._measurement_vi:
+                    raise CryoSoftConfigError(
+                        f"{type(self).name!r}: reading variant "
+                        f"{variant.key!r} commands VI {cmd.vi_name!r}; a "
+                        f"measurement VI's variants may only configure the VI "
+                        f"itself ({self._measurement_vi!r})."
+                    )
+        self._reading_variants: tuple = variants
+
+        # Live-plot / data keys: suffix per reading level only when that level
+        # loops — per variant with >=2 variants, per route with >=2 routes.
+        # Suffixes compose inner level (variant) first: {key}__{variant}__{route}.
+        # No variants and 0 or 1 route keeps the plain measurement columns.
+        keys = list(vi.measurement_data_keys) + list(vi.measurement_scalar_columns)
+        if len(self._reading_variants) >= 2:
+            keys = [f"{key}__{v.key}" for key in keys for v in self._reading_variants]
         if len(self._selected_routes) >= 2:
-            self.measurement_data_keys = [
+            keys = [
                 f"{key}__{route}"
-                for key in base_keys
+                for key in keys
                 for route in self._selected_routes
             ]
-        else:
-            self.measurement_data_keys = base_keys
+        self.measurement_data_keys = keys
 
     # ------------------------------------------------------------------
     # Parameter groups: measurement-method selection + selected VI's params
@@ -801,7 +848,16 @@ class SweepMeasureProcedure(BaseProcedure):
     def live_plot_measurement_keys(
         cls, station: Station, selections: Mapping[str, Any] | None = None
     ) -> list[str]:
-        """Return the selected measurement VI's array + scalar column names."""
+        """Return the selected measurement VI's array + scalar column names.
+
+        When the VI declares reading variants for the current selections, the
+        keys are expanded per variant (``{key}__{variant}``) so the plot axis
+        selectors offer the columns the run will actually produce. This is why
+        a variant-driving measurement parameter must be ``structural=True``:
+        only structural values reach ``selections``, and only their changes
+        re-derive the selectors. Route suffixes are NOT applied here — the
+        GUI's per-plot route selector composes them at draw time.
+        """
         names = station.measurement_vi_names()
         if not names:
             return []
@@ -810,7 +866,13 @@ class SweepMeasureProcedure(BaseProcedure):
         if selected not in names:
             selected = names[0]
         vi = station.get_vi(selected)
-        return list(vi.measurement_data_keys) + list(vi.measurement_scalar_columns)
+        keys = list(vi.measurement_data_keys) + list(vi.measurement_scalar_columns)
+        params = {name: spec.default for name, spec in vi.measurement_parameters.items()}
+        params.update({k: v for k, v in selections.items() if k in params})
+        variants = tuple(vi.reading_variants(selected, params))
+        if len(variants) >= 2:
+            keys = [f"{key}__{v.key}" for key in keys for v in variants]
+        return keys
 
     # ------------------------------------------------------------------
     # Axis-specific hooks — implemented by concrete axis procedures
@@ -867,14 +929,22 @@ class SweepMeasureProcedure(BaseProcedure):
         arrays = dict(vi.data_arrays(self._measurement_params))
         base = DataSchema(sweep_columns=sweep_columns, arrays=arrays)
 
-        # Multiplex only when two or more routes are selected: every array (and
-        # the VI's per-point scalar columns, e.g. n_valid) is expanded per route
-        # into "<name>__<route>". With 0 or 1 route the schema is unsuffixed,
-        # exactly as before Wave 6.
+        # The reading loop expands the schema once per looping level, inner
+        # level (reading variants) first, so suffixes compose as
+        # "<name>__<variant>__<route>". Each level expands every measurement
+        # array and the VI's per-point scalar columns (e.g. n_valid). A level
+        # that does not loop (no variants / 0 or 1 route) leaves the schema
+        # untouched, exactly as before that level existed.
+        scalar_names = tuple(vi.measurement_scalar_columns.keys())
+        if len(self._reading_variants) >= 2:
+            variant_keys = [v.key for v in self._reading_variants]
+            base = base.multiplexed(variant_keys, scalar_columns=scalar_names)
+            scalar_names = tuple(
+                f"{name}__{key}" for name in scalar_names for key in variant_keys
+            )
         if len(self._selected_routes) >= 2:
-            return base.multiplexed(
-                self._selected_routes,
-                scalar_columns=tuple(vi.measurement_scalar_columns.keys()),
+            base = base.multiplexed(
+                self._selected_routes, scalar_columns=scalar_names
             )
         return base
 
@@ -957,7 +1027,17 @@ class SweepMeasureProcedure(BaseProcedure):
         )
 
     def measure(self) -> None:
-        """Read the measurement VI, tag on the axis read-back, and save.
+        """Run the reading loop, tag on the axis read-back, and save.
+
+        The reading loop takes every reading of one datapoint: routes (outer
+        level, switch re-selection is the slow operation) x reading variants
+        (inner level). Each level that loops suffixes the returned columns with
+        its label, composing as ``{name}__{variant}__{route}``; a level that
+        does not loop adds no suffix and no commands, so with no variants and
+        0 or 1 route this is a single plain ``take_reading()``. All setup
+        commands (route selection, variant configuration) are dispatched as
+        ``Command``s through the Station — the same channel ``initiate()`` and
+        the Orchestrator use — never as direct calls on another VI.
 
         Raises:
             RuntimeError: If called before ``initiate()``.
@@ -968,24 +1048,33 @@ class SweepMeasureProcedure(BaseProcedure):
             raise RuntimeError("measure() called before initiate()")
         vi = self._station.get_vi(self._measurement_vi)
 
-        if len(self._selected_routes) >= 2:
-            # Multiplexed datapoint: connect each route in turn, take one reading
-            # per route, and suffix every returned key with "__<route>". The
-            # route switch is dispatched as a Command through the Station (the
-            # same channel initiate()/the Orchestrator use), never a direct
-            # call on the switch VI.
-            assert self._switch_vi is not None  # set whenever routes are selected
-            measured_data: dict = {}
-            for route in self._selected_routes:
+        # Outer level: loop routes only when multiplexing (>=2 selected). With
+        # exactly 1 route the switch was already selected at initiate(); with 0
+        # routes there is no switch involvement at all.
+        route_loop: list[str | None] = (
+            list(self._selected_routes)
+            if len(self._selected_routes) >= 2
+            else [None]
+        )
+        # Inner level: loop variants only when the VI declared any (0 or >=2 by
+        # construction).
+        variant_loop: tuple = self._reading_variants or (None,)
+
+        measured_data: dict = {}
+        for route in route_loop:
+            if route is not None:
+                assert self._switch_vi is not None  # set whenever routes are selected
                 self._station.send_measurement_commands(
                     (Command(self._switch_vi, "select_route", {"route": route}),)
                 )
+            for variant in variant_loop:
+                if variant is not None:
+                    self._station.send_measurement_commands(variant.commands)
+                suffix = "" if variant is None else f"__{variant.key}"
+                if route is not None:
+                    suffix += f"__{route}"
                 for key, value in vi.take_reading().items():
-                    measured_data[f"{key}__{route}"] = value
-        else:
-            # 0 routes: plain path, no switch calls. 1 route: the switch was
-            # already selected at initiate(), so a plain reading is correct.
-            measured_data = vi.take_reading()
+                    measured_data[f"{key}{suffix}"] = value
 
         measured_data[type(self).sweep_axis.data_key] = self._axis_readback()
         self._save_datapoint(measured_data)
