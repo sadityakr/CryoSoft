@@ -876,23 +876,38 @@ def test_reading_loop_group_merges_channels_and_value_list(station):
     assert all(n.startswith("mux_") for n in delta_loop.params)
 
 
-def test_live_plot_keys_expand_per_label(station):
-    """live_plot_measurement_keys() offers the label-suffixed columns."""
-    selections = {
+def test_live_plot_keys_stay_plain_and_loop_labels_drive_the_selector(station):
+    """Axis keys stay plain; live_plot_loop_labels() feeds the Loop selector.
+
+    The plot panels mirror the route selector with a Loop selector, so the
+    axis keys are the bare column names and the label map picks the reading:
+    None = no loop possible (hidden), {} = loop off/invalid (disabled),
+    ordered label->display map = active loop (enabled).
+    """
+    on = {
         "measurement_vi": "dc_measurement",
         "loop_parameter": "current_A",
         "loop_values": "1e-6, -1e-6",
     }
-    keys = FieldSweep.live_plot_measurement_keys(station, selections)
-    assert keys == [
-        "voltage_V__L1", "voltage_V__L2",
-        "current_A__L1", "current_A__L2",
+    assert FieldSweep.live_plot_measurement_keys(station, on) == [
+        "voltage_V", "current_A",
     ]
-    # Without a loop the keys are plain — routes are a GUI selector concern.
-    plain = FieldSweep.live_plot_measurement_keys(
+    assert FieldSweep.live_plot_loop_labels(station, on) == {
+        "L1": "L1 = 1e-06",
+        "L2": "L2 = -1e-06",
+    }
+    # Loop possible (DC VI has setters) but off -> {} (selector disabled).
+    assert FieldSweep.live_plot_loop_labels(
         station, {"measurement_vi": "dc_measurement"}
-    )
-    assert plain == ["voltage_V", "current_A"]
+    ) == {}
+    # An invalid value list is treated as off here (construction refuses it).
+    assert FieldSweep.live_plot_loop_labels(
+        station, {**on, "loop_values": "1e-6, abc"}
+    ) == {}
+    # No setters at all (delta VI) -> None (selector hidden).
+    assert FieldSweep.live_plot_loop_labels(
+        station, {"measurement_vi": "keithley_delta_mode"}
+    ) is None
 
 
 def test_loop_full_orchestrator_run(station, tmp_path, qtbot):

@@ -14,14 +14,17 @@
 # input: |
 #   Constructor objectName strings (preserved so findChild-by-name still works),
 #   a list of available axis keys via set_available_keys(), route names via
-#   set_available_routes() (optional; hidden by default), and a datapoint
-#   history (list of enriched dicts) via redraw().
+#   set_available_routes() (optional; hidden by default), reading-loop labels
+#   via set_available_loop_labels() (optional; hidden by default), and a
+#   datapoint history (list of enriched dicts) via redraw().
 # process: |
 #   set_available_keys() repopulates X/Y selectors, preserving still-valid
-#   selections. set_available_routes() shows/hides/enables the route selector
-#   based on availability (hidden if empty, disabled if <2 routes, enabled if
-#   >=2). redraw() extracts scalar X/Y series (suffixed with __<route> when a
-#   route is selected) from the datapoint history and feeds them to the curve.
+#   selections. set_available_routes() / set_available_loop_labels() show/hide/
+#   enable the route and reading-loop selectors based on availability (hidden
+#   if None, disabled if <2 entries, enabled if >=2). redraw() extracts scalar
+#   X/Y series (suffix-composed as __<loop>__<route> from the selected loop
+#   reading and route, with progressive fallback for unsuffixed columns) from
+#   the datapoint history and feeds them to the curve.
 #   Changing any selector redraws against the last datapoint list the panel
 #   was handed.
 # output: |
@@ -75,8 +78,12 @@ class LivePlotPanel(QGroupBox):
     reusable widget class so the two instances stay in lock-step and the parent
     shrinks. Each panel keeps a reference to the last datapoint history handed to
     ``redraw`` so that changing an axis selector can immediately redraw without
-    the parent re-supplying the data. The route selector is optional and hidden
-    by default; call ``set_available_routes`` to show it for multiplexed measurements.
+    the parent re-supplying the data. The route and reading-loop selectors are
+    optional and hidden by default; call ``set_available_routes`` /
+    ``set_available_loop_labels`` to show them for multiplexed / looped
+    measurements. Axis keys stay the PLAIN column names — the selected loop
+    reading and route are composed onto them at draw time
+    (``{key}__{loop}__{route}``, with fallback for unsuffixed columns).
 
     Args:
         title: Group-box title (e.g. ``"Plot 1"``).
@@ -86,6 +93,8 @@ class LivePlotPanel(QGroupBox):
         y_selector_name: objectName for the Y-axis combo (e.g. ``"y_axis_selector"``).
         route_selector_name: objectName for the route combo (e.g. ``"route1_selector"``).
         plot_object_name: objectName for the PlotWidget (e.g. ``"live_plot"``).
+        loop_selector_name: objectName for the reading-loop combo
+            (e.g. ``"loop1_selector"``).
         parent: Optional Qt parent widget.
     """
 
@@ -97,6 +106,7 @@ class LivePlotPanel(QGroupBox):
         y_selector_name: str,
         route_selector_name: str,
         plot_object_name: str,
+        loop_selector_name: str = "",
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(title, parent)
@@ -126,6 +136,18 @@ class LivePlotPanel(QGroupBox):
         self._route_selector.setObjectName(route_selector_name)
         self._route_selector.currentTextChanged.connect(self._redraw)
         axis_row.addWidget(self._route_selector)
+
+        # Reading-loop selector: picks WHICH loop reading (L1, L2, ...) of the
+        # datapoint is plotted, mirroring the route selector. Hidden until
+        # set_available_loop_labels() is called with a non-None value.
+        self._loop_label = QLabel("Loop:")
+        axis_row.addWidget(self._loop_label)
+        self._loop_selector = QComboBox()
+        self._loop_selector.setObjectName(loop_selector_name or "loop_selector")
+        self._loop_selector.currentIndexChanged.connect(self._redraw)
+        axis_row.addWidget(self._loop_selector)
+        self._loop_label.setVisible(False)
+        self._loop_selector.setVisible(False)
 
         axis_row.addStretch()
         vlay.addLayout(axis_row)
@@ -224,6 +246,47 @@ class LivePlotPanel(QGroupBox):
                 self._route_selector.setCurrentIndex(0)
             self._route_selector.blockSignals(False)
 
+    def set_available_loop_labels(self, labels: dict[str, str] | None) -> None:
+        """Show/hide/enable the reading-loop selector, mirroring the route one.
+
+        When the current selections offer no reading loop at all (the selected
+        measurement VI declares no ``reading_setters``), labels is None —
+        selector is hidden. When a loop is possible but off/invalid, pass an
+        empty dict — selector is visible but disabled. With two or more
+        entries the selector is enabled: each item shows the display text
+        (e.g. ``"L1 = 1e-06"``) and carries the bare suffix label (``"L1"``)
+        as its item data, which ``_redraw`` uses to pick the column.
+
+        Args:
+            labels: Ordered ``{suffix_label: display_text}`` map of the active
+                loop readings, ``{}`` if a loop is possible but not active, or
+                ``None`` if the selection offers no loop.
+        """
+        if labels is None:
+            self._loop_label.setVisible(False)
+            self._loop_selector.setVisible(False)
+            return
+
+        self._loop_label.setVisible(True)
+        self._loop_selector.setVisible(True)
+
+        if len(labels) < 2:
+            self._loop_selector.setEnabled(False)
+            self._loop_selector.blockSignals(True)
+            self._loop_selector.clear()
+            self._loop_selector.blockSignals(False)
+        else:
+            self._loop_selector.setEnabled(True)
+            prev = self._loop_selector.currentData()
+            self._loop_selector.blockSignals(True)
+            self._loop_selector.clear()
+            for label, display in labels.items():
+                self._loop_selector.addItem(display, label)
+            index = self._loop_selector.findData(prev)
+            self._loop_selector.setCurrentIndex(index if index >= 0 else 0)
+            self._loop_selector.blockSignals(False)
+        self._redraw()
+
     def redraw(self, datapoints: list[dict]) -> None:
         """Store the datapoint history and redraw the curve from it.
 
@@ -255,30 +318,46 @@ class LivePlotPanel(QGroupBox):
         ):
             route = self._route_selector.currentText()
 
-        # Extract X and Y series. When a route is selected, try the suffixed key
-        # first (for measurement columns), then fall back to unsuffixed (for sweep
-        # columns, system state, etc. which are not multiplexed).
+        loop = ""
+        if (
+            self._loop_selector.isVisible()
+            and self._loop_selector.isEnabled()
+            and self._loop_selector.currentData()
+        ):
+            loop = str(self._loop_selector.currentData())
+
+        # Candidate suffixes, most-specific first, matching the reading-loop
+        # column composition {name}__{loop}__{route}. The trailing plain key is
+        # the fallback for sweep columns, system state, etc., which the
+        # reading loop never suffixes.
+        suffixes: list[str] = []
+        if loop and route:
+            suffixes.append(f"__{loop}__{route}")
+        if loop:
+            suffixes.append(f"__{loop}")
+        if route:
+            suffixes.append(f"__{route}")
+        suffixes.append("")
+
+        def _lookup(dp: dict, key: str):
+            for suffix in suffixes:
+                value = dp.get(f"{key}{suffix}")
+                if value is not None:
+                    return value
+            return None
+
         xs = []
         ys = []
         for dp in self._datapoints:
-            if route:
-                x_val = dp.get(f"{x_key}__{route}")
-                if x_val is None:
-                    x_val = dp.get(x_key)
-                y_val = dp.get(f"{y_key}__{route}")
-                if y_val is None:
-                    y_val = dp.get(y_key)
-            else:
-                x_val = dp.get(x_key)
-                y_val = dp.get(y_key)
-            xs.append(_extract_scalar(x_val))
-            ys.append(_extract_scalar(y_val))
+            xs.append(_extract_scalar(_lookup(dp, x_key)))
+            ys.append(_extract_scalar(_lookup(dp, y_key)))
 
         self._curve.setData(xs, ys)
         x_label = x_key.replace("_", " ")
         y_label = y_key.replace("_", " ")
-        if route:
-            x_label += f" ({route})"
-            y_label += f" ({route})"
+        qualifiers = ", ".join(q for q in (loop, route) if q)
+        if qualifiers:
+            x_label += f" ({qualifiers})"
+            y_label += f" ({qualifiers})"
         self._plot_widget.setLabel("bottom", x_label)
         self._plot_widget.setLabel("left", y_label)

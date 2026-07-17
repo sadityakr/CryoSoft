@@ -109,10 +109,11 @@ that reading's columns via `DataSchema.multiplexed(...)`:
 Suffixes compose inner level first: `{name}__L{i}__{route}`. The loop is
 capped at these two levels (channels x one looped parameter). A level that
 does not loop (loop off, 0 or 1 route) adds no suffix and no commands; the
-axis, system columns, and `unix_time` are never suffixed. Live-plot axis
-selectors follow the same two levels: with the loop on they offer the
-`{name}__L{i}` keys, and the per-plot route selector composes the route
-suffix at draw time.
+axis, system columns, and `unix_time` are never suffixed. The live plots
+mirror both levels with per-plot selectors: axis keys stay the plain column
+names, the Route selector picks the channel, and the Loop selector (fed by
+`live_plot_loop_labels()`, items like "L1 = 1e-06") picks the loop reading;
+the panel composes `{key}__L{i}__{route}` at draw time.
 
 ## How to add a new module
 

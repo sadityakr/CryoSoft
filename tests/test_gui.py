@@ -678,6 +678,49 @@ def test_generic_field_sweep_mux_row_label_strips_prefix(procedure_win, station)
     assert "Mux-Ch1" not in values         # the bare route is not a param key
 
 
+def test_live_plot_loop_selector_follows_reading_loop(procedure_win, station):
+    """The plot Loop selector mirrors the route selector for the value list.
+
+    Hidden while the selected VI has no reading_setters (delta); visible but
+    disabled once a setter-declaring VI (DC) is selected with the loop off;
+    enabled with one item per value — display text carrying the value, item
+    data carrying the bare L-label — once a valid value list is entered.
+    """
+    from cryosoft.procedures.field_sweep import FieldSweep
+
+    procedure_win._select_procedure_by_name(FieldSweep.name)
+    loop_sel = procedure_win.findChild(QComboBox, "loop1_selector")
+    assert loop_sel is not None
+    # Default VI is delta (no setters): selector hidden.
+    assert not loop_sel.isVisibleTo(procedure_win)
+
+    # Switch to the DC method: loop possible but off -> visible, disabled.
+    _measurement_combo(procedure_win).setCurrentText("DC (6221 + 2182A)")
+    loop_sel = procedure_win.findChild(QComboBox, "loop1_selector")
+    assert loop_sel.isVisibleTo(procedure_win)
+    assert not loop_sel.isEnabled()
+
+    # Turn the loop on: pick current_A and enter a +/- pair.
+    procedure_win.findChild(QComboBox, "param_loop_parameter_input").setCurrentText(
+        "current_A (A)"
+    )
+    values_edit = procedure_win.findChild(QLineEdit, "param_loop_values_input")
+    values_edit.setText("1e-6, -1e-6")
+    values_edit.editingFinished.emit()
+
+    loop_sel = procedure_win.findChild(QComboBox, "loop1_selector")
+    assert loop_sel.isEnabled()
+    assert [loop_sel.itemText(i) for i in range(loop_sel.count())] == [
+        "L1 = 1e-06", "L2 = -1e-06",
+    ]
+    assert [loop_sel.itemData(i) for i in range(loop_sel.count())] == ["L1", "L2"]
+    # Axis keys stay plain — the Loop selector picks the reading.
+    x_sel = procedure_win.findChild(QComboBox, "x1_axis_selector")
+    keys = [x_sel.itemText(i) for i in range(x_sel.count())]
+    assert "voltage_V" in keys
+    assert not any("__L" in k for k in keys)
+
+
 def test_param_form_renders_all_widget_kinds_and_round_trips(qtbot):
     """param_form maps each ParamSpec kind to the right widget and round-trips values.
 

@@ -761,9 +761,10 @@ class ProcedureWindow(QMainWindow):
     def _refresh_route_selectors(self) -> None:
         """Update plot route selectors with currently-selected routes.
 
-        Checks if a mux group exists (scanner VI present) and which routes are
-        checked; passes that to both plot panels' ``set_available_routes()``.
-        If no scanner VI exists, passes None to hide the selector.
+        Checks whether the form carries route checkboxes (enabled switch VI)
+        and which routes are checked; passes that to both plot panels'
+        ``set_available_routes()``. No route checkboxes passes None to hide
+        the selector.
         """
         if self._has_mux_group():
             routes = self._current_mux_routes()
@@ -771,6 +772,23 @@ class ProcedureWindow(QMainWindow):
             routes = None
         self._plot1.set_available_routes(routes)
         self._plot2.set_available_routes(routes)
+
+    def _refresh_loop_selectors(self) -> None:
+        """Update plot Loop selectors from the current reading-loop selections.
+
+        Asks the selected procedure class for the loop labels
+        (``live_plot_loop_labels``: None = no loop possible, {} = loop off,
+        map = active loop) and passes them to both plot panels'
+        ``set_available_loop_labels()`` — the Loop selector mirrors the route
+        selector, picking which loop reading of a datapoint is plotted.
+        """
+        index = self._proc_selector.currentIndex()
+        if index < 0 or index >= len(self._procedures):
+            return
+        cls = self._procedures[index]
+        labels = cls.live_plot_loop_labels(self._station, self._current_selections())
+        self._plot1.set_available_loop_labels(labels)
+        self._plot2.set_available_loop_labels(labels)
 
     def _on_structural_changed(self, *_args: Any) -> None:
         """Re-derive the form after a structural parameter changed.
@@ -948,6 +966,7 @@ class ProcedureWindow(QMainWindow):
             y_selector_name="y_axis_selector",
             route_selector_name="route1_selector",
             plot_object_name="live_plot",
+            loop_selector_name="loop1_selector",
         )
         self._plot2 = LivePlotPanel(
             "Plot 2", PLOT_SERIES[1],
@@ -955,6 +974,7 @@ class ProcedureWindow(QMainWindow):
             y_selector_name="y2_axis_selector",
             route_selector_name="route2_selector",
             plot_object_name="live_plot_2",
+            loop_selector_name="loop2_selector",
         )
         for panel in (self._plot1, self._plot2):
             panel.setMinimumWidth(250)
@@ -1268,8 +1288,9 @@ class ProcedureWindow(QMainWindow):
         self._plot1.set_available_keys(keys, default_x, "voltage_V")
         self._plot2.set_available_keys(keys, default_x, "current_A")
 
-        # Refresh route selectors based on currently-selected routes (if any).
+        # Refresh route + loop selectors based on the current selections.
         self._refresh_route_selectors()
+        self._refresh_loop_selectors()
 
     def _reset_plot(self, proc: BaseProcedure) -> None:
         """Clear datapoints and refresh axis selectors for a new run.

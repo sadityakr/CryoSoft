@@ -238,6 +238,31 @@ class BaseProcedure:
         _ = (station, selections)
         return list(cls.measurement_data_keys)
 
+    @classmethod
+    def live_plot_loop_labels(
+        cls, station: Station, selections: Mapping[str, Any] | None = None
+    ) -> dict[str, str] | None:
+        """Return the reading-loop labels for the plot panels' Loop selector.
+
+        The GUI mirrors its per-plot route selector with a Loop selector that
+        picks WHICH loop reading of a datapoint is plotted. The default (no
+        reading loop concept) returns ``None`` — selector hidden. A procedure
+        with a reading loop overrides this (see ``SweepMeasureProcedure``) to
+        return ``{}`` (loop possible but off — selector visible, disabled) or
+        an ordered ``{suffix_label: display_text}`` map (e.g.
+        ``{"L1": "L1 = 1e-06", ...}`` — selector enabled).
+
+        Args:
+            station: The active Station (unused by the default).
+            selections: Current structural-parameter values, or ``None``
+                (unused by the default).
+
+        Returns:
+            ``None`` by default.
+        """
+        _ = (station, selections)
+        return None
+
     def __init__(
         self,
         station: Station,
@@ -983,15 +1008,10 @@ class SweepMeasureProcedure(BaseProcedure):
     ) -> list[str]:
         """Return the selected measurement VI's array + scalar column names.
 
-        When the current selections define a reading loop (a loopable
-        ``loop_parameter`` plus two or more parseable ``loop_values``), the
-        keys are expanded per index label (``{key}__L1``, ``{key}__L2``, …) so
-        the plot axis selectors offer the columns the run will actually
-        produce. Both loop params are ``structural=True`` precisely so their
-        values reach ``selections`` and their changes re-derive the selectors.
-        An un-parseable value list is treated as no loop here (construction
-        will refuse it loudly). Route suffixes are NOT applied — the GUI's
-        per-plot route selector composes them at draw time.
+        Keys stay the PLAIN column names even when a reading loop is defined:
+        the per-plot Loop and Route selectors (see ``live_plot_loop_labels``)
+        pick which reading of the datapoint is drawn, and the panel composes
+        the ``{key}__L{i}__{route}`` suffixes at draw time.
         """
         names = station.measurement_vi_names()
         if not names:
@@ -1001,23 +1021,55 @@ class SweepMeasureProcedure(BaseProcedure):
         if selected not in names:
             selected = names[0]
         vi = station.get_vi(selected)
-        keys = list(vi.measurement_data_keys) + list(vi.measurement_scalar_columns)
+        return list(vi.measurement_data_keys) + list(vi.measurement_scalar_columns)
+
+    @classmethod
+    def live_plot_loop_labels(
+        cls, station: Station, selections: Mapping[str, Any] | None = None
+    ) -> dict[str, str] | None:
+        """Return the Loop-selector labels for the current selections.
+
+        ``None`` when the selected measurement VI declares no
+        ``reading_setters`` (no loop possible — selector hidden); ``{}`` when
+        a loop is possible but off or its value list is empty/invalid
+        (selector visible, disabled; construction will refuse a bad list
+        loudly); otherwise an ordered ``{label: display}`` map like
+        ``{"L1": "L1 = 1e-06", "L2": "L2 = -1e-06"}``. Both loop params are
+        ``structural=True`` precisely so their values reach ``selections``
+        and their changes re-derive the selectors.
+        """
+        names = station.measurement_vi_names()
+        if not names:
+            return None
+        selections = selections or {}
+        selected = selections.get("measurement_vi")
+        if selected not in names:
+            selected = names[0]
+        vi = station.get_vi(selected)
+        if not vi.reading_setters:
+            return None
         loop_parameter = selections.get("loop_parameter") or ""
-        if loop_parameter in vi.reading_setters:
-            spec = vi.measurement_parameters.get(loop_parameter)
-            try:
-                values = cls._parse_loop_values(
-                    loop_parameter, spec, str(selections.get("loop_values") or "")
-                ) if spec is not None else []
-            except CryoSoftConfigError:
-                values = []
-            if len(values) >= 2:
-                keys = [
-                    f"{key}__L{i}"
-                    for key in keys
-                    for i in range(1, len(values) + 1)
-                ]
-        return keys
+        if loop_parameter not in vi.reading_setters:
+            return {}
+        spec = vi.measurement_parameters.get(loop_parameter)
+        if spec is None:
+            return {}
+        try:
+            values = cls._parse_loop_values(
+                loop_parameter, spec, str(selections.get("loop_values") or "")
+            )
+        except CryoSoftConfigError:
+            return {}
+        if len(values) < 2:
+            return {}
+        return {
+            f"L{i}": (
+                f"L{i} = {value:g}"
+                if isinstance(value, (int, float))
+                else f"L{i} = {value}"
+            )
+            for i, value in enumerate(values, start=1)
+        }
 
     # ------------------------------------------------------------------
     # Axis-specific hooks — implemented by concrete axis procedures
