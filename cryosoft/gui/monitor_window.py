@@ -24,6 +24,8 @@
 #   - cryosoft.gui.log_panel (LogPanel)
 #   - cryosoft.gui.config_menu (ConfigMenuController)
 #   - cryosoft.gui.window_geometry (geometry persistence helpers)
+#   - cryosoft.session.manager (SessionManager, optional — forwarded to
+#     SampleInfoPanel, which owns the experiment lifecycle controls)
 # input: |
 #   Station instance and Orchestrator instance.
 # process: |
@@ -75,6 +77,7 @@ from cryosoft.gui.log_panel import LogPanel
 from cryosoft.gui.notification_banner import NotificationBanner
 from cryosoft.gui.other_devices import OtherDevicesPanel
 from cryosoft.gui.sample_info_panel import SampleInfoPanel
+from cryosoft.session.manager import SessionManager
 from cryosoft.gui.theme import (
     BANNER_SEVERITY_ERROR,
     BANNER_SEVERITY_WARNING,
@@ -149,16 +152,16 @@ class MonitorWindow(QMainWindow):
         active_config_path: str | None = None,
         restart_callback: Callable[[], None] | None = None,
         startup_warning: str | None = None,
-        session_manager: object | None = None,
+        session_manager: SessionManager | None = None,
     ) -> None:
         super().__init__(parent)
         self._station = station
         self._orchestrator = orchestrator
         self._procedure_window = None  # lazily created
 
-        # Session layer (L6, optional — absent in unit tests). The window only
-        # reads experiment_context() to stamp built procedures; the experiment
-        # GUI surfaces land with the session layer's own GUI phase.
+        # Session layer (L6, optional — absent in unit tests). experiment_context()
+        # stamps built procedures; the experiment start/close/attendance/findings
+        # controls live on the SampleInfoPanel, which owns session_manager directly.
         self._session_manager = session_manager
 
         # Config management (optional — absent in unit tests that build the
@@ -289,7 +292,7 @@ class MonitorWindow(QMainWindow):
         # ── Fixed 2x2 quadrant grid ──────────────────────────────────
         top_left = self._build_instruments_quadrant()
         self._trends = TrendsQuadrant(self._station, parent=self)
-        self._sample_info = SampleInfoPanel()
+        self._sample_info = SampleInfoPanel(session_manager=self._session_manager)
         bottom_right = self._build_other_devices_log_quadrant(measurement_vis, switch_vis)
 
         self._left_splitter = QSplitter(Qt.Orientation.Vertical)

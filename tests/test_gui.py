@@ -23,6 +23,7 @@ from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
     QFormLayout,
     QLabel,
     QLineEdit,
@@ -848,6 +849,165 @@ def test_monitor_get_sample_info(monitor_win):
 def test_monitor_get_data_dir(monitor_win):
     """get_data_dir() returns a non-empty string."""
     assert monitor_win.get_data_dir() != ""
+
+
+# ── Experiment lifecycle (SampleInfoPanel) ─────────────────────────────────────
+
+@pytest.fixture
+def session_manager(tmp_path, station, orchestrator):
+    """SessionManager backed by a tmp_path store/roster, with one roster user."""
+    from cryosoft.session.manager import SessionManager
+    from cryosoft.session.models import User
+    from cryosoft.session.store import ExperimentStore, UserRoster
+
+    roster = UserRoster(tmp_path / "users.json")
+    roster.add(User(user_id="jdoe", name="J. Doe", email="jdoe@example.org"))
+    store = ExperimentStore(tmp_path / "experiments")
+    return SessionManager(
+        store=store,
+        roster=roster,
+        orchestrator=orchestrator,
+        station=station,
+        config_name="sim_cryostat",
+    )
+
+
+@pytest.fixture
+def monitor_win_session(station, orchestrator, session_manager, qtbot):
+    """MonitorWindow wired to a real SessionManager."""
+    win = MonitorWindow(station, orchestrator, session_manager=session_manager)
+    qtbot.addWidget(win)
+    win.show()
+    return win
+
+
+class _FakeStartDialog:
+    """Stand-in for StartExperimentDialog that auto-accepts fixed values."""
+
+    def __init__(self, values: tuple[str, str, bool]) -> None:
+        self._values = values
+
+    def exec(self):
+        return QDialog.DialogCode.Accepted
+
+    def result_values(self):
+        return self._values
+
+
+class _FakeCloseDialog:
+    """Stand-in for CloseExperimentDialog that auto-accepts fixed findings."""
+
+    def __init__(self, findings_text: str) -> None:
+        self._findings_text = findings_text
+
+    def exec(self):
+        return QDialog.DialogCode.Accepted
+
+    def findings(self):
+        return self._findings_text
+
+
+def _stub_start_dialog(monkeypatch, title, user_id, attended=True):
+    """Replace StartExperimentDialog with a fake that auto-accepts ``values``."""
+    from cryosoft.gui import sample_info_panel as sip
+
+    monkeypatch.setattr(
+        sip,
+        "StartExperimentDialog",
+        lambda roster, parent=None: _FakeStartDialog((title, user_id, attended)),
+    )
+
+
+def _stub_close_dialog(monkeypatch, findings_text=""):
+    """Replace CloseExperimentDialog with a fake that auto-accepts ``findings_text``."""
+    from cryosoft.gui import sample_info_panel as sip
+
+    monkeypatch.setattr(
+        sip,
+        "CloseExperimentDialog",
+        lambda current_findings="", parent=None: _FakeCloseDialog(findings_text),
+    )
+
+
+def test_experiment_row_disabled_without_session_manager(monitor_win):
+    """The Start Experiment button is disabled when no SessionManager is wired."""
+    btn = monitor_win._sample_info._start_close_btn
+    assert not btn.isEnabled()
+    assert monitor_win._sample_info._experiment_status_label.text() == "No experiment open"
+
+
+def test_experiment_row_enabled_with_session_manager(monitor_win_session):
+    """The Start Experiment button is enabled and shows the closed state."""
+    panel = monitor_win_session._sample_info
+    assert panel._start_close_btn.isEnabled()
+    assert panel._start_close_btn.text() == "Start Experiment…"
+    assert not panel._attended_checkbox.isVisible()
+
+
+def test_start_experiment_updates_panel_and_manager(monitor_win_session, session_manager, monkeypatch):
+    """Clicking Start Experiment opens the dialog and installs the experiment."""
+    _stub_start_dialog(monkeypatch, "Hall bar A3", "jdoe", attended=True)
+    panel = monitor_win_session._sample_info
+
+    panel._start_close_btn.click()
+
+    experiment = session_manager.current_experiment()
+    assert experiment is not None
+    assert experiment.title == "Hall bar A3"
+    assert experiment.user_id == "jdoe"
+    assert panel._start_close_btn.text() == "Close Experiment…"
+    assert "Hall bar A3" in panel._experiment_status_label.text()
+    assert "J. Doe" in panel._experiment_status_label.text()
+    assert panel._attended_checkbox.isVisible()
+    assert panel._attended_checkbox.isChecked()
+
+
+def test_close_experiment_saves_findings_and_resets_panel(
+    monitor_win_session, session_manager, monkeypatch
+):
+    """Clicking Close Experiment saves findings and reverts the panel to closed."""
+    _stub_start_dialog(monkeypatch, "Hall bar A3", "jdoe")
+    panel = monitor_win_session._sample_info
+    panel._start_close_btn.click()
+    experiment_id = session_manager.current_experiment().experiment_id
+
+    _stub_close_dialog(monkeypatch, "Saw a clean switching signal.")
+    panel._start_close_btn.click()
+
+    assert session_manager.current_experiment() is None
+    assert panel._start_close_btn.text() == "Start Experiment…"
+    assert panel._experiment_status_label.text() == "No experiment open"
+    assert not panel._attended_checkbox.isVisible()
+    closed = session_manager.store.load(experiment_id)
+    assert closed.findings == "Saw a clean switching signal."
+    assert closed.status == "closed"
+
+
+def test_attendance_checkbox_toggle_calls_set_attended(
+    monitor_win_session, session_manager, monkeypatch
+):
+    """Unchecking Attended flips the experiment's attendance flag."""
+    _stub_start_dialog(monkeypatch, "Hall bar A3", "jdoe", attended=True)
+    panel = monitor_win_session._sample_info
+    panel._start_close_btn.click()
+
+    panel._attended_checkbox.setChecked(False)
+
+    assert session_manager.current_experiment().attended is False
+
+
+def test_add_user_dialog_autofills_id_from_name(qtbot):
+    """AddUserDialog derives a roster-key slug from the typed name."""
+    from cryosoft.gui.experiment_dialogs import AddUserDialog
+
+    dialog = AddUserDialog()
+    qtbot.addWidget(dialog)
+    dialog._name_input.setText("Jane O'Doe")
+
+    assert dialog._id_input.text() == "jane_o_doe"
+    user = dialog.user()
+    assert user.user_id == "jane_o_doe"
+    assert user.name == "Jane O'Doe"
 
 
 def test_procedure_control_buttons_exist(procedure_win, qtbot):

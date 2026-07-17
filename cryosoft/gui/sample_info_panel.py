@@ -1,22 +1,34 @@
 # ---
 # description: |
-#   SampleInfoPanel: the Sample Info quadrant of MonitorWindow — sample name,
-#   ID, comments, and the data-directory field with its Browse button.
-#   Extracted from monitor_window.py; it is the single owner of session-level
-#   sample metadata in the GUI, read by ProcedureWindow through
-#   MonitorWindow's get_sample_info/get_data_dir callables.
+#   SampleInfoPanel: the Sample Info quadrant of MonitorWindow — the
+#   experiment status/Start-Close control (when a SessionManager is wired),
+#   plus sample name, ID, comments, and the data-directory field with its
+#   Browse button. The sample fields stay free-editable per run regardless of
+#   whether an experiment is open; whatever they hold at "Start Experiment"
+#   time is snapshotted onto the ExperimentRecord for record-keeping. It is
+#   the single owner of session-level sample metadata in the GUI, read by
+#   ProcedureWindow through MonitorWindow's get_sample_info/get_data_dir
+#   callables.
 # entry_point: Not run directly. Hosted as MonitorWindow's bottom-left quadrant.
 # dependencies:
 #   - PyQt6 >= 6.5
 #   - cryosoft.gui.form_autosave (SessionState)
 #   - cryosoft.gui.theme (button classes)
+#   - cryosoft.gui.experiment_dialogs (Start/Close experiment dialogs)
+#   - cryosoft.session.manager (SessionManager, optional)
 # input: |
-#   A loaded SessionState (via apply_session) to prefill the fields.
+#   A loaded SessionState (via apply_session) to prefill the fields, and an
+#   optional SessionManager whose experiment_changed signal drives the
+#   experiment status row.
 # process: |
 #   Builds the form inside a QScrollArea (objectNames sample_info_quadrant /
 #   sample_info_scroll and the *_input fields are preserved API for tests).
+#   The experiment row is always built; without a SessionManager its button
+#   stays disabled.
 # output: |
 #   get_sample_info()/get_data_dir() read the live field values.
+#   SessionManager.start_experiment()/close_experiment()/set_findings()/
+#   set_attended() are called from the dialogs' results.
 # ---
 
 """SampleInfoPanel — the Sample Info quadrant (session-level metadata)."""
@@ -25,11 +37,14 @@ from __future__ import annotations
 
 import qtawesome as qta
 from PyQt6.QtWidgets import (
+    QCheckBox,
+    QDialog,
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -38,27 +53,43 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from cryosoft.gui.experiment_dialogs import CloseExperimentDialog, StartExperimentDialog
 from cryosoft.gui.form_autosave import SessionState
 from cryosoft.gui.theme import TEXT_PRIMARY
+from cryosoft.session.manager import SessionManager
 
 _DEFAULT_DATA_DIR = "C:/CryoData"
 
 
 class SampleInfoPanel(QWidget):
-    """The Sample Info quadrant: name, ID, comments, and data-directory fields.
+    """The Sample Info quadrant: experiment control, plus sample fields.
 
     ObjectNames (``sample_info_quadrant``, ``sample_info_scroll``,
     ``sample_name_input``, ``sample_id_input``, ``comments_input``,
-    ``data_dir_input``, ``browse_btn``) are preserved API — tests and muscle
-    memory rely on them.
+    ``data_dir_input``, ``browse_btn``, ``experiment_status_label``,
+    ``start_close_experiment_btn``, ``attended_checkbox``) are preserved API
+    — tests and muscle memory rely on them.
+
+    Args:
+        parent: Optional Qt parent widget.
+        session_manager: The L6 SessionManager. When ``None`` (unit tests
+            that build the panel standalone), the experiment row is shown
+            but its button stays disabled.
     """
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        session_manager: SessionManager | None = None,
+    ) -> None:
         super().__init__(parent)
+        self._session_manager = session_manager
         self.setObjectName("sample_info_quadrant")
         outer = QVBoxLayout(self)
         outer.setContentsMargins(4, 4, 4, 4)
         outer.setSpacing(4)
+        outer.addWidget(QLabel("<b>Experiment</b>"))
+        outer.addLayout(self._build_experiment_row())
         outer.addWidget(QLabel("<b>Sample Info</b>"))
 
         scroll = QScrollArea()
@@ -66,6 +97,114 @@ class SampleInfoPanel(QWidget):
         scroll.setWidgetResizable(True)
         scroll.setWidget(self._build_form())
         outer.addWidget(scroll)
+
+        if self._session_manager is not None:
+            self._session_manager.experiment_changed.connect(self._on_experiment_changed)
+            current = self._session_manager.current_experiment()
+            self._on_experiment_changed(current.to_dict() if current is not None else {})
+
+    def _build_experiment_row(self) -> QVBoxLayout:
+        """Build the experiment status label, Start/Close button, and attendance box.
+
+        Returns:
+            A layout with the status/button row plus the (initially hidden)
+            attendance checkbox.
+        """
+        section = QVBoxLayout()
+
+        status_row = QHBoxLayout()
+        self._experiment_status_label = QLabel("No experiment open")
+        self._experiment_status_label.setObjectName("experiment_status_label")
+        self._experiment_status_label.setWordWrap(True)
+        status_row.addWidget(self._experiment_status_label, 1)
+
+        self._start_close_btn = QPushButton("Start Experiment…")
+        self._start_close_btn.setObjectName("start_close_experiment_btn")
+        if self._session_manager is None:
+            self._start_close_btn.setEnabled(False)
+            self._start_close_btn.setToolTip("Session management is not available")
+        else:
+            self._start_close_btn.clicked.connect(self._on_start_close_clicked)
+        status_row.addWidget(self._start_close_btn)
+        section.addLayout(status_row)
+
+        self._attended_checkbox = QCheckBox("Attended")
+        self._attended_checkbox.setObjectName("attended_checkbox")
+        self._attended_checkbox.setChecked(True)
+        self._attended_checkbox.setVisible(False)
+        self._attended_checkbox.toggled.connect(self._on_attended_toggled)
+        section.addWidget(self._attended_checkbox)
+
+        return section
+
+    def _on_start_close_clicked(self) -> None:
+        """Open the Start or Close Experiment dialog depending on current state."""
+        if self._session_manager is None:
+            return
+        if self._session_manager.current_experiment() is None:
+            self._run_start_dialog()
+        else:
+            self._run_close_dialog()
+
+    def _run_start_dialog(self) -> None:
+        assert self._session_manager is not None
+        dialog = StartExperimentDialog(self._session_manager.roster, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        title, user_id, attended = dialog.result_values()
+        try:
+            self._session_manager.start_experiment(
+                title=title,
+                user_id=user_id,
+                sample_info=self.get_sample_info(),
+                attended=attended,
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "Could not start experiment", str(exc))
+
+    def _run_close_dialog(self) -> None:
+        assert self._session_manager is not None
+        record = self._session_manager.current_experiment()
+        current_findings = record.findings if record is not None else ""
+        dialog = CloseExperimentDialog(current_findings, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._session_manager.set_findings(dialog.findings())
+        self._session_manager.close_experiment()
+
+    def _on_attended_toggled(self, checked: bool) -> None:
+        if self._session_manager is not None:
+            self._session_manager.set_attended(checked)
+
+    def _on_experiment_changed(self, record: dict) -> None:
+        """Reflect a SessionManager ``experiment_changed`` payload in the row.
+
+        Args:
+            record: ``ExperimentRecord.to_dict()``, or ``{}`` when none open.
+        """
+        if not record:
+            self._experiment_status_label.setText("No experiment open")
+            self._start_close_btn.setText("Start Experiment…")
+            self._attended_checkbox.setVisible(False)
+            return
+
+        user_id = record.get("user_id", "")
+        user_name = user_id
+        if self._session_manager is not None:
+            user = self._session_manager.roster.get(user_id)
+            if user is not None and user.name:
+                user_name = user.name
+        attended = bool(record.get("attended", True))
+
+        self._experiment_status_label.setText(
+            f"{record.get('title', '')} — {user_name} "
+            f"({'attended' if attended else 'unattended'})"
+        )
+        self._start_close_btn.setText("Close Experiment…")
+        self._attended_checkbox.setVisible(True)
+        self._attended_checkbox.blockSignals(True)
+        self._attended_checkbox.setChecked(attended)
+        self._attended_checkbox.blockSignals(False)
 
     def _build_form(self) -> QWidget:
         """Build the sample-info form (session-level metadata).
