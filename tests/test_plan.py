@@ -17,9 +17,11 @@ from cryosoft.core.exceptions import DataSchemaError
 from cryosoft.core.plan import (
     Command,
     DataSchema,
+    EnvelopeBound,
     ParamGroup,
     ParamSpec,
     PhasePlan,
+    SessionEnvelope,
     StepPlan,
     Target,
 )
@@ -528,3 +530,66 @@ def test_validate_reports_multiple_problems_together():
     assert "field_T" in msg
     assert "voltage_V" in msg
     assert "junk" in msg
+
+
+# ── EnvelopeBound / SessionEnvelope ──────────────────────────────────────────
+
+class TestEnvelopeBound:
+    def test_requires_at_least_one_bound(self):
+        with pytest.raises(ValueError):
+            EnvelopeBound()
+
+    def test_rejects_min_above_max(self):
+        with pytest.raises(ValueError):
+            EnvelopeBound(min_value=2.0, max_value=1.0)
+
+    def test_rejects_non_numeric_and_non_finite(self):
+        with pytest.raises(TypeError):
+            EnvelopeBound(max_value=True)
+        with pytest.raises(ValueError):
+            EnvelopeBound(max_value=float("inf"))
+
+    def test_violation_messages_and_pass(self):
+        bound = EnvelopeBound(min_value=-0.5, max_value=0.5)
+        assert bound.violation(0.0) is None
+        assert "below the session minimum" in bound.violation(-1.0)
+        assert "above the session maximum" in bound.violation(1.0)
+        # Non-numeric state values can never trip a numeric envelope.
+        assert bound.violation("HOLDING") is None
+
+
+class TestSessionEnvelope:
+    def test_rejects_empty_bounds(self):
+        with pytest.raises(ValueError):
+            SessionEnvelope(bounds={})
+
+    def test_rejects_wrong_value_type(self):
+        with pytest.raises(TypeError):
+            SessionEnvelope(bounds={"magnet_x": (0.0, 1.0)})
+
+    def test_check_target(self):
+        env = SessionEnvelope(
+            bounds={"magnet_x": EnvelopeBound(min_value=-2.0, max_value=2.0)}
+        )
+        assert env.check_target("magnet_x", 1.0) is None
+        assert env.check_target("other_vi", 99.0) is None  # unbounded VI
+        message = env.check_target("magnet_x", 3.0)
+        assert "session envelope" in message and "magnet_x" in message
+
+    def test_check_state_uses_state_key_and_skips_missing(self):
+        env = SessionEnvelope(
+            bounds={
+                "temperature_sample": EnvelopeBound(
+                    min_value=4.0, state_key="temperature"
+                ),
+                "magnet_x": EnvelopeBound(max_value=2.0),  # no state_key: skipped
+            }
+        )
+        violations = env.check_state(
+            {"temperature_sample": {"temperature": 2.0}, "magnet_x": {"get_field": 9.0}}
+        )
+        assert len(violations) == 1
+        assert "temperature_sample" in violations[0]
+        # VI or key absent from the snapshot -> staleness, not a violation.
+        assert env.check_state({}) == []
+        assert env.check_state({"temperature_sample": {}}) == []

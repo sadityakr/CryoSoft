@@ -160,6 +160,13 @@ class BaseProcedure:
     # read it to decide whether to hand the procedure a populated sim Station.
     requires_measurement_vi: bool = False
 
+    # What kind of run this procedure execution is, recorded in the
+    # Orchestrator's run manifests: "run" for a normal science run. The session
+    # layer's future probe runs (a miniature pre-flight execution of the same
+    # procedure) will override this with "probe" so probe data files and run
+    # records are never confused with science data.
+    run_kind: str = "run"
+
     def __init_subclass__(cls, **kwargs: object) -> None:
         super().__init_subclass__(**kwargs)
         axis_params = sweep_axis_param_specs(cls.sweep_axis) if cls.sweep_axis else {}
@@ -238,6 +245,7 @@ class BaseProcedure:
         sample_info: dict[str, str],
         data_directory: str,
         file_prefix: str = "",
+        experiment_info: dict[str, Any] | None = None,
         **param_values: Any,
     ) -> None:
         """Initialise the procedure.
@@ -251,6 +259,11 @@ class BaseProcedure:
                 Empty string falls back to ``self.name``. Frozen into the
                 procedure instance at construction time, so queued entries
                 each keep the prefix that was set when they were added.
+            experiment_info: Optional experiment-level context from the session
+                layer (experiment id/title, user identity, ELN link), forwarded
+                verbatim to every ``DataManager`` this procedure creates and
+                stored as ``/metadata/experiment_info``. ``None`` means "no
+                experiment open" and is recorded as ``{}``.
             **param_values: Procedure-specific parameter values from the GUI form.
                 Any declared parameter with a ``default`` that the caller omits
                 is filled in automatically; caller-supplied values always win.
@@ -259,6 +272,7 @@ class BaseProcedure:
         self._sample_info = sample_info
         self._data_directory = data_directory
         self._file_prefix = file_prefix
+        self._experiment_info: dict[str, Any] = dict(experiment_info or {})
         # Every ParamSpec carries a default (enforced at ParamSpec construction),
         # so the merge is unconditional — no "default present?" guard needed.
         merged_params: dict[str, Any] = {
@@ -354,6 +368,54 @@ class BaseProcedure:
             measured_data=enriched,
             station_snapshot=self._station.cached_state,
         )
+
+    # ------------------------------------------------------------------
+    # Public read-only surface (consumed by the Orchestrator's run manifests
+    # and the GUI — no caller should ever reach into _data_manager directly)
+    # ------------------------------------------------------------------
+
+    @property
+    def data_filepath(self) -> str | None:
+        """Absolute path of this run's HDF5 file, or ``None`` before ``initiate()``.
+
+        Remains available while the run's ``DataManager`` is open; after
+        ``standby()``/``abort()`` close the file the property returns ``None``
+        again, so consumers that need the path across the whole run (the
+        Orchestrator's run manifests) must capture it at start.
+
+        Returns:
+            The file path as a string, or ``None`` when no data file is open.
+        """
+        if self._data_manager is None:
+            return None
+        return str(self._data_manager.filepath)
+
+    @property
+    def last_datapoint(self) -> dict:
+        """A copy of the most recently saved datapoint, or ``{}``.
+
+        The Orchestrator reads this after each ``measure()`` to emit
+        ``measurement_ready`` for the live plot.
+
+        Returns:
+            The last saved datapoint dict (copied), or ``{}`` when no data
+            file is open or nothing has been saved yet.
+        """
+        if self._data_manager is None or not self._data_manager.last_datapoint:
+            return {}
+        return dict(self._data_manager.last_datapoint)
+
+    def get_params(self) -> dict[str, Any]:
+        """Return a copy of this instance's merged parameter values.
+
+        Declared defaults merged with caller-supplied values (and, for the
+        generic sweep procedures, the resolved measurement-VI selection and its
+        parameters). This is what the run manifests and HDF5 metadata record.
+
+        Returns:
+            A shallow copy of the parameter dict.
+        """
+        return dict(self._params)
 
     def get_data_keys(self) -> list[str]:
         """Return all datapoint keys available for live-plot axis selection.
@@ -544,6 +606,7 @@ class SweepMeasureProcedure(BaseProcedure):
         sample_info: dict[str, str],
         data_directory: str,
         file_prefix: str = "",
+        experiment_info: dict[str, Any] | None = None,
         **param_values: Any,
     ) -> None:
         """Resolve the selected measurement VI and merge its parameter defaults.
@@ -553,6 +616,8 @@ class SweepMeasureProcedure(BaseProcedure):
             sample_info: ``{"sample_name", "sample_id", "comments"}``.
             data_directory: Base directory for the HDF5 output file.
             file_prefix: Optional filename prefix (see ``BaseProcedure``).
+            experiment_info: Optional session-layer experiment context (see
+                ``BaseProcedure``), forwarded to the ``DataManager``.
             **param_values: Form values. ``measurement_vi`` selects the
                 measurement VI by name (defaults to the first registered one);
                 the remaining keys are the sweep/system params and the selected
@@ -580,7 +645,14 @@ class SweepMeasureProcedure(BaseProcedure):
         # BaseProcedure merges class-declared param defaults (axis + system) and
         # builds the sweep array. It does NOT know the measurement params (those
         # are the selected VI's, resolved below).
-        super().__init__(station, sample_info, data_directory, file_prefix, **param_values)
+        super().__init__(
+            station,
+            sample_info,
+            data_directory,
+            file_prefix,
+            experiment_info,
+            **param_values,
+        )
 
         vi = station.get_vi(selected)
         vi_specs: dict[str, ParamSpec] = vi.measurement_parameters
@@ -901,6 +973,7 @@ class SweepMeasureProcedure(BaseProcedure):
             measurement_commands=[dataclasses.asdict(c) for c in commands],
             data_config=data_config,
             n_sweep_points=len(self._sweep),
+            experiment_info=self._experiment_info,
         )
 
         logger.info(

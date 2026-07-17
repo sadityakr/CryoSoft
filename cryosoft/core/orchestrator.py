@@ -31,7 +31,9 @@
 #   the safety condition persists; recover_from_error() exits ERROR.
 # output: |
 #   Emits signals: states_updated, state_changed, procedure_progress,
-#   procedure_finished, error_occurred, action_blocked, action_succeeded,
+#   procedure_finished, run_started/run_finished (run manifests: id, procedure,
+#   kind, params, data file path, timestamps, terminal status — consumed by the
+#   session layer), error_occurred, action_blocked, action_succeeded,
 #   action_failed (vi, method, reason — the uniform per-action verdict),
 #   status_message (concise human-readable procedure milestones for the
 #   Procedure window's status log; also written to the cryosoft.procedure_status
@@ -58,13 +60,15 @@ import json
 import logging
 import time
 from collections.abc import Sequence
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
+from cryosoft.core.exceptions import CryoSoftSafetyError
 from cryosoft.core.operational_status import build_operational_status
-from cryosoft.core.plan import Command, Target
+from cryosoft.core.plan import Command, SessionEnvelope, Target
 from cryosoft.core.station import Station
 from cryosoft.core.watchdog import WatchdogConfig, WatchdogState, apply_watchdog
 # Procedures will be imported/type-checked but for now we expect a BaseProcedure mock.
@@ -97,6 +101,18 @@ class Orchestrator(QObject):
         state_changed (str): Emitted when orchestrator state changes.
         procedure_progress (float): 0.0 to 1.0 progress of current procedure.
         procedure_finished (): Emitted when a procedure ends cleanly.
+        run_started (dict): Run manifest emitted once per run, after a
+            procedure's ``initiate()`` succeeded and its plan was dispatched.
+            Keys: ``run_id``, ``procedure`` (display name), ``kind``
+            ("run"; probe runs will carry "probe"), ``params`` (merged
+            parameter values), ``data_file`` (HDF5 path, captured here because
+            the procedure closes its file before the run ends), and
+            ``started_utc`` (ISO 8601). The session layer records runs from
+            this signal; a run whose setup fails emits no manifest at all.
+        run_finished (dict): The same manifest re-emitted exactly once when the
+            run ends, with ``finished_utc``, terminal ``status`` (``done`` /
+            ``aborted`` / ``failed``), and ``reason`` (error text, empty for
+            ``done``/``aborted``) added.
         error_occurred (str): Emitted when ERROR or EMERGENCY state entered.
         action_blocked (str): Emitted if GUI action submitted while busy.
         action_succeeded (str, str): Emitted (vi_name, method_name) after a
@@ -125,6 +141,8 @@ class Orchestrator(QObject):
     state_changed = pyqtSignal(str)
     procedure_progress = pyqtSignal(float)
     procedure_finished = pyqtSignal()
+    run_started = pyqtSignal(dict)  # run manifest at successful setup
+    run_finished = pyqtSignal(dict)  # same manifest + finished_utc/status/reason
     error_occurred = pyqtSignal(str)
     action_blocked = pyqtSignal(str)
     action_succeeded = pyqtSignal(str, str)
@@ -154,6 +172,16 @@ class Orchestrator(QObject):
         self._status_logger = logging.getLogger("cryosoft.status")
         self._watchdog_state = WatchdogState()
         self._watchdog_config = WatchdogConfig()
+
+        # Session envelope (sample-specific bounds, narrower than config
+        # limits) — set by the session layer, enforced here so it binds every
+        # writer (GUI and agents alike). None = no envelope active.
+        self._session_envelope: SessionEnvelope | None = None
+
+        # Active run manifest: captured at run_started (the data file path is
+        # gone by the time the run ends) and re-emitted once on run_finished.
+        self._active_run_manifest: dict[str, Any] | None = None
+        self._run_counter = 0
 
         self._pre_pause_state = OrchestratorState.IDLE
         self._paused_wait_elapsed = 0.0
@@ -243,6 +271,27 @@ class Orchestrator(QObject):
     # Public API
     # ------------------------------------------------------------------
 
+    def set_session_envelope(self, envelope: SessionEnvelope | None) -> None:
+        """Install (or clear) the active experiment's session envelope.
+
+        Called by the session layer on experiment start/close. Config
+        ``init_params`` limits protect the instrument; the envelope protects
+        the mounted sample with narrower per-experiment bounds. Enforcement
+        happens here in the Orchestrator — the single choke point every writer
+        goes through — in two places: every submitted ``Target`` for a bounded
+        VI is validated before dispatch, and every tick each bound with a
+        ``state_key`` is checked against the VI's live reading (a violation
+        enters EMERGENCY exactly like a tripped safety flag).
+
+        Args:
+            envelope: The bounds to enforce, or ``None`` to clear them.
+        """
+        self._session_envelope = envelope
+        if envelope is None:
+            logger.info("Session envelope cleared")
+        else:
+            logger.info("Session envelope set: %r", envelope)
+
     def run_procedure(self, procedure: Any) -> None:
         """Start a procedure immediately if IDLE or during a manual ramp; else queue it.
 
@@ -300,13 +349,27 @@ class Orchestrator(QObject):
             self._current_wait_time = plan.wait_s
 
             self._change_state(OrchestratorState.INITIATING)
+            self._emit_run_started()
             self._emit_initiation_status(plan.targets, plan.commands)
         except Exception as exc:
             logger.exception("run_procedure() failed during setup")
             self._fail_to_error(f"Could not start procedure: {exc}")
 
     def _dispatch_targets(self, targets: dict[str, Target]) -> None:
-        """Forward targets to the Station, remembering them for resume."""
+        """Forward targets to the Station, remembering them for resume.
+
+        Raises:
+            CryoSoftSafetyError: If a target for a bounded VI falls outside the
+                active session envelope. Nothing is dispatched — the whole
+                plan is rejected before any hardware is touched, and the tick
+                boundary (or ``run_procedure``'s setup guard) contains the run
+                to ERROR with the reason.
+        """
+        if self._session_envelope is not None:
+            for vi_name, target in targets.items():
+                message = self._session_envelope.check_target(vi_name, target.target)
+                if message is not None:
+                    raise CryoSoftSafetyError(message)
         self._last_system_targets = dict(targets)
         self._station.process_system_targets(targets)
 
@@ -369,6 +432,7 @@ class Orchestrator(QObject):
             logger.info("abort_procedure ignored during EMERGENCY")
             return
         self._abort_active_procedure()
+        self._emit_run_finished("aborted")
         self._change_state(OrchestratorState.IDLE)
         self._emit_status("Aborted by user")
         self.run_queue()
@@ -394,6 +458,10 @@ class Orchestrator(QObject):
             return
         safety = self._station.check_safety()
         active = sorted(flag for flag, tripped in safety.items() if tripped)
+        # A still-violated session envelope blocks acknowledgement for the same
+        # reason a safety flag does — the next tick would bounce straight back.
+        if self._session_envelope is not None:
+            active.extend(self._session_envelope.check_state(self._station.cached_state))
         if active:
             self._error(
                 "Cannot acknowledge emergency: condition still active "
@@ -452,6 +520,62 @@ class Orchestrator(QObject):
             self._gui_action_queue.append(
                 {"vi_name": vi_name, "method_name": method, "kwargs": {}}
             )
+
+    # ------------------------------------------------------------------
+    # Run manifests (consumed by the session layer)
+    # ------------------------------------------------------------------
+
+    def _emit_run_started(self) -> None:
+        """Capture the active run's manifest and emit ``run_started``.
+
+        Called exactly once per run, after ``initiate()`` succeeded and its
+        plan was dispatched. The data file path must be captured here: the
+        procedure closes its ``DataManager`` (and forgets the path) in
+        ``standby()``/``abort()``, before the run-finished emission.
+        Best-effort on the optional fields — a minimal procedure (e.g. a test
+        mock) without the public accessors still gets a manifest.
+        """
+        procedure = self._procedure
+        name = getattr(procedure, "name", "") or type(procedure).__name__
+        slug = "".join(c if c.isalnum() else "_" for c in name.lower()).strip("_")
+        self._run_counter += 1
+        params: dict[str, Any] = {}
+        get_params = getattr(procedure, "get_params", None)
+        if callable(get_params):
+            try:
+                params = get_params()
+            except Exception:  # noqa: BLE001 — manifest must never abort a run
+                logger.exception("run manifest: get_params() failed")
+        self._active_run_manifest = {
+            "run_id": f"{time.strftime('%Y%m%d_%H%M%S')}_{self._run_counter:03d}_{slug}",
+            "procedure": name,
+            "kind": getattr(procedure, "run_kind", "run"),
+            "params": params,
+            "data_file": str(getattr(procedure, "data_filepath", None) or ""),
+            "started_utc": datetime.now(timezone.utc).isoformat(),
+        }
+        self.run_started.emit(dict(self._active_run_manifest))
+
+    def _emit_run_finished(self, status: str, reason: str = "") -> None:
+        """Emit ``run_finished`` for the active run, exactly once.
+
+        Idempotent: the captured manifest is cleared on emission, so the
+        overlapping cleanup paths (user abort, error containment, emergency
+        entry) cannot double-report a run. A no-op when no run ever started
+        (e.g. ``initiate()`` itself failed, or a manual-ramp-only session).
+
+        Args:
+            status: Terminal status — ``done``, ``aborted``, or ``failed``.
+            reason: Error text for ``failed``; empty otherwise.
+        """
+        if self._active_run_manifest is None:
+            return
+        manifest = dict(self._active_run_manifest)
+        self._active_run_manifest = None
+        manifest["finished_utc"] = datetime.now(timezone.utc).isoformat()
+        manifest["status"] = status
+        manifest["reason"] = reason
+        self.run_finished.emit(manifest)
 
     # ------------------------------------------------------------------
     # Private / internal
@@ -678,6 +802,15 @@ class Orchestrator(QObject):
                 self._enter_emergency(", ".join(active_flags))
                 return  # emergency entry already cleaned up; nothing else this tick
 
+            # Session-envelope check — same snapshot, same consequence as a tripped
+            # safety flag: the envelope protects the mounted sample, so a live
+            # reading outside it is treated exactly like an instrument safety event.
+            if self._session_envelope is not None and self._state != OrchestratorState.EMERGENCY:
+                envelope_violations = self._session_envelope.check_state(state)
+                if envelope_violations:
+                    self._enter_emergency("; ".join(envelope_violations))
+                    return
+
             # Stale check during procedure
             if self._state not in (OrchestratorState.IDLE, OrchestratorState.PAUSED,
                                    OrchestratorState.ERROR, OrchestratorState.EMERGENCY):
@@ -743,9 +876,9 @@ class Orchestrator(QObject):
                 self._procedure.measure()
                 if hasattr(self._procedure, "get_progress"):
                     self.procedure_progress.emit(self._procedure.get_progress())
-                dm = getattr(self._procedure, "_data_manager", None)
-                if dm is not None and dm.last_datapoint:
-                    self.measurement_ready.emit(dict(dm.last_datapoint))
+                last_datapoint = getattr(self._procedure, "last_datapoint", None)
+                if last_datapoint:
+                    self.measurement_ready.emit(dict(last_datapoint))
             self._change_state(OrchestratorState.SWEEPING)
         elif self._state == OrchestratorState.SWEEPING:
             if self._procedure:
@@ -780,6 +913,7 @@ class Orchestrator(QObject):
                 # before declaring the procedure finished.
                 if self._station.check_ramps():
                     self._emit_status("Procedure finished")
+                    self._emit_run_finished("done")
                     self.procedure_finished.emit()
                     self._procedure = None
                     self._active_system_vis.clear()
@@ -834,6 +968,7 @@ class Orchestrator(QObject):
             self._abort_active_procedure()
         except Exception:
             logger.exception("Cleanup while entering ERROR also failed")
+        self._emit_run_finished("failed", reason=message)
         self._change_state(OrchestratorState.ERROR)
 
     def _enter_emergency(self, reason: str) -> None:
@@ -848,6 +983,7 @@ class Orchestrator(QObject):
             self._abort_active_procedure()
         except Exception:
             logger.exception("Cleanup while entering EMERGENCY failed")
+        self._emit_run_finished("failed", reason=f"EMERGENCY: {reason}")
         self._change_state(OrchestratorState.EMERGENCY)
         try:
             self._station.standby_all()

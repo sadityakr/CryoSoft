@@ -11,7 +11,7 @@
 #   - PyQt6 >= 6.5
 #   - cryosoft.core.station (Station, to rebuild procedure instances)
 #   - cryosoft.core.orchestrator (Orchestrator)
-#   - cryosoft.gui.session (QueueItemState, status constants)
+#   - cryosoft.gui.form_autosave (QueueItemState, status constants)
 # input: |
 #   QueueEntry objects built by ProcedureWindow from validated form values;
 #   persisted QueueItemStates on session restore.
@@ -48,7 +48,7 @@ from PyQt6.QtWidgets import (
 from cryosoft.core.orchestrator import Orchestrator
 from cryosoft.core.procedure import BaseProcedure
 from cryosoft.core.station import Station
-from cryosoft.gui.session import (
+from cryosoft.gui.form_autosave import (
     STATUS_DONE,
     STATUS_FAILED,
     STATUS_PENDING,
@@ -92,6 +92,9 @@ class QueuePanel(QGroupBox):
         station: The active Station instance (rebuilds restored procedures).
         orchestrator: The active Orchestrator instance.
         parent: Optional Qt parent widget.
+        get_experiment_info: Callable returning the session layer's experiment
+            context, stamped into procedures rebuilt from a persisted queue.
+            ``None`` means no session layer is wired — procedures get ``{}``.
     """
 
     def __init__(
@@ -99,10 +102,12 @@ class QueuePanel(QGroupBox):
         station: Station,
         orchestrator: Orchestrator,
         parent: QWidget | None = None,
+        get_experiment_info: Callable[[], dict[str, str]] | None = None,
     ) -> None:
         super().__init__("Queue", parent)
         self._station = station
         self._orchestrator = orchestrator
+        self._get_experiment_info = get_experiment_info
 
         # Run queue as QueueEntry objects (spec + params + prefix + status).
         self._queue: list[QueueEntry] = []
@@ -314,13 +319,21 @@ class QueuePanel(QGroupBox):
     # ------------------------------------------------------------------
 
     def _build_entry_procedure(self, entry: QueueEntry) -> BaseProcedure | None:
-        """Build a procedure instance from a queue entry's stored values."""
+        """Build a procedure instance from a queue entry's stored values.
+
+        Stamped with the experiment context read at build time, so a restored
+        run belongs to the experiment that is open when it actually runs.
+        """
+        experiment_info = (
+            self._get_experiment_info() if self._get_experiment_info else {}
+        )
         try:
             return entry.cls(
                 station=self._station,
                 sample_info=entry.sample_info,
                 data_directory=entry.data_dir,
                 file_prefix=entry.file_prefix,
+                experiment_info=experiment_info,
                 **entry.params,
             )
         except (TypeError, ValueError) as exc:

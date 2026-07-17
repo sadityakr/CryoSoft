@@ -1,0 +1,402 @@
+# ---
+# description: |
+#   Typed records of the L6 Session Management layer: User (who measures),
+#   RunRecord (one procedure execution -> one HDF5 file), ExperimentRecord
+#   (a named group of runs on one sample, with its session envelope and ELN
+#   linkage), and ElnLink (the experiment's ELN entry reference). All follow
+#   the tolerant-parse standard of gui/form_autosave.py: to_dict()/from_dict()
+#   convert to/from plain JSON types, missing keys take defaults, unknown keys
+#   are ignored, and from_dict() never raises on junk input. Machine-checked
+#   by the session-model conformance tests.
+# entry_point: Not run directly. Used by store.py / manager.py and tests.
+# dependencies:
+#   - cryosoft.core.plan (SessionEnvelope / EnvelopeBound serialisation)
+# input: |
+#   from_dict(data) accepts anything; non-dict input yields a default instance.
+# process: |
+#   Plain dataclasses; envelope_to_dict()/envelope_from_dict() bridge the typed
+#   core.plan.SessionEnvelope and its JSON form stored on ExperimentRecord.
+# output: |
+#   JSON-serialisable dicts via to_dict(); typed records via from_dict().
+# ---
+
+"""Typed records of the L6 Session Management layer.
+
+Every class here is a plain ``@dataclass`` with the tolerant-parse contract:
+``from_dict()`` accepts arbitrary junk and degrades to defaults instead of
+raising, so a hand-edited or older ``experiment.json`` can never brick the
+application. All models construct from defaults alone — both properties are
+machine-checked by the session-model conformance tests.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from typing import Any
+
+from cryosoft.core.plan import EnvelopeBound, SessionEnvelope
+
+logger = logging.getLogger(__name__)
+
+# Run lifecycle states (mirrors the Orchestrator's run-manifest statuses, plus
+# the initial "running"). Exposed as constants so callers never hard-code them.
+RUN_STATUS_RUNNING = "running"
+RUN_STATUS_DONE = "done"
+RUN_STATUS_FAILED = "failed"
+RUN_STATUS_ABORTED = "aborted"
+_VALID_RUN_STATUSES = frozenset(
+    {RUN_STATUS_RUNNING, RUN_STATUS_DONE, RUN_STATUS_FAILED, RUN_STATUS_ABORTED}
+)
+
+# Experiment lifecycle states.
+EXPERIMENT_STATUS_OPEN = "open"
+EXPERIMENT_STATUS_CLOSED = "closed"
+_VALID_EXPERIMENT_STATUSES = frozenset(
+    {EXPERIMENT_STATUS_OPEN, EXPERIMENT_STATUS_CLOSED}
+)
+
+
+def _as_str(value: object, default: str = "") -> str:
+    """Coerce a JSON value to ``str``, falling back to ``default`` on ``None``."""
+    return default if value is None else str(value)
+
+def _as_bool(value: object, default: bool) -> bool:
+    """Return ``value`` if it is a bool, else ``default`` (defensive parse)."""
+    return value if isinstance(value, bool) else default
+
+
+def _as_dict(value: object) -> dict[str, Any]:
+    """Return ``value`` if it is a dict, else an empty dict (defensive parse)."""
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def envelope_to_dict(envelope: SessionEnvelope | None) -> dict[str, Any]:
+    """Serialise a ``SessionEnvelope`` to the JSON form stored on records.
+
+    Args:
+        envelope: The typed envelope, or ``None`` for "no envelope".
+
+    Returns:
+        ``{vi_name: {"min_value": ..., "max_value": ..., "state_key": ...}}``,
+        or ``{}`` for ``None``.
+    """
+    if envelope is None:
+        return {}
+    return {
+        vi_name: {
+            "min_value": bound.min_value,
+            "max_value": bound.max_value,
+            "state_key": bound.state_key,
+        }
+        for vi_name, bound in envelope.bounds.items()
+    }
+
+
+def envelope_from_dict(data: object) -> SessionEnvelope | None:
+    """Rebuild a ``SessionEnvelope`` from its stored JSON form, tolerantly.
+
+    Args:
+        data: The dict written by ``envelope_to_dict()`` (or junk).
+
+    Returns:
+        The typed envelope, or ``None`` when ``data`` is empty, not a dict, or
+        fails ``SessionEnvelope`` validation (logged at WARNING — a corrupt
+        envelope must not brick loading, but silently *narrowing* it would be
+        worse than none, so the whole envelope is dropped and the operator is
+        told).
+    """
+    if not isinstance(data, dict) or not data:
+        return None
+    try:
+        bounds = {
+            str(vi_name): EnvelopeBound(
+                min_value=entry.get("min_value"),
+                max_value=entry.get("max_value"),
+                state_key=str(entry.get("state_key") or ""),
+            )
+            for vi_name, entry in data.items()
+            if isinstance(entry, dict)
+        }
+        if not bounds:
+            return None
+        return SessionEnvelope(bounds=bounds)
+    except (TypeError, ValueError) as exc:
+        logger.warning("session envelope in record is invalid (%s); dropping it", exc)
+        return None
+
+
+@dataclass
+class User:
+    """One person in the setup-local user roster.
+
+    Identity, not authentication: the roster records who is measuring so runs
+    and data files are attributable, and carries the optional link to the
+    person's ELN identity for the publishing track.
+
+    Attributes:
+        user_id: Unique roster key (a short slug, e.g. ``"jdoe"``).
+        name: Display name.
+        email: Contact email (optional).
+        orcid: ORCID iD (optional).
+        eln_user_id: The person's backend-side ELN identity (optional).
+    """
+
+    user_id: str = ""
+    name: str = ""
+    email: str = ""
+    orcid: str = ""
+    eln_user_id: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-safe dict representation."""
+        return {
+            "user_id": self.user_id,
+            "name": self.name,
+            "email": self.email,
+            "orcid": self.orcid,
+            "eln_user_id": self.eln_user_id,
+        }
+
+    @classmethod
+    def from_dict(cls, data: object) -> User:
+        """Build a ``User`` from a parsed dict, tolerating bad input."""
+        if not isinstance(data, dict):
+            return cls()
+        return cls(
+            user_id=_as_str(data.get("user_id")),
+            name=_as_str(data.get("name")),
+            email=_as_str(data.get("email")),
+            orcid=_as_str(data.get("orcid")),
+            eln_user_id=_as_str(data.get("eln_user_id")),
+        )
+
+
+@dataclass
+class ElnLink:
+    """Reference to the ELN entry an experiment is published to.
+
+    Attributes:
+        backend: ELN backend identifier (e.g. ``"elabftw"``).
+        entry_id: The entry's id on that backend.
+        url: Direct URL of the entry.
+        template_id: The backend template the entry was created from.
+    """
+
+    backend: str = ""
+    entry_id: str = ""
+    url: str = ""
+    template_id: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-safe dict representation."""
+        return {
+            "backend": self.backend,
+            "entry_id": self.entry_id,
+            "url": self.url,
+            "template_id": self.template_id,
+        }
+
+    @classmethod
+    def from_dict(cls, data: object) -> ElnLink:
+        """Build an ``ElnLink`` from a parsed dict, tolerating bad input."""
+        if not isinstance(data, dict):
+            return cls()
+        return cls(
+            backend=_as_str(data.get("backend")),
+            entry_id=_as_str(data.get("entry_id")),
+            url=_as_str(data.get("url")),
+            template_id=_as_str(data.get("template_id")),
+        )
+
+
+@dataclass
+class RunRecord:
+    """One procedure execution — one HDF5 file — inside an experiment.
+
+    Created by the ``SessionManager`` from the Orchestrator's ``run_started``
+    manifest and completed from ``run_finished``. The initiate-time instrument
+    settings are kept here so the experiment file answers "what were the
+    settings for run N" without opening HDF5.
+
+    Attributes:
+        run_id: The manifest's unique run id.
+        procedure: The procedure's display name.
+        kind: ``"run"`` for science runs; probe runs will carry ``"probe"``.
+        params: Merged parameter values the run executed with.
+        data_file: Absolute path of the run's HDF5 file.
+        started_utc: ISO 8601 start time (UTC).
+        finished_utc: ISO 8601 end time; empty while running.
+        status: ``running`` → ``done`` / ``failed`` / ``aborted``.
+        reason: Error text for a failed run; empty otherwise.
+        settings_snapshot: Full station snapshot captured at run start.
+        published: Whether this run has been mirrored to the ELN entry yet
+            (written by the publishing track).
+    """
+
+    run_id: str = ""
+    procedure: str = ""
+    kind: str = "run"
+    params: dict[str, Any] = field(default_factory=dict)
+    data_file: str = ""
+    started_utc: str = ""
+    finished_utc: str = ""
+    status: str = RUN_STATUS_RUNNING
+    reason: str = ""
+    settings_snapshot: dict[str, Any] = field(default_factory=dict)
+    published: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-safe dict representation."""
+        return {
+            "run_id": self.run_id,
+            "procedure": self.procedure,
+            "kind": self.kind,
+            "params": dict(self.params),
+            "data_file": self.data_file,
+            "started_utc": self.started_utc,
+            "finished_utc": self.finished_utc,
+            "status": self.status,
+            "reason": self.reason,
+            "settings_snapshot": dict(self.settings_snapshot),
+            "published": self.published,
+        }
+
+    @classmethod
+    def from_dict(cls, data: object) -> RunRecord:
+        """Build a ``RunRecord`` from a parsed dict, tolerating bad input.
+
+        An unrecognised ``status`` degrades to ``failed`` (never silently back
+        to ``running`` — a record whose status cannot be trusted must not look
+        like live work).
+        """
+        if not isinstance(data, dict):
+            return cls()
+        status = _as_str(data.get("status"), RUN_STATUS_RUNNING)
+        if status not in _VALID_RUN_STATUSES:
+            status = RUN_STATUS_FAILED
+        return cls(
+            run_id=_as_str(data.get("run_id")),
+            procedure=_as_str(data.get("procedure")),
+            kind=_as_str(data.get("kind"), "run"),
+            params=_as_dict(data.get("params")),
+            data_file=_as_str(data.get("data_file")),
+            started_utc=_as_str(data.get("started_utc")),
+            finished_utc=_as_str(data.get("finished_utc")),
+            status=status,
+            reason=_as_str(data.get("reason")),
+            settings_snapshot=_as_dict(data.get("settings_snapshot")),
+            published=_as_bool(data.get("published"), False),
+        )
+
+
+@dataclass
+class ExperimentRecord:
+    """A named group of runs on one sample toward one scientific question.
+
+    The unit the session layer manages and (in the publishing track) mirrors
+    to one ELN entry. Persisted as ``experiment.json`` inside the data
+    directory, so the record archives with the data it describes.
+
+    Attributes:
+        experiment_id: Unique store key (slug + date, see
+            ``ExperimentStore.make_experiment_id``).
+        title: Human title (e.g. "Hall bar A3 — SOT switching vs T").
+        user_id: Roster key of the person running the experiment.
+        sample_info: The ``{sample_name, sample_id, comments}`` snapshot taken
+            when the experiment was started.
+        config_name: Identity of the active config at creation.
+        created_utc: ISO 8601 creation time (UTC).
+        closed_utc: ISO 8601 close time; empty while open.
+        status: ``open`` or ``closed``.
+        attended: The attendance flag — ``True`` when a human is present.
+            Governs how much autonomy debug agents get (recovery actions are
+            reserved for unattended sessions; see the agent-native plan).
+        envelope: The session envelope in its JSON form
+            (``envelope_to_dict()``); ``{}`` means no envelope.
+        runs: The experiment's runs, oldest first.
+        findings: Free-text science notes (markdown).
+        eln_link: The ELN entry this experiment publishes to, or ``None``.
+    """
+
+    experiment_id: str = ""
+    title: str = ""
+    user_id: str = ""
+    sample_info: dict[str, Any] = field(default_factory=dict)
+    config_name: str = ""
+    created_utc: str = ""
+    closed_utc: str = ""
+    status: str = EXPERIMENT_STATUS_OPEN
+    attended: bool = True
+    envelope: dict[str, Any] = field(default_factory=dict)
+    runs: list[RunRecord] = field(default_factory=list)
+    findings: str = ""
+    eln_link: ElnLink | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-safe dict representation."""
+        return {
+            "experiment_id": self.experiment_id,
+            "title": self.title,
+            "user_id": self.user_id,
+            "sample_info": dict(self.sample_info),
+            "config_name": self.config_name,
+            "created_utc": self.created_utc,
+            "closed_utc": self.closed_utc,
+            "status": self.status,
+            "attended": self.attended,
+            "envelope": dict(self.envelope),
+            "runs": [run.to_dict() for run in self.runs],
+            "findings": self.findings,
+            "eln_link": self.eln_link.to_dict() if self.eln_link else None,
+        }
+
+    @classmethod
+    def from_dict(cls, data: object) -> ExperimentRecord:
+        """Build an ``ExperimentRecord`` from a parsed dict, tolerating bad input.
+
+        An unrecognised ``status`` degrades to ``closed`` (a record whose
+        state cannot be trusted must not resume as the live experiment).
+        """
+        if not isinstance(data, dict):
+            return cls()
+        status = _as_str(data.get("status"), EXPERIMENT_STATUS_OPEN)
+        if status not in _VALID_EXPERIMENT_STATUSES:
+            status = EXPERIMENT_STATUS_CLOSED
+        raw_runs = data.get("runs")
+        runs = (
+            [RunRecord.from_dict(item) for item in raw_runs]
+            if isinstance(raw_runs, list)
+            else []
+        )
+        raw_link = data.get("eln_link")
+        eln_link = ElnLink.from_dict(raw_link) if isinstance(raw_link, dict) else None
+        return cls(
+            experiment_id=_as_str(data.get("experiment_id")),
+            title=_as_str(data.get("title")),
+            user_id=_as_str(data.get("user_id")),
+            sample_info=_as_dict(data.get("sample_info")),
+            config_name=_as_str(data.get("config_name")),
+            created_utc=_as_str(data.get("created_utc")),
+            closed_utc=_as_str(data.get("closed_utc")),
+            status=status,
+            attended=_as_bool(data.get("attended"), True),
+            envelope=_as_dict(data.get("envelope")),
+            runs=runs,
+            findings=_as_str(data.get("findings")),
+            eln_link=eln_link,
+        )
+
+    def find_run(self, run_id: str) -> RunRecord | None:
+        """Return the run with ``run_id``, or ``None``.
+
+        Args:
+            run_id: The manifest run id to look up.
+
+        Returns:
+            The matching ``RunRecord``, or ``None`` when absent.
+        """
+        for run in self.runs:
+            if run.run_id == run_id:
+                return run
+        return None

@@ -68,10 +68,10 @@ from cryosoft.core.station import Station
 from cryosoft.gui import window_geometry
 from cryosoft.gui.live_plot_panel import LivePlotPanel
 from cryosoft.gui.notification_banner import NotificationBanner
+from cryosoft.gui.form_autosave import STATUS_PENDING, SessionState
 from cryosoft.gui.procedure_discovery import discover_procedures
 from cryosoft.gui.procedure_params_panel import ProcedureParamsPanel
 from cryosoft.gui.queue_panel import QueueEntry, QueuePanel
-from cryosoft.gui.session import STATUS_PENDING, SessionState
 from cryosoft.gui.theme import (
     BANNER_SEVERITY_ERROR,
     BANNER_SEVERITY_WARNING,
@@ -110,7 +110,11 @@ class ProcedureWindow(QMainWindow):
         get_sample_info: Callable returning ``{sample_name, sample_id, comments}``.
         get_data_dir: Callable returning the data directory path string.
         parent: Optional Qt parent widget.
-        initial_session: A loaded session to restore (selection, params, queue).
+        initial_session: Persisted form-autosave content to restore, if any.
+        get_experiment_info: Callable returning the session layer's experiment
+            context (``SessionManager.experiment_context()``), stamped into
+            every built procedure as ``experiment_info``. ``None`` means no
+            session layer is wired (unit tests) — procedures get ``{}``.
     """
 
     def __init__(
@@ -121,12 +125,17 @@ class ProcedureWindow(QMainWindow):
         get_data_dir: Callable[[], str],
         parent: QWidget | None = None,
         initial_session: SessionState | None = None,
+        get_experiment_info: Callable[[], dict[str, str]] | None = None,
     ) -> None:
         super().__init__(parent)
         self._station = station
         self._orchestrator = orchestrator
         self._get_sample_info = get_sample_info
         self._get_data_dir = get_data_dir
+        # Session-layer experiment context, stamped into every built
+        # procedure's HDF5 metadata. None (unit tests, no session layer)
+        # means "no experiment": procedures get an empty context.
+        self._get_experiment_info = get_experiment_info
 
         # Active procedure reference (set on run)
         self._active_procedure: BaseProcedure | None = None
@@ -223,7 +232,9 @@ class ProcedureWindow(QMainWindow):
         split = QSplitter(Qt.Orientation.Vertical)
         split.setObjectName("queue_status_splitter")
         split.setChildrenCollapsible(False)
-        self._queue_panel = QueuePanel(self._station, self._orchestrator)
+        self._queue_panel = QueuePanel(
+            self._station, self._orchestrator, get_experiment_info=self._experiment_info
+        )
         self._queue_panel.setMinimumHeight(120)
         split.addWidget(self._queue_panel)
         split.addWidget(self._build_status_section())
@@ -423,6 +434,7 @@ class ProcedureWindow(QMainWindow):
                 sample_info=sample_info,
                 data_directory=data_dir,
                 file_prefix=file_prefix,
+                experiment_info=self._experiment_info(),
                 **param_values,
             )
         except Exception as exc:
@@ -577,6 +589,20 @@ class ProcedureWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Session persistence (procedure selection, params, queue)
     # ------------------------------------------------------------------
+
+    def _experiment_info(self) -> dict[str, str]:
+        """Return the current experiment context for procedure construction.
+
+        Read at build time (not queue time): a queued run is stamped with the
+        experiment that is open when it actually gets built and run.
+
+        Returns:
+            ``SessionManager.experiment_context()``, or ``{}`` when no session
+            layer is wired.
+        """
+        if self._get_experiment_info is None:
+            return {}
+        return self._get_experiment_info()
 
     def _restore_session(self, session_state: SessionState) -> None:
         """Apply a loaded session to the procedure form and queue."""

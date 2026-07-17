@@ -8,7 +8,7 @@
 # entry_point: Not run directly. Hosted as MonitorWindow's bottom-left quadrant.
 # dependencies:
 #   - PyQt6 >= 6.5
-#   - cryosoft.gui.session (SessionState)
+#   - cryosoft.gui.form_autosave (SessionState)
 #   - cryosoft.gui.theme (button classes)
 # input: |
 #   A loaded SessionState (via apply_session) to prefill the fields.
@@ -38,7 +38,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from cryosoft.gui.session import SessionState
+from cryosoft.gui.form_autosave import SessionState
 from cryosoft.gui.theme import TEXT_PRIMARY
 
 _DEFAULT_DATA_DIR = "C:/CryoData"

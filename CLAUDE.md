@@ -11,7 +11,7 @@ The project virtual environment lives at `.venv` (project root). Run all
 code, tests, and tools through it, and install any required libraries into
 it, never into the system Python.
 
-## Architecture: six layers, dependencies point strictly downward
+## Architecture: seven layers, dependencies point strictly downward
 
 ```
 L0  Drivers               raw instrument I/O; sim drivers mirror real drivers 1:1
@@ -20,6 +20,7 @@ L2  Station + Config      builds VIs from YAML configs; owns state snapshots
 L3  Orchestrator          single tick loop and state machine; sole writer to hardware
 L4  Procedures            measurement recipes driven by the Orchestrator
 L5  Data manager          HDF5 output (lives in core/)
+L6  Session manager       experiments, runs, users; envelope + run records
 GUI                       PyQt6 windows; talks only to the Orchestrator's public API
 ```
 
@@ -83,7 +84,7 @@ No task is complete until `make check` passes (equivalently `ruff check .`,
 `lint-imports`, `pytest -m "not hardware"`, all from the activated `.venv`).
 CI runs exactly these targets on every push. Three parts:
 
-- **Layer contracts (C1–C10)**: import-linter rules in `pyproject.toml` that
+- **Layer contracts (C1–C12)**: import-linter rules in `pyproject.toml` that
   enforce the layer boundaries mechanically. Never edit or weaken a contract
   to make it pass; propose the change instead.
 - **Conformance tests** (`tests/test_conformance.py`): auto-discover every

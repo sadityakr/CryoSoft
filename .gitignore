@@ -21,6 +21,7 @@
 # Tracked folders
 !/cryosoft/
 !/data/
+!/docs/
 !/tests/
 
 # Claude Code project skills/agents are tracked (git history is the safety net);

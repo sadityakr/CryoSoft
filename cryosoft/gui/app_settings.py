@@ -66,7 +66,7 @@ def session_file_path() -> Path:
 
     Returns:
         The absolute ``Path`` of the session JSON file. The parent directory is
-        not guaranteed to exist yet; ``session.save`` creates it on first write.
+        not guaranteed to exist yet; ``form_autosave.save`` creates it on first write.
     """
     base = QStandardPaths.writableLocation(
         QStandardPaths.StandardLocation.AppDataLocation

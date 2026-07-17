@@ -193,6 +193,7 @@ source_modules = [
     "cryosoft.procedures",
     "cryosoft.gui",
     "cryosoft.main",
+    "cryosoft.session",
 ]
 forbidden_modules = ["cryosoft.troubleshoot"]
 
@@ -212,3 +213,30 @@ forbidden_modules = [
     "cryosoft.gui",
     "cryosoft.main",
 ]
+
+[[tool.importlinter.contracts]]
+name = "C11: the session layer (L6) sits below the GUI — it imports core downward, never gui/main/drivers/VIs/procedures"
+type = "forbidden"
+source_modules = ["cryosoft.session"]
+# Same pass-through exemption as C5/C6: the session layer reaches the Station
+# and Orchestrator, whose own VI imports do not make it hardware-aware.
+ignore_imports = ["cryosoft.core.station -> cryosoft.virtual_instruments.*"]
+forbidden_modules = [
+    "cryosoft.gui",
+    "cryosoft.main",
+    "cryosoft.drivers",
+    "cryosoft.virtual_instruments",
+    "cryosoft.procedures",
+]
+
+[[tool.importlinter.contracts]]
+name = "C12: nothing below the GUI imports the session layer (only gui and main may)"
+type = "forbidden"
+source_modules = [
+    "cryosoft.core",
+    "cryosoft.drivers",
+    "cryosoft.virtual_instruments",
+    "cryosoft.procedures",
+    "cryosoft.troubleshoot",
+]
+forbidden_modules = ["cryosoft.session"]

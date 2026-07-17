@@ -62,7 +62,7 @@ from cryosoft.core.plan import ParamGroup, ParamSpec
 from cryosoft.core.procedure import BaseProcedure
 from cryosoft.core.station import Station
 from cryosoft.gui import param_form
-from cryosoft.gui.session import SessionState
+from cryosoft.gui.form_autosave import SessionState
 from cryosoft.gui.sweep_axis_widget import SweepAxisWidget
 from cryosoft.gui.theme import (
     BTN_CLASS_PRIMARY,
