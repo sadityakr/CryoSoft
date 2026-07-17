@@ -660,3 +660,58 @@ def test_measurement_vi_round_trip(vi_cls: type) -> None:
             f"{vi_cls.__name__}.take_reading()['{name}'] must be a real-number "
             f"scalar, got {value!r}"
         )
+
+
+# ── Session-model standard (L6) ───────────────────────────────────────────────
+# Every dataclass in cryosoft.session.models follows the tolerant-parse
+# contract (see the module docstring and cryosoft/session/README.md):
+# constructs from defaults alone, to_dict() is JSON-safe, from_dict() accepts
+# junk without raising and round-trips to_dict() output. A new model in
+# models.py is covered the moment the class exists.
+
+
+def _session_model_classes() -> list[type]:
+    import dataclasses
+
+    from cryosoft.session import models
+
+    return [
+        obj
+        for name, obj in vars(models).items()
+        if not name.startswith("_")
+        and isinstance(obj, type)
+        and dataclasses.is_dataclass(obj)
+        # Only models defined here — not the eager-validating core.plan types
+        # (SessionEnvelope/EnvelopeBound) the module re-imports.
+        and obj.__module__ == models.__name__
+    ]
+
+
+@pytest.mark.parametrize("model_cls", _session_model_classes(), ids=lambda c: c.__name__)
+def test_session_model_constructs_from_defaults(model_cls: type) -> None:
+    """Every session model constructs with no arguments."""
+    model_cls()
+
+
+@pytest.mark.parametrize("model_cls", _session_model_classes(), ids=lambda c: c.__name__)
+def test_session_model_dict_contract(model_cls: type) -> None:
+    """to_dict()/from_dict() exist, are JSON-safe, and round-trip defaults."""
+    import json as json_module
+
+    instance = model_cls()
+    assert hasattr(instance, "to_dict") and hasattr(model_cls, "from_dict"), (
+        f"{model_cls.__name__} must implement to_dict()/from_dict()"
+    )
+    payload = instance.to_dict()
+    json_module.dumps(payload)  # JSON-safe or this raises
+    assert model_cls.from_dict(payload) == instance
+
+
+@pytest.mark.parametrize("model_cls", _session_model_classes(), ids=lambda c: c.__name__)
+@pytest.mark.parametrize(
+    "junk", [None, 42, "text", [], {"bogus_key": object}], ids=type
+)
+def test_session_model_from_dict_tolerates_junk(model_cls: type, junk) -> None:
+    """from_dict() never raises on junk input — it degrades to defaults."""
+    result = model_cls.from_dict(junk)
+    assert isinstance(result, model_cls)

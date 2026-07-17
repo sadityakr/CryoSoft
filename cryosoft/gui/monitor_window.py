@@ -211,11 +211,17 @@ class MonitorWindow(QMainWindow):
         active_config_path: str | None = None,
         restart_callback: Callable[[], None] | None = None,
         startup_warning: str | None = None,
+        session_manager: object | None = None,
     ) -> None:
         super().__init__(parent)
         self._station = station
         self._orchestrator = orchestrator
         self._procedure_window = None  # lazily created
+
+        # Session layer (L6, optional — absent in unit tests). The window only
+        # reads experiment_context() to stamp built procedures; the experiment
+        # GUI surfaces land with the session layer's own GUI phase.
+        self._session_manager = session_manager
 
         # Config management (optional — absent in unit tests that build the
         # window without a catalog). The Config menu is only built when a
@@ -306,6 +312,7 @@ class MonitorWindow(QMainWindow):
                 get_sample_info=self.get_sample_info,
                 get_data_dir=self.get_data_dir,
                 initial_session=self._session,
+                get_experiment_info=self.get_experiment_info,
             )
         self._procedure_window.show()
         self._procedure_window.raise_()
@@ -981,6 +988,18 @@ class MonitorWindow(QMainWindow):
             Absolute path string; falls back to ``"C:/CryoData"`` if empty.
         """
         return self._data_dir_input.text().strip() or "C:/CryoData"
+
+    def get_experiment_info(self) -> dict[str, str]:
+        """Return the session layer's experiment context for procedure stamping.
+
+        Returns:
+            ``SessionManager.experiment_context()`` (experiment id/title, user
+            identity), or ``{}`` when no session layer is wired or no
+            experiment is open.
+        """
+        if self._session_manager is None:
+            return {}
+        return self._session_manager.experiment_context()
 
     # ------------------------------------------------------------------
     # Session persistence (content tier: sample info, procedure params, queue)

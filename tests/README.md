@@ -80,6 +80,7 @@ config also has automatic `test_conformance.py` coverage on top of these.
 | `cryosoft/core/plan.py` | `tests/test_plan.py` |
 | `cryosoft/core/sweep_builder.py` | `tests/test_sweep_builder.py` |
 | `cryosoft/core/data_manager.py` (L5) | `tests/test_l5_data_manager.py` |
+| `cryosoft/session/` (L6) | `tests/test_session_layer.py` + session-model conformance |
 | `cryosoft/gui/param_form.py`, `monitor_window.py`, `procedure_window.py`, `instrument_panel.py`, `notification_banner.py`, `theme.py`, `live_plot_panel.py`, `app_settings.py` | `tests/test_gui.py` |
 | `cryosoft/gui/sweep_axis_widget.py` | `tests/test_sweep_axis_widget.py` |
 | `cryosoft/gui/lifecycle_toggle.py` | `tests/test_lifecycle_toggle.py` |

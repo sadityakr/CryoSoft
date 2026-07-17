@@ -206,6 +206,11 @@ class ProcedureWindow(QMainWindow):
         get_sample_info: Callable returning ``{sample_name, sample_id, comments}``.
         get_data_dir: Callable returning the data directory path string.
         parent: Optional Qt parent widget.
+        initial_session: Persisted form-autosave content to restore, if any.
+        get_experiment_info: Callable returning the session layer's experiment
+            context (``SessionManager.experiment_context()``), stamped into
+            every built procedure as ``experiment_info``. ``None`` means no
+            session layer is wired (unit tests) — procedures get ``{}``.
     """
 
     def __init__(
@@ -216,12 +221,17 @@ class ProcedureWindow(QMainWindow):
         get_data_dir: Callable[[], str],
         parent: QWidget | None = None,
         initial_session: SessionState | None = None,
+        get_experiment_info: Callable[[], dict[str, str]] | None = None,
     ) -> None:
         super().__init__(parent)
         self._station = station
         self._orchestrator = orchestrator
         self._get_sample_info = get_sample_info
         self._get_data_dir = get_data_dir
+        # Session-layer experiment context, stamped into every built
+        # procedure's HDF5 metadata. None (unit tests, no session layer)
+        # means "no experiment": procedures get an empty context.
+        self._get_experiment_info = get_experiment_info
 
         self._procedures: list[type[BaseProcedure]] = _discover_procedures()
         # Run queue as _QueueEntry objects (spec + params + prefix + status).
@@ -1109,6 +1119,7 @@ class ProcedureWindow(QMainWindow):
                 sample_info=sample_info,
                 data_directory=data_dir,
                 file_prefix=file_prefix,
+                experiment_info=self._experiment_info(),
                 **param_values,
             )
         except Exception as exc:
@@ -1463,6 +1474,20 @@ class ProcedureWindow(QMainWindow):
                     self._proc_selector.setCurrentIndex(i)  # fires _on_procedure_selected
                 return
 
+    def _experiment_info(self) -> dict[str, str]:
+        """Return the current experiment context for procedure construction.
+
+        Read at build time (not queue time): a queued run is stamped with the
+        experiment that is open when it actually gets built and run.
+
+        Returns:
+            ``SessionManager.experiment_context()``, or ``{}`` when no session
+            layer is wired.
+        """
+        if self._get_experiment_info is None:
+            return {}
+        return self._get_experiment_info()
+
     def _build_entry_procedure(self, entry: _QueueEntry) -> BaseProcedure | None:
         """Build a procedure instance from a queue entry's stored values."""
         try:
@@ -1471,6 +1496,7 @@ class ProcedureWindow(QMainWindow):
                 sample_info=entry.sample_info,
                 data_directory=entry.data_dir,
                 file_prefix=entry.file_prefix,
+                experiment_info=self._experiment_info(),
                 **entry.params,
             )
         except (TypeError, ValueError) as exc:
