@@ -1,4 +1,4 @@
-"""Unit tests for the Qt-free session model (cryosoft.gui.session).
+"""Unit tests for the Qt-free form-autosave model (cryosoft.gui.form_autosave).
 
 These exercise SessionState/QueueItemState serialisation and the load/save
 round-trip directly, with no QApplication — the model is deliberately stdlib
@@ -10,8 +10,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from cryosoft.gui import session
-from cryosoft.gui.session import QueueItemState, SessionState
+from cryosoft.gui import form_autosave as session
+from cryosoft.gui.form_autosave import QueueItemState, SessionState
 
 
 # ── SessionState round-trip ───────────────────────────────────────────────────

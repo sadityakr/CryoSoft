@@ -576,3 +576,147 @@ def test_run_procedure_refused_when_magnet_in_persistent_mode(qtbot):
     orch.run_procedure(procedure)
     assert orch._procedure is procedure
     orch.abort_procedure()
+
+
+# ── Run manifests (run_started / run_finished) ───────────────────────────────
+
+def _fast_magnet(station):
+    """Make magnet_x ramps effectively instant for state-machine tests."""
+    station.magnet_x._default_ramp_rate = 6000.0
+    station.magnet_x._ramp_segments = []
+
+
+def test_run_manifests_full_cycle(orchestrator, station, qtbot):
+    """A completed run emits one run_started and one matching run_finished."""
+    _fast_magnet(station)
+    procedure = MockProcedure(station)
+    started, finished = [], []
+    orchestrator.run_started.connect(started.append)
+    orchestrator.run_finished.connect(finished.append)
+
+    orchestrator.run_procedure(procedure)
+    with qtbot.waitSignal(orchestrator.procedure_finished, timeout=5000):
+        pass
+
+    assert len(started) == 1 and len(finished) == 1
+    manifest = started[0]
+    assert manifest["procedure"] == "Mock Sweep"
+    assert manifest["kind"] == "run"
+    assert manifest["run_id"]
+    assert manifest["started_utc"]
+    # MockProcedure has no data file / params accessors — best-effort fields.
+    assert manifest["data_file"] == ""
+    assert manifest["params"] == {}
+    end = finished[0]
+    assert end["run_id"] == manifest["run_id"]
+    assert end["status"] == "done"
+    assert end["finished_utc"]
+
+
+def test_abort_emits_run_finished_aborted(orchestrator, station, qtbot):
+    """User abort ends the run with status 'aborted', exactly once."""
+    procedure = MockProcedure(station)  # slow default ramp keeps the run alive
+    finished = []
+    orchestrator.run_finished.connect(finished.append)
+
+    orchestrator.run_procedure(procedure)
+    with qtbot.waitSignal(orchestrator.state_changed, timeout=2000):
+        pass
+    orchestrator.abort_procedure()
+
+    assert len(finished) == 1
+    assert finished[0]["status"] == "aborted"
+    assert orchestrator._state == OrchestratorState.IDLE
+    # Recovering/ticking afterwards must not re-emit for the dead run.
+    orchestrator._tick()
+    assert len(finished) == 1
+
+
+def test_failed_setup_emits_no_manifests(orchestrator, station, qtbot):
+    """When initiate() itself raises, neither manifest is emitted."""
+
+    class BrokenProcedure(MockProcedure):
+        def initiate(self):
+            raise RuntimeError("boom")
+
+    started, finished = [], []
+    orchestrator.run_started.connect(started.append)
+    orchestrator.run_finished.connect(finished.append)
+    orchestrator.run_procedure(BrokenProcedure(station))
+
+    assert orchestrator._state == OrchestratorState.ERROR
+    assert started == [] and finished == []
+
+
+# ── Session envelope enforcement ─────────────────────────────────────────────
+
+def _envelope(**bounds):
+    from cryosoft.core.plan import SessionEnvelope
+
+    return SessionEnvelope(bounds=dict(bounds))
+
+
+def test_envelope_rejects_out_of_bounds_target(orchestrator, station, qtbot):
+    """A procedure target outside the envelope is rejected before dispatch."""
+    from cryosoft.core.plan import EnvelopeBound
+
+    orchestrator.set_session_envelope(
+        _envelope(magnet_x=EnvelopeBound(min_value=-0.5, max_value=0.5))
+    )
+    errors: list[str] = []
+    started: list[dict] = []
+    orchestrator.error_occurred.connect(errors.append)
+    orchestrator.run_started.connect(started.append)
+
+    orchestrator.run_procedure(MockProcedure(station))  # first target is 1.0 T
+
+    assert orchestrator._state == OrchestratorState.ERROR
+    assert started == [], "a rejected run must not report as started"
+    assert any("session envelope" in e and "magnet_x" in e for e in errors)
+    # The magnet was never asked to move.
+    assert station.magnet_x.get_field() == pytest.approx(0.0, abs=1e-6)
+
+
+def test_envelope_allows_within_bounds_and_clears(orchestrator, station, qtbot):
+    """Targets inside the envelope run normally; None clears the envelope."""
+    from cryosoft.core.plan import EnvelopeBound
+
+    _fast_magnet(station)
+    orchestrator.set_session_envelope(
+        _envelope(magnet_x=EnvelopeBound(min_value=-5.0, max_value=5.0))
+    )
+    orchestrator.run_procedure(MockProcedure(station))
+    with qtbot.waitSignal(orchestrator.procedure_finished, timeout=5000):
+        pass
+    assert orchestrator._state == OrchestratorState.IDLE
+
+    orchestrator.set_session_envelope(None)
+    assert orchestrator._session_envelope is None
+
+
+def test_envelope_state_violation_enters_emergency(orchestrator, station, qtbot):
+    """A live reading outside a state_key bound trips EMERGENCY like a safety flag."""
+    from cryosoft.core.plan import EnvelopeBound
+
+    # Sim sample thermometer sits at 300 K; a 400 K session minimum is an
+    # immediate violation on the next tick.
+    orchestrator.set_session_envelope(
+        _envelope(
+            temperature_sample=EnvelopeBound(min_value=400.0, state_key="temperature")
+        )
+    )
+    errors: list[str] = []
+    orchestrator.error_occurred.connect(errors.append)
+
+    orchestrator._tick()
+    assert orchestrator._state == OrchestratorState.EMERGENCY
+    assert any("session envelope" in e and "temperature_sample" in e for e in errors)
+
+    # Acknowledgement is refused while the violation persists...
+    orchestrator.acknowledge_emergency()
+    assert orchestrator._state == OrchestratorState.EMERGENCY
+
+    # ...and succeeds once the envelope is cleared (the "sample removed" case).
+    orchestrator.set_session_envelope(None)
+    orchestrator.acknowledge_emergency()
+    assert orchestrator._state == OrchestratorState.IDLE

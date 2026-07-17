@@ -39,7 +39,7 @@ from cryosoft.core.config_catalog import ConfigCatalog
 from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 from cryosoft.core.station import build_station
 from cryosoft.gui import app_settings as _app_settings
-from cryosoft.gui import session as session_store
+from cryosoft.gui import form_autosave as session_store
 from cryosoft.gui.instrument_panel import InstrumentPanel
 from cryosoft.gui.monitor_window import MonitorWindow
 from cryosoft.gui.notification_banner import NotificationBanner

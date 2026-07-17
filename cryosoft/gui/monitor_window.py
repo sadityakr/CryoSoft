@@ -72,7 +72,7 @@ from PyQt6.QtWidgets import (
 from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 from cryosoft.core.station import Station
 from cryosoft.gui import app_settings  # import the module (not the function) so tests can monkeypatch the factory
-from cryosoft.gui import session as session_store  # module import keeps save/load monkeypatchable
+from cryosoft.gui import form_autosave as session_store  # module import keeps save/load monkeypatchable
 from cryosoft.gui.instrument_panel import InstrumentPanel
 from cryosoft.gui.lifecycle_toggle import LifecycleToggleButton
 from cryosoft.gui.monitor_history import MonitorHistory

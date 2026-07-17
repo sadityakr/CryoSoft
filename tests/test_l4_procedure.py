@@ -506,3 +506,115 @@ def test_full_orchestrator_loop(station, tmp_path, qtbot):
     assert len(h5_files) == 1
     with h5py.File(h5_files[0], "r") as f:
         assert f["metadata"].attrs["procedure_name"] == "Field Sweep"
+
+
+# ── Public run surface: data_filepath / get_params / experiment_info ─────────
+
+def test_data_filepath_none_before_initiate(procedure):
+    """data_filepath is None until initiate() opens the data file."""
+    assert procedure.data_filepath is None
+
+
+def test_data_filepath_set_while_file_open_then_cleared(procedure, tmp_path):
+    """data_filepath points at the HDF5 file during the run, None after close."""
+    procedure.initiate()
+    path = procedure.data_filepath
+    assert path is not None
+    assert path.endswith(".h5")
+    assert str(tmp_path) in path
+    procedure.standby()
+    assert procedure.data_filepath is None
+
+
+def test_last_datapoint_empty_before_measure(procedure, tmp_path):
+    """last_datapoint is {} before anything is saved, populated after measure()."""
+    assert procedure.last_datapoint == {}
+    procedure.initiate()
+    assert procedure.last_datapoint == {}
+    procedure._station.keithley_delta_mode.initiate(current=1e-6, n_readings=5)
+    procedure.measure()
+    point = procedure.last_datapoint
+    assert point, "expected a datapoint after measure()"
+    # It is a copy: mutating it must not touch the stored datapoint.
+    point.clear()
+    assert procedure.last_datapoint
+    procedure.standby()
+
+
+def test_get_params_returns_merged_copy(procedure):
+    """get_params() has form values + resolved measurement selection, as a copy."""
+    params = procedure.get_params()
+    assert params["field_steps"] == 3
+    assert params["measurement_vi"] == "keithley_delta_mode"
+    params["field_steps"] = 999
+    assert procedure.get_params()["field_steps"] == 3
+
+
+def test_run_kind_defaults_to_run():
+    """The run-manifest kind of a normal procedure is 'run'."""
+    assert FieldSweep.run_kind == "run"
+
+
+def test_experiment_info_defaults_to_empty_in_hdf5(procedure, tmp_path):
+    """Without a session layer the HDF5 experiment_info attribute records {}."""
+    procedure.initiate()
+    filepath = procedure._data_manager.filepath
+    procedure.standby()
+    with h5py.File(filepath, "r") as f:
+        assert json.loads(f["metadata"].attrs["experiment_info"]) == {}
+
+
+def test_experiment_info_forwarded_to_hdf5(station, tmp_path):
+    """experiment_info passed at construction is stamped into the HDF5 file."""
+    info = {"experiment_id": "exp-1", "user_id": "jdoe"}
+    proc = FieldSweep(
+        station=station,
+        sample_info=SAMPLE_INFO,
+        data_directory=str(tmp_path),
+        experiment_info=info,
+        **FAST_PARAMS,
+    )
+    proc.initiate()
+    filepath = proc._data_manager.filepath
+    proc.standby()
+    with h5py.File(filepath, "r") as f:
+        assert json.loads(f["metadata"].attrs["experiment_info"]) == info
+
+
+def test_full_orchestrator_loop_emits_run_manifests(station, tmp_path, qtbot):
+    """A real run emits run_started/run_finished manifests with the file path."""
+    from cryosoft.core.orchestrator import Orchestrator
+
+    station.magnet_x._default_ramp_rate = 6000.0
+    station.magnet_x._ramp_segments = []
+
+    procedure = FieldSweep(
+        station=station,
+        sample_info=SAMPLE_INFO,
+        data_directory=str(tmp_path),
+        **FAST_PARAMS,
+    )
+    orch = Orchestrator(station, tick_interval_ms=10)
+    started: list[dict] = []
+    finished: list[dict] = []
+    orch.run_started.connect(started.append)
+    orch.run_finished.connect(finished.append)
+
+    orch.run_procedure(procedure)
+    with qtbot.waitSignal(orch.procedure_finished, timeout=10000):
+        pass
+
+    assert len(started) == 1 and len(finished) == 1
+    manifest = started[0]
+    assert manifest["procedure"] == "Field Sweep"
+    assert manifest["kind"] == "run"
+    assert manifest["params"]["field_steps"] == 3
+    assert manifest["data_file"].endswith(".h5")
+    assert list(tmp_path.glob("*.h5"))[0].samefile(manifest["data_file"])
+    end = finished[0]
+    assert end["run_id"] == manifest["run_id"]
+    assert end["status"] == "done"
+    assert end["reason"] == ""
+    # The file path survives into the finished manifest even though the
+    # procedure closed (and forgot) its DataManager in standby().
+    assert end["data_file"] == manifest["data_file"]

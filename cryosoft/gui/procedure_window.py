@@ -85,7 +85,7 @@ from cryosoft.gui import app_settings  # import the module (not the function) so
 from cryosoft.gui import param_form
 from cryosoft.gui.live_plot_panel import LivePlotPanel
 from cryosoft.gui.notification_banner import NotificationBanner
-from cryosoft.gui.session import (
+from cryosoft.gui.form_autosave import (
     STATUS_DONE,
     STATUS_FAILED,
     STATUS_PENDING,

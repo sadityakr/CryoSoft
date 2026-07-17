@@ -44,6 +44,8 @@ __all__ = [
     "ParamSpec",
     "ParamGroup",
     "DataSchema",
+    "EnvelopeBound",
+    "SessionEnvelope",
 ]
 
 # Scalar Python types accepted for GUI-facing parameters and their HDF5 dtypes.
@@ -726,3 +728,184 @@ class DataSchema:
             raise DataSchemaError(
                 "datapoint does not match schema: " + "; ".join(problems)
             )
+
+
+@dataclass(frozen=True)
+class EnvelopeBound:
+    """One session-envelope limit on a system VI's swept quantity.
+
+    Config ``init_params`` limits protect the *instrument* and never change at
+    runtime; an ``EnvelopeBound`` protects the *sample* mounted for one
+    experiment (e.g. "this device must never see more than 2 T even though the
+    magnet allows 9 T"). Bounds are expressed in the same SI unit as the VI's
+    ``Target.target`` (Tesla, Kelvin, …).
+
+    Attributes:
+        min_value: Lowest allowed value, or ``None`` for no lower bound.
+        max_value: Highest allowed value, or ``None`` for no upper bound.
+        state_key: Optional key into the VI's ``get_state()`` dict (e.g.
+            ``"field_T"``, ``"temperature_K"``) naming the live reading this
+            bound also applies to. When set, the Orchestrator checks the
+            reading every tick in addition to validating submitted targets;
+            when empty, only targets are checked.
+    """
+
+    min_value: float | None = None
+    max_value: float | None = None
+    state_key: str = ""
+
+    def __post_init__(self) -> None:
+        """Validate the fields.
+
+        Raises:
+            TypeError: If a bound is not a real number or ``state_key`` is not
+                a string.
+            ValueError: If both bounds are ``None``, a bound is non-finite, or
+                ``min_value`` exceeds ``max_value``.
+        """
+        for attr in ("min_value", "max_value"):
+            value = getattr(self, attr)
+            if value is None:
+                continue
+            if not _is_real_number(value):
+                raise TypeError(
+                    f"EnvelopeBound.{attr} must be a real number, got {value!r}"
+                )
+            if not math.isfinite(value):
+                raise ValueError(f"EnvelopeBound.{attr} must be finite, got {value!r}")
+            object.__setattr__(self, attr, float(value))
+        if self.min_value is None and self.max_value is None:
+            raise ValueError("EnvelopeBound needs at least one of min_value/max_value")
+        if (
+            self.min_value is not None
+            and self.max_value is not None
+            and self.min_value > self.max_value
+        ):
+            raise ValueError(
+                f"EnvelopeBound.min_value {self.min_value!r} exceeds "
+                f"max_value {self.max_value!r}"
+            )
+        if not isinstance(self.state_key, str):
+            raise TypeError(
+                f"EnvelopeBound.state_key must be a str, got {self.state_key!r}"
+            )
+
+    def violation(self, value: float) -> str | None:
+        """Return a human-readable violation message for ``value``, or ``None``.
+
+        Args:
+            value: The candidate value (a submitted target or a live reading),
+                in the VI's SI unit.
+
+        Returns:
+            A message naming the violated bound, or ``None`` when ``value`` is
+            within the bound (non-numeric values are ignored — a text or bool
+            state field can never trip a numeric envelope).
+        """
+        if not _is_real_number(value):
+            return None
+        if self.min_value is not None and value < self.min_value:
+            return f"{value:g} is below the session minimum {self.min_value:g}"
+        if self.max_value is not None and value > self.max_value:
+            return f"{value:g} is above the session maximum {self.max_value:g}"
+        return None
+
+
+@dataclass(frozen=True)
+class SessionEnvelope:
+    """Per-experiment safety bounds, narrower than the config limits.
+
+    The typed currency between the session layer (which owns the experiment
+    record the envelope belongs to) and the Orchestrator (which enforces it).
+    Enforcement lives in the Orchestrator so the envelope binds *every* writer
+    — a human slip in the GUI is caught by the same check as an agent call:
+
+    * every submitted ``Target`` for a bounded VI is validated before dispatch;
+    * every tick, each bound with a ``state_key`` is checked against the VI's
+      live reading, entering EMERGENCY on a violation exactly like a tripped
+      safety flag.
+
+    Attributes:
+        bounds: Mapping of system VI name to its ``EnvelopeBound``.
+            Defensively copied; must be non-empty (pass ``None`` to
+            ``Orchestrator.set_session_envelope()`` for "no envelope" rather
+            than an empty one).
+    """
+
+    bounds: Mapping[str, EnvelopeBound]
+
+    def __post_init__(self) -> None:
+        """Validate and defensively copy ``bounds``.
+
+        Raises:
+            TypeError: If ``bounds`` is not a mapping of str to
+                ``EnvelopeBound``.
+            ValueError: If ``bounds`` is empty or a VI name is empty.
+        """
+        if not isinstance(self.bounds, Mapping):
+            raise TypeError(
+                f"SessionEnvelope.bounds must be a mapping, got {self.bounds!r}"
+            )
+        if not self.bounds:
+            raise ValueError(
+                "SessionEnvelope.bounds must be non-empty (use None for no envelope)"
+            )
+        copied: dict[str, EnvelopeBound] = {}
+        for vi_name, bound in self.bounds.items():
+            if not isinstance(vi_name, str) or not vi_name:
+                raise ValueError(
+                    f"SessionEnvelope VI name must be a non-empty str, got {vi_name!r}"
+                )
+            if not isinstance(bound, EnvelopeBound):
+                raise TypeError(
+                    f"SessionEnvelope bound for {vi_name!r} must be an "
+                    f"EnvelopeBound, got {bound!r}"
+                )
+            copied[vi_name] = bound
+        object.__setattr__(self, "bounds", copied)
+
+    def check_target(self, vi_name: str, value: float) -> str | None:
+        """Validate one submitted target value against the envelope.
+
+        Args:
+            vi_name: The system VI the target is for.
+            value: The requested ``Target.target`` value (SI unit).
+
+        Returns:
+            A violation message naming the VI, or ``None`` when the VI is
+            unbounded or the value is within its bound.
+        """
+        bound = self.bounds.get(vi_name)
+        if bound is None:
+            return None
+        message = bound.violation(value)
+        if message is None:
+            return None
+        return f"session envelope: {vi_name} target {message}"
+
+    def check_state(self, state: Mapping[str, Mapping[str, Any]]) -> list[str]:
+        """Check every ``state_key``-carrying bound against a station snapshot.
+
+        Args:
+            state: A ``Station.get_state()`` snapshot
+                (``{vi_name: {field: value}}``).
+
+        Returns:
+            One violation message per tripped bound (empty when all live
+            readings are inside the envelope). A bound whose VI or state key
+            is absent from the snapshot is skipped — a missing reading is a
+            staleness problem, not an envelope violation.
+        """
+        violations: list[str] = []
+        for vi_name, bound in self.bounds.items():
+            if not bound.state_key:
+                continue
+            vi_state = state.get(vi_name)
+            if not isinstance(vi_state, Mapping) or bound.state_key not in vi_state:
+                continue
+            message = bound.violation(vi_state[bound.state_key])
+            if message is not None:
+                violations.append(
+                    f"session envelope: {vi_name} {bound.state_key} {message}"
+                )
+        return violations

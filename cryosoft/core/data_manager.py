@@ -10,9 +10,9 @@
 # input: |
 #   Constructor receives procedure name, an optional user filename prefix,
 #   parameter dicts (procedure_params, sample_info, instrument_state,
-#   system_targets, measurement_commands, data_config), target data
-#   directory, and n_sweep_points (int). data_config defines sweep_columns
-#   (1-D) and measurement_arrays (2-D).
+#   system_targets, measurement_commands, data_config, and the optional
+#   session-layer experiment_info), target data directory, and n_sweep_points
+#   (int). data_config defines sweep_columns (1-D) and measurement_arrays (2-D).
 # process: |
 #   Creates an HDF5 file at {data_directory}/{stem}_{YYYYMMDD_HHMMSS}.h5,
 #   where stem is file_prefix if given, else procedure_name; writes all
@@ -66,6 +66,7 @@ class DataManager:
         data_config: dict,
         n_sweep_points: int,
         file_prefix: str = "",
+        experiment_info: dict | None = None,
     ) -> None:
         """Create the HDF5 file and write all metadata.
 
@@ -104,6 +105,11 @@ class DataManager:
 
         n_sweep_points:
             Total number of sweep points expected (used for pre-allocation).
+        experiment_info:
+            Optional experiment-level context (JSON-serialisable dict) from the
+            session layer — experiment id/title, user identity, ELN link. Stored
+            as ``/metadata/experiment_info``; ``None`` is recorded as ``{}`` so
+            the attribute always exists.
         """
         if n_sweep_points < 1:
             raise ValueError(f"n_sweep_points must be >= 1, got {n_sweep_points}")
@@ -140,6 +146,7 @@ class DataManager:
             system_targets=system_targets,
             measurement_commands=measurement_commands,
             data_config=data_config,
+            experiment_info=experiment_info or {},
         )
 
         # Pre-allocate datasets
@@ -160,12 +167,14 @@ class DataManager:
         system_targets: dict,
         measurement_commands: dict | list,
         data_config: dict,
+        experiment_info: dict,
     ) -> None:
         """Write all metadata to `/metadata/` as JSON-encoded HDF5 attributes."""
         meta = self._file.require_group("metadata")
         meta.attrs["procedure_name"] = self._procedure_name
         meta.attrs["procedure_params"] = json.dumps(procedure_params)
         meta.attrs["sample_info"] = json.dumps(sample_info)
+        meta.attrs["experiment_info"] = json.dumps(experiment_info)
         meta.attrs["start_time"] = datetime.now(timezone.utc).isoformat()
         meta.attrs["end_time"] = ""  # filled in at close()
         meta.attrs["instrument_state"] = json.dumps(instrument_state)

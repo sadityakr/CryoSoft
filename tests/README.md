@@ -83,7 +83,7 @@ config also has automatic `test_conformance.py` coverage on top of these.
 | `cryosoft/gui/param_form.py`, `monitor_window.py`, `procedure_window.py`, `instrument_panel.py`, `notification_banner.py`, `theme.py`, `live_plot_panel.py`, `app_settings.py` | `tests/test_gui.py` |
 | `cryosoft/gui/sweep_axis_widget.py` | `tests/test_sweep_axis_widget.py` |
 | `cryosoft/gui/lifecycle_toggle.py` | `tests/test_lifecycle_toggle.py` |
-| `cryosoft/gui/session.py` | `tests/test_session.py` |
+| `cryosoft/gui/form_autosave.py` | `tests/test_form_autosave.py` |
 | `cryosoft/gui/monitor_history.py` | `tests/test_monitor_history.py` |
 | `cryosoft/gui/trend_plot_panel.py` | `tests/test_trend_plot_panel.py` |
 | `cryosoft/gui/config_editor.py` | `tests/test_config_editor.py` |
@@ -101,5 +101,5 @@ config also has automatic `test_conformance.py` coverage on top of these.
 - **L3 orchestrator:** `test_l3_orchestrator.py`.
 - **L4 procedures + planning:** `test_l4_procedure.py`, `test_new_procedures.py`, `test_field_voltage_procedure.py`, `test_plan.py`, `test_sweep_builder.py`.
 - **L5 data manager:** `test_l5_data_manager.py`.
-- **GUI (pytest-qt, offscreen):** `test_gui.py`, `test_sweep_axis_widget.py`, `test_lifecycle_toggle.py`, `test_session.py`, `test_monitor_history.py`, `test_trend_plot_panel.py`, `test_config_editor.py`.
+- **GUI (pytest-qt, offscreen):** `test_gui.py`, `test_sweep_axis_widget.py`, `test_lifecycle_toggle.py`, `test_form_autosave.py`, `test_monitor_history.py`, `test_trend_plot_panel.py`, `test_config_editor.py`.
 - **Troubleshooting / operational status:** `test_troubleshoot_cli.py`, `test_troubleshoot_engine.py`, `test_operational_status.py`, `test_status_reader.py`, `test_watchdog.py`.

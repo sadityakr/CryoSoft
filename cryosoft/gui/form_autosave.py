@@ -1,39 +1,46 @@
 # ---
 # description: |
-#   session: the persistent user-session model for the CryoSoft GUI. A
-#   SessionState holds the content a user would otherwise retype on every
-#   launch — sample metadata, data directory, the last-selected procedure and
-#   its parameters, and the run queue with per-item status. It serialises to a
-#   single JSON file so a closed session is restored on the next open.
-#   Deliberately Qt-free (stdlib only) so it unit-tests without a QApplication;
-#   the *location* of the file is resolved separately by
-#   app_settings.session_file_path().
+#   form_autosave: the GUI's form-autosave model (historically called the
+#   "session model" — renamed so "session" is free for the L6 Session
+#   Management layer, which manages experiments/runs/users; this module is
+#   purely form persistence). A SessionState holds the content a user would
+#   otherwise retype on every launch — sample metadata, data directory, the
+#   last-selected procedure and its parameters, and the run queue with
+#   per-item status. It serialises to a single JSON file so a closed app is
+#   restored on the next open. Deliberately Qt-free (stdlib only) so it
+#   unit-tests without a QApplication; the *location* of the file is resolved
+#   separately by app_settings.session_file_path().
 # entry_point: Not run directly. Constructed and (de)serialised by the GUI windows.
 # dependencies: []  # standard library only
 # input: |
 #   load(path) reads a JSON file previously written by save(). A missing or
 #   malformed file yields a default SessionState rather than raising, so a
-#   corrupt session can never block application startup.
+#   corrupt autosave can never block application startup.
 # process: |
 #   to_dict()/from_dict() convert between the dataclass tree and plain JSON
 #   types, tolerating missing keys (older files) and ignoring unknown ones.
 # output: |
-#   save(state, path) writes the JSON session file atomically. load(path)
+#   save(state, path) writes the JSON autosave file atomically. load(path)
 #   returns a SessionState.
 # ---
 
-"""session — persistent user-session model for the CryoSoft GUI.
+"""form_autosave — the CryoSoft GUI's form-autosave model.
 
 The GUI splits persistence into two tiers. Window geometry and dock layout
 (machine-specific "chrome") stay in ``QSettings`` (the Windows registry). The
-*content* of a session — what the physicist typed and queued — lives here, in a
-plain JSON file that is inspectable, portable, and archivable next to the run
-data.
+*content* the physicist typed and queued lives here, in a plain JSON file that
+is inspectable, portable, and archivable next to the run data.
+
+Naming note: this module was ``gui/session.py`` and its classes keep their
+historical names (``SessionState``, the ``last_session.json`` file), so
+existing autosave files keep loading unchanged. The word "session" now belongs
+to the L6 Session Management layer (``cryosoft.session``), which manages
+experiments, runs, and users — a different concept from this form autosave.
 
 ``SessionState`` is a ``@dataclass``: a class whose ``__init__`` and field
 storage are generated from the annotated attributes below, so we declare the
 shape once instead of hand-writing a constructor. ``load``/``save`` never raise
-on bad input — a broken session file degrades to defaults rather than bricking
+on bad input — a broken autosave file degrades to defaults rather than bricking
 startup.
 """
 

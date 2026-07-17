@@ -355,3 +355,37 @@ def test_save_datapoint_truncates_long_measurement_arrays(dm):
     stored = dm._file["data"]["voltage_V"][0, :]
     assert stored.shape == (10,)
     assert np.allclose(stored, np.arange(10, dtype=float))
+
+
+# ── experiment_info metadata (session layer) ─────────────────────────────────
+
+def test_experiment_info_defaults_to_empty(dm):
+    """Without experiment_info the attribute still exists, recording {}."""
+    dm.close()
+    with h5py.File(dm.filepath, "r") as f:
+        assert json.loads(f["metadata"].attrs["experiment_info"]) == {}
+
+
+def test_experiment_info_written(tmp_path):
+    """A supplied experiment_info dict round-trips via /metadata/experiment_info."""
+    info = {
+        "experiment_id": "20260717_hallbar_a3",
+        "experiment_title": "SOT switching vs T",
+        "user_id": "jdoe",
+        "user_name": "J. Doe",
+    }
+    dm = DataManager(
+        data_directory=str(tmp_path),
+        procedure_name="Test_Sweep",
+        procedure_params=PROCEDURE_PARAMS,
+        sample_info=SAMPLE_INFO,
+        instrument_state={},
+        system_targets={},
+        measurement_commands=[],
+        data_config=DATA_CONFIG,
+        n_sweep_points=5,
+        experiment_info=info,
+    )
+    dm.close()
+    with h5py.File(dm.filepath, "r") as f:
+        assert json.loads(f["metadata"].attrs["experiment_info"]) == info
