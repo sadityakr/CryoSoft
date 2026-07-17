@@ -56,10 +56,18 @@ def station():
 
 @pytest.fixture
 def orchestrator(station, qtbot):
-    """Build Orchestrator with a small tick interval."""
+    """Build Orchestrator with a small tick interval, monitoring active.
+
+    Monitoring is OFF at construction (the production default: nothing is
+    polled until the instruments are initiated), so tests of the monitored
+    behavior start it explicitly here. The teardown stops the tick timer so
+    no tick can ever fire into a test's torn-down objects.
+    """
     # We create a QCoreApplication instance but qtbot handles the event loop
     orch = Orchestrator(station, tick_interval_ms=10)
-    return orch
+    orch.start_monitoring()
+    yield orch
+    orch.shutdown()
 
 
 def test_basic_ticking(orchestrator, qtbot):
@@ -576,3 +584,115 @@ def test_run_procedure_refused_when_magnet_in_persistent_mode(qtbot):
     orch.run_procedure(procedure)
     assert orch._procedure is procedure
     orch.abort_procedure()
+    orch.shutdown()
+
+
+# ── Monitoring lifecycle (start/stop/shutdown) ────────────────────────────────
+# Monitoring is OFF at construction: the tick timer runs (it processes GUI
+# actions and the state machine), but no instrument is polled until
+# start_monitoring(). This is what keeps a freshly launched app quiet while
+# the instruments are still being initiated.
+
+
+def _spy_get_state(station, monkeypatch):
+    """Wrap station.get_state with a call counter; returns the counter list."""
+    calls: list[int] = []
+    real_get_state = station.get_state
+
+    def counted():
+        calls.append(1)
+        return real_get_state()
+
+    monkeypatch.setattr(station, "get_state", counted)
+    return calls
+
+
+def test_monitoring_off_by_default_polls_nothing(station, qtbot, monkeypatch):
+    """A fresh Orchestrator neither polls the station nor emits states_updated."""
+    orch = Orchestrator(station, tick_interval_ms=10)
+    calls = _spy_get_state(station, monkeypatch)
+    emitted: list[dict] = []
+    orch.states_updated.connect(emitted.append)
+
+    assert orch.is_monitoring() is False
+    for _ in range(3):
+        orch._tick()
+    assert calls == []
+    assert emitted == []
+    assert orch.get_operational_status() == {}
+    orch.shutdown()
+
+
+def test_start_monitoring_begins_polling_and_signals(station, qtbot, monkeypatch):
+    """start_monitoring() emits monitoring_changed(True) and enables polling."""
+    orch = Orchestrator(station, tick_interval_ms=10)
+    calls = _spy_get_state(station, monkeypatch)
+    changes: list[bool] = []
+    orch.monitoring_changed.connect(changes.append)
+
+    assert orch.start_monitoring() is True
+    assert orch.is_monitoring() is True
+    orch._tick()
+    assert calls, "monitored tick must poll the station"
+
+    # Idempotent: a second start emits no second signal.
+    assert orch.start_monitoring() is True
+    assert changes == [True]
+    orch.shutdown()
+
+
+def test_gui_actions_execute_while_monitoring_off(station, qtbot, monkeypatch):
+    """The initiate-before-monitoring flow: actions run on the tick with no polling."""
+    orch = Orchestrator(station, tick_interval_ms=10)
+    calls = _spy_get_state(station, monkeypatch)
+    verdicts: list[tuple[str, str]] = []
+    orch.action_succeeded.connect(lambda vi, m: verdicts.append((vi, m)))
+
+    orch.submit_vi_action("magnet_x", "initiate")
+    orch._tick()
+
+    assert ("magnet_x", "initiate") in verdicts
+    assert calls == []  # still no instrument polling
+    orch.shutdown()
+
+
+def test_run_procedure_auto_starts_monitoring(station, qtbot):
+    """A procedure must run under the safety watchdog: monitoring auto-starts."""
+    orch = Orchestrator(station, tick_interval_ms=10)
+    assert orch.is_monitoring() is False
+    orch.run_procedure(MockProcedure(station))
+    assert orch.is_monitoring() is True
+    orch.abort_procedure()
+    orch.shutdown()
+
+
+def test_stop_monitoring_refused_while_procedure_active(station, qtbot):
+    """stop_monitoring() is blocked outside IDLE/ERROR and allowed back in IDLE."""
+    orch = Orchestrator(station, tick_interval_ms=10)
+    blocked: list[str] = []
+    orch.action_blocked.connect(blocked.append)
+
+    orch.run_procedure(MockProcedure(station))
+    assert orch._state == OrchestratorState.INITIATING
+
+    assert orch.stop_monitoring() is False
+    assert orch.is_monitoring() is True
+    assert blocked and "monitoring" in blocked[0].lower()
+
+    orch.abort_procedure()  # back to IDLE
+    assert orch.stop_monitoring() is True
+    assert orch.is_monitoring() is False
+    orch.shutdown()
+
+
+def test_shutdown_stops_ticking(station, qtbot):
+    """After shutdown() no tick fires: states_updated stays silent."""
+    orch = Orchestrator(station, tick_interval_ms=10)
+    orch.start_monitoring()
+    with qtbot.waitSignal(orch.states_updated, timeout=500):
+        pass  # ticking while monitoring: baseline
+
+    orch.shutdown()
+    with qtbot.waitSignal(orch.states_updated, timeout=100, raising=False) as blocker:
+        pass
+    assert not blocker.signal_triggered

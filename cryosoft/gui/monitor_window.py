@@ -331,6 +331,19 @@ class MonitorWindow(QMainWindow):
 
         row.addStretch()
 
+        # Monitoring toggle: the Orchestrator polls no instrument until
+        # monitoring is started (typically after "Initiate All" has brought
+        # the instruments up), and can be stopped again in IDLE to debug an
+        # instrument by hand. Checked state mirrors the Orchestrator via
+        # monitoring_changed — never set optimistically from the click alone.
+        self._monitoring_btn = QPushButton()
+        self._monitoring_btn.setObjectName("monitoring_btn")
+        self._monitoring_btn.setProperty("class", BTN_CLASS_SECONDARY)
+        self._monitoring_btn.setCheckable(True)
+        self._monitoring_btn.clicked.connect(self._on_monitoring_clicked)
+        self._sync_monitoring_btn()
+        row.addWidget(self._monitoring_btn)
+
         initiate_all_btn = QPushButton("Initiate All")
         initiate_all_btn.setObjectName("initiate_all_btn")
         initiate_all_btn.setProperty("class", BTN_CLASS_PRIMARY)
@@ -352,6 +365,40 @@ class MonitorWindow(QMainWindow):
         row.addWidget(initiate_all_btn)
         row.addWidget(standby_all_btn)
         return row
+
+    def _on_monitoring_clicked(self, checked: bool) -> None:
+        """Start or stop monitoring from the header toggle.
+
+        The Orchestrator may refuse a stop (outside IDLE/ERROR the safety
+        watchdog must keep running; the refusal reason arrives on
+        ``action_blocked`` and shows in the banner), so the button is re-synced
+        from the confirmed state rather than left at the clicked position.
+
+        Args:
+            checked: The button's new checked state after the click.
+        """
+        if checked:
+            self._orchestrator.start_monitoring()
+        else:
+            self._orchestrator.stop_monitoring()
+        self._sync_monitoring_btn()
+
+    def _sync_monitoring_btn(self) -> None:
+        """Mirror the Orchestrator's confirmed monitoring state onto the toggle."""
+        monitoring = self._orchestrator.is_monitoring()
+        btn = self._monitoring_btn
+        btn.setChecked(monitoring)
+        btn.setText("Stop Monitoring" if monitoring else "Start Monitoring")
+        btn.setIcon(
+            qta.icon("fa5s.eye-slash" if monitoring else "fa5s.eye", color=TEXT_PRIMARY)
+        )
+        btn.setToolTip(
+            "Stop polling instrument state (allowed only while idle — e.g. to "
+            "debug an instrument by hand)"
+            if monitoring
+            else "Start polling instrument state each tick (do this once the "
+            "instruments have been initiated)"
+        )
 
     def _build_instruments_quadrant(self) -> QWidget:
         """Build the top-left quadrant: a scrollable 2-column instrument grid.
@@ -524,6 +571,9 @@ class MonitorWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _connect_signals(self) -> None:
+        self._orchestrator.monitoring_changed.connect(
+            lambda _on: self._sync_monitoring_btn()
+        )
         self._orchestrator.state_changed.connect(self._on_state_changed)
         self._orchestrator.error_occurred.connect(self._on_error)
         self._orchestrator.action_blocked.connect(self._on_action_blocked)

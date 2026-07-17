@@ -128,7 +128,10 @@ def main() -> None:
     )
     monitor.show()
 
-    # The Orchestrator timer starts automatically in __init__.
+    # The Orchestrator's tick timer starts in __init__, but monitoring starts
+    # OFF: no instrument is polled (and no communication errors can fire)
+    # until the user starts monitoring from the Monitor window's header
+    # toggle, normally after "Initiate All" has brought the instruments up.
     sys.exit(app.exec())
 
 

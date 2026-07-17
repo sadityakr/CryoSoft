@@ -98,8 +98,17 @@ def station():
 
 @pytest.fixture
 def orchestrator(station, qtbot):
-    """Orchestrator with a short tick for fast tests."""
-    return Orchestrator(station, tick_interval_ms=50)
+    """Orchestrator with a short tick for fast tests.
+
+    Monitoring stays OFF (the production launch state): GUI tests drive
+    updates by emitting Orchestrator signals directly, so they need no real
+    polling ticks. The teardown stops the tick timer entirely, so a tick can
+    never fire into the half-destroyed widget tree while qtbot tears the
+    windows down (the historical source of rare RuntimeError/segfault flakes).
+    """
+    orch = Orchestrator(station, tick_interval_ms=50)
+    yield orch
+    orch.shutdown()
 
 
 @pytest.fixture
@@ -1629,3 +1638,48 @@ def test_offscreen_saved_geometry_recenters(station, orchestrator, qtbot):
     win2 = MonitorWindow(station, orchestrator)
     qtbot.addWidget(win2)
     assert window_geometry.geometry_on_screen(win2)
+
+
+# ── Monitoring toggle (Orchestrator start/stop monitoring from the header) ────
+
+
+def test_monitoring_button_starts_and_stops_monitoring(monitor_win, orchestrator):
+    """The header toggle starts monitoring, then stops it again in IDLE."""
+    btn = monitor_win.findChild(QPushButton, "monitoring_btn")
+    assert btn is not None
+    # Launch state: monitoring off, button offers to start it.
+    assert orchestrator.is_monitoring() is False
+    assert not btn.isChecked()
+    assert btn.text() == "Start Monitoring"
+
+    btn.click()
+    assert orchestrator.is_monitoring() is True
+    assert btn.isChecked()
+    assert btn.text() == "Stop Monitoring"
+
+    btn.click()  # IDLE, so the stop is allowed
+    assert orchestrator.is_monitoring() is False
+    assert btn.text() == "Start Monitoring"
+
+
+def test_monitoring_button_mirrors_orchestrator_state(monitor_win, orchestrator):
+    """Starting monitoring on the Orchestrator directly updates the toggle."""
+    btn = monitor_win.findChild(QPushButton, "monitoring_btn")
+    orchestrator.start_monitoring()
+    assert btn.isChecked()
+    assert btn.text() == "Stop Monitoring"
+
+
+def test_monitoring_button_snaps_back_when_stop_refused(monitor_win, orchestrator):
+    """A refused stop (non-IDLE state) re-syncs the button and warns via banner."""
+    btn = monitor_win.findChild(QPushButton, "monitoring_btn")
+    orchestrator.start_monitoring()
+    # Force a non-IDLE state so stop_monitoring() is refused.
+    orchestrator._state = OrchestratorState.RAMPING
+
+    btn.click()  # attempt to stop
+
+    assert orchestrator.is_monitoring() is True
+    assert btn.isChecked(), "button must snap back to the confirmed state"
+    assert monitor_win._banner.isVisible()
+    orchestrator._state = OrchestratorState.IDLE

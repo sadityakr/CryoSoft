@@ -9,13 +9,20 @@
 #   - enum.Enum
 #   - cryosoft.core.station.Station
 # input: |
-#   Constructed with a Station instance and tick interval.
+#   Constructed with a Station instance and tick interval. Monitoring starts
+#   OFF: the tick timer runs from construction (it processes GUI actions and
+#   the state machine), but no instrument is polled until start_monitoring()
+#   — so a freshly launched app does not fire errors while instruments are
+#   still being initiated. run_procedure() auto-starts monitoring (the
+#   safety watchdog is mandatory during a run); stop_monitoring() is refused
+#   outside IDLE/ERROR; shutdown() stops the tick timer for good.
 # process: |
 #   On _tick() (inside an exception boundary that degrades to ERROR instead
-#   of crashing the app): gets state from station, evaluates safety flags on
-#   that same snapshot (any tripped flag -> one-shot EMERGENCY entry: abort
-#   procedure, stop ramps, standby_all once), checks for stale active system
-#   VIs, processes IDLE gui actions, and runs the state machine. STANDBY is a
+#   of crashing the app): while monitoring is active, gets state from
+#   station, evaluates safety flags on that same snapshot (any tripped flag
+#   -> one-shot EMERGENCY entry: abort procedure, stop ramps, standby_all
+#   once) and checks for stale active system VIs; then (monitoring or not)
+#   processes IDLE gui actions and runs the state machine. STANDBY is a
 #   two-phase wait: first for any ramp already in flight when SWEEPING ended,
 #   then (after dispatching procedure.standby()'s own targets) for whatever
 #   ramp standby() itself started, before declaring the procedure finished.
@@ -83,7 +90,10 @@ class Orchestrator(QObject):
     """State machine driving measurements and monitoring safety.
 
     Signals:
-        states_updated (dict): Full station state emitted every tick.
+        states_updated (dict): Full station state emitted every monitored tick.
+        monitoring_changed (bool): Emitted when monitoring starts (True) or
+            stops (False) — the source of truth for GUI state like the
+            Monitor window's monitoring toggle.
         state_changed (str): Emitted when orchestrator state changes.
         procedure_progress (float): 0.0 to 1.0 progress of current procedure.
         procedure_finished (): Emitted when a procedure ends cleanly.
@@ -111,6 +121,7 @@ class Orchestrator(QObject):
     """
 
     states_updated = pyqtSignal(dict)
+    monitoring_changed = pyqtSignal(bool)
     state_changed = pyqtSignal(str)
     procedure_progress = pyqtSignal(float)
     procedure_finished = pyqtSignal()
@@ -150,10 +161,83 @@ class Orchestrator(QObject):
         # because pause_procedure() holds the hardware (which forgets its ramp).
         self._last_system_targets: dict[str, Target] = {}
 
+        # Monitoring starts OFF: instruments are not polled until
+        # start_monitoring() is called (typically from the Monitor window,
+        # after the instruments have been initiated), so a fresh launch does
+        # not immediately fire communication errors at not-yet-ready hardware.
+        # The tick timer itself always runs — it is what processes GUI actions
+        # (including "Initiate All") and drives the state machine.
+        self._monitoring = False
+
         self._timer = QTimer(self)
         self._timer.setInterval(tick_interval_ms)
         self._timer.timeout.connect(self._tick)
         self._timer.start()
+
+    # ------------------------------------------------------------------
+    # Public API — monitoring lifecycle
+    # ------------------------------------------------------------------
+
+    def is_monitoring(self) -> bool:
+        """Return True while the per-tick monitoring cycle is active."""
+        return self._monitoring
+
+    def start_monitoring(self) -> bool:
+        """Begin the per-tick monitoring cycle (state polling + safety watchdog).
+
+        Idempotent. Until this is called, ticks process GUI actions and the
+        state machine but touch no instrument — call it once the instruments
+        have been initiated and are ready to be polled.
+
+        Returns:
+            True (monitoring is active when this returns).
+        """
+        if self._monitoring:
+            return True
+        self._monitoring = True
+        logger.info("Monitoring started")
+        self._emit_status("Monitoring started")
+        self.monitoring_changed.emit(True)
+        return True
+
+    def stop_monitoring(self) -> bool:
+        """Stop the per-tick monitoring cycle (e.g. to debug an instrument).
+
+        Refused (with an ``action_blocked`` signal) outside IDLE/ERROR: while
+        a procedure runs or hardware ramps, the safety watchdog and stale
+        detection that live in the monitoring cycle must keep running.
+        Idempotent when already stopped.
+
+        Returns:
+            True if monitoring is stopped when this returns, False if the
+            request was refused.
+        """
+        if not self._monitoring:
+            return True
+        if self._state not in (OrchestratorState.IDLE, OrchestratorState.ERROR):
+            msg = (
+                f"Cannot stop monitoring in state {self._state.name}: "
+                "the safety watchdog must keep running while hardware is active."
+            )
+            logger.info("Blocked stop_monitoring: %s", msg)
+            self.action_blocked.emit(msg)
+            return False
+        self._monitoring = False
+        logger.info("Monitoring stopped")
+        self._emit_status("Monitoring stopped")
+        self.monitoring_changed.emit(False)
+        return True
+
+    def shutdown(self) -> None:
+        """Stop the tick timer permanently (application exit / test teardown).
+
+        After this no tick ever fires again: no polling, no action
+        processing, no state-machine advancement. Used by tests to guarantee
+        a tick can never land while the GUI widget tree is being destroyed.
+        Idempotent.
+        """
+        self._timer.stop()
+        logger.info("Orchestrator shut down — tick timer stopped")
 
     # ------------------------------------------------------------------
     # Public API
@@ -191,6 +275,13 @@ class Orchestrator(QObject):
         if manual_ramping:
             self._station.stop_ramps()
             logger.info("Manual ramp cancelled — procedure starting.")
+
+        # A run without the per-tick safety watchdog and stale detection would
+        # be blind to a quench or a dead controller, so monitoring is mandatory
+        # while a procedure executes.
+        if not self._monitoring:
+            logger.info("run_procedure: monitoring was off — starting it (required during a run)")
+            self.start_monitoring()
 
         self._procedure = procedure
         self._standby_dispatched = False
@@ -553,43 +644,50 @@ class Orchestrator(QObject):
             self._fail_to_error(f"Internal error: {exc}")
 
     def _tick_body(self) -> None:
-        # 1. Always monitor
-        state = self._station.get_state()
-        self.states_updated.emit(state)
+        # 1.+2. Monitor cycle — only while monitoring is active (see
+        # start_monitoring()). While it is off, no instrument is polled at
+        # all: a freshly launched app stays quiet until the instruments have
+        # been initiated. run_procedure() auto-starts monitoring and
+        # stop_monitoring() is refused outside IDLE/ERROR, so the safety
+        # watchdog and stale detection below are guaranteed to run whenever
+        # a procedure is active.
+        if self._monitoring:
+            state = self._station.get_state()
+            self.states_updated.emit(state)
 
-        # One-line summary per tick (full per-method detail stays in the file log)
-        parts = []
-        for vi_name, vi_state in state.items():
-            readable = {k: v for k, v in vi_state.items() if not k.startswith("_")}
-            if readable:
-                kv = ", ".join(
-                    f"{k}={v:.4g}" if isinstance(v, float) else f"{k}={v}"
-                    for k, v in readable.items()
-                )
-                parts.append(f"{vi_name}: {kv}")
-        logger.debug("Monitor: %s", " | ".join(parts))
-
-        # Operational-status record (runtime troubleshooting signal): assembled
-        # from this tick's snapshot, emitted, and appended to logs/status.jsonl.
-        self._update_operational_status(state)
-
-        # Safety check — reuses this tick's snapshot (no second hardware poll).
-        safety = self._station.check_safety(state)
-        active_flags = sorted(flag for flag, tripped in safety.items() if tripped)
-        if active_flags and self._state != OrchestratorState.EMERGENCY:
-            self._enter_emergency(", ".join(active_flags))
-            return  # emergency entry already cleaned up; nothing else this tick
-
-        # 2. Stale check during procedure
-        if self._state not in (OrchestratorState.IDLE, OrchestratorState.PAUSED,
-                               OrchestratorState.ERROR, OrchestratorState.EMERGENCY):
-            for vi_name in self._active_system_vis:
-                vi_state = state.get(vi_name, {})
-                if vi_state.get("_stale"):
-                    self._fail_to_error(
-                        f"Active VI '{vi_name}' became stale during procedure."
+            # One-line summary per tick (full per-method detail stays in the file log)
+            parts = []
+            for vi_name, vi_state in state.items():
+                readable = {k: v for k, v in vi_state.items() if not k.startswith("_")}
+                if readable:
+                    kv = ", ".join(
+                        f"{k}={v:.4g}" if isinstance(v, float) else f"{k}={v}"
+                        for k, v in readable.items()
                     )
-                    break
+                    parts.append(f"{vi_name}: {kv}")
+            logger.debug("Monitor: %s", " | ".join(parts))
+
+            # Operational-status record (runtime troubleshooting signal): assembled
+            # from this tick's snapshot, emitted, and appended to logs/status.jsonl.
+            self._update_operational_status(state)
+
+            # Safety check — reuses this tick's snapshot (no second hardware poll).
+            safety = self._station.check_safety(state)
+            active_flags = sorted(flag for flag, tripped in safety.items() if tripped)
+            if active_flags and self._state != OrchestratorState.EMERGENCY:
+                self._enter_emergency(", ".join(active_flags))
+                return  # emergency entry already cleaned up; nothing else this tick
+
+            # Stale check during procedure
+            if self._state not in (OrchestratorState.IDLE, OrchestratorState.PAUSED,
+                                   OrchestratorState.ERROR, OrchestratorState.EMERGENCY):
+                for vi_name in self._active_system_vis:
+                    vi_state = state.get(vi_name, {})
+                    if vi_state.get("_stale"):
+                        self._fail_to_error(
+                            f"Active VI '{vi_name}' became stale during procedure."
+                        )
+                        break
 
         # 3. GUI Actions — processed in IDLE or during a manual ramp (no active procedure).
         _manual_ramping = (

@@ -75,7 +75,7 @@ def main() -> None:
 
     import pyqtgraph as pg
     from PyQt6.QtTest import QTest
-    from PyQt6.QtWidgets import QApplication
+    from PyQt6.QtWidgets import QApplication, QPushButton
 
     from cryosoft.core.orchestrator import Orchestrator
     from cryosoft.core.station import build_station
@@ -98,6 +98,10 @@ def main() -> None:
         monitor.resize(1280, 940)
     monitor.show()
     app.processEvents()
+
+    # Monitoring is OFF at launch (nothing is polled until the instruments
+    # are initiated); start it through the real GUI path — the header toggle.
+    monitor.findChild(QPushButton, "monitoring_btn").click()
 
     # Let the orchestrator's real tick loop run for at least two ticks so
     # instrument values and trend curves show real simulated data, not "—".
