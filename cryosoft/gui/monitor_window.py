@@ -125,6 +125,8 @@ _TRENDS_KEY = "MonitorWindow/trends"
 _ACTIVE_STATES = frozenset({
     OrchestratorState.INITIATING.value,
     OrchestratorState.RAMPING.value,
+    OrchestratorState.INITIATION_GATE.value,
+    OrchestratorState.READING_GATE.value,
     OrchestratorState.MEASURING.value,
     OrchestratorState.SWEEPING.value,
     OrchestratorState.PAUSED.value,

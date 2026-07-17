@@ -71,6 +71,8 @@ class OrchestratorState(Enum):
     IDLE = "IDLE"
     INITIATING = "INITIATING"
     RAMPING = "RAMPING"
+    INITIATION_GATE = "INITIATION_GATE"
+    READING_GATE = "READING_GATE"
     MEASURING = "MEASURING"
     SWEEPING = "SWEEPING"
     STANDBY = "STANDBY"
@@ -136,6 +138,20 @@ class Orchestrator(QObject):
         self._current_wait_time = 0.0
         self._standby_dispatched = False
 
+        # Gate framework: procedure-declared waits that replace wait_s for the
+        # RAMPING->MEASURING transition when the procedure declares any.
+        # _first_measurement distinguishes the run's very first transition
+        # (initiation_gates()) from every subsequent one (reading_gates()).
+        self._pending_gates: list = []
+        self._first_measurement = True
+
+        # Scanner (switch VI) availability: an on/off flag procedures check
+        # via Station.scanner_enabled() rather than assuming the first switch
+        # VI a station exposes is theirs to use. Resolved once at construction
+        # (the Station is fully built before the Orchestrator is).
+        switch_names = station.switch_vi_names()
+        self._scanner_vi_name: str | None = switch_names[0] if switch_names else None
+
         # Operational-status reporting (runtime troubleshooting signal).
         self._state_entered_at = time.time()
         self._prev_gaps: dict[str, float] = {}
@@ -195,6 +211,8 @@ class Orchestrator(QObject):
         self._procedure = procedure
         self._standby_dispatched = False
         self._wait_started = False
+        self._first_measurement = True
+        self._pending_gates = []
         try:
             plan = self._procedure.initiate()
             # The frozen-dataclass repr is the permanent record of exactly what
@@ -213,6 +231,23 @@ class Orchestrator(QObject):
         except Exception as exc:
             logger.exception("run_procedure() failed during setup")
             self._fail_to_error(f"Could not start procedure: {exc}")
+
+    def _current_gates(self) -> tuple:
+        """Return the gates for the current RAMPING->MEASURING transition.
+
+        ``initiation_gates()`` for the run's first transition,
+        ``reading_gates()`` for every one after. Looked up defensively
+        (``getattr`` with an empty-tuple default) so a duck-typed procedure
+        test double without these methods behaves exactly like the no-op
+        ``BaseProcedure`` default.
+        """
+        if self._procedure is None:
+            return ()
+        method_name = "initiation_gates" if self._first_measurement else "reading_gates"
+        method = getattr(self._procedure, method_name, None)
+        if method is None:
+            return ()
+        return tuple(method())
 
     def _dispatch_targets(self, targets: dict[str, Target]) -> None:
         """Forward targets to the Station, remembering them for resume."""
@@ -240,6 +275,7 @@ class Orchestrator(QObject):
         if self._procedure is None:
             return
         if self._state in (OrchestratorState.INITIATING, OrchestratorState.RAMPING,
+                           OrchestratorState.INITIATION_GATE, OrchestratorState.READING_GATE,
                            OrchestratorState.MEASURING, OrchestratorState.SWEEPING,
                            OrchestratorState.STANDBY):
             self._pre_pause_state = self._state
@@ -362,6 +398,24 @@ class Orchestrator(QObject):
                 {"vi_name": vi_name, "method_name": method, "kwargs": {}}
             )
 
+    def set_scanner_enabled(self, enabled: bool) -> None:
+        """Toggle scanner availability for scanner-sensitive procedures.
+
+        A no-op (logged at INFO) when the station has no switch VI, so
+        stations without a scanner can call this unconditionally.
+
+        Args:
+            enabled: True to make the scanner available to procedures.
+        """
+        if self._scanner_vi_name is None:
+            logger.info("set_scanner_enabled ignored: no switch VI in station")
+            return
+        self._station.set_scanner_enabled(bool(enabled))
+
+    def scanner_enabled(self) -> bool:
+        """Return whether scanner-sensitive procedures may use the switch VI."""
+        return self._station.scanner_enabled()
+
     # ------------------------------------------------------------------
     # Private / internal
     # ------------------------------------------------------------------
@@ -409,6 +463,7 @@ class Orchestrator(QObject):
                 wait_target_s=wait_target,
                 wait_elapsed_s=wait_elapsed,
                 progress=progress,
+                active_gates=[g.name for g in self._pending_gates],
             )
             record, self._watchdog_state = apply_watchdog(
                 record, self._watchdog_state, self._watchdog_config
@@ -628,17 +683,34 @@ class Orchestrator(QObject):
                     # Manual ramp from GUI — return to IDLE.
                     self._change_state(OrchestratorState.IDLE)
                 else:
-                    if not self._wait_started:
-                        self._wait_started = True
-                        self._wait_start_time = time.time()
-                        if self._current_wait_time > 0:
-                            self._emit_status(
-                                f"Waiting {self._current_wait_time:g} s at setpoint"
-                            )
+                    gates = self._current_gates()
+                    if gates:
+                        # Gates replace wait_s entirely for this transition.
+                        self._pending_gates = list(gates)
+                        gate_state = (
+                            OrchestratorState.INITIATION_GATE
+                            if self._first_measurement
+                            else OrchestratorState.READING_GATE
+                        )
+                        self._change_state(gate_state)
+                    else:
+                        if not self._wait_started:
+                            self._wait_started = True
+                            self._wait_start_time = time.time()
+                            if self._current_wait_time > 0:
+                                self._emit_status(
+                                    f"Waiting {self._current_wait_time:g} s at setpoint"
+                                )
 
-                    if time.time() - self._wait_start_time >= self._current_wait_time:
-                        self._wait_started = False
-                        self._change_state(OrchestratorState.MEASURING)
+                        if time.time() - self._wait_start_time >= self._current_wait_time:
+                            self._wait_started = False
+                            self._first_measurement = False
+                            self._change_state(OrchestratorState.MEASURING)
+        elif self._state in (OrchestratorState.INITIATION_GATE, OrchestratorState.READING_GATE):
+            self._pending_gates = [g for g in self._pending_gates if not g.step()]
+            if not self._pending_gates:
+                self._first_measurement = False
+                self._change_state(OrchestratorState.MEASURING)
         elif self._state == OrchestratorState.MEASURING:
             if self._procedure:
                 self._emit_status(self._measure_status_line())
@@ -727,6 +799,8 @@ class Orchestrator(QObject):
         self._active_system_vis.clear()
         self._standby_dispatched = False
         self._wait_started = False
+        self._first_measurement = True
+        self._pending_gates = []
         self._last_system_targets = {}
 
     def _fail_to_error(self, message: str) -> None:

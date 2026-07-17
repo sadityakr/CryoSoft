@@ -489,7 +489,7 @@ def test_generic_field_sweep_renders_measurement_select_and_default_group(proced
     assert "measurement:keithley_delta_mode" not in procedure_win._group_boxes
 
 
-def test_generic_field_sweep_all_four_columns_visible_no_hscroll(procedure_win):
+def test_generic_field_sweep_all_four_columns_visible_no_hscroll(procedure_win, station):
     """At 1280 px, Sweep/System/Measurement/mux all fit with no horizontal scroll.
 
     This is the geometry regression for the reported bug: the measurement params
@@ -498,7 +498,12 @@ def test_generic_field_sweep_all_four_columns_visible_no_hscroll(procedure_win):
     """
     from cryosoft.procedures.field_sweep import FieldSweep
 
-    _select_procedure(procedure_win, FieldSweep.name)
+    # scanner_enabled must be set before the form is (re)built for the mux
+    # group to render; _select_procedure_by_name forces a rebuild even when
+    # FieldSweep is already the current selection (unlike setCurrentIndex()
+    # to an unchanged index, which fires no signal).
+    station.set_scanner_enabled(True)
+    procedure_win._select_procedure_by_name(FieldSweep.name)
     _settle_at_width(procedure_win, 1280, 800)
 
     # No horizontal scrollbar is needed for the parameter form.
@@ -585,11 +590,12 @@ def test_generic_field_sweep_typed_values_survive_selection_round_trip(procedure
     assert restored.text() == "37"
 
 
-def test_generic_field_sweep_renders_mux_checkboxes(procedure_win):
+def test_generic_field_sweep_renders_mux_checkboxes(procedure_win, station):
     """The mux group renders one checkbox per switch route for the sim station."""
     from cryosoft.procedures.field_sweep import FieldSweep
 
-    _select_procedure(procedure_win, FieldSweep.name)
+    station.set_scanner_enabled(True)
+    procedure_win._select_procedure_by_name(FieldSweep.name)
 
     assert "mux" in procedure_win._group_boxes
     for route in ("Mux-Ch1", "Mux-Ch2", "Mux-Ch3", "Mux-Ch4"):
@@ -598,11 +604,12 @@ def test_generic_field_sweep_renders_mux_checkboxes(procedure_win):
         assert box.isChecked() is False  # default False
 
 
-def test_generic_field_sweep_collect_returns_mux_bools(procedure_win):
+def test_generic_field_sweep_collect_returns_mux_bools(procedure_win, station):
     """_collect_params returns the mux_<route> bools reflecting the checkboxes."""
     from cryosoft.procedures.field_sweep import FieldSweep
 
-    _select_procedure(procedure_win, FieldSweep.name)
+    station.set_scanner_enabled(True)
+    procedure_win._select_procedure_by_name(FieldSweep.name)
 
     procedure_win.findChild(QCheckBox, "param_mux_Mux-Ch1_input").setChecked(True)
     procedure_win.findChild(QCheckBox, "param_mux_Mux-Ch3_input").setChecked(True)
@@ -646,7 +653,7 @@ def test_generic_field_sweep_method_combo_shows_selector_labels(procedure_win, s
     assert values["measurement_vi"] == "keithley_delta_mode"
 
 
-def test_generic_field_sweep_mux_row_label_strips_prefix(procedure_win):
+def test_generic_field_sweep_mux_row_label_strips_prefix(procedure_win, station):
     """The mux checkbox row label is the bare route; the collected key keeps mux_.
 
     Only the visible label is prettified — the parameter key (and thus the HDF5
@@ -654,7 +661,8 @@ def test_generic_field_sweep_mux_row_label_strips_prefix(procedure_win):
     """
     from cryosoft.procedures.field_sweep import FieldSweep
 
-    _select_procedure(procedure_win, FieldSweep.name)
+    station.set_scanner_enabled(True)
+    procedure_win._select_procedure_by_name(FieldSweep.name)
 
     checkbox = procedure_win.findChild(QCheckBox, "param_mux_Mux-Ch1_input")
     assert checkbox is not None

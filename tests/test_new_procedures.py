@@ -436,6 +436,7 @@ MUX1 = {"mux_Mux-Ch1": True}                          # one route -> unsuffixed
 
 
 def _field_proc_mux(station, tmp_path, meas, mux):
+    station.set_scanner_enabled(True)
     return FieldSweep(
         station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
         **FAST_FIELD, **meas, **mux,
@@ -554,11 +555,63 @@ def test_mux_unknown_route_selection_refused(station, tmp_path):
     """A mux_ selection naming a route the switch lacks fails at construction."""
     from cryosoft.core.exceptions import CryoSoftConfigError
 
+    station.set_scanner_enabled(True)
     with pytest.raises(CryoSoftConfigError, match="Mux-Ch9"):
         FieldSweep(
             station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
             **FAST_FIELD, **DELTA, **{"mux_Mux-Ch9": True},
         )
+
+
+def test_mux_two_routes_measure_dispatches_select_route_as_command(station, tmp_path):
+    """measure()'s per-route switching goes through send_measurement_commands.
+
+    Regression guard for the layering fix: measure() must not call
+    select_route() directly on the switch VI (a hardware write bypassing the
+    Orchestrator's dispatch channel); it must go through the same
+    Command/send_measurement_commands path initiate() uses.
+    """
+    proc = _field_proc_mux(station, tmp_path, DELTA, MUX2)
+    proc.initiate()
+    station.get_vi("keithley_delta_mode").initiate(**proc._measurement_params)
+
+    calls = []
+    original = station.send_measurement_commands
+
+    def spy(commands):
+        calls.append(list(commands))
+        return original(commands)
+
+    station.send_measurement_commands = spy
+    try:
+        proc.measure()
+    finally:
+        station.send_measurement_commands = original
+        proc.standby()
+
+    route_calls = [
+        c for batch in calls for c in batch
+        if c.vi_name == "switch_matrix" and c.method == "select_route"
+    ]
+    assert [c.kwargs["route"] for c in route_calls] == ["Mux-Ch1", "Mux-Ch2"]
+
+
+def test_scanner_disabled_behaves_as_no_switch_vi(station, tmp_path):
+    """With scanner_enabled() False, a switch-VI-equipped station acts switch-less."""
+    assert station.scanner_enabled() is False  # default, no set_scanner_enabled() call
+    proc = FieldSweep(
+        station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
+        **FAST_FIELD, **DELTA, **MUX2,
+    )
+    assert proc._selected_routes == []
+    assert proc._switch_vi is None
+    plan = proc.initiate()
+    proc.standby()
+    assert len(plan.commands) == 1
+    assert plan.commands[0].vi_name == "keithley_delta_mode"
+
+    groups = FieldSweep.get_param_groups(station)
+    assert not any(g.key == "mux" for g in groups)
 
 
 def test_mux_full_orchestrator_loop_two_routes(station, tmp_path, qtbot):

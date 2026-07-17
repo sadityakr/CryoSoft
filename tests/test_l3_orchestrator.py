@@ -576,3 +576,154 @@ def test_run_procedure_refused_when_magnet_in_persistent_mode(qtbot):
     orch.run_procedure(procedure)
     assert orch._procedure is procedure
     orch.abort_procedure()
+
+
+# ── Scanner-enabled flag ──────────────────────────────────────────────────
+
+def test_scanner_enabled_default_false(orchestrator):
+    """Scanner is disabled by default on a fresh Orchestrator."""
+    assert orchestrator.scanner_enabled() is False
+
+
+def test_set_scanner_enabled_round_trips_with_switch_vi(orchestrator, station):
+    """set_scanner_enabled() forwards to the Station when a switch VI exists."""
+    assert station.switch_vi_names(), "sim_cryostat is expected to have a switch VI"
+    orchestrator.set_scanner_enabled(True)
+    assert orchestrator.scanner_enabled() is True
+    assert station.scanner_enabled() is True
+
+    orchestrator.set_scanner_enabled(False)
+    assert orchestrator.scanner_enabled() is False
+
+
+def test_set_scanner_enabled_is_noop_without_switch_vi(qtbot):
+    """A station with no switch VI: set_scanner_enabled() logs and does nothing."""
+    from cryosoft.core.station import Station
+
+    bare_station = Station()
+    orch = Orchestrator(bare_station, tick_interval_ms=10)
+    orch.set_scanner_enabled(True)
+    assert orch.scanner_enabled() is False
+
+
+# ── Gate framework ─────────────────────────────────────────────────────────
+
+def test_current_gates_empty_for_procedure_without_gate_methods(orchestrator, station):
+    """A duck-typed procedure with no gate methods behaves like the no-op default."""
+    procedure = MockProcedure(station)
+    orchestrator._procedure = procedure
+    orchestrator._first_measurement = True
+    assert orchestrator._current_gates() == ()
+    orchestrator._first_measurement = False
+    assert orchestrator._current_gates() == ()
+
+
+def test_initiation_gate_replaces_wait_and_blocks_until_satisfied(orchestrator, station):
+    """A declared initiation gate is stepped each tick and wait_s is ignored."""
+    from cryosoft.core.gates import Gate
+
+    procedure = MockProcedure(station)
+    calls = {"n": 0}
+
+    def check():
+        calls["n"] += 1
+        return calls["n"] >= 3
+
+    procedure.initiation_gates = lambda: (Gate("settle", check=check),)
+    # A large wait_s that must be ignored once a gate is declared.
+    procedure.initiate = lambda: PhasePlan(
+        targets={"magnet_x": Target(1.0)}, commands=(), wait_s=999.0
+    )
+    station.magnet_x._default_ramp_rate = 6000.0
+    station.magnet_x._ramp_segments = []
+
+    orchestrator.run_procedure(procedure)
+    for _ in range(200):
+        orchestrator._tick()
+        if orchestrator._state == OrchestratorState.INITIATION_GATE:
+            break
+    assert orchestrator._state == OrchestratorState.INITIATION_GATE
+    assert calls["n"] == 0  # ramp-complete tick declares the gate, doesn't step it yet
+    assert orchestrator._wait_started is False
+
+    orchestrator._tick()
+    assert orchestrator._state == OrchestratorState.INITIATION_GATE
+    assert calls["n"] == 1
+
+    orchestrator._tick()
+    assert orchestrator._state == OrchestratorState.INITIATION_GATE
+    assert calls["n"] == 2
+
+    orchestrator._tick()
+    assert orchestrator._state == OrchestratorState.MEASURING
+    assert calls["n"] == 3
+
+
+def test_reading_gate_used_after_first_measurement_not_initiation(orchestrator, station):
+    """reading_gates() governs the second sweep point; the first uses wait_s."""
+    from cryosoft.core.gates import Gate
+
+    procedure = MockProcedure(station)
+    calls = {"n": 0}
+
+    def check():
+        calls["n"] += 1
+        return calls["n"] >= 2
+
+    procedure.reading_gates = lambda: (Gate("settle", check=check),)
+    station.magnet_x._default_ramp_rate = 6000.0
+    station.magnet_x._ramp_segments = []
+
+    orchestrator.run_procedure(procedure)
+    for _ in range(200):
+        orchestrator._tick()
+        if orchestrator._state == OrchestratorState.READING_GATE:
+            break
+    assert orchestrator._state == OrchestratorState.READING_GATE
+    assert procedure.measure_called == 1  # first point measured via ordinary wait_s
+    assert calls["n"] == 0
+
+    orchestrator._tick()
+    assert orchestrator._state == OrchestratorState.READING_GATE
+    assert calls["n"] == 1
+
+    orchestrator._tick()
+    assert orchestrator._state == OrchestratorState.MEASURING
+    assert calls["n"] == 2
+
+
+def test_pause_resume_during_reading_gate_holds_and_resumes(orchestrator, station):
+    """Pausing mid-gate holds pending_gates; resume continues stepping them."""
+    from cryosoft.core.gates import Gate
+
+    procedure = MockProcedure(station)
+    calls = {"n": 0}
+
+    def check():
+        calls["n"] += 1
+        return calls["n"] >= 5
+
+    procedure.reading_gates = lambda: (Gate("settle", check=check),)
+    station.magnet_x._default_ramp_rate = 6000.0
+    station.magnet_x._ramp_segments = []
+
+    orchestrator.run_procedure(procedure)
+    for _ in range(200):
+        orchestrator._tick()
+        if orchestrator._state == OrchestratorState.READING_GATE:
+            break
+    assert orchestrator._state == OrchestratorState.READING_GATE
+
+    orchestrator._tick()
+    n_before_pause = calls["n"]
+    assert orchestrator._state == OrchestratorState.READING_GATE
+
+    orchestrator.pause_procedure()
+    assert orchestrator._state == OrchestratorState.PAUSED
+    orchestrator._tick()
+    assert calls["n"] == n_before_pause  # no stepping while paused
+
+    orchestrator.resume_procedure()
+    assert orchestrator._state == OrchestratorState.READING_GATE
+    orchestrator._tick()
+    assert calls["n"] == n_before_pause + 1

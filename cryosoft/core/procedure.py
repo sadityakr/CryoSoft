@@ -50,6 +50,7 @@ from typing import Any
 
 from cryosoft.core.data_manager import DataManager
 from cryosoft.core.exceptions import CryoSoftConfigError
+from cryosoft.core.gates import Gate
 from cryosoft.core.plan import (
     Command,
     DataSchema,
@@ -500,6 +501,36 @@ class BaseProcedure:
             self._data_manager = None
         return ()
 
+    # ------------------------------------------------------------------
+    # Gates — no-op defaults; override to require settling before a reading
+    # ------------------------------------------------------------------
+
+    def initiation_gates(self) -> tuple[Gate, ...]:
+        """Gates that must pass once, before the run's first measurement.
+
+        Checked by the Orchestrator after the initial targets ramp completes
+        (``initiate()``'s targets), in place of ``PhasePlan.wait_s`` when
+        non-empty. The base implementation declares no gates, so ``wait_s``
+        governs unchanged.
+
+        Returns:
+            An ordered ``tuple[Gate, ...]``; empty by default.
+        """
+        return ()
+
+    def reading_gates(self) -> tuple[Gate, ...]:
+        """Gates that must pass before every measurement after the first.
+
+        Checked by the Orchestrator after each sweep step's targets ramp
+        completes (``change_sweep_step()``'s targets), in place of
+        ``StepPlan.wait_s`` when non-empty. The base implementation declares
+        no gates, so ``wait_s`` governs unchanged.
+
+        Returns:
+            An ordered ``tuple[Gate, ...]``; empty by default.
+        """
+        return ()
+
 
 class SweepMeasureProcedure(BaseProcedure):
     """Generic base for "sweep one axis, run any measurement method" procedures.
@@ -617,7 +648,7 @@ class SweepMeasureProcedure(BaseProcedure):
         # change. (Multiple switch VIs are out of scope: the first is used.)
         self._switch_vi: str | None = None
         self._selected_routes: list[str] = []
-        switch_names = station.switch_vi_names()
+        switch_names = station.switch_vi_names() if station.scanner_enabled() else []
         if switch_names:
             self._switch_vi = switch_names[0]
             switch = station.get_vi(self._switch_vi)
@@ -745,7 +776,7 @@ class SweepMeasureProcedure(BaseProcedure):
         # measurement/system parameter names) in their own namespace. No switch
         # VI -> no group, zero behaviour change. (Multiple switches out of
         # scope: the first switch VI is used.)
-        switch_names = station.switch_vi_names()
+        switch_names = station.switch_vi_names() if station.scanner_enabled() else []
         if switch_names:
             switch = station.get_vi(switch_names[0])
             mux_specs = {
@@ -940,11 +971,15 @@ class SweepMeasureProcedure(BaseProcedure):
         if len(self._selected_routes) >= 2:
             # Multiplexed datapoint: connect each route in turn, take one reading
             # per route, and suffix every returned key with "__<route>". The
-            # switch is reached only through the Station (contract C6).
-            switch = self._station.get_vi(self._switch_vi)
+            # route switch is dispatched as a Command through the Station (the
+            # same channel initiate()/the Orchestrator use), never a direct
+            # call on the switch VI.
+            assert self._switch_vi is not None  # set whenever routes are selected
             measured_data: dict = {}
             for route in self._selected_routes:
-                switch.select_route(route)
+                self._station.send_measurement_commands(
+                    (Command(self._switch_vi, "select_route", {"route": route}),)
+                )
                 for key, value in vi.take_reading().items():
                     measured_data[f"{key}__{route}"] = value
         else:
