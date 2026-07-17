@@ -328,3 +328,17 @@ def test_check_safety_flags_magnet_quench(sim_station: Station):
     safety = sim_station.check_safety(state)
     assert safety["quench"] is True
 
+
+
+def test_scanner_enabled_defaults_false(sim_station: Station):
+    """A freshly built Station has the scanner disabled by default."""
+    assert sim_station.scanner_enabled() is False
+
+
+def test_scanner_enabled_round_trip(sim_station: Station):
+    """set_scanner_enabled() is reflected by scanner_enabled()."""
+    sim_station.set_scanner_enabled(True)
+    assert sim_station.scanner_enabled() is True
+
+    sim_station.set_scanner_enabled(False)
+    assert sim_station.scanner_enabled() is False

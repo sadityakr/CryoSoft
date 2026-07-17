@@ -67,27 +67,44 @@ axis hooks.
 - `get_param_groups(station, selections)` (classmethod) drives GUI form
   generation. `SweepMeasureProcedure` uses it to add a structural
   `measurement_vi` selector (choices are the station's measurement VIs) plus the
-  selected VI's own `measurement_parameters`, and, when a switch VI is present,
-  the multiplexing checkboxes.
+  selected VI's own `measurement_parameters`, and, when anything is loopable,
+  the Reading loop slot group (see below).
 - SI units everywhere: tesla, kelvin, amperes, volts, seconds.
 
-### Generic sweep and switch multiplexing (owned by the base, no per-procedure code)
+### Generic sweep and the reading loop (owned by the base, no per-procedure code)
 
 `SweepMeasureProcedure` runs ANY measurement VI the station exposes, chosen in
 the GUI, so a new *measurement method* is a new measurement VI, not a new
 procedure. `initiate()` assembles a `DataSchema` (axis column + system columns +
-the VI's arrays/scalars) and arms the VI; `measure()` reads the VI, tags on the
-axis read-back, validates per datapoint, and saves; `standby()` / `abort()`
-disarm the VI.
+the VI's arrays/scalars) and arms the VI; `measure()` runs the **reading loop**
+(below), tags on the axis read-back, validates per datapoint, and saves;
+`standby()` / `abort()` disarm the VI.
 
-When the station exposes a switch VI (`vi_type: switch`), the base gains
-multiplexing with no procedure code: `get_param_groups()` appends one
-`mux_<route>` checkbox per route; with two or more routes selected, `measure()`
-connects each route in turn and every measurement array and per-point scalar is
-suffixed `{array}__{route}` (e.g. `voltage_V__Mux-Ch1`) via
-`DataSchema.multiplexed(...)`; the axis, system columns, and `unix_time` are
-never suffixed. `standby()` / `abort()` append a switch `open_all` when routes
-were used.
+The reading loop is the standard for taking multiple readings at a single
+sweep point. It has up to TWO generic slots, each a **loopable parameter** —
+anything a reading-path VI advertises via its `reading_setters` class
+attribute: the switch VI's `route` (setter `select_route`, safe-off
+`open_all`) and the DC measurement VI's `current_A` (setter
+`set_source_current`) are the *same concept*, so a setup with no scanner
+simply has one fewer loopable parameter and no special case anywhere. Slot 1
+(index labels `A1, A2, …`) is the outer level, slot 2 (`B1, B2, …`) the inner
+one.
+
+The **Reading loop** form group renders automatically whenever anything is
+loopable: one `{slot}_parameter` drop-down per slot plus that parameter's
+values input — per-choice `{slot}_pick_{value}` checkboxes when the ParamSpec
+is enumerated (tick the channels), a `{slot}_values` comma-separated text
+field otherwise (e.g. `1e-6, -1e-6`), each value validated against the
+parameter's own spec at construction. A slot with ONE value is a static
+setting (dispatched once at `initiate()`, no suffix); with two or more it
+loops: the setter is dispatched as a `Command` through the Station before
+every reading and columns compose as `{name}__A{i}__B{j}`. The label -> value
+map is stored in the HDF5 metadata (`procedure_params["loop_labels"]`);
+participating non-measurement VIs get their `reading_safe_off` at
+standby/abort. The live plots mirror the slots with per-plot Loop 1 / Loop 2
+selectors (fed by `live_plot_loop_labels()`, items like "A1 = Mux-Ch1"); axis
+keys stay the plain column names and the panel composes the suffix at draw
+time.
 
 ## How to add a new module
 

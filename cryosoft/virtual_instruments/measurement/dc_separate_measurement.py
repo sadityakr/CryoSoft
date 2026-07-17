@@ -4,7 +4,10 @@
 #   using a dedicated current source and a separate voltmeter.
 #   initiate() arms the source with a fixed current, compliance, voltmeter
 #   range and readings-per-point. take_reading() collects that many voltage
-#   samples at the fixed current.
+#   samples at the fixed current. Declares reading_setters
+#   {"current_A": "set_source_current"} so the generic sweep procedure's
+#   reading loop can measure a user-entered list of currents (e.g. +/- pairs
+#   for thermal-offset cancellation) at every sweep point.
 # entry_point: Not run directly; instantiated by Station factory.
 # dependencies:
 #   - cryosoft.virtual_instruments.base (DCMeasurementBase)
@@ -16,11 +19,12 @@
 # process: |
 #   initiate() stores measurement parameters and programs both instruments.
 #   take_reading() acquires readings_per_point voltage samples and returns them
-#   alongside a constant current array.
+#   alongside a constant current array. set_source_current() reprograms only
+#   the source current between readings (the reading loop's setter command).
 # output: |
 #   {"voltage_V": list[float], "current_A": list[float]} of length
 #   readings_per_point.
-# last_updated: 2026-07-13
+# last_updated: 2026-07-17
 # ---
 
 """DCSeparateMeasurementVI — DC measurement with separate current source + voltmeter."""
@@ -68,6 +72,12 @@ class DCSeparateMeasurementVI(DCMeasurementBase):
     # Short drop-down name: separate current source + nanovoltmeter, versus the
     # single-SMU DCSingleInstrumentVI.
     selector_label: ClassVar[str] = "DC (6221 + 2182A)"
+
+    # Reading-loop declaration: the source current can be reprogrammed between
+    # readings without re-arming, so the generic sweep procedure lets the user
+    # loop a list of currents (e.g. "1e-6, -1e-6" for +/- offset cancellation)
+    # at every sweep point.
+    reading_setters: ClassVar[dict[str, str]] = {"current_A": "set_source_current"}
 
     def __init__(self, drivers: dict[str, object], **init_params: Any) -> None:
         super().__init__(drivers, **init_params)
@@ -133,6 +143,26 @@ class DCSeparateMeasurementVI(DCMeasurementBase):
             voltages.append(float(meter.get_voltage()))
             currents.append(current)
         return {"voltage_V": voltages, "current_A": currents}
+
+    @control
+    def set_source_current(self, current_A: float) -> None:
+        """Reprogram the source current without re-arming the measurement.
+
+        The per-reading setter behind ``reading_setters["current_A"]``: keeps
+        compliance, voltmeter range and readings-per-point as armed and changes
+        only the source current (sign included). Subsequent ``take_reading()``
+        calls report the new current in ``current_A``.
+
+        Args:
+            current_A: New DC source current in Amperes (may be negative).
+
+        Raises:
+            RuntimeError: If ``initiate()`` has not been called first.
+        """
+        if self._current_A is _NOT_INITIATED:
+            raise RuntimeError("initiate() must be called before set_source_current().")
+        self._current_A = float(current_A)
+        self._source.set_current(self._current_A)  # type: ignore[attr-defined]
 
     # ------------------------------------------------------------------
     # Lifecycle

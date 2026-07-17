@@ -715,3 +715,122 @@ def test_session_model_from_dict_tolerates_junk(model_cls: type, junk) -> None:
     """from_dict() never raises on junk input — it degrades to defaults."""
     result = model_cls.from_dict(junk)
     assert isinstance(result, model_cls)
+
+
+@pytest.mark.parametrize(
+    "vi_cls", _all_measurement_vi_classes(), ids=lambda c: c.__name__
+)
+def test_measurement_vi_reading_setters_contract(vi_cls: type) -> None:
+    """reading_setters obeys the reading-loop standard.
+
+    Every key names an existing, non-bool measurement parameter; every value
+    names a real method of the VI whose signature accepts the parameter under
+    its own name. See MeasurementInstrumentBase's "reading loop" section.
+    """
+    for param_name, setter_name in vi_cls.reading_setters.items():
+        spec = vi_cls.measurement_parameters.get(param_name)
+        assert spec is not None, (
+            f"{vi_cls.__name__}.reading_setters key {param_name!r} is not a "
+            f"measurement parameter"
+        )
+        assert spec.type is not bool, (
+            f"{vi_cls.__name__}.reading_setters key {param_name!r} is a bool — "
+            f"a bool cannot be looped over a value list"
+        )
+        setter = getattr(vi_cls, setter_name, None)
+        assert callable(setter), (
+            f"{vi_cls.__name__}.reading_setters[{param_name!r}] names method "
+            f"{setter_name!r}, which the VI does not have"
+        )
+        sig_params = inspect.signature(setter).parameters
+        accepts = param_name in sig_params or any(
+            p.kind is p.VAR_KEYWORD for p in sig_params.values()
+        )
+        assert accepts, (
+            f"{vi_cls.__name__}.{setter_name}() must accept the looped "
+            f"parameter as a keyword named {param_name!r}"
+        )
+
+
+@pytest.mark.parametrize(
+    "vi_cls", _all_measurement_vi_classes(), ids=lambda c: c.__name__
+)
+def test_measurement_vi_reading_setter_round_trip(vi_cls: type) -> None:
+    """Every reading setter reconfigures the reading, never its shape.
+
+    Built from sim drivers and armed with defaults, calling each declared
+    setter (with the parameter's default value, as one reading-loop iteration
+    would) must leave take_reading() returning exactly the declared keys and
+    lengths.
+    """
+    if not vi_cls.reading_setters:
+        pytest.skip(f"{vi_cls.__name__} declares no reading_setters")
+    vi = vi_cls(_build_sim_measurement_drivers())
+    defaults = {
+        name: spec.default for name, spec in vi_cls.measurement_parameters.items()
+    }
+    vi.initiate(**defaults)
+    arrays = vi.data_arrays(defaults)
+    expected_keys = (
+        set(vi_cls.measurement_data_keys) | set(vi_cls.measurement_scalar_columns)
+    )
+    for param_name, setter_name in vi_cls.reading_setters.items():
+        getattr(vi, setter_name)(**{param_name: defaults[param_name]})
+        data = vi.take_reading()
+        assert set(data) == expected_keys, (
+            f"{vi_cls.__name__}: after {setter_name}(), take_reading() returned "
+            f"{sorted(data)}, expected {sorted(expected_keys)}"
+        )
+        for name, length in arrays.items():
+            assert len(data[name]) == length, (
+                f"{vi_cls.__name__}: after {setter_name}(), '{name}' has length "
+                f"{len(data[name])}, declared {length}"
+            )
+
+
+# ── Reading-loop standard (BaseVirtualInstrument level, all VI roles) ────────
+# reading_setters is a VI-level standard: the switch VI's route and a
+# measurement VI's current are the same loopable-parameter concept. Check
+# every VI the sim station builds, whatever its role.
+
+def test_reading_loop_standard_on_sim_station() -> None:
+    """Every sim-station VI with reading_setters honours the loop standard.
+
+    For each declared entry: reading_parameters supplies a ParamSpec for the
+    key; the setter is a real method accepting the parameter under its own
+    name; and a non-measurement participant's reading_safe_off (if declared)
+    names a real method.
+    """
+    station = build_station("cryosoft/configs/sim_cryostat")
+    checked = 0
+    for vi_name in station.get_vi_names():
+        vi = station.get_vi(vi_name)
+        specs = vi.reading_parameters
+        for param_name, setter_name in vi.reading_setters.items():
+            checked += 1
+            spec = specs.get(param_name)
+            assert isinstance(spec, ParamSpec), (
+                f"{vi_name}.reading_parameters must supply a ParamSpec for "
+                f"loopable parameter {param_name!r}, got {spec!r}"
+            )
+            setter = getattr(vi, setter_name, None)
+            assert callable(setter), (
+                f"{vi_name}.reading_setters[{param_name!r}] names method "
+                f"{setter_name!r}, which the VI does not have"
+            )
+            sig_params = inspect.signature(setter).parameters
+            accepts = param_name in sig_params or any(
+                p.kind is p.VAR_KEYWORD for p in sig_params.values()
+            )
+            assert accepts, (
+                f"{vi_name}.{setter_name}() must accept the looped parameter "
+                f"as a keyword named {param_name!r}"
+            )
+        if vi.reading_safe_off:
+            assert callable(getattr(vi, vi.reading_safe_off, None)), (
+                f"{vi_name}.reading_safe_off names method "
+                f"{vi.reading_safe_off!r}, which the VI does not have"
+            )
+    # The sim station must exercise the standard: the switch's route and the
+    # DC VI's current at minimum.
+    assert checked >= 2, "sim station should declare at least two loopable parameters"

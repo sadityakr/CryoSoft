@@ -11,8 +11,8 @@
 #   - cryosoft.core.exceptions (DataSchemaError)
 # input: |
 #   Constructor arguments only. Procedures build Target / Command / PhasePlan /
-#   StepPlan objects; the GUI reads ParamSpec / ParamGroup; the data manager
-#   builds and checks DataSchema objects.
+#   StepPlan objects; the GUI reads ParamSpec / ParamGroup; the data
+#   manager builds and checks DataSchema objects.
 # process: |
 #   Every dataclass is frozen and validates in __post_init__, raising ValueError
 #   (bad value) or TypeError (wrong type) with a message naming the offending
@@ -20,9 +20,10 @@
 #   leak into an already-constructed, notionally immutable plan.
 # output: |
 #   Immutable value objects. DataSchema additionally offers multiplexed() (derive
-#   a per-route schema) and validate() (check one datapoint, raising
-#   DataSchemaError listing every problem at once).
-# last_updated: 2026-07-13
+#   a per-suffix schema, used once per reading-loop level with its index
+#   labels) and validate() (check one datapoint, raising DataSchemaError listing every
+#   problem at once).
+# last_updated: 2026-07-17
 # ---
 
 """Typed vocabulary of frozen dataclasses shared across all CryoSoft layers."""
@@ -517,7 +518,9 @@ class DataSchema:
 
     Assembled at ``initiate()`` by composition: the sweep axis contributes its
     sweep column, the station its system columns, the measurement VI its arrays,
-    and a multiplexer suffixes the arrays per route (see ``multiplexed``). This
+    and each looping level of the reading loop suffixes the arrays with its
+    index labels (see ``multiplexed``, applied once per level, slot 1 first;
+    suffixes compose as ``{name}__A{i}__B{j}``). This
     is the single owner of the run's shape contract, the thing that catches
     "HDF5 expected a different format" mismatches before any data is written.
     Both dicts are defensively copied.
@@ -581,6 +584,11 @@ class DataSchema:
         self, routes: Sequence[str], scalar_columns: Sequence[str] = ()
     ) -> DataSchema:
         """Return a new schema with every array (and named scalars) per route.
+
+        ``routes`` is any ordered set of suffix labels — each looping level of
+        the reading loop reuses this one expansion with its index labels
+        (applied once per level, slot 1 first, so suffixes compose as
+        ``{name}__A{i}__B{j}``).
 
         Each array ``name`` becomes ``f"{name}__{route}"`` for each route. The
         resulting ``arrays`` dict is ordered arrays-outer, routes-inner: all

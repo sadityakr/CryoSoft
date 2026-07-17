@@ -126,6 +126,7 @@ def build_operational_status(
     wait_target_s: float | None = None,
     wait_elapsed_s: float | None = None,
     progress: float | None = None,
+    active_gates: list[str] | None = None,
 ) -> tuple[dict, dict[str, float]]:
     """Assemble one operational-status record and the next-tick gap map.
 
@@ -144,6 +145,8 @@ def build_operational_status(
         prev_gaps: Per-VI gap from the previous tick, for the closing fact.
         wait_target_s / wait_elapsed_s: Settle-wait clock, if in a wait.
         progress: Procedure progress 0..1, if a procedure is running.
+        active_gates: Names of the currently pending initiation/reading
+            gates, if any (see ``cryosoft.core.gates.Gate``).
 
     Returns:
         ``(record, new_gaps)`` — the JSON-ready record dict and the gap map to
@@ -211,5 +214,6 @@ def build_operational_status(
         "verdict": verdict.value,
         "alerts": [],
         "vis": vis,
+        "active_gates": list(active_gates) if active_gates else [],
     }
     return record, new_gaps

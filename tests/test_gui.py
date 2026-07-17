@@ -434,6 +434,16 @@ def _measurement_combo(win):
     return combo
 
 
+def _set_slot_parameter(win, slot_param_name, qualified):
+    """Set a Reading-loop slot drop-down to the entry mapping to *qualified*."""
+    combo = win.findChild(QComboBox, f"param_{slot_param_name}_input")
+    assert combo is not None, f"{slot_param_name} selector should be rendered"
+    groups = {g.key: g for g in win._params_panel._current_groups}
+    spec = groups["reading_loop"].params[slot_param_name]
+    label = next(k for k, v in spec.choices.items() if v == qualified)
+    combo.setCurrentText(label)
+
+
 def _select_measurement(win, vi_name):
     """Set the measurement combobox to the label whose mapped value is *vi_name*."""
     combo = _measurement_combo(win)
@@ -499,16 +509,24 @@ def test_generic_field_sweep_renders_measurement_select_and_default_group(proced
     assert "measurement:keithley_delta_mode" not in procedure_win._params_panel._group_boxes
 
 
-def test_generic_field_sweep_all_four_columns_visible_no_hscroll(procedure_win):
-    """At 1280 px, Sweep/System/Measurement/mux all fit with no horizontal scroll.
+def test_generic_field_sweep_all_four_columns_visible_no_hscroll(procedure_win, station):
+    """At 1280 px, Sweep/System/Measurement/Reading loop fit with no h-scroll.
 
-    This is the geometry regression for the reported bug: the measurement params
-    and mux panel used to overflow off the right edge behind a horizontal
-    scrollbar. Assert the actual on-screen geometry, not just widget existence.
+    This is the geometry regression for the reported bug: the measurement
+    params and the rightmost column used to overflow off the right edge behind
+    a horizontal scrollbar. Assert the actual on-screen geometry, not just
+    widget existence.
     """
     from cryosoft.procedures.field_sweep import FieldSweep
 
-    _select_procedure(procedure_win, FieldSweep.name)
+    # scanner_enabled must be set before the form is (re)built for the
+    # Reading loop group to render; select_procedure_by_name forces a rebuild
+    # even when FieldSweep is already the current selection.
+    station.set_scanner_enabled(True)
+    procedure_win._params_panel.select_procedure_by_name(FieldSweep.name)
+    # Put the (enumerated) route parameter in slot 1 so the pick checkboxes
+    # render — the widest state the Reading loop column takes.
+    _set_slot_parameter(procedure_win, "loop1_parameter", "switch_matrix.route")
     _settle_at_width(procedure_win, 1280, 800)
 
     # No horizontal scrollbar is needed for the parameter form.
@@ -519,10 +537,10 @@ def test_generic_field_sweep_all_four_columns_visible_no_hscroll(procedure_win):
     assert first_param is not None
     assert _fully_inside_param_viewport(procedure_win, first_param)
 
-    # The first mux checkbox is fully inside the viewport (not off-screen right).
-    first_mux = procedure_win.findChild(QCheckBox, "param_mux_Mux-Ch1_input")
-    assert first_mux is not None
-    assert _fully_inside_param_viewport(procedure_win, first_mux)
+    # The first pick checkbox is fully inside the viewport (not off-screen).
+    first_pick = procedure_win.findChild(QCheckBox, "param_loop1_pick_Mux-Ch1_input")
+    assert first_pick is not None
+    assert _fully_inside_param_viewport(procedure_win, first_pick)
 
 
 def test_generic_field_sweep_switching_vi_swaps_only_measurement_group(procedure_win):
@@ -595,33 +613,38 @@ def test_generic_field_sweep_typed_values_survive_selection_round_trip(procedure
     assert restored.text() == "37"
 
 
-def test_generic_field_sweep_renders_mux_checkboxes(procedure_win):
-    """The mux group renders one checkbox per switch route for the sim station."""
+def test_generic_field_sweep_renders_route_pick_checkboxes(procedure_win, station):
+    """Putting the route in a loop slot renders one pick checkbox per route."""
     from cryosoft.procedures.field_sweep import FieldSweep
 
-    _select_procedure(procedure_win, FieldSweep.name)
+    station.set_scanner_enabled(True)
+    procedure_win._params_panel.select_procedure_by_name(FieldSweep.name)
+    assert "reading_loop" in procedure_win._params_panel._group_boxes
 
-    assert "mux" in procedure_win._params_panel._group_boxes
+    _set_slot_parameter(procedure_win, "loop1_parameter", "switch_matrix.route")
     for route in ("Mux-Ch1", "Mux-Ch2", "Mux-Ch3", "Mux-Ch4"):
-        box = procedure_win.findChild(QCheckBox, f"param_mux_{route}_input")
-        assert box is not None, f"mux checkbox for {route} should render"
+        box = procedure_win.findChild(QCheckBox, f"param_loop1_pick_{route}_input")
+        assert box is not None, f"pick checkbox for {route} should render"
         assert box.isChecked() is False  # default False
 
 
-def test_generic_field_sweep_collect_returns_mux_bools(procedure_win):
-    """_collect_params returns the mux_<route> bools reflecting the checkboxes."""
+def test_generic_field_sweep_collect_returns_pick_bools(procedure_win, station):
+    """_collect_params returns the loop1_pick_<route> bools from the checkboxes."""
     from cryosoft.procedures.field_sweep import FieldSweep
 
-    _select_procedure(procedure_win, FieldSweep.name)
+    station.set_scanner_enabled(True)
+    procedure_win._params_panel.select_procedure_by_name(FieldSweep.name)
+    _set_slot_parameter(procedure_win, "loop1_parameter", "switch_matrix.route")
 
-    procedure_win.findChild(QCheckBox, "param_mux_Mux-Ch1_input").setChecked(True)
-    procedure_win.findChild(QCheckBox, "param_mux_Mux-Ch3_input").setChecked(True)
+    procedure_win.findChild(QCheckBox, "param_loop1_pick_Mux-Ch1_input").setChecked(True)
+    procedure_win.findChild(QCheckBox, "param_loop1_pick_Mux-Ch3_input").setChecked(True)
 
     values, *_ = procedure_win._collect_params()
-    assert values["mux_Mux-Ch1"] is True
-    assert values["mux_Mux-Ch2"] is False
-    assert values["mux_Mux-Ch3"] is True
-    assert values["mux_Mux-Ch4"] is False
+    assert values["loop1_parameter"] == "switch_matrix.route"
+    assert values["loop1_pick_Mux-Ch1"] is True
+    assert values["loop1_pick_Mux-Ch2"] is False
+    assert values["loop1_pick_Mux-Ch3"] is True
+    assert values["loop1_pick_Mux-Ch4"] is False
 
 
 def test_generic_field_sweep_method_combo_shows_selector_labels(procedure_win, station):
@@ -656,28 +679,88 @@ def test_generic_field_sweep_method_combo_shows_selector_labels(procedure_win, s
     assert values["measurement_vi"] == "keithley_delta_mode"
 
 
-def test_generic_field_sweep_mux_row_label_strips_prefix(procedure_win):
-    """The mux checkbox row label is the bare route; the collected key keeps mux_.
+def test_generic_field_sweep_pick_row_label_strips_prefix(procedure_win, station):
+    """The pick checkbox row label is the bare choice; the key keeps its slot.
 
-    Only the visible label is prettified — the parameter key (and thus the HDF5
-    metadata key) remains ``mux_<route>`` so route names stay namespaced.
+    Only the visible label is prettified — the parameter key (and thus the
+    HDF5 metadata key) remains ``loop1_pick_<value>`` so choices stay
+    namespaced per slot.
     """
     from cryosoft.procedures.field_sweep import FieldSweep
 
-    _select_procedure(procedure_win, FieldSweep.name)
+    station.set_scanner_enabled(True)
+    procedure_win._params_panel.select_procedure_by_name(FieldSweep.name)
+    _set_slot_parameter(procedure_win, "loop1_parameter", "switch_matrix.route")
 
-    checkbox = procedure_win.findChild(QCheckBox, "param_mux_Mux-Ch1_input")
+    checkbox = procedure_win.findChild(QCheckBox, "param_loop1_pick_Mux-Ch1_input")
     assert checkbox is not None
     form = checkbox.parent().layout()
     assert isinstance(form, QFormLayout)
     row_label = form.labelForField(checkbox)
     assert isinstance(row_label, QLabel)
-    assert row_label.text() == "Mux-Ch1:"  # route name, no "mux_" prefix
+    assert row_label.text() == "Mux-Ch1:"  # bare choice, no slot prefix
 
     checkbox.setChecked(True)
     values, *_ = procedure_win._collect_params()
-    assert values["mux_Mux-Ch1"] is True   # prefixed key kept for metadata
-    assert "Mux-Ch1" not in values         # the bare route is not a param key
+    assert values["loop1_pick_Mux-Ch1"] is True  # prefixed key kept
+    assert "Mux-Ch1" not in values               # bare choice is not a key
+
+
+def test_live_plot_loop_selectors_follow_reading_loop(procedure_win, station):
+    """The plots' two Loop selectors follow the reading-loop slots.
+
+    Hidden while nothing is loopable (delta VI, scanner off); visible but
+    disabled once something is loopable with the slots off; enabled with one
+    item per value — display text carrying the value, item data carrying the
+    index label — once a slot has two or more values.
+    """
+    from cryosoft.procedures.field_sweep import FieldSweep
+
+    procedure_win._params_panel.select_procedure_by_name(FieldSweep.name)
+    sel1 = procedure_win.findChild(QComboBox, "plot1_loop1_selector")
+    sel2 = procedure_win.findChild(QComboBox, "plot1_loop2_selector")
+    assert sel1 is not None and sel2 is not None
+    # Default: delta VI, scanner off -> nothing loopable, selectors hidden.
+    assert not sel1.isVisibleTo(procedure_win)
+    assert not sel2.isVisibleTo(procedure_win)
+
+    # Enable the scanner and rebuild: the route is loopable now, slots off ->
+    # both selectors visible but disabled.
+    station.set_scanner_enabled(True)
+    procedure_win._params_panel.select_procedure_by_name(FieldSweep.name)
+    sel1 = procedure_win.findChild(QComboBox, "plot1_loop1_selector")
+    sel2 = procedure_win.findChild(QComboBox, "plot1_loop2_selector")
+    assert sel1.isVisibleTo(procedure_win) and not sel1.isEnabled()
+    assert sel2.isVisibleTo(procedure_win) and not sel2.isEnabled()
+
+    # Slot 1: route with two channels ticked. Slot 2: DC current +/- pair.
+    _select_measurement(procedure_win, "dc_measurement")
+    _set_slot_parameter(procedure_win, "loop1_parameter", "switch_matrix.route")
+    procedure_win.findChild(QCheckBox, "param_loop1_pick_Mux-Ch1_input").setChecked(True)
+    procedure_win.findChild(QCheckBox, "param_loop1_pick_Mux-Ch2_input").setChecked(True)
+    _set_slot_parameter(
+        procedure_win, "loop2_parameter", "dc_measurement.current_A"
+    )
+    values_edit = procedure_win.findChild(QLineEdit, "param_loop2_values_input")
+    values_edit.setText("1e-6, -1e-6")
+    values_edit.editingFinished.emit()
+
+    sel1 = procedure_win.findChild(QComboBox, "plot1_loop1_selector")
+    sel2 = procedure_win.findChild(QComboBox, "plot1_loop2_selector")
+    assert sel1.isEnabled()
+    assert [sel1.itemText(i) for i in range(sel1.count())] == [
+        "A1 = Mux-Ch1", "A2 = Mux-Ch2",
+    ]
+    assert [sel1.itemData(i) for i in range(sel1.count())] == ["A1", "A2"]
+    assert sel2.isEnabled()
+    assert [sel2.itemText(i) for i in range(sel2.count())] == [
+        "B1 = 1e-06", "B2 = -1e-06",
+    ]
+    # Axis keys stay plain — the Loop selectors pick the reading.
+    x_sel = procedure_win.findChild(QComboBox, "x1_axis_selector")
+    keys = [x_sel.itemText(i) for i in range(x_sel.count())]
+    assert "voltage_V" in keys
+    assert not any("__A" in k or "__B" in k for k in keys)
 
 
 def test_param_form_renders_all_widget_kinds_and_round_trips(qtbot):

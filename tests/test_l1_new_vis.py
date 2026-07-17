@@ -744,6 +744,26 @@ class TestDCSeparateMeasurementVI:
         vi = self._make_vi(source_driver, meter_driver)
         assert vi.vi_type == "measurement"
 
+    # ── The reading-loop setter (reading_setters standard) ───────────────────
+
+    def test_set_source_current_before_initiate_raises(self, source_driver, meter_driver):
+        vi = self._make_vi(source_driver, meter_driver)
+        with pytest.raises(RuntimeError):
+            vi.set_source_current(1e-6)
+
+    def test_set_source_current_changes_reported_current(self, source_driver, meter_driver):
+        vi = self._make_vi(source_driver, meter_driver)
+        vi.initiate(current_A=1e-6, readings_per_point=4)
+        vi.set_source_current(-1e-6)
+        data = vi.take_reading()
+        assert all(abs(c + 1e-6) < 1e-12 for c in data["current_A"])
+        assert len(data["voltage_V"]) == 4
+
+    def test_declares_current_reading_setter(self, source_driver, meter_driver):
+        """current_A is loopable via set_source_current (the reading loop)."""
+        vi = self._make_vi(source_driver, meter_driver)
+        assert vi.reading_setters == {"current_A": "set_source_current"}
+
 
 # ---------------------------------------------------------------------------
 # DCSingleInstrumentVI

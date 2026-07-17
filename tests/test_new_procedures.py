@@ -8,8 +8,15 @@
 #   column, an end-to-end Orchestrator run, and the DataSchema negative case
 #   (a wrong-shaped reading degrades the Orchestrator to ERROR, unwritten).
 #   Also keeps the set_ramp_rate @control and Station rate-forwarding checks.
+#   The reading-loop section covers the two generic loop slots (the switch's
+#   route and the DC VI's current_A are the same loopable-parameter concept):
+#   index-label schema/columns ({name}__A{i}__B{j}), static single-value
+#   slots, the HDF5 loop_labels metadata, command dispatch through the
+#   Station, slot composition and ordering, construction-time refusals, the
+#   auto-rendered Reading loop form group, the live-plot label maps, and
+#   end-to-end Orchestrator runs for both slot kinds.
 # entry_point: pytest tests/test_new_procedures.py -v
-# last_updated: 2026-07-13
+# last_updated: 2026-07-17
 # ---
 
 
@@ -428,24 +435,40 @@ def test_wrong_shape_reading_degrades_to_error(station, tmp_path, qtbot, monkeyp
     with h5py.File(h5_files[0], "r") as f:
         assert np.all(np.isnan(f["data"]["field_T"][:]))
 
+# ── The reading loop: two generic slots (channels x value list) ──────────────
+# Slot 1 (labels A1, A2, ...) is the outer level, slot 2 (B1, B2, ...) the
+# inner one. The switch's route and the DC VI's current are the SAME concept:
+# loopable parameters advertised via reading_setters.
 
-# ── Switch multiplexing (Wave 6) ─────────────────────────────────────────────
+ROUTES2 = {
+    "loop1_parameter": "switch_matrix.route",
+    "loop1_pick_Mux-Ch1": True,
+    "loop1_pick_Mux-Ch2": True,
+}
+ROUTES1 = {"loop1_parameter": "switch_matrix.route", "loop1_pick_Mux-Ch1": True}
+CURRENTS2 = {"loop1_parameter": "dc_measurement.current_A", "loop1_values": "1e-6, -1e-6"}
+BOTH = {
+    "loop1_parameter": "switch_matrix.route",
+    "loop1_pick_Mux-Ch1": True,
+    "loop1_pick_Mux-Ch2": True,
+    "loop2_parameter": "dc_measurement.current_A",
+    "loop2_values": "1e-6, -1e-6",
+}
 
-MUX2 = {"mux_Mux-Ch1": True, "mux_Mux-Ch2": True}   # two routes -> multiplexed
-MUX1 = {"mux_Mux-Ch1": True}                          # one route -> unsuffixed
 
-
-def _field_proc_mux(station, tmp_path, meas, mux):
+def _field_proc_scanner(station, tmp_path, meas, loop):
+    station.set_scanner_enabled(True)
     return FieldSweep(
         station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
-        **FAST_FIELD, **meas, **mux,
+        **FAST_FIELD, **meas, **loop,
     )
 
 
-def test_mux_two_routes_initiate_command_order(station, tmp_path):
-    """With 2 routes, initiate() selects the FIRST route BEFORE arming the VI."""
-    proc = _field_proc_mux(station, tmp_path, DELTA, MUX2)
-    assert proc._selected_routes == ["Mux-Ch1", "Mux-Ch2"]
+# ── Channel slot alone (the old mux behaviour, now generic) ──────────────────
+
+def test_channel_slot_initiate_selects_first_route_before_arming(station, tmp_path):
+    """A looping channel slot dispatches its first route BEFORE the arm."""
+    proc = _field_proc_scanner(station, tmp_path, DELTA, ROUTES2)
     plan = proc.initiate()
     proc.standby()
 
@@ -457,45 +480,43 @@ def test_mux_two_routes_initiate_command_order(station, tmp_path):
     assert plan.commands[1].method == "initiate"
 
 
-def test_mux_two_routes_schema_has_suffixed_arrays_and_scalars(station, tmp_path):
-    """The DataSchema arrays AND scalar columns are expanded per route."""
-    proc = _field_proc_mux(station, tmp_path, DELTA, MUX2)
+def test_channel_slot_schema_uses_index_labels(station, tmp_path):
+    """Arrays AND scalar columns are expanded per index label (A1, A2)."""
+    proc = _field_proc_scanner(station, tmp_path, DELTA, ROUTES2)
     proc.initiate()
     schema = proc._data_schema
     proc.standby()
 
     assert set(schema.arrays) == {
-        "voltage_V__Mux-Ch1", "voltage_V__Mux-Ch2",
-        "current_A__Mux-Ch1", "current_A__Mux-Ch2",
+        "voltage_V__A1", "voltage_V__A2", "current_A__A1", "current_A__A2",
     }
-    # The delta VI's n_valid scalar is expanded per route; the bare name is gone.
     assert "n_valid" not in schema.sweep_columns
-    assert "n_valid__Mux-Ch1" in schema.sweep_columns
-    assert "n_valid__Mux-Ch2" in schema.sweep_columns
-    # Non-mux system columns (e.g. field_T) are NOT suffixed.
+    assert "n_valid__A1" in schema.sweep_columns
+    assert "n_valid__A2" in schema.sweep_columns
     assert "field_T" in schema.sweep_columns
+    # The label -> value map ties A1/A2 back to the routes in the metadata.
+    assert proc._params["loop_labels"] == {"A1": "Mux-Ch1", "A2": "Mux-Ch2"}
 
 
-def test_mux_two_routes_measure_writes_suffixed_keys(station, tmp_path):
-    """measure() loops the routes and writes per-route suffixed datasets."""
-    proc = _field_proc_mux(station, tmp_path, DELTA, MUX2)
+def test_channel_slot_measure_writes_labelled_keys(station, tmp_path):
+    """measure() loops the routes and writes per-label suffixed datasets."""
+    proc = _field_proc_scanner(station, tmp_path, DELTA, ROUTES2)
     proc.initiate()
-    station.get_vi("keithley_delta_mode").initiate(**proc._measurement_params)
+    _arm(station, DELTA, proc)
     proc.measure()
     filepath = proc._data_manager.filepath
     proc.standby()
 
     with h5py.File(filepath, "r") as f:
-        assert f["data"]["voltage_V__Mux-Ch1"].shape == (1, 5)
-        assert f["data"]["voltage_V__Mux-Ch2"].shape == (1, 5)
-        assert not np.any(np.isnan(f["data"]["voltage_V__Mux-Ch1"][0]))
-        assert f["data"]["n_valid__Mux-Ch1"][0] == 5
-        assert f["data"]["n_valid__Mux-Ch2"][0] == 5
+        assert f["data"]["voltage_V__A1"].shape == (1, 5)
+        assert f["data"]["voltage_V__A2"].shape == (1, 5)
+        assert not np.any(np.isnan(f["data"]["voltage_V__A1"][0]))
+        assert f["data"]["n_valid__A1"][0] == 5
 
 
-def test_mux_two_routes_standby_and_abort_open_all(station, tmp_path):
-    """standby() and abort() both append a switch open_all command."""
-    proc = _field_proc_mux(station, tmp_path, DELTA, MUX2)
+def test_channel_slot_standby_and_abort_dispatch_safe_off(station, tmp_path):
+    """standby() and abort() append the switch's reading_safe_off (open_all)."""
+    proc = _field_proc_scanner(station, tmp_path, DELTA, ROUTES2)
     proc.initiate()
     standby_plan = proc.standby()
     open_cmds = [
@@ -504,7 +525,7 @@ def test_mux_two_routes_standby_and_abort_open_all(station, tmp_path):
     ]
     assert len(open_cmds) == 1
 
-    proc2 = _field_proc_mux(station, tmp_path, DELTA, MUX2)
+    proc2 = _field_proc_scanner(station, tmp_path, DELTA, ROUTES2)
     proc2.initiate()
     abort_cmds = proc2.abort()
     assert any(
@@ -515,60 +536,344 @@ def test_mux_two_routes_standby_and_abort_open_all(station, tmp_path):
     )
 
 
-def test_mux_one_route_unsuffixed_schema_and_select_at_initiate(station, tmp_path):
-    """One route: schema is unsuffixed, switch selected once at initiate only."""
-    proc = _field_proc_mux(station, tmp_path, DELTA, MUX1)
-    assert proc._selected_routes == ["Mux-Ch1"]
+def test_single_value_slot_is_static(station, tmp_path):
+    """One value = static setting: dispatched once at initiate, no suffix."""
+    proc = _field_proc_scanner(station, tmp_path, DELTA, ROUTES1)
     plan = proc.initiate()
     schema = proc._data_schema
 
-    # Switch is selected at initiate (before arming), but the schema is plain.
+    # Selected once before arming; schema is plain.
     assert plan.commands[0].vi_name == "switch_matrix"
     assert plan.commands[0].method == "select_route"
     assert set(schema.arrays) == {"voltage_V", "current_A"}
     assert "n_valid" in schema.sweep_columns
+    assert proc._params["loop_labels"] == {}
 
-    # measure() takes a plain reading (no per-route re-selection, no suffix).
-    station.get_vi("keithley_delta_mode").initiate(**proc._measurement_params)
+    # measure() takes a plain reading (no re-selection, no suffix).
+    _arm(station, DELTA, proc)
     proc.measure()
     filepath = proc._data_manager.filepath
     proc.standby()
     with h5py.File(filepath, "r") as f:
         assert "voltage_V" in f["data"]
-        assert "voltage_V__Mux-Ch1" not in f["data"]
+        assert "voltage_V__A1" not in f["data"]
 
 
-def test_mux_zero_routes_is_unchanged(station, tmp_path):
-    """No route selected: behaviour is identical to pre-Wave-6 (no switch calls)."""
-    proc = _field_proc_mux(station, tmp_path, DELTA, {})
-    assert proc._selected_routes == []
+def test_static_measurement_slot_dispatches_after_arm(station, tmp_path):
+    """A static single-value slot on the measurement VI dispatches AFTER arming."""
+    proc = _field_proc(
+        station, tmp_path,
+        {**DC, "loop1_parameter": "dc_measurement.current_A", "loop1_values": "2e-6"},
+    )
     plan = proc.initiate()
     proc.standby()
-    # Only the measurement initiate command — no switch select_route.
+
+    assert [(c.vi_name, c.method) for c in plan.commands] == [
+        ("dc_measurement", "initiate"),
+        ("dc_measurement", "set_source_current"),
+    ]
+    assert plan.commands[1].kwargs == {"current_A": 2e-6}
+    assert set(proc._data_schema.arrays) == {"voltage_V", "current_A"}
+
+
+def test_loop_off_is_unchanged(station, tmp_path):
+    """No slot selected: single plain reading; stray values text is ignored."""
+    proc = _field_proc_scanner(
+        station, tmp_path, DELTA, {"loop1_values": "1e-6, -1e-6"}
+    )
+    assert proc._loop_slots == []
+    plan = proc.initiate()
+    proc.standby()
     assert len(plan.commands) == 1
     assert plan.commands[0].vi_name == "keithley_delta_mode"
     assert set(proc._data_schema.arrays) == {"voltage_V", "current_A"}
 
 
-def test_mux_unknown_route_selection_refused(station, tmp_path):
-    """A mux_ selection naming a route the switch lacks fails at construction."""
+def test_unknown_pick_refused(station, tmp_path):
+    """A pick naming a choice the parameter lacks fails at construction."""
     from cryosoft.core.exceptions import CryoSoftConfigError
 
+    station.set_scanner_enabled(True)
     with pytest.raises(CryoSoftConfigError, match="Mux-Ch9"):
         FieldSweep(
             station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
-            **FAST_FIELD, **DELTA, **{"mux_Mux-Ch9": True},
+            **FAST_FIELD, **DELTA,
+            loop1_parameter="switch_matrix.route", **{"loop1_pick_Mux-Ch9": True},
         )
 
 
-def test_mux_full_orchestrator_loop_two_routes(station, tmp_path, qtbot):
-    """A 2-route mux sweep completes to IDLE with per-route datasets written."""
+def test_channel_slot_measure_dispatches_select_route_as_command(station, tmp_path):
+    """Per-route switching goes through send_measurement_commands.
+
+    Regression guard for the layering rule: measure() must never call
+    select_route() directly on the switch VI; it goes through the same
+    Command/send_measurement_commands path initiate() uses.
+    """
+    proc = _field_proc_scanner(station, tmp_path, DELTA, ROUTES2)
+    proc.initiate()
+    _arm(station, DELTA, proc)
+
+    calls = []
+    original = station.send_measurement_commands
+
+    def spy(commands):
+        calls.append(list(commands))
+        return original(commands)
+
+    station.send_measurement_commands = spy
+    try:
+        proc.measure()
+    finally:
+        station.send_measurement_commands = original
+        proc.standby()
+
+    route_calls = [
+        c for batch in calls for c in batch
+        if c.vi_name == "switch_matrix" and c.method == "select_route"
+    ]
+    assert [c.kwargs["route"] for c in route_calls] == ["Mux-Ch1", "Mux-Ch2"]
+
+
+def test_scanner_disabled_removes_channel_parameter(station, tmp_path):
+    """Scanner disabled: the switch's route is not loopable — refused loudly."""
+    from cryosoft.core.exceptions import CryoSoftConfigError
+
+    assert station.scanner_enabled() is False
+    with pytest.raises(CryoSoftConfigError, match="switch_matrix.route"):
+        FieldSweep(
+            station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
+            **FAST_FIELD, **DELTA, **ROUTES2,
+        )
+    # And the form offers no channel parameter (delta VI: no group at all).
+    groups = FieldSweep.get_param_groups(station)
+    assert not any(g.key == "reading_loop" for g in groups)
+
+
+# ── Value-list slot alone (± current) ────────────────────────────────────────
+
+def test_value_slot_labels_and_suffixed_keys(station, tmp_path):
+    """A two-value current loop resolves A1/A2 and suffixes the data keys."""
+    proc = _field_proc(station, tmp_path, {**DC, **CURRENTS2})
+    assert [s["qualified"] for s in proc._loop_slots] == ["dc_measurement.current_A"]
+    assert proc.measurement_data_keys == [
+        "voltage_V__A1", "voltage_V__A2", "current_A__A1", "current_A__A2",
+    ]
+    assert proc._params["loop_labels"] == {"A1": 1e-6, "A2": -1e-6}
+
+
+def test_value_slot_measure_writes_signed_current(station, tmp_path):
+    """measure() loops the values; the A2 reading carries -current_A."""
+    proc = _field_proc(station, tmp_path, {**DC, **CURRENTS2})
+    proc.initiate()
+    _arm(station, DC, proc)
+    proc.measure()
+    filepath = proc._data_manager.filepath
+    proc.standby()
+
+    with h5py.File(filepath, "r") as f:
+        assert f["data"]["voltage_V__A1"].shape == (1, 5)
+        assert np.allclose(f["data"]["current_A__A1"][0], 1e-6)
+        assert np.allclose(f["data"]["current_A__A2"][0], -1e-6)
+
+
+def test_value_slot_metadata_carries_label_map(station, tmp_path):
+    """The HDF5 metadata's procedure_params records the slots and labels."""
+    import json
+
+    proc = _field_proc(station, tmp_path, {**DC, **CURRENTS2})
+    proc.initiate()
+    filepath = proc._data_manager.filepath
+    proc.standby()
+
+    with h5py.File(filepath, "r") as f:
+        params = json.loads(f["metadata"].attrs["procedure_params"])
+    assert params["loop1_parameter"] == "dc_measurement.current_A"
+    assert params["loop1_values"] == [1e-6, -1e-6]
+    assert params["loop2_parameter"] == ""
+    assert params["loop_labels"] == {"A1": 1e-6, "A2": -1e-6}
+
+
+def test_value_slot_bad_entry_refused(station, tmp_path):
+    """An entry that does not parse as the parameter's type fails loudly."""
+    from cryosoft.core.exceptions import CryoSoftConfigError
+
+    with pytest.raises(CryoSoftConfigError, match="abc"):
+        _field_proc(
+            station, tmp_path,
+            {**DC, "loop1_parameter": "dc_measurement.current_A",
+             "loop1_values": "1e-6, abc"},
+        )
+
+
+def test_non_loopable_parameter_refused(station, tmp_path):
+    """Looping a parameter no VI advertised a setter for fails at construction."""
+    from cryosoft.core.exceptions import CryoSoftConfigError
+
+    with pytest.raises(CryoSoftConfigError, match="voltmeter_range_V"):
+        _field_proc(
+            station, tmp_path,
+            {**DC, "loop1_parameter": "dc_measurement.voltmeter_range_V",
+             "loop1_values": "0.1, 1.0"},
+        )
+
+
+def test_same_parameter_in_both_slots_refused(station, tmp_path):
+    """The same loopable parameter cannot occupy both slots."""
+    from cryosoft.core.exceptions import CryoSoftConfigError
+
+    with pytest.raises(CryoSoftConfigError, match="both"):
+        _field_proc(
+            station, tmp_path,
+            {**DC,
+             "loop1_parameter": "dc_measurement.current_A", "loop1_values": "1e-6, -1e-6",
+             "loop2_parameter": "dc_measurement.current_A", "loop2_values": "2e-6, -2e-6"},
+        )
+
+
+# ── Both slots: channels (outer) x currents (inner) ──────────────────────────
+
+def test_both_slots_compose(station, tmp_path):
+    """Slot 1 x slot 2: columns {name}__A{i}__B{j}, route outer, value inner."""
+    proc = _field_proc_scanner(station, tmp_path, DC, BOTH)
+    proc.initiate()
+    schema = proc._data_schema
+    _arm(station, DC, proc)
+
+    assert set(schema.arrays) == {
+        f"{name}__{a}__{b}"
+        for name in ("voltage_V", "current_A")
+        for a in ("A1", "A2")
+        for b in ("B1", "B2")
+    }
+    assert proc._params["loop_labels"] == {
+        "A1": "Mux-Ch1", "A2": "Mux-Ch2", "B1": 1e-6, "B2": -1e-6,
+    }
+
+    calls = []
+    original = station.send_measurement_commands
+
+    def spy(commands):
+        calls.append(list(commands))
+        return original(commands)
+
+    station.send_measurement_commands = spy
+    try:
+        proc.measure()
+    finally:
+        station.send_measurement_commands = original
+
+    filepath = proc._data_manager.filepath
+    proc.standby()
+
+    flat = [
+        (c.method, c.kwargs.get("route") or c.kwargs.get("current_A"))
+        for batch in calls for c in batch
+    ]
+    assert flat == [
+        ("select_route", "Mux-Ch1"),
+        ("set_source_current", 1e-6), ("set_source_current", -1e-6),
+        ("select_route", "Mux-Ch2"),
+        ("set_source_current", 1e-6), ("set_source_current", -1e-6),
+    ]
+
+    with h5py.File(filepath, "r") as f:
+        assert f["data"]["voltage_V__A1__B1"].shape == (1, 5)
+        assert np.allclose(f["data"]["current_A__A2__B2"][0], -1e-6)
+
+
+# ── Form group + live-plot hooks ─────────────────────────────────────────────
+
+def test_reading_loop_group_offers_all_loopable_parameters(station):
+    """One group, two slots; selecting a slot reveals its values input."""
+    station.set_scanner_enabled(True)
+    groups = FieldSweep.get_param_groups(
+        station, {"measurement_vi": "dc_measurement"}
+    )
+    loop = next(g for g in groups if g.key == "reading_loop")
+    # Both slot drop-downs offer Off + route + current_A.
+    spec = loop.params["loop1_parameter"]
+    assert set(spec.choices.values()) == {
+        "", "switch_matrix.route", "dc_measurement.current_A",
+    }
+    assert spec.structural is True
+    # No slot selected -> no values inputs yet.
+    assert set(loop.params) == {"loop1_parameter", "loop2_parameter"}
+
+    # Selecting the (enumerated) route reveals per-choice pick checkboxes;
+    # selecting the (free) current reveals the comma-separated text field.
+    groups = FieldSweep.get_param_groups(
+        station,
+        {"measurement_vi": "dc_measurement",
+         "loop1_parameter": "switch_matrix.route",
+         "loop2_parameter": "dc_measurement.current_A"},
+    )
+    loop = next(g for g in groups if g.key == "reading_loop")
+    names = list(loop.params)
+    assert names[0] == "loop1_parameter"
+    assert [n for n in names if n.startswith("loop1_pick_")] == [
+        "loop1_pick_Mux-Ch1", "loop1_pick_Mux-Ch2",
+        "loop1_pick_Mux-Ch3", "loop1_pick_Mux-Ch4",
+    ]
+    assert "loop2_values" in names
+    # The loop group sits ABOVE the selected VI's own parameter group.
+    keys = [g.key for g in groups]
+    assert keys.index("reading_loop") < keys.index("measurement:dc_measurement")
+
+
+def test_reading_loop_group_absent_when_nothing_loopable(station):
+    """Scanner off + a VI without setters (delta): no Reading loop group."""
+    groups = FieldSweep.get_param_groups(
+        station, {"measurement_vi": "keithley_delta_mode"}
+    )
+    assert not any(g.key == "reading_loop" for g in groups)
+    # Scanner on: even delta gets the group (the route is loopable).
+    station.set_scanner_enabled(True)
+    groups = FieldSweep.get_param_groups(
+        station, {"measurement_vi": "keithley_delta_mode"}
+    )
+    assert any(g.key == "reading_loop" for g in groups)
+
+
+def test_live_plot_keys_stay_plain_and_loop_labels_drive_the_selectors(station):
+    """Axis keys stay plain; live_plot_loop_labels() feeds the two selectors."""
+    station.set_scanner_enabled(True)
+    on = {
+        "measurement_vi": "dc_measurement",
+        "loop1_parameter": "switch_matrix.route",
+        "loop1_pick_Mux-Ch1": True,
+        "loop1_pick_Mux-Ch2": True,
+        "loop2_parameter": "dc_measurement.current_A",
+        "loop2_values": "1e-6, -1e-6",
+    }
+    assert FieldSweep.live_plot_measurement_keys(station, on) == [
+        "voltage_V", "current_A",
+    ]
+    labels1, labels2 = FieldSweep.live_plot_loop_labels(station, on)
+    assert labels1 == {"A1": "A1 = Mux-Ch1", "A2": "A2 = Mux-Ch2"}
+    assert labels2 == {"B1": "B1 = 1e-06", "B2": "B2 = -1e-06"}
+    # Slots off -> ({}, {}) (selectors visible, disabled).
+    assert FieldSweep.live_plot_loop_labels(
+        station, {"measurement_vi": "dc_measurement"}
+    ) == ({}, {})
+
+
+def test_live_plot_loop_labels_none_when_nothing_loopable(station):
+    """No switch (scanner off) + no setters (delta): (None, None) — hidden."""
+    assert FieldSweep.live_plot_loop_labels(
+        station, {"measurement_vi": "keithley_delta_mode"}
+    ) == (None, None)
+
+
+# ── End-to-end Orchestrator runs ─────────────────────────────────────────────
+
+def test_full_orchestrator_run_channel_slot(station, tmp_path, qtbot):
+    """A 2-route channel-slot sweep completes to IDLE with per-label datasets."""
     from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 
     station.magnet_x._default_ramp_rate = 6000.0
     station.magnet_x._ramp_segments = []
 
-    proc = _field_proc_mux(station, tmp_path, DELTA, MUX2)
+    proc = _field_proc_scanner(station, tmp_path, DELTA, ROUTES2)
     orch = Orchestrator(station, tick_interval_ms=10)
     orch.run_procedure(proc)
 
@@ -581,6 +886,29 @@ def test_mux_full_orchestrator_loop_two_routes(station, tmp_path, qtbot):
     assert len(h5_files) == 1
     with h5py.File(h5_files[0], "r") as f:
         assert f["data"]["field_T"].shape[0] == 3
-        assert f["data"]["voltage_V__Mux-Ch1"].shape == (3, 5)
-        assert f["data"]["voltage_V__Mux-Ch2"].shape == (3, 5)
-        assert not np.any(np.isnan(f["data"]["voltage_V__Mux-Ch1"][:]))
+        assert f["data"]["voltage_V__A1"].shape == (3, 5)
+        assert f["data"]["voltage_V__A2"].shape == (3, 5)
+        assert not np.any(np.isnan(f["data"]["voltage_V__A1"][:]))
+
+
+def test_full_orchestrator_run_value_slot(station, tmp_path, qtbot):
+    """A +/- current sweep completes to IDLE with per-label datasets."""
+    from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
+
+    station.magnet_x._default_ramp_rate = 6000.0
+    station.magnet_x._ramp_segments = []
+
+    proc = _field_proc(station, tmp_path, {**DC, **CURRENTS2})
+    orch = Orchestrator(station, tick_interval_ms=10)
+    orch.run_procedure(proc)
+
+    with qtbot.waitSignal(orch.procedure_finished, timeout=10000):
+        pass
+
+    assert orch._state == OrchestratorState.IDLE
+    h5_files = list(tmp_path.glob("*.h5"))
+    assert len(h5_files) == 1
+    with h5py.File(h5_files[0], "r") as f:
+        assert f["data"]["field_T"].shape[0] == 3
+        assert f["data"]["voltage_V__A1"].shape == (3, 5)
+        assert np.allclose(f["data"]["current_A__A2"][:], -1e-6)

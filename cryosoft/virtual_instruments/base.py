@@ -10,8 +10,8 @@
 #   TemperatureControllerBase, LevelMeterBase, MeasurementInstrumentBase,
 #   DCMeasurementBase). MeasurementInstrumentBase also defines the
 #   self-describing measurement-method standard (measurement_parameters /
-#   measurement_data_keys / measurement_scalar_columns class attrs plus the
-#   data_arrays / initiate / take_reading / standby lifecycle).
+#   measurement_data_keys / measurement_scalar_columns / reading_setters class
+#   attrs plus the data_arrays / initiate / take_reading / standby lifecycle).
 # entry_point: Not run directly; imported by all concrete VI modules.
 # dependencies:
 #   - cryosoft.core.exceptions
@@ -26,7 +26,7 @@
 #   methods via get_monitored_methods() helper and returns a flat dict.
 # output: |
 #   Logged method calls (DEBUG/ERROR), structured state dicts from get_state().
-# last_updated: 2026-07-13
+# last_updated: 2026-07-17
 # ---
 
 """BaseVirtualInstrument and category base classes.
@@ -101,6 +101,35 @@ class BaseVirtualInstrument:
     # Declarative control limits: {method_name: {param_name: limit_name}}.
     # See "Control-validation standard" in the class docstring.
     control_limits: dict[str, dict[str, str]] = {}
+
+    # ── Reading-loop participation (see GLOSSARY "Reading loop") ──────────
+    # A VI in the reading path may declare parameters the generic sweep
+    # procedure can loop at every sweep point: ``reading_setters`` maps a
+    # parameter name to the cheap setter method that reprograms just that
+    # quantity between readings (the setter accepts the parameter under its
+    # own name); ``reading_parameters`` supplies each such parameter's
+    # ParamSpec (enumerated specs render as checkboxes in the Reading loop
+    # form group, free specs as a comma-separated value list); and
+    # ``reading_safe_off`` optionally names a method the procedure dispatches
+    # at standby/abort when this (non-measurement) VI took part in the loop
+    # (e.g. a switch's ``open_all``). Defaults: no participation.
+    reading_setters: ClassVar[dict[str, str]] = {}
+    reading_safe_off: ClassVar[str] = ""
+
+    @property
+    def reading_parameters(self) -> dict[str, ParamSpec]:
+        """Return ``{name: ParamSpec}`` for every ``reading_setters`` parameter.
+
+        The base implementation returns ``{}`` (no loopable parameters). A VI
+        that declares ``reading_setters`` must override this so the generic
+        sweep procedure can render and validate the loop values; a
+        measurement VI inherits an implementation reading its own
+        ``measurement_parameters`` (see ``MeasurementInstrumentBase``).
+
+        Returns:
+            Mapping of loopable parameter name to its ``ParamSpec``.
+        """
+        return {}
 
     # ------------------------------------------------------------------
     # __init_subclass__: auto-wrap @monitored / @control methods
@@ -380,9 +409,41 @@ class MeasurementInstrumentBase(BaseVirtualInstrument):
       mismatches mid-run.
     * ``standby() -> None`` — put the instrument in a safe-off idle state.
 
+    The reading loop (optional): ``reading_setters``
+    ------------------------------------------------
+    A VI may declare that some of its measurement parameters can be CHANGED
+    BETWEEN READINGS without re-arming, via the class attribute::
+
+        reading_setters: ClassVar[dict[str, str]] = {"current_A": "set_source_current"}
+
+    mapping a ``measurement_parameters`` name to the cheap setter method that
+    reprograms just that quantity. Declaring an entry is all a VI does: the
+    generic sweep procedure automatically renders a "Reading loop" form group
+    where the user picks ONE such parameter and enters a comma-separated list
+    of values, and then, at every sweep point, dispatches the setter (as a
+    ``Command`` via the Station) before each value's ``take_reading()``. The
+    readings' columns are suffixed with index labels ``__L1``, ``__L2``, …
+    (composing with switch routes as ``{name}__L{i}__{route}``); the
+    label-to-value map is stored in the run's HDF5 metadata
+    (``procedure_params["loop_labels"]``).
+
+    Contract (machine-enforced by ``tests/test_conformance.py``):
+
+    * Every key names an existing ``measurement_parameters`` entry.
+    * Every value names a real method of the VI whose signature accepts the
+      parameter under its own name (e.g. ``set_source_current(current_A=...)``).
+    * The setter reconfigures the reading, never its shape: after any setter
+      call, ``take_reading()`` still returns exactly ``measurement_data_keys``
+      with the lengths ``data_arrays(params)`` declared.
+    * Setter calls obey the same validation discipline as any hardware write —
+      keep ``@control`` (and ``control_limits``) on setters whose values must
+      be bounded.
+
     Adding a new measurement method: subclass this base (or ``DCMeasurementBase``
     for a DC-resistance method), declare the three class attributes, and
-    implement ``data_arrays`` / ``initiate`` / ``take_reading`` / ``standby``.
+    implement ``data_arrays`` / ``initiate`` / ``take_reading`` / ``standby``
+    (plus ``reading_setters`` entries for any parameter the reading loop may
+    vary per point).
     """
 
     vi_type: str = "measurement"
@@ -396,6 +457,24 @@ class MeasurementInstrumentBase(BaseVirtualInstrument):
     measurement_parameters: ClassVar[dict[str, ParamSpec]] = {}
     measurement_data_keys: ClassVar[list[str]] = []
     measurement_scalar_columns: ClassVar[dict[str, str]] = {}
+    # Reading-loop declaration: parameter name -> per-reading setter method.
+    # Empty (the default) means no parameter of this VI can be looped.
+    reading_setters: ClassVar[dict[str, str]] = {}
+
+    @property
+    def reading_parameters(self) -> dict[str, ParamSpec]:
+        """Return the ``ParamSpec`` of every loopable measurement parameter.
+
+        A measurement VI's loopable parameters are, by definition, a subset of
+        its ``measurement_parameters``, so this reads their specs from there.
+
+        Returns:
+            ``{name: measurement_parameters[name]}`` for every
+            ``reading_setters`` key.
+        """
+        return {
+            name: self.measurement_parameters[name] for name in self.reading_setters
+        }
 
     def data_arrays(self, params: Mapping[str, Any]) -> dict[str, int]:
         """Return declared array name → per-point length for these *params*.

@@ -6,11 +6,11 @@
 #   procedure's ParamGroups (BaseProcedure.get_param_groups()) as side-by-side
 #   columns through cryosoft.gui.param_form, composes the Sweep column
 #   (SweepAxisWidget + flat sweep fields), the single composite Measurement
-#   column (method drop-down + selected VI's sub-form), and the narrow
-#   scanner/mux column; structural params trigger a keyed diff re-render that
-#   rebuilds only the group boxes that changed. Owns the per-procedure
-#   raw-text parameter cache that backs session persistence. Extracted from
-#   procedure_window.py.
+#   column (method drop-down + selected VI's sub-form), and the Reading loop
+#   column (up to two generic loop slots); structural params trigger a keyed
+#   diff re-render that rebuilds only the group boxes that changed. Owns the
+#   per-procedure raw-text parameter cache that backs session persistence.
+#   Extracted from procedure_window.py.
 # entry_point: Not run directly. Hosted as ProcedureWindow's top-left quadrant.
 # dependencies:
 #   - PyQt6 >= 6.5
@@ -26,11 +26,12 @@
 #   typed values and re-applying the incoming one's); a structural parameter
 #   change re-derives the groups and swaps only the affected boxes. The
 #   ``structure_changed`` signal fires wherever the hosting window must
-#   refresh its plot axis selectors; ``routes_changed`` fires on mux checkbox
-#   toggles.
+#   refresh its plot axis selectors, including the reading-loop selectors.
 # output: |
 #   collect_values() returns validated parameter values + the file prefix;
 #   export/restore methods round-trip the parameter cache through a session.
+#   structure_changed also drives the hosting window's reading-loop plot
+#   selectors, since a loop slot's pick checkboxes are structural params.
 # ---
 
 """ProcedureParamsPanel — procedure selector, parameter form, and param cache."""
@@ -74,10 +75,9 @@ from cryosoft.gui.theme import (
 # Max width (px) for the Sweep parameter column. Its inputs are narrow, so this
 # stops it expanding to an equal third and crowding out the Measurement column.
 _SWEEP_COLUMN_MAX_WIDTH = 260
-# Max width (px) for the scanner/mux column. Its content is a short list of
-# route checkboxes, so cap it narrow (like the Sweep column) — it should hug the
-# checkbox labels and leave the horizontal room to the Measurement column.
-_MUX_COLUMN_MAX_WIDTH = 170
+# Max width (px) for the Reading loop column (two slot drop-downs plus their
+# values inputs — pick checkboxes or a comma-separated text field).
+_READING_LOOP_COLUMN_MAX_WIDTH = 320
 
 
 class ProcedureParamsPanel(QWidget):
@@ -92,8 +92,9 @@ class ProcedureParamsPanel(QWidget):
         add_to_queue_requested: The "Add to Queue" button was clicked.
         run_now_requested: The "Run Now" button was clicked.
         structure_changed: The form was (re)built for the given procedure
-            class — the hosting window refreshes its plot axis selectors.
-        routes_changed: A mux route checkbox was toggled.
+            class — the hosting window refreshes its plot axis selectors
+            (including the reading-loop selectors, since a loop slot's
+            parameter choice and pick checkboxes are all structural).
 
     Args:
         station: The active Station instance.
@@ -104,7 +105,6 @@ class ProcedureParamsPanel(QWidget):
     add_to_queue_requested = pyqtSignal()
     run_now_requested = pyqtSignal()
     structure_changed = pyqtSignal(object)  # type[BaseProcedure]
-    routes_changed = pyqtSignal()
 
     def __init__(
         self,
@@ -136,7 +136,7 @@ class ProcedureParamsPanel(QWidget):
         # (rather than a box per group). On a method change only the sub-form
         # container is rebuilt; the box and the drop-down keep their instances.
         # Kept separate from _group_boxes, which holds the independent columns
-        # (System, mux, any generic group).
+        # (System, Reading loop, any generic group).
         self._measurement_box: QGroupBox | None = None
         self._measurement_params_layout: QVBoxLayout | None = None
         self._measurement_params_container: QWidget | None = None
@@ -234,7 +234,9 @@ class ProcedureParamsPanel(QWidget):
           "Measurement" column (method drop-down on top, the selected VI's
           parameter sub-form below), instead of two separate columns that would
           overflow off-screen. See ``_build_measurement_box``.
-        * ``mux`` — a narrow scanner column of route checkboxes.
+        * ``reading_loop`` — the two generic loop slots (a loopable-parameter
+          drop-down each, with per-choice pick checkboxes or a value-list text
+          field). See ``_build_reading_loop_box``.
 
         Any OTHER group key becomes its own generic column (so future procedures
         are not constrained by these conventions). Widget construction, labels,
@@ -300,8 +302,8 @@ class ProcedureParamsPanel(QWidget):
                 )
                 hbox.addWidget(self._build_measurement_box(group, params_group))
                 continue
-            if key == "mux":
-                box = self._build_mux_box(group)
+            if key == "reading_loop":
+                box = self._build_reading_loop_box(group)
             else:
                 # System / generic columns wrap long rows too, so all four
                 # columns compress to fit the params quadrant without a
@@ -395,30 +397,33 @@ class ProcedureParamsPanel(QWidget):
         self._measurement_params_container = container
         self._measurement_params_layout.addWidget(container)
 
-    def _build_mux_box(self, group: ParamGroup) -> QGroupBox:
-        """Build the narrow scanner/mux column of route checkboxes.
+    def _build_reading_loop_box(self, group: ParamGroup) -> QGroupBox:
+        """Build the Reading loop column: the two generic loop slots.
 
-        Titled from the switch VI's ``display_label`` (e.g. "Scanner (mux)").
-        Each checkbox row shows the bare route name; the parameter key stays
-        ``mux_<route>`` (so route names cannot collide with measurement/system
-        params, and the HDF5 metadata key is unchanged) via ``label_overrides``
-        — only the visible label is prettified.
+        Each slot is a ``{slot}_parameter`` drop-down plus its values input —
+        per-choice ``{slot}_pick_{value}`` checkboxes for an enumerated
+        parameter (each row label prettified to the bare choice via
+        ``label_overrides``; the parameter key keeps its namespaced name for
+        collection and HDF5 metadata) or a ``{slot}_values`` text field
+        otherwise. All widgets are structural, so their wiring comes from
+        ``_register_group_widgets``.
 
         Args:
-            group: The ``mux`` group (one ``mux_<route>`` bool per route).
+            group: The ``reading_loop`` group.
 
         Returns:
-            The capped-width scanner ``QGroupBox``.
+            The capped-width ``QGroupBox``.
         """
         box = QGroupBox(group.title)
         box.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
-        box.setMaximumWidth(_MUX_COLUMN_MAX_WIDTH)
-        label_overrides = {name: name.removeprefix("mux_") for name in group.params}
+        box.setMaximumWidth(_READING_LOOP_COLUMN_MAX_WIDTH)
+        label_overrides = {
+            name: name.split("_pick_", 1)[1]
+            for name in group.params
+            if "_pick_" in name
+        }
         form, widgets = param_form.build_form_layout(group.params, label_overrides, wrap=True)
         self._register_group_widgets(group, widgets)
-        for widget in widgets.values():
-            if isinstance(widget, QCheckBox):
-                widget.stateChanged.connect(self.routes_changed)
         box.setLayout(form)
         return box
 
@@ -468,40 +473,6 @@ class ProcedureParamsPanel(QWidget):
                 except (ValueError, TypeError):
                     pass
         return selections
-
-    def current_mux_routes(self) -> list[str]:
-        """Return the route names whose mux_<route> checkboxes are currently checked.
-
-        Scans the "mux" ParamGroup (if it exists) for enabled checkboxes. Returns
-        an empty list if no mux group exists (no switch VI on the station), or if
-        the mux group exists but no routes are checked (scanner available but off).
-
-        Returns:
-            List of route names corresponding to checked mux checkboxes, in group order.
-            Empty list if no mux group exists OR no routes are selected.
-        """
-        mux_group = next(
-            (g for g in self._current_groups if g.key == "mux"), None
-        )
-        if mux_group is None:
-            return []
-
-        selected: list[str] = []
-        for name, spec in mux_group.params.items():
-            widget = self._param_inputs.get(name)
-            if widget is None:
-                continue
-            try:
-                if param_form.collect_value(widget, spec):
-                    route_name = name.removeprefix("mux_")
-                    selected.append(route_name)
-            except (ValueError, TypeError):
-                pass
-        return selected
-
-    def has_mux_group(self) -> bool:
-        """Return True if the station has a switch VI (mux group exists)."""
-        return any(g.key == "mux" for g in self._current_groups)
 
     def _on_structural_changed(self, *_args: Any) -> None:
         """Re-derive the form after a structural parameter changed.
@@ -564,9 +535,10 @@ class ProcedureParamsPanel(QWidget):
             if new_meas_key is not None:
                 self._install_measurement_params(new_by_key[new_meas_key])
 
-        # (2) Independent columns (System, mux, any generic group) diff by key.
-        # The measurement_select / measurement:* keys are NOT here — they live in
-        # the Measurement column handled above.
+        # (2) Independent columns (System, Reading loop, any generic group)
+        # diff by key AND parameter set. The measurement_select /
+        # measurement:* keys are NOT here — they live in the Measurement
+        # column handled above.
         def _is_column_key(key: str) -> bool:
             return (
                 key != "sweep"
@@ -575,9 +547,18 @@ class ProcedureParamsPanel(QWidget):
             )
 
         for key in list(self._group_boxes):
-            if key not in new_by_key:
+            old_group = old_by_key.get(key)
+            # A column is stale when its key vanished OR its key persists but
+            # its parameter set changed (e.g. the Reading loop group gains or
+            # loses the loopN_pick_*/loopN_values fields when a slot's chosen
+            # parameter changes). A changed column is dropped here and rebuilt
+            # by the append loop below.
+            stale = key not in new_by_key or (
+                old_group is not None
+                and set(old_group.params) != set(new_by_key[key].params)
+            )
+            if stale:
                 box = self._group_boxes.pop(key)
-                old_group = old_by_key.get(key)
                 if old_group is not None:
                     for name in old_group.params:
                         self._param_inputs.pop(name, None)
@@ -594,8 +575,8 @@ class ProcedureParamsPanel(QWidget):
             if not _is_column_key(key) or key in self._group_boxes:
                 continue
             group = new_by_key[key]
-            if key == "mux":
-                box = self._build_mux_box(group)
+            if key == "reading_loop":
+                box = self._build_reading_loop_box(group)
             else:
                 box, widgets = param_form.build_group_box(group, wrap=True)
                 self._register_group_widgets(group, widgets)

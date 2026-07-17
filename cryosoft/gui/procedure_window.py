@@ -32,7 +32,7 @@
 #   window validates the form into a procedure instance (the single
 #   construction path shared by run-now and the queue), submits it through
 #   orchestrator.run_procedure()/queue_procedure(), and keeps the plot axis
-#   selectors in sync with the selected procedure and mux routes.
+#   and reading-loop selectors in sync with the selected procedure.
 # output: |
 #   A QMainWindow. Two live plots update via orchestrator.measurement_ready.
 # ---
@@ -288,15 +288,17 @@ class ProcedureWindow(QMainWindow):
             "Plot 1", PLOT_SERIES[0],
             x_selector_name="x1_axis_selector",
             y_selector_name="y_axis_selector",
-            route_selector_name="route1_selector",
             plot_object_name="live_plot",
+            loop1_selector_name="plot1_loop1_selector",
+            loop2_selector_name="plot1_loop2_selector",
         )
         self._plot2 = LivePlotPanel(
             "Plot 2", PLOT_SERIES[1],
             x_selector_name="x2_axis_selector",
             y_selector_name="y2_axis_selector",
-            route_selector_name="route2_selector",
             plot_object_name="live_plot_2",
+            loop1_selector_name="plot2_loop1_selector",
+            loop2_selector_name="plot2_loop2_selector",
         )
         for panel in (self._plot1, self._plot2):
             panel.setMinimumWidth(250)
@@ -364,7 +366,6 @@ class ProcedureWindow(QMainWindow):
         self._params_panel.add_to_queue_requested.connect(self._on_add_to_queue)
         self._params_panel.run_now_requested.connect(self._on_run_now)
         self._params_panel.structure_changed.connect(self._populate_axis_selectors)
-        self._params_panel.routes_changed.connect(self._refresh_route_selectors)
 
     # ------------------------------------------------------------------
     # Slot handlers
@@ -557,22 +558,26 @@ class ProcedureWindow(QMainWindow):
         self._plot1.set_available_keys(keys, default_x, "voltage_V")
         self._plot2.set_available_keys(keys, default_x, "current_A")
 
-        # Refresh route selectors based on currently-selected routes (if any).
-        self._refresh_route_selectors()
+        # Refresh the loop selectors based on the current selections.
+        self._refresh_loop_selectors()
 
-    def _refresh_route_selectors(self) -> None:
-        """Update plot route selectors with currently-selected routes.
+    def _refresh_loop_selectors(self) -> None:
+        """Update the plots' two Loop selectors from the reading-loop selections.
 
-        Checks if a mux group exists (scanner VI present) and which routes are
-        checked; passes that to both plot panels' ``set_available_routes()``.
-        If no scanner VI exists, passes None to hide the selector.
+        Asks the selected procedure class for the per-slot label maps
+        (``live_plot_loop_labels``: None = no loop possible, {} = slot
+        off/static, map = looping slot) and passes them to both plot panels'
+        ``set_available_loop_labels()`` — each Loop selector picks which
+        reading of a datapoint is plotted.
         """
-        if self._params_panel.has_mux_group():
-            routes: list[str] | None = self._params_panel.current_mux_routes()
-        else:
-            routes = None
-        self._plot1.set_available_routes(routes)
-        self._plot2.set_available_routes(routes)
+        cls = self._params_panel.current_class()
+        if cls is None:
+            return
+        labels = cls.live_plot_loop_labels(
+            self._station, self._params_panel.current_selections()
+        )
+        self._plot1.set_available_loop_labels(labels)
+        self._plot2.set_available_loop_labels(labels)
 
     def _reset_plot(self, proc: BaseProcedure) -> None:
         """Clear datapoints and refresh axis selectors for a new run.

@@ -68,6 +68,7 @@ class Station:
         self._last_known_state: dict[str, dict] = {}       # Stale value cache
         self._error_counts: dict[str, int] = {}
         self._max_errors: int = 3
+        self._scanner_enabled: bool = False
 
     # ------------------------------------------------------------------
     # VI registration and access
@@ -147,6 +148,22 @@ class Station:
     def has_vi(self, vi_name: str) -> bool:
         """Return True if a VI with this name is registered."""
         return vi_name in self._virtual_instruments
+
+    def set_scanner_enabled(self, enabled: bool) -> None:
+        """Toggle whether scanner-sensitive procedures may use the switch VI.
+
+        A plain availability bit: it does not touch the switch VI itself.
+        When disabled, a scanner-sensitive procedure behaves as if no switch
+        VI exists (see ``SweepMeasureProcedure``'s route discovery).
+
+        Args:
+            enabled: True to make the scanner available to procedures.
+        """
+        self._scanner_enabled = bool(enabled)
+
+    def scanner_enabled(self) -> bool:
+        """Return whether scanner-sensitive procedures may use the switch VI."""
+        return self._scanner_enabled
 
     def get_vi_type(self, vi_name: str) -> str:
         """Return the vi_type for the given VI name.

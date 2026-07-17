@@ -42,6 +42,18 @@ Uniform lifecycle (methods)
   mismatches mid-run.
 - `standby() → None` — safe-off idle state.
 - `ping() → bool` — IDN check on all drivers.
+- `reading_setters: dict[str, str]` — OPTIONAL reading-loop declaration
+  (default `{}`): maps a `measurement_parameters` name to the cheap setter
+  method that reprograms just that quantity between readings without
+  re-arming (e.g. `{"current_A": "set_source_current"}`). One entry is all a
+  VI declares — the generic sweep procedure offers the parameter in its
+  Reading loop slots, dispatches the setter before each value's reading,
+  suffixes columns with per-slot index labels (`{name}__A{i}__B{j}`), and
+  stores the label -> value map in the HDF5 metadata. Setters must accept
+  the parameter under its own name and never change the reading's shape.
+  The same standard lives on `BaseVirtualInstrument` (plus
+  `reading_parameters` / `reading_safe_off`), so non-measurement VIs like
+  the switch participate identically. Full contract in the base docstrings.
 
 ## Interface contract
 DC measurement classes inherit `DCMeasurementBase` (which fixes the DC-resistance
@@ -61,7 +73,9 @@ every measurement VI automatically.
 3. Implement `data_arrays(params)`, `initiate(**params)`, `take_reading()`,
    `standby()` (and `ping()`). Keep `@control` on `initiate()` if the GUI should
    be able to arm it. Pad short returns to the declared length with
-   `float("nan")` and report the true count in a scalar column.
+   `float("nan")` and report the true count in a scalar column. Declare a
+   `reading_setters` entry (parameter → setter method) for any parameter the
+   reading loop should be able to vary per point (see the Exit section above).
 4. If the VI needs a driver role not already in
    `tests/test_conformance.py::_SIM_MEASUREMENT_DRIVER_CLASSES`, add its sim
    driver there so the round-trip conformance test can build it.
@@ -69,8 +83,12 @@ every measurement VI automatically.
 
 ## Files
 - `dc_separate_measurement.py` — `DCSeparateMeasurementVI`: Keithley 6221 source +
-  2182A nanovoltmeter, simple DC mode. tests: `tests/test_measurement_dc_vi.py`,
-  `tests/test_l1_new_vis.py` (`TestDCSeparateMeasurementVI`).
+  2182A nanovoltmeter, simple DC mode. Declares the reference `reading_setters`
+  entry `{"current_A": "set_source_current"}`, so the reading loop can measure
+  a user-entered current list (e.g. `1e-6, -1e-6`) at every sweep point
+  (per-slot index-label columns). tests: `tests/test_measurement_dc_vi.py`,
+  `tests/test_l1_new_vis.py` (`TestDCSeparateMeasurementVI`),
+  `tests/test_new_procedures.py` (reading loop).
 - `dc_single_instrument.py` — `DCSingleInstrumentVI`: Keithley 2400 SMU,
   single-instrument DC mode with the same method contract. tests:
   `tests/test_l1_new_vis.py` (`TestDCSingleInstrumentVI`).

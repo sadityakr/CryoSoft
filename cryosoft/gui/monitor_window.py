@@ -107,6 +107,8 @@ _RIGHT_SPLITTER_KEY = "MonitorWindow/quadrant_right_splitter"
 _ACTIVE_STATES = frozenset({
     OrchestratorState.INITIATING.value,
     OrchestratorState.RAMPING.value,
+    OrchestratorState.INITIATION_GATE.value,
+    OrchestratorState.READING_GATE.value,
     OrchestratorState.MEASURING.value,
     OrchestratorState.SWEEPING.value,
     OrchestratorState.PAUSED.value,

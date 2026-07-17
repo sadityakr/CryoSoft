@@ -34,10 +34,11 @@
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Any, ClassVar
 
 from cryosoft.core.decorators import control, monitored
 from cryosoft.core.exceptions import CryoSoftConfigError
+from cryosoft.core.plan import ParamSpec
 from cryosoft.virtual_instruments.base import BaseVirtualInstrument
 
 
@@ -68,6 +69,37 @@ class SwitchMatrixVI(BaseVirtualInstrument):
 
     vi_type: str = "switch"
     display_label: str = "Scanner (mux)"
+
+    # Reading-loop participation: the route is a loopable parameter like any
+    # other — the generic sweep procedure can loop it at every sweep point via
+    # select_route, and dispatches open_all at standby/abort when this VI took
+    # part in the loop. See BaseVirtualInstrument's reading-loop section.
+    reading_setters: ClassVar[dict[str, str]] = {"route": "select_route"}
+    reading_safe_off: ClassVar[str] = "open_all"
+
+    @property
+    def reading_parameters(self) -> dict[str, ParamSpec]:
+        """Return the loopable ``route`` parameter's spec.
+
+        The spec is built at runtime because its enumerated ``choices`` are
+        the config-owned route table. An enumerated spec renders as one
+        checkbox per route in the Reading loop form group.
+
+        Returns:
+            ``{"route": ParamSpec}`` with choices ``{route_name: route_name}``,
+            or ``{}`` when the config declares no routes.
+        """
+        route_names = list(self._routes)
+        if not route_names:
+            return {}
+        return {
+            "route": ParamSpec(
+                type=str,
+                default=route_names[0],
+                choices={name: name for name in route_names},
+                description="Measurement channel (configured switch route)",
+            )
+        }
 
     def __init__(self, drivers: dict[str, object], **init_params: Any) -> None:
         """Validate the route table and settle time from config.
