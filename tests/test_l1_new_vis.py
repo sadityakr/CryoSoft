@@ -66,6 +66,12 @@ def smu_driver():
     return SimKeithley2400("SIM")
 
 
+@pytest.fixture
+def lockin_driver():
+    from cryosoft.drivers.sim_lockin import SimLockIn
+    return SimLockIn("SIM")
+
+
 # ---------------------------------------------------------------------------
 # SuperconductingMagnetVI
 # ---------------------------------------------------------------------------
@@ -951,3 +957,88 @@ class TestDCSingleInstrumentVI:
             data = vi.take_reading()
             assert set(data.keys()) == {"voltage_V", "current_A"}
             assert len(data["voltage_V"]) == 3
+
+
+# ---------------------------------------------------------------------------
+# LockInHarmonicMeasurementVI
+# ---------------------------------------------------------------------------
+
+class TestLockInHarmonicMeasurementVI:
+    """Tests for LockInHarmonicMeasurementVI (internal-source 1f/2f)."""
+
+    def _make_vi(self, lockin, series_resistance_ohm=1e6):
+        from cryosoft.virtual_instruments.measurement.lockin_harmonic import LockInHarmonicMeasurementVI
+        vi = LockInHarmonicMeasurementVI(
+            {"lockin": lockin}, series_resistance_ohm=series_resistance_ohm
+        )
+        vi.vi_name = "lockin_harmonic"
+        return vi
+
+    def test_ping_returns_true_when_driver_responds(self, lockin_driver):
+        vi = self._make_vi(lockin_driver)
+        assert vi.ping() is True
+
+    def test_take_reading_without_initiate_raises(self, lockin_driver):
+        vi = self._make_vi(lockin_driver)
+        with pytest.raises(RuntimeError):
+            vi.take_reading()
+
+    def test_initiate_sets_internal_reference(self, lockin_driver):
+        vi = self._make_vi(lockin_driver)
+        vi.initiate(oscillator_amplitude_V=0.5)
+        assert lockin_driver.get_reference_source() == "INT"
+        assert lockin_driver.get_oscillator_amplitude() == pytest.approx(0.5)
+
+    def test_initiate_sets_oscillator_frequency_and_time_constant(self, lockin_driver):
+        vi = self._make_vi(lockin_driver)
+        vi.initiate(oscillator_frequency_Hz=1234.0, time_constant_s=0.3)
+        assert lockin_driver.get_oscillator_frequency() == pytest.approx(1234.0)
+        assert lockin_driver.get_time_constant() == pytest.approx(0.3)
+
+    def test_take_reading_returns_correct_n_points(self, lockin_driver):
+        vi = self._make_vi(lockin_driver)
+        vi.initiate(n_readings=7)
+        data = vi.take_reading()
+        for key in ("x_1f_V", "y_1f_V", "x_2f_V", "y_2f_V", "current_A"):
+            assert key in data
+            assert len(data[key]) == 7
+
+    def test_take_reading_switches_harmonic_between_1f_and_2f(self, lockin_driver):
+        """A single-demodulator lock-in reports one harmonic at a time."""
+        vi = self._make_vi(lockin_driver)
+        lockin_driver._noise_std = 0.0  # deterministic
+        vi.initiate(oscillator_amplitude_V=1.0, n_readings=1)
+        data = vi.take_reading()
+        # 1f response is linear in amplitude, 2f is quadratic (see SimLockIn) —
+        # different values confirm take_reading() actually switched harmonics.
+        assert data["x_1f_V"][0] != pytest.approx(data["x_2f_V"][0])
+        assert lockin_driver.get_harmonic() == 2  # left on 2f after the last read
+
+    def test_current_computed_from_amplitude_and_series_resistance(self, lockin_driver):
+        vi = self._make_vi(lockin_driver, series_resistance_ohm=2e6)
+        vi.initiate(oscillator_amplitude_V=1.0, n_readings=3)
+        data = vi.take_reading()
+        assert all(c == pytest.approx(0.5e-6) for c in data["current_A"])
+
+    def test_standby_zeros_oscillator_amplitude(self, lockin_driver):
+        vi = self._make_vi(lockin_driver)
+        vi.initiate(oscillator_amplitude_V=1.0)
+        vi.standby()
+        assert lockin_driver.get_oscillator_amplitude() == pytest.approx(0.0)
+
+    def test_standby_blocks_subsequent_take_reading(self, lockin_driver):
+        vi = self._make_vi(lockin_driver)
+        vi.initiate()
+        vi.standby()
+        with pytest.raises(RuntimeError):
+            vi.take_reading()
+
+    def test_vi_type_is_measurement(self, lockin_driver):
+        vi = self._make_vi(lockin_driver)
+        assert vi.vi_type == "measurement"
+
+    def test_data_arrays_matches_measurement_data_keys(self, lockin_driver):
+        vi = self._make_vi(lockin_driver)
+        arrays = vi.data_arrays({"n_readings": 5})
+        assert set(arrays) == set(vi.measurement_data_keys)
+        assert all(length == 5 for length in arrays.values())

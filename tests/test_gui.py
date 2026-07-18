@@ -512,7 +512,7 @@ def test_generic_field_sweep_renders_measurement_select_and_default_group(proced
     _select_procedure(procedure_win, FieldSweep.name)
 
     combo = _measurement_combo(procedure_win)
-    assert combo.count() == 2  # keithley_delta_mode + dc_measurement
+    assert combo.count() == 3  # keithley_delta_mode + dc_measurement + lockin_harmonic
     # The default VI's params render (delta-mode).
     assert procedure_win.findChild(QComboBox, "param_voltmeter_range_V_input") is not None
     assert procedure_win.findChild(QLineEdit, "param_n_readings_input") is not None
@@ -680,7 +680,9 @@ def test_generic_field_sweep_method_combo_shows_selector_labels(procedure_win, s
         for n in station.measurement_vi_names()
     ]
     assert items == expected
-    assert items == ["Delta mode (6221 + 2182A)", "DC (6221 + 2182A)"]
+    assert items == [
+        "Delta mode (6221 + 2182A)", "DC (6221 + 2182A)", "Lock-in 1f/2f (internal source)",
+    ]
 
     # Each item carries its vi_name as a tooltip (disambiguation).
     tips = [

@@ -542,6 +542,7 @@ _SIM_MEASUREMENT_DRIVER_CLASSES = {
     "source": "cryosoft.drivers.sim_keithley_6221.SimKeithley6221",
     "meter": "cryosoft.drivers.sim_keithley_2182a.SimKeithley2182A",
     "main": "cryosoft.drivers.sim_keithley_2400.SimKeithley2400",
+    "lockin": "cryosoft.drivers.sim_lockin.SimLockIn",
 }
 
 

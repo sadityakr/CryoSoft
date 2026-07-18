@@ -98,10 +98,13 @@ def test_station_get_vi_returns_named_instance(sim_station: Station):
 def test_station_measurement_vi_names_registration_order(sim_station: Station):
     """measurement_vi_names() returns only measurement VIs, in registration order.
 
-    sim_cryostat registers keithley_delta_mode before dc_measurement (both
-    vi_type=measurement); the system/level VIs are excluded.
+    sim_cryostat registers keithley_delta_mode, then dc_measurement, then
+    lockin_harmonic (all vi_type=measurement); the system/level VIs are
+    excluded.
     """
-    assert sim_station.measurement_vi_names() == ["keithley_delta_mode", "dc_measurement"]
+    assert sim_station.measurement_vi_names() == [
+        "keithley_delta_mode", "dc_measurement", "lockin_harmonic",
+    ]
 
 
 def test_station_measurement_vi_names_empty_when_none_registered():

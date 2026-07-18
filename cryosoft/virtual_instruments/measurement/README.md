@@ -16,6 +16,9 @@ Driver dicts and optional `init_params` (none required for current classes).
 - `DCSeparateMeasurementVI`: `{"source": <K6221>, "meter": <K2182A>}`
 - `DCSingleInstrumentVI`: `{"main": <K2400 SMU>}`
 - `DeltaModeMeasurementVI`: `{"source": <K6221>, "meter": <K2182A>}`
+- `LockInHarmonicMeasurementVI`: `{"lockin": <lock-in amplifier>}`,
+  `init_params: {series_resistance_ohm}` (the excitation series resistor, a
+  setup wiring constant).
 
 ## Exit (what goes out)
 The measurement-method standard (all classes obey it):
@@ -117,4 +120,13 @@ shared-6221 handoff test for the pattern.
   delta-mode (reverses current polarity each reading for offset cancellation).
   Pads short delta returns to `n_readings` with NaN and reports `n_valid`. tests:
   `tests/test_l1_virtual_instruments.py`.
+- `lockin_harmonic.py` — `LockInHarmonicMeasurementVI`: lock-in first/second
+  harmonic (1f/2f) measurement, sourced by the lock-in's own internal
+  oscillator through a series resistor. A single-demodulator lock-in reports
+  one harmonic at a time, so `take_reading()` switches `set_harmonic(1)` /
+  `set_harmonic(2)` between reads rather than assuming simultaneous
+  multi-harmonic hardware. External-source excitation (Keithley 6221 synced
+  to a common reference) is a scoped follow-up, not yet implemented — it
+  needs new AC/waveform driver capability on the 6221 that doesn't exist yet.
+  tests: `tests/test_l1_new_vis.py` (`TestLockInHarmonicMeasurementVI`).
 - `__init__.py` — package marker. tests: none.

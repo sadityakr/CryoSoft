@@ -29,6 +29,9 @@ real_drivers:
   rotator_drv:
     class: cryosoft.drivers.sim_rotator.SimRotator
     address: "SIM::ROTATOR"
+  lockin_drv:
+    class: cryosoft.drivers.sim_lockin.SimLockIn
+    address: "SIM::LOCKIN"
 
 virtual_instruments:
   magnet_x:
@@ -133,6 +136,16 @@ virtual_instruments:
       role: Sample rotation stage
       manufacturer: CryoSoft
       model: Sim rotator
+  lockin_harmonic:
+    class: cryosoft.virtual_instruments.measurement.lockin_harmonic.LockInHarmonicMeasurementVI
+    drivers: {lockin: lockin_drv}
+    vi_type: measurement
+    init_params:
+      series_resistance_ohm: 1.0e6
+    metadata:
+      role: Lock-in 1f/2f harmonic measurement (internal source)
+      manufacturer: CryoSoft
+      model: Sim lock-in
   switch_matrix:
     class: cryosoft.virtual_instruments.switch.switch_matrix.SwitchMatrixVI
     drivers: {main: k705}

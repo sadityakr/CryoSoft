@@ -514,3 +514,133 @@ class TestSimKeithley2182A:
         d._simulate_error = True
         with pytest.raises(CryoSoftCommunicationError):
             d.get_voltage()
+
+
+class TestSimLockIn:
+    """Tests for SimLockIn phase-sensitive lock-in amplifier."""
+
+    def test_contract_single_string_init(self):
+        from cryosoft.drivers.sim_lockin import SimLockIn
+
+        d = SimLockIn("GPIB0::8::INSTR")
+        assert d is not None
+
+    def test_initial_state(self):
+        from cryosoft.drivers.sim_lockin import SimLockIn
+
+        d = SimLockIn("SIM")
+        assert d.get_reference_source() == "INT"
+        assert d.get_oscillator_amplitude() == pytest.approx(0.0)
+        assert d.get_harmonic() == 1
+
+    def test_reference_source_round_trip(self):
+        from cryosoft.drivers.sim_lockin import SimLockIn
+
+        d = SimLockIn("SIM")
+        d.set_reference_source("EXT")
+        assert d.get_reference_source() == "EXT"
+
+    def test_reference_source_rejects_invalid(self):
+        from cryosoft.drivers.sim_lockin import SimLockIn
+
+        d = SimLockIn("SIM")
+        with pytest.raises(ValueError):
+            d.set_reference_source("BOGUS")
+
+    def test_oscillator_amplitude_round_trip(self):
+        from cryosoft.drivers.sim_lockin import SimLockIn
+
+        d = SimLockIn("SIM")
+        d.set_oscillator_amplitude(0.5)
+        assert d.get_oscillator_amplitude() == pytest.approx(0.5)
+
+    def test_oscillator_amplitude_rejects_negative(self):
+        from cryosoft.drivers.sim_lockin import SimLockIn
+
+        d = SimLockIn("SIM")
+        with pytest.raises(ValueError):
+            d.set_oscillator_amplitude(-1.0)
+
+    def test_oscillator_frequency_round_trip(self):
+        from cryosoft.drivers.sim_lockin import SimLockIn
+
+        d = SimLockIn("SIM")
+        d.set_oscillator_frequency(1234.0)
+        assert d.get_oscillator_frequency() == pytest.approx(1234.0)
+
+    def test_oscillator_frequency_rejects_non_positive(self):
+        from cryosoft.drivers.sim_lockin import SimLockIn
+
+        d = SimLockIn("SIM")
+        with pytest.raises(ValueError):
+            d.set_oscillator_frequency(0.0)
+
+    def test_harmonic_round_trip(self):
+        from cryosoft.drivers.sim_lockin import SimLockIn
+
+        d = SimLockIn("SIM")
+        d.set_harmonic(2)
+        assert d.get_harmonic() == 2
+
+    def test_harmonic_rejects_non_positive(self):
+        from cryosoft.drivers.sim_lockin import SimLockIn
+
+        d = SimLockIn("SIM")
+        with pytest.raises(ValueError):
+            d.set_harmonic(0)
+
+    def test_time_constant_round_trip(self):
+        from cryosoft.drivers.sim_lockin import SimLockIn
+
+        d = SimLockIn("SIM")
+        d.set_time_constant(0.3)
+        assert d.get_time_constant() == pytest.approx(0.3)
+
+    def test_time_constant_rejects_non_positive(self):
+        from cryosoft.drivers.sim_lockin import SimLockIn
+
+        d = SimLockIn("SIM")
+        with pytest.raises(ValueError):
+            d.set_time_constant(0.0)
+
+    def test_x_scales_with_amplitude_at_1f(self):
+        from cryosoft.drivers.sim_lockin import SimLockIn
+
+        d = SimLockIn("SIM")
+        d._noise_std = 0.0  # deterministic
+        d.set_harmonic(1)
+        d.set_oscillator_amplitude(1.0)
+        x1 = d.get_x()
+        d.set_oscillator_amplitude(2.0)
+        x2 = d.get_x()
+        assert x2 == pytest.approx(2 * x1)
+
+    def test_x_scales_quadratically_with_amplitude_at_2f(self):
+        from cryosoft.drivers.sim_lockin import SimLockIn
+
+        d = SimLockIn("SIM")
+        d._noise_std = 0.0  # deterministic
+        d.set_harmonic(2)
+        d.set_oscillator_amplitude(1.0)
+        x1 = d.get_x()
+        d.set_oscillator_amplitude(2.0)
+        x2 = d.get_x()
+        assert x2 == pytest.approx(4 * x1)
+
+    def test_return_types(self):
+        from cryosoft.drivers.sim_lockin import SimLockIn
+
+        d = SimLockIn("SIM")
+        assert isinstance(d.get_x(), float)
+        assert isinstance(d.get_y(), float)
+        assert isinstance(d.get_reference_source(), str)
+        assert isinstance(d.get_harmonic(), int)
+
+    def test_simulate_error_raises(self):
+        from cryosoft.core.exceptions import CryoSoftCommunicationError
+        from cryosoft.drivers.sim_lockin import SimLockIn
+
+        d = SimLockIn("SIM")
+        d._simulate_error = True
+        with pytest.raises(CryoSoftCommunicationError):
+            d.get_x()
