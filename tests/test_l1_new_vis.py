@@ -43,6 +43,12 @@ def ilm_driver():
 
 
 @pytest.fixture
+def rotator_driver():
+    from cryosoft.drivers.sim_rotator import SimRotator
+    return SimRotator("SIM")
+
+
+@pytest.fixture
 def source_driver():
     from cryosoft.drivers.sim_keithley_6221 import SimKeithley6221
     return SimKeithley6221("SIM")
@@ -689,6 +695,118 @@ class TestCryogenLevelMeterVI:
     def test_vi_type_is_level(self, ilm_driver):
         vi = self._make_vi(ilm_driver)
         assert vi.vi_type == "level"
+
+
+# ---------------------------------------------------------------------------
+# RotatorVI
+# ---------------------------------------------------------------------------
+
+class TestRotatorVI:
+    """Tests for RotatorVI."""
+
+    def _make_vi(self, driver):
+        from cryosoft.virtual_instruments.rotator.rotator import RotatorVI
+        vi = RotatorVI(
+            {"main": driver},
+            default_rate_deg_per_min=1.0,
+            min_angle_deg=-180.0,
+            max_angle_deg=180.0,
+            max_rate_deg_per_min=10.0,
+        )
+        vi.vi_name = "rotator"
+        return vi
+
+    def test_initial_angle_is_zero(self, rotator_driver):
+        vi = self._make_vi(rotator_driver)
+        assert vi.get_sample_angle() == pytest.approx(0.0)
+
+    def test_initial_status_is_idle(self, rotator_driver):
+        vi = self._make_vi(rotator_driver)
+        assert vi.ramp_status() == "IDLE"
+
+    def test_start_ramp_transitions_to_ramping(self, rotator_driver):
+        vi = self._make_vi(rotator_driver)
+        vi.start_ramp(90.0)
+        assert vi.ramp_status() == "RAMPING"
+
+    def test_ramp_reaches_target(self, rotator_driver):
+        vi = self._make_vi(rotator_driver)
+        vi._rate_deg_per_min = 600.0  # bypass the config-limited control for a fast test ramp
+        rotator_driver.set_rate(600.0)
+        vi.start_ramp(90.0)
+        rotator_driver._last_update = time.time() - 10.0
+        for _ in range(20):
+            vi.advance_ramp()
+        assert vi.ramp_status() in ("TARGET_REACHED", "RAMPING")
+
+    def test_get_state_returns_monitored_keys(self, rotator_driver):
+        vi = self._make_vi(rotator_driver)
+        state = vi.get_state()
+        assert "get_sample_angle" in state
+        assert "get_rate_sample_angle" in state
+        assert "rotator_status" in state
+
+    def test_get_sample_angle_type(self, rotator_driver):
+        vi = self._make_vi(rotator_driver)
+        assert isinstance(vi.get_sample_angle(), float)
+
+    def test_set_sample_angle_control_starts_ramp(self, rotator_driver):
+        vi = self._make_vi(rotator_driver)
+        vi.set_sample_angle(45.0)
+        assert vi.ramp_status() == "RAMPING"
+
+    def test_start_ramp_accepts_persistent_kwarg_as_noop(self, rotator_driver):
+        """persistent= is accepted (ignored) so Station can forward it
+        uniformly to any system VI without special-casing which one it is."""
+        vi = self._make_vi(rotator_driver)
+        vi.start_ramp(45.0, persistent=False)
+        assert vi.ramp_status() == "RAMPING"
+
+    def test_standby_holds_current_angle(self, rotator_driver):
+        vi = self._make_vi(rotator_driver)
+        rotator_driver._position = 45.0
+        vi.standby()
+        assert vi.ramp_status() == "IDLE"
+        assert rotator_driver.get_position_setpoint() == pytest.approx(45.0)
+
+    def test_vi_type_is_rotator(self, rotator_driver):
+        vi = self._make_vi(rotator_driver)
+        assert vi.vi_type == "rotator"
+
+    def test_ramp_target_and_rate_none_when_idle(self, rotator_driver):
+        vi = self._make_vi(rotator_driver)
+        assert vi.ramp_target() is None
+        assert vi.ramp_rate() is None
+
+    def test_ramp_target_reports_angle_in_degrees(self, rotator_driver):
+        vi = self._make_vi(rotator_driver)
+        vi.start_ramp(90.0)
+        assert vi.ramp_target() == pytest.approx(90.0)
+        assert vi.ramp_rate() == pytest.approx(1.0)
+
+    def test_stop_ramp_clears_ramp_target(self, rotator_driver):
+        vi = self._make_vi(rotator_driver)
+        vi.start_ramp(90.0)
+        vi.stop_ramp()
+        assert vi.ramp_target() is None
+        assert vi.ramp_status() == "IDLE"
+
+    def test_set_rate_sample_angle_updates_rate(self, rotator_driver):
+        vi = self._make_vi(rotator_driver)
+        vi.set_rate_sample_angle(5.0)
+        assert vi.get_rate_sample_angle() == pytest.approx(5.0)
+
+    def test_set_sample_angle_rejects_out_of_range(self, rotator_driver):
+        from cryosoft.core.exceptions import CryoSoftSafetyError
+        vi = self._make_vi(rotator_driver)
+        with pytest.raises(CryoSoftSafetyError):
+            vi.set_sample_angle(200.0)
+
+    def test_set_rate_sample_angle_rejects_out_of_range(self, rotator_driver):
+        from cryosoft.core.exceptions import CryoSoftSafetyError
+        vi = self._make_vi(rotator_driver)
+        with pytest.raises(CryoSoftSafetyError):
+            vi.set_rate_sample_angle(20.0)
 
 
 # ---------------------------------------------------------------------------

@@ -7,8 +7,8 @@
 #   init_params; out-of-range @control calls raise CryoSoftSafetyError before
 #   any hardware command). Also get_state() auto-build, evaluate_safety() hook,
 #   and typed sub-bases for each VI category (MagnetBase,
-#   TemperatureControllerBase, LevelMeterBase, MeasurementInstrumentBase,
-#   DCMeasurementBase). MeasurementInstrumentBase also defines the
+#   TemperatureControllerBase, LevelMeterBase, RotatorBase,
+#   MeasurementInstrumentBase, DCMeasurementBase). MeasurementInstrumentBase also defines the
 #   self-describing measurement-method standard (measurement_parameters /
 #   measurement_data_keys / measurement_scalar_columns / reading_setters class
 #   attrs plus the data_arrays / initiate / take_reading / standby lifecycle).
@@ -32,7 +32,7 @@
 """BaseVirtualInstrument and category base classes.
 
 All VIs inherit from BaseVirtualInstrument (and possibly one of the typed
-sub-bases: MagnetBase, TemperatureControllerBase, LevelMeterBase,
+sub-bases: MagnetBase, TemperatureControllerBase, LevelMeterBase, RotatorBase,
 MeasurementInstrumentBase).
 
 Do NOT import from Station, Orchestrator, or Procedure here.
@@ -352,6 +352,14 @@ class TemperatureControllerBase(BaseVirtualInstrument):
 class LevelMeterBase(BaseVirtualInstrument):
     """Base class for all cryogen-level-meter VIs."""
     vi_type: str = "level"
+
+
+class RotatorBase(BaseVirtualInstrument):
+    """Base class for all sample-rotator VIs."""
+    vi_type: str = "rotator"
+    setpoint_label: str = "sample angle"
+    setpoint_unit: str = "deg"
+    display_label: str = "rotator"
 
 
 class MeasurementInstrumentBase(BaseVirtualInstrument):

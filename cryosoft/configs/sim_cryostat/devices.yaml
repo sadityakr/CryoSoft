@@ -26,6 +26,9 @@ real_drivers:
   k705:
     class: cryosoft.drivers.sim_keithley_705.SimKeithley705
     address: "SIM::K705"
+  rotator_drv:
+    class: cryosoft.drivers.sim_rotator.SimRotator
+    address: "SIM::ROTATOR"
 
 virtual_instruments:
   magnet_x:
@@ -117,6 +120,19 @@ virtual_instruments:
       role: DC source-and-measure (source + nanovoltmeter pair)
       manufacturer: Keithley
       model: 6221 + 2182A
+  rotator:
+    class: cryosoft.virtual_instruments.rotator.rotator.RotatorVI
+    drivers: {main: rotator_drv}
+    vi_type: system
+    init_params:
+      default_rate_deg_per_min: 1.0
+      min_angle_deg: -180.0
+      max_angle_deg: 180.0
+      max_rate_deg_per_min: 10.0
+    metadata:
+      role: Sample rotation stage
+      manufacturer: CryoSoft
+      model: Sim rotator
   switch_matrix:
     class: cryosoft.virtual_instruments.switch.switch_matrix.SwitchMatrixVI
     drivers: {main: k705}

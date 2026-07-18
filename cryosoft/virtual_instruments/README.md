@@ -44,8 +44,9 @@ The written standards all live in this root and are enforced by
 ## How to add a new module
 1. Pick the `vi_type` and open that subfolder's README for the local recipe.
 2. Subclass the right base (`MagnetBase`, `TemperatureControllerBase`,
-   `LevelMeterBase`, `MeasurementInstrumentBase` / `DCMeasurementBase`, or
-   `BaseVirtualInstrument` directly for a switch), adding `RampableVI` if it ramps.
+   `LevelMeterBase`, `RotatorBase`, `MeasurementInstrumentBase` /
+   `DCMeasurementBase`, or `BaseVirtualInstrument` directly for a switch),
+   adding `RampableVI` if it ramps.
 3. Tag reads `@monitored` and actions `@control`; declare `control_limits` for any
    bounded parameter and read the value from `init_params`.
 4. Register the VI in a config `devices.yaml`; add behaviour tests to the
@@ -55,8 +56,8 @@ The written standards all live in this root and are enforced by
 Shared contracts at the root; concrete classes live in the subfolders.
 
 - `base.py` — `BaseVirtualInstrument` plus the typed sub-bases `MagnetBase`,
-  `TemperatureControllerBase`, `LevelMeterBase`, `MeasurementInstrumentBase`,
-  `DCMeasurementBase`. Provides `__init_subclass__` auto-wrapping of
+  `TemperatureControllerBase`, `LevelMeterBase`, `RotatorBase`,
+  `MeasurementInstrumentBase`, `DCMeasurementBase`. Provides `__init_subclass__` auto-wrapping of
   `@monitored`/`@control` (structured logging + declarative limit enforcement),
   `get_state()`, `evaluate_safety()`, and the full measurement-method standard in
   `MeasurementInstrumentBase`'s docstring. (`@monitored`/`@control` decorators
@@ -71,6 +72,8 @@ Shared contracts at the root; concrete classes live in the subfolders.
 - `magnet/` — superconducting magnet PSU VIs (field ramp, persistent mode).
 - `temperature/` — temperature controller VIs (sample and VTI).
 - `level/` — cryogen level meter VIs.
+- `rotator/` — motorized sample-rotation stage VIs (uniaxial/2D magnet sample
+  orientation).
 - `measurement/` — electrical transport measurement-method VIs (DC, delta-mode).
 - `switch/` — matrix-switch / scanner VIs (exclusive-mux routing).
 

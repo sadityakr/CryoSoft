@@ -118,6 +118,121 @@ class TestSimOxfordIPS120:
         assert d.get_status() == "HOLD"
 
 
+class TestSimRotator:
+    """Tests for SimRotator sample-rotation stage."""
+
+    def test_contract_single_string_init(self):
+        """Driver accepts a single string argument."""
+        from cryosoft.drivers.sim_rotator import SimRotator
+
+        driver = SimRotator("GPIB0::26::INSTR")
+        assert driver is not None
+
+    def test_initial_state(self):
+        from cryosoft.drivers.sim_rotator import SimRotator
+
+        d = SimRotator("SIM")
+        assert d.get_position() == pytest.approx(0.0)
+        assert d.get_position_setpoint() == pytest.approx(0.0)
+        assert d.get_status() == "HOLD"
+
+    def test_return_types(self):
+        from cryosoft.drivers.sim_rotator import SimRotator
+
+        d = SimRotator("SIM")
+        assert isinstance(d.get_position(), float)
+        assert isinstance(d.get_position_setpoint(), float)
+        assert isinstance(d.get_status(), str)
+
+    def test_ramp_starts_on_setpoint_change(self):
+        from cryosoft.drivers.sim_rotator import SimRotator
+
+        d = SimRotator("SIM")
+        d.set_position_setpoint(90.0)
+        assert d.get_status() == "MOVING"
+
+    def test_ramp_completes(self):
+        """Rotation from 0 to a small target completes with enough time."""
+        from cryosoft.drivers.sim_rotator import SimRotator
+
+        d = SimRotator("SIM")
+        d.set_rate(600.0)  # Very fast: 600 deg/min for testing
+        d.set_position_setpoint(1.0)
+        d._last_update = time.time() - 1.0  # 1 second ago
+        d._update_simulation()
+        assert d.get_position() == pytest.approx(1.0)
+        assert d.get_status() == "HOLD"
+
+    def test_ramp_direction_negative(self):
+        from cryosoft.drivers.sim_rotator import SimRotator
+
+        d = SimRotator("SIM")
+        d._position = 10.0
+        d.set_rate(600.0)
+        d.set_position_setpoint(0.0)
+        d._last_update = time.time() - 2.0
+        d._update_simulation()
+        assert d.get_position() == pytest.approx(0.0)
+
+    def test_hold_when_no_ramp(self):
+        from cryosoft.drivers.sim_rotator import SimRotator
+
+        d = SimRotator("SIM")
+        d._last_update = time.time() - 10.0
+        d._update_simulation()
+        assert d.get_position() == pytest.approx(0.0)
+        assert d.get_status() == "HOLD"
+
+    def test_setpoint_clamping_above_max(self):
+        from cryosoft.drivers.sim_rotator import SimRotator
+
+        d = SimRotator("SIM")
+        d.set_position_setpoint(500.0)  # Above 180 deg max
+        assert d.get_position_setpoint() == pytest.approx(180.0)
+
+    def test_setpoint_clamping_below_min(self):
+        from cryosoft.drivers.sim_rotator import SimRotator
+
+        d = SimRotator("SIM")
+        d.set_position_setpoint(-500.0)  # Below -180 deg min
+        assert d.get_position_setpoint() == pytest.approx(-180.0)
+
+    def test_simulate_error_raises(self):
+        from cryosoft.core.exceptions import CryoSoftCommunicationError
+        from cryosoft.drivers.sim_rotator import SimRotator
+
+        d = SimRotator("SIM")
+        d._simulate_error = True
+        with pytest.raises(CryoSoftCommunicationError):
+            d.get_position()
+
+    def test_no_ramp_when_setpoint_at_current(self):
+        """No state transition when setpoint equals current (within 0.01 deg)."""
+        from cryosoft.drivers.sim_rotator import SimRotator
+
+        d = SimRotator("SIM")
+        d.set_position_setpoint(0.005)  # Difference < 0.01
+        assert d.get_status() == "HOLD"
+
+    def test_set_rate_rejects_non_positive(self):
+        from cryosoft.drivers.sim_rotator import SimRotator
+
+        d = SimRotator("SIM")
+        with pytest.raises(ValueError):
+            d.set_rate(0.0)
+
+    def test_hold_freezes_position(self):
+        from cryosoft.drivers.sim_rotator import SimRotator
+
+        d = SimRotator("SIM")
+        d.set_rate(600.0)
+        d.set_position_setpoint(90.0)
+        d._last_update = time.time() - 0.05  # small step, mid-ramp
+        d.hold()
+        assert d.get_status() == "HOLD"
+        assert d.get_position_setpoint() == pytest.approx(d.get_position())
+
+
 class TestSimOxfordITC503:
     """Tests for SimOxfordITC503 temperature controller."""
 
