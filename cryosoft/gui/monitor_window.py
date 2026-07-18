@@ -4,8 +4,8 @@
 #   Content below the header/banner is a fixed 2x2 quadrant grid, built from
 #   nested QSplitters (one horizontal, two vertical): top-left is a scrollable
 #   2-column instrument monitor/control list, top-right is a TrendsQuadrant
-#   (cryosoft.gui.trends_quadrant), bottom-left is a SampleInfoPanel
-#   (cryosoft.gui.sample_info_panel), and bottom-right is an OtherDevicesPanel
+#   (cryosoft.gui.trends_quadrant), bottom-left is a SessionInfoPanel
+#   (cryosoft.gui.session_info_panel), and bottom-right is an OtherDevicesPanel
 #   / LogPanel pair behind a QComboBox selector (cryosoft.gui.other_devices,
 #   cryosoft.gui.log_panel). Splitter boundaries are draggable but nothing can
 #   be closed, detached, or floated. This module is the composition shell:
@@ -19,13 +19,13 @@
 #   - cryosoft.core.orchestrator (Orchestrator)
 #   - cryosoft.gui.instrument_panel (InstrumentPanel)
 #   - cryosoft.gui.trends_quadrant (TrendsQuadrant)
-#   - cryosoft.gui.sample_info_panel (SampleInfoPanel)
+#   - cryosoft.gui.session_info_panel (SessionInfoPanel)
 #   - cryosoft.gui.other_devices (OtherDevicesPanel)
 #   - cryosoft.gui.log_panel (LogPanel)
 #   - cryosoft.gui.config_menu (ConfigMenuController)
 #   - cryosoft.gui.window_geometry (geometry persistence helpers)
 #   - cryosoft.session.manager (SessionManager, optional — forwarded to
-#     SampleInfoPanel, which owns the experiment lifecycle controls)
+#     SessionInfoPanel, which owns the experiment lifecycle controls)
 # input: |
 #   Station instance and Orchestrator instance.
 # process: |
@@ -76,7 +76,7 @@ from cryosoft.gui.instrument_panel import InstrumentPanel
 from cryosoft.gui.log_panel import LogPanel
 from cryosoft.gui.notification_banner import NotificationBanner
 from cryosoft.gui.other_devices import OtherDevicesPanel
-from cryosoft.gui.sample_info_panel import SampleInfoPanel
+from cryosoft.gui.session_info_panel import SessionInfoPanel
 from cryosoft.session.manager import SessionManager
 from cryosoft.gui.theme import (
     BANNER_SEVERITY_ERROR,
@@ -128,7 +128,7 @@ class MonitorWindow(QMainWindow):
     Everything below the header/banner is a fixed 2x2 quadrant grid built
     from nested QSplitters: top-left is a scrollable 2-column instrument
     monitor/control list, top-right is the :class:`TrendsQuadrant`,
-    bottom-left is the :class:`SampleInfoPanel`, and bottom-right is the
+    bottom-left is the :class:`SessionInfoPanel`, and bottom-right is the
     :class:`OtherDevicesPanel` / :class:`LogPanel` pair behind a QComboBox
     selector. Every splitter boundary is draggable; nothing in the grid can
     be closed, detached, or floated.
@@ -161,7 +161,7 @@ class MonitorWindow(QMainWindow):
 
         # Session layer (L6, optional — absent in unit tests). experiment_context()
         # stamps built procedures; the experiment start/close/attendance/findings
-        # controls live on the SampleInfoPanel, which owns session_manager directly.
+        # controls live on the SessionInfoPanel, which owns session_manager directly.
         self._session_manager = session_manager
 
         # Config management (optional — absent in unit tests that build the
@@ -183,7 +183,7 @@ class MonitorWindow(QMainWindow):
         window_geometry.restore_or_center(self, _GEOMETRY_KEY, fraction=0.9)
 
         self._build_ui()
-        self._sample_info.apply_session(self._session)
+        self._session_info.apply_session(self._session)
         self._build_menu()
         self._connect_signals()
         self._restore_monitor_state()
@@ -292,14 +292,14 @@ class MonitorWindow(QMainWindow):
         # ── Fixed 2x2 quadrant grid ──────────────────────────────────
         top_left = self._build_instruments_quadrant()
         self._trends = TrendsQuadrant(self._station, parent=self)
-        self._sample_info = SampleInfoPanel(session_manager=self._session_manager)
+        self._session_info = SessionInfoPanel(session_manager=self._session_manager)
         bottom_right = self._build_other_devices_log_quadrant(measurement_vis, switch_vis)
 
         self._left_splitter = QSplitter(Qt.Orientation.Vertical)
         self._left_splitter.setObjectName("left_splitter")
         self._left_splitter.setChildrenCollapsible(False)
         self._left_splitter.addWidget(top_left)
-        self._left_splitter.addWidget(self._sample_info)
+        self._left_splitter.addWidget(self._session_info)
         self._left_splitter.setSizes([750, 250])
 
         self._right_splitter = QSplitter(Qt.Orientation.Vertical)
@@ -517,7 +517,7 @@ class MonitorWindow(QMainWindow):
         Returns:
             Dict with keys ``sample_name``, ``sample_id``, ``comments``.
         """
-        return self._sample_info.get_sample_info()
+        return self._session_info.get_sample_info()
 
     def get_data_dir(self) -> str:
         """Return the configured data directory path.
@@ -525,7 +525,7 @@ class MonitorWindow(QMainWindow):
         Returns:
             Absolute path string; falls back to ``"C:/CryoData"`` if empty.
         """
-        return self._sample_info.get_data_dir()
+        return self._session_info.get_data_dir()
 
     def get_experiment_info(self) -> dict[str, str]:
         """Return the session layer's experiment context for procedure stamping.
@@ -585,7 +585,7 @@ class MonitorWindow(QMainWindow):
         if reply != QMessageBox.StandardButton.Yes:
             return
         self._session = session_store.SessionState()
-        self._sample_info.apply_session(self._session)
+        self._session_info.apply_session(self._session)
         if self._procedure_window is not None:
             self._procedure_window.reset_session()
         self._save_session()

@@ -1,6 +1,6 @@
 # ---
 # description: |
-#   SampleInfoPanel: the Sample Info quadrant of MonitorWindow — the
+#   SessionInfoPanel: the Session Information quadrant of MonitorWindow — the
 #   experiment status/Start-Close control (when a SessionManager is wired),
 #   plus sample name, ID, comments, and the data-directory field with its
 #   Browse button. The sample fields stay free-editable per run regardless of
@@ -21,8 +21,8 @@
 #   optional SessionManager whose experiment_changed signal drives the
 #   experiment status row.
 # process: |
-#   Builds the form inside a QScrollArea (objectNames sample_info_quadrant /
-#   sample_info_scroll and the *_input fields are preserved API for tests).
+#   Builds the form inside a QScrollArea (objectNames session_info_quadrant /
+#   session_info_scroll and the *_input fields are preserved API for tests).
 #   The experiment row is always built; without a SessionManager its button
 #   stays disabled.
 # output: |
@@ -31,7 +31,7 @@
 #   set_attended() are called from the dialogs' results.
 # ---
 
-"""SampleInfoPanel — the Sample Info quadrant (session-level metadata)."""
+"""SessionInfoPanel — the Session Information quadrant (experiment + sample metadata)."""
 
 from __future__ import annotations
 
@@ -61,10 +61,10 @@ from cryosoft.session.manager import SessionManager
 _DEFAULT_DATA_DIR = "C:/CryoData"
 
 
-class SampleInfoPanel(QWidget):
-    """The Sample Info quadrant: experiment control, plus sample fields.
+class SessionInfoPanel(QWidget):
+    """The Session Information quadrant: experiment control, plus sample fields.
 
-    ObjectNames (``sample_info_quadrant``, ``sample_info_scroll``,
+    ObjectNames (``session_info_quadrant``, ``session_info_scroll``,
     ``sample_name_input``, ``sample_id_input``, ``comments_input``,
     ``data_dir_input``, ``browse_btn``, ``experiment_status_label``,
     ``start_close_experiment_btn``, ``attended_checkbox``) are preserved API
@@ -84,7 +84,7 @@ class SampleInfoPanel(QWidget):
     ) -> None:
         super().__init__(parent)
         self._session_manager = session_manager
-        self.setObjectName("sample_info_quadrant")
+        self.setObjectName("session_info_quadrant")
         outer = QVBoxLayout(self)
         outer.setContentsMargins(4, 4, 4, 4)
         outer.setSpacing(4)
@@ -93,7 +93,7 @@ class SampleInfoPanel(QWidget):
         outer.addWidget(QLabel("<b>Sample Info</b>"))
 
         scroll = QScrollArea()
-        scroll.setObjectName("sample_info_scroll")
+        scroll.setObjectName("session_info_scroll")
         scroll.setWidgetResizable(True)
         scroll.setWidget(self._build_form())
         outer.addWidget(scroll)

@@ -827,15 +827,15 @@ def test_param_form_renders_all_widget_kinds_and_round_trips(qtbot):
 
 def test_monitor_sample_info_inputs_exist(monitor_win):
     """Sample name, ID, and comments fields are present in MonitorWindow."""
-    assert monitor_win._sample_info._sample_name_input is not None
-    assert monitor_win._sample_info._sample_id_input is not None
-    assert monitor_win._sample_info._comments_input is not None
+    assert monitor_win._session_info._sample_name_input is not None
+    assert monitor_win._session_info._sample_id_input is not None
+    assert monitor_win._session_info._comments_input is not None
 
 
 def test_monitor_data_dir_input_exists(monitor_win):
     """Data directory input is in MonitorWindow and has a default value."""
-    assert monitor_win._sample_info._data_dir_input is not None
-    assert monitor_win._sample_info._data_dir_input.text() != ""
+    assert monitor_win._session_info._data_dir_input is not None
+    assert monitor_win._session_info._data_dir_input.text() != ""
 
 
 def test_monitor_get_sample_info(monitor_win):
@@ -851,7 +851,7 @@ def test_monitor_get_data_dir(monitor_win):
     assert monitor_win.get_data_dir() != ""
 
 
-# ── Experiment lifecycle (SampleInfoPanel) ─────────────────────────────────────
+# ── Experiment lifecycle (SessionInfoPanel) ────────────────────────────────────
 
 @pytest.fixture
 def session_manager(tmp_path, station, orchestrator):
@@ -909,7 +909,7 @@ class _FakeCloseDialog:
 
 def _stub_start_dialog(monkeypatch, title, user_id, attended=True):
     """Replace StartExperimentDialog with a fake that auto-accepts ``values``."""
-    from cryosoft.gui import sample_info_panel as sip
+    from cryosoft.gui import session_info_panel as sip
 
     monkeypatch.setattr(
         sip,
@@ -920,7 +920,7 @@ def _stub_start_dialog(monkeypatch, title, user_id, attended=True):
 
 def _stub_close_dialog(monkeypatch, findings_text=""):
     """Replace CloseExperimentDialog with a fake that auto-accepts ``findings_text``."""
-    from cryosoft.gui import sample_info_panel as sip
+    from cryosoft.gui import session_info_panel as sip
 
     monkeypatch.setattr(
         sip,
@@ -931,14 +931,14 @@ def _stub_close_dialog(monkeypatch, findings_text=""):
 
 def test_experiment_row_disabled_without_session_manager(monitor_win):
     """The Start Experiment button is disabled when no SessionManager is wired."""
-    btn = monitor_win._sample_info._start_close_btn
+    btn = monitor_win._session_info._start_close_btn
     assert not btn.isEnabled()
-    assert monitor_win._sample_info._experiment_status_label.text() == "No experiment open"
+    assert monitor_win._session_info._experiment_status_label.text() == "No experiment open"
 
 
 def test_experiment_row_enabled_with_session_manager(monitor_win_session):
     """The Start Experiment button is enabled and shows the closed state."""
-    panel = monitor_win_session._sample_info
+    panel = monitor_win_session._session_info
     assert panel._start_close_btn.isEnabled()
     assert panel._start_close_btn.text() == "Start Experiment…"
     assert not panel._attended_checkbox.isVisible()
@@ -947,7 +947,7 @@ def test_experiment_row_enabled_with_session_manager(monitor_win_session):
 def test_start_experiment_updates_panel_and_manager(monitor_win_session, session_manager, monkeypatch):
     """Clicking Start Experiment opens the dialog and installs the experiment."""
     _stub_start_dialog(monkeypatch, "Hall bar A3", "jdoe", attended=True)
-    panel = monitor_win_session._sample_info
+    panel = monitor_win_session._session_info
 
     panel._start_close_btn.click()
 
@@ -967,7 +967,7 @@ def test_close_experiment_saves_findings_and_resets_panel(
 ):
     """Clicking Close Experiment saves findings and reverts the panel to closed."""
     _stub_start_dialog(monkeypatch, "Hall bar A3", "jdoe")
-    panel = monitor_win_session._sample_info
+    panel = monitor_win_session._session_info
     panel._start_close_btn.click()
     experiment_id = session_manager.current_experiment().experiment_id
 
@@ -988,7 +988,7 @@ def test_attendance_checkbox_toggle_calls_set_attended(
 ):
     """Unchecking Attended flips the experiment's attendance flag."""
     _stub_start_dialog(monkeypatch, "Hall bar A3", "jdoe", attended=True)
-    panel = monitor_win_session._sample_info
+    panel = monitor_win_session._session_info
     panel._start_close_btn.click()
 
     panel._attended_checkbox.setChecked(False)
@@ -1130,7 +1130,7 @@ def test_monitor_instrument_panels_exist_for_system_vis(monitor_win, station):
 
 def test_monitor_fixed_quadrants_exist_with_expected_content(monitor_win):
     """Sample Info and the Other Devices/Log stack contain the expected widgets."""
-    sample_quadrant = monitor_win.findChild(QScrollArea, "sample_info_scroll")
+    sample_quadrant = monitor_win.findChild(QScrollArea, "session_info_scroll")
     assert sample_quadrant is not None
     assert sample_quadrant.widget().findChild(QLineEdit, "sample_name_input") is not None
 
@@ -1639,16 +1639,16 @@ def test_monitor_restores_sample_fields_from_session(station, orchestrator, qtbo
     )
     win = MonitorWindow(station, orchestrator)
     qtbot.addWidget(win)
-    assert win._sample_info._sample_name_input.text() == "Si_001"
-    assert win._sample_info._sample_id_input.text() == "S2024-01"
-    assert win._sample_info._comments_input.toPlainText() == "cooldown 2"
-    assert win._sample_info._data_dir_input.text() == "D:/runs"
+    assert win._session_info._sample_name_input.text() == "Si_001"
+    assert win._session_info._sample_id_input.text() == "S2024-01"
+    assert win._session_info._comments_input.toPlainText() == "cooldown 2"
+    assert win._session_info._data_dir_input.text() == "D:/runs"
 
 
 def test_monitor_saves_session_on_close(monitor_win, tmp_path):
     """Closing the window persists the current Sample Info to the session file."""
-    monitor_win._sample_info._sample_name_input.setText("SampleZ")
-    monitor_win._sample_info._data_dir_input.setText("E:/data")
+    monitor_win._session_info._sample_name_input.setText("SampleZ")
+    monitor_win._session_info._data_dir_input.setText("E:/data")
     monitor_win.close()
     loaded = session_store.load(tmp_path / "last_session.json")
     assert loaded.sample_name == "SampleZ"
@@ -1657,13 +1657,13 @@ def test_monitor_saves_session_on_close(monitor_win, tmp_path):
 
 def test_new_session_clears_fields(monitor_win, monkeypatch):
     """New Session (confirmed) resets the Sample Info fields to defaults."""
-    monitor_win._sample_info._sample_name_input.setText("ToClear")
+    monitor_win._session_info._sample_name_input.setText("ToClear")
     monkeypatch.setattr(
         QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes
     )
     monitor_win._on_new_session()
-    assert monitor_win._sample_info._sample_name_input.text() == ""
-    assert monitor_win._sample_info._data_dir_input.text() == "C:/CryoData"
+    assert monitor_win._session_info._sample_name_input.text() == ""
+    assert monitor_win._session_info._data_dir_input.text() == "C:/CryoData"
 
 
 def test_procedure_window_restores_selection_and_params(station, orchestrator, qtbot):

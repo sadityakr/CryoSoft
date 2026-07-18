@@ -3,11 +3,11 @@
 #   Modal dialogs for the experiment lifecycle: StartExperimentDialog (title,
 #   user, attendance — with an inline "New user" flow via AddUserDialog) and
 #   CloseExperimentDialog (closing findings text). Opened only by
-#   SampleInfoPanel's Start/Close Experiment button; every SessionManager
+#   SessionInfoPanel's Start/Close Experiment button; every SessionManager
 #   mutation happens in the panel after a dialog accepts, never inside the
 #   dialogs themselves (the one exception is AddUserDialog's caller adding
 #   the new User to the roster, since the roster has no other writer).
-# entry_point: Not run directly. Opened by cryosoft.gui.sample_info_panel.
+# entry_point: Not run directly. Opened by cryosoft.gui.session_info_panel.
 # dependencies:
 #   - PyQt6 >= 6.5
 #   - cryosoft.session.models (User)
