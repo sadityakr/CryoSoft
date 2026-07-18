@@ -18,8 +18,9 @@ one allowed exception). CI runs `make lint + make contracts + make test`.
 | `cryosoft/gui/theme.py` | ALL colors and QSS live here (tokens + `build_stylesheet()`) |
 | `cryosoft/gui/monitor_window.py` | Main window (composition shell): quadrant splitters, banner, status bar, menus, signal wiring |
 | `cryosoft/gui/trends_quadrant.py` | Trends quadrant: TrendPlotPanel grid + MonitorHistory + persistence |
-| `cryosoft/gui/session_info_panel.py` | Session Information quadrant (experiment Start/Close control + name/ID/comments/data dir) |
-| `cryosoft/gui/experiment_dialogs.py` | Start/Close Experiment dialogs, add-user dialog |
+| `cryosoft/gui/session_info_panel.py` | Experiment-tier quadrant (Start/Close control + name/ID/comments/data dir + eLab status line) |
+| `cryosoft/gui/experiment_dialogs.py` | Start/Close Experiment dialogs, shared `UserPickerWidget`, add-user dialog |
+| `cryosoft/gui/setup_dialogs.py` | Setup-tier dialogs: login (`LoginDialog`), read-only instrument info (`InstrumentInfoDialog`) |
 | `cryosoft/gui/other_devices.py` | Other Devices rows (measurement check rows, display-only switch rows) |
 | `cryosoft/gui/log_panel.py` | Log widget + `QtLogHandler` (attach/detach lifecycle) |
 | `cryosoft/gui/config_menu.py` | Config menu controller (select/switch/restart, editor launcher) |

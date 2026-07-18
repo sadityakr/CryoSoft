@@ -4,13 +4,16 @@
 #   Owns the experiment lifecycle (start/close, findings, attendance), records
 #   every run automatically from the Orchestrator's run_started/run_finished
 #   manifests, installs the experiment's session envelope on the Orchestrator,
-#   and supplies experiment_context() for stamping HDF5 files. Qt-widget-free:
-#   a QObject with signals, no gui imports (contract C11).
+#   and supplies experiment_context() — a two-tier {setup, experiment} dict —
+#   for stamping HDF5 files. The Setup tier (config identity + each VI's
+#   optional devices.yaml metadata block) is read once at construction via
+#   read_instrument_metadata() and is present even with no experiment open.
+#   Qt-widget-free: a QObject with signals, no gui imports (contract C11).
 # entry_point: Not run directly. Constructed in cryosoft.main after the
 #   Orchestrator; injected into the GUI like the ConfigCatalog.
 # dependencies:
 #   - cryosoft.core.orchestrator (run manifests, set_session_envelope)
-#   - cryosoft.core.station (settings snapshots)
+#   - cryosoft.core.station (settings snapshots, read_instrument_metadata)
 #   - cryosoft.session.store / cryosoft.session.models
 # input: |
 #   Orchestrator signals (run manifests) and GUI lifecycle calls
@@ -37,7 +40,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 
 from cryosoft.core.orchestrator import Orchestrator
 from cryosoft.core.plan import SessionEnvelope
-from cryosoft.core.station import Station
+from cryosoft.core.station import Station, read_instrument_metadata
 from cryosoft.session.models import (
     EXPERIMENT_STATUS_CLOSED,
     EXPERIMENT_STATUS_OPEN,
@@ -86,6 +89,7 @@ class SessionManager(QObject):
         orchestrator: Orchestrator,
         station: Station,
         config_name: str = "",
+        config_path: str | None = None,
     ) -> None:
         """Wire into the Orchestrator and resume any active experiment.
 
@@ -98,6 +102,10 @@ class SessionManager(QObject):
             station: The active Station (settings snapshots at run start).
             config_name: Identity of the active config, recorded on new
                 experiments.
+            config_path: Directory of the active config, read once for each
+                VI's optional ``metadata:`` block (``read_instrument_metadata``).
+                ``None`` (e.g. in unit tests) just means no instrument
+                metadata is stamped — never an error.
         """
         super().__init__()
         self._store = store
@@ -105,6 +113,9 @@ class SessionManager(QObject):
         self._orchestrator = orchestrator
         self._station = station
         self._config_name = config_name
+        self._instrument_metadata = (
+            read_instrument_metadata(config_path) if config_path else {}
+        )
         self._experiment: ExperimentRecord | None = None
 
         orchestrator.run_started.connect(self._on_run_started)
@@ -130,29 +141,44 @@ class SessionManager(QObject):
         """Return the open experiment record, or ``None``."""
         return self._experiment
 
-    def experiment_context(self) -> dict[str, str]:
-        """Return the context dict stamped into every HDF5 file of a run.
+    def experiment_context(self) -> dict[str, Any]:
+        """Return the two-tier context dict stamped into every run's metadata.
 
         This is what the GUI passes as ``experiment_info`` when constructing a
-        procedure, ending up in ``/metadata/experiment_info``.
+        procedure, ending up whole (as one JSON blob) in
+        ``/metadata/experiment_info``. Nests the two tiers this layer knows
+        about — Setup (the config/instrument identity, true regardless of
+        whether an experiment is open) and Experiment (this named group of
+        runs, empty when none is open). The third tier, per-run measurement
+        metadata, is stamped separately by the procedure itself.
 
         Returns:
-            ``{experiment_id, experiment_title, user_id, user_name}`` (plus
-            ``eln_url`` once the experiment is published), or ``{}`` when no
-            experiment is open.
+            ``{"setup": {"config_name": ..., "instruments": {vi_name: {...}}},
+            "experiment": {...} or {}}``. The experiment sub-dict, when
+            present, has ``experiment_id``, ``experiment_title``, ``user_id``,
+            ``user_name``, ``attended``, and ``eln_link`` (``{}`` until
+            published).
         """
+        setup = {
+            "config_name": self._config_name,
+            "instruments": dict(self._instrument_metadata),
+        }
         if self._experiment is None:
-            return {}
+            return {"setup": setup, "experiment": {}}
         user = self._roster.get(self._experiment.user_id)
-        context = {
+        experiment = {
             "experiment_id": self._experiment.experiment_id,
             "experiment_title": self._experiment.title,
             "user_id": self._experiment.user_id,
             "user_name": user.name if user else "",
+            "attended": self._experiment.attended,
+            "eln_link": (
+                self._experiment.eln_link.to_dict()
+                if self._experiment.eln_link is not None
+                else {}
+            ),
         }
-        if self._experiment.eln_link is not None and self._experiment.eln_link.url:
-            context["eln_url"] = self._experiment.eln_link.url
-        return context
+        return {"setup": setup, "experiment": experiment}
 
     # ------------------------------------------------------------------
     # Experiment lifecycle

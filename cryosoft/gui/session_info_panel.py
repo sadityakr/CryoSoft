@@ -1,9 +1,13 @@
 # ---
 # description: |
 #   SessionInfoPanel: the Session Information quadrant of MonitorWindow — the
-#   experiment status/Start-Close control (when a SessionManager is wired),
-#   plus sample name, ID, comments, and the data-directory field with its
-#   Browse button. The sample fields stay free-editable per run regardless of
+#   GUI surface for the Experiment tier (Setup-tier concerns — config
+#   identity, instrument metadata, user login — live in the menu bar, not
+#   here). Holds the experiment status/Start-Close control (when a
+#   SessionManager is wired), sample name/ID/comments and the data-directory
+#   field with its Browse button, and an eLab status line (publish controls
+#   land with Track B; today it just reflects ElnLink on the open
+#   experiment). The sample fields stay free-editable per run regardless of
 #   whether an experiment is open; whatever they hold at "Start Experiment"
 #   time is snapshotted onto the ExperimentRecord for record-keeping. It is
 #   the single owner of session-level sample metadata in the GUI, read by
@@ -59,6 +63,7 @@ from cryosoft.gui.theme import TEXT_PRIMARY
 from cryosoft.session.manager import SessionManager
 
 _DEFAULT_DATA_DIR = "C:/CryoData"
+_ELN_NOT_CONFIGURED_TEXT = "eLab publishing is not configured yet"
 
 
 class SessionInfoPanel(QWidget):
@@ -97,6 +102,12 @@ class SessionInfoPanel(QWidget):
         scroll.setWidgetResizable(True)
         scroll.setWidget(self._build_form())
         outer.addWidget(scroll)
+
+        outer.addWidget(QLabel("<b>eLab</b>"))
+        self._eln_status_label = QLabel(_ELN_NOT_CONFIGURED_TEXT)
+        self._eln_status_label.setObjectName("eln_status_label")
+        self._eln_status_label.setWordWrap(True)
+        outer.addWidget(self._eln_status_label)
 
         if self._session_manager is not None:
             self._session_manager.experiment_changed.connect(self._on_experiment_changed)
@@ -186,6 +197,7 @@ class SessionInfoPanel(QWidget):
             self._experiment_status_label.setText("No experiment open")
             self._start_close_btn.setText("Start Experiment…")
             self._attended_checkbox.setVisible(False)
+            self._eln_status_label.setText(_ELN_NOT_CONFIGURED_TEXT)
             return
 
         user_id = record.get("user_id", "")
@@ -205,6 +217,12 @@ class SessionInfoPanel(QWidget):
         self._attended_checkbox.blockSignals(True)
         self._attended_checkbox.setChecked(attended)
         self._attended_checkbox.blockSignals(False)
+
+        eln_link = record.get("eln_link") or {}
+        if eln_link.get("url"):
+            self._eln_status_label.setText(f"Published: {eln_link['url']}")
+        else:
+            self._eln_status_label.setText(f"Not published yet — {_ELN_NOT_CONFIGURED_TEXT}")
 
     def _build_form(self) -> QWidget:
         """Build the sample-info form (session-level metadata).

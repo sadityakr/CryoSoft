@@ -122,13 +122,71 @@ class AddUserDialog(QDialog):
         )
 
 
+class UserPickerWidget(QWidget):
+    """A roster user combo plus an inline "New user…" flow.
+
+    Shared by ``StartExperimentDialog`` and the Setup-tier ``LoginDialog`` so
+    the roster-picking behavior (reload, inline add via ``AddUserDialog``,
+    select-by-id) exists in exactly one place.
+    """
+
+    def __init__(self, roster: UserRoster, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._roster = roster
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        self._combo = QComboBox()
+        self._combo.setObjectName("user_picker_combo")
+        row.addWidget(self._combo, 1)
+        new_user_btn = QPushButton("New user…")
+        new_user_btn.setObjectName("new_user_btn")
+        new_user_btn.clicked.connect(self._on_new_user)
+        row.addWidget(new_user_btn)
+
+        self.reload(select_user_id=None)
+
+    def reload(self, select_user_id: str | None) -> None:
+        """Repopulate the combo from the roster, optionally selecting one.
+
+        Args:
+            select_user_id: A roster id to select if present, or ``None``.
+        """
+        self._combo.clear()
+        for user in self._roster.list_users():
+            self._combo.addItem(user.name or user.user_id, userData=user.user_id)
+        if select_user_id:
+            index = self._combo.findData(select_user_id)
+            if index >= 0:
+                self._combo.setCurrentIndex(index)
+
+    def _on_new_user(self) -> None:
+        dialog = AddUserDialog(self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        user = dialog.user()
+        self._roster.add(user)
+        self.reload(select_user_id=user.user_id)
+
+    def selected_user_id(self) -> str:
+        """Return the currently selected roster id, or ``""`` if none exist."""
+        return self._combo.currentData() or ""
+
+    def has_users(self) -> bool:
+        """Return whether the combo currently offers at least one user."""
+        return self._combo.count() > 0
+
+    def selection_changed_signal(self):  # noqa: ANN201 — thin Qt signal passthrough
+        """Expose the combo's ``currentIndexChanged`` for callers to connect to."""
+        return self._combo.currentIndexChanged
+
+
 class StartExperimentDialog(QDialog):
     """Collect a title, user, and attendance flag to open a new experiment."""
 
     def __init__(self, roster: UserRoster, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Start Experiment")
-        self._roster = roster
 
         form = QFormLayout()
 
@@ -138,15 +196,9 @@ class StartExperimentDialog(QDialog):
         self._title_input.textChanged.connect(self._update_ok_enabled)
         form.addRow("Title:", self._title_input)
 
-        user_row = QHBoxLayout()
-        self._user_combo = QComboBox()
-        self._user_combo.setObjectName("experiment_user_combo")
-        user_row.addWidget(self._user_combo, 1)
-        new_user_btn = QPushButton("New user…")
-        new_user_btn.setObjectName("new_user_btn")
-        new_user_btn.clicked.connect(self._on_new_user)
-        user_row.addWidget(new_user_btn)
-        form.addRow("User:", user_row)
+        self._user_picker = UserPickerWidget(roster)
+        self._user_picker.selection_changed_signal().connect(self._update_ok_enabled)
+        form.addRow("User:", self._user_picker)
 
         self._attended_checkbox = QCheckBox("Human attending this experiment")
         self._attended_checkbox.setObjectName("start_attended_checkbox")
@@ -164,30 +216,11 @@ class StartExperimentDialog(QDialog):
         layout.addLayout(form)
         layout.addWidget(buttons)
 
-        self._reload_users()
-
-    def _reload_users(self, select_user_id: str = "") -> None:
-        """Repopulate the user combo from the roster, optionally selecting one."""
-        self._user_combo.clear()
-        for user in self._roster.list_users():
-            self._user_combo.addItem(user.name or user.user_id, userData=user.user_id)
-        if select_user_id:
-            index = self._user_combo.findData(select_user_id)
-            if index >= 0:
-                self._user_combo.setCurrentIndex(index)
         self._update_ok_enabled()
-
-    def _on_new_user(self) -> None:
-        dialog = AddUserDialog(self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        user = dialog.user()
-        self._roster.add(user)
-        self._reload_users(select_user_id=user.user_id)
 
     def _update_ok_enabled(self) -> None:
         self._ok_button.setEnabled(
-            bool(self._title_input.text().strip()) and self._user_combo.count() > 0
+            bool(self._title_input.text().strip()) and self._user_picker.has_users()
         )
 
     def result_values(self) -> tuple[str, str, bool]:
@@ -199,7 +232,7 @@ class StartExperimentDialog(QDialog):
         """
         return (
             self._title_input.text().strip(),
-            self._user_combo.currentData() or "",
+            self._user_picker.selected_user_id(),
             self._attended_checkbox.isChecked(),
         )
 

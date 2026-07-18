@@ -134,6 +134,7 @@ def main() -> None:
         orchestrator=orchestrator,
         station=station,
         config_name=used_entry.name if used_entry is not None else Path(used_path).name,
+        config_path=used_path,
     )
 
     monitor = MonitorWindow(

@@ -1,11 +1,16 @@
 # ---
 # description: |
-#   app_settings: a one-function factory for the application's QSettings object.
-#   It exists purely as a test seam. Windows persist their geometry via
-#   QSettings("CryoSoft", "CryoSoft"), which on Windows is backed by the real
-#   registry (HKCU\Software\CryoSoft\CryoSoft). Routing every construction
-#   through this factory lets GUI tests monkeypatch it to point at a throwaway
-#   .ini file, so a pytest run never overwrites the user's real saved geometry.
+#   app_settings: a one-function factory for the application's QSettings object,
+#   plus machine-level identity persisted through it — which config is active
+#   (config_active/set_config_active) and who is currently logged in
+#   (current_user_id/set_current_user_id). It exists purely as a test seam.
+#   Windows persist their geometry via QSettings("CryoSoft", "CryoSoft"), which
+#   on Windows is backed by the real registry (HKCU\Software\CryoSoft\CryoSoft).
+#   Routing every construction through this factory lets GUI tests monkeypatch
+#   it to point at a throwaway .ini file, so a pytest run never overwrites the
+#   user's real saved geometry. session_file_path(user_id) is the per-user form
+#   autosave: with a logged-in user_id it resolves to that person's own file
+#   under sessions/, so switching users switches what's remembered.
 # entry_point: Not run directly. Called by MonitorWindow and ProcedureWindow.
 # dependencies:
 #   - PyQt6 >= 6.5
@@ -38,8 +43,10 @@ _ORGANISATION = "CryoSoft"
 _APPLICATION = "CryoSoft"
 
 _SESSION_FILENAME = "last_session.json"
+_SESSIONS_SUBDIR = "sessions"
 _ACTIVE_CONFIG_NAME_KEY = "ActiveConfig/name"
 _ACTIVE_CONFIG_SOURCE_KEY = "ActiveConfig/source"
+_CURRENT_USER_KEY = "CurrentUser/user_id"
 
 
 def get_settings() -> QSettings:
@@ -53,16 +60,25 @@ def get_settings() -> QSettings:
     return QSettings(_ORGANISATION, _APPLICATION)
 
 
-def session_file_path() -> Path:
-    """Return the path to the persistent ``last_session.json`` file.
+def session_file_path(user_id: str | None = None) -> Path:
+    """Return the path to a persistent form-autosave JSON file.
 
-    The file lives in the platform per-user application-data directory
-    (``%APPDATA%/CryoSoft/`` on Windows), separate from both the registry and
-    the user's measurement data directory. This is the second persistence tier:
-    ``get_settings()`` holds machine-specific window/dock *chrome*, while this
-    file holds portable session *content* (sample metadata, procedure params,
-    run queue). Like ``get_settings``, GUI tests monkeypatch this function to
-    redirect it into a throwaway directory.
+    The file lives in the platform per-installation application-data
+    directory (``%APPDATA%/CryoSoft/`` on Windows), separate from both the
+    registry and the user's measurement data directory. This is the second
+    persistence tier: ``get_settings()`` holds machine-specific window/dock
+    *chrome*, while this file holds portable session *content* (sample
+    metadata, procedure params, run queue). Like ``get_settings``, GUI tests
+    monkeypatch this function to redirect it into a throwaway directory.
+
+    Args:
+        user_id: When given (someone is logged in — see ``current_user_id``),
+            returns that person's own autosave file
+            (``%APPDATA%/CryoSoft/sessions/<user_id>.json``), so switching
+            users switches what's remembered instead of one person's fields
+            overwriting another's. ``None`` (nobody logged in yet, or a
+            caller that predates the login feature) returns the original
+            shared ``last_session.json``.
 
     Returns:
         The absolute ``Path`` of the session JSON file. The parent directory is
@@ -71,6 +87,8 @@ def session_file_path() -> Path:
     base = QStandardPaths.writableLocation(
         QStandardPaths.StandardLocation.AppDataLocation
     )
+    if user_id:
+        return Path(base) / _SESSIONS_SUBDIR / f"{user_id}.json"
     return Path(base) / _SESSION_FILENAME
 
 
@@ -133,3 +151,32 @@ def set_config_active(name: str, source: str) -> None:
     settings = get_settings()
     settings.setValue(_ACTIVE_CONFIG_NAME_KEY, name)
     settings.setValue(_ACTIVE_CONFIG_SOURCE_KEY, source)
+
+
+def current_user_id() -> str | None:
+    """Return the roster id of whoever is currently "logged in", or None.
+
+    Machine-level like the active config: persists across restarts until the
+    User menu's "Log in as…" switches it. Identity only — no password, no
+    session token; the roster (``cryosoft.session.store.UserRoster``) is the
+    source of truth for whether the id still exists.
+
+    Returns:
+        The roster ``user_id``, or ``None`` when nobody has logged in yet.
+    """
+    value = get_settings().value(_CURRENT_USER_KEY)
+    return str(value) if value else None
+
+
+def set_current_user_id(user_id: str | None) -> None:
+    """Persist (or clear) who is currently logged in.
+
+    Args:
+        user_id: The roster id to remember, or ``None`` to log out (falls
+            back to the shared ``last_session.json`` on next read).
+    """
+    settings = get_settings()
+    if user_id:
+        settings.setValue(_CURRENT_USER_KEY, user_id)
+    else:
+        settings.remove(_CURRENT_USER_KEY)

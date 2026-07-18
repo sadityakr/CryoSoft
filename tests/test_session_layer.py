@@ -188,6 +188,41 @@ def test_roster_add_get_replace(tmp_path):
 
 # ── SessionManager lifecycle ─────────────────────────────────────────────────
 
+def test_experiment_context_setup_tier_present_with_no_experiment_open(manager):
+    """The setup tier is available even before any experiment is ever started."""
+    context = manager.experiment_context()
+    assert context == {"setup": {"config_name": "sim_cryostat", "instruments": {}}, "experiment": {}}
+
+
+def test_experiment_context_includes_instrument_metadata_from_config(
+    store, roster, orchestrator, station
+):
+    """config_path wires read_instrument_metadata() into the setup tier."""
+    manager = SessionManager(
+        store=store,
+        roster=roster,
+        orchestrator=orchestrator,
+        station=station,
+        config_name="sim_cryostat",
+        config_path=CONFIG_PATH,
+    )
+    instruments = manager.experiment_context()["setup"]["instruments"]
+    assert instruments  # sim_cryostat/devices.yaml carries metadata for every VI
+    assert instruments["magnet_x"]["role"] == "X-axis magnet"
+
+
+def test_experiment_context_tolerates_missing_config_path(store, roster, orchestrator, station):
+    """A bad/absent config_path degrades to no instrument metadata, never raises."""
+    manager = SessionManager(
+        store=store,
+        roster=roster,
+        orchestrator=orchestrator,
+        station=station,
+        config_path="/no/such/config",
+    )
+    assert manager.experiment_context()["setup"]["instruments"] == {}
+
+
 def test_start_experiment_persists_and_installs_envelope(manager, orchestrator, store):
     envelope = SessionEnvelope(
         bounds={"magnet_x": EnvelopeBound(min_value=-2.0, max_value=2.0)}
@@ -205,8 +240,11 @@ def test_start_experiment_persists_and_installs_envelope(manager, orchestrator, 
     assert orchestrator._session_envelope == envelope
     assert changed and changed[-1]["experiment_id"] == record.experiment_id
     context = manager.experiment_context()
-    assert context["experiment_id"] == record.experiment_id
-    assert context["user_name"] == "J. Doe"
+    assert context["setup"]["config_name"] == "sim_cryostat"
+    assert context["experiment"]["experiment_id"] == record.experiment_id
+    assert context["experiment"]["user_name"] == "J. Doe"
+    assert context["experiment"]["attended"] is True
+    assert context["experiment"]["eln_link"] == {}
 
 
 def test_start_experiment_rejects_unknown_user_and_double_open(manager):
@@ -223,7 +261,9 @@ def test_close_experiment_clears_envelope_and_context(manager, orchestrator, sto
     manager.close_experiment()
 
     assert manager.current_experiment() is None
-    assert manager.experiment_context() == {}
+    context = manager.experiment_context()
+    assert context["experiment"] == {}
+    assert context["setup"]["config_name"] == "sim_cryostat"
     assert orchestrator._session_envelope is None
     assert store.get_active() is None
     stored = store.load(record.experiment_id)
@@ -367,6 +407,7 @@ def test_end_to_end_run_recorded_and_stamped(
     # The record's data_file is the real HDF5 file, stamped with the context.
     with h5py.File(run.data_file, "r") as f:
         info = json.loads(f["metadata"].attrs["experiment_info"])
-    assert info["experiment_id"] == record.experiment_id
-    assert info["user_id"] == "jdoe"
-    assert info["experiment_title"] == "SOT switching vs T"
+    assert info["experiment"]["experiment_id"] == record.experiment_id
+    assert info["experiment"]["user_id"] == "jdoe"
+    assert info["experiment"]["experiment_title"] == "SOT switching vs T"
+    assert info["setup"]["config_name"] == "sim_cryostat"

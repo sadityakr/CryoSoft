@@ -11,11 +11,14 @@
 #   be closed, detached, or floated. This module is the composition shell:
 #   quadrant assembly, menus, status bar, Orchestrator signal wiring, and
 #   session/geometry persistence — the quadrant content lives in the
-#   component modules above.
+#   component modules above. Also owns the Setup tier's menu surfaces: the
+#   User menu (Log in as… — switches which per-user form-autosave file is
+#   loaded/saved) and the Config menu's Instrument Info… action (read-only
+#   devices.yaml metadata via cryosoft.gui.setup_dialogs).
 # entry_point: Not run directly. Instantiated in main.py.
 # dependencies:
 #   - PyQt6 >= 6.5
-#   - cryosoft.core.station (Station)
+#   - cryosoft.core.station (Station, read_instrument_metadata)
 #   - cryosoft.core.orchestrator (Orchestrator)
 #   - cryosoft.gui.instrument_panel (InstrumentPanel)
 #   - cryosoft.gui.trends_quadrant (TrendsQuadrant)
@@ -23,9 +26,11 @@
 #   - cryosoft.gui.other_devices (OtherDevicesPanel)
 #   - cryosoft.gui.log_panel (LogPanel)
 #   - cryosoft.gui.config_menu (ConfigMenuController)
+#   - cryosoft.gui.setup_dialogs (LoginDialog, InstrumentInfoDialog)
 #   - cryosoft.gui.window_geometry (geometry persistence helpers)
 #   - cryosoft.session.manager (SessionManager, optional — forwarded to
-#     SessionInfoPanel, which owns the experiment lifecycle controls)
+#     SessionInfoPanel, which owns the experiment lifecycle controls; also
+#     read here for the User menu's roster)
 # input: |
 #   Station instance and Orchestrator instance.
 # process: |
@@ -67,7 +72,7 @@ from PyQt6.QtWidgets import (
 )
 
 from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
-from cryosoft.core.station import Station
+from cryosoft.core.station import Station, read_instrument_metadata
 from cryosoft.gui import app_settings  # import the module (not the function) so tests can monkeypatch the factory
 from cryosoft.gui import form_autosave as session_store  # module import keeps save/load monkeypatchable
 from cryosoft.gui import window_geometry
@@ -77,7 +82,7 @@ from cryosoft.gui.log_panel import LogPanel
 from cryosoft.gui.notification_banner import NotificationBanner
 from cryosoft.gui.other_devices import OtherDevicesPanel
 from cryosoft.gui.session_info_panel import SessionInfoPanel
-from cryosoft.session.manager import SessionManager
+from cryosoft.gui.setup_dialogs import InstrumentInfoDialog, LoginDialog
 from cryosoft.gui.theme import (
     BANNER_SEVERITY_ERROR,
     BANNER_SEVERITY_WARNING,
@@ -87,6 +92,7 @@ from cryosoft.gui.theme import (
     TEXT_PRIMARY,
 )
 from cryosoft.gui.trends_quadrant import TrendsQuadrant
+from cryosoft.session.manager import SessionManager
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -173,11 +179,19 @@ class MonitorWindow(QMainWindow):
         self._startup_warning = startup_warning
         self._config_controller: ConfigMenuController | None = None
 
+        # Who's logged in (Setup tier, User menu). Identity only — governs which
+        # form-autosave file the session *content* below is loaded from/saved to,
+        # so switching users switches what's remembered instead of one person's
+        # fields overwriting another's. None means nobody has logged in yet (or
+        # this is a unit test), and everything falls back to the original
+        # shared last_session.json.
+        self._current_user_id = app_settings.current_user_id()
+
         # Persistent session *content* (sample metadata, procedure params, run
         # queue) — a second persistence tier separate from the QSettings window
         # state. Loaded here and applied to the fields once they exist; re-saved
-        # on close and by the Session menu.
-        self._session = session_store.load(app_settings.session_file_path())
+        # on close and by the User menu.
+        self._session = session_store.load(app_settings.session_file_path(self._current_user_id))
 
         self.setWindowTitle("CryoSoft — Monitor")
         window_geometry.restore_or_center(self, _GEOMETRY_KEY, fraction=0.9)
@@ -204,7 +218,7 @@ class MonitorWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _build_menu(self) -> None:
-        """Build the Session / Config / Procedures menus.
+        """Build the User / Config / Procedures menus.
 
         There is no View menu: every quadrant is always visible and nothing
         can be hidden, so there is nothing to toggle. Trend plots are added
@@ -212,30 +226,49 @@ class MonitorWindow(QMainWindow):
         """
         menu_bar = self.menuBar()
 
-        # Session menu is added first so it sits leftmost (menu order follows
-        # addMenu() call order).
-        session_menu = menu_bar.addMenu("Session")
+        # User menu is added first so it sits leftmost (menu order follows
+        # addMenu() call order). Setup-tier concerns: who's logged in, and the
+        # per-user form-autosave content that follows (sample info, params,
+        # queue) — a "Session" label here would collide with cryosoft.session
+        # (L6, the experiment layer), so this menu is named for what it is.
+        user_menu = menu_bar.addMenu("User")
+        login_action = QAction("Log in as…", self)
+        login_action.setToolTip(
+            "Pick who's using CryoSoft — switches which saved sample info, "
+            "parameters, and queue are loaded"
+        )
+        login_action.triggered.connect(self._open_login_dialog)
+        user_menu.addAction(login_action)
+        user_menu.addSeparator()
         new_session_action = QAction("New Session", self)
         new_session_action.setToolTip(
             "Clear sample info, parameters, and queue and start a fresh session"
         )
         new_session_action.triggered.connect(self._on_new_session)
-        session_menu.addAction(new_session_action)
+        user_menu.addAction(new_session_action)
         save_session_action = QAction("Save Session Now", self)
         save_session_action.setToolTip("Write the current session to disk immediately")
         save_session_action.triggered.connect(self._save_session)
-        session_menu.addAction(save_session_action)
+        user_menu.addAction(save_session_action)
 
         # Config menu (only when config management is wired in).
         if self._catalog is not None:
+            config_menu = menu_bar.addMenu("Config")
             self._config_controller = ConfigMenuController(
                 self,
-                menu_bar.addMenu("Config"),
+                config_menu,
                 self._catalog,
                 self._active_config_path,
                 self._restart_callback,
                 save_session=self._save_session,
             )
+            config_menu.addSeparator()
+            instrument_info_action = QAction("Instrument Info…", self)
+            instrument_info_action.setToolTip(
+                "View each instrument's identity metadata from devices.yaml"
+            )
+            instrument_info_action.triggered.connect(self._open_instrument_info)
+            config_menu.addAction(instrument_info_action)
 
         proc_menu = menu_bar.addMenu("Procedures")
         open_action = QAction("Open Procedures…", self)
@@ -340,6 +373,11 @@ class MonitorWindow(QMainWindow):
 
         title = QLabel("<b>CryoSoft</b>  — Instrument Monitor")
         row.addWidget(title)
+
+        self._current_user_label = QLabel()
+        self._current_user_label.setObjectName("current_user_label")
+        self._sync_current_user_label()
+        row.addWidget(self._current_user_label)
 
         row.addStretch()
 
@@ -568,7 +606,9 @@ class MonitorWindow(QMainWindow):
         """Persist the current session to disk, tolerating write failures."""
         self._session = self._collect_session_state()
         try:
-            session_store.save(self._session, app_settings.session_file_path())
+            session_store.save(
+                self._session, app_settings.session_file_path(self._current_user_id)
+            )
         except OSError as exc:
             logger.warning("MonitorWindow: could not save session: %s", exc)
 
@@ -589,6 +629,59 @@ class MonitorWindow(QMainWindow):
         if self._procedure_window is not None:
             self._procedure_window.reset_session()
         self._save_session()
+
+    def _open_login_dialog(self) -> None:
+        """Open LoginDialog and switch to the picked user, if any."""
+        if self._session_manager is None:
+            QMessageBox.information(
+                self, "Log In", "Session management is not available."
+            )
+            return
+        dialog = LoginDialog(
+            self._session_manager.roster, self._current_user_id, self
+        )
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return
+        self._switch_user(dialog.selected_user_id())
+
+    def _switch_user(self, user_id: str) -> None:
+        """Save the outgoing user's fields and load the incoming user's own.
+
+        Only the Session Info panel's sample fields, data dir, and app
+        settings persistence follow the switch; a ProcedureWindow already
+        open keeps its in-memory queue/params from before the switch (it
+        re-reads whoever is current the next time it is built).
+
+        Args:
+            user_id: The roster id to switch to.
+        """
+        self._save_session()
+        self._current_user_id = user_id
+        app_settings.set_current_user_id(user_id)
+        self._session = session_store.load(app_settings.session_file_path(user_id))
+        self._session_info.apply_session(self._session)
+        self._sync_current_user_label()
+
+    def _sync_current_user_label(self) -> None:
+        """Reflect the current login in the header label."""
+        if not self._current_user_id:
+            self._current_user_label.setText("Not logged in")
+            return
+        name = self._current_user_id
+        if self._session_manager is not None:
+            user = self._session_manager.roster.get(self._current_user_id)
+            if user is not None and user.name:
+                name = user.name
+        self._current_user_label.setText(f"Logged in as {name}")
+
+    def _open_instrument_info(self) -> None:
+        """Open a read-only view of each VI's devices.yaml metadata block."""
+        metadata = (
+            read_instrument_metadata(self._active_config_path)
+            if self._active_config_path
+            else {}
+        )
+        InstrumentInfoDialog(metadata, self).exec()
 
     # ------------------------------------------------------------------
     # Signal connections

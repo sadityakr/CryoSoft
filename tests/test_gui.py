@@ -87,7 +87,11 @@ def isolated_settings(tmp_path, monkeypatch):
     # Same seam for the JSON session file: redirect it into tmp_path so a pytest
     # run never reads or overwrites the user's real last_session.json in AppData.
     session_path = tmp_path / "last_session.json"
-    monkeypatch.setattr(app_settings, "session_file_path", lambda: session_path)
+
+    def _fake_session_file_path(user_id=None):
+        return (tmp_path / "sessions" / f"{user_id}.json") if user_id else session_path
+
+    monkeypatch.setattr(app_settings, "session_file_path", _fake_session_file_path)
     return ini_path
 
 
@@ -960,6 +964,24 @@ def test_start_experiment_updates_panel_and_manager(monitor_win_session, session
     assert "J. Doe" in panel._experiment_status_label.text()
     assert panel._attended_checkbox.isVisible()
     assert panel._attended_checkbox.isChecked()
+    assert "not configured" in panel._eln_status_label.text()
+
+
+def test_eln_status_shows_published_url_when_eln_link_set(
+    monitor_win_session, session_manager, monkeypatch
+):
+    """Once ElnLink carries a url, the panel reflects it instead of the placeholder."""
+    from cryosoft.session.models import ElnLink
+
+    _stub_start_dialog(monkeypatch, "Hall bar A3", "jdoe")
+    panel = monitor_win_session._session_info
+    panel._start_close_btn.click()
+
+    experiment = session_manager.current_experiment()
+    experiment.eln_link = ElnLink(backend="elabftw", entry_id="42", url="https://elab.example/42")
+    session_manager.experiment_changed.emit(experiment.to_dict())
+
+    assert panel._eln_status_label.text() == "Published: https://elab.example/42"
 
 
 def test_close_experiment_saves_findings_and_resets_panel(
@@ -978,6 +1000,7 @@ def test_close_experiment_saves_findings_and_resets_panel(
     assert panel._start_close_btn.text() == "Start Experiment…"
     assert panel._experiment_status_label.text() == "No experiment open"
     assert not panel._attended_checkbox.isVisible()
+    assert "not configured" in panel._eln_status_label.text()
     closed = session_manager.store.load(experiment_id)
     assert closed.findings == "Saw a clean switching signal."
     assert closed.status == "closed"
@@ -1008,6 +1031,149 @@ def test_add_user_dialog_autofills_id_from_name(qtbot):
     user = dialog.user()
     assert user.user_id == "jane_o_doe"
     assert user.name == "Jane O'Doe"
+
+
+# ── Setup tier: login and instrument info (User / Config menus) ───────────────
+
+def test_current_user_label_defaults_not_logged_in(monitor_win):
+    """With nobody logged in, the header shows the default state."""
+    assert monitor_win._current_user_label.text() == "Not logged in"
+
+
+def test_login_dialog_lists_roster_users(qtbot, tmp_path):
+    """LoginDialog's user picker is pre-populated from the roster."""
+    from cryosoft.gui.setup_dialogs import LoginDialog
+    from cryosoft.session.models import User
+    from cryosoft.session.store import UserRoster
+
+    roster = UserRoster(tmp_path / "users.json")
+    roster.add(User(user_id="jdoe", name="J. Doe"))
+
+    dialog = LoginDialog(roster)
+    qtbot.addWidget(dialog)
+
+    assert dialog._user_picker.has_users()
+    assert dialog._user_picker.selected_user_id() == "jdoe"
+
+
+def test_open_login_dialog_without_session_manager_shows_message(monitor_win, monkeypatch):
+    """No SessionManager wired: the login action informs rather than crashing."""
+    shown = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: shown.append(a))
+    monitor_win._open_login_dialog()
+    assert shown
+
+
+def test_switch_user_saves_outgoing_and_loads_incoming_session(
+    station, orchestrator, qtbot, tmp_path
+):
+    """_switch_user() persists the outgoing user's fields and loads the incoming one's."""
+    from cryosoft.gui import app_settings as _app_settings
+    from cryosoft.session.manager import SessionManager
+    from cryosoft.session.models import User
+    from cryosoft.session.store import ExperimentStore, UserRoster
+
+    roster = UserRoster(tmp_path / "users.json")
+    roster.add(User(user_id="jdoe", name="J. Doe"))
+    roster.add(User(user_id="asmith", name="A. Smith"))
+    manager = SessionManager(
+        store=ExperimentStore(tmp_path / "experiments"),
+        roster=roster,
+        orchestrator=orchestrator,
+        station=station,
+        config_name="sim_cryostat",
+    )
+    win = MonitorWindow(station, orchestrator, session_manager=manager)
+    qtbot.addWidget(win)
+    win.show()
+
+    win._switch_user("jdoe")
+    assert win._current_user_id == "jdoe"
+    assert win._current_user_label.text() == "Logged in as J. Doe"
+    assert _app_settings.current_user_id() == "jdoe"
+    assert win._session_info._sample_name_input.text() == ""  # jdoe's file is fresh
+
+    win._session_info._sample_name_input.setText("SampleB")
+    win._switch_user("asmith")
+    assert win._current_user_label.text() == "Logged in as A. Smith"
+    assert win._session_info._sample_name_input.text() == ""  # asmith's file is fresh
+
+    win._switch_user("jdoe")
+    assert win._session_info._sample_name_input.text() == "SampleB"
+
+
+def test_open_login_dialog_full_flow(station, orchestrator, qtbot, tmp_path, monkeypatch):
+    """Confirming LoginDialog switches the current user."""
+    from cryosoft.gui import monitor_window as mw
+    from cryosoft.session.manager import SessionManager
+    from cryosoft.session.models import User
+    from cryosoft.session.store import ExperimentStore, UserRoster
+
+    roster = UserRoster(tmp_path / "users.json")
+    roster.add(User(user_id="jdoe", name="J. Doe"))
+    manager = SessionManager(
+        store=ExperimentStore(tmp_path / "experiments"),
+        roster=roster,
+        orchestrator=orchestrator,
+        station=station,
+    )
+    win = MonitorWindow(station, orchestrator, session_manager=manager)
+    qtbot.addWidget(win)
+    win.show()
+
+    class _FakeLoginDialog:
+        DialogCode = QDialog.DialogCode
+
+        def __init__(self, *a, **k):
+            pass
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+        def selected_user_id(self):
+            return "jdoe"
+
+    monkeypatch.setattr(mw, "LoginDialog", _FakeLoginDialog)
+    win._open_login_dialog()
+
+    assert win._current_user_id == "jdoe"
+    assert win._current_user_label.text() == "Logged in as J. Doe"
+
+
+def test_instrument_info_action_opens_dialog_with_config_metadata(
+    station, orchestrator, qtbot, monkeypatch
+):
+    """Config menu's Instrument Info… reads read_instrument_metadata() for the active config."""
+    from cryosoft.gui import monitor_window as mw
+
+    win = MonitorWindow(
+        station, orchestrator, active_config_path="cryosoft/configs/sim_cryostat"
+    )
+    qtbot.addWidget(win)
+    win.show()
+
+    captured = {}
+
+    class _FakeInstrumentInfoDialog:
+        def __init__(self, metadata, parent=None):
+            captured["metadata"] = metadata
+
+        def exec(self):
+            return None
+
+    monkeypatch.setattr(mw, "InstrumentInfoDialog", _FakeInstrumentInfoDialog)
+    win._open_instrument_info()
+
+    assert captured["metadata"]["magnet_x"]["role"] == "X-axis magnet"
+
+
+def test_instrument_info_dialog_handles_empty_metadata(qtbot):
+    """An empty metadata dict shows the fallback message instead of an empty scroll area."""
+    from cryosoft.gui.setup_dialogs import InstrumentInfoDialog
+
+    dialog = InstrumentInfoDialog({})
+    qtbot.addWidget(dialog)
+    assert dialog.findChild(QScrollArea, "instrument_info_scroll") is None
 
 
 def test_procedure_control_buttons_exist(procedure_win, qtbot):
@@ -1621,11 +1787,11 @@ def _data_dir_stub():
     return lambda: "C:/CryoData"
 
 
-def test_monitor_window_has_session_menu(monitor_win):
-    """The menu bar has a leftmost 'Session' menu."""
+def test_monitor_window_has_user_menu(monitor_win):
+    """The menu bar has a leftmost 'User' menu (Setup tier: login, form autosave)."""
     titles = [a.text() for a in monitor_win.menuBar().actions()]
-    assert "Session" in titles
-    assert titles[0] == "Session"
+    assert "User" in titles
+    assert titles[0] == "User"
 
 
 def test_monitor_restores_sample_fields_from_session(station, orchestrator, qtbot, tmp_path):
