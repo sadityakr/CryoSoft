@@ -44,6 +44,7 @@ from cryosoft.gui import form_autosave as session_store
 from cryosoft.gui import window_geometry
 from cryosoft.gui.instrument_panel import InstrumentPanel
 from cryosoft.gui.monitor_window import MonitorWindow
+from cryosoft.gui.diagnostics_window import DiagnosticsWindow
 from cryosoft.gui.notification_banner import NotificationBanner
 from cryosoft.gui.procedure_window import ProcedureWindow
 from cryosoft.gui.theme import (
@@ -120,6 +121,15 @@ def orchestrator(station, qtbot):
 def monitor_win(station, orchestrator, qtbot):
     """MonitorWindow shown via qtbot."""
     win = MonitorWindow(station, orchestrator)
+    qtbot.addWidget(win)
+    win.show()
+    return win
+
+
+@pytest.fixture
+def diagnostics_win(orchestrator, qtbot):
+    """DiagnosticsWindow shown via qtbot."""
+    win = DiagnosticsWindow(orchestrator)
     qtbot.addWidget(win)
     win.show()
     return win
@@ -2092,3 +2102,138 @@ def test_monitoring_button_snaps_back_when_stop_refused(monitor_win, orchestrato
     assert btn.isChecked(), "button must snap back to the confirmed state"
     assert monitor_win._banner.isVisible()
     orchestrator._state = OrchestratorState.IDLE
+
+
+# ── DiagnosticsWindow tests ─────────────────────────────────────────────────────────
+
+_STALLED_RECORD = {
+    "orch_state": "RAMPING",
+    "elapsed_in_state_s": 12.3,
+    "verdict": "RAMP_STALLED",
+    "alerts": ["magnet: ramp stalled (gap 0.5 not closing for 6 ticks)"],
+    "vis": [
+        {
+            "vi_name": "magnet", "value": 1.0, "target": 1.5, "gap": 0.5,
+            "closing": 0.0, "rate": 0.1, "eta_s": 300.0,
+            "ramp_status": "RAMPING", "phase": None,
+            "code": "RAMP_STALLED", "detail": "gap 0.5 not closing for 6 ticks",
+        },
+        {
+            "vi_name": "temp_ctrl", "value": 4.2, "target": 4.2, "gap": 0.0,
+            "closing": 0.0, "rate": 0.0, "eta_s": None,
+            "ramp_status": "TARGET_REACHED", "phase": None,
+            "code": "OK", "detail": "",
+        },
+    ],
+}
+
+
+def test_monitor_window_has_diagnostics_menu(monitor_win):
+    """The menu bar exposes a Diagnostics menu alongside Session/Procedures."""
+    menu_titles = {action.text() for action in monitor_win.menuBar().actions()}
+    assert "Diagnostics" in menu_titles
+
+
+def test_monitor_opens_diagnostics_window_from_menu(monitor_win):
+    """Triggering the Diagnostics menu's action lazily creates and shows DiagnosticsWindow."""
+    assert monitor_win._diagnostics_window is None
+    monitor_win._open_diagnostics_window()
+    assert monitor_win._diagnostics_window is not None
+    assert monitor_win._diagnostics_window.isVisible()
+
+
+def test_diagnostics_window_opens(diagnostics_win):
+    """DiagnosticsWindow constructs and is visible."""
+    assert diagnostics_win.isVisible()
+
+
+def test_diagnostics_window_placeholder_before_first_tick(diagnostics_win):
+    """Before any operational_status tick, the window shows a neutral placeholder."""
+    assert "No live data yet" in diagnostics_win._state_label.text()
+    assert diagnostics_win._table.rowCount() == 0
+    assert diagnostics_win._alerts_view.toPlainText() == "No active alerts."
+
+
+def test_diagnostics_window_renders_operational_status(diagnostics_win, orchestrator):
+    """A live operational_status tick populates state, verdict, table, and alerts."""
+    orchestrator.operational_status.emit(_STALLED_RECORD)
+
+    assert "RAMPING" in diagnostics_win._state_label.text()
+    assert diagnostics_win._verdict_badge.text() == "RAMP_STALLED"
+    assert diagnostics_win._verdict_badge.property("severity") == "warning"
+
+    assert diagnostics_win._table.rowCount() == 2
+    assert diagnostics_win._table.item(0, 0).text() == "magnet"
+    assert diagnostics_win._table.item(0, 1).text() == "RAMP_STALLED"
+    assert "gap 0.5" in diagnostics_win._table.item(0, 2).text()
+    assert diagnostics_win._table.item(1, 0).text() == "temp_ctrl"
+    assert diagnostics_win._table.item(1, 1).text() == "OK"
+
+    assert "ramp stalled" in diagnostics_win._alerts_view.toPlainText()
+
+
+def test_diagnostics_window_verdict_badge_error_severity(diagnostics_win, orchestrator):
+    """A VI_DISCONNECTED verdict drives the badge to 'error' severity."""
+    record = dict(_STALLED_RECORD, verdict="VI_DISCONNECTED")
+    orchestrator.operational_status.emit(record)
+    assert diagnostics_win._verdict_badge.property("severity") == "error"
+
+
+def test_diagnostics_window_ok_verdict_clears_alerts_placeholder(diagnostics_win, orchestrator):
+    """An OK tick with no alerts restores the 'no active alerts' placeholder."""
+    ok_record = {
+        "orch_state": "IDLE", "elapsed_in_state_s": 1.0, "verdict": "OK",
+        "alerts": [], "vis": [],
+    }
+    orchestrator.operational_status.emit(_STALLED_RECORD)
+    orchestrator.operational_status.emit(ok_record)
+    assert diagnostics_win._verdict_badge.property("severity") == "ok"
+    assert diagnostics_win._alerts_view.toPlainText() == "No active alerts."
+    assert diagnostics_win._table.rowCount() == 0
+
+
+def test_diagnostics_window_seeds_from_existing_status(orchestrator, qtbot):
+    """A DiagnosticsWindow opened after ticks already happened seeds from get_operational_status()."""
+    # A raw signal emit does not update Orchestrator's stored record — only a
+    # real tick does that (_update_operational_status). Setting the private
+    # field directly is the same forcing pattern other GUI tests use for
+    # Orchestrator internals (e.g. `orchestrator._state = ...`).
+    orchestrator._operational_status = _STALLED_RECORD
+    win = DiagnosticsWindow(orchestrator)
+    qtbot.addWidget(win)
+    win.show()
+    assert win._verdict_badge.text() == "RAMP_STALLED"
+
+
+def test_diagnostics_window_copy_diagnostics_to_clipboard(diagnostics_win, orchestrator, qtbot):
+    """Copy Diagnostics puts a plain-text summary on the clipboard."""
+    orchestrator.operational_status.emit(_STALLED_RECORD)
+    copy_btn = diagnostics_win.findChild(QPushButton, "copy_diagnostics_btn")
+    assert copy_btn is not None
+    copy_btn.click()
+
+    clipboard_text = QApplication.clipboard().text()
+    assert "RAMP_STALLED" in clipboard_text
+    assert "magnet" in clipboard_text
+    assert "ramp stalled" in clipboard_text
+    assert diagnostics_win._status_bar.currentMessage() == "Diagnostics copied to clipboard"
+
+
+def test_diagnostics_window_copy_diagnostics_before_any_tick(diagnostics_win):
+    """Copy Diagnostics before any tick copies a clear placeholder, not a crash."""
+    copy_btn = diagnostics_win.findChild(QPushButton, "copy_diagnostics_btn")
+    copy_btn.click()
+    assert "No live status available" in QApplication.clipboard().text()
+
+
+def test_diagnostics_window_geometry_persists_on_close(orchestrator, qtbot, isolated_settings):
+    """DiagnosticsWindow geometry is saved under its own QSettings key on close."""
+    from PyQt6.QtCore import QSettings
+
+    win = DiagnosticsWindow(orchestrator)
+    qtbot.addWidget(win)
+    win.show()
+    win.close()
+
+    settings = QSettings(str(isolated_settings), QSettings.Format.IniFormat)
+    assert settings.value("DiagnosticsWindow/geometry") is not None
