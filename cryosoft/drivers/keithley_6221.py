@@ -17,7 +17,11 @@
 #   DC mode: direct :SOUR:CURR writes with OUTP ON/OFF.
 # output: |
 #   Returns float/bool state values and list[float] delta readings via public API.
-# last_updated: 2026-04-19
+#   set_current() and stop_delta_mode() both reassert :SOUR:CURR:MODE FIX so
+#   the instrument recovers to plain DC mode regardless of what mode a prior
+#   measurement VI sharing this driver left it in (shared-instrument mode
+#   discipline).
+# last_updated: 2026-07-18
 # ---
 
 """Real Keithley 6221 AC/DC current source driver."""
@@ -104,9 +108,18 @@ class Keithley6221:
     def set_current(self, current: float) -> None:
         """Set the DC source current; enables output for non-zero values.
 
+        Unconditionally reasserts fixed-current mode first, mirroring how
+        ``_program_delta_mode()`` always leads with ``:SOUR:SWE:ABOR``. This
+        makes the call self-recovering regardless of whether the instrument
+        was previously left in delta mode by another measurement VI sharing
+        this same physical 6221 (see the "shared-instrument mode discipline"
+        standard in ``virtual_instruments/measurement/README.md``) — callers
+        never need to know or care what mode the instrument was last in.
+
         Args:
             current: Desired current in Amperes.
         """
+        self._write(":SOUR:CURR:MODE FIX")
         self._write(f":SOUR:CURR {current:.9e}")
         self._write("OUTP " + ("ON" if current != 0.0 else "OFF"))
 
@@ -232,8 +245,18 @@ class Keithley6221:
         return list(self._delta_readings)
 
     def stop_delta_mode(self) -> None:
-        """Abort the running delta measurement and disable the source output."""
-        for cmd in (":SOUR:SWE:ABOR", "OUTP OFF"):
+        """Abort the running delta measurement and return to a plain idle state.
+
+        Reasserts fixed-current mode (not just aborting the sweep) so the
+        instrument is left in the same documented idle baseline regardless of
+        which measurement method runs next — see the "shared-instrument mode
+        discipline" standard in ``virtual_instruments/measurement/README.md``.
+        This is defense-in-depth: ``set_current()`` is already self-recovering
+        on its own, but a human inspecting the instrument between runs (or a
+        future driver method that doesn't go through ``set_current()``)
+        should still find it in a known state.
+        """
+        for cmd in (":SOUR:SWE:ABOR", ":SOUR:CURR:MODE FIX", "OUTP OFF"):
             try:
                 self._write(cmd)
             except CryoSoftCommunicationError:

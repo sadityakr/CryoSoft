@@ -64,6 +64,27 @@ written standard in its docstring. `tests/test_conformance.py` enforces the
 standard (declaration validity, lifecycle presence, and a sim round-trip) for
 every measurement VI automatically.
 
+## Shared-instrument mode discipline
+Several measurement methods here can be wired to the SAME physical driver
+instance (e.g. `dc_measurement` and `keithley_delta_mode` both reference the
+one `keithley_6221` entry in `devices.yaml`'s `real_drivers`), because only
+one measurement VI is armed at a time — but the underlying instrument can have
+more than one mutually exclusive SCPI/operating mode (plain DC output vs. the
+bipolar delta engine). A driver method that establishes one of these modes
+MUST be **idempotent and self-recovering**: it must reassert its own required
+mode unconditionally, never assume the instrument is already in a compatible
+state left over from whichever VI ran last. This is the primary defense (see
+`Keithley6221.set_current()`'s unconditional `:SOUR:CURR:MODE FIX`, mirroring
+how `_program_delta_mode()` already always leads with `:SOUR:SWE:ABOR`).
+`stop_delta_mode()`-style teardown methods should still also return the
+instrument to a documented idle baseline as defense-in-depth (useful for a
+human inspecting the instrument between runs), but a VI's `initiate()` must
+never *rely* on a previous VI's `standby()` having been called correctly. A
+sim driver modeling more than one such mode should track it (e.g.
+`SimKeithley6221._mode`) so a VI that skips the defensive reassertion fails in
+tests, not on hardware — see `tests/test_l1_virtual_instruments.py`'s
+shared-6221 handoff test for the pattern.
+
 ## How to add a new measurement VI
 1. Subclass `DCMeasurementBase` (for a DC-resistance method) or
    `MeasurementInstrumentBase` (any other protocol).

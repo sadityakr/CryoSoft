@@ -249,3 +249,70 @@ def test_delta_mode_short_return_is_nan_padded():
     assert all(not math.isnan(v) for v in data["voltage_V"][:3])
     assert all(math.isnan(v) for v in data["voltage_V"][3:])
     assert all(math.isnan(c) for c in data["current_A"][3:])
+
+
+# 16. Shared-instrument mode discipline (see GLOSSARY.md and
+#     virtual_instruments/measurement/README.md): DCSeparateMeasurementVI and
+#     DeltaModeMeasurementVI can be wired to the same physical Keithley 6221
+#     (devices.yaml's real_drivers.keithley_6221), so a VI must never assume
+#     the instrument was left in a compatible mode by whichever measurement
+#     method ran previously.
+def test_dc_separate_initiate_recovers_from_stale_delta_arm():
+    """DC-separate VI's initiate() must not depend on a prior standby().
+
+    Arms delta mode on a shared 6221 WITHOUT calling standby() (the Orchestrator
+    normally would, but this proves DC-separate is safe even if it weren't —
+    the shared-instrument mode discipline standard). initiate() must still
+    leave the instrument correctly in plain DC mode at the requested current.
+    """
+    from cryosoft.virtual_instruments.measurement.dc_separate_measurement import (
+        DCSeparateMeasurementVI,
+    )
+    from cryosoft.virtual_instruments.measurement.measurement_delta_mode import (
+        DeltaModeMeasurementVI,
+    )
+
+    source = SimKeithley6221("SIM")
+    meter = SimKeithley2182A("SIM")
+    source._paired_meter = meter
+
+    delta_vi = DeltaModeMeasurementVI({"source": source, "meter": meter})
+    delta_vi.initiate(current=1e-6, n_readings=5)
+    assert source._mode == "DELTA"
+
+    dc_vi = DCSeparateMeasurementVI({"source": source, "meter": meter})
+    dc_vi.initiate(current_A=5e-6)
+
+    assert source._mode == "DC"
+    assert source.get_current() == pytest.approx(5e-6)
+
+
+def test_delta_mode_initiate_recovers_from_prior_dc_current():
+    """Delta-mode VI's initiate() must not depend on the instrument idling at 0 A.
+
+    The reverse handoff: DC-separate leaves a nonzero current set, then
+    delta mode is armed directly on the same shared 6221 without an
+    intervening standby(). configure_and_start_delta() already always leads
+    with :SOUR:SWE:ABOR, so this should already hold — this test pins it.
+    """
+    from cryosoft.virtual_instruments.measurement.dc_separate_measurement import (
+        DCSeparateMeasurementVI,
+    )
+    from cryosoft.virtual_instruments.measurement.measurement_delta_mode import (
+        DeltaModeMeasurementVI,
+    )
+
+    source = SimKeithley6221("SIM")
+    meter = SimKeithley2182A("SIM")
+    source._paired_meter = meter
+
+    dc_vi = DCSeparateMeasurementVI({"source": source, "meter": meter})
+    dc_vi.initiate(current_A=5e-6)
+    assert source._mode == "DC"
+
+    delta_vi = DeltaModeMeasurementVI({"source": source, "meter": meter})
+    delta_vi.initiate(current=1e-6, n_readings=5, delay_s=0.001)
+    assert source._mode == "DELTA"
+
+    data = delta_vi.take_reading()
+    assert data["n_valid"] == 5

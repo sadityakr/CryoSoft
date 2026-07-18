@@ -15,8 +15,11 @@
 # output: |
 #   Returns bool source state, float current, and list[float] delta readings.
 #   A private _delta_return_count test hook forces a short acquire_delta_readings
-#   return to exercise the delta VI's NaN-padding + n_valid contract.
-# last_updated: 2026-07-13
+#   return to exercise the delta VI's NaN-padding + n_valid contract. A private
+#   _mode ("DC"/"DELTA") test hook mirrors the real instrument's SCPI function
+#   mode so tests can catch a measurement VI that assumes a starting mode
+#   instead of asserting its own (shared-instrument mode discipline).
+# last_updated: 2026-07-18
 # ---
 
 """Simulated Keithley 6221 AC/DC Current Source driver."""
@@ -52,6 +55,14 @@ class SimKeithley6221:
         self._source_enabled: bool = False
         self._current: float = 0.0         # Amperes
         self._compliance: float = 0.1      # Volts (voltage compliance limit)
+
+        # Source function mode — "DC" (fixed current) or "DELTA" (bipolar
+        # delta engine armed/running). Mirrors the real 6221's SCPI function
+        # mode so tests can catch a VI that assumes a starting mode instead of
+        # asserting its own (the "shared-instrument mode discipline" standard
+        # in virtual_instruments/measurement/README.md). Private test/model
+        # hook, not part of the public API parity check.
+        self._mode: str = "DC"
 
         # Delta-mode configuration
         self._delta_high_current: float = 0.0
@@ -98,9 +109,15 @@ class SimKeithley6221:
     def set_current(self, current: float) -> None:
         """Set the source current.
 
+        Unconditionally reasserts fixed-current mode first, regardless of
+        whether the instrument was previously left armed in delta mode by
+        another measurement VI sharing this driver — mirrors the real
+        driver's defensive ``:SOUR:CURR:MODE FIX``.
+
         Args:
             current: Desired current in Amperes.
         """
+        self._mode = "DC"
         self._current = float(current)
 
     def set_compliance(self, compliance_v: float) -> None:
@@ -193,6 +210,7 @@ class SimKeithley6221:
             compliance_abort: Delta compliance-abort flag — stored but unused in sim.
             cold_switch: Delta cold-switch flag — stored but unused in sim.
         """
+        self._mode = "DELTA"
         self._delta_high_current = float(high_current)
         self._delta_n_readings = int(n_readings)
         self._delta_delay = float(delay)
@@ -234,7 +252,8 @@ class SimKeithley6221:
         return list(self._delta_readings)
 
     def stop_delta_mode(self) -> None:
-        """Abort the simulated delta engine and reset source to zero."""
+        """Abort the simulated delta engine and reset source to a plain idle state."""
+        self._mode = "DC"
         self._current = 0.0
         self._source_enabled = False
         self._delta_readings = []
