@@ -578,4 +578,29 @@ QLabel[class="lifecycle_dot"][status="standby"] {{
 QLabel[class="lifecycle_dot"][status="initiated"] {{
     color: {STATUS_OK};
 }}
+
+/* ── Verdict badge (DebugWindow) ──────────────────────────────────────── */
+/* Base rule reserves the 2px transparent border so warning/error states
+   (which add a coloured border) never shift layout — same pattern as the
+   QGroupBox[status] borders above. Reuses the banner's validated bg/border/
+   text triples; "ok" has no fill, just the existing STATUS_OK foreground. */
+QLabel[class="verdict_badge"] {{
+    font-weight: bold;
+    padding: 4px 10px;
+    border: 2px solid transparent;
+    border-radius: 4px;
+}}
+QLabel[class="verdict_badge"][severity="ok"] {{
+    color: {STATUS_OK};
+}}
+QLabel[class="verdict_badge"][severity="warning"] {{
+    background-color: {BANNER_WARNING_BG};
+    border-color: {BANNER_WARNING_BORDER};
+    color: {BANNER_WARNING_TEXT};
+}}
+QLabel[class="verdict_badge"][severity="error"] {{
+    background-color: {BANNER_ERROR_BG};
+    border-color: {BANNER_ERROR_BORDER};
+    color: {BANNER_ERROR_TEXT};
+}}
 """
