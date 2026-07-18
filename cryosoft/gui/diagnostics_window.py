@@ -1,6 +1,6 @@
 # ---
 # description: |
-#   DebugWindow: read-only live diagnostics window for connection and
+#   DiagnosticsWindow: read-only live diagnostics window for connection and
 #   progress problems ("a device stopped communicating" / "this is taking
 #   way longer than expected"). Renders the Orchestrator's operational_status
 #   signal (the per-tick record cryosoft.core.operational_status assembles
@@ -9,7 +9,7 @@
 #   fault-code vocabulary the offline troubleshoot CLI uses. A Copy
 #   Diagnostics button puts a text summary on the clipboard for a support
 #   message.
-# entry_point: Not run directly. Opened via MonitorWindow's Debug menu.
+# entry_point: Not run directly. Opened via MonitorWindow's Diagnostics menu.
 # dependencies:
 #   - PyQt6 >= 6.5
 #   - cryosoft.core.orchestrator (Orchestrator)
@@ -26,7 +26,7 @@
 #   A QMainWindow. Nothing here can change Orchestrator or hardware state.
 # ---
 
-"""DebugWindow — live connection/progress diagnostics (read-only)."""
+"""DiagnosticsWindow — live connection/progress diagnostics (read-only)."""
 
 from __future__ import annotations
 
@@ -55,7 +55,7 @@ from cryosoft.gui.theme import BTN_CLASS_SECONDARY, STATUS_ERROR, STATUS_OK, STA
 
 logger = logging.getLogger(__name__)
 
-_GEOMETRY_KEY = "DebugWindow/geometry"
+_GEOMETRY_KEY = "DiagnosticsWindow/geometry"
 
 # Plain-English cause per runtime fault code, mirroring
 # cryosoft.troubleshoot.status_reader.CODE_HELP's vocabulary. Kept as its own
@@ -102,7 +102,7 @@ _CODE_SEVERITY: dict[str, str] = {
 _SEVERITY_COLOR = {"ok": STATUS_OK, "warning": STATUS_WARN, "error": STATUS_ERROR}
 
 
-class DebugWindow(QMainWindow):
+class DiagnosticsWindow(QMainWindow):
     """Read-only live diagnostics: instrument connection/progress health.
 
     Answers "did a device stop communicating?" and "is this taking way
@@ -157,12 +157,12 @@ class DebugWindow(QMainWindow):
         self._state_label = QLabel(
             "No live data yet — start monitoring to see live status."
         )
-        self._state_label.setObjectName("debug_state_label")
+        self._state_label.setObjectName("diagnostics_state_label")
         root.addWidget(self._state_label)
 
         root.addWidget(QLabel("<b>Instruments</b>"))
         self._table = QTableWidget(0, 3)
-        self._table.setObjectName("debug_vi_table")
+        self._table.setObjectName("diagnostics_vi_table")
         self._table.setHorizontalHeaderLabels(["Instrument", "Status", "Detail"])
         self._table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeMode.ResizeToContents
@@ -180,7 +180,7 @@ class DebugWindow(QMainWindow):
 
         root.addWidget(QLabel("<b>Alerts</b>"))
         self._alerts_view = QTextEdit()
-        self._alerts_view.setObjectName("debug_alerts_view")
+        self._alerts_view.setObjectName("diagnostics_alerts_view")
         self._alerts_view.setReadOnly(True)
         self._alerts_view.setMaximumHeight(100)
         self._alerts_view.setPlainText("No active alerts.")

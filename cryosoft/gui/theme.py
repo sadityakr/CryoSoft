@@ -579,7 +579,7 @@ QLabel[class="lifecycle_dot"][status="initiated"] {{
     color: {STATUS_OK};
 }}
 
-/* ── Verdict badge (DebugWindow) ──────────────────────────────────────── */
+/* ── Verdict badge (DiagnosticsWindow) ──────────────────────────────────── */
 /* Base rule reserves the 2px transparent border so warning/error states
    (which add a coloured border) never shift layout — same pattern as the
    QGroupBox[status] borders above. Reuses the banner's validated bg/border/

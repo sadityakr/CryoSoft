@@ -70,7 +70,7 @@ from cryosoft.gui import app_settings  # import the module (not the function) so
 from cryosoft.gui import form_autosave as session_store  # module import keeps save/load monkeypatchable
 from cryosoft.gui import window_geometry
 from cryosoft.gui.config_menu import ConfigMenuController
-from cryosoft.gui.debug_window import DebugWindow
+from cryosoft.gui.diagnostics_window import DiagnosticsWindow
 from cryosoft.gui.instrument_panel import InstrumentPanel
 from cryosoft.gui.log_panel import LogPanel
 from cryosoft.gui.notification_banner import NotificationBanner
@@ -156,7 +156,7 @@ class MonitorWindow(QMainWindow):
         self._station = station
         self._orchestrator = orchestrator
         self._procedure_window = None  # lazily created
-        self._debug_window = None  # lazily created
+        self._diagnostics_window = None  # lazily created
 
         # Session layer (L6, optional — absent in unit tests). The window only
         # reads experiment_context() to stamp built procedures; the experiment
@@ -203,7 +203,7 @@ class MonitorWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _build_menu(self) -> None:
-        """Build the Session / Config / Procedures / Debug menus.
+        """Build the Session / Config / Procedures / Diagnostics menus.
 
         There is no View menu: every quadrant is always visible and nothing
         can be hidden, so there is nothing to toggle. Trend plots are added
@@ -242,14 +242,14 @@ class MonitorWindow(QMainWindow):
         open_action.triggered.connect(self._open_procedures)
         proc_menu.addAction(open_action)
 
-        debug_menu = menu_bar.addMenu("Debug")
-        open_debug_action = QAction("Open Diagnostics…", self)
-        open_debug_action.setToolTip(
+        diagnostics_menu = menu_bar.addMenu("Diagnostics")
+        open_diagnostics_action = QAction("Open Diagnostics…", self)
+        open_diagnostics_action.setToolTip(
             "Live connection/progress status — for a device that stopped "
             "responding or a run taking longer than expected"
         )
-        open_debug_action.triggered.connect(self._open_debug_window)
-        debug_menu.addAction(open_debug_action)
+        open_diagnostics_action.triggered.connect(self._open_diagnostics_window)
+        diagnostics_menu.addAction(open_diagnostics_action)
 
     def _open_procedures(self) -> None:
         """Lazily create and show the ProcedureWindow."""
@@ -267,13 +267,13 @@ class MonitorWindow(QMainWindow):
         self._procedure_window.raise_()
         self._procedure_window.activateWindow()
 
-    def _open_debug_window(self) -> None:
-        """Lazily create and show the DebugWindow."""
-        if self._debug_window is None:
-            self._debug_window = DebugWindow(self._orchestrator)
-        self._debug_window.show()
-        self._debug_window.raise_()
-        self._debug_window.activateWindow()
+    def _open_diagnostics_window(self) -> None:
+        """Lazily create and show the DiagnosticsWindow."""
+        if self._diagnostics_window is None:
+            self._diagnostics_window = DiagnosticsWindow(self._orchestrator)
+        self._diagnostics_window.show()
+        self._diagnostics_window.raise_()
+        self._diagnostics_window.activateWindow()
 
     # ------------------------------------------------------------------
     # UI construction
