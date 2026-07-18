@@ -818,3 +818,50 @@ def validate_config_dir(config_path: str) -> list[str]:
                 )
 
     return errors
+
+
+def read_instrument_metadata(config_path: str) -> dict[str, dict[str, str]]:
+    """Read each VI's optional descriptive ``metadata:`` block, GUI-safe.
+
+    A setup property, like everything else in ``devices.yaml``: free-text
+    identity (manufacturer, model, role, notes — whatever the setup wants to
+    record about what a VI physically is) for display and for stamping onto
+    every run's metadata. Parses YAML only — never imports a driver/VI class
+    or instantiates anything, so it is safe to call from the GUI thread on a
+    config that may describe unreachable hardware.
+
+    Args:
+        config_path: Path to the config directory containing ``devices.yaml``.
+
+    Returns:
+        ``{vi_name: {field: value, ...}}``, string-coerced. Empty for a VI
+        with no ``metadata:`` block, and ``{}`` entirely if the config
+        directory, file, or YAML is unreadable — never raises.
+    """
+    try:
+        from ruamel.yaml import YAML  # type: ignore
+    except ImportError:
+        return {}
+
+    devices_file = Path(config_path) / "devices.yaml"
+    try:
+        with devices_file.open("r", encoding="utf-8") as f:
+            devices_config = dict(YAML().load(f) or {})
+    except OSError:
+        return {}
+    except Exception:  # noqa: BLE001 — malformed YAML must not break the GUI
+        return {}
+
+    virtual_instruments = devices_config.get("virtual_instruments") or {}
+    if not isinstance(virtual_instruments, dict):
+        return {}
+
+    result: dict[str, dict[str, str]] = {}
+    for vi_name, vi_cfg in virtual_instruments.items():
+        if not isinstance(vi_cfg, dict):
+            continue
+        metadata = vi_cfg.get("metadata")
+        if isinstance(metadata, dict) and metadata:
+            result[str(vi_name)] = {str(k): str(v) for k, v in metadata.items()}
+
+    return result

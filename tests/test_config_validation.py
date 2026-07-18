@@ -11,7 +11,11 @@ from pathlib import Path
 import pytest
 
 from cryosoft.core.exceptions import CryoSoftConfigError
-from cryosoft.core.station import build_station_with_fallback, validate_config_dir
+from cryosoft.core.station import (
+    build_station_with_fallback,
+    read_instrument_metadata,
+    validate_config_dir,
+)
 
 _SIM_CONFIG = "cryosoft/configs/sim_cryostat"
 
@@ -101,3 +105,88 @@ def test_fallback_all_invalid_raises(tmp_path):
     bad = _write(tmp_path / "bad", "real_drivers: {: broken\n")
     with pytest.raises(CryoSoftConfigError):
         build_station_with_fallback([str(bad)])
+
+
+# ── read_instrument_metadata ────────────────────────────────────────────────
+
+_DEVICES_WITH_METADATA = """\
+real_drivers:
+  ips_x:
+    class: cryosoft.drivers.sim_oxford_ips120.SimOxfordIPS120
+    address: "SIM::IPS_X"
+virtual_instruments:
+  magnet_x:
+    class: cryosoft.virtual_instruments.magnet.superconducting_magnet.SuperconductingMagnetVI
+    drivers: {main: ips_x}
+    vi_type: system
+    metadata:
+      role: X-axis magnet
+      manufacturer: Oxford Instruments
+      model: IPS120-10
+  magnet_y:
+    class: cryosoft.virtual_instruments.magnet.superconducting_magnet.SuperconductingMagnetVI
+    drivers: {main: ips_x}
+    vi_type: system
+"""
+
+
+def test_read_instrument_metadata_returns_only_vis_with_a_block(tmp_path):
+    """A VI with a metadata: block is included; one without is omitted."""
+    d = _write(tmp_path / "cfg", _DEVICES_WITH_METADATA)
+    result = read_instrument_metadata(str(d))
+    assert result == {
+        "magnet_x": {
+            "role": "X-axis magnet",
+            "manufacturer": "Oxford Instruments",
+            "model": "IPS120-10",
+        }
+    }
+
+
+def test_read_instrument_metadata_from_sim_cryostat():
+    """The shipped sim_cryostat config carries metadata for every VI."""
+    result = read_instrument_metadata(_SIM_CONFIG)
+    assert result  # non-empty
+    assert set(result.keys()) <= set(build_station_with_fallback([_SIM_CONFIG])[0].get_vi_names())
+    for vi_meta in result.values():
+        assert "role" in vi_meta
+
+
+def test_read_instrument_metadata_never_instantiates_anything(tmp_path):
+    """A metadata-only read of a config with an unimportable class does not raise."""
+    devices = """\
+virtual_instruments:
+  ghost:
+    class: cryosoft.does.not.exist.Ghost
+    drivers: {}
+    vi_type: system
+    metadata:
+      role: Deliberately unimportable
+"""
+    d = _write(tmp_path / "cfg", devices)
+    assert read_instrument_metadata(str(d)) == {"ghost": {"role": "Deliberately unimportable"}}
+
+
+def test_read_instrument_metadata_tolerates_missing_directory():
+    """A nonexistent config path returns {} rather than raising."""
+    assert read_instrument_metadata("/no/such/config/path") == {}
+
+
+def test_read_instrument_metadata_tolerates_malformed_yaml(tmp_path):
+    """Unparseable devices.yaml returns {} rather than raising."""
+    d = _write(tmp_path / "cfg", "real_drivers: {: broken\n")
+    assert read_instrument_metadata(str(d)) == {}
+
+
+def test_read_instrument_metadata_ignores_empty_metadata_block(tmp_path):
+    """A VI with an empty metadata: {} block is omitted, not included as {}."""
+    devices = """\
+virtual_instruments:
+  magnet_x:
+    class: cryosoft.virtual_instruments.magnet.superconducting_magnet.SuperconductingMagnetVI
+    drivers: {}
+    vi_type: system
+    metadata: {}
+"""
+    d = _write(tmp_path / "cfg", devices)
+    assert read_instrument_metadata(str(d)) == {}

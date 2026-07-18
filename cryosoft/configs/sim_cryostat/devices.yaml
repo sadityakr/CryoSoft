@@ -41,6 +41,10 @@ virtual_instruments:
         - {max_current_A: 40.0, rate_A_per_min: 5.0}
         - {max_current_A: 70.0, rate_A_per_min: 3.0}
         - {max_current_A: 90.0, rate_A_per_min: 1.0}
+    metadata:
+      role: X-axis magnet
+      manufacturer: Oxford Instruments
+      model: IPS120-10
   magnet_y:
     class: cryosoft.virtual_instruments.magnet.superconducting_magnet.SuperconductingMagnetVI
     drivers: {main: ips_y}
@@ -50,6 +54,10 @@ virtual_instruments:
       max_current: 20.0
       min_current: -20.0
       default_ramp_rate: 2.0
+    metadata:
+      role: Y-axis magnet
+      manufacturer: Oxford Instruments
+      model: IPS120-10
   temperature_vti:
     class: cryosoft.virtual_instruments.temperature.vti_temperature_controller.VTITemperatureControllerVI
     drivers: {main: itc_vti}
@@ -61,6 +69,10 @@ virtual_instruments:
       min_temperature_K: 1.4
       max_temperature_K: 320.0
       max_ramp_rate_K_per_min: 20.0
+    metadata:
+      role: VTI temperature controller
+      manufacturer: Oxford Instruments
+      model: ITC503
   temperature_sample:
     class: cryosoft.virtual_instruments.temperature.sample_temperature_controller.SampleTemperatureControllerVI
     drivers: {main: itc_sample}
@@ -72,6 +84,10 @@ virtual_instruments:
       min_temperature_K: 1.4
       max_temperature_K: 320.0
       max_ramp_rate_K_per_min: 20.0
+    metadata:
+      role: Sample-space temperature controller
+      manufacturer: Oxford Instruments
+      model: ITC503
   level_meter:
     class: cryosoft.virtual_instruments.level.cryogen_level_meter.CryogenLevelMeterVI
     drivers: {main: ilm}
@@ -79,16 +95,28 @@ virtual_instruments:
     init_params:
       helium_low_threshold: 20.0
       buffer_size: 5
+    metadata:
+      role: Helium/nitrogen level meter
+      manufacturer: Oxford Instruments
+      model: ILM200
   keithley_delta_mode:
     class: cryosoft.virtual_instruments.measurement.measurement_delta_mode.DeltaModeMeasurementVI
     drivers: {source: keithley_6221, meter: keithley_2182a}
     vi_type: measurement
     init_params: {}
+    metadata:
+      role: Delta-mode resistance measurement (source + nanovoltmeter pair)
+      manufacturer: Keithley
+      model: 6221 + 2182A
   dc_measurement:
     class: cryosoft.virtual_instruments.measurement.dc_separate_measurement.DCSeparateMeasurementVI
     drivers: {source: keithley_6221, meter: keithley_2182a}
     vi_type: measurement
     init_params: {}
+    metadata:
+      role: DC source-and-measure (source + nanovoltmeter pair)
+      manufacturer: Keithley
+      model: 6221 + 2182A
   switch_matrix:
     class: cryosoft.virtual_instruments.switch.switch_matrix.SwitchMatrixVI
     drivers: {main: k705}
@@ -100,3 +128,7 @@ virtual_instruments:
         Mux-Ch3: ["1!3"]
         Mux-Ch4: ["1!4"]
       settle_time_s: 0.0
+    metadata:
+      role: Sample multiplexer
+      manufacturer: Keithley
+      model: 705
