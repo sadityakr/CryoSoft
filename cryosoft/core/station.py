@@ -9,7 +9,11 @@
 #   an "operation"-scope @control method is refused (CryoSoftSafetyError,
 #   nothing dispatched) unless the caller passes allowed_scope="operation".
 #   build_station() is the factory that constructs the full instrument stack
-#   from a YAML config directory.
+#   from a YAML config directory. magnet_vi_names() mirrors switch_vi_names()
+#   for registry-system VIs whose class vi_type == "magnet". read_cryogenics_
+#   config()/read_servicing_logs_config() mirror read_instrument_metadata()'s
+#   GUI-safe YAML-only pattern for the optional cryogenics:/servicing_logs:
+#   config blocks (docs/plans/cryogenics-logbook.md §9).
 # entry_point: Not run directly; used by Orchestrator and GUI.
 # dependencies:
 #   - cryosoft.core.exceptions
@@ -150,6 +154,28 @@ class Station:
             name
             for name, vi_type in self._vi_registry.items()
             if vi_type == "switch"
+        ]
+
+    def magnet_vi_names(self) -> list[str]:
+        """Return the names of all registered magnet VIs, in registration order.
+
+        A magnet VI is a registry-``system`` VI whose class ``vi_type ==
+        "magnet"`` (the typed VI category from ``MagnetBase`` and its
+        subclasses — distinct from the registry's own "system" role string,
+        see GLOSSARY.md's "vi_type (class)" / "vi_type (config/registry)"
+        entries). The order is config order, so a caller that defaults to
+        "every magnet" (e.g. the helium-fill operation forcing all magnets to
+        zero field, plan §8.1) gets a stable, config-controlled list —
+        mirrors ``switch_vi_names()``.
+
+        Returns:
+            List of magnet VI names, registration order preserved.
+        """
+        return [
+            name
+            for name, vi_type in self._vi_registry.items()
+            if vi_type == "system"
+            and getattr(self._virtual_instruments[name], "vi_type", "") == "magnet"
         ]
 
     def has_vi(self, vi_name: str) -> bool:
@@ -909,3 +935,104 @@ def read_instrument_metadata(config_path: str) -> dict[str, dict[str, str]]:
             result[str(vi_name)] = {str(k): str(v) for k, v in metadata.items()}
 
     return result
+
+
+# Defaults applied by read_cryogenics_config() for every key the config omits
+# (docs/plans/cryogenics-logbook.md §9). ``helium_volume_l`` deliberately has
+# no default: its absence means "no L/h display", not "0 L".
+_CRYOGENICS_DEFAULTS: dict[str, float | str] = {
+    "level_vi": "level_meter",
+    "helium_warning_pct": 35.0,
+    "fill_target_pct": 90.0,
+    "fill_zero_field_eps_T": 0.005,
+    "fill_zero_field_window_s": 10.0,
+    "fill_complete_window_s": 120.0,
+    "max_fill_duration_s": 3600.0,
+    "sample_period_s": 10.0,
+    "history_sample_s": 3600.0,
+}
+
+
+def _load_devices_yaml(config_path: str) -> dict[str, Any] | None:
+    """Parse ``devices.yaml`` under *config_path*, GUI-safe.
+
+    Shared by ``read_cryogenics_config`` / ``read_servicing_logs_config``:
+    YAML-parse only, never imports a driver/VI class or instantiates
+    anything, so it is safe to call from the GUI thread on a config that may
+    describe unreachable hardware.
+
+    Args:
+        config_path: Path to the config directory containing ``devices.yaml``.
+
+    Returns:
+        The parsed mapping, or ``None`` if ruamel.yaml is unavailable, the
+        file is missing/unreadable, or the YAML is malformed.
+    """
+    try:
+        from ruamel.yaml import YAML  # type: ignore
+    except ImportError:
+        return None
+
+    devices_file = Path(config_path) / "devices.yaml"
+    try:
+        with devices_file.open("r", encoding="utf-8") as f:
+            return dict(YAML().load(f) or {})
+    except OSError:
+        return None
+    except Exception:  # noqa: BLE001 — malformed YAML must not break the GUI
+        return None
+
+
+def read_cryogenics_config(config_path: str) -> dict[str, Any]:
+    """Read the optional ``cryogenics:`` block, GUI-safe, with defaults applied.
+
+    A setup property like everything else in ``devices.yaml`` (plan §9): the
+    fill target, zero-field tolerance, timing, and the level VI the
+    cryogenics feature (the helium-fill operation, the consumption display,
+    the automatic recorder) is built around. Parses YAML only — never
+    imports a driver/VI class or instantiates anything, so it is safe to
+    call from the GUI thread on a config that may describe unreachable
+    hardware, mirroring ``read_instrument_metadata``'s GUI-safe pattern.
+
+    Args:
+        config_path: Path to the config directory containing ``devices.yaml``.
+
+    Returns:
+        The ``cryogenics:`` mapping with every omitted key defaulted from
+        ``_CRYOGENICS_DEFAULTS``. ``{}`` when the block is absent, malformed,
+        or the config directory/file/YAML is unreadable — never raises.
+    """
+    devices_config = _load_devices_yaml(config_path)
+    if devices_config is None:
+        return {}
+    block = devices_config.get("cryogenics")
+    if not isinstance(block, dict) or not block:
+        return {}
+    merged = dict(_CRYOGENICS_DEFAULTS)
+    merged.update(block)
+    return merged
+
+
+def read_servicing_logs_config(config_path: str) -> list[str]:
+    """Read the optional ``servicing_logs:`` list, GUI-safe.
+
+    Names which declared servicing-log kinds (``cryosoft.session.
+    servicing_log.DECLARED_LOG_KINDS``) this setup keeps (plan §9). Parses
+    YAML only, mirroring ``read_cryogenics_config`` — never imports the
+    session layer or instantiates anything.
+
+    Args:
+        config_path: Path to the config directory containing ``devices.yaml``.
+
+    Returns:
+        The declared log-kind keys, string-coerced, in config order. ``[]``
+        when the block is absent, malformed, or the config is unreadable —
+        never raises.
+    """
+    devices_config = _load_devices_yaml(config_path)
+    if devices_config is None:
+        return []
+    block = devices_config.get("servicing_logs")
+    if not isinstance(block, list):
+        return []
+    return [str(kind) for kind in block]

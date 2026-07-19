@@ -78,6 +78,7 @@ config also has automatic `test_conformance.py` coverage on top of these.
 | `cryosoft/core/orchestrator.py` | `tests/test_l3_orchestrator.py`, `tests/test_operations.py` |
 | `cryosoft/core/operation.py` | `tests/test_operations.py` |
 | `cryosoft/core/procedure.py`, `cryosoft/procedures/*` | `tests/test_l4_procedure.py`, `tests/test_new_procedures.py`, `tests/test_field_voltage_procedure.py` |
+| `cryosoft/procedures/operations/*` (concrete operations) | `tests/test_helium_fill.py` |
 | `cryosoft/core/plan.py` | `tests/test_plan.py` |
 | `cryosoft/core/sweep_builder.py` | `tests/test_sweep_builder.py` |
 | `cryosoft/core/data_manager.py` (L5) | `tests/test_l5_data_manager.py` |
@@ -102,7 +103,7 @@ config also has automatic `test_conformance.py` coverage on top of these.
 - **L1 virtual instruments:** `test_l1_virtual_instruments.py`, `test_l1_new_vis.py`, `test_l1_switch_vi.py`, `test_measurement_dc_vi.py`, `test_switch_heater.py`.
 - **L2 station + config:** `test_l2_station.py`, `test_config_validation.py`, `test_config_catalog.py`.
 - **L3 orchestrator:** `test_l3_orchestrator.py`.
-- **L3/L4 operations:** `test_operations.py` (`OperationBase`, `run_operation`/`queue_operation`/`finish_operation`, tolerated safety flags, postcondition gates, capability-scope dispatch).
+- **L3/L4 operations:** `test_operations.py` (`OperationBase`, `run_operation`/`queue_operation`/`finish_operation`, tolerated safety flags, postcondition gates, capability-scope dispatch); `test_helium_fill.py` (`HeliumFillOperation` end-to-end against a real Orchestrator + `sim_cryostat`, including the `CryogenicsRecorder` wiring).
 - **L4 procedures + planning:** `test_l4_procedure.py`, `test_new_procedures.py`, `test_field_voltage_procedure.py`, `test_plan.py`, `test_sweep_builder.py`.
 - **L5 data manager:** `test_l5_data_manager.py`.
 - **L6 session management:** `test_session_layer.py`, `test_servicing_log.py`.

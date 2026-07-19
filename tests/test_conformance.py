@@ -446,6 +446,73 @@ def test_config_schema(config_dir: Path) -> None:
             )
 
 
+# ── Cryogenics config block ───────────────────────────────────────────────────
+# See docs/plans/cryogenics-logbook.md §9: an optional cryogenics: block plus
+# a servicing_logs: list. A config that declares neither carries zero
+# footprint (the feature stays off); a config that declares cryogenics: must
+# reference a real vi_type: level VI with sane, ordered bounds.
+
+
+@pytest.mark.parametrize("config_dir", _config_dirs(), ids=lambda p: p.name)
+def test_cryogenics_config_block(config_dir: Path) -> None:
+    """A declared cryogenics: block names a real level VI with sane bounds."""
+    devices = _load_yaml(config_dir / "devices.yaml")
+    cryo = devices.get("cryogenics")
+    if cryo is None:
+        pytest.skip(f"{config_dir.name} declares no cryogenics: block")
+    assert isinstance(cryo, dict), f"{config_dir.name}: cryogenics: must be a mapping"
+
+    level_vi_name = cryo.get("level_vi")
+    virtual_instruments = devices.get("virtual_instruments", {})
+    vi_cfg = virtual_instruments.get(level_vi_name)
+    assert vi_cfg is not None, (
+        f"{config_dir.name}: cryogenics.level_vi={level_vi_name!r} does not "
+        f"name a registered VI"
+    )
+    assert vi_cfg.get("vi_type") == "level", (
+        f"{config_dir.name}: cryogenics.level_vi={level_vi_name!r} must be a "
+        f"vi_type: level VI, got {vi_cfg.get('vi_type')!r}"
+    )
+
+    helium_low_threshold = float(
+        (vi_cfg.get("init_params") or {}).get("helium_low_threshold", 0.0)
+    )
+    warning_pct = float(cryo.get("helium_warning_pct", 0.0))
+    assert warning_pct > helium_low_threshold, (
+        f"{config_dir.name}: cryogenics.helium_warning_pct ({warning_pct}) "
+        f"must exceed the level VI's helium_low_threshold "
+        f"({helium_low_threshold})"
+    )
+
+    positive_keys = (
+        "helium_warning_pct",
+        "fill_target_pct",
+        "fill_zero_field_eps_T",
+        "fill_zero_field_window_s",
+        "fill_complete_window_s",
+        "max_fill_duration_s",
+        "sample_period_s",
+        "history_sample_s",
+    )
+    for key in positive_keys:
+        if key not in cryo:
+            continue
+        assert float(cryo[key]) > 0, (
+            f"{config_dir.name}: cryogenics.{key} must be positive, "
+            f"got {cryo[key]!r}"
+        )
+
+    servicing_logs = devices.get("servicing_logs") or []
+    assert isinstance(servicing_logs, list), (
+        f"{config_dir.name}: servicing_logs must be a list"
+    )
+    for kind in servicing_logs:
+        assert kind in DECLARED_LOG_KINDS, (
+            f"{config_dir.name}: servicing_logs entry {kind!r} is not a "
+            f"declared log kind ({sorted(DECLARED_LOG_KINDS)})"
+        )
+
+
 # ── Control-validation standard ───────────────────────────────────────────────
 # See BaseVirtualInstrument's "Control-validation standard" docstring: VIs
 # declare control_limits (method -> {param: limit_name}); __init__ populates
@@ -674,8 +741,18 @@ def test_operation_declaration(op_cls: type) -> None:
 
 @pytest.mark.parametrize("op_cls", _all_operation_classes(), ids=lambda c: c.__name__)
 def test_operation_constructs_from_defaults(op_cls: type) -> None:
-    """Every OperationBase subclass must construct with zero explicit arguments."""
-    op_cls()
+    """Every OperationBase subclass must construct from a sim station alone.
+
+    Unlike a plain procedure (some of which build from an empty ``Station``),
+    every operation resolves VIs from the station at construction (e.g. the
+    helium fill's ``Station.magnet_vi_names()`` and its configured level VI),
+    so it needs a populated one — mirrors
+    ``test_procedure_constructs_from_defaults``'s station-dependent branch.
+    Every other constructor argument (``person``, the plan-§9 ``**config``
+    keys) must have a working default.
+    """
+    station = build_station("cryosoft/configs/sim_cryostat")
+    op_cls(station)
 
 
 # ── Measurement-method standard ───────────────────────────────────────────────

@@ -99,3 +99,22 @@ virtual_instruments:
     drivers: {source: keithley_6221, meter: keithley_2182a}
     vi_type: measurement
     init_params: {}
+
+# Cryogenics management (docs/plans/cryogenics-logbook.md §9): the helium
+# fill operation, the consumption display, and the automatic helium-record
+# recorder are all built around this block. Absent on a setup that doesn't
+# need the feature -> zero footprint, zero code changes.
+cryogenics:
+  level_vi: level_meter
+  helium_warning_pct: 35.0       # advisory; must exceed level_meter's helium_low_threshold (20.0)
+  fill_target_pct: 90.0
+  fill_zero_field_eps_T: 0.005
+  fill_zero_field_window_s: 10.0
+  fill_complete_window_s: 120.0
+  max_fill_duration_s: 3600.0
+  sample_period_s: 10.0          # fill-time sampling (FAST mode)
+  history_sample_s: 3600.0       # helium record cadence -- hourly
+  helium_volume_l: 40.0          # optional; enables L/h display
+
+servicing_logs:                  # which declared log kinds this setup keeps
+  - cryogenics
