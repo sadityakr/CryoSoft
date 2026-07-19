@@ -1,20 +1,24 @@
-# Plan: operations, the Logbook, and cryogenics management
+# Plan: operations, the Servicing Log, and cryogenics management
 
 **Status:** proposal — no code yet.
 **Scope:** three connected pieces. (1) **Operations**: a new L4 class for
 multi-step *cryostat-servicing* actions (helium fill, sample change) that is
 distinct from measurement procedures — higher submission priority, access to
 a broader, explicitly-scoped hardware capability tier, verified
-postconditions, and no required data file. (2) A setup-level **logbook**
-(timestamped operational events, independent of experiments). (3)
-**Cryogenics management** built on both: a GUI sub-panel showing helium
-consumption over the last hours and a "Fill helium" operation that forces
-all magnets to zero field and records start/end time and level. Everything
-is config-gated so a cryostat that doesn't need a feature carries zero UI
-footprint with zero code changes.
-**Date:** 2026-07-19 (revised same day: the fill is now the first
-*operation*, superseding the earlier `run_kind = "service"` procedure
-marker, per design discussion).
+postconditions, and no required data file. (2) A **servicing-log framework**
+(L6): per-setup, typed, human-editable logs of servicing events, where a new
+log *kind* is a declaration rather than new code. The first kind is the
+**cryogenics log** technical staff care about — who filled, start/end time,
+start/end helium level, whether LN2 was filled too — plus an hourly
+machine-recorded **helium record**. (3) **Cryogenics management** built on
+both: a GUI sub-panel showing helium consumption over the last hours and a
+"Fill helium" operation that forces all magnets to zero field and writes the
+cryogenics log entry. Everything is config-gated so a cryostat that doesn't
+need a feature carries zero UI footprint with zero code changes.
+**Date:** 2026-07-19 (rev. 2: the fill is an *operation*, superseding the
+earlier `run_kind = "service"` marker. rev. 3: the logbook generalized into
+the servicing-log framework — editable, kind-declared logs; hourly helium
+record; Monitor window gains a second page hosting all logs).
 
 ---
 
@@ -44,11 +48,11 @@ A survey of the codebase (2026-07-19) established the starting point:
   keeps 24 h of every monitored value in ring buffers fed by
   `states_updated`. Nothing is persisted: close the app and the consumption
   history is gone.
-- **There is no logbook.** The closest artifacts are per-run `RunRecord`s
-  (only recorded inside an open experiment), free-text
-  `ExperimentRecord.findings`, and the machine-only `logs/status.jsonl`. A
-  timestamped stream of operational events tied to the *setup* rather than
-  to an experiment does not exist.
+- **There is no servicing record of any kind.** The closest artifacts are
+  per-run `RunRecord`s (only recorded inside an open experiment), free-text
+  `ExperimentRecord.findings`, and the machine-only `logs/status.jsonl`.
+  Who filled helium on Tuesday, and from what level to what level, is
+  recorded nowhere.
 - **One genuine safety-layer gap.** `helium_low` trips EMERGENCY;
   `acknowledge_emergency()` is refused while the condition persists;
   `run_procedure()` starts only from IDLE. Consequence: when helium is
@@ -69,8 +73,8 @@ checks. The differences live at exactly three points:
 
 1. **Submission** — priority, queueing, and the EMERGENCY carve-out (§4.2).
 2. **Dispatch** — the capability scope a plan's commands may carry (§5).
-3. **Completion** — verified postconditions and logbook recording instead
-   of a mandatory dataset (§4.1).
+3. **Completion** — verified postconditions and a servicing-log record
+   instead of a mandatory dataset (§4.1).
 
 The rule that keeps this safe: **an operation is never a bypass.** Its
 extra capabilities are ordinary `@control` methods with config limits,
@@ -82,8 +86,9 @@ name*.
 Layer placement — a vertical slice, no new horizontal layer:
 
 ```
-GUI   gui/cryogenics_panel.py + operations UI    config-gated composition
-L6    session/logbook.py                          logbook models + store + recorder (new)
+GUI   monitor pages, gui/cryogenics_panel.py,     config-gated composition; page 2 = logs
+      gui/servicing_log_page.py
+L6    session/servicing_log.py                    log-kind specs, stores, recorder (new)
 L4    core/operation.py (OperationBase)           the new contract (new)
       procedures/operations/*.py                  concrete operations (new)
 L3    Orchestrator                                run_operation(), scope enforcement hooks,
@@ -96,7 +101,8 @@ L0    drivers                                     unchanged (except optional ITC
 
 Contracts C1–C12 cover every piece unchanged; C6 (procedures are
 hardware-blind) extends verbatim to `core.operation` and the operations
-package.
+package; the servicing log lands under C11/C12 exactly like the rest of
+`cryosoft/session/`.
 
 ## 3. Concept model (→ `GLOSSARY.md` in the first implementation commit)
 
@@ -105,8 +111,11 @@ package.
 | **Operation** | A multi-step cryostat-servicing action (subclass of `OperationBase`, L4): helium fill, sample change. Declarative like a procedure (returns plans, never touches VIs directly), but with operation-scope command access, tolerated safety flags, verified postconditions, an optional (not required) data file, and higher submission priority. Not listed among measurement procedures. |
 | **Capability scope** | The tier a VI `@control` method belongs to: `"measurement"` (may appear in any plan) or `"operation"` (may appear only in operation plans; still a GUI control as before). Declared on the decorator, enforced at dispatch, conformance-checked. |
 | **Postcondition gate** | A `Gate` an operation declares via `postcondition_gates()`: stepped after parking completes, and the operation only reports **done** once every gate holds. The difference between "the commands ran" and "the cryostat is verifiably in the promised state". |
-| **Logbook** | A per-setup, append-only stream of timestamped operational events, independent of experiments. Survives restarts; never rewritten. |
-| **Logbook event** | One typed record: `utc`, `kind` (`operation`, `helium_fill`, `cryo_warning`, `note`), `data`, optional `run_id` linkage. Tolerant-parse dataclass like every session model. |
+| **Servicing log** | The L6 framework for per-setup, human-facing logs of servicing events. Each log is one **log kind**; entries are typed records, editable via **entry revisions**, persisted append-only. Independent of experiments; what technical staff consult and maintain. |
+| **Log kind** | One declared servicing-log table: a key (`"cryogenics"`), a title, and an ordered field schema (reusing `ParamSpec`). Adding a log kind for a new setup is a declaration + config reference — the storage, revision handling, table view, and add/edit dialogs all follow automatically. The standards-over-one-off-code move, applied to record keeping. |
+| **Cryogenics log** | The first log kind: one entry per cryogen fill — `person`, `start_utc`, `end_utc`, `helium_start_pct`, `helium_end_pct`, `ln2_filled` (bool), `notes`. Written automatically by the fill operation, addable and editable manually (fills done by hand, LN2 top-ups, corrections). |
+| **Entry revision** | How editability and trustworthiness coexist: every entry has a stable `entry_id`; an edit appends a new revision (`revised_utc`, `revised_by`) rather than rewriting; a deletion appends a tombstone. The store presents the latest revision per entry; the full history stays on disk. The file itself is never rewritten. |
+| **Helium record** | The machine companion to the cryogenics log: one `(utc, helium_pct, nitrogen_pct)` sample per hour, appended by the recorder from the monitoring tick. Powers the consumption display and start/end-level lookup; not human-editable. |
 
 ## 4. `OperationBase` (L4, `cryosoft/core/operation.py`)
 
@@ -129,7 +138,7 @@ machinery, plus three declarations procedures don't have:
   `standby()`'s ramps complete. Only when all hold does the Orchestrator
   emit the manifest with status `done`; a timeout (per-gate `window_s` plus
   an operation-level `postcondition_timeout_s`) degrades to ERROR with the
-  unmet gate named, and the logbook records the operation as
+  unmet gate named, and the operation's servicing-log entry is marked
   **unverified**. Gates read the station's cached state — no extra polls.
 - **`tolerated_safety_flags: frozenset[str] = frozenset()`** *(new)* —
   flags that do not abort *this* operation (§7).
@@ -195,35 +204,89 @@ This converts today's "procedures don't touch the switch heater, by
 convention" into a machine-checked rule — the standards-over-one-off-code
 move, applied to privilege.
 
-## 6. The Logbook (L6, `cryosoft/session/logbook.py`)
+## 6. The Servicing Log (L6, `cryosoft/session/servicing_log.py`)
 
-- **Models** in `session/models.py` (`LogbookEvent`), so existing
-  session-model conformance (defaults-constructible, JSON-safe round-trip,
-  junk-tolerant `from_dict`) covers them the moment they exist.
-- **`LogbookStore`** — append-only JSONL per setup
-  (`<store root>/logbook/<config_name>.jsonl`), atomic appends, tolerant
-  loads, windowed reads. Same discipline as `ExperimentStore`.
-- **`HeliumHistoryStore`** — the persistence MonitorHistory lacks: a
-  decimated `(utc, helium_pct, nitrogen_pct)` sample every
-  `history_sample_s` (default 300 s), size-bounded rotation. This makes
-  "consumption over the last few hours" survive a restart.
-- **`CryogenicsRecorder(QObject)`** — single writer to both stores,
-  constructed by `main.py` beside `SessionManager` (only when the feature
-  is on), driven purely by existing Orchestrator signals:
-  - `states_updated` → decimate/append history; log one `cryo_warning`
-    per threshold crossing (hysteresis, not per tick).
-  - operation manifests (`run_started`/`run_finished`, kind
-    `"operation"`) → compose the event: start/end UTC, start/end level
-    from its own history, verified/unverified, terminal status, data-file
-    linkage when present.
+### 6.1 The framework: log kinds are declarations
 
-  **Every operation is logbook-recorded, always** — unlike measurement
-  runs, which are only recorded inside an open experiment. Operations are
-  precisely what you consult when asking "who warmed the VTI last night?".
+One generic engine, N declared kinds. A log kind is:
+
+```python
+LogKindSpec(
+    key="cryogenics",
+    title="Cryogenics log",
+    fields={  # ordered; reuses ParamSpec — the same currency the GUI already renders
+        "person":           ParamSpec(type=str,   description="Who performed the fill"),
+        "start_utc":        ParamSpec(type=str,   widget_hint="datetime"),
+        "end_utc":          ParamSpec(type=str,   widget_hint="datetime"),
+        "helium_start_pct": ParamSpec(type=float, unit="%"),
+        "helium_end_pct":   ParamSpec(type=float, unit="%"),
+        "ln2_filled":       ParamSpec(type=bool,  default=False),
+        "notes":            ParamSpec(type=str,   default=""),
+    },
+)
+```
+
+Everything downstream is generic: `ServicingLogStore` persists entries of
+any kind; the GUI's table view derives its columns from `fields`; the
+add/edit dialog is rendered by the existing `param_form.py` machinery from
+the same `ParamSpec`s. **Adding a servicing log for another setup — pump
+maintenance, compressor service, transfer-line checks — is one
+`LogKindSpec` plus one config line.** No new store code, no new GUI code.
+Conformance auto-discovers every declared kind and checks its fields are
+valid `ParamSpec`s with defaults, mirroring how procedures are checked.
+
+At this stage exactly one kind ships: `cryogenics`.
+
+### 6.2 Storage: editable for humans, append-only on disk
+
+`ServicingLogStore` — one JSONL file per kind per setup
+(`<store root>/servicing/<config_name>/<kind>.jsonl`), atomic appends,
+tolerant loads. Editability comes from the **entry-revision model** (§3):
+`add_entry()` / `revise_entry()` / `delete_entry()` all append; readers get
+the latest revision per `entry_id` (tombstones hidden), and revision
+history remains inspectable. A technician can correct a mistyped level or
+add a forgotten fill from last week without anything ever being lost —
+the property a servicing record needs to stay trustworthy.
+
+Entries carry provenance: `source` = `"operation"` (written by a fill run,
+with `run_id` linkage) or `"manual"`, plus `revised_by`/`revised_utc` on
+every revision. Person attribution offers the session `UserRoster` as a
+pick list with free-text fallback (technical staff need not be roster
+users).
+
+### 6.3 The helium record and the recorder
+
+- **`HeliumRecordStore`** — the machine stream: one
+  `(utc, helium_pct, nitrogen_pct)` sample per `history_sample_s`
+  (**default 3600 s — hourly**, per the user-level requirement), appended
+  from the monitoring tick, size-bounded rotation. ~24 lines/day: cheap
+  enough to run forever, and on disk so consumption history survives
+  restarts (unlike the RAM-only `MonitorHistory`, which keeps serving the
+  fine-grained live trends).
+- **`CryogenicsRecorder(QObject)`** — the automatic writer, constructed by
+  `main.py` beside `SessionManager` (only when `cryogenics:` is present),
+  driven purely by existing Orchestrator signals:
+  - `states_updated` → decimate/append the helium record; threshold
+    warnings with hysteresis (§7) — surfaced as a banner and noted in the
+    application log, not as cryogenics-log entries (the fill log stays
+    clean).
+  - fill-operation manifests (`run_started`/`run_finished`) → compose the
+    cryogenics-log entry: start/end UTC from the manifest, start/end level
+    from the fill's own sampled data, person from the fill dialog,
+    `ln2_filled` defaulting False (LN2 fills are manual and undetectable —
+    the technician ticks the box, which is exactly what the edit feature
+    is for), verified/unverified from the postcondition result, `run_id`
+    linkage to the HDF5 level curve.
+  - every operation (fill, sample change, future ones) also appends to a
+    non-editable **operations stream** (kind `"operations"`, machine
+    source only): start/end, parameters, terminal status,
+    verified/unverified — the audit trail for "who warmed the VTI last
+    night?".
 
 Consumption is derived, not stored: one pure function (linear fit over the
-last N hours → %/h; × optional `helium_volume_l` → L/h), shared by the GUI
-and any future agent tool.
+requested window of the helium record, fill intervals excluded so a fill
+doesn't read as negative consumption → %/h; × optional `helium_volume_l` →
+L/h), shared by the GUI and any future agent tool.
 
 ## 7. Safety layer: what actually changes
 
@@ -242,9 +305,11 @@ operations (§4.2, §5):
 3. **The capability scope** (§5) — strictly a *tightening*: procedures
    lose access they never legitimately had.
 
-Deliberately not a safety mechanism: the `helium_warning_pct` advisory. It
-is surfaced by the recorder/panel (banner + logbook event), never by
-`evaluate_safety()` — warnings that trip EMERGENCY teach operators to
+Deliberately not a safety mechanism: the `helium_warning_pct` advisory
+(crossing detected by the recorder with hysteresis — one warning per
+low-helium episode, cleared only when the level rises back above threshold
+plus a margin). It is surfaced as a banner and application-log line, never
+by `evaluate_safety()` — warnings that trip EMERGENCY teach operators to
 ignore EMERGENCY.
 
 ## 8. The first two operations
@@ -256,7 +321,7 @@ ignore EMERGENCY.
   `vi_type == "magnet"`) → `Target(0.0)`; level meter → refresh FAST
   (operation-scope). Creates a DataManager: columns
   `unix_time, helium_pct` + per-magnet fields — every fill's curve is
-  preserved and linkable from its logbook event.
+  preserved and linkable from its cryogenics-log entry.
 - `initiation_gates()` → `Gate("zero_field", |B|<ε on every magnet from
   cached state, window_s from config)`. The fill does not count as started
   until zero field is confirmed *and held*; a stuck gate is visible by
@@ -270,9 +335,12 @@ ignore EMERGENCY.
 - `standby()` → refresh SLOW; also from `abort()`, so an aborted fill never
   leaves the meter in FAST.
 - `postcondition_gates()` → refresh mode is SLOW; level ≥ start level
-  (sanity that a fill actually happened — else the logbook records
+  (sanity that a fill actually happened — else the log entry is marked
   unverified).
 - `tolerated_safety_flags = frozenset({"helium_low"})`.
+- The fill dialog asks for the operator (roster pick list or free text);
+  on finish the recorder writes the cryogenics-log entry (§6.3), which
+  remains editable afterwards (LN2 checkbox, notes, corrections).
 
 ### 8.2 Sample change (`procedures/operations/sample_change.py`)
 
@@ -294,7 +362,7 @@ valve closed.
   sim-twinned, conformance-covered). Where the valve is manual, the config
   omits the capability and the postcondition becomes an **operator
   confirmation** in the GUI ("needle valve closed ✓"), recorded in the
-  logbook event as human-confirmed rather than machine-verified. The
+  operations stream as human-confirmed rather than machine-verified. The
   postcondition declaration must support both, which is why gates and
   confirmations are declared, not hardcoded.
 - Whether a sample change should also *position* things (e.g. rotator to a
@@ -315,9 +383,13 @@ cryogenics:
   fill_zero_field_window_s: 10.0
   fill_complete_window_s: 120.0
   max_fill_duration_s: 3600.0
-  sample_period_s: 10.0
-  history_sample_s: 300.0
+  sample_period_s: 10.0          # fill-time sampling (FAST mode)
+  history_sample_s: 3600.0       # helium record cadence — hourly
   helium_volume_l: 40.0          # optional; enables L/h display
+
+servicing_logs:                  # which declared log kinds this setup keeps
+  - cryogenics                   # (the operations stream is always on when any
+                                 #  operation exists; it is not listed here)
 
 operations:
   sample_change:
@@ -334,31 +406,54 @@ operations:
 The `helium_low_threshold` stays in the level VI's `init_params` — it is an
 instrument-protection property; the blocks above are operational policy.
 Conformance: referenced VIs exist and have the right types, thresholds
-ordered, durations positive, `needle_valve` is `"manual"` or resolves to an
+ordered, durations positive, every `servicing_logs` entry names a declared
+`LogKindSpec`, `needle_valve` is `"manual"` or resolves to an
 operation-scope control.
 
-## 10. GUI
+## 10. GUI: the Monitor window gains pages
 
-- **Cryogenics panel** (`gui/cryogenics_panel.py`): a third page in the
-  bottom-right stacked quadrant, built only when `cryogenics:` is present
-  and the level VI exists. Current levels + consumption (%/h, L/h),
-  level-vs-time plot (1 h/6 h/24 h) from the persistent history with fill
-  events overlaid, recent-fill list, and **Fill helium** →
-  `run_operation()`, toggling to **Stop filling** → `finish_operation()`.
-- **Operations affordances**: a "Prepare for sample change" action
-  (placement: the session-info quadrant or a small operations strip —
-  decide at GUI phase), a progress/status line naming the active gate, and
-  the operator-confirmation checkbox flow for human-verified
-  postconditions. Verdicts arrive through the existing
+`MonitorWindow` becomes **paged** (a slim page switcher; the current 2×2
+quadrant grid is page 1, unchanged in layout):
+
+- **Page 1 — Monitor** (the existing quadrants):
+  - The bottom-right stacked quadrant keeps "Other devices" and gains
+    **Cryogenics** (`gui/cryogenics_panel.py`, built only when the
+    `cryogenics:` block and a level VI exist): current He/N₂ levels,
+    consumption (%/h, L/h), level-vs-time plot (1 h / 6 h / 24 h) from the
+    helium record with fill markers overlaid, and **Fill helium** →
+    operator prompt → `run_operation()`, toggling to **Stop filling** →
+    `finish_operation()`. Live *status* stays on page 1 because it is
+    monitoring; the *records* live on page 2.
+  - The existing application-log view **moves off this quadrant to page
+    2**, freeing the stack here.
+- **Page 2 — Logs** (`gui/servicing_log_page.py`): the natural home for
+  everything retrospective:
+  - One table per configured servicing-log kind (columns derived from its
+    `LogKindSpec`), newest first, with **Add entry** and **Edit** — both
+    dialogs auto-rendered from the kind's `ParamSpec`s via the existing
+    `param_form.py` machinery. Edits go through the revision model; a
+    subtle "edited" marker exposes revision history on demand.
+  - The read-only operations stream (filterable), and the relocated
+    application `LogPanel`.
+  - Adding a future log kind adds a table here automatically — zero new
+    GUI code.
+- Verdicts and progress arrive through the existing
   `action_*`/`run_*`/`status_message` surface; no new signal channels.
 - Per the GUI standard: theme tokens, no blocking calls, qtbot geometry
-  tests, offscreen screenshot verification.
+  tests, offscreen screenshot verification. The page split touches
+  `MonitorWindow._build_ui` composition only — child panels keep their
+  single-receiver `states_updated` forwarding pattern.
+- Rendering note for the consumption plot: the helium record has gaps
+  whenever the app was closed or monitoring was off — render gaps as gaps,
+  never interpolate across them.
 
 ## 11. Phasing (bottom-up, each phase lands green)
 
-1. **Logbook foundation (L6):** `LogbookEvent`, `LogbookStore`,
-   `HeliumHistoryStore`, consumption function, `CryogenicsRecorder`
-   against a mocked Orchestrator; GLOSSARY terms.
+1. **Servicing-log foundation (L6):** `LogKindSpec` + the `cryogenics`
+   kind, `ServicingLogStore` with the revision model, `HeliumRecordStore`
+   (hourly), consumption function, `CryogenicsRecorder` against a mocked
+   Orchestrator; GLOSSARY terms; conformance for kind declarations and
+   session models.
 2. **Operation substrate (L3/L4 + scope):** `OperationBase`,
    `run_operation()` with priority + EMERGENCY carve-out + tolerated
    flags, postcondition phase, `finish_operation()`; `@control` scope +
@@ -366,12 +461,15 @@ operation-scope control.
    quench matrix, scope rejection).
 3. **Helium fill (first operation):** `Station.magnet_vi_names()`, the
    operation against `sim_cryostat`, `cryogenics:` config block +
-   validation.
+   validation, recorder's auto-entry path end-to-end.
 4. **Sample change (second operation):** config block, operator-confirm
    postconditions; ITC needle-valve capability only where hardware
    supports it (driver + sim twin + VI method, operation-scope).
-5. **GUI:** cryogenics panel + operations affordances, config-gated
-   composition, geometry tests + screenshots.
+5. **GUI:** Monitor window pages, the Logs page (servicing-log tables with
+   add/edit, operations stream, relocated LogPanel), the cryogenics panel
+   on page 1; geometry tests + screenshots.
 
 Each phase is independently useful; nothing above a phase blocks shipping
-it.
+it. After Phase 1 a running setup is already accumulating the hourly helium
+record and (once Phase 3 lands) writing clean fill entries — the Logs page
+in Phase 5 is display, not function.
