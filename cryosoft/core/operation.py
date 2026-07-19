@@ -9,18 +9,22 @@
 #   so the Orchestrator needs almost no branching to support both request
 #   types — it detects an operation purely by duck-typing
 #   (``command_scope == "operation"``) and never imports this module (keeps
-#   import-linter contract C5 clean).
+#   import-linter contract C5 clean). Also declares the readiness/next-due
+#   contract (plan §12) the GUI's Operations panel renders generically:
+#   ReadinessCondition/NextDue dataclasses plus the readiness_conditions()/
+#   next_due() hooks and the ready_message/config_key class attributes.
 # entry_point: Not run directly. Subclassed by concrete operations
-#   (``cryosoft.procedures.operations.*`` — not shipped in this phase; see
-#   plan §11 phase 3+).
+#   (``cryosoft.procedures.operations.*``).
 # dependencies:
 #   - cryosoft.core.gates (Gate)
 #   - cryosoft.core.plan (Command, PhasePlan, StepPlan)
 # input: |
 #   Concrete subclasses implement initiate()/step()/standby() (and optionally
-#   sample()/abort()/initiation_gates()/postcondition_gates()); the
-#   Orchestrator drives them exactly like a BaseProcedure, submitted via
-#   Orchestrator.run_operation() / queue_operation().
+#   sample()/abort()/initiation_gates()/postcondition_gates()/
+#   readiness_conditions()/next_due()); the Orchestrator drives the lifecycle
+#   exactly like a BaseProcedure, submitted via Orchestrator.run_operation() /
+#   queue_operation(); the GUI's Operations panel drives readiness_conditions()
+#   /next_due() against per-tick state snapshots, never touching hardware.
 # process: |
 #   measure() (final) forwards to sample(). change_sweep_step() (final)
 #   returns None once request_finish() has set the graceful-finish flag,
@@ -29,7 +33,9 @@
 #   with no new states and minimal branching.
 # output: |
 #   PhasePlan / StepPlan / Command / Gate objects consumed by the
-#   Orchestrator, exactly like a BaseProcedure's.
+#   Orchestrator, exactly like a BaseProcedure's. readiness_conditions() /
+#   next_due() output ReadinessCondition / NextDue objects consumed only by
+#   the GUI (never by the Orchestrator).
 # last_updated: 2026-07-19
 # ---
 
@@ -37,12 +43,65 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, final
 
 from cryosoft.core.gates import Gate
 from cryosoft.core.plan import Command, PhasePlan, StepPlan
 
-__all__ = ["OperationBase"]
+__all__ = ["NextDue", "OperationBase", "ReadinessCondition"]
+
+
+@dataclass(frozen=True)
+class ReadinessCondition:
+    """One live readiness check, rendered by the GUI as a checklist row (plan §12).
+
+    An operation declares its readiness conditions via
+    ``OperationBase.readiness_conditions()``; the GUI's Operations panel
+    builds one checklist row per condition and re-evaluates ``check()``/
+    ``detail()`` every ``on_states_updated`` tick against the latest state
+    snapshot — no extra hardware poll.
+
+    Attributes:
+        key: Stable identifier, snake_case (e.g. ``"zero_field"``). Used by
+            the GUI as a widget-name suffix; must be unique within one
+            operation's ``readiness_conditions()`` tuple.
+        label: Human-readable checklist label, e.g. ``"All magnets at zero
+            field"``.
+        check: ``state_snapshot -> bool`` — ``True`` when the condition
+            holds. ``state_snapshot`` is the Orchestrator's per-tick
+            ``{vi_name: {field: value}}`` dict (the same shape
+            ``on_states_updated`` receives). Must be a pure read (cached
+            state only) — never touches hardware.
+        detail: Optional ``state_snapshot -> str`` giving a live detail
+            string next to the label, e.g. ``lambda s: f"currently {t:.1f}
+            K"``. ``None`` means the checklist row shows no detail text.
+    """
+
+    key: str
+    label: str
+    check: Callable[[dict[str, Any]], bool]
+    detail: Callable[[dict[str, Any]], str] | None = None
+
+
+@dataclass(frozen=True)
+class NextDue:
+    """When an operation is predicted to next be needed (plan §12).
+
+    Returned by ``OperationBase.next_due()``; the GUI shows ``text`` in the
+    operation card's header when not ``None``.
+
+    Attributes:
+        due_unix: Predicted unix time the operation will next be needed, or
+            ``None`` when unknown/not predictable (the GUI still shows
+            ``text`` in that case — e.g. "consumption unknown").
+        text: Human-readable display string, e.g. ``"Fill due in ~2.3 d
+            (level 62.0 %, warning at 30.0 %)"``.
+    """
+
+    due_unix: float | None
+    text: str
 
 
 class OperationBase:
@@ -83,9 +142,54 @@ class OperationBase:
     lets ``Orchestrator.run_operation()`` reuse the existing setup/dispatch
     path with essentially no new state-machine branching (plan §2, §4.2).
 
+    Readiness / next-due contract (Operations panel, plan §12)
+    -------------------------------------------------------------
+    Two overridable hooks and two class attributes let the GUI's Operations
+    panel render a live readiness checklist, a next-due prediction, and a
+    ready banner with ZERO per-operation GUI code (the "hybrid declaration"
+    standard: the operation *class* declares what to check and how to
+    predict; the config supplies thresholds via ``**config``):
+
+    * ``ready_message`` — shown in the panel's green ready banner once a run
+      of this operation has finished ``done`` AND every current
+      ``readiness_conditions()`` holds. Empty (the default) means "no
+      banner" — the panel shows nothing, not a generic fallback string.
+    * ``readiness_conditions()`` — the checklist. Default ``()`` (no
+      checklist rows). Each condition's ``check``/``detail`` callables take
+      the Orchestrator's per-tick state snapshot and must be pure reads, no
+      hardware access (see ``ReadinessCondition``'s own docstring).
+    * ``next_due(context)`` — the header's next-due prediction. Default
+      ``None`` (no next-due line). ``context`` is a documented, extensible
+      dict the GUI assembles fresh on every update; keys defined today:
+
+      - ``"state"``: the latest Orchestrator state snapshot dict
+        (``{vi_name: {field: value}}``).
+      - ``"now_unix"``: current unix time (``float``).
+      - ``"consumption_rate_pct_per_h"``: ``float | None`` — computed by
+        the GUI panel, not here. An operation must NOT import the session
+        layer to compute its own rate (contract C12: nothing below the GUI
+        imports the session layer) — this is deliberate layering, not an
+        oversight, and is why the rate arrives pre-computed in ``context``
+        instead of being read from ``cryosoft.session.servicing_log``
+        directly.
+
+      A future context key is additive — an operation that does not read it
+      is unaffected, so old and new operations coexist in the same panel.
+    * ``config_key`` — the string a ``config: {key: block}`` mapping (e.g.
+      ``operations:`` in ``devices.yaml``) uses to select this class when
+      the GUI builds cards generically. Empty by default (opts out of
+      generic config-block discovery — used by operations, like the helium
+      fill, that are wired some other way).
+
     Class attributes:
         name: Human-readable display name.
         description: One-line description.
+        ready_message: Shown in the Operations panel's green ready banner;
+            see "Readiness / next-due contract" above. Empty by default.
+        config_key: Maps a ``config:`` sub-block key (e.g.
+            ``operations.sample_change:``) to this class for the GUI's
+            generic card-building discovery; see "Readiness / next-due
+            contract" above. Empty by default.
         run_kind: Recorded verbatim into the Orchestrator's run manifests
             (``"kind"`` field) via the existing
             ``getattr(procedure, "run_kind", "run")`` lookup — no Orchestrator
@@ -144,6 +248,8 @@ class OperationBase:
 
     name: str = ""
     description: str = ""
+    ready_message: str = ""
+    config_key: str = ""
     run_kind: str = "operation"
     tolerated_safety_flags: frozenset[str] = frozenset()
     command_scope: str = "operation"
@@ -256,6 +362,37 @@ class OperationBase:
             ``{}`` by default.
         """
         return {}
+
+    def readiness_conditions(self) -> tuple[ReadinessCondition, ...]:
+        """Return this operation's live readiness checklist (plan §12).
+
+        Called once by the GUI, on a display instance constructed at panel
+        init; the returned ``ReadinessCondition``s' ``check``/``detail``
+        callables are then re-invoked every ``on_states_updated`` tick
+        against the latest state snapshot — this method itself takes no
+        snapshot and must not read live state directly.
+
+        Returns:
+            ``()`` by default (no checklist rows).
+        """
+        return ()
+
+    def next_due(self, context: dict[str, Any]) -> NextDue | None:
+        """Predict when this operation will next be needed (plan §12).
+
+        Args:
+            context: GUI-assembled, extensible dict. Keys defined today:
+                ``"state"`` (the latest state snapshot dict), ``"now_unix"``
+                (current unix time, ``float``), and
+                ``"consumption_rate_pct_per_h"`` (``float | None``,
+                computed by the GUI panel — see the class docstring's
+                "Readiness / next-due contract" section for why this is
+                passed in rather than computed here).
+
+        Returns:
+            ``None`` by default (no next-due line shown).
+        """
+        return None
 
     # ------------------------------------------------------------------
     # Orchestrator adapter — final; do not override (see class docstring)
