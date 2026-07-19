@@ -20,9 +20,14 @@
 #   Initialises logging, creates QApplication, builds the ConfigCatalog, resolves
 #   the Station via build_station_with_fallback(), persists the config that
 #   actually loaded, constructs the session layer (ExperimentStore rooted in the
-#   data dir + UserRoster + SessionManager wired to the Orchestrator), opens the
-#   Monitor (passing the catalog, session manager, a restart callback, and any
-#   fallback warning), and enters the Qt event loop.
+#   data dir + UserRoster + SessionManager wired to the Orchestrator), then —
+#   only when the active config declares a cryogenics: block AND the station
+#   has the level VI it names (docs/plans/cryogenics-logbook.md §9) — builds a
+#   HeliumRecordStore/ServicingLogStore rooted in a "servicing" directory
+#   sibling to the experiment store, constructs a CryogenicsRecorder, and
+#   connects it to the Orchestrator's states_updated/run_started/run_finished
+#   signals. Opens the Monitor (passing the catalog, session manager, a
+#   restart callback, and any fallback warning), and enters the Qt event loop.
 # output: |
 #   The running CryoSoft desktop application. Exits when all windows are closed.
 # ---
@@ -42,11 +47,16 @@ from PyQt6.QtWidgets import QApplication
 from cryosoft.core.config_catalog import ConfigCatalog
 from cryosoft.core.logging_config import setup_logging
 from cryosoft.core.orchestrator import Orchestrator
-from cryosoft.core.station import build_station_with_fallback
+from cryosoft.core.station import build_station_with_fallback, read_cryogenics_config
 from cryosoft.gui import app_settings, form_autosave
 from cryosoft.gui.monitor_window import MonitorWindow
 from cryosoft.gui.theme import PLOT_AXIS, PLOT_BG, build_stylesheet
 from cryosoft.session.manager import SessionManager
+from cryosoft.session.servicing_log import (
+    CryogenicsRecorder,
+    HeliumRecordStore,
+    ServicingLogStore,
+)
 from cryosoft.session.store import ExperimentStore, UserRoster
 
 logger = logging.getLogger(__name__)
@@ -136,6 +146,38 @@ def main() -> None:
         config_name=used_entry.name if used_entry is not None else Path(used_path).name,
         config_path=used_path,
     )
+
+    # Cryogenics management (Phase 3, docs/plans/cryogenics-logbook.md §9):
+    # config-gated like every optional feature — a setup without a
+    # cryogenics: block (or without the level VI it names) carries zero
+    # footprint and this whole block is a no-op. Stores are rooted in a
+    # "servicing" directory sibling to the experiment store (both live under
+    # the same data directory, so a servicing record archives alongside the
+    # data it describes). No GUI consumption yet (Phase 5 adds the panel and
+    # the low-helium banner) — this only keeps the hourly helium record and
+    # the cryogenics/operations logs current in the background.
+    cryogenics_config = read_cryogenics_config(used_path)
+    cryogenics_recorder: CryogenicsRecorder | None = None
+    if cryogenics_config and station.has_vi(cryogenics_config["level_vi"]):
+        servicing_root = Path(autosave.data_dir) / "servicing"
+        config_identity = (
+            used_entry.name if used_entry is not None else Path(used_path).name
+        )
+        cryogenics_recorder = CryogenicsRecorder(
+            HeliumRecordStore(servicing_root, config_identity),
+            ServicingLogStore(servicing_root, config_identity),
+            level_vi_name=cryogenics_config["level_vi"],
+            warning_pct=float(cryogenics_config["helium_warning_pct"]),
+            history_sample_s=float(cryogenics_config["history_sample_s"]),
+        )
+        orchestrator.states_updated.connect(cryogenics_recorder.on_states_updated)
+        orchestrator.run_started.connect(cryogenics_recorder.on_run_started)
+        orchestrator.run_finished.connect(cryogenics_recorder.on_run_finished)
+        logger.info(
+            "Cryogenics recorder active (level_vi=%s, config=%s)",
+            cryogenics_config["level_vi"],
+            config_identity,
+        )
 
     monitor = MonitorWindow(
         station,

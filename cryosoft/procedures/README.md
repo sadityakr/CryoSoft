@@ -106,11 +106,27 @@ selectors (fed by `live_plot_loop_labels()`, items like "A1 = Mux-Ch1"); axis
 keys stay the plain column names and the panel composes the suffix at draw
 time.
 
+## Operations
+
+`procedures/operations/` (its own `README.md`) holds a DIFFERENT kind of
+request: cryostat-**servicing** actions (helium fill, sample change), each a
+subclass of `cryosoft.core.operation.OperationBase` rather than
+`BaseProcedure`. An operation is declarative like a procedure — it returns
+the same `PhasePlan`/`StepPlan`/`Target`/`Command`/`Gate` currency and is
+driven by the same Orchestrator tick loop — but carries operation-scope
+command access, tolerated safety flags, a verified `postcondition_gates()`
+phase, and higher submission priority; it is never returned among the
+measurement procedures discovered from this folder. See
+`docs/plans/cryogenics-logbook.md` §2/§4 for the design and
+`procedures/operations/README.md` for its own entry/exit/interface contract.
+
 ## How to add a new module
 
 Add a procedure only for a new **sweep axis**. To add a new *measurement*
 instead, add a measurement VI and register it with `vi_type: measurement`; both
-shipped sweeps pick it up with zero procedure change.
+shipped sweeps pick it up with zero procedure change. To add a new
+cryostat-servicing action, see `procedures/operations/README.md` instead —
+that is a different contract, not a sweep axis.
 
 1. Create `procedures/your_sweep.py` with the PEP 257 header docstring
    (Workspace Rule 1).
