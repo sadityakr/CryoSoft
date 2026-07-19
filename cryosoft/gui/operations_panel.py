@@ -232,6 +232,14 @@ class OperationCard(QGroupBox):
         self._running = False
         self._last_run_done = False
         self._last_all_holding = True
+        #: The instance built by the factory for a run this card started,
+        #: held until its run_started arrives (see _on_run_started). The
+        #: checklist must be re-bound to it because state the orchestrator
+        #: mutates on the RUNNING instance — an operator confirmation via
+        #: confirm_operation() — is invisible to the display instance's
+        #: condition closures; without the re-bind, a confirmed needle valve
+        #: would stay red forever and the ready banner could never show.
+        self._pending_instance: OperationBase | None = None
         self._conditions = display_instance.readiness_conditions()
         self._condition_rows: dict[str, tuple[QLabel, QLabel]] = {}
 
@@ -330,7 +338,10 @@ class OperationCard(QGroupBox):
         for condition in self._conditions:
             holds = bool(condition.check(state))
             all_holding = all_holding and holds
-            icon_label, detail_label = self._condition_rows[condition.key]
+            row = self._condition_rows.get(condition.key)
+            if row is None:
+                continue
+            icon_label, detail_label = row
             icon_label.setPixmap(
                 qta.icon(
                     "fa5s.check-circle" if holds else "fa5s.times-circle",
@@ -368,6 +379,7 @@ class OperationCard(QGroupBox):
             return
         person = dialog.operator_name()
         operation = self._factory(person)
+        self._pending_instance = operation
         self._orchestrator.run_operation(operation)
 
     def _on_run_started(self, manifest: dict[str, Any]) -> None:
@@ -375,6 +387,15 @@ class OperationCard(QGroupBox):
             return
         self._running = True
         self._last_run_done = False
+        if self._pending_instance is not None:
+            # Re-bind the checklist to the instance the orchestrator is
+            # actually running (and mutating — confirm_operation() lands
+            # there, not on the display instance). Kept bound after the run
+            # finishes so a given confirmation stays green under the ready
+            # banner. Condition keys are class-declared, so the row lookup
+            # in on_states_updated stays valid across the swap.
+            self._conditions = self._pending_instance.readiness_conditions()
+            self._pending_instance = None
         self._reset_confirmations()
         self._sync_button()
         self._sync_confirmations_row()

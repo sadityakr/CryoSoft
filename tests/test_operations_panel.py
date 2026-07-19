@@ -455,13 +455,25 @@ def test_ready_banner_appears_only_after_done_and_all_green(
     card.on_states_updated(all_green_state, ctx)
     assert card._ready_banner.isHidden()
 
-    # A run finishes "done", but needle_valve_confirmed has never been
+    # Start a run the way the card really does: the factory-built instance is
+    # what the orchestrator runs AND what confirm_operation() mutates — the
+    # card must re-bind its checklist to it (regression: confirming only ever
+    # lands on the running instance, never the display instance; without the
+    # re-bind the needle-valve row could never turn green and the banner
+    # could never show for exactly the operation that needs it).
+    running = card._factory("tester")
+    card._pending_instance = running
+    card._on_run_started({"procedure": SampleChangeOperation.name})
+
+    # The run finishes "done", but needle_valve_confirmed has never been
     # confirmed -> not all-green -> banner stays hidden.
     card._on_run_finished({"procedure": SampleChangeOperation.name, "status": "done"})
     card.on_states_updated(all_green_state, ctx)
     assert card._ready_banner.isHidden()
 
-    card._display_instance.confirm("needle_valve")
+    # What Orchestrator.confirm_operation("needle_valve") does to the ACTIVE
+    # operation — note: the running instance, not card._display_instance.
+    running.confirm("needle_valve")
     card.on_states_updated(all_green_state, ctx)
     assert not card._ready_banner.isHidden()
     assert card._ready_banner.text() == f"✓ {SampleChangeOperation.ready_message}"
