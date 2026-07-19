@@ -11,9 +11,10 @@
 #   build_station() is the factory that constructs the full instrument stack
 #   from a YAML config directory. magnet_vi_names() mirrors switch_vi_names()
 #   for registry-system VIs whose class vi_type == "magnet". read_cryogenics_
-#   config()/read_servicing_logs_config() mirror read_instrument_metadata()'s
-#   GUI-safe YAML-only pattern for the optional cryogenics:/servicing_logs:
-#   config blocks (docs/plans/cryogenics-logbook.md §9).
+#   config()/read_servicing_logs_config()/read_operations_config() mirror
+#   read_instrument_metadata()'s GUI-safe YAML-only pattern for the optional
+#   cryogenics:/servicing_logs:/operations: config blocks
+#   (docs/plans/cryogenics-logbook.md §9).
 # entry_point: Not run directly; used by Orchestrator and GUI.
 # dependencies:
 #   - cryosoft.core.exceptions
@@ -1036,3 +1037,62 @@ def read_servicing_logs_config(config_path: str) -> list[str]:
     if not isinstance(block, list):
         return []
     return [str(kind) for kind in block]
+
+
+# Per-operation-kind defaults for read_operations_config()'s merge (plan §9).
+# Only "sample_change" exists today (plan §11 phase 4); a future operation
+# kind adds its own entry here. An operation name declared in devices.yaml
+# but absent from this dict is passed through unmerged — forward-compatible
+# with an operation this function does not yet know defaults for.
+_OPERATIONS_DEFAULTS: dict[str, dict[str, float | str]] = {
+    "sample_change": {
+        "vti_vi": "temperature_vti",
+        "target_temperature_K": 300.0,
+        "temperature_tolerance_K": 2.0,
+        "temperature_window_s": 60.0,
+        "zero_field_eps_T": 0.005,
+        "zero_field_window_s": 10.0,
+        "needle_valve": "manual",
+        "postcondition_timeout_s": 7200.0,
+    },
+}
+
+
+def read_operations_config(config_path: str) -> dict[str, dict[str, Any]]:
+    """Read the optional ``operations:`` block, GUI-safe, with defaults applied.
+
+    Unlike ``cryogenics:`` (one flat mapping), ``operations:`` is a mapping
+    of *named* operation configs (``sample_change:``, and future kinds) —
+    see plan §9. Parses YAML only, mirroring ``read_cryogenics_config`` —
+    never imports the operations layer or instantiates anything, so it is
+    safe to call from the GUI thread on a config that may describe
+    unreachable hardware.
+
+    Args:
+        config_path: Path to the config directory containing ``devices.yaml``.
+
+    Returns:
+        ``{operation_name: {key: value, ...}}`` for every declared operation
+        sub-block, with every omitted key defaulted from
+        ``_OPERATIONS_DEFAULTS[operation_name]`` (an operation name with no
+        known defaults is passed through unmerged). ``{}`` when the
+        ``operations:`` block is absent, malformed, or the config
+        directory/file/YAML is unreadable — never raises. A caller
+        constructs the concrete operation with
+        ``SampleChangeOperation(station, **read_operations_config(path)
+        ["sample_change"])``.
+    """
+    devices_config = _load_devices_yaml(config_path)
+    if devices_config is None:
+        return {}
+    block = devices_config.get("operations")
+    if not isinstance(block, dict) or not block:
+        return {}
+    result: dict[str, dict[str, Any]] = {}
+    for op_name, op_cfg in block.items():
+        if not isinstance(op_cfg, dict):
+            continue
+        merged = dict(_OPERATIONS_DEFAULTS.get(op_name, {}))
+        merged.update(op_cfg)
+        result[str(op_name)] = merged
+    return result

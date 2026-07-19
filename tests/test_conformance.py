@@ -513,6 +513,68 @@ def test_cryogenics_config_block(config_dir: Path) -> None:
         )
 
 
+# ── Operations config block ───────────────────────────────────────────────────
+# See docs/plans/cryogenics-logbook.md §9: an optional operations: block, one
+# named sub-block per OperationBase subclass (only sample_change ships so
+# far). A config that declares none carries zero footprint; a declared
+# operations.sample_change: must reference a real vi_type: system VI with
+# sane, ordered timing/tolerance values, and needle_valve must be "manual"
+# (a VI-capability reference is future work, plan §8.2).
+
+
+@pytest.mark.parametrize("config_dir", _config_dirs(), ids=lambda p: p.name)
+def test_operations_config_block(config_dir: Path) -> None:
+    """A declared operations.sample_change: block is well-formed."""
+    devices = _load_yaml(config_dir / "devices.yaml")
+    operations = devices.get("operations")
+    if operations is None:
+        pytest.skip(f"{config_dir.name} declares no operations: block")
+    assert isinstance(operations, dict), (
+        f"{config_dir.name}: operations: must be a mapping"
+    )
+
+    sample_change = operations.get("sample_change")
+    if sample_change is None:
+        pytest.skip(f"{config_dir.name} declares no operations.sample_change: block")
+    assert isinstance(sample_change, dict), (
+        f"{config_dir.name}: operations.sample_change: must be a mapping"
+    )
+
+    vti_vi_name = sample_change.get("vti_vi", "temperature_vti")
+    virtual_instruments = devices.get("virtual_instruments", {})
+    vi_cfg = virtual_instruments.get(vti_vi_name)
+    assert vi_cfg is not None, (
+        f"{config_dir.name}: operations.sample_change.vti_vi={vti_vi_name!r} "
+        f"does not name a registered VI"
+    )
+    assert vi_cfg.get("vi_type") == "system", (
+        f"{config_dir.name}: operations.sample_change.vti_vi={vti_vi_name!r} "
+        f"must be a vi_type: system VI, got {vi_cfg.get('vi_type')!r}"
+    )
+
+    positive_keys = (
+        "temperature_tolerance_K",
+        "temperature_window_s",
+        "zero_field_eps_T",
+        "zero_field_window_s",
+        "postcondition_timeout_s",
+    )
+    for key in positive_keys:
+        if key not in sample_change:
+            continue
+        assert float(sample_change[key]) > 0, (
+            f"{config_dir.name}: operations.sample_change.{key} must be "
+            f"positive, got {sample_change[key]!r}"
+        )
+
+    needle_valve = sample_change.get("needle_valve", "manual")
+    assert needle_valve == "manual", (
+        f"{config_dir.name}: operations.sample_change.needle_valve="
+        f"{needle_valve!r} is not supported; only 'manual' is implemented "
+        f"today (a VI-capability reference is future work, plan §8.2)"
+    )
+
+
 # ── Control-validation standard ───────────────────────────────────────────────
 # See BaseVirtualInstrument's "Control-validation standard" docstring: VIs
 # declare control_limits (method -> {param: limit_name}); __init__ populates

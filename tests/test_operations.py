@@ -56,6 +56,17 @@ class SimpleOperation(OperationBase):
         self._open_ended = open_ended
         self.sample_calls = 0
         self.postcondition_gates_calls = 0
+        # Minimal operator-confirmation surface, mirroring
+        # SampleChangeOperation's confirm()/confirmed() (plan §8.2) closely
+        # enough to exercise Orchestrator.confirm_operation()'s duck-typed
+        # dispatch generically, without depending on the concrete operation.
+        self._confirmations: set[str] = set()
+
+    def confirm(self, key: str) -> None:
+        self._confirmations.add(key)
+
+    def confirmed(self, key: str) -> bool:
+        return key in self._confirmations
 
     def initiate(self) -> PhasePlan:
         return PhasePlan(
@@ -360,6 +371,39 @@ def test_finish_operation_blocked_when_no_operation_running(orchestrator, statio
     orchestrator.action_blocked.connect(blocked.append)
 
     orchestrator.finish_operation()
+    assert blocked
+    assert "no operation" in blocked[0].lower()
+
+
+# ── confirm_operation() (plan §8.2) ───────────────────────────────────────
+# Mirrors finish_operation()'s tests exactly: confirm_operation() is the
+# same duck-typed-active-operation / action_blocked pattern, generalised
+# from request_finish() to confirm(key). SampleChangeOperation's own
+# postcondition-gate usage of confirmed() is covered end-to-end in
+# tests/test_sample_change.py; these two tests exercise the Orchestrator
+# method itself against the generic SimpleOperation double.
+
+
+def test_confirm_operation_calls_confirm_on_active_operation(orchestrator, station, qtbot):
+    """confirm_operation() forwards the key to the active operation's confirm()."""
+    op = SimpleOperation(station)
+    orchestrator.run_operation(op)
+    assert orchestrator._procedure is op
+    assert not op.confirmed("needle_valve")
+
+    orchestrator.confirm_operation("needle_valve")
+    assert op.confirmed("needle_valve")
+
+    orchestrator.finish_operation()
+    qtbot.waitUntil(lambda: orchestrator._procedure is None, timeout=2000)
+
+
+def test_confirm_operation_blocked_when_no_operation_running(orchestrator, station, qtbot):
+    """confirm_operation() with nothing active (or a plain procedure) is refused."""
+    blocked: list[str] = []
+    orchestrator.action_blocked.connect(blocked.append)
+
+    orchestrator.confirm_operation("needle_valve")
     assert blocked
     assert "no operation" in blocked[0].lower()
 

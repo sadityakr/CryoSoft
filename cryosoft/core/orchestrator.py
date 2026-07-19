@@ -640,6 +640,35 @@ class Orchestrator(QObject):
             request_finish()
         self._emit_status("Finish requested — completing operation")
 
+    def confirm_operation(self, key: str) -> None:
+        """Record an operator confirmation on the active operation (plan §8.2).
+
+        Mirrors ``finish_operation()``: calls ``confirm(key)`` on the active
+        operation (duck-typed — a plain procedure or an operation without a
+        ``confirm`` method is simply ignored) so a subsequent
+        ``postcondition_gates()`` check reading ``confirmed(key)`` sees the
+        flag. Refused with ``action_blocked`` if no operation is currently
+        active (a duck-typed procedure without ``command_scope ==
+        "operation"`` does not count).
+
+        Args:
+            key: The confirmation key (e.g. ``"needle_valve"``), forwarded
+                verbatim to the operation's ``confirm()``.
+        """
+        is_operation = (
+            self._procedure is not None
+            and getattr(self._procedure, "command_scope", "measurement") == "operation"
+        )
+        if not is_operation:
+            msg = "Cannot confirm operation step: no operation is currently running."
+            logger.info("Blocked confirm_operation: %s", msg)
+            self.action_blocked.emit(msg)
+            return
+        confirm = getattr(self._procedure, "confirm", None)
+        if callable(confirm):
+            confirm(key)
+        self._emit_status(f"Confirmed: {key}")
+
     def recover_from_error(self) -> None:
         """Return to IDLE after the user has reviewed an ERROR condition.
 
