@@ -63,7 +63,7 @@ from typing import Any
 
 from cryosoft.core.exceptions import CryoSoftConfigError
 from cryosoft.core.gates import Gate
-from cryosoft.core.operation import OperationBase
+from cryosoft.core.operation import OperationBase, ReadinessCondition
 from cryosoft.core.plan import Command, PhasePlan, StepPlan, Target
 from cryosoft.core.station import Station
 
@@ -112,10 +112,21 @@ class SampleChangeOperation(OperationBase):
     machine-checked gate and skip the confirmation declaration entirely —
     the postcondition contract already supports both, which is why gates
     and confirmations are declared, not hardcoded.
+
+    Readiness (Operations panel, plan §12): ``readiness_conditions()``
+    mirrors the four ``postcondition_gates()`` checks as live checklist
+    rows -- ``zero_field``, ``heater_off`` (only meaningful on a station
+    with a magnet exposing ``switch_heater_state``; vacuously holds
+    otherwise), ``vti_at_target``, ``needle_valve_confirmed``. ``config_key
+    = "sample_change"`` maps the ``operations.sample_change:`` config block
+    to this class for the GUI's generic card-building discovery. No
+    ``next_due()`` override -- a sample change has no schedule.
     """
 
     name = "Sample Change"
     description = "Verify the cryostat is safe to open"
+    ready_message = "Ready — sample can be taken out"
+    config_key = "sample_change"
 
     #: Declared operator confirmations: {key: human-readable checkbox label}.
     #: Only "needle_valve" exists today because "manual" is the only
@@ -256,6 +267,138 @@ class SampleChangeOperation(OperationBase):
             "zero_field_window_s": self._zero_field_window_s,
             "needle_valve": self._needle_valve,
         }
+
+    # ------------------------------------------------------------------
+    # Operations panel: readiness (plan §12) — no next_due() override, a
+    # sample change has no schedule (the OperationBase default, None, is
+    # exactly right).
+    # ------------------------------------------------------------------
+
+    def readiness_conditions(self) -> tuple[ReadinessCondition, ...]:
+        """Return the four postcondition checks as live checklist rows.
+
+        Every ``check``/``detail`` closure reads only the state snapshot
+        passed to it (never ``self._station.cached_state`` directly), per
+        the readiness-condition contract. ``heater_off`` is always present
+        (unlike ``postcondition_gates()``, which omits the gate entirely
+        when no magnet's *cached* state exposes ``switch_heater_state`` —
+        readiness_conditions() is built once, before any tick may have
+        populated that cache, so presence is instead decided per call from
+        the live snapshot passed to ``check()``): if the current snapshot
+        shows no magnet exposing the field, the row holds vacuously (there
+        is nothing to check on this station).
+
+        Returns:
+            ``(zero_field, heater_off, vti_at_target,
+            needle_valve_confirmed)`` — the last one included only while
+            ``needle_valve == "manual"`` (the only supported mode today, so
+            effectively always).
+        """
+
+        def _worst_offender(state: dict[str, Any]) -> tuple[str | None, float | None]:
+            if not self._magnets:
+                return None, None
+            worst_name = self._magnets[0]
+            worst_field: float | None = None
+            worst_abs = -1.0
+            for magnet in self._magnets:
+                field = state.get(magnet, {}).get("get_field")
+                if isinstance(field, bool) or not isinstance(field, (int, float)):
+                    return magnet, None
+                if abs(float(field)) > worst_abs:
+                    worst_abs = abs(float(field))
+                    worst_name = magnet
+                    worst_field = float(field)
+            return worst_name, worst_field
+
+        def _zero_field_holds(state: dict[str, Any]) -> bool:
+            if not self._magnets:
+                return True
+            _name, field = _worst_offender(state)
+            return field is not None and abs(field) < self._zero_field_eps_T
+
+        def _zero_field_detail(state: dict[str, Any]) -> str:
+            if not self._magnets:
+                return "no magnets on this station"
+            name, field = _worst_offender(state)
+            if field is None:
+                return f"{name} field reading unavailable"
+            return f"{name} at {field:.2f} T"
+
+        def _heater_relevant_magnets(state: dict[str, Any]) -> list[str]:
+            return [
+                magnet
+                for magnet in self._magnets
+                if "switch_heater_state" in state.get(magnet, {})
+            ]
+
+        def _heater_off_holds(state: dict[str, Any]) -> bool:
+            relevant = _heater_relevant_magnets(state)
+            if not relevant:
+                return True  # nothing on this station exposes a heater state
+            return all(
+                state.get(magnet, {}).get("switch_heater_state") == "OFF"
+                for magnet in relevant
+            )
+
+        def _heater_off_detail(state: dict[str, Any]) -> str:
+            relevant = _heater_relevant_magnets(state)
+            if not relevant:
+                return "no switch heater on this station"
+            offenders = [
+                magnet
+                for magnet in relevant
+                if state.get(magnet, {}).get("switch_heater_state") != "OFF"
+            ]
+            if not offenders:
+                return "all switch heaters off"
+            offender = offenders[0]
+            return f"{offender} heater {state.get(offender, {}).get('switch_heater_state')}"
+
+        def _vti_holds(state: dict[str, Any]) -> bool:
+            temperature = state.get(self._vti_vi_name, {}).get("temperature")
+            if isinstance(temperature, bool) or not isinstance(temperature, (int, float)):
+                return False
+            return abs(float(temperature) - self._target_temperature_K) <= (
+                self._temperature_tolerance_K
+            )
+
+        def _vti_detail(state: dict[str, Any]) -> str:
+            temperature = state.get(self._vti_vi_name, {}).get("temperature")
+            if isinstance(temperature, bool) or not isinstance(temperature, (int, float)):
+                return "reading unavailable"
+            return f"currently {float(temperature):.1f} K"
+
+        conditions = [
+            ReadinessCondition(
+                key="zero_field",
+                label="All magnets at zero field",
+                check=_zero_field_holds,
+                detail=_zero_field_detail,
+            ),
+            ReadinessCondition(
+                key="heater_off",
+                label="Switch heater off",
+                check=_heater_off_holds,
+                detail=_heater_off_detail,
+            ),
+            ReadinessCondition(
+                key="vti_at_target",
+                label=f"VTI at {self._target_temperature_K:.0f} K",
+                check=_vti_holds,
+                detail=_vti_detail,
+            ),
+        ]
+        if self._needle_valve == _NEEDLE_VALVE_MANUAL:
+            conditions.append(
+                ReadinessCondition(
+                    key="needle_valve_confirmed",
+                    label="Needle valve closed",
+                    check=lambda _state: self.confirmed("needle_valve"),
+                    detail=None,
+                )
+            )
+        return tuple(conditions)
 
     def initiate(self) -> PhasePlan:
         """Ramp every magnet to zero field and the VTI to target, park everything else.

@@ -91,7 +91,7 @@ config also has automatic `test_conformance.py` coverage on top of these.
 | `cryosoft/gui/monitor_history.py` | `tests/test_monitor_history.py` |
 | `cryosoft/gui/trend_plot_panel.py` | `tests/test_trend_plot_panel.py` |
 | `cryosoft/gui/config_editor.py` | `tests/test_config_editor.py` |
-| `cryosoft/gui/cryogenics_panel.py` | `tests/test_cryogenics_panel.py` |
+| `cryosoft/gui/operations_panel.py`, `procedure_discovery.py` (`discover_operations`) | `tests/test_operations_panel.py` |
 | `cryosoft/gui/servicing_log_page.py` | `tests/test_servicing_log_page.py` |
 | `cryosoft/troubleshoot/*`, operational status / watchdog | `tests/test_troubleshoot_cli.py`, `tests/test_troubleshoot_engine.py`, `tests/test_operational_status.py`, `tests/test_status_reader.py`, `tests/test_watchdog.py` |
 
@@ -105,9 +105,9 @@ config also has automatic `test_conformance.py` coverage on top of these.
 - **L1 virtual instruments:** `test_l1_virtual_instruments.py`, `test_l1_new_vis.py`, `test_l1_switch_vi.py`, `test_measurement_dc_vi.py`, `test_switch_heater.py`.
 - **L2 station + config:** `test_l2_station.py`, `test_config_validation.py`, `test_config_catalog.py`.
 - **L3 orchestrator:** `test_l3_orchestrator.py`.
-- **L3/L4 operations:** `test_operations.py` (`OperationBase`, `run_operation`/`queue_operation`/`finish_operation`, tolerated safety flags, postcondition gates, capability-scope dispatch); `test_helium_fill.py` (`HeliumFillOperation` end-to-end against a real Orchestrator + `sim_cryostat`, including the `CryogenicsRecorder` wiring); `test_sample_change.py` (`SampleChangeOperation` end-to-end against a real Orchestrator + `sim_cryostat`, including `confirm_operation()`'s operator-confirmation gate and postcondition timeout).
+- **L3/L4 operations:** `test_operations.py` (`OperationBase`, `run_operation`/`queue_operation`/`finish_operation`, tolerated safety flags, postcondition gates, capability-scope dispatch); `test_operation_readiness.py` (the readiness/next-due contract — `ReadinessCondition`/`NextDue`, `OperationBase` defaults, `HeliumFillOperation`/`SampleChangeOperation`'s concrete `readiness_conditions()`/`next_due()`, Qt-free); `test_helium_fill.py` (`HeliumFillOperation` end-to-end against a real Orchestrator + `sim_cryostat`, including the `CryogenicsRecorder` wiring); `test_sample_change.py` (`SampleChangeOperation` end-to-end against a real Orchestrator + `sim_cryostat`, including `confirm_operation()`'s operator-confirmation gate and postcondition timeout).
 - **L4 procedures + planning:** `test_l4_procedure.py`, `test_new_procedures.py`, `test_field_voltage_procedure.py`, `test_plan.py`, `test_sweep_builder.py`.
 - **L5 data manager:** `test_l5_data_manager.py`.
 - **L6 session management:** `test_session_layer.py`, `test_servicing_log.py`.
-- **GUI (pytest-qt, offscreen):** `test_gui.py`, `test_sweep_axis_widget.py`, `test_lifecycle_toggle.py`, `test_form_autosave.py`, `test_monitor_history.py`, `test_trend_plot_panel.py`, `test_config_editor.py`, `test_cryogenics_panel.py`, `test_servicing_log_page.py`.
+- **GUI (pytest-qt, offscreen):** `test_gui.py`, `test_sweep_axis_widget.py`, `test_lifecycle_toggle.py`, `test_form_autosave.py`, `test_monitor_history.py`, `test_trend_plot_panel.py`, `test_config_editor.py`, `test_operations_panel.py`, `test_servicing_log_page.py`.
 - **Troubleshooting / operational status:** `test_troubleshoot_cli.py`, `test_troubleshoot_engine.py`, `test_operational_status.py`, `test_status_reader.py`, `test_watchdog.py`.

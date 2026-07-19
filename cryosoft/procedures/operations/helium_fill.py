@@ -63,7 +63,7 @@ from typing import Any
 from cryosoft.core.data_manager import DataManager
 from cryosoft.core.exceptions import CryoSoftConfigError
 from cryosoft.core.gates import Gate
-from cryosoft.core.operation import OperationBase
+from cryosoft.core.operation import NextDue, OperationBase, ReadinessCondition
 from cryosoft.core.plan import Command, PhasePlan, StepPlan, Target
 from cryosoft.core.station import Station
 
@@ -85,6 +85,27 @@ _RISE_NOISE_FLOOR_PCT = 1e-6
 # max_fill_duration_s / sample_period_s sample count when sizing the HDF5
 # file, so tick-interval jitter never overruns the pre-allocated dataset.
 _SAMPLE_COUNT_MARGIN = 5
+
+# Default advisory helium warning threshold (%), used by next_due() when the
+# config omits "helium_warning_pct" — matches read_cryogenics_config()'s own
+# default (cryosoft/core/station.py's _CRYOGENICS_DEFAULTS), so a fill built
+# directly (not via **read_cryogenics_config(...)) still predicts sensibly.
+_DEFAULT_WARNING_PCT = 35.0
+
+
+def _humanize_duration_hours(hours: float) -> str:
+    """Format a positive duration in hours as a compact "X.X d"/"X.X h" string.
+
+    Args:
+        hours: Duration in hours; must be positive (callers clamp at 0
+            separately — an overdue fill never reaches this helper).
+
+    Returns:
+        ``"{hours/24:.1f} d"`` when ``hours >= 24``, else ``"{hours:.1f} h"``.
+    """
+    if hours >= 24.0:
+        return f"{hours / 24.0:.1f} d"
+    return f"{hours:.1f} h"
 
 
 def _default_data_directory() -> str:
@@ -117,10 +138,17 @@ class HeliumFillOperation(OperationBase):
     purpose is fixing low helium, so that flag must not abort it — a
     non-tolerated flag (e.g. ``quench``) still aborts the fill exactly like
     any other run (plan §7).
+
+    Readiness / next-due (Operations panel, plan §12): ``readiness_conditions()``
+    exposes one aggregate ``zero_field`` checklist row (empty if the station
+    has no magnets); ``next_due()`` predicts when the level will cross the
+    configured warning threshold from the measured consumption rate passed
+    in via ``context``.
     """
 
     name = "Helium Fill"
     description = "Force all magnets to zero field and fill the helium reservoir"
+    ready_message = "Ready — helium transfer can begin"
     tolerated_safety_flags = frozenset({"helium_low"})
 
     def __init__(
@@ -141,14 +169,15 @@ class HeliumFillOperation(OperationBase):
             **config: Plan §9 ``cryogenics:`` keys — ``level_vi``,
                 ``fill_target_pct``, ``fill_zero_field_eps_T``,
                 ``fill_zero_field_window_s``, ``fill_complete_window_s``,
-                ``max_fill_duration_s``, ``sample_period_s`` — each with a
-                sane default matching §9 so this constructs from a sim
-                station alone. ``data_directory`` (not a §9 key) may also be
-                passed to control where the level-curve HDF5 file is
-                written; unrecognised keys (e.g. §9's ``helium_warning_pct``,
-                which governs the recorder, not the fill) are silently
-                ignored, so ``**read_cryogenics_config(config_path)`` can be
-                passed verbatim.
+                ``max_fill_duration_s``, ``sample_period_s``,
+                ``helium_warning_pct`` (read by ``next_due()``, plan §12 —
+                the same key the recorder's advisory warning uses) — each
+                with a sane default matching §9 so this constructs from a
+                sim station alone. ``data_directory`` (not a §9 key) may
+                also be passed to control where the level-curve HDF5 file is
+                written; unrecognised keys are silently ignored, so
+                ``**read_cryogenics_config(config_path)`` can be passed
+                verbatim.
 
         Raises:
             CryoSoftConfigError: If ``level_vi`` does not name a VI
@@ -173,6 +202,15 @@ class HeliumFillOperation(OperationBase):
             config.get("max_fill_duration_s", 3600.0)
         )
         self._sample_period_s: float = float(config.get("sample_period_s", 10.0))
+        # next_due()'s prediction threshold (plan §12) — the same
+        # helium_warning_pct key the recorder's advisory cryo_warning signal
+        # already reads (see cryosoft.session.servicing_log.CryogenicsRecorder
+        # and Station._CRYOGENICS_DEFAULTS), so **cryogenics_config passed
+        # verbatim wires the panel's prediction to the same threshold the
+        # operator already sees the low-helium warning at.
+        self._warning_pct: float = float(
+            config.get("helium_warning_pct", _DEFAULT_WARNING_PCT)
+        )
         self._data_directory: str = str(
             config.get("data_directory") or _default_data_directory()
         )
@@ -231,6 +269,107 @@ class HeliumFillOperation(OperationBase):
             "max_fill_duration_s": self._max_fill_duration_s,
             "sample_period_s": self._sample_period_s,
         }
+
+    # ------------------------------------------------------------------
+    # Operations panel: readiness / next-due (plan §12)
+    # ------------------------------------------------------------------
+
+    def readiness_conditions(self) -> tuple[ReadinessCondition, ...]:
+        """Return the aggregate ``zero_field`` checklist row.
+
+        Mirrors ``initiation_gates()``'s zero-field check, but reads the
+        state snapshot passed to ``check()``/``detail()`` (never
+        ``self._station.cached_state`` directly), per the readiness-condition
+        contract.
+
+        Returns:
+            One ``ReadinessCondition`` naming the worst-offending magnet in
+            its detail text, or ``()`` if the station has no magnets.
+        """
+        if not self._magnets:
+            return ()
+
+        def _worst_offender(state: dict[str, Any]) -> tuple[str, float | None]:
+            worst_name = self._magnets[0]
+            worst_field: float | None = None
+            worst_abs = -1.0
+            for magnet in self._magnets:
+                field = state.get(magnet, {}).get("get_field")
+                if isinstance(field, bool) or not isinstance(field, (int, float)):
+                    return magnet, None
+                if abs(float(field)) > worst_abs:
+                    worst_abs = abs(float(field))
+                    worst_name = magnet
+                    worst_field = float(field)
+            return worst_name, worst_field
+
+        def _holds(state: dict[str, Any]) -> bool:
+            _name, field = _worst_offender(state)
+            return field is not None and abs(field) < self._fill_zero_field_eps_T
+
+        def _detail(state: dict[str, Any]) -> str:
+            name, field = _worst_offender(state)
+            if field is None:
+                return f"{name} field reading unavailable"
+            return f"{name} at {field:.2f} T"
+
+        return (
+            ReadinessCondition(
+                key="zero_field",
+                label="All magnets at zero field",
+                check=_holds,
+                detail=_detail,
+            ),
+        )
+
+    def next_due(self, context: dict[str, Any]) -> NextDue | None:
+        """Predict when the next fill will be needed from the consumption rate.
+
+        Args:
+            context: ``{"state": ..., "now_unix": ..., "consumption_rate_pct_per_h":
+                ...}`` — see ``OperationBase.next_due()``. Reads the current
+                helium level from ``context["state"][level_vi]["helium_level"]``.
+
+        Returns:
+            ``NextDue(due_unix, text)`` with ``hours = (level -
+            helium_warning_pct) / rate``; ``NextDue(None, ...)`` variants
+            when the level or rate is unavailable ("consumption unknown"),
+            the rate is not positive ("level not falling" — the level is
+            flat or rising), or the level is already at/below the warning
+            threshold ("Fill overdue …").
+        """
+        level: float | None = None
+        state = context.get("state")
+        if isinstance(state, dict):
+            vi_state = state.get(self._level_vi_name)
+            if isinstance(vi_state, dict):
+                raw_level = vi_state.get("helium_level")
+                if isinstance(raw_level, (int, float)) and not isinstance(raw_level, bool):
+                    level = float(raw_level)
+
+        rate = context.get("consumption_rate_pct_per_h")
+        if isinstance(rate, bool) or not isinstance(rate, (int, float)):
+            rate = None
+
+        if level is None or rate is None:
+            return NextDue(None, "Fill due: consumption unknown")
+        if rate <= 0:
+            return NextDue(None, "Fill due: level not falling")
+        if level <= self._warning_pct:
+            return NextDue(None, "Fill overdue (level below warning threshold)")
+
+        hours = (level - self._warning_pct) / rate
+        now_unix = context.get("now_unix")
+        due_unix = (
+            float(now_unix) + hours * 3600.0
+            if isinstance(now_unix, (int, float)) and not isinstance(now_unix, bool)
+            else None
+        )
+        text = (
+            f"Fill due in ~{_humanize_duration_hours(hours)} "
+            f"(level {level:.1f} %, warning at {self._warning_pct:.1f} %)"
+        )
+        return NextDue(due_unix, text)
 
     # ------------------------------------------------------------------
     # OperationBase lifecycle

@@ -78,11 +78,11 @@ from cryosoft.gui import app_settings  # import the module (not the function) so
 from cryosoft.gui import form_autosave as session_store  # module import keeps save/load monkeypatchable
 from cryosoft.gui import window_geometry
 from cryosoft.gui.config_menu import ConfigMenuController
-from cryosoft.gui.cryogenics_panel import CryogenicsPanel
 from cryosoft.gui.diagnostics_window import DiagnosticsWindow
 from cryosoft.gui.instrument_panel import InstrumentPanel
 from cryosoft.gui.log_panel import LogPanel
 from cryosoft.gui.notification_banner import NotificationBanner
+from cryosoft.gui.operations_panel import OperationsPanel
 from cryosoft.gui.other_devices import OtherDevicesPanel
 from cryosoft.gui.servicing_log_page import ServicingLogPage
 from cryosoft.gui.session_info_panel import SessionInfoPanel
@@ -146,7 +146,7 @@ class MonitorWindow(QMainWindow):
     a scrollable 2-column instrument monitor/control list, top-right is the
     :class:`TrendsQuadrant`, bottom-left is the :class:`SessionInfoPanel`,
     and bottom-right is the :class:`OtherDevicesPanel` (plus an optional
-    :class:`CryogenicsPanel`) behind a QComboBox selector. Every splitter
+    :class:`OperationsPanel`) behind a QComboBox selector. Every splitter
     boundary is draggable; nothing in the grid can be closed, detached, or
     floated. Page 2 (Logs) is a :class:`ServicingLogPage` hosting one table
     per configured servicing-log kind plus the relocated :class:`LogPanel`.
@@ -165,6 +165,11 @@ class MonitorWindow(QMainWindow):
             block (``Station.read_cryogenics_config()``), or None/empty when
             the setup has no such block. Optional — every existing
             construction site keeps working unchanged.
+        operations_config: The active config's resolved ``operations:``
+            block (``Station.read_operations_config()``), or None/empty when
+            the setup declares none. The Operations panel is available when
+            cryogenics is enabled OR this is non-empty — a setup with only
+            ``sample_change`` still gets the panel, minus the cryo section.
         helium_store: The active setup's HeliumRecordStore, or None.
         servicing_store: The active setup's ServicingLogStore, or None.
         servicing_log_kinds: The declared, editable log-kind keys this setup
@@ -184,6 +189,7 @@ class MonitorWindow(QMainWindow):
         startup_warning: str | None = None,
         session_manager: SessionManager | None = None,
         cryogenics_config: dict[str, Any] | None = None,
+        operations_config: dict[str, dict[str, Any]] | None = None,
         helium_store: HeliumRecordStore | None = None,
         servicing_store: ServicingLogStore | None = None,
         servicing_log_kinds: list[str] | None = None,
@@ -198,18 +204,25 @@ class MonitorWindow(QMainWindow):
         # Cryogenics management (docs/plans/cryogenics-logbook.md §9/§10),
         # all optional — every existing construction site (and every prior
         # test) keeps working with these left at their None defaults, which
-        # simply builds the Logs page with no tables/no Cryogenics panel.
+        # simply builds the Logs page with no tables/no Operations panel.
         self._cryogenics_config = cryogenics_config
+        self._operations_config = dict(operations_config or {})
         self._helium_store = helium_store
         self._servicing_store = servicing_store
         self._servicing_log_kinds = list(servicing_log_kinds or [])
         self._cryogenics_recorder = cryogenics_recorder
-        self._cryogenics_panel: CryogenicsPanel | None = None
+        self._operations_panel: OperationsPanel | None = None
         self._cryogenics_enabled = bool(
             self._cryogenics_config
             and self._helium_store is not None
             and self._servicing_store is not None
             and self._station.has_vi(str(self._cryogenics_config.get("level_vi", "")))
+        )
+        # The Operations panel (plan §12) is available when cryogenics is
+        # enabled OR an operations: config block is declared — a setup with
+        # only sample_change still gets the panel, minus the cryo section.
+        self._operations_panel_enabled = self._cryogenics_enabled or bool(
+            self._operations_config
         )
 
         # Session layer (L6, optional — absent in unit tests). experiment_context()
@@ -583,14 +596,14 @@ class MonitorWindow(QMainWindow):
     def _build_bottom_right_quadrant(
         self, measurement_vis: list[str], switch_vis: list[str]
     ) -> QWidget:
-        """Build the bottom-right quadrant: Other Devices (+ optional Cryogenics).
+        """Build the bottom-right quadrant: Other Devices (+ optional Operations).
 
         A QComboBox picks which of the always-built views is visible in the
         QStackedWidget below it — this keeps the quadrant's footprint
         constant regardless of how many measurement VIs a station has,
         rather than showing both stacked and always-visible. The Log view
         that used to live here has moved to the Logs page (page 2); the
-        Cryogenics entry is added only when ``self._cryogenics_enabled``.
+        Operations entry is added only when ``self._operations_panel_enabled``.
 
         Args:
             measurement_vis: Names of measurement VIs to display in Other Devices.
@@ -610,8 +623,8 @@ class MonitorWindow(QMainWindow):
         self._devices_log_selector = QComboBox()
         self._devices_log_selector.setObjectName("devices_log_selector")
         selector_items = ["Other Devices"]
-        if self._cryogenics_enabled:
-            selector_items.append("Cryogenics")
+        if self._operations_panel_enabled:
+            selector_items.append("Operations")
         self._devices_log_selector.addItems(selector_items)
         self._devices_log_selector.currentIndexChanged.connect(self._on_devices_log_selector_changed)
         selector_row.addWidget(self._devices_log_selector)
@@ -630,32 +643,33 @@ class MonitorWindow(QMainWindow):
         other_devices_scroll.setWidget(self._other_devices)
         self._devices_log_stack.addWidget(other_devices_scroll)
 
-        if self._cryogenics_enabled:
-            self._cryogenics_panel = CryogenicsPanel(
+        if self._operations_panel_enabled:
+            self._operations_panel = OperationsPanel(
                 self._station,
                 self._orchestrator,
-                dict(self._cryogenics_config or {}),
+                dict(self._cryogenics_config or {}) if self._cryogenics_enabled else None,
+                self._operations_config,
                 self._helium_store,
                 self._servicing_store,
                 get_data_dir=self.get_data_dir,
                 get_current_person=self._current_person_for_logs,
                 parent=self,
             )
-            cryo_scroll = QScrollArea()
-            cryo_scroll.setObjectName("cryogenics_scroll")
-            cryo_scroll.setWidgetResizable(True)
-            cryo_scroll.setWidget(self._cryogenics_panel)
-            self._devices_log_stack.addWidget(cryo_scroll)
+            operations_scroll = QScrollArea()
+            operations_scroll.setObjectName("operations_scroll")
+            operations_scroll.setWidgetResizable(True)
+            operations_scroll.setWidget(self._operations_panel)
+            self._devices_log_stack.addWidget(operations_scroll)
 
         outer.addWidget(self._devices_log_stack)
         return container
 
     def _on_devices_log_selector_changed(self, index: int) -> None:
-        """Switch the bottom-right quadrant between Other Devices and Cryogenics.
+        """Switch the bottom-right quadrant between Other Devices and Operations.
 
         Args:
             index: The selector's new current index (0 = Other Devices,
-                1 = Cryogenics, when present).
+                1 = Operations, when present).
         """
         self._devices_log_stack.setCurrentIndex(index)
 
@@ -836,7 +850,7 @@ class MonitorWindow(QMainWindow):
         # Separate from InstrumentPanel's own states_updated connections
         # (each panel connects itself in its constructor) — this slot only
         # feeds the Trends quadrant, the Other Devices switch rows, and the
-        # optional Cryogenics panel.
+        # optional Operations panel.
         self._orchestrator.states_updated.connect(self._on_states_updated)
         # run_finished fires only at run boundaries (not every tick), so —
         # like OtherDevicesPanel's own direct action_succeeded connection —
@@ -863,8 +877,8 @@ class MonitorWindow(QMainWindow):
         # Refresh the display-only switch/scanner rows (connection + active
         # route) from the same per-tick snapshot.
         self._other_devices.on_states_updated(state)
-        if self._cryogenics_panel is not None:
-            self._cryogenics_panel.on_states_updated(state)
+        if self._operations_panel is not None:
+            self._operations_panel.on_states_updated(state)
 
     def _on_run_finished_for_logs(self, _manifest: dict) -> None:
         """Refresh the Logs page's tables after any run finishes.

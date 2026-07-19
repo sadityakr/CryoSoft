@@ -50,7 +50,7 @@ import cryosoft.procedures
 import cryosoft.virtual_instruments
 from cryosoft.core.decorators import VALID_CONTROL_SCOPES, get_control_scope
 from cryosoft.core.exceptions import CryoSoftSafetyError
-from cryosoft.core.operation import OperationBase
+from cryosoft.core.operation import OperationBase, ReadinessCondition
 from cryosoft.core.plan import ParamSpec
 from cryosoft.core.procedure import BaseProcedure
 from cryosoft.core.station import Station, _import_class, build_station
@@ -131,11 +131,11 @@ def _all_procedure_classes() -> list[type]:
 def _all_operation_classes() -> list[type]:
     """Every concrete OperationBase subclass anywhere under cryosoft.procedures.
 
-    Walks the package tree (not just its top level) so a future
-    ``cryosoft.procedures.operations`` subpackage (plan §11 phase 3+) is
-    picked up automatically. No operation ships yet in this phase, so this
-    is expected to return an empty list — the discovery scaffold (and every
-    test parametrized on it) must tolerate that.
+    Walks the package tree (not just its top level), so
+    ``cryosoft.procedures.operations`` and any future operations subpackage
+    are picked up automatically — the discovery scaffold (and every test
+    parametrized on it) tolerates an empty result too, for a hypothetical
+    setup with no operations module at all.
     """
     classes: list[type] = []
     for mod_info in pkgutil.walk_packages(
@@ -781,9 +781,9 @@ def test_measurement_lifecycle_is_measurement_scope(vi_cls: type) -> None:
 
 
 # ── Operation contract (L4, cryosoft.core.operation.OperationBase) ───────────
-# See OperationBase's docstring and plan §4.1. No operation ships in this
-# phase (§11 phase 2) — the discovery scaffold below must tolerate an empty
-# parametrize set, which pytest handles by simply collecting zero test cases.
+# See OperationBase's docstring, plan §4.1, and §12 (readiness/next-due). The
+# discovery scaffold above tolerates an empty parametrize set too, which
+# pytest handles by simply collecting zero test cases.
 
 
 @pytest.mark.parametrize("op_cls", _all_operation_classes(), ids=lambda c: c.__name__)
@@ -815,6 +815,40 @@ def test_operation_constructs_from_defaults(op_cls: type) -> None:
     """
     station = build_station("cryosoft/configs/sim_cryostat")
     op_cls(station)
+
+
+@pytest.mark.parametrize("op_cls", _all_operation_classes(), ids=lambda c: c.__name__)
+def test_operation_readiness_conditions_returns_tuple_of_readiness_condition(op_cls: type) -> None:
+    """readiness_conditions() must return a tuple of ReadinessCondition (plan §12).
+
+    The Operations panel (``gui/operations_panel.py``) builds one checklist
+    row per element with zero per-operation code — a wrong return type would
+    silently break every card, not just this one, so it is checked here for
+    every discovered operation automatically.
+    """
+    station = build_station("cryosoft/configs/sim_cryostat")
+    op = op_cls(station)
+    conditions = op.readiness_conditions()
+    assert isinstance(conditions, tuple), (
+        f"{op_cls.__name__}.readiness_conditions() must return a tuple, got {type(conditions)!r}"
+    )
+    for condition in conditions:
+        assert isinstance(condition, ReadinessCondition), (
+            f"{op_cls.__name__}.readiness_conditions() must contain only "
+            f"ReadinessCondition instances, got {condition!r}"
+        )
+
+
+def test_operation_config_key_unique_across_operations() -> None:
+    """A non-empty config_key must be unique across every discovered operation.
+
+    The Operations panel maps ``operations: {config_key: block}`` config
+    entries to a class by ``config_key`` (plan §12) — a collision would make
+    that mapping ambiguous.
+    """
+    keys = [op_cls.config_key for op_cls in _all_operation_classes() if op_cls.config_key]
+    duplicates = {key for key in keys if keys.count(key) > 1}
+    assert not duplicates, f"config_key collision(s) across operations: {duplicates}"
 
 
 # ── Measurement-method standard ───────────────────────────────────────────────

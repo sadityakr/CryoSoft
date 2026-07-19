@@ -26,11 +26,12 @@
 #   HeliumRecordStore/ServicingLogStore rooted in a "servicing" directory
 #   sibling to the experiment store, constructs a CryogenicsRecorder, and
 #   connects it to the Orchestrator's states_updated/run_started/run_finished
-#   signals. Opens the Monitor (passing the catalog, session manager, a
-#   restart callback, any fallback warning, and — when cryogenics is active —
-#   the same store instances, config, and recorder, so the Monitor window's
-#   Cryogenics panel and Logs page share the recorder's data), and enters the
-#   Qt event loop.
+#   signals. Reads the operations: config block (read_operations_config(),
+#   GUI-safe, {} when undeclared) unconditionally. Opens the Monitor (passing
+#   the catalog, session manager, a restart callback, any fallback warning,
+#   the operations: config, and — when cryogenics is active — the same store
+#   instances, config, and recorder, so the Monitor window's Operations panel
+#   and Logs page share the recorder's data), and enters the Qt event loop.
 # output: |
 #   The running CryoSoft desktop application. Exits when all windows are closed.
 # ---
@@ -53,6 +54,7 @@ from cryosoft.core.orchestrator import Orchestrator
 from cryosoft.core.station import (
     build_station_with_fallback,
     read_cryogenics_config,
+    read_operations_config,
     read_servicing_logs_config,
 )
 from cryosoft.gui import app_settings, form_autosave
@@ -164,6 +166,10 @@ def main() -> None:
     # recorder and the Monitor window's Cryogenics panel / Logs page, so both
     # always see the same data.
     cryogenics_config = read_cryogenics_config(used_path)
+    # Operations panel (plan §12): declared operations.<key>: config blocks,
+    # GUI-safe to read unconditionally (empty {} when the setup declares
+    # none) — the panel decides which discovered class each key maps to.
+    operations_config = read_operations_config(used_path)
     cryogenics_recorder: CryogenicsRecorder | None = None
     helium_store: HeliumRecordStore | None = None
     servicing_store: ServicingLogStore | None = None
@@ -201,6 +207,7 @@ def main() -> None:
         startup_warning="; ".join(warnings) if warnings else None,
         session_manager=session_manager,
         cryogenics_config=cryogenics_config or None,
+        operations_config=operations_config or None,
         helium_store=helium_store,
         servicing_store=servicing_store,
         servicing_log_kinds=servicing_log_kinds,

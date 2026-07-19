@@ -1,25 +1,30 @@
 # ---
 # description: |
-#   Procedure auto-discovery for the GUI: imports every module in
-#   cryosoft.procedures and returns the concrete BaseProcedure subclasses at
-#   any depth (so procedures under intermediate bases like
-#   SweepMeasureProcedure are found). Qt-free; extracted from
-#   procedure_window.py.
-# entry_point: Not run directly. Called by ProcedureWindow at construction.
+#   Procedure and operation auto-discovery for the GUI: imports every module
+#   in cryosoft.procedures (discover_procedures()) or
+#   cryosoft.procedures.operations (discover_operations()) and returns the
+#   concrete BaseProcedure / OperationBase subclasses at any depth (so a
+#   class under an intermediate base like SweepMeasureProcedure is found).
+#   Qt-free; extracted from procedure_window.py.
+# entry_point: Not run directly. discover_procedures() is called by
+#   ProcedureWindow at construction; discover_operations() by the Operations
+#   panel (gui/operations_panel.py) at panel init.
 # dependencies:
+#   - cryosoft.core.operation (OperationBase)
 #   - cryosoft.core.procedure (BaseProcedure)
 #   - cryosoft.procedures (the discovered package)
+#   - cryosoft.procedures.operations (the discovered subpackage)
 # input: |
-#   Nothing — walks the cryosoft.procedures package on disk.
+#   Nothing — each walks its package on disk.
 # process: |
 #   pkgutil-iterates the package's modules, importing each (logging, never
-#   raising, on a broken module), then collects every named BaseProcedure
-#   subclass via a transitive __subclasses__ walk.
+#   raising, on a broken module), then collects every named BaseProcedure /
+#   OperationBase subclass via a transitive __subclasses__ walk.
 # output: |
-#   An ordered, deduplicated list of concrete procedure classes.
+#   An ordered, deduplicated list of concrete procedure or operation classes.
 # ---
 
-"""Procedure auto-discovery — concrete BaseProcedure subclasses for the GUI."""
+"""Procedure/operation auto-discovery for the GUI."""
 
 from __future__ import annotations
 
@@ -28,6 +33,7 @@ import logging
 import pkgutil
 from pathlib import Path
 
+from cryosoft.core.operation import OperationBase
 from cryosoft.core.procedure import BaseProcedure
 
 logger = logging.getLogger(__name__)
@@ -79,6 +85,39 @@ def discover_procedures() -> list[type[BaseProcedure]]:
     subclasses: list[type[BaseProcedure]] = []
     seen: set[type] = set()
     for cls in all_subclasses(BaseProcedure):
+        if getattr(cls, "name", "") and cls not in seen:
+            seen.add(cls)
+            subclasses.append(cls)
+    return subclasses
+
+
+def discover_operations() -> list[type[OperationBase]]:
+    """Import all modules in cryosoft.procedures.operations and return concrete operations.
+
+    Same pkgutil-walk-and-import pattern as ``discover_procedures()``, over
+    the operations subpackage instead. The Operations panel (plan §12) uses
+    this to build one card per discovered class whose ``config_key`` matches
+    a key in the ``operations:`` config block — no per-operation GUI code.
+
+    Returns:
+        List of concrete ``OperationBase`` subclasses (not the base, which
+        carries no ``name``).
+    """
+    import cryosoft.procedures.operations as _pkg
+
+    pkg_path = Path(_pkg.__file__).parent
+    for _, module_name, _ in pkgutil.iter_modules([str(pkg_path)]):
+        try:
+            importlib.import_module(f"cryosoft.procedures.operations.{module_name}")
+        except Exception:
+            logger.exception(
+                "procedure_discovery: failed to import cryosoft.procedures.operations.%s",
+                module_name,
+            )
+
+    subclasses: list[type[OperationBase]] = []
+    seen: set[type] = set()
+    for cls in all_subclasses(OperationBase):
         if getattr(cls, "name", "") and cls not in seen:
             seen.add(cls)
             subclasses.append(cls)
