@@ -1,14 +1,20 @@
-# Plan: the Logbook and cryogenics management
+# Plan: operations, the Logbook, and cryogenics management
 
 **Status:** proposal — no code yet.
-**Scope:** a setup-level logbook (timestamped operational events, independent
-of experiments) and a cryogenics-management feature built on it: a GUI
-sub-panel showing helium consumption over the last hours, a "Fill helium"
-action that forces all magnets to zero field before the fill and records
-start/end time and level, and the safety-layer changes needed to make a fill
-startable exactly when helium is low. The whole feature is config-gated so a
-dry cryostat carries zero UI footprint with zero code changes.
-**Date:** 2026-07-19
+**Scope:** three connected pieces. (1) **Operations**: a new L4 class for
+multi-step *cryostat-servicing* actions (helium fill, sample change) that is
+distinct from measurement procedures — higher submission priority, access to
+a broader, explicitly-scoped hardware capability tier, verified
+postconditions, and no required data file. (2) A setup-level **logbook**
+(timestamped operational events, independent of experiments). (3)
+**Cryogenics management** built on both: a GUI sub-panel showing helium
+consumption over the last hours and a "Fill helium" operation that forces
+all magnets to zero field and records start/end time and level. Everything
+is config-gated so a cryostat that doesn't need a feature carries zero UI
+footprint with zero code changes.
+**Date:** 2026-07-19 (revised same day: the fill is now the first
+*operation*, superseding the earlier `run_kind = "service"` procedure
+marker, per design discussion).
 
 ---
 
@@ -18,260 +24,354 @@ A survey of the codebase (2026-07-19) established the starting point:
 
 - **The level meter VI already has everything the fill needs at L1.**
   `CryogenLevelMeterVI` exposes `helium_level()`/`nitrogen_level()`
-  (`@monitored`), the three-mode refresh standard (`set_refresh_rate`,
-  0=STANDBY/1=SLOW/2=FAST — FAST is documented as "rapid polling used during
-  a helium fill"), and the debounced `helium_low` safety flag via
-  `evaluate_safety()`. No L0/L1 changes are required.
-- **The Orchestrator's procedure lifecycle fits a fill.** A fill is a
-  sequence "ramp things to targets, confirm, sample repeatedly, park" — the
-  exact shape of `BaseProcedure` (`initiate()` → RAMPING → gates →
-  MEASURING/SWEEPING loop → `standby()`). `procedures/README.md` explicitly
-  allows non-sweep shapes to subclass `BaseProcedure` directly. Running the
-  fill as a procedure buys, for free: the single-writer rule (all GUI magnet
-  actions are refused while it runs — nobody can ramp a field mid-fill), the
-  mandatory safety watchdog, pause/abort, progress and status feeds, and a
-  run manifest (`run_started`/`run_finished`) that the session layer already
-  records.
-- **Zero-field enforcement needs no new machinery.** `initiate()` returns
-  `targets = {each magnet: Target(0.0)}`; the RAMPING state completes only
-  when every ramp reports done; an `initiation_gates()` `Gate` can then
-  require |B| < ε to hold for a window before the fill counts as started —
-  and the gate's name shows up in operational status while it waits.
+  (`@monitored`), the three-mode refresh standard (FAST is documented as
+  "rapid polling used during a helium fill"), and the debounced
+  `helium_low` safety flag via `evaluate_safety()`.
+- **The Orchestrator's execution machinery fits servicing actions.** Ramp
+  targets, gates, the two-phase STANDBY, pause/abort, error containment,
+  watchdog, run manifests — a fill or sample change needs exactly this. What
+  does *not* fit is the `BaseProcedure` contract wrapped around it:
+  procedures are sweep-shaped (DataManager, `DataSchema`, `measurement_vi`
+  selection, live-plot columns, progress in points). A servicing action has
+  none of that.
+- **The plan command surface is open.** `Station.send_measurement_commands`
+  dispatches *any* `Command` to *any* method of *any* registered VI. Nothing
+  but convention stops a procedure from carrying
+  `Command("magnet_z", "switch_heater_on")`. If procedures are to be denied
+  such capabilities while operations are allowed them, an enforcement
+  mechanism is needed — none exists today.
 - **Time-series history exists but is RAM-only.** `gui/monitor_history.py`
   keeps 24 h of every monitored value in ring buffers fed by
-  `states_updated`, and `TrendPlotPanel` can already plot
-  `level_meter_helium_level` over 15 min–24 h windows. Nothing is persisted:
-  close the app and the consumption history is gone.
+  `states_updated`. Nothing is persisted: close the app and the consumption
+  history is gone.
 - **There is no logbook.** The closest artifacts are per-run `RunRecord`s
-  (session layer, only recorded inside an open experiment), the free-text
-  `ExperimentRecord.findings`, and the machine-only `logs/status.jsonl`.
-  A timestamped stream of *operational* events (fills, cryogen warnings,
-  operator notes) tied to the setup rather than to an experiment does not
-  exist.
+  (only recorded inside an open experiment), free-text
+  `ExperimentRecord.findings`, and the machine-only `logs/status.jsonl`. A
+  timestamped stream of operational events tied to the *setup* rather than
+  to an experiment does not exist.
 - **One genuine safety-layer gap.** `helium_low` trips EMERGENCY;
-  `acknowledge_emergency()` is refused while the condition persists; and
-  `run_procedure()` only starts from IDLE. Consequence: **when helium is
+  `acknowledge_emergency()` is refused while the condition persists;
+  `run_procedure()` starts only from IDLE. Consequence: when helium is
   actually low — the one time a fill matters — a software-driven fill can
-  never start.** The operator would have to fill blind, outside the
-  software, with no record. This is the part of the safety layer that needs
-  improving (§6); everything else the feature needs is already there.
+  never start (§7).
 - **Strong precedents exist for the optionality mechanism.** Panels are
-  discovered from the station config by `vi_type` (`MonitorWindow._build_ui`
-  partitions VIs; `OtherDevicesPanel` renders "No other devices configured"
-  when empty); the scanner is an availability bit resolved from
-  `switch_vi_names()`; limits and roles live in `devices.yaml`. "Present in
+  discovered from the station config by `vi_type`; the scanner is an
+  availability bit; limits and roles live in `devices.yaml`. "Present in
   config → feature active" is already the house style.
 
-## 2. Design principle: a vertical slice, not a new layer
+## 2. Design principle: two request types, one execution engine
 
-Cryogenics management is **not a new horizontal layer** — it is one feature
-whose pieces each belong to an existing layer, wired together by config:
+Operations and procedures are **different contracts submitted to the same
+single writer** — not two orchestration paths. Both speak the existing plan
+currency (`PhasePlan` / `StepPlan` / `Target` / `Command` / `Gate`); both
+are driven by the same tick loop, state machine, watchdog, and safety
+checks. The differences live at exactly three points:
+
+1. **Submission** — priority, queueing, and the EMERGENCY carve-out (§4.2).
+2. **Dispatch** — the capability scope a plan's commands may carry (§5).
+3. **Completion** — verified postconditions and logbook recording instead
+   of a mandatory dataset (§4.1).
+
+The rule that keeps this safe: **an operation is never a bypass.** Its
+extra capabilities are ordinary `@control` methods with config limits,
+validated by the control-validation standard, executed on the tick by the
+single writer, and watched by `evaluate_safety()` like everything else. The
+only thing "privileged" about an operation is *which methods its plans may
+name*.
+
+Layer placement — a vertical slice, no new horizontal layer:
 
 ```
-GUI   gui/cryogenics_panel.py     sub-panel; built only when the feature is on
-L6    session/logbook.py          logbook models + store + recorder (new)
-L4    procedures/helium_fill.py   the fill as a service procedure (new)
-L3    Orchestrator                tolerated-flags + graceful-finish (small, generic changes)
-L2    Station                     magnet_vi_names() helper; config gains a cryogenics block
-L1    CryogenLevelMeterVI         unchanged
-L0    ILM drivers                 unchanged
+GUI   gui/cryogenics_panel.py + operations UI    config-gated composition
+L6    session/logbook.py                          logbook models + store + recorder (new)
+L4    core/operation.py (OperationBase)           the new contract (new)
+      procedures/operations/*.py                  concrete operations (new)
+L3    Orchestrator                                run_operation(), scope enforcement hooks,
+                                                  finish request, postcondition phase (small)
+L2    Station                                     magnet_vi_names(); command-scope check
+L1    VIs                                         @control gains a scope; ITC503 VI may gain
+                                                  needle-valve control (hardware-dependent)
+L0    drivers                                     unchanged (except optional ITC gas-flow method)
 ```
 
-A separate `cryosoft/cryogenics/` package was considered and rejected: it
-would need its own import contracts, duplicate the session layer's
-persistence patterns, and still have to reach into procedures and the GUI —
-i.e. it would be a vertical slice pretending to be a layer. The existing
-contracts C1–C12 cover every piece above unchanged (the logbook lands under
-C11/C12 exactly like the rest of `cryosoft/session/`).
+Contracts C1–C12 cover every piece unchanged; C6 (procedures are
+hardware-blind) extends verbatim to `core.operation` and the operations
+package.
 
-**Removability = config, not code.** The feature is active iff:
+## 3. Concept model (→ `GLOSSARY.md` in the first implementation commit)
 
-1. the station config registers a VI with registry `vi_type: level`, and
-2. `devices.yaml` carries a `cryogenics:` block (§5).
-
-A dry cryostat omits both → no panel, no fill procedure offered, no logbook
-cryo events, nothing to delete. This mirrors how a station without a switch
-VI simply has no reading-loop group.
-
-## 3. The Logbook (L6, `cryosoft/session/logbook.py`)
-
-### 3.1 Concept
-
-| Term (→ GLOSSARY.md) | Definition |
+| Term | Definition |
 |---|---|
-| **Logbook** | A per-setup, append-only stream of timestamped operational events, independent of experiments. Lives beside the experiment store; survives app restarts; never rewritten. |
-| **Logbook event** | One typed record: `utc`, `kind` (e.g. `helium_fill`, `cryo_warning`, `note`), `data` (kind-specific dict), optional `run_id` linkage. Tolerant-parse dataclass like every session model. |
-| **Service procedure** | A procedure whose purpose is operating the cryostat rather than measuring a sample (`run_kind = "service"`). Recorded like any run; filtered out of measurement-procedure UI lists. |
+| **Operation** | A multi-step cryostat-servicing action (subclass of `OperationBase`, L4): helium fill, sample change. Declarative like a procedure (returns plans, never touches VIs directly), but with operation-scope command access, tolerated safety flags, verified postconditions, an optional (not required) data file, and higher submission priority. Not listed among measurement procedures. |
+| **Capability scope** | The tier a VI `@control` method belongs to: `"measurement"` (may appear in any plan) or `"operation"` (may appear only in operation plans; still a GUI control as before). Declared on the decorator, enforced at dispatch, conformance-checked. |
+| **Postcondition gate** | A `Gate` an operation declares via `postcondition_gates()`: stepped after parking completes, and the operation only reports **done** once every gate holds. The difference between "the commands ran" and "the cryostat is verifiably in the promised state". |
+| **Logbook** | A per-setup, append-only stream of timestamped operational events, independent of experiments. Survives restarts; never rewritten. |
+| **Logbook event** | One typed record: `utc`, `kind` (`operation`, `helium_fill`, `cryo_warning`, `note`), `data`, optional `run_id` linkage. Tolerant-parse dataclass like every session model. |
 
-### 3.2 Structure
+## 4. `OperationBase` (L4, `cryosoft/core/operation.py`)
 
-- **Models** go in `session/models.py` (`LogbookEvent`), so the existing
-  session-model conformance tests (construct from defaults, JSON-safe
-  round-trip, junk-tolerant `from_dict`) cover them the moment they exist.
-- **`LogbookStore`** — JSONL append-only file per setup
+### 4.1 Contract
+
+Same four-phase surface the Orchestrator already drives, minus the sweep
+machinery, plus three declarations procedures don't have:
+
+- `initiate() -> PhasePlan` — initial targets/commands. **No DataManager
+  required**; an operation that wants a dataset (the fill's level curve)
+  may create one, and its manifest then carries the path like any run.
+- `step() -> StepPlan | None` — next tick's waits/targets; `None` ends the
+  operation. Open-ended operations honor the graceful-finish flag (§4.3).
+- `sample() -> None` — optional per-tick observation hook (the fill logs a
+  level point; a sample change does nothing). Default no-op.
+- `standby() -> PhasePlan` / `abort() -> tuple[Command, ...]` — park /
+  safe-off, as for procedures.
+- `initiation_gates() -> tuple[Gate, ...]` — as for procedures.
+- **`postcondition_gates() -> tuple[Gate, ...]`** *(new)* — stepped after
+  `standby()`'s ramps complete. Only when all hold does the Orchestrator
+  emit the manifest with status `done`; a timeout (per-gate `window_s` plus
+  an operation-level `postcondition_timeout_s`) degrades to ERROR with the
+  unmet gate named, and the logbook records the operation as
+  **unverified**. Gates read the station's cached state — no extra polls.
+- **`tolerated_safety_flags: frozenset[str] = frozenset()`** *(new)* —
+  flags that do not abort *this* operation (§7).
+- **`command_scope = "operation"`** *(fixed by the base class)* — see §5.
+- Parameters come from config and `ParamSpec`s exactly like procedures
+  (same form rendering if an operation ever needs a form), but operations
+  are **not** returned by `discover_procedures()`; a parallel
+  `discover_operations()` filters on `OperationBase`.
+
+### 4.2 Priority semantics — written down, because they will be contested
+
+- **Queue-jumping, not preemption.** `Orchestrator.run_operation(op)`
+  starts from IDLE (or manual-ramp RAMPING, cancelling the manual ramp as
+  `run_procedure` does). Queued operations always run before queued
+  procedures. A *running* procedure is **never** auto-aborted by an
+  operation: interrupting a 12-hour sweep stays an explicit human
+  abort, then the operation starts. The refusal comes back as
+  `action_blocked` with exactly that instruction.
+- **While an operation runs, everything else is locked out** — this is the
+  existing single-writer behavior (`submit_vi_action` and `run_procedure`
+  refuse outside IDLE) and is what makes "ensure all magnets are at zero
+  field" a guarantee rather than a hope: nobody can ramp a field mid-fill
+  or mid-sample-change.
+- **EMERGENCY carve-out**: `run_operation` is additionally allowed from
+  EMERGENCY iff every currently-active safety flag is in the operation's
+  `tolerated_safety_flags` (emergency entry already ran `standby_all`). On
+  finish: flags cleared → IDLE, else back to EMERGENCY. This is the
+  narrowest possible door for remediation, and it exists **only** on
+  operations — `BaseProcedure` gets neither tolerated flags nor the
+  carve-out.
+
+### 4.3 Graceful finish
+
+`Orchestrator.finish_operation()` sets a flag the operation reads
+(`OperationBase.finish_requested`); the next `step()` returns `None` and
+the normal STANDBY → postcondition path runs. (The same mechanism is worth
+exposing for procedures later, but it ships here because "Stop filling"
+needs it.)
+
+## 5. The capability-scope standard (the enforceable privilege boundary)
+
+- `@control` gains a `scope` argument, default `"measurement"`. Methods
+  whose automated misuse is dangerous get `scope="operation"`:
+  switch-heater on/off, persistent-mode entry/exit, needle-valve/gas-flow
+  control, level-meter refresh mode. GUI behavior is unchanged — a human in
+  IDLE can still click any `@control` as today.
+- **Enforcement at dispatch**: command dispatch takes the submitting
+  context's allowed scope. Plans from procedures may only carry commands
+  whose target method is `"measurement"`-scope; operation plans may carry
+  both. A violation raises `CryoSoftSafetyError` naming the method — the
+  whole plan is rejected before any hardware is touched, contained to ERROR
+  like an envelope violation. (Reading-loop setters and the measurement
+  lifecycle are `"measurement"`-scope by definition, so no existing
+  procedure changes behavior.)
+- **Conformance additions**: scope values are valid; every method named in
+  any VI's `reading_setters`/measurement lifecycle is measurement-scope;
+  switch-heater and persistent-mode methods on the persistent magnet VI
+  (and any future needle-valve method) are operation-scope; and a behavior
+  test proves a procedure plan carrying an operation-scope command is
+  rejected while the same command in an operation plan dispatches.
+
+This converts today's "procedures don't touch the switch heater, by
+convention" into a machine-checked rule — the standards-over-one-off-code
+move, applied to privilege.
+
+## 6. The Logbook (L6, `cryosoft/session/logbook.py`)
+
+- **Models** in `session/models.py` (`LogbookEvent`), so existing
+  session-model conformance (defaults-constructible, JSON-safe round-trip,
+  junk-tolerant `from_dict`) covers them the moment they exist.
+- **`LogbookStore`** — append-only JSONL per setup
   (`<store root>/logbook/<config_name>.jsonl`), atomic appends, tolerant
-  loads, windowed reads (`events(kind=None, since=None)`). Same discipline
-  as `ExperimentStore`.
+  loads, windowed reads. Same discipline as `ExperimentStore`.
 - **`HeliumHistoryStore`** — the persistence MonitorHistory lacks: a
-  decimated `(utc, helium_pct, nitrogen_pct)` sample appended every
-  `history_sample_s` (config, default 300 s), with size-bounded rotation.
-  This is what makes "consumption over the last few hours" survive a
-  restart and cost ~nothing on disk.
-- **`CryogenicsRecorder(QObject)`** — the single writer to both stores,
-  constructed by `main.py` beside `SessionManager` (only when the feature is
-  on) and connected to the same Orchestrator signals the session layer uses:
-  - `states_updated` → decimate and append helium history; compare against
-    the config's warning threshold and log one `cryo_warning` event per
-    crossing (hysteresis, not one per tick).
-  - `run_started`/`run_finished` where `kind == "service"` and the procedure
-    is the helium fill → compose the `helium_fill` event: start/end UTC from
-    the manifest, start/end level from its own history, terminal status, and
-    the run's HDF5 path (the full fill curve) as linkage.
+  decimated `(utc, helium_pct, nitrogen_pct)` sample every
+  `history_sample_s` (default 300 s), size-bounded rotation. This makes
+  "consumption over the last few hours" survive a restart.
+- **`CryogenicsRecorder(QObject)`** — single writer to both stores,
+  constructed by `main.py` beside `SessionManager` (only when the feature
+  is on), driven purely by existing Orchestrator signals:
+  - `states_updated` → decimate/append history; log one `cryo_warning`
+    per threshold crossing (hysteresis, not per tick).
+  - operation manifests (`run_started`/`run_finished`, kind
+    `"operation"`) → compose the event: start/end UTC, start/end level
+    from its own history, verified/unverified, terminal status, data-file
+    linkage when present.
 
-  The recorder is to the logbook what `SessionManager` is to experiments:
-  one writer, signal-driven, GUI-free. No Orchestrator changes are needed
-  for any of this — the manifests and `states_updated` already carry
-  everything.
+  **Every operation is logbook-recorded, always** — unlike measurement
+  runs, which are only recorded inside an open experiment. Operations are
+  precisely what you consult when asking "who warmed the VTI last night?".
 
-Consumption is **derived, not stored**: a linear fit over the last N hours
-of history gives %/h, times the optional `helium_volume_l` gives L/h. Done
-in one pure function in `session/logbook.py` so the GUI and any future agent
-tool share it.
+Consumption is derived, not stored: one pure function (linear fit over the
+last N hours → %/h; × optional `helium_volume_l` → L/h), shared by the GUI
+and any future agent tool.
 
-## 4. The fill procedure (L4, `procedures/helium_fill.py`)
+## 7. Safety layer: what actually changes
 
-`HeliumFillProcedure(BaseProcedure)`, `name = "Helium Fill"`,
-`run_kind = "service"`. Non-sweep shape, per the procedures README.
+The zero-field interlock needs nothing new — plan targets + gates +
+single-writer lockout already guarantee it. The changes, all attached to
+operations (§4.2, §5):
 
-- **`initiate()`** → `PhasePlan(targets={m: Target(0.0) for m in magnets},
-  commands=(Command(level_vi, "set_refresh_rate", {"mode": 2}),), wait_s=0)`.
-  The magnet list comes from a new `Station.magnet_vi_names()` (registry
-  `system` VIs whose class `vi_type == "magnet"` — the mirror of
-  `switch_vi_names()`); the level VI name from the cryogenics config.
-  Creates the DataManager: the fill writes an HDF5 run like any procedure,
-  columns `unix_time, helium_pct` (+ per-magnet field columns), so every
-  fill's level curve is preserved and linkable from the logbook event.
-- **`initiation_gates()`** → one `Gate("zero_field", check=|B|<ε on every
-  magnet from the station's cached state, window_s from config)`. The fill
-  does not count as started until zero field is *confirmed and held*, and a
-  stuck gate is visible by name in operational status.
-- **`measure()`** → read `helium_level()` (and fields) via the station,
-  save one datapoint. A stale/disconnected level meter raises here — the
-  tick boundary contains it to ERROR with hardware already held at zero
-  field, which is the correct failure mode for "we lost our eyes mid-fill".
-- **`change_sweep_step()`** → `StepPlan(targets={}, wait_s=sample_period_s)`
-  until any of: graceful stop requested (§4.1), level ≥
-  `fill_target_pct` and non-rising for `fill_complete_window_s`, or
-  `max_fill_duration_s` exceeded (safety timeout) → then `None`.
-  `get_progress()` maps level between start and target.
-- **`standby()`** → `PhasePlan(commands=(set_refresh_rate SLOW,))`; also on
-  `abort()` as the measurement safe-off, so an aborted fill never leaves the
-  meter in FAST.
+1. **`tolerated_safety_flags` on `OperationBase`** — the fill declares
+   `{"helium_low"}` (its plan forces every magnet to zero and arms
+   nothing, so low helium is not a hazard for it; it is its reason to
+   exist). The tick subtracts the *running operation's* tolerated flags
+   before deciding on EMERGENCY; a non-tolerated flag (`quench`) still
+   kills a fill instantly. Behavior tests cover the full matrix.
+2. **Remediation start from EMERGENCY** — §4.2's carve-out closes the
+   deadlock in §1.
+3. **The capability scope** (§5) — strictly a *tightening*: procedures
+   lose access they never legitimately had.
 
-### 4.1 Graceful finish
+Deliberately not a safety mechanism: the `helium_warning_pct` advisory. It
+is surfaced by the recorder/panel (banner + logbook event), never by
+`evaluate_safety()` — warnings that trip EMERGENCY teach operators to
+ignore EMERGENCY.
 
-"Stop filling" must run `standby()` (park the meter, close the file, emit
-`run_finished("done")`) — `abort_procedure()` deliberately skips parking.
-Add one small, generic Orchestrator API:
+## 8. The first two operations
 
-- `Orchestrator.finish_procedure()` — request a graceful finish; sets a flag
-  the procedure sees (`BaseProcedure.finish_requested`), so the next
-  `change_sweep_step()` returns `None` and the normal STANDBY path runs.
-  Useful beyond fills (e.g. ending any open-ended monitoring procedure), and
-  a clean tool call for the future agent gateway.
+### 8.1 Helium fill (`procedures/operations/helium_fill.py`)
 
-## 5. Config (single source of truth)
+- `initiate()` → all magnets (`Station.magnet_vi_names()`, the new mirror
+  of `switch_vi_names()`: registry-`system` VIs with class
+  `vi_type == "magnet"`) → `Target(0.0)`; level meter → refresh FAST
+  (operation-scope). Creates a DataManager: columns
+  `unix_time, helium_pct` + per-magnet fields — every fill's curve is
+  preserved and linkable from its logbook event.
+- `initiation_gates()` → `Gate("zero_field", |B|<ε on every magnet from
+  cached state, window_s from config)`. The fill does not count as started
+  until zero field is confirmed *and held*; a stuck gate is visible by
+  name in operational status.
+- `sample()` → read + save helium level. A stale/disconnected meter raises
+  → contained to ERROR with hardware already at zero field — the correct
+  failure mode for losing our eyes mid-fill.
+- `step()` → `StepPlan(wait_s=sample_period_s)` until: finish requested,
+  level ≥ `fill_target_pct` and non-rising for `fill_complete_window_s`,
+  or `max_fill_duration_s` exceeded.
+- `standby()` → refresh SLOW; also from `abort()`, so an aborted fill never
+  leaves the meter in FAST.
+- `postcondition_gates()` → refresh mode is SLOW; level ≥ start level
+  (sanity that a fill actually happened — else the logbook records
+  unverified).
+- `tolerated_safety_flags = frozenset({"helium_low"})`.
 
-New optional top-level block in `devices.yaml`:
+### 8.2 Sample change (`procedures/operations/sample_change.py`)
+
+"Verify the cryostat is safe to open": magnets off, VTI at 300 K, needle
+valve closed.
+
+- `initiate()` → all magnets → `Target(0.0)` (the persistent magnet's own
+  VI logic owns heater sequencing; explicit heater-off commands are
+  operation-scope and available if the setup's exit sequence needs them);
+  VTI (and sample controller, if configured) → 300 K; switch VI
+  `open_all`; measurement VIs disarmed; needle valve closed **if the setup
+  has the capability** (see below).
+- `postcondition_gates()` → |B|<ε held on every magnet; switch-heater OFF
+  confirmed on persistent magnets; VTI within tolerance of 300 K held for
+  a window; valve confirmed closed.
+- **The needle-valve reality check**: no needle-valve/gas-flow capability
+  exists anywhere in the stack today. Where the ITC503 controls the valve,
+  the driver + VTI VI gain a `close_needle_valve()` (operation-scope,
+  sim-twinned, conformance-covered). Where the valve is manual, the config
+  omits the capability and the postcondition becomes an **operator
+  confirmation** in the GUI ("needle valve closed ✓"), recorded in the
+  logbook event as human-confirmed rather than machine-verified. The
+  postcondition declaration must support both, which is why gates and
+  confirmations are declared, not hardcoded.
+- Whether a sample change should also *position* things (e.g. rotator to a
+  load angle) is an open per-setup question — the config block below
+  leaves room (`extra_targets`), but v1 ships without it.
+
+## 9. Config (single source of truth)
+
+New optional top-level blocks in `devices.yaml` — a block absent means that
+feature is off and hidden:
 
 ```yaml
 cryogenics:
   level_vi: level_meter          # must name a registered vi_type: level VI
-  helium_warning_pct: 35.0       # advisory "please fill" threshold (> safety threshold)
+  helium_warning_pct: 35.0       # advisory; must exceed the VI's helium_low_threshold
   fill_target_pct: 90.0
   fill_zero_field_eps_T: 0.005
   fill_zero_field_window_s: 10.0
   fill_complete_window_s: 120.0
   max_fill_duration_s: 3600.0
-  sample_period_s: 10.0          # fill-time sampling (FAST mode)
-  history_sample_s: 300.0        # logbook helium-history decimation
+  sample_period_s: 10.0
+  history_sample_s: 300.0
   helium_volume_l: 40.0          # optional; enables L/h display
+
+operations:
+  sample_change:
+    vti_vi: temperature_vti
+    target_temperature_K: 300.0
+    temperature_tolerance_K: 2.0
+    temperature_window_s: 60.0
+    zero_field_eps_T: 0.005
+    zero_field_window_s: 10.0
+    needle_valve: manual          # "manual" -> operator confirmation; or a VI capability ref
+    postcondition_timeout_s: 7200.0
 ```
 
-The safety threshold stays where it is (`helium_low_threshold` in the level
-VI's `init_params`) — it is an instrument-protection property; the block
-above is operational policy. Conformance additions: if the block is present,
-`level_vi` must resolve to a registered level VI, thresholds must be
-ordered (`helium_warning_pct > helium_low_threshold`), and all durations
-positive. Absent block → feature off, nothing to validate.
+The `helium_low_threshold` stays in the level VI's `init_params` — it is an
+instrument-protection property; the blocks above are operational policy.
+Conformance: referenced VIs exist and have the right types, thresholds
+ordered, durations positive, `needle_valve` is `"manual"` or resolves to an
+operation-scope control.
 
-## 6. Safety layer: what actually needs improving
+## 10. GUI
 
-The zero-field interlock needs **nothing new** — plan targets + gate +
-single-writer blocking already guarantee it. Two real changes:
+- **Cryogenics panel** (`gui/cryogenics_panel.py`): a third page in the
+  bottom-right stacked quadrant, built only when `cryogenics:` is present
+  and the level VI exists. Current levels + consumption (%/h, L/h),
+  level-vs-time plot (1 h/6 h/24 h) from the persistent history with fill
+  events overlaid, recent-fill list, and **Fill helium** →
+  `run_operation()`, toggling to **Stop filling** → `finish_operation()`.
+- **Operations affordances**: a "Prepare for sample change" action
+  (placement: the session-info quadrant or a small operations strip —
+  decide at GUI phase), a progress/status line naming the active gate, and
+  the operator-confirmation checkbox flow for human-verified
+  postconditions. Verdicts arrive through the existing
+  `action_*`/`run_*`/`status_message` surface; no new signal channels.
+- Per the GUI standard: theme tokens, no blocking calls, qtbot geometry
+  tests, offscreen screenshot verification.
 
-1. **Tolerated safety flags (small Orchestrator + BaseProcedure change).**
-   `BaseProcedure.tolerated_safety_flags: frozenset[str] = frozenset()`;
-   the fill declares `frozenset({"helium_low"})` — justified because its
-   plan forces every magnet to zero and arms no measurement, so low helium
-   is not a hazard *for this procedure*; it is its reason to exist. The tick
-   subtracts the running procedure's tolerated flags before deciding on
-   EMERGENCY; a *non*-tolerated flag (e.g. `quench`) still kills a fill
-   instantly. Conformance: any procedure declaring tolerated flags must be
-   `run_kind == "service"`, and a behavior test proves a fill survives
-   `helium_low` while a quench still aborts it.
+## 11. Phasing (bottom-up, each phase lands green)
 
-2. **Starting a remediation from EMERGENCY.** `run_procedure()` gains one
-   carve-out: allowed from EMERGENCY iff every currently-active safety flag
-   is tolerated by the submitted procedure (emergency entry already ran
-   `standby_all`, so magnets are at zero or heading there). On finish, if
-   flags have cleared → IDLE, else back to EMERGENCY. This closes the
-   deadlock in §1 with the narrowest possible door: only a procedure that
-   explicitly tolerates *exactly* the active condition may run.
+1. **Logbook foundation (L6):** `LogbookEvent`, `LogbookStore`,
+   `HeliumHistoryStore`, consumption function, `CryogenicsRecorder`
+   against a mocked Orchestrator; GLOSSARY terms.
+2. **Operation substrate (L3/L4 + scope):** `OperationBase`,
+   `run_operation()` with priority + EMERGENCY carve-out + tolerated
+   flags, postcondition phase, `finish_operation()`; `@control` scope +
+   dispatch enforcement; conformance + behavior tests (helium_low vs
+   quench matrix, scope rejection).
+3. **Helium fill (first operation):** `Station.magnet_vi_names()`, the
+   operation against `sim_cryostat`, `cryogenics:` config block +
+   validation.
+4. **Sample change (second operation):** config block, operator-confirm
+   postconditions; ITC needle-valve capability only where hardware
+   supports it (driver + sim twin + VI method, operation-scope).
+5. **GUI:** cryogenics panel + operations affordances, config-gated
+   composition, geometry tests + screenshots.
 
-Deliberately **not** a safety mechanism: the `helium_warning_pct` advisory.
-It is surfaced by the recorder/panel (banner + logbook event), never by
-`evaluate_safety()` — warnings that trip EMERGENCY teach operators to
-ignore EMERGENCY.
-
-## 7. GUI (`gui/cryogenics_panel.py`)
-
-A third page in the bottom-right stacked quadrant (selector gains
-"Cryogenics" beside "Other devices"/"Log"), built by `MonitorWindow` only
-when the feature is on — same conditional-composition pattern as the
-existing vi_type partitioning. Contents:
-
-- Current He/N₂ levels + consumption rate (%/h, L/h when volume known),
-  computed by the shared function in §3.2 from the persistent history.
-- A pyqtgraph level-vs-time plot (reusing the `TrendPlotPanel`/
-  `MonitorHistory` idioms; window selector 1 h/6 h/24 h) with fill events
-  from the logbook overlaid as markers.
-- **Fill helium** button → constructs `HeliumFillProcedure` from the config
-  block and calls `orchestrator.run_procedure()`; while it runs the button
-  becomes **Stop filling** → `orchestrator.finish_procedure()`. Verdicts
-  arrive through the existing `action_*`/`run_*` signal surface; no new
-  channels.
-- Recent fill history: last few `helium_fill` events (start/end, levels,
-  duration, status).
-
-Per the GUI standard: theme tokens, no blocking calls, qtbot geometry test,
-offscreen screenshot verification.
-
-## 8. Phasing (bottom-up, each phase lands green)
-
-1. **Logbook foundation (L6):** `LogbookEvent` model, `LogbookStore`,
-   `HeliumHistoryStore`, consumption function, `CryogenicsRecorder` against
-   a mocked Orchestrator; GLOSSARY terms; conformance inherits the models.
-2. **Station + procedure (L2/L4):** `magnet_vi_names()`,
-   `HeliumFillProcedure` against `sim_cryostat` (zero-field gate, FAST/SLOW
-   round-trip, HDF5 fill curve, timeout/target termination); cryogenics
-   config block + conformance checks.
-3. **Safety extension (L3):** `tolerated_safety_flags`,
-   EMERGENCY-start carve-out, `finish_procedure()`; behavior tests for the
-   helium_low-during-fill and quench-during-fill matrix.
-4. **GUI (top):** the panel, config-gated composition in `MonitorWindow`,
-   fill-event overlay, geometry tests + screenshots.
-
-Each phase is independently useful (a logbook without a fill button is
-already a logbook; a fill procedure is already runnable from the procedure
-window filtered list before the panel exists).
+Each phase is independently useful; nothing above a phase blocks shipping
+it.
