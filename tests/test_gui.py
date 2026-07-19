@@ -1307,15 +1307,19 @@ def test_monitor_instrument_panels_exist_for_system_vis(monitor_win, station):
 
 
 def test_monitor_fixed_quadrants_exist_with_expected_content(monitor_win):
-    """Sample Info and the Other Devices/Log stack contain the expected widgets."""
+    """Sample Info and the Other Devices stack contain the expected widgets.
+
+    The Log view moved to page 2 (ServicingLogPage) in Phase 5; with no
+    cryogenics config wired, the bottom-right stack holds only Other Devices.
+    """
     sample_quadrant = monitor_win.findChild(QScrollArea, "session_info_scroll")
     assert sample_quadrant is not None
     assert sample_quadrant.widget().findChild(QLineEdit, "sample_name_input") is not None
 
     stack = monitor_win.findChild(QStackedWidget, "devices_log_stack")
     assert stack is not None
-    assert stack.count() == 2
-    assert stack.widget(1) is monitor_win._log_panel
+    assert stack.count() == 1
+    assert monitor_win._log_panel is monitor_win._servicing_log_page.findChild(QTextEdit, "log_panel")
 
 
 def test_monitor_default_trend_panels_exist_and_gridded(monitor_win):
@@ -1380,13 +1384,18 @@ def test_monitor_trend_remove_button_drops_panel_never_below_one(monitor_win):
     assert monitor_win._trends._add_trend_btn.isEnabled()
 
 
-def test_monitor_other_devices_log_selector_switches_stack(monitor_win):
-    """Changing the View selector switches the bottom-right stacked widget's page."""
-    assert monitor_win._devices_log_stack.currentIndex() == 0
-    monitor_win._devices_log_selector.setCurrentIndex(1)
-    assert monitor_win._devices_log_stack.currentIndex() == 1
-    monitor_win._devices_log_selector.setCurrentIndex(0)
-    assert monitor_win._devices_log_stack.currentIndex() == 0
+def test_monitor_page_switcher_swaps_pages(monitor_win):
+    """The header page tab bar switches the central QStackedWidget's page."""
+    assert monitor_win._page_stack.currentIndex() == 0
+    assert monitor_win._page_stack.currentWidget() is monitor_win._main_splitter
+
+    monitor_win._page_tab_bar.setCurrentIndex(1)
+    assert monitor_win._page_stack.currentIndex() == 1
+    assert monitor_win._page_stack.currentWidget() is monitor_win._servicing_log_page
+
+    monitor_win._page_tab_bar.setCurrentIndex(0)
+    assert monitor_win._page_stack.currentIndex() == 0
+    assert monitor_win._page_stack.currentWidget() is monitor_win._main_splitter
 
 
 def test_monitor_other_devices_lists_switch_vi_with_display_label(monitor_win, station):

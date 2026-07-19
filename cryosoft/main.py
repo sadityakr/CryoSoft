@@ -27,7 +27,10 @@
 #   sibling to the experiment store, constructs a CryogenicsRecorder, and
 #   connects it to the Orchestrator's states_updated/run_started/run_finished
 #   signals. Opens the Monitor (passing the catalog, session manager, a
-#   restart callback, and any fallback warning), and enters the Qt event loop.
+#   restart callback, any fallback warning, and — when cryogenics is active —
+#   the same store instances, config, and recorder, so the Monitor window's
+#   Cryogenics panel and Logs page share the recorder's data), and enters the
+#   Qt event loop.
 # output: |
 #   The running CryoSoft desktop application. Exits when all windows are closed.
 # ---
@@ -47,7 +50,11 @@ from PyQt6.QtWidgets import QApplication
 from cryosoft.core.config_catalog import ConfigCatalog
 from cryosoft.core.logging_config import setup_logging
 from cryosoft.core.orchestrator import Orchestrator
-from cryosoft.core.station import build_station_with_fallback, read_cryogenics_config
+from cryosoft.core.station import (
+    build_station_with_fallback,
+    read_cryogenics_config,
+    read_servicing_logs_config,
+)
 from cryosoft.gui import app_settings, form_autosave
 from cryosoft.gui.monitor_window import MonitorWindow
 from cryosoft.gui.theme import PLOT_AXIS, PLOT_BG, build_stylesheet
@@ -147,25 +154,31 @@ def main() -> None:
         config_path=used_path,
     )
 
-    # Cryogenics management (Phase 3, docs/plans/cryogenics-logbook.md §9):
+    # Cryogenics management (Phase 3/5, docs/plans/cryogenics-logbook.md §9/§10):
     # config-gated like every optional feature — a setup without a
     # cryogenics: block (or without the level VI it names) carries zero
     # footprint and this whole block is a no-op. Stores are rooted in a
     # "servicing" directory sibling to the experiment store (both live under
     # the same data directory, so a servicing record archives alongside the
-    # data it describes). No GUI consumption yet (Phase 5 adds the panel and
-    # the low-helium banner) — this only keeps the hourly helium record and
-    # the cryogenics/operations logs current in the background.
+    # data it describes). The same store instances feed both the automatic
+    # recorder and the Monitor window's Cryogenics panel / Logs page, so both
+    # always see the same data.
     cryogenics_config = read_cryogenics_config(used_path)
     cryogenics_recorder: CryogenicsRecorder | None = None
+    helium_store: HeliumRecordStore | None = None
+    servicing_store: ServicingLogStore | None = None
+    servicing_log_kinds: list[str] = []
     if cryogenics_config and station.has_vi(cryogenics_config["level_vi"]):
         servicing_root = Path(autosave.data_dir) / "servicing"
         config_identity = (
             used_entry.name if used_entry is not None else Path(used_path).name
         )
+        helium_store = HeliumRecordStore(servicing_root, config_identity)
+        servicing_store = ServicingLogStore(servicing_root, config_identity)
+        servicing_log_kinds = read_servicing_logs_config(used_path)
         cryogenics_recorder = CryogenicsRecorder(
-            HeliumRecordStore(servicing_root, config_identity),
-            ServicingLogStore(servicing_root, config_identity),
+            helium_store,
+            servicing_store,
             level_vi_name=cryogenics_config["level_vi"],
             warning_pct=float(cryogenics_config["helium_warning_pct"]),
             history_sample_s=float(cryogenics_config["history_sample_s"]),
@@ -187,6 +200,11 @@ def main() -> None:
         restart_callback=_restart_application,
         startup_warning="; ".join(warnings) if warnings else None,
         session_manager=session_manager,
+        cryogenics_config=cryogenics_config or None,
+        helium_store=helium_store,
+        servicing_store=servicing_store,
+        servicing_log_kinds=servicing_log_kinds,
+        cryogenics_recorder=cryogenics_recorder,
     )
     monitor.show()
 
