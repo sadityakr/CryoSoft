@@ -1,26 +1,33 @@
 # ---
 # description: |
-#   Behavior tests for cryosoft.gui.cryogenics_panel (Phase 5,
-#   docs/plans/cryogenics-logbook.md §10): panel presence gated on config,
-#   live level readouts from a synthetic states_updated snapshot, on-screen
-#   geometry when selected in MonitorWindow's bottom-right quadrant, and the
-#   Fill helium / Stop filling control against a mock Orchestrator.
+#   Behavior tests for cryosoft.gui.operations_panel (Phase 6,
+#   docs/plans/cryogenics-logbook.md §12): panel presence gated on
+#   cryogenics/operations config, live cryogenics-status readouts from a
+#   synthetic states_updated snapshot, on-screen geometry when selected in
+#   MonitorWindow's bottom-right quadrant, generic OperationCard
+#   construction (helium fill + sample change), the readiness checklist
+#   flipping on a snapshot change, the start/finish button toggling on
+#   run_started/run_finished, the operator-confirmation checkbox calling
+#   confirm_operation(), the ready banner appearing only once a run is done
+#   and every condition holds, and a cryogenics-less/operations-only panel
+#   building only the sample-change card.
 # last_updated: 2026-07-19
 # ---
 
-"""Behavior tests for CryogenicsPanel."""
+"""Behavior tests for OperationsPanel / OperationCard / OperatorDialog."""
 
 from unittest.mock import MagicMock
 
 import pytest
-from PyQt6.QtWidgets import QDialog, QLabel, QPushButton, QScrollArea
+from PyQt6.QtWidgets import QDialog, QLabel, QScrollArea
 
 from cryosoft.core.orchestrator import Orchestrator
-from cryosoft.core.station import build_station, read_cryogenics_config
-from cryosoft.gui import cryogenics_panel as cryogenics_panel_module
-from cryosoft.gui.cryogenics_panel import CryogenicsPanel
+from cryosoft.core.station import build_station, read_cryogenics_config, read_operations_config
+from cryosoft.gui import operations_panel as operations_panel_module
 from cryosoft.gui.monitor_window import MonitorWindow
+from cryosoft.gui.operations_panel import OperationCard, OperationsPanel
 from cryosoft.procedures.operations.helium_fill import HeliumFillOperation
+from cryosoft.procedures.operations.sample_change import SampleChangeOperation
 from cryosoft.session.servicing_log import HeliumRecordStore, ServicingLogStore
 
 CONFIG_PATH = "cryosoft/configs/sim_cryostat"
@@ -44,6 +51,11 @@ def orchestrator(station, qtbot):
 @pytest.fixture
 def cryogenics_config():
     return read_cryogenics_config(CONFIG_PATH)
+
+
+@pytest.fixture
+def operations_config():
+    return read_operations_config(CONFIG_PATH)
 
 
 @pytest.fixture
@@ -76,25 +88,28 @@ def _fully_inside(viewport, widget) -> bool:
 # ── Config-gated presence ─────────────────────────────────────────────────────
 
 
-def test_cryogenics_panel_absent_without_config(station, orchestrator, qtbot):
-    """No cryogenics kwargs -> no panel, no "Cryogenics" selector entry."""
+def test_operations_panel_absent_without_any_config(station, orchestrator, qtbot):
+    """No cryogenics/operations kwargs -> no panel, no "Operations" selector entry."""
     win = MonitorWindow(station, orchestrator)
     qtbot.addWidget(win)
     win.show()
 
-    assert win._cryogenics_enabled is False
-    assert win._cryogenics_panel is None
+    assert win._operations_panel_enabled is False
+    assert win._operations_panel is None
     items = [win._devices_log_selector.itemText(i) for i in range(win._devices_log_selector.count())]
     assert items == ["Other Devices"]
 
 
-def test_cryogenics_panel_present_with_config(station, orchestrator, cryogenics_config, stores, qtbot):
+def test_operations_panel_present_with_cryogenics_config(
+    station, orchestrator, cryogenics_config, operations_config, stores, qtbot
+):
     """A wired cryogenics config + stores + level VI builds the panel and selector entry."""
     helium_store, servicing_store = stores
     win = MonitorWindow(
         station,
         orchestrator,
         cryogenics_config=cryogenics_config,
+        operations_config=operations_config,
         helium_store=helium_store,
         servicing_store=servicing_store,
         servicing_log_kinds=["cryogenics"],
@@ -103,20 +118,47 @@ def test_cryogenics_panel_present_with_config(station, orchestrator, cryogenics_
     win.show()
 
     assert win._cryogenics_enabled is True
-    assert win._cryogenics_panel is not None
+    assert win._operations_panel_enabled is True
+    assert win._operations_panel is not None
     items = [win._devices_log_selector.itemText(i) for i in range(win._devices_log_selector.count())]
-    assert items == ["Other Devices", "Cryogenics"]
+    assert items == ["Other Devices", "Operations"]
 
 
-def test_cryogenics_panel_geometry_fully_visible_when_selected(
-    station, orchestrator, cryogenics_config, stores, qtbot
+def test_operations_panel_without_cryogenics_but_with_operations_builds_sample_change_only(
+    station, orchestrator, operations_config, qtbot
 ):
-    """Selecting Cryogenics shows the panel fully inside its scroll viewport."""
+    """No cryogenics block, but an operations: block -> panel with only the sample-change card."""
+    win = MonitorWindow(
+        station,
+        orchestrator,
+        operations_config=operations_config,
+    )
+    qtbot.addWidget(win)
+    win.show()
+
+    assert win._cryogenics_enabled is False
+    assert win._operations_panel_enabled is True
+    assert win._operations_panel is not None
+    items = [win._devices_log_selector.itemText(i) for i in range(win._devices_log_selector.count())]
+    assert items == ["Other Devices", "Operations"]
+
+    cards = win._operations_panel._cards
+    assert len(cards) == 1
+    assert cards[0]._display_instance.name == SampleChangeOperation.name
+    # No cryogenics status section built.
+    assert win._operations_panel.findChild(QLabel, "cryo_helium_level_label") is None
+
+
+def test_operations_panel_geometry_fully_visible_when_selected(
+    station, orchestrator, cryogenics_config, operations_config, stores, qtbot
+):
+    """Selecting Operations shows the panel fully inside its scroll viewport."""
     helium_store, servicing_store = stores
     win = MonitorWindow(
         station,
         orchestrator,
         cryogenics_config=cryogenics_config,
+        operations_config=operations_config,
         helium_store=helium_store,
         servicing_store=servicing_store,
         servicing_log_kinds=["cryogenics"],
@@ -129,30 +171,31 @@ def test_cryogenics_panel_geometry_fully_visible_when_selected(
     win._devices_log_selector.setCurrentIndex(1)
     assert win._devices_log_stack.currentIndex() == 1
 
-    scroll = win.findChild(QScrollArea, "cryogenics_scroll")
+    scroll = win.findChild(QScrollArea, "operations_scroll")
     assert scroll is not None
     viewport = scroll.viewport()
     assert scroll.horizontalScrollBar().maximum() == 0
 
-    helium_label = win._cryogenics_panel.findChild(QLabel, "cryo_helium_level_label")
-    fill_btn = win._cryogenics_panel.findChild(QPushButton, "cryo_fill_btn")
-    assert helium_label is not None and fill_btn is not None
+    helium_label = win._operations_panel.findChild(QLabel, "cryo_helium_level_label")
+    fill_card = win.findChild(OperationCard, "operation_card_helium_fill")
+    assert helium_label is not None and fill_card is not None
     assert _fully_inside(viewport, helium_label)
-    assert _fully_inside(viewport, fill_btn)
+    assert _fully_inside(viewport, fill_card)
 
 
-# ── Live level readouts ────────────────────────────────────────────────────────
+# ── Live level readouts (cryogenics status section) ────────────────────────────
 
 
-def test_cryogenics_panel_shows_levels_from_synthetic_states_updated(
+def test_operations_panel_shows_levels_from_synthetic_states_updated(
     station, orchestrator, cryogenics_config, stores, qtbot
 ):
     """on_states_updated() with a synthetic snapshot updates the He/N2 readouts."""
     helium_store, servicing_store = stores
-    panel = CryogenicsPanel(
+    panel = OperationsPanel(
         station,
         orchestrator,
         cryogenics_config,
+        {},
         helium_store,
         servicing_store,
         get_data_dir=lambda: "/tmp",
@@ -166,13 +209,91 @@ def test_cryogenics_panel_shows_levels_from_synthetic_states_updated(
     assert "44.0" in panel._nitrogen_label.text()
 
 
-# ── Fill helium / Stop filling against a mock Orchestrator ────────────────────
+# ── Generic card construction ──────────────────────────────────────────────────
 
 
-class _FakeFillDialog:
-    """Stand-in for FillOperatorDialog that auto-accepts a fixed operator name."""
+def test_cards_built_for_fill_and_sample_change_on_sim_cryostat(
+    station, orchestrator, cryogenics_config, operations_config, stores, qtbot
+):
+    """sim_cryostat's config builds one card per configured operation."""
+    helium_store, servicing_store = stores
+    panel = OperationsPanel(
+        station,
+        orchestrator,
+        cryogenics_config,
+        operations_config,
+        helium_store,
+        servicing_store,
+        get_data_dir=lambda: "/tmp",
+    )
+    qtbot.addWidget(panel)
 
-    def __init__(self, prefill: str = "", parent=None) -> None:
+    names = [card._display_instance.name for card in panel._cards]
+    assert names == [HeliumFillOperation.name, SampleChangeOperation.name]
+    assert panel.findChild(OperationCard, "operation_card_helium_fill") is not None
+    assert panel.findChild(OperationCard, "operation_card_sample_change") is not None
+
+
+def test_unknown_operations_config_key_is_skipped_with_warning(
+    station, orchestrator, stores, qtbot, caplog
+):
+    """An operations: key with no matching discovered config_key is skipped, not fatal."""
+    helium_store, servicing_store = stores
+    with caplog.at_level("WARNING"):
+        panel = OperationsPanel(
+            station,
+            orchestrator,
+            None,
+            {"not_a_real_operation": {}},
+            helium_store,
+            servicing_store,
+            get_data_dir=lambda: "/tmp",
+        )
+    qtbot.addWidget(panel)
+    assert panel._cards == []
+    assert any("not_a_real_operation" in record.message for record in caplog.records)
+
+
+# ── Readiness checklist ─────────────────────────────────────────────────────────
+
+
+def test_checklist_flips_on_snapshot_change(
+    station, orchestrator, cryogenics_config, stores, qtbot
+):
+    """The zero_field checklist row flips its icon/detail as the state snapshot changes."""
+    helium_store, servicing_store = stores
+    panel = OperationsPanel(
+        station,
+        orchestrator,
+        cryogenics_config,
+        {},
+        helium_store,
+        servicing_store,
+        get_data_dir=lambda: "/tmp",
+    )
+    qtbot.addWidget(panel)
+    card = panel._cards[0]
+    icon_label, detail_label = card._condition_rows["zero_field"]
+
+    zero_state = {"magnet_x": {"get_field": 0.0}, "magnet_y": {"get_field": 0.0}}
+    ctx = {"state": zero_state, "now_unix": 0.0, "consumption_rate_pct_per_h": None}
+    card.on_states_updated(zero_state, ctx)
+    assert not icon_label.pixmap().isNull()
+    assert "0.00" in detail_label.text()
+
+    nonzero_state = {"magnet_x": {"get_field": 1.5}, "magnet_y": {"get_field": 0.0}}
+    ctx = {"state": nonzero_state, "now_unix": 0.0, "consumption_rate_pct_per_h": None}
+    card.on_states_updated(nonzero_state, ctx)
+    assert "magnet_x at 1.50 T" == detail_label.text()
+
+
+# ── Start / finish button ────────────────────────────────────────────────────
+
+
+class _FakeOperatorDialog:
+    """Stand-in for OperatorDialog that auto-accepts a fixed operator name."""
+
+    def __init__(self, title: str = "", message: str = "", prefill: str = "", parent=None) -> None:
         self._name = prefill or "Test Operator"
 
     def exec(self):
@@ -182,79 +303,201 @@ class _FakeFillDialog:
         return self._name
 
 
-def test_fill_button_submits_run_operation_with_person(
+def test_action_button_submits_run_operation_with_person(
     station, cryogenics_config, stores, qtbot, monkeypatch, tmp_path
 ):
-    """Clicking Fill helium constructs a HeliumFillOperation and calls run_operation."""
+    """Clicking the action button constructs a fresh HeliumFillOperation and calls run_operation."""
     helium_store, servicing_store = stores
     mock_orch = MagicMock(spec=Orchestrator)
 
-    monkeypatch.setattr(cryogenics_panel_module, "FillOperatorDialog", _FakeFillDialog)
+    monkeypatch.setattr(operations_panel_module, "OperatorDialog", _FakeOperatorDialog)
 
-    panel = CryogenicsPanel(
+    panel = OperationsPanel(
         station,
         mock_orch,
         cryogenics_config,
+        {},
         helium_store,
         servicing_store,
         get_data_dir=lambda: str(tmp_path),
         get_current_person=lambda: "J. Doe",
     )
     qtbot.addWidget(panel)
+    card = panel._cards[0]
 
-    panel._fill_btn.click()
+    card._action_btn.click()
 
     mock_orch.run_operation.assert_called_once()
     submitted = mock_orch.run_operation.call_args[0][0]
     assert isinstance(submitted, HeliumFillOperation)
     assert submitted.get_params()["person"] == "J. Doe"
+    # The display instance (used for readiness/next-due) is never the one submitted.
+    assert submitted is not card._display_instance
 
 
-def test_stop_filling_calls_finish_operation(station, cryogenics_config, stores, qtbot, tmp_path):
-    """Once a fill is tracked as running, the button becomes Stop filling and calls finish_operation."""
+def test_button_toggles_on_run_started_and_finished(
+    station, cryogenics_config, stores, qtbot, tmp_path
+):
+    """Once tracked as running, the button becomes Finish <name> and calls finish_operation()."""
     helium_store, servicing_store = stores
     mock_orch = MagicMock(spec=Orchestrator)
 
-    panel = CryogenicsPanel(
+    panel = OperationsPanel(
         station,
         mock_orch,
         cryogenics_config,
+        {},
         helium_store,
         servicing_store,
         get_data_dir=lambda: str(tmp_path),
     )
     qtbot.addWidget(panel)
+    card = panel._cards[0]
 
-    assert panel._fill_btn.text() == "Fill helium"
+    assert card._action_btn.text() == "Helium Fill…"
 
     # Simulate the run_started manifest directly — a MagicMock's .connect()
-    # does not deliver a real Qt signal, matching how CryogenicsPanel
-    # connects run_started/run_finished directly (not through the window).
-    panel._on_run_started({"procedure": HeliumFillOperation.name})
-    assert panel._fill_btn.text() == "Stop filling"
+    # does not deliver a real Qt signal, matching how OperationCard connects
+    # run_started/run_finished directly (not through the window).
+    card._on_run_started({"procedure": HeliumFillOperation.name})
+    assert card._action_btn.text() == "Finish Helium Fill"
 
-    panel._fill_btn.click()
+    card._action_btn.click()
     mock_orch.finish_operation.assert_called_once()
 
-    panel._on_run_finished({"procedure": HeliumFillOperation.name})
-    assert panel._fill_btn.text() == "Fill helium"
+    card._on_run_finished({"procedure": HeliumFillOperation.name, "status": "done"})
+    assert card._action_btn.text() == "Helium Fill…"
 
 
 def test_run_started_for_other_procedure_does_not_toggle_button(
     station, cryogenics_config, stores, qtbot, tmp_path
 ):
-    """A run_started manifest for an unrelated procedure leaves the button alone."""
+    """A run_started manifest for an unrelated procedure leaves the card's button alone."""
     helium_store, servicing_store = stores
     mock_orch = MagicMock(spec=Orchestrator)
-    panel = CryogenicsPanel(
+    panel = OperationsPanel(
         station,
         mock_orch,
         cryogenics_config,
+        {},
         helium_store,
         servicing_store,
         get_data_dir=lambda: str(tmp_path),
     )
     qtbot.addWidget(panel)
+    card = panel._cards[0]
 
-    panel._on_run_started({"procedure": "Field Sweep"})
-    assert panel._fill_btn.text() == "Fill helium"
+    card._on_run_started({"procedure": "Field Sweep"})
+    assert card._action_btn.text() == "Helium Fill…"
+
+
+# ── Operator confirmations ────────────────────────────────────────────────────
+
+
+def test_confirmation_checkbox_calls_confirm_operation(
+    station, operations_config, qtbot
+):
+    """Checking a declared confirmation checkbox calls confirm_operation(key) and disables itself."""
+    mock_orch = MagicMock(spec=Orchestrator)
+    panel = OperationsPanel(
+        station,
+        mock_orch,
+        None,
+        operations_config,
+        None,
+        None,
+        get_data_dir=lambda: "/tmp",
+    )
+    qtbot.addWidget(panel)
+    card = panel._cards[0]
+    assert card._display_instance.name == SampleChangeOperation.name
+
+    assert card._confirmations_row.isHidden()
+    card._on_run_started({"procedure": SampleChangeOperation.name})
+    assert not card._confirmations_row.isHidden()
+
+    checkbox = card._confirm_checkboxes["needle_valve"]
+    assert checkbox.isEnabled()
+    checkbox.setChecked(True)
+
+    mock_orch.confirm_operation.assert_called_once_with("needle_valve")
+    assert not checkbox.isEnabled()
+
+
+# ── Ready banner ─────────────────────────────────────────────────────────────
+
+
+def test_ready_banner_appears_only_after_done_and_all_green(
+    station, operations_config, qtbot
+):
+    """The ready banner shows only once a run finishes done AND every condition holds."""
+    mock_orch = MagicMock(spec=Orchestrator)
+    panel = OperationsPanel(
+        station,
+        mock_orch,
+        None,
+        operations_config,
+        None,
+        None,
+        get_data_dir=lambda: "/tmp",
+    )
+    qtbot.addWidget(panel)
+    card = panel._cards[0]
+
+    all_green_state = {
+        "magnet_x": {"get_field": 0.0},
+        "magnet_y": {"get_field": 0.0},
+        "temperature_vti": {"temperature": 300.0},
+    }
+    ctx = {"state": all_green_state, "now_unix": 0.0, "consumption_rate_pct_per_h": None}
+
+    # Not done yet -> no banner, even though conditions currently hold.
+    card.on_states_updated(all_green_state, ctx)
+    assert card._ready_banner.isHidden()
+
+    # A run finishes "done", but needle_valve_confirmed has never been
+    # confirmed -> not all-green -> banner stays hidden.
+    card._on_run_finished({"procedure": SampleChangeOperation.name, "status": "done"})
+    card.on_states_updated(all_green_state, ctx)
+    assert card._ready_banner.isHidden()
+
+    card._display_instance.confirm("needle_valve")
+    card.on_states_updated(all_green_state, ctx)
+    assert not card._ready_banner.isHidden()
+    assert card._ready_banner.text() == f"✓ {SampleChangeOperation.ready_message}"
+
+    # A condition stops holding -> banner clears.
+    not_green_state = dict(all_green_state, magnet_x={"get_field": 1.0})
+    ctx = {"state": not_green_state, "now_unix": 0.0, "consumption_rate_pct_per_h": None}
+    card.on_states_updated(not_green_state, ctx)
+    assert card._ready_banner.isHidden()
+
+
+def test_ready_banner_clears_when_new_run_starts(station, operations_config, qtbot):
+    """Starting a new run clears the ready banner even if the last run was done+all-green."""
+    mock_orch = MagicMock(spec=Orchestrator)
+    panel = OperationsPanel(
+        station,
+        mock_orch,
+        None,
+        operations_config,
+        None,
+        None,
+        get_data_dir=lambda: "/tmp",
+    )
+    qtbot.addWidget(panel)
+    card = panel._cards[0]
+    card._display_instance.confirm("needle_valve")
+
+    all_green_state = {
+        "magnet_x": {"get_field": 0.0},
+        "magnet_y": {"get_field": 0.0},
+        "temperature_vti": {"temperature": 300.0},
+    }
+    ctx = {"state": all_green_state, "now_unix": 0.0, "consumption_rate_pct_per_h": None}
+    card._on_run_finished({"procedure": SampleChangeOperation.name, "status": "done"})
+    card.on_states_updated(all_green_state, ctx)
+    assert not card._ready_banner.isHidden()
+
+    card._on_run_started({"procedure": SampleChangeOperation.name})
+    assert card._ready_banner.isHidden()
