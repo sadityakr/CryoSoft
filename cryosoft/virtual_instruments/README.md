@@ -23,7 +23,8 @@ a `drivers` dict of role → driver instance (e.g. `{"main": ...}`,
 - `@monitored` read-only methods, auto-collected by `get_state()` into a flat
   numeric state snapshot each tick.
 - `@control` action methods, validated against `control_limits` before any
-  hardware call (out-of-range raises `CryoSoftSafetyError`).
+  hardware call (out-of-range raises `CryoSoftSafetyError`), and carrying a
+  capability scope (see below).
 - `evaluate_safety()` interlock verdicts reported to `Station.check_safety()`.
 - For rampable VIs, the `start_ramp` / `advance_ramp` / `ramp_status` /
   `stop_ramp` generator API the Orchestrator drives each tick.
@@ -36,6 +37,17 @@ The written standards all live in this root and are enforced by
 - The control-validation standard: bounded `@control` parameters declared in
   `control_limits`, limit values populated from `init_params`, enforced by the
   base class before the hardware call.
+- The capability-scope standard: `@control` (bare, or `@control(scope=...)`)
+  carries a scope — `"measurement"` (default, usable by any plan) or
+  `"operation"` (usable only by an operation's plan; a human in IDLE can still
+  click either from the GUI, this only gates *plan dispatch*). Enforcement
+  lives one layer up, in `Station.send_measurement_commands(commands,
+  allowed_scope=...)` (`cryosoft.core.station`) — this folder only declares
+  the scope. Give a method `scope="operation"` when automated misuse is
+  dangerous (switch-heater on/off, persistent-mode entry/exit, a future
+  needle-valve control); leave it at the default otherwise. Every
+  `reading_setters` target and the measurement lifecycle
+  (`initiate`/`standby`) must stay measurement-scope — conformance-checked.
 - Measurement VIs additionally obey the self-describing measurement-method
   standard (`measurement_parameters` / `measurement_data_keys` /
   `measurement_scalar_columns` plus the `data_arrays` / `initiate` /

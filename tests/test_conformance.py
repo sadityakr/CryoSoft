@@ -48,7 +48,9 @@ import pytest
 import cryosoft.drivers
 import cryosoft.procedures
 import cryosoft.virtual_instruments
+from cryosoft.core.decorators import VALID_CONTROL_SCOPES, get_control_scope
 from cryosoft.core.exceptions import CryoSoftSafetyError
+from cryosoft.core.operation import OperationBase
 from cryosoft.core.plan import ParamSpec
 from cryosoft.core.procedure import BaseProcedure
 from cryosoft.core.station import Station, _import_class, build_station
@@ -121,6 +123,26 @@ def _all_procedure_classes() -> list[type]:
         module = importlib.import_module(f"cryosoft.procedures.{mod_info.name}")
         for cls in _public_classes(module):
             if issubclass(cls, BaseProcedure) and cls is not BaseProcedure:
+                classes.append(cls)
+    return classes
+
+
+def _all_operation_classes() -> list[type]:
+    """Every concrete OperationBase subclass anywhere under cryosoft.procedures.
+
+    Walks the package tree (not just its top level) so a future
+    ``cryosoft.procedures.operations`` subpackage (plan §11 phase 3+) is
+    picked up automatically. No operation ships yet in this phase, so this
+    is expected to return an empty list — the discovery scaffold (and every
+    test parametrized on it) must tolerate that.
+    """
+    classes: list[type] = []
+    for mod_info in pkgutil.walk_packages(
+        cryosoft.procedures.__path__, prefix="cryosoft.procedures."
+    ):
+        module = importlib.import_module(mod_info.name)
+        for cls in _public_classes(module):
+            if issubclass(cls, OperationBase) and cls is not OperationBase:
                 classes.append(cls)
     return classes
 
@@ -525,6 +547,134 @@ def test_declared_finite_limits_reject_out_of_range(config_dir: Path) -> None:
         f"{config_dir.name}: no finite limits were exercised — expected at "
         f"least one limited @control method"
     )
+
+
+# ── Capability-scope standard ─────────────────────────────────────────────────
+# See cryosoft.core.decorators ("@control gains a scope") and GLOSSARY.md's
+# "Capability scope" entry: every @control method carries "measurement"
+# (default, usable by any plan) or "operation" (usable only by an operation's
+# plan; still an ordinary GUI control). These tests make the standard binding
+# for every VI, present and future.
+
+
+def _control_methods(cls: type) -> dict[str, object]:
+    """{method_name: method} for every @control method defined on *cls*."""
+    methods: dict[str, object] = {}
+    for name in dir(cls):
+        try:
+            attr = getattr(cls, name)
+        except AttributeError:
+            continue
+        if callable(attr) and getattr(attr, "_is_control", False):
+            methods[name] = attr
+    return methods
+
+
+@pytest.mark.parametrize("vi_cls", _all_vi_classes(), ids=lambda c: c.__name__)
+def test_control_scope_is_a_valid_value(vi_cls: type) -> None:
+    """Every @control method's capability scope is "measurement" or "operation"."""
+    for method_name, method in _control_methods(vi_cls).items():
+        scope = get_control_scope(method)
+        assert scope in VALID_CONTROL_SCOPES, (
+            f"{vi_cls.__name__}.{method_name} has invalid control scope "
+            f"{scope!r}, must be one of {sorted(VALID_CONTROL_SCOPES)}"
+        )
+
+
+def test_known_operation_scope_controls() -> None:
+    """The persistent-magnet heater/persistent-mode and level-meter refresh
+    controls are operation-scope (plan §5) — the switch-heater/persistent-mode
+    entry-exit methods on the persistent magnet VI, and
+    CryogenLevelMeterVI.set_refresh_rate.
+    """
+    from cryosoft.virtual_instruments.level.cryogen_level_meter import CryogenLevelMeterVI
+    from cryosoft.virtual_instruments.magnet.superconducting_magnet_persistent import (
+        SuperconductingMagnetPersistentVI,
+    )
+
+    assert get_control_scope(CryogenLevelMeterVI.set_refresh_rate) == "operation"
+    for method_name in (
+        "enable_persistent_mode",
+        "disable_persistent_mode",
+        "switch_heater_on",
+        "switch_heater_off",
+    ):
+        method = getattr(SuperconductingMagnetPersistentVI, method_name)
+        assert get_control_scope(method) == "operation", (
+            f"SuperconductingMagnetPersistentVI.{method_name} must be "
+            f"operation-scope"
+        )
+
+
+def test_reading_setters_are_measurement_scope() -> None:
+    """Every reading_setters target method is measurement-scope.
+
+    The reading loop is a procedure-only mechanism (plan §5: "reading-loop
+    setters and the measurement lifecycle are measurement-scope by
+    definition, so no existing procedure changes behavior").
+    """
+    checked = 0
+    for vi_cls in _all_vi_classes():
+        for param_name, setter_name in vi_cls.reading_setters.items():
+            method = getattr(vi_cls, setter_name, None)
+            if method is None:
+                continue
+            scope = get_control_scope(method)
+            assert scope == "measurement", (
+                f"{vi_cls.__name__}.reading_setters[{param_name!r}] setter "
+                f"{setter_name!r} must be measurement-scope, got {scope!r}"
+            )
+            checked += 1
+    assert checked > 0, "expected at least one declared reading_setters entry"
+
+
+@pytest.mark.parametrize(
+    "vi_cls",
+    [cls for cls in _all_vi_classes() if issubclass(cls, MeasurementInstrumentBase)],
+    ids=lambda c: c.__name__,
+)
+def test_measurement_lifecycle_is_measurement_scope(vi_cls: type) -> None:
+    """A measurement VI's initiate()/standby() lifecycle is measurement-scope.
+
+    Some concrete VIs keep @control on initiate() so the GUI can arm it
+    manually (MeasurementInstrumentBase docstring); that @control must never
+    carry operation scope. standby() is typically undecorated, which
+    defaults to measurement-scope — checked here too for completeness.
+    """
+    for method_name in ("initiate", "standby"):
+        method = getattr(vi_cls, method_name)
+        scope = get_control_scope(method)
+        assert scope == "measurement", (
+            f"{vi_cls.__name__}.{method_name} must be measurement-scope, "
+            f"got {scope!r}"
+        )
+
+
+# ── Operation contract (L4, cryosoft.core.operation.OperationBase) ───────────
+# See OperationBase's docstring and plan §4.1. No operation ships in this
+# phase (§11 phase 2) — the discovery scaffold below must tolerate an empty
+# parametrize set, which pytest handles by simply collecting zero test cases.
+
+
+@pytest.mark.parametrize("op_cls", _all_operation_classes(), ids=lambda c: c.__name__)
+def test_operation_declaration(op_cls: type) -> None:
+    """Every OperationBase subclass names itself and declares valid tolerated flags."""
+    assert op_cls.name, f"{op_cls.__name__} must set the 'name' class attribute"
+    tolerated = op_cls.tolerated_safety_flags
+    assert isinstance(tolerated, frozenset), (
+        f"{op_cls.__name__}.tolerated_safety_flags must be a frozenset, "
+        f"got {tolerated!r}"
+    )
+    assert all(isinstance(flag, str) for flag in tolerated), (
+        f"{op_cls.__name__}.tolerated_safety_flags must contain only str "
+        f"flags, got {tolerated!r}"
+    )
+
+
+@pytest.mark.parametrize("op_cls", _all_operation_classes(), ids=lambda c: c.__name__)
+def test_operation_constructs_from_defaults(op_cls: type) -> None:
+    """Every OperationBase subclass must construct with zero explicit arguments."""
+    op_cls()
 
 
 # ── Measurement-method standard ───────────────────────────────────────────────

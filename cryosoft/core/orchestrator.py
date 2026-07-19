@@ -1,8 +1,15 @@
 # ---
 # description: |
 #   Orchestrator class: cooperative state machine driven by a single QTimer.
-#   Manages procedure lifecycle, runs the monitor cycle, routes GUI actions,
-#   and handles safety/emergency states. Single-threaded via PyQt6.
+#   Manages procedure AND operation lifecycle, runs the monitor cycle, routes
+#   GUI actions, and handles safety/emergency states. Single-threaded via
+#   PyQt6. An operation (cryosoft.core.operation.OperationBase — detected by
+#   duck-typing via command_scope == "operation", never imported here, to
+#   keep import-linter contract C5 clean) is a second request type driven by
+#   the SAME state machine: run_operation()/queue_operation() give it
+#   queue-jumping priority and a narrow EMERGENCY carve-out
+#   (docs/plans/cryogenics-logbook.md §4.2), and its plans may carry
+#   operation-scope @control commands a procedure's may not (§5).
 # entry_point: Not run directly. Instantiated dynamically.
 # dependencies:
 #   - PyQt6.QtCore (QObject, QTimer, pyqtSignal)
@@ -13,27 +20,36 @@
 #   OFF: the tick timer runs from construction (it processes GUI actions and
 #   the state machine), but no instrument is polled until start_monitoring()
 #   — so a freshly launched app does not fire errors while instruments are
-#   still being initiated. run_procedure() auto-starts monitoring (the
-#   safety watchdog is mandatory during a run); stop_monitoring() is refused
-#   outside IDLE/ERROR; shutdown() stops the tick timer for good.
+#   still being initiated. run_procedure()/run_operation() auto-start
+#   monitoring (the safety watchdog is mandatory during a run);
+#   stop_monitoring() is refused outside IDLE/ERROR; shutdown() stops the
+#   tick timer for good.
 # process: |
 #   On _tick() (inside an exception boundary that degrades to ERROR instead
 #   of crashing the app): while monitoring is active, gets state from
-#   station, evaluates safety flags on that same snapshot (any tripped flag
-#   -> one-shot EMERGENCY entry: abort procedure, stop ramps, standby_all
-#   once) and checks for stale active system VIs; then (monitoring or not)
-#   processes IDLE gui actions and runs the state machine. STANDBY is a
-#   two-phase wait: first for any ramp already in flight when SWEEPING ended,
-#   then (after dispatching procedure.standby()'s own targets) for whatever
-#   ramp standby() itself started, before declaring the procedure finished.
-#   abort/pause/ERROR hold hardware via Station.stop_ramps(); resume
-#   re-dispatches the last targets. acknowledge_emergency() is refused while
-#   the safety condition persists; recover_from_error() exits ERROR.
+#   station, evaluates safety flags on that same snapshot — subtracting the
+#   active operation's tolerated_safety_flags first, if one is running — (any
+#   remaining tripped flag -> one-shot EMERGENCY entry: abort procedure, stop
+#   ramps, standby_all once) and checks for stale active system VIs; then
+#   (monitoring or not) processes IDLE gui actions and runs the state
+#   machine. STANDBY is a three-phase wait: first for any ramp already in
+#   flight when SWEEPING ended, then (after dispatching procedure.standby()'s
+#   own targets) for whatever ramp standby() itself started, then — a
+#   duck-typed postcondition_gates() phase, inert for a plain procedure —
+#   stepping the active procedure's declared postcondition gates (a timeout
+#   degrades to ERROR naming the unmet gate) before declaring the run
+#   finished. abort/pause/ERROR hold hardware via Station.stop_ramps();
+#   resume re-dispatches the last targets. acknowledge_emergency() is refused
+#   while the safety condition persists (its own check, NOT tolerance-aware —
+#   unchanged); recover_from_error() exits ERROR. A finishing operation
+#   returns to EMERGENCY instead of IDLE when it was started via the
+#   carve-out or a safety flag is still tripped.
 # output: |
 #   Emits signals: states_updated, state_changed, procedure_progress,
 #   procedure_finished, run_started/run_finished (run manifests: id, procedure,
 #   kind, params, data file path, timestamps, terminal status — consumed by the
-#   session layer), error_occurred, action_blocked, action_succeeded,
+#   session layer; kind is "operation" for an operation via its run_kind class
+#   attribute), error_occurred, action_blocked, action_succeeded,
 #   action_failed (vi, method, reason — the uniform per-action verdict),
 #   status_message (concise human-readable procedure milestones for the
 #   Procedure window's status log; also written to the cryosoft.procedure_status
@@ -104,11 +120,13 @@ class Orchestrator(QObject):
         procedure_progress (float): 0.0 to 1.0 progress of current procedure.
         procedure_finished (): Emitted when a procedure ends cleanly.
         run_started (dict): Run manifest emitted once per run, after a
-            procedure's ``initiate()`` succeeded and its plan was dispatched.
-            Keys: ``run_id``, ``procedure`` (display name), ``kind``
-            ("run"; probe runs will carry "probe"), ``params`` (merged
-            parameter values), ``data_file`` (HDF5 path, captured here because
-            the procedure closes its file before the run ends), and
+            procedure's/operation's ``initiate()`` succeeded and its plan was
+            dispatched. Keys: ``run_id``, ``procedure`` (display name),
+            ``kind`` ("run" for a procedure, "probe" for a probe run, and
+            "operation" for an operation — its ``run_kind`` class attribute),
+            ``params`` (merged parameter values), ``data_file`` (HDF5 path,
+            captured here because the procedure closes its file before the
+            run ends; empty for a dataset-less operation), and
             ``started_utc`` (ISO 8601). The session layer records runs from
             this signal; a run whose setup fails emits no manifest at all.
         run_finished (dict): The same manifest re-emitted exactly once when the
@@ -159,6 +177,11 @@ class Orchestrator(QObject):
         self._state = OrchestratorState.IDLE
         self._procedure: Any = None
         self._procedure_queue: list[Any] = []
+        # Operations (L4, duck-typed via command_scope == "operation") queue
+        # separately and always drain first — see run_operation()/
+        # queue_operation()/run_queue() and plan §4.2's "queue-jumping, not
+        # preemption".
+        self._operation_queue: list[Any] = []
         self._gui_action_queue: list[dict[str, Any]] = []
         self._active_system_vis: set[str] = set()
 
@@ -173,6 +196,20 @@ class Orchestrator(QObject):
         # (initiation_gates()) from every subsequent one (reading_gates()).
         self._pending_gates: list = []
         self._first_measurement = True
+
+        # Postcondition phase (operations only, duck-typed via
+        # postcondition_gates() — a plain procedure has none, so this stays
+        # inert for every existing run). Stepped in STANDBY after standby()'s
+        # own ramp completes, before the run is declared "done".
+        self._postcondition_active: bool = False
+        self._postcondition_gates: list = []
+        self._postcondition_deadline: float | None = None
+
+        # Set by run_operation() when the EMERGENCY carve-out (plan §4.2) was
+        # used to start the active operation; read by _operation_end_state()
+        # so a finishing operation returns to EMERGENCY rather than IDLE when
+        # appropriate. Meaningless (and unread) for a plain procedure.
+        self._operation_started_from_emergency: bool = False
 
         # Scanner (switch VI) availability: an on/off flag procedures check
         # via Station.scanner_enabled() rather than assuming the first switch
@@ -348,30 +385,119 @@ class Orchestrator(QObject):
             logger.info("run_procedure: monitoring was off — starting it (required during a run)")
             self.start_monitoring()
 
+        self._operation_started_from_emergency = False
+        self._start_run(procedure, kind="procedure")
+
+    def run_operation(self, operation: Any) -> None:
+        """Start an operation immediately if permitted; else refuse it (plan §4.2).
+
+        Allowed from IDLE, from a manual ramp (cancelled first, exactly like
+        ``run_procedure()``), and — the narrow EMERGENCY carve-out — from
+        EMERGENCY iff every currently tripped safety flag (from
+        ``Station.check_safety()``) is in the operation's
+        ``tolerated_safety_flags``.
+
+        Unlike ``run_procedure()``, a busy Orchestrator never auto-queues the
+        request: a running procedure (or operation) is NEVER auto-aborted, so
+        the refusal (``action_blocked``) tells the caller to abort it first.
+        Use ``queue_operation()`` to queue explicitly — queued operations
+        always run ahead of queued procedures (see ``run_queue()``).
+
+        Any exception during setup is contained exactly like
+        ``run_procedure()`` — degrades to ERROR rather than crashing.
+        """
+        manual_ramping = (
+            self._state == OrchestratorState.RAMPING and self._procedure is None
+        )
+        started_from_emergency = False
+
+        if self._state == OrchestratorState.EMERGENCY:
+            tolerated = frozenset(getattr(operation, "tolerated_safety_flags", frozenset()))
+            safety = self._station.check_safety()
+            active = {flag for flag, tripped in safety.items() if tripped}
+            untolerated = sorted(active - tolerated)
+            if untolerated:
+                msg = (
+                    "Cannot start operation from EMERGENCY: active safety "
+                    f"condition(s) not tolerated by this operation "
+                    f"({', '.join(untolerated)}). Resolve them first."
+                )
+                logger.info("Blocked run_operation: %s", msg)
+                self.action_blocked.emit(msg)
+                return
+            started_from_emergency = True
+        elif not (self._state == OrchestratorState.IDLE or manual_ramping):
+            running_label = "procedure"
+            if self._procedure is not None and (
+                getattr(self._procedure, "command_scope", "measurement") == "operation"
+            ):
+                running_label = "operation"
+            msg = (
+                f"Cannot start operation: a {running_label} is running "
+                f"(state {self._state.name}). Abort it first, then start the "
+                "operation."
+            )
+            logger.info("Blocked run_operation: %s", msg)
+            self.action_blocked.emit(msg)
+            return
+
+        if manual_ramping:
+            self._station.stop_ramps()
+            logger.info("Manual ramp cancelled — operation starting.")
+
+        # A run without the per-tick safety watchdog and stale detection would
+        # be blind to a quench or a dead controller, so monitoring is mandatory
+        # while an operation executes.
+        if not self._monitoring:
+            logger.info("run_operation: monitoring was off — starting it (required during a run)")
+            self.start_monitoring()
+
+        self._operation_started_from_emergency = started_from_emergency
+        self._start_run(operation, kind="operation")
+
+    def _start_run(self, procedure: Any, *, kind: str = "procedure") -> None:
+        """Shared setup path for ``run_procedure()``/``run_operation()``.
+
+        Dispatches ``procedure.initiate()``'s plan (scope-checked via the
+        procedure's own ``command_scope``, defaulting to "measurement" for a
+        plain procedure), enters INITIATING, and emits the run-started
+        manifest. Any exception is contained to ERROR — the caller must have
+        already confirmed permission to start (queueing, EMERGENCY
+        carve-out, monitoring) before calling this.
+
+        Args:
+            procedure: The procedure or operation to start.
+            kind: ``"procedure"`` or ``"operation"``, used only for logging
+                and the error message on setup failure.
+        """
         self._procedure = procedure
         self._standby_dispatched = False
         self._wait_started = False
         self._first_measurement = True
         self._pending_gates = []
+        self._postcondition_active = False
+        self._postcondition_gates = []
+        self._postcondition_deadline = None
         try:
-            plan = self._procedure.initiate()
+            plan = procedure.initiate()
             # The frozen-dataclass repr is the permanent record of exactly what
-            # the procedure requested — logged once, at INFO, on receipt.
-            logger.info("Procedure plan (initiate): %r", plan)
+            # was requested — logged once, at INFO, on receipt.
+            logger.info("%s plan (initiate): %r", kind.capitalize(), plan)
 
             # Track active system VIs for stale monitoring
             self._active_system_vis = set(plan.targets.keys())
 
             self._dispatch_targets(plan.targets)
-            self._station.send_measurement_commands(plan.commands)
+            allowed_scope = getattr(procedure, "command_scope", "measurement")
+            self._station.send_measurement_commands(plan.commands, allowed_scope=allowed_scope)
             self._current_wait_time = plan.wait_s
 
             self._change_state(OrchestratorState.INITIATING)
             self._emit_run_started()
             self._emit_initiation_status(plan.targets, plan.commands)
         except Exception as exc:
-            logger.exception("run_procedure() failed during setup")
-            self._fail_to_error(f"Could not start procedure: {exc}")
+            logger.exception("%s setup failed", kind)
+            self._fail_to_error(f"Could not start {kind}: {exc}")
 
     def _current_gates(self) -> tuple:
         """Return the gates for the current RAMPING->MEASURING transition.
@@ -412,11 +538,27 @@ class Orchestrator(QObject):
         """Add procedure to queue."""
         self._procedure_queue.append(procedure)
 
+    def queue_operation(self, operation: Any) -> None:
+        """Queue an operation to run once the Orchestrator returns to IDLE.
+
+        Operations queue separately from procedures and always drain first
+        (see ``run_queue()``) — the queueing half of plan §4.2's
+        "queue-jumping, not preemption".
+        """
+        self._operation_queue.append(operation)
+
     def run_queue(self) -> None:
-        """Run the next procedure in the queue if IDLE."""
-        if self._state == OrchestratorState.IDLE and self._procedure_queue:
-            proc = self._procedure_queue.pop(0)
-            self.run_procedure(proc)
+        """Run the next queued operation, else the next queued procedure, if IDLE.
+
+        Operations always drain before procedures (plan §4.2).
+        """
+        if self._state != OrchestratorState.IDLE:
+            return
+        if self._operation_queue:
+            self.run_operation(self._operation_queue.pop(0))
+            return
+        if self._procedure_queue:
+            self.run_procedure(self._procedure_queue.pop(0))
 
     def pause_procedure(self) -> None:
         """Pause the current procedure and hold all hardware where it is.
@@ -472,6 +614,31 @@ class Orchestrator(QObject):
         self._change_state(OrchestratorState.IDLE)
         self._emit_status("Aborted by user")
         self.run_queue()
+
+    def finish_operation(self) -> None:
+        """Request a graceful stop of the active operation (plan §4.3).
+
+        Calls ``request_finish()`` on the active operation so its next
+        ``change_sweep_step()`` (the ``OperationBase`` adapter) returns
+        ``None`` regardless of what ``step()`` would return, ending an
+        open-ended operation and running the normal
+        STANDBY -> postcondition path. Refused with ``action_blocked`` if no
+        operation is currently active (a duck-typed procedure without
+        ``command_scope == "operation"`` does not count).
+        """
+        is_operation = (
+            self._procedure is not None
+            and getattr(self._procedure, "command_scope", "measurement") == "operation"
+        )
+        if not is_operation:
+            msg = "Cannot finish operation: no operation is currently running."
+            logger.info("Blocked finish_operation: %s", msg)
+            self.action_blocked.emit(msg)
+            return
+        request_finish = getattr(self._procedure, "request_finish", None)
+        if callable(request_finish):
+            request_finish()
+        self._emit_status("Finish requested — completing operation")
 
     def recover_from_error(self) -> None:
         """Return to IDLE after the user has reviewed an ERROR condition.
@@ -678,7 +845,14 @@ class Orchestrator(QObject):
                 wait_target_s=wait_target,
                 wait_elapsed_s=wait_elapsed,
                 progress=progress,
-                active_gates=[g.name for g in self._pending_gates],
+                # Initiation/reading gates and postcondition gates are never
+                # both non-empty at once (different sub-phases), so a plain
+                # concatenation surfaces whichever is active — postcondition
+                # gates the same way initiation gates already are.
+                active_gates=(
+                    [g.name for g in self._pending_gates]
+                    + [g.name for g in self._postcondition_gates]
+                ),
             )
             record, self._watchdog_state = apply_watchdog(
                 record, self._watchdog_state, self._watchdog_config
@@ -851,8 +1025,23 @@ class Orchestrator(QObject):
             self._update_operational_status(state)
 
             # Safety check — reuses this tick's snapshot (no second hardware poll).
+            # An active operation's tolerated_safety_flags (plan §7) are
+            # subtracted before deciding on EMERGENCY: a tolerated flag (e.g.
+            # helium_low during a helium-fill operation) must not abort the
+            # very operation that exists to fix it. A non-tolerated flag
+            # (e.g. quench) still enters EMERGENCY exactly as for any
+            # procedure. Only the ACTIVE procedure's tolerance applies here —
+            # a plain procedure (or IDLE) tolerates nothing, unchanged.
             safety = self._station.check_safety(state)
-            active_flags = sorted(flag for flag, tripped in safety.items() if tripped)
+            tripped_flags = {flag for flag, tripped in safety.items() if tripped}
+            if self._procedure is not None and (
+                getattr(self._procedure, "command_scope", "measurement") == "operation"
+            ):
+                tolerated = frozenset(
+                    getattr(self._procedure, "tolerated_safety_flags", frozenset())
+                )
+                tripped_flags = tripped_flags - tolerated
+            active_flags = sorted(tripped_flags)
             if active_flags and self._state != OrchestratorState.EMERGENCY:
                 self._enter_emergency(", ".join(active_flags))
                 return  # emergency entry already cleaned up; nothing else this tick
@@ -975,23 +1164,54 @@ class Orchestrator(QObject):
                         plan = self._procedure.standby()
                         logger.info("Procedure plan (standby): %r", plan)
                         self._dispatch_targets(plan.targets)
-                        self._station.send_measurement_commands(plan.commands)
+                        allowed_scope = getattr(
+                            self._procedure, "command_scope", "measurement"
+                        )
+                        self._station.send_measurement_commands(
+                            plan.commands, allowed_scope=allowed_scope
+                        )
                         if plan.targets or plan.commands:
                             self._emit_status("Parking hardware")
                             self._emit_setup_actions(plan.targets, plan.commands, verb="Ramping")
                     self._standby_dispatched = True
-            else:
+            elif not self._postcondition_active:
                 # Wait for the ramp standby() itself just started (if any)
-                # before declaring the procedure finished.
+                # before stepping postconditions (plan §4.1). A plain
+                # BaseProcedure declares no postcondition_gates(), so the
+                # gate list below comes back empty and the run finishes on
+                # the very next tick — unchanged behavior for every existing
+                # procedure.
                 if self._station.check_ramps():
-                    self._emit_status("Procedure finished")
-                    self._emit_run_finished("done")
-                    self.procedure_finished.emit()
-                    self._procedure = None
-                    self._active_system_vis.clear()
-                    self._standby_dispatched = False
-                    self._change_state(OrchestratorState.IDLE)
-                    self.run_queue()
+                    self._postcondition_active = True
+                    gates_fn = getattr(self._procedure, "postcondition_gates", None)
+                    self._postcondition_gates = list(gates_fn()) if gates_fn else []
+                    if self._postcondition_gates:
+                        timeout = getattr(
+                            self._procedure, "postcondition_timeout_s", 600.0
+                        )
+                        self._postcondition_deadline = time.time() + float(timeout)
+                        self._emit_status("Verifying postconditions")
+                    else:
+                        self._postcondition_deadline = None
+            else:
+                # Postcondition sub-phase: step declared gates each tick.
+                if self._postcondition_gates:
+                    if (
+                        self._postcondition_deadline is not None
+                        and time.time() >= self._postcondition_deadline
+                    ):
+                        unmet = ", ".join(g.name for g in self._postcondition_gates)
+                        self._fail_to_error(
+                            f"Postcondition timeout: unmet gate(s) ({unmet})"
+                        )
+                    else:
+                        self._postcondition_gates = [
+                            g for g in self._postcondition_gates if not g.step()
+                        ]
+                if not self._postcondition_gates and self._state == OrchestratorState.STANDBY:
+                    # Re-check state: the timeout branch above may have
+                    # already degraded to ERROR this same tick.
+                    self._finish_run()
         elif self._state == OrchestratorState.PAUSED:
             pass # Monitor continues, no ramp advancement
         elif self._state == OrchestratorState.ERROR:
@@ -1017,7 +1237,10 @@ class Orchestrator(QObject):
             try:
                 commands = procedure.abort()
                 if commands:
-                    self._station.send_measurement_commands(commands)
+                    allowed_scope = getattr(procedure, "command_scope", "measurement")
+                    self._station.send_measurement_commands(
+                        commands, allowed_scope=allowed_scope
+                    )
             except Exception:
                 logger.exception("Procedure abort cleanup failed")
         try:
@@ -1033,7 +1256,68 @@ class Orchestrator(QObject):
         self._wait_started = False
         self._first_measurement = True
         self._pending_gates = []
+        self._postcondition_active = False
+        self._postcondition_gates = []
+        self._postcondition_deadline = None
+        self._operation_started_from_emergency = False
         self._last_system_targets = {}
+
+    def _operation_end_state(self, procedure: Any) -> OrchestratorState:
+        """Return the state a finishing run should return to (plan §4.2/§7).
+
+        A plain procedure always returns to IDLE. An operation returns to
+        EMERGENCY instead when it was started via the EMERGENCY carve-out, or
+        when any safety flag — even one this operation tolerated — is still
+        tripped at finish: a tolerated flag was tolerated for THIS operation
+        only, it was never cleared. An operation could not reach this "done"
+        path with a non-tolerated flag active, because the tick safety check
+        would already have escalated it to EMERGENCY and aborted the run.
+
+        Args:
+            procedure: The procedure/operation that just finished (captured
+                by the caller before clearing ``self._procedure``).
+
+        Returns:
+            ``OrchestratorState.EMERGENCY`` or ``OrchestratorState.IDLE``.
+        """
+        if getattr(procedure, "command_scope", "measurement") != "operation":
+            return OrchestratorState.IDLE
+        if self._operation_started_from_emergency:
+            return OrchestratorState.EMERGENCY
+        safety = self._station.check_safety()
+        if any(safety.values()):
+            return OrchestratorState.EMERGENCY
+        return OrchestratorState.IDLE
+
+    def _finish_run(self) -> None:
+        """Declare the active run done: emit finished signals and return home.
+
+        Called once the STANDBY postcondition sub-phase holds (or, for a
+        procedure with no postcondition_gates(), immediately). Home is IDLE
+        for a plain procedure, or for an operation whose safety condition has
+        cleared; an operation returns to EMERGENCY instead when appropriate
+        (see ``_operation_end_state()``).
+        """
+        procedure = self._procedure
+        self._emit_status("Procedure finished")
+        self._emit_run_finished("done")
+        self.procedure_finished.emit()
+        end_state = self._operation_end_state(procedure)
+        self._procedure = None
+        self._active_system_vis.clear()
+        self._standby_dispatched = False
+        self._postcondition_active = False
+        self._postcondition_gates = []
+        self._postcondition_deadline = None
+        self._operation_started_from_emergency = False
+        self._change_state(end_state)
+        if end_state == OrchestratorState.IDLE:
+            self.run_queue()
+        else:
+            self._emit_status(
+                "Operation finished; a safety condition is still active — "
+                "remaining in EMERGENCY."
+            )
 
     def _fail_to_error(self, message: str) -> None:
         """Contain a failure: clean up the run and degrade to ERROR."""
