@@ -11,15 +11,17 @@ drive hardware.
 ## Architecture layer
 
 **GUI (top layer).** Depends downward on: L3 Orchestrator (Qt signals + public
-action methods), L4 Procedures (via `BaseProcedure.get_param_groups()` returning
-`ParamGroup`/`ParamSpec` from `cryosoft.core.plan`, and `SweepAxis` from
-`cryosoft.core.sweep_builder`; also `cryosoft.procedures.operations.helium_fill.
-HeliumFillOperation`, constructed directly by `CryogenicsPanel` — contract C8
-forbids only drivers and concrete VI subpackages, not `cryosoft.procedures`),
-L2 Station (VI names, VI types, VI instances for decorator introspection
-only), and L6 Session (`cryosoft.session.servicing_log`/`models`/`manager` —
-contract C11/C12 name the GUI and `main.py` as the only importers). Nothing
-depends on the GUI.
+action methods), L4 Procedures and Operations (via `BaseProcedure.get_param_groups()`
+returning `ParamGroup`/`ParamSpec` from `cryosoft.core.plan`, and `SweepAxis` from
+`cryosoft.core.sweep_builder`; also `cryosoft.core.operation` — `OperationBase`,
+`ReadinessCondition`, `NextDue` — and every concrete class under
+`cryosoft.procedures.operations.*`, constructed directly by `OperationsPanel`/
+`OperationCard` — contract C8 forbids only drivers and concrete VI
+subpackages, not `cryosoft.procedures`/`cryosoft.core.operation`), L2 Station
+(VI names, VI types, VI instances for decorator introspection only), and L6
+Session (`cryosoft.session.servicing_log`/`models`/`manager` — contract
+C11/C12 name the GUI and `main.py` as the only importers). Nothing depends on
+the GUI.
 
 ### Pages (MonitorWindow)
 
@@ -32,15 +34,18 @@ splitter into the stack, it did not touch its internal layout. **Page 2
 (from `ServicingLogStore`/`LogKindSpec`), the read-only `operations` audit
 table, and the relocated `LogPanel` (moved off page 1's bottom-right
 selector, which now offers only "Other Devices" and, when cryogenics is
-configured, "Cryogenics"). Tables refresh on log-page-shown and
-`run_finished` — never on a timer. Child panels keep the established
-single-receiver `states_updated` forwarding pattern (`MonitorWindow`
-receives the tick and forwards to `TrendsQuadrant` / `OtherDevicesPanel` /
-`CryogenicsPanel`; see the destruction-order rule above); signals that fire
-only at run boundaries (`run_started`/`run_finished`/`action_succeeded`) are
-connected directly by the panel that needs them, matching
-`OtherDevicesPanel`'s existing precedent — there is no teardown race for a
-signal that only fires while the window is alive and not mid-tick.
+enabled OR an `operations:` config block is declared, "Operations" — plan
+§12; renamed from "Cryogenics", which it absorbs rather than replaces).
+Tables refresh on log-page-shown and `run_finished` — never on a timer.
+Child panels keep the established single-receiver `states_updated`
+forwarding pattern (`MonitorWindow` receives the tick and forwards to
+`TrendsQuadrant` / `OtherDevicesPanel` / `OperationsPanel`; see the
+destruction-order rule above); signals that fire only at run boundaries
+(`run_started`/`run_finished`/`action_succeeded`) are connected directly by
+the panel (or, for `OperationsPanel`, each `OperationCard`) that needs them,
+matching `OtherDevicesPanel`'s existing precedent — there is no teardown
+race for a signal that only fires while the window is alive and not
+mid-tick.
 
 ## Entry (what comes in)
 
@@ -65,6 +70,12 @@ signal that only fires while the window is alive and not mid-tick.
   (for its `cryo_warning` signal) — all optional keyword params on
   `MonitorWindow`, wired by `main.py`. Every param defaults to `None`, so
   existing construction sites and tests are unaffected when omitted.
+- Optionally, a resolved `operations:` config block (`Station.
+  read_operations_config()`, `operations_config` keyword param, plan §12) —
+  `{config_key: {key: value}}`. The Operations panel is available whenever
+  cryogenics is enabled OR this is non-empty; every entry is mapped to a
+  discovered `OperationBase` subclass by `config_key` (unknown keys log a
+  warning and are skipped, never fatal).
 
 ## Exit (what goes out)
 
@@ -82,6 +93,15 @@ signal that only fires while the window is alive and not mid-tick.
   Orchestrator action.
 - **Never** block the Qt event loop (no `time.sleep`, no synchronous I/O). Data
   arrives via Orchestrator signals; do not poll instruments.
+- **`operations_panel.py`'s `OperationCard` is the single per-operation card
+  standard (plan §12).** It contains no per-operation logic — every visible
+  detail (checklist rows, next-due line, ready banner, confirmations)
+  renders generically from an `OperationBase` instance's declarations
+  (`readiness_conditions()`, `next_due()`, `ready_message`,
+  `operator_confirmations`) plus a panel-supplied factory closure for
+  building a fresh run instance. Adding an operation to a setup never
+  touches this file; a new operation with none of those declarations still
+  gets a working card (just a bare button).
 - **`param_form.py` is the single ParamSpec-to-Qt-widget mapping.** It is the
   only module that names widget classes for procedure parameters
   (`choices` -> `QComboBox`, `bool` -> `QCheckBox`, else `QLineEdit`). All
@@ -131,14 +151,14 @@ signal that only fires while the window is alive and not mid-tick.
 | `experiment_dialogs.py` | Modal dialogs for the experiment lifecycle: `StartExperimentDialog` (title, user picker with inline "New user…", attendance checkbox) and `CloseExperimentDialog` (findings text), plus the shared `UserPickerWidget` (roster combo + inline "New user…" → `AddUserDialog`) reused by `setup_dialogs.LoginDialog`. Opened only by `SessionInfoPanel`; every `SessionManager` mutation happens in the panel after a dialog accepts. | `StartExperimentDialog`, `CloseExperimentDialog`, `AddUserDialog`, `UserPickerWidget` | `tests/test_gui.py` |
 | `setup_dialogs.py` | Modal dialogs for the Setup tier: `LoginDialog` (pick/create who's using the app, via the shared `UserPickerWidget`) and `InstrumentInfoDialog` (read-only view of each VI's `devices.yaml` `metadata:` block). Opened from MonitorWindow's User and Config menus respectively. | `LoginDialog`, `InstrumentInfoDialog` | `tests/test_gui.py` |
 | `other_devices.py` | Compact Other Devices rows: measurement VIs get dot + status + Check button + `LifecycleToggleButton`; switch VIs get display-only rows with a live active-route label refreshed each tick via `on_states_updated`. | `OtherDevicesPanel` | `tests/test_gui.py` |
-| `cryogenics_panel.py` | Bottom-right quadrant entry (page 1), built only when `cryogenics:` is configured and the station has the named level VI: live He/N2 readouts, a consumption (%/h, optional L/h) figure over a 1h/6h/24h window via `consumption_rate_pct_per_h`, a level-vs-time plot (gaps rendered as gaps, fill events overlaid), and Fill helium/Stop filling (constructs `HeliumFillOperation` and calls `orchestrator.run_operation()`/`finish_operation()`). | `CryogenicsPanel`, `FillOperatorDialog`, `on_states_updated` | `tests/test_cryogenics_panel.py` |
+| `operations_panel.py` | Bottom-right quadrant entry (page 1, plan §12), built when cryogenics is configured OR an `operations:` config block is declared. An optional cryogenics status section (live He/N2 readouts, consumption %/h over a 1h/6h/24h window via `consumption_rate_pct_per_h`, a level-vs-time plot — gaps rendered as gaps, fill events overlaid — gated on `cryogenics:`), followed by one generic `OperationCard` per available operation: a live readiness checklist (from `readiness_conditions()`), a next-due line (from `next_due()`), an operator-confirmations row while active, a ready banner once done + all-green, and a start/finish button (`OperatorDialog` → fresh instance → `orchestrator.run_operation()`/`finish_operation()`/`confirm_operation()`). Zero per-operation code — cards are built from `OperationBase` declarations plus `discover_operations()`. | `OperationsPanel`, `OperationCard`, `OperatorDialog`, `on_states_updated` | `tests/test_operations_panel.py` |
 | `servicing_log_page.py` | Page 2 (Logs): one table per declared servicing-log kind (columns from its `LogKindSpec.fields`, newest first) with Add/Edit/Delete/History for editable kinds (dialogs built from `param_form.py`), the read-only `operations` audit table, and the relocated `LogPanel`. `refresh()` is called on log-page-shown and `run_finished` — never on a timer. | `ServicingLogPage`, `ServicingLogEntryDialog`, `RevisionHistoryDialog`, `refresh` | `tests/test_servicing_log_page.py` |
 | `trends_quadrant.py` | The Trends quadrant: 1-4 `TrendPlotPanel`s auto-arranged into a `ceil(sqrt(N))` grid, backed by the `MonitorHistory` it owns; Add button (cap 4), per-panel remove (floor 1), opportunistic temperature/level default keys, and QSettings persistence of the panel list. | `TrendsQuadrant`, `on_states_updated`, `save_settings`, `restore_settings` | `tests/test_gui.py` |
 | `config_menu.py` | The Config menu: checkable shipped/user config list, the confirm-switch-persist-restart flow, and the lazy config-editor launcher. Built by MonitorWindow only when a `ConfigCatalog` is provided. | `ConfigMenuController` | `tests/test_gui.py` |
-| `procedure_discovery.py` | Qt-free procedure auto-discovery: imports every `cryosoft.procedures` module and returns the named `BaseProcedure` subclasses at any depth. | `discover_procedures`, `all_subclasses` | `tests/test_gui.py` (via ProcedureWindow) |
+| `procedure_discovery.py` | Qt-free procedure/operation auto-discovery: imports every `cryosoft.procedures` (or `cryosoft.procedures.operations`) module and returns the named `BaseProcedure`/`OperationBase` subclasses at any depth. | `discover_procedures`, `discover_operations`, `all_subclasses` | `tests/test_gui.py` (via ProcedureWindow), `tests/test_operations_panel.py` (via `OperationsPanel`) |
 | `procedure_params_panel.py` | The parameter quadrant of ProcedureWindow: procedure selector row (Add to Queue / Run Now), filename-prefix field, and the auto-generated form — Sweep column with `SweepAxisWidget`, composite Measurement column (method drop-down + selected VI's sub-form), Reading loop column (two generic slots: a loopable-parameter drop-down each, with per-choice pick checkboxes or a value-list text field); structural params trigger a keyed diff re-render. Owns the per-procedure raw-text param cache behind session persistence. Signals `structure_changed`/`routes_changed` let the window sync its plot selectors. | `ProcedureParamsPanel`, `collect_values`, `current_selections`, `export_session_state`, `restore_session` | `tests/test_gui.py` |
 | `queue_panel.py` | The run-queue group box: list + reorder/remove/Run Queue buttons, per-item lifecycle status (pending/running/done/failed), Orchestrator pending-queue resync after reorders (the GUI queue is the source of truth), and session restore/export of queued procedures. | `QueuePanel`, `QueueEntry`, `add_entry`, `notify_finished`, `notify_aborted`, `restore_items`, `export_items` | `tests/test_gui.py` |
-| `monitor_window.py` | Main live-monitor window — a composition shell. A header `QTabBar` (`page_tab_bar`) switches a central `QStackedWidget` (`page_stack`) between Page 1 (Monitor: the fixed 2x2 quadrant grid of nested `QSplitter`s, draggable/not closable — top-left a 2-column `InstrumentPanel` list for system/level VIs, top-right a `TrendsQuadrant`, bottom-left a `SessionInfoPanel`, bottom-right an `OtherDevicesPanel` plus an optional `CryogenicsPanel` behind a `QComboBox`) and Page 2 (Logs: a `ServicingLogPage`, see "Pages" above). Hosts the Start/Stop Monitoring toggle (mirrors `monitoring_changed`; monitoring is off at launch until instruments are initiated), Initiate/Standby All, the state-driven status bar, the notification banner (also used by the `CryogenicsRecorder`'s `cryo_warning` signal), session/splitter persistence, and the menu bar — including the Setup tier's surfaces: the User menu (`Log in as…` switches which per-user form-autosave file is loaded/saved, via `setup_dialogs.LoginDialog`; a header label reflects who's logged in) and the Config menu's `Instrument Info…` action (`setup_dialogs.InstrumentInfoDialog`, reading `core.station.read_instrument_metadata()`). The window is deliberately the `states_updated` receiver, forwarding each tick to the panels — Qt severs a receiver's connections at the start of its destruction, so no tick can reach a partially destroyed child tree. | `MonitorWindow` | `tests/test_gui.py`, `tests/test_cryogenics_panel.py` |
+| `monitor_window.py` | Main live-monitor window — a composition shell. A header `QTabBar` (`page_tab_bar`) switches a central `QStackedWidget` (`page_stack`) between Page 1 (Monitor: the fixed 2x2 quadrant grid of nested `QSplitter`s, draggable/not closable — top-left a 2-column `InstrumentPanel` list for system/level VIs, top-right a `TrendsQuadrant`, bottom-left a `SessionInfoPanel`, bottom-right an `OtherDevicesPanel` plus an optional `OperationsPanel` behind a `QComboBox`) and Page 2 (Logs: a `ServicingLogPage`, see "Pages" above). Hosts the Start/Stop Monitoring toggle (mirrors `monitoring_changed`; monitoring is off at launch until instruments are initiated), Initiate/Standby All, the state-driven status bar, the notification banner (also used by the `CryogenicsRecorder`'s `cryo_warning` signal), session/splitter persistence, and the menu bar — including the Setup tier's surfaces: the User menu (`Log in as…` switches which per-user form-autosave file is loaded/saved, via `setup_dialogs.LoginDialog`; a header label reflects who's logged in) and the Config menu's `Instrument Info…` action (`setup_dialogs.InstrumentInfoDialog`, reading `core.station.read_instrument_metadata()`). The window is deliberately the `states_updated` receiver, forwarding each tick to the panels — Qt severs a receiver's connections at the start of its destruction, so no tick can reach a partially destroyed child tree. | `MonitorWindow` | `tests/test_gui.py`, `tests/test_operations_panel.py` |
 | `procedure_window.py` | Procedure builder, run queue, and live-data window — a composition shell over `ProcedureParamsPanel`, `QueuePanel`, and two `LivePlotPanel`s. Same 2x2 splitter grid (params / queue-over-status / Plot 1 / Plot 2); single procedure-construction path shared by Run Now and the queue; progress bar from `procedure_progress`; emergency-acknowledge button visible only in EMERGENCY. | `ProcedureWindow` | `tests/test_gui.py` |
 | `diagnostics_window.py` | Read-only live diagnostics window for connection/progress trouble ("a device stopped responding", "this is taking way longer than expected"). Renders the Orchestrator's `operational_status` tick — verdict badge, per-instrument status table, alerts feed — with the same plain-English fault-code vocabulary as the offline troubleshoot CLI; a Copy Diagnostics button puts a text summary on the clipboard. Polls no hardware and reads no files. Opened from MonitorWindow's Diagnostics menu. | `DiagnosticsWindow` | `tests/test_gui.py` |
 | `config_editor.py` | Interactive editor for device/instrument configs: lists shipped (read-only) and user configs, edits `devices.yaml`/`monitor.yaml` behind a hard validation gate, forks shipped configs to user copies, keeps versioned history, and applies a config (restart via injected callback). Opened from MonitorWindow's Config menu. | `ConfigEditorWindow` | `tests/test_config_editor.py` |

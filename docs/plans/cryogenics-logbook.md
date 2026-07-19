@@ -473,3 +473,69 @@ Each phase is independently useful; nothing above a phase blocks shipping
 it. After Phase 1 a running setup is already accumulating the hourly helium
 record and (once Phase 3 lands) writing clean fill entries — the Logs page
 in Phase 5 is display, not function.
+
+## 12. Phase 6 — operations panel
+
+The cryogenics view becomes the **Operations panel**: the place an operator
+looks to answer *what state is the setup in, is it ready right now for
+operation X, and when will X next be needed?* Agreed design, implemented
+exactly as follows:
+
+- **Absorb, don't add.** The bottom-right selector entry renamed
+  "Cryogenics" → **"Operations"**
+  (`gui/cryogenics_panel.py` → `gui/operations_panel.py`,
+  `CryogenicsPanel` → `OperationsPanel`). The existing cryogenics status
+  section (levels, consumption, plot) stays at the top, still gated on the
+  `cryogenics:` block; below it, one **operation card** per configured
+  operation. The panel is available when cryogenics is enabled OR the
+  `operations:` config is non-empty — a setup with only `sample_change`
+  still gets the panel, minus the cryo section.
+- **Per-condition checklist.** `OperationBase` gains a
+  `readiness_conditions() -> tuple[ReadinessCondition, ...]` hook (default
+  `()`). Each `ReadinessCondition` (a frozen dataclass: `key`, `label`,
+  `check(state) -> bool`, optional `detail(state) -> str`) is evaluated
+  purely from the Orchestrator's per-tick state snapshot — no extra
+  hardware poll — and rendered as one checklist row (colored ✓/✗ icon,
+  label, live detail text).
+- **Button starts the prep, not gated on the checklist.** A card's button
+  is active whenever the Orchestrator can accept the operation — the
+  operation itself is what drives the setup to the safe state, so gating
+  the button on readiness would be circular. While running, the button
+  becomes "Finish `<name>`" (`orchestrator.finish_operation()`). Once the
+  run has finished `done` AND every current readiness condition holds, the
+  card shows a **ready banner** with the operation's `ready_message` class
+  attribute (empty string = no banner); the banner clears the moment a
+  condition stops holding or a new run starts.
+- **Next-due line.** `OperationBase.next_due(context) -> NextDue | None`
+  (default `None`; `NextDue` is a frozen dataclass: `due_unix`, `text`).
+  `context` is a documented, extensible dict the GUI assembles fresh every
+  tick: `"state"`, `"now_unix"`, and `"consumption_rate_pct_per_h"` (computed
+  by the panel, reusing its existing throttled consumption fit — an
+  operation must NOT import the session layer itself, contract C12, which
+  is exactly why the rate is passed in rather than computed in
+  `next_due()`). `HeliumFillOperation.next_due()` predicts time-to-warning
+  from the measured rate; `SampleChangeOperation` has no schedule and
+  overrides nothing.
+- **Hybrid declaration — the core of the vision.** The operation *class*
+  declares its readiness conditions, next-due logic, and `ready_message`;
+  the *config* supplies thresholds (already true — the constructor's
+  `**config`). A new `config_key: str = ""` class attribute on
+  `OperationBase` is how the panel maps `operations:` config blocks to
+  classes generically (`SampleChangeOperation.config_key =
+  "sample_change"`); `gui/procedure_discovery.py` gains
+  `discover_operations()`, the same pkgutil-walk pattern as
+  `discover_procedures()`. Adding an operation to a setup = declare the
+  class + add a config block; the panel needs **zero** per-operation code.
+- **Sample change's operator confirmations** render as one checkbox per
+  `operator_confirmations` entry while it is the active run (checkbox →
+  `orchestrator.confirm_operation(key)`, disabled after checking —
+  confirmations are one-way, mirroring the existing L4 contract exactly).
+
+Implementation: `core/operation.py` (`ReadinessCondition`, `NextDue`, the
+two hooks, `ready_message`/`config_key`); `procedures/operations/
+helium_fill.py` and `sample_change.py` (concrete `readiness_conditions()`/
+`next_due()`); `gui/procedure_discovery.py` (`discover_operations()`);
+`gui/operations_panel.py` (`OperationsPanel`, `OperationCard` — the fully
+generic per-operation widget, `OperatorDialog` — the generic operator-name
+prompt replacing `FillOperatorDialog`); `gui/monitor_window.py` / `main.py`
+(selector rename, `operations_config` wiring).

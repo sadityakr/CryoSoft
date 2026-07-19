@@ -67,6 +67,23 @@ operation) — the capability a plain procedure's plan does not have.
   empty by default) naming the safety flags that must NOT abort *this*
   operation (e.g. the fill tolerates `"helium_low"` — fixing that condition
   is its whole purpose).
+- Readiness / next-due / discovery (plan §12, `gui/operations_panel.py`'s
+  `OperationsPanel`): override `readiness_conditions() -> tuple[
+  ReadinessCondition, ...]` to declare the live checklist rows the panel
+  renders for this operation (each a `key`/`label`/`check(state)`/optional
+  `detail(state)` — pure reads against the Orchestrator's per-tick state
+  snapshot, no hardware access); override `next_due(context) ->
+  NextDue | None` if the operation has a predictable schedule (the helium
+  fill does, from the measured consumption rate passed in via
+  `context["consumption_rate_pct_per_h"]` — an operation must NOT import
+  the session layer itself to compute this, contract C12); set
+  `ready_message` (non-empty) to the string shown in the panel's ready
+  banner once a run finishes `done` with every condition holding; set
+  `config_key` (non-empty, unique across operations — checked by
+  conformance) to the `operations:` config-block key this class should be
+  built from generically. All four default to "nothing" (`()`, `None`,
+  `""`, `""`) — an operation that skips this section still works, it just
+  gets no card checklist/next-due/ready-banner beyond the button.
 - Operations never import from `drivers/` or `virtual_instruments/`;
   instruments are reached only through `self._station` (contract C6, same
   rule as `cryosoft.procedures`).
@@ -89,6 +106,12 @@ operation) — the capability a plain procedure's plan does not have.
    / `abort()` / `initiation_gates()` / `postcondition_gates()` /
    `get_progress()` / `get_params()` as the operation needs (see
    `OperationBase`'s docstring for each hook's default).
+3a. If the setup should see this operation in the GUI's Operations panel
+   (`gui/operations_panel.py`): add `readiness_conditions()`/`next_due()`,
+   `ready_message`, and (if config-driven generically rather than wired by
+   hand like the helium fill) `config_key` — see "How a new operation
+   declares readiness" above. Skipping this section is fine; the operation
+   still runs, it just gets a bare button in the panel.
 4. Give the constructor a working zero-argument-beyond-`station` default (a
    sim `Station` must be enough to build it) — the conformance suite
    constructs every discovered operation this way.
@@ -129,5 +152,5 @@ already supports both, which is why this is declared, not hardcoded.
 | File | Responsibility | Key public API | Tests |
 |------|----------------|-----------------|-------|
 | `__init__.py` | Package marker | (none) | none |
-| `helium_fill.py` | Ramps every magnet (`Station.magnet_vi_names()`) to zero field, switches the level meter to FAST refresh, samples the helium level once per `sample_period_s` into an HDF5 curve, and finishes once the level holds at/above `fill_target_pct` for `fill_complete_window_s` (or `max_fill_duration_s` elapses); restores SLOW refresh on standby/abort and verifies it via `postcondition_gates()`. Tolerates `helium_low` (its whole purpose). | `HeliumFillOperation` | `tests/test_helium_fill.py` |
-| `sample_change.py` | "Verify the cryostat is safe to open": ramps every magnet (`Station.magnet_vi_names()`) to zero field and the configured VTI VI to `target_temperature_K` (default 300 K), opens the first switch VI (if any), and sends `standby` to every measurement VI (`Station.measurement_vi_names()`). No sampling loop (`step()` returns `None` immediately) and no data file. `postcondition_gates()` verifies `zero_field`, `heater_off` (only for magnets whose cached state exposes `switch_heater_state`), `vti_at_target`, and — for the only supported `needle_valve: manual` mode — an **operator confirmation** (`needle_valve_confirmed`). `tolerated_safety_flags` is empty. | `SampleChangeOperation` | `tests/test_sample_change.py` |
+| `helium_fill.py` | Ramps every magnet (`Station.magnet_vi_names()`) to zero field, switches the level meter to FAST refresh, samples the helium level once per `sample_period_s` into an HDF5 curve, and finishes once the level holds at/above `fill_target_pct` for `fill_complete_window_s` (or `max_fill_duration_s` elapses); restores SLOW refresh on standby/abort and verifies it via `postcondition_gates()`. Tolerates `helium_low` (its whole purpose). `readiness_conditions()` exposes one aggregate `zero_field` row; `next_due()` predicts time-to-`helium_warning_pct` from the panel-supplied consumption rate (plan §12). | `HeliumFillOperation` | `tests/test_helium_fill.py`, `tests/test_operation_readiness.py` |
+| `sample_change.py` | "Verify the cryostat is safe to open": ramps every magnet (`Station.magnet_vi_names()`) to zero field and the configured VTI VI to `target_temperature_K` (default 300 K), opens the first switch VI (if any), and sends `standby` to every measurement VI (`Station.measurement_vi_names()`). No sampling loop (`step()` returns `None` immediately) and no data file. `postcondition_gates()` verifies `zero_field`, `heater_off` (only for magnets whose cached state exposes `switch_heater_state`), `vti_at_target`, and — for the only supported `needle_valve: manual` mode — an **operator confirmation** (`needle_valve_confirmed`). `tolerated_safety_flags` is empty. `readiness_conditions()` mirrors the same four checks as live checklist rows; `config_key = "sample_change"` (plan §12). | `SampleChangeOperation` | `tests/test_sample_change.py`, `tests/test_operation_readiness.py` |
