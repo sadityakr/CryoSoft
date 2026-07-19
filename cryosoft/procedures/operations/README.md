@@ -32,8 +32,9 @@ Every operation here is constructed with:
 - `person` (keyword, default `""`): who is performing the servicing action,
   recorded via `get_params()` so the servicing-log recorder can attribute it.
 - `**config`: the operation's own config keys (e.g. the helium fill's
-  `docs/plans/cryogenics-logbook.md` §9 `cryogenics:` block keys), each with
-  a class-level default so the conformance suite's
+  `docs/plans/cryogenics-logbook.md` §9 `cryogenics:` block keys, or the
+  sample change's `operations.sample_change:` block keys), each with a
+  class-level default so the conformance suite's
   `test_operation_constructs_from_defaults` can build the class from a sim
   station alone.
 
@@ -96,9 +97,37 @@ operation) — the capability a plain procedure's plan does not have.
    `tests/test_operations.py`'s fixtures).
 6. Add the file to the Files map below with its owning test file.
 
+## Operator confirmations
+
+Some postconditions cannot be machine-verified because no capability exists
+for them yet (plan §8.2's "needle-valve reality check": no needle-valve/
+gas-flow capability exists anywhere in the stack today). Rather than skip
+the postcondition or hardcode a GUI checkbox, an operation **declares** it:
+
+- A class-level `operator_confirmations: dict[str, str]` maps a stable key
+  (e.g. `"needle_valve"`) to a human-readable checkbox label (e.g.
+  `"Needle valve closed"`).
+- Instance methods `confirm(key)` (raises `ValueError` on an undeclared key)
+  and `confirmed(key) -> bool` set and read the per-run flag.
+- `postcondition_gates()` includes a gate that reads `confirmed(key)` — the
+  run cannot reach `done` until the flag is set.
+- `Orchestrator.confirm_operation(key)` (mirroring `finish_operation()`,
+  same duck-typed-active-operation / `action_blocked` pattern) is the single
+  entry point a caller uses to set it.
+- The GUI (Phase 5, `docs/plans/cryogenics-logbook.md` §10) renders one
+  checkbox per declared `operator_confirmations` entry and forwards a click
+  through `Orchestrator.confirm_operation(key)`; the entry is recorded in
+  the **operations stream** as human-confirmed rather than machine-verified.
+
+A future machine-verifiable capability (e.g. an ITC503 `close_needle_valve()`
+VI method) replaces the confirmation with a real `Gate` and drops the
+`operator_confirmations` declaration entirely — the postcondition contract
+already supports both, which is why this is declared, not hardcoded.
+
 ## Files
 
 | File | Responsibility | Key public API | Tests |
 |------|----------------|-----------------|-------|
 | `__init__.py` | Package marker | (none) | none |
 | `helium_fill.py` | Ramps every magnet (`Station.magnet_vi_names()`) to zero field, switches the level meter to FAST refresh, samples the helium level once per `sample_period_s` into an HDF5 curve, and finishes once the level holds at/above `fill_target_pct` for `fill_complete_window_s` (or `max_fill_duration_s` elapses); restores SLOW refresh on standby/abort and verifies it via `postcondition_gates()`. Tolerates `helium_low` (its whole purpose). | `HeliumFillOperation` | `tests/test_helium_fill.py` |
+| `sample_change.py` | "Verify the cryostat is safe to open": ramps every magnet (`Station.magnet_vi_names()`) to zero field and the configured VTI VI to `target_temperature_K` (default 300 K), opens the first switch VI (if any), and sends `standby` to every measurement VI (`Station.measurement_vi_names()`). No sampling loop (`step()` returns `None` immediately) and no data file. `postcondition_gates()` verifies `zero_field`, `heater_off` (only for magnets whose cached state exposes `switch_heater_state`), `vti_at_target`, and — for the only supported `needle_valve: manual` mode — an **operator confirmation** (`needle_valve_confirmed`). `tolerated_safety_flags` is empty. | `SampleChangeOperation` | `tests/test_sample_change.py` |
