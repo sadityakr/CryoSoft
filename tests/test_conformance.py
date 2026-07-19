@@ -52,6 +52,7 @@ from cryosoft.core.exceptions import CryoSoftSafetyError
 from cryosoft.core.plan import ParamSpec
 from cryosoft.core.procedure import BaseProcedure
 from cryosoft.core.station import Station, _import_class, build_station
+from cryosoft.session.servicing_log import DECLARED_LOG_KINDS
 from cryosoft.virtual_instruments.base import (
     BaseVirtualInstrument,
     MeasurementInstrumentBase,
@@ -716,6 +717,36 @@ def test_session_model_from_dict_tolerates_junk(model_cls: type, junk) -> None:
     """from_dict() never raises on junk input — it degrades to defaults."""
     result = model_cls.from_dict(junk)
     assert isinstance(result, model_cls)
+
+
+# ── Servicing-log kind standard (L6) ──────────────────────────────────────────
+# Every declared LogKindSpec (cryosoft.session.servicing_log.DECLARED_LOG_KINDS)
+# must have a valid key, a title, and a non-empty ordered field schema of
+# ParamSpecs — see LogKindSpec's docstring and docs/plans/cryogenics-logbook.md
+# §6.1. A new log kind is covered the moment it's added to the registry, no
+# test needs to be written for it. ParamSpec.__post_init__ already enforces at
+# construction that every field's default matches its declared type, so a
+# LogKindSpec that imports at all already has a usable default per field.
+
+
+@pytest.mark.parametrize("kind_key", sorted(DECLARED_LOG_KINDS), ids=lambda k: k)
+def test_log_kind_spec_is_valid(kind_key: str) -> None:
+    """Every declared log kind has a valid key and a ParamSpec field schema."""
+    spec = DECLARED_LOG_KINDS[kind_key]
+    assert spec.key == kind_key, (
+        f"DECLARED_LOG_KINDS[{kind_key!r}] must be registered under its own key, "
+        f"got LogKindSpec.key={spec.key!r}"
+    )
+    assert spec.key and spec.key.isidentifier() and spec.key == spec.key.lower(), (
+        f"LogKindSpec.key {spec.key!r} must be a non-empty lowercase identifier"
+    )
+    assert spec.title, f"LogKindSpec({spec.key!r}) must declare a non-empty title"
+    assert spec.fields, f"LogKindSpec({spec.key!r}) declares no fields"
+    for name, field_spec in spec.fields.items():
+        assert isinstance(field_spec, ParamSpec), (
+            f"LogKindSpec({spec.key!r}).fields[{name!r}] must be a ParamSpec, "
+            f"got {field_spec!r}"
+        )
 
 
 @pytest.mark.parametrize(

@@ -3,12 +3,15 @@
 #   Typed records of the L6 Session Management layer: User (who measures),
 #   RunRecord (one procedure execution -> one HDF5 file), ExperimentRecord
 #   (a named group of runs on one sample, with its session envelope and ELN
-#   linkage), and ElnLink (the experiment's ELN entry reference). All follow
-#   the tolerant-parse standard of gui/form_autosave.py: to_dict()/from_dict()
-#   convert to/from plain JSON types, missing keys take defaults, unknown keys
-#   are ignored, and from_dict() never raises on junk input. Machine-checked
-#   by the session-model conformance tests.
-# entry_point: Not run directly. Used by store.py / manager.py and tests.
+#   linkage), ElnLink (the experiment's ELN entry reference), and
+#   ServiceLogEntry (one revision of one servicing-log entry — see
+#   session/servicing_log.py). All follow the tolerant-parse standard of
+#   gui/form_autosave.py: to_dict()/from_dict() convert to/from plain JSON
+#   types, missing keys take defaults, unknown keys are ignored, and
+#   from_dict() never raises on junk input. Machine-checked by the
+#   session-model conformance tests.
+# entry_point: Not run directly. Used by store.py / manager.py /
+#   servicing_log.py and tests.
 # dependencies:
 #   - cryosoft.core.plan (SessionEnvelope / EnvelopeBound serialisation)
 # input: |
@@ -64,6 +67,21 @@ def _as_str(value: object, default: str = "") -> str:
 def _as_bool(value: object, default: bool) -> bool:
     """Return ``value`` if it is a bool, else ``default`` (defensive parse)."""
     return value if isinstance(value, bool) else default
+
+
+def _as_int(value: object, default: int) -> int:
+    """Coerce a JSON value to ``int``, falling back to ``default`` on junk.
+
+    ``bool`` is explicitly rejected (it is never a legitimate revision number)
+    even though it subclasses ``int`` in Python.
+    """
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return default
 
 
 def _as_dict(value: object) -> dict[str, Any]:
@@ -400,3 +418,79 @@ class ExperimentRecord:
             if run.run_id == run_id:
                 return run
         return None
+
+
+@dataclass
+class ServiceLogEntry:
+    """One revision of one servicing-log entry (see ``session/servicing_log.py``).
+
+    Implements the **entry revision** model (GLOSSARY.md): every edit or
+    deletion of a logical entry appends a *new* ``ServiceLogEntry`` sharing the
+    same ``entry_id`` with an incremented ``revision`` rather than rewriting
+    anything on disk. ``ServicingLogStore.entries()`` presents only the latest,
+    non-deleted revision per ``entry_id``; ``revisions()`` returns the full
+    history. ``created_utc`` is copied from the first revision and never
+    changes, so entries keep a stable creation time across edits.
+
+    Attributes:
+        entry_id: Stable id shared by every revision of the same logical entry
+            (a ``uuid4`` hex string, assigned on the first revision).
+        kind: The declared log kind's key (e.g. ``"cryogenics"``).
+        values: The entry's field values, keyed by the kind's field names.
+        source: Provenance of this entry — ``"manual"`` (a technician via the
+            GUI), ``"operation"`` (written by an operation's recorder), or
+            ``"machine"`` (a non-editable machine stream, e.g. ``"operations"``).
+        run_id: The linked run id when ``source == "operation"``; ``""`` otherwise.
+        created_utc: ISO 8601 creation time of the entry's first revision.
+        revised_utc: ISO 8601 time this revision was written; ``""`` on the
+            first revision.
+        revised_by: Who made this revision; ``""`` on the first revision.
+        revision: 1-based revision number, incrementing with every edit or
+            deletion.
+        deleted: ``True`` for a tombstone revision — the entry is hidden from
+            ``ServicingLogStore.entries()`` but remains in its history.
+    """
+
+    entry_id: str = ""
+    kind: str = ""
+    values: dict[str, Any] = field(default_factory=dict)
+    source: str = "manual"
+    run_id: str = ""
+    created_utc: str = ""
+    revised_utc: str = ""
+    revised_by: str = ""
+    revision: int = 1
+    deleted: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-safe dict representation."""
+        return {
+            "entry_id": self.entry_id,
+            "kind": self.kind,
+            "values": dict(self.values),
+            "source": self.source,
+            "run_id": self.run_id,
+            "created_utc": self.created_utc,
+            "revised_utc": self.revised_utc,
+            "revised_by": self.revised_by,
+            "revision": self.revision,
+            "deleted": self.deleted,
+        }
+
+    @classmethod
+    def from_dict(cls, data: object) -> ServiceLogEntry:
+        """Build a ``ServiceLogEntry`` from a parsed dict, tolerating bad input."""
+        if not isinstance(data, dict):
+            return cls()
+        return cls(
+            entry_id=_as_str(data.get("entry_id")),
+            kind=_as_str(data.get("kind")),
+            values=_as_dict(data.get("values")),
+            source=_as_str(data.get("source"), "manual"),
+            run_id=_as_str(data.get("run_id")),
+            created_utc=_as_str(data.get("created_utc")),
+            revised_utc=_as_str(data.get("revised_utc")),
+            revised_by=_as_str(data.get("revised_by")),
+            revision=_as_int(data.get("revision"), 1),
+            deleted=_as_bool(data.get("deleted"), False),
+        )
