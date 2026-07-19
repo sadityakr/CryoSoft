@@ -49,7 +49,7 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import qtawesome as qta
 from PyQt6.QtCore import Qt
@@ -67,6 +67,7 @@ from PyQt6.QtWidgets import (
     QSplitter,
     QStackedWidget,
     QStatusBar,
+    QTabBar,
     QVBoxLayout,
     QWidget,
 )
@@ -77,11 +78,13 @@ from cryosoft.gui import app_settings  # import the module (not the function) so
 from cryosoft.gui import form_autosave as session_store  # module import keeps save/load monkeypatchable
 from cryosoft.gui import window_geometry
 from cryosoft.gui.config_menu import ConfigMenuController
+from cryosoft.gui.cryogenics_panel import CryogenicsPanel
 from cryosoft.gui.diagnostics_window import DiagnosticsWindow
 from cryosoft.gui.instrument_panel import InstrumentPanel
 from cryosoft.gui.log_panel import LogPanel
 from cryosoft.gui.notification_banner import NotificationBanner
 from cryosoft.gui.other_devices import OtherDevicesPanel
+from cryosoft.gui.servicing_log_page import ServicingLogPage
 from cryosoft.gui.session_info_panel import SessionInfoPanel
 from cryosoft.gui.setup_dialogs import InstrumentInfoDialog, LoginDialog
 from cryosoft.gui.theme import (
@@ -99,6 +102,11 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from cryosoft.core.config_catalog import ConfigCatalog
+    from cryosoft.session.servicing_log import (
+        CryogenicsRecorder,
+        HeliumRecordStore,
+        ServicingLogStore,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -132,13 +140,16 @@ _ERROR_STATES = frozenset({
 class MonitorWindow(QMainWindow):
     """Main window: live instrument monitor, sample info, global controls, and log.
 
-    Everything below the header/banner is a fixed 2x2 quadrant grid built
-    from nested QSplitters: top-left is a scrollable 2-column instrument
-    monitor/control list, top-right is the :class:`TrendsQuadrant`,
-    bottom-left is the :class:`SessionInfoPanel`, and bottom-right is the
-    :class:`OtherDevicesPanel` / :class:`LogPanel` pair behind a QComboBox
-    selector. Every splitter boundary is draggable; nothing in the grid can
-    be closed, detached, or floated.
+    A slim page tab bar in the header switches between two pages held in a
+    central QStackedWidget. Page 1 (Monitor) is the fixed 2x2 quadrant grid
+    built from nested QSplitters, unchanged from before paging: top-left is
+    a scrollable 2-column instrument monitor/control list, top-right is the
+    :class:`TrendsQuadrant`, bottom-left is the :class:`SessionInfoPanel`,
+    and bottom-right is the :class:`OtherDevicesPanel` (plus an optional
+    :class:`CryogenicsPanel`) behind a QComboBox selector. Every splitter
+    boundary is draggable; nothing in the grid can be closed, detached, or
+    floated. Page 2 (Logs) is a :class:`ServicingLogPage` hosting one table
+    per configured servicing-log kind plus the relocated :class:`LogPanel`.
 
     Args:
         station: The active Station instance.
@@ -148,6 +159,18 @@ class MonitorWindow(QMainWindow):
         active_config_path: Path of the currently-active config, or None.
         restart_callback: Called after a confirmed config switch, or None.
         startup_warning: Startup config-fallback warning to surface, or None.
+        session_manager: Optional SessionManager (L6), forwarded to
+            SessionInfoPanel and used for attribution prefills.
+        cryogenics_config: The active config's resolved ``cryogenics:``
+            block (``Station.read_cryogenics_config()``), or None/empty when
+            the setup has no such block. Optional — every existing
+            construction site keeps working unchanged.
+        helium_store: The active setup's HeliumRecordStore, or None.
+        servicing_store: The active setup's ServicingLogStore, or None.
+        servicing_log_kinds: The declared, editable log-kind keys this setup
+            keeps (``Station.read_servicing_logs_config()``), or None/empty.
+        cryogenics_recorder: The active CryogenicsRecorder, or None — only
+            used to connect its ``cryo_warning`` signal to the banner.
     """
 
     def __init__(
@@ -160,12 +183,34 @@ class MonitorWindow(QMainWindow):
         restart_callback: Callable[[], None] | None = None,
         startup_warning: str | None = None,
         session_manager: SessionManager | None = None,
+        cryogenics_config: dict[str, Any] | None = None,
+        helium_store: HeliumRecordStore | None = None,
+        servicing_store: ServicingLogStore | None = None,
+        servicing_log_kinds: list[str] | None = None,
+        cryogenics_recorder: CryogenicsRecorder | None = None,
     ) -> None:
         super().__init__(parent)
         self._station = station
         self._orchestrator = orchestrator
         self._procedure_window = None  # lazily created
         self._diagnostics_window = None  # lazily created
+
+        # Cryogenics management (docs/plans/cryogenics-logbook.md §9/§10),
+        # all optional — every existing construction site (and every prior
+        # test) keeps working with these left at their None defaults, which
+        # simply builds the Logs page with no tables/no Cryogenics panel.
+        self._cryogenics_config = cryogenics_config
+        self._helium_store = helium_store
+        self._servicing_store = servicing_store
+        self._servicing_log_kinds = list(servicing_log_kinds or [])
+        self._cryogenics_recorder = cryogenics_recorder
+        self._cryogenics_panel: CryogenicsPanel | None = None
+        self._cryogenics_enabled = bool(
+            self._cryogenics_config
+            and self._helium_store is not None
+            and self._servicing_store is not None
+            and self._station.has_vi(str(self._cryogenics_config.get("level_vi", "")))
+        )
 
         # Session layer (L6, optional — absent in unit tests). experiment_context()
         # stamps built procedures; the experiment start/close/attendance/findings
@@ -341,11 +386,11 @@ class MonitorWindow(QMainWindow):
         self._banner = NotificationBanner()
         root.addWidget(self._banner)
 
-        # ── Fixed 2x2 quadrant grid ──────────────────────────────────
+        # ── Fixed 2x2 quadrant grid (Page 1 — Monitor) ───────────────
         top_left = self._build_instruments_quadrant()
         self._trends = TrendsQuadrant(self._station, parent=self)
         self._session_info = SessionInfoPanel(session_manager=self._session_manager)
-        bottom_right = self._build_other_devices_log_quadrant(measurement_vis, switch_vis)
+        bottom_right = self._build_bottom_right_quadrant(measurement_vis, switch_vis)
 
         self._left_splitter = QSplitter(Qt.Orientation.Vertical)
         self._left_splitter.setObjectName("left_splitter")
@@ -368,7 +413,26 @@ class MonitorWindow(QMainWindow):
         self._main_splitter.addWidget(self._right_splitter)
         self._main_splitter.setSizes([600, 600])
 
-        root.addWidget(self._main_splitter)
+        # ── Page 2 — Logs ─────────────────────────────────────────────
+        # The application LogPanel is created here and composed into the
+        # Logs page (moved off the bottom-right quadrant); MonitorWindow
+        # still owns its attach()/detach() lifecycle (see __init__/closeEvent).
+        self._log_panel = LogPanel()
+        self._servicing_log_page = ServicingLogPage(
+            self._servicing_store,
+            self._servicing_log_kinds,
+            self._log_panel,
+            get_current_person=self._current_person_for_logs,
+            parent=self,
+        )
+
+        # ── Page switcher: a QStackedWidget driven by the header tab bar ──
+        self._page_stack = QStackedWidget()
+        self._page_stack.setObjectName("page_stack")
+        self._page_stack.addWidget(self._main_splitter)  # page 0: Monitor
+        self._page_stack.addWidget(self._servicing_log_page)  # page 1: Logs
+        root.addWidget(self._page_stack)
+        self._page_tab_bar.currentChanged.connect(self._on_page_changed)
 
         # ── Content widget is the central widget directly (no outer scroll) ──
         self.setCentralWidget(content_widget)
@@ -397,6 +461,17 @@ class MonitorWindow(QMainWindow):
         self._current_user_label.setObjectName("current_user_label")
         self._sync_current_user_label()
         row.addWidget(self._current_user_label)
+
+        # Slim page switcher: Page 1 (Monitor, the quadrant grid, unchanged)
+        # / Page 2 (Logs, ServicingLogPage). Not connected here — the pages
+        # it switches between are built later in _build_ui(); the connection
+        # is made once both exist, at the end of _build_ui().
+        self._page_tab_bar = QTabBar()
+        self._page_tab_bar.setObjectName("page_tab_bar")
+        self._page_tab_bar.addTab("Monitor")
+        self._page_tab_bar.addTab("Logs")
+        self._page_tab_bar.setExpanding(False)
+        row.addWidget(self._page_tab_bar)
 
         row.addStretch()
 
@@ -505,15 +580,17 @@ class MonitorWindow(QMainWindow):
         outer.addWidget(scroll)
         return container
 
-    def _build_other_devices_log_quadrant(
+    def _build_bottom_right_quadrant(
         self, measurement_vis: list[str], switch_vis: list[str]
     ) -> QWidget:
-        """Build the bottom-right quadrant: Other Devices / Log behind a selector.
+        """Build the bottom-right quadrant: Other Devices (+ optional Cryogenics).
 
-        A QComboBox picks which of the two always-built views is visible in
-        the QStackedWidget below it — this keeps the quadrant's footprint
+        A QComboBox picks which of the always-built views is visible in the
+        QStackedWidget below it — this keeps the quadrant's footprint
         constant regardless of how many measurement VIs a station has,
-        rather than showing both stacked and always-visible.
+        rather than showing both stacked and always-visible. The Log view
+        that used to live here has moved to the Logs page (page 2); the
+        Cryogenics entry is added only when ``self._cryogenics_enabled``.
 
         Args:
             measurement_vis: Names of measurement VIs to display in Other Devices.
@@ -523,7 +600,7 @@ class MonitorWindow(QMainWindow):
             A QWidget containing the selector row and the QStackedWidget.
         """
         container = QWidget()
-        container.setObjectName("other_devices_log_quadrant")
+        container.setObjectName("other_devices_quadrant")
         outer = QVBoxLayout(container)
         outer.setContentsMargins(4, 4, 4, 4)
         outer.setSpacing(4)
@@ -532,7 +609,10 @@ class MonitorWindow(QMainWindow):
         selector_row.addWidget(QLabel("<b>View:</b>"))
         self._devices_log_selector = QComboBox()
         self._devices_log_selector.setObjectName("devices_log_selector")
-        self._devices_log_selector.addItems(["Other Devices", "Log"])
+        selector_items = ["Other Devices"]
+        if self._cryogenics_enabled:
+            selector_items.append("Cryogenics")
+        self._devices_log_selector.addItems(selector_items)
         self._devices_log_selector.currentIndexChanged.connect(self._on_devices_log_selector_changed)
         selector_row.addWidget(self._devices_log_selector)
         selector_row.addStretch()
@@ -550,19 +630,57 @@ class MonitorWindow(QMainWindow):
         other_devices_scroll.setWidget(self._other_devices)
         self._devices_log_stack.addWidget(other_devices_scroll)
 
-        self._log_panel = LogPanel()
-        self._devices_log_stack.addWidget(self._log_panel)
+        if self._cryogenics_enabled:
+            self._cryogenics_panel = CryogenicsPanel(
+                self._station,
+                self._orchestrator,
+                dict(self._cryogenics_config or {}),
+                self._helium_store,
+                self._servicing_store,
+                get_data_dir=self.get_data_dir,
+                get_current_person=self._current_person_for_logs,
+                parent=self,
+            )
+            cryo_scroll = QScrollArea()
+            cryo_scroll.setObjectName("cryogenics_scroll")
+            cryo_scroll.setWidgetResizable(True)
+            cryo_scroll.setWidget(self._cryogenics_panel)
+            self._devices_log_stack.addWidget(cryo_scroll)
 
         outer.addWidget(self._devices_log_stack)
         return container
 
     def _on_devices_log_selector_changed(self, index: int) -> None:
-        """Switch the bottom-right quadrant between Other Devices and Log.
+        """Switch the bottom-right quadrant between Other Devices and Cryogenics.
 
         Args:
-            index: The selector's new current index (0 = Other Devices, 1 = Log).
+            index: The selector's new current index (0 = Other Devices,
+                1 = Cryogenics, when present).
         """
         self._devices_log_stack.setCurrentIndex(index)
+
+    def _on_page_changed(self, index: int) -> None:
+        """Switch the central QStackedWidget's page and refresh Logs on show.
+
+        Args:
+            index: The tab bar's new current index (0 = Monitor, 1 = Logs).
+        """
+        self._page_stack.setCurrentIndex(index)
+        if index == 1:
+            self._servicing_log_page.refresh()
+
+    def _current_person_for_logs(self) -> str:
+        """Return the active experiment's user name, for attribution prefill.
+
+        Used to prefill the "Edited by" / "Deleted by" fields on the Logs
+        page and the operator-name field on the Fill helium dialog.
+
+        Returns:
+            The active experiment's user name, or ``""`` when no session
+            layer is wired or no experiment is currently open.
+        """
+        info = self.get_experiment_info()
+        return str(info.get("experiment", {}).get("user_name", ""))
 
     # ------------------------------------------------------------------
     # Public sample-info accessors (used by ProcedureWindow)
@@ -717,8 +835,15 @@ class MonitorWindow(QMainWindow):
         self._orchestrator.action_succeeded.connect(self._on_action_confirmed)
         # Separate from InstrumentPanel's own states_updated connections
         # (each panel connects itself in its constructor) — this slot only
-        # feeds the Trends quadrant and the Other Devices switch rows.
+        # feeds the Trends quadrant, the Other Devices switch rows, and the
+        # optional Cryogenics panel.
         self._orchestrator.states_updated.connect(self._on_states_updated)
+        # run_finished fires only at run boundaries (not every tick), so —
+        # like OtherDevicesPanel's own direct action_succeeded connection —
+        # there is no teardown-race concern connecting it here directly.
+        self._orchestrator.run_finished.connect(self._on_run_finished_for_logs)
+        if self._cryogenics_recorder is not None:
+            self._cryogenics_recorder.cryo_warning.connect(self._on_cryo_warning)
 
     def _on_states_updated(self, state: dict) -> None:
         """Forward the per-tick state snapshot to the Trends and Other Devices panels.
@@ -738,6 +863,22 @@ class MonitorWindow(QMainWindow):
         # Refresh the display-only switch/scanner rows (connection + active
         # route) from the same per-tick snapshot.
         self._other_devices.on_states_updated(state)
+        if self._cryogenics_panel is not None:
+            self._cryogenics_panel.on_states_updated(state)
+
+    def _on_run_finished_for_logs(self, _manifest: dict) -> None:
+        """Refresh the Logs page's tables after any run finishes.
+
+        A run's manifest (procedure or operation) may have just produced a
+        new servicing-log entry via the CryogenicsRecorder (connected ahead
+        of this in main.py, so its write always lands before this refresh
+        reads); cheap to call even when nothing changed.
+        """
+        self._servicing_log_page.refresh()
+
+    def _on_cryo_warning(self, message: str) -> None:
+        """Surface the recorder's low-helium advisory via the existing banner."""
+        self._banner.show_message(message, BANNER_SEVERITY_WARNING)
 
     def _on_state_changed(self, state_name: str) -> None:
         """Update the status bar label and colour level when state changes.
