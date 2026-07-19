@@ -1,11 +1,15 @@
 # Configuration for the 12T-Cryo setup
-# Instruments: Oxford Mercury iPS (magnet), Oxford ITC 503 (VTI temperature),
-# Lakeshore 335 (sample temperature), Keithley 6220 (source), Keithley 2182A (meter).
+# Instruments: Oxford Mercury iPS (magnet, z-axis), Oxford ITC 503 (VTI temperature),
+# Oxford ILM 210 (helium level), Lakeshore 335 (sample temperature),
+# Keithley 705 (scanner, driver only — no VI wired yet, see note below),
+# Keithley 6220 (source), Keithley 2182A (meter).
 #
 # Calibration:
 #   TESLA_TO_AMPERE = 7.954  A/T
 #   Mercury iPS: ±90 A = ±12 T max
-#   Magnet currently in persistent mode (not energized during commissioning)
+#   Magnet leads connected to the coil + persistent switch heater (2026-07-20);
+#   see setup.md "Safe testing limits (overrides)" for the switch-heater
+#   diagnostic exception (small field only, PSU/magnet current confirmed matched).
 
 # Default data directory (outside CryoSoft folder)
 data_directory: "C:/CryoData"
@@ -16,13 +20,18 @@ real_drivers:
     address: "ASRL5::INSTR"
     expect_idn: "MERCURY IPS"
   
-  # BLOCKED: OxfordITC503 pymeasure integration issue (C3 command fails)
-  # Requires investigation into pymeasure serial parameters
-  # itc_vti:
-  #   class: cryosoft.drivers.oxford_itc503.OxfordITC503
-  #   address: "ASRL12::INSTR"
-  #   expect_idn: "ITC503"
-  
+  itc_vti:
+    class: cryosoft.drivers.oxford_itc503.OxfordITC503
+    address: "ASRL12::INSTR"
+    expect_idn: "ITC503"
+
+  # ID string is "ILM200 Version 1.06" (legacy/compatible string reused across
+  # the ILM200/210 family) — physical unit confirmed to be an ILM 210.
+  ilm_210:
+    class: cryosoft.drivers.oxford_ilm210.OxfordILM210
+    address: "ASRL11::INSTR"
+    expect_idn: "ILM200"
+
   lakeshore_sample:
     class: cryosoft.drivers.lakeshore_335.Lakeshore335
     address: "GPIB0::30::INSTR"
@@ -33,6 +42,11 @@ real_drivers:
     address: "GPIB0::19::INSTR"
     expect_idn: "KEITHLEY INSTRUMENTS INC.,MODEL 6220"
   
+  # NOTE: no switch_matrix VI wired to this yet — the real Keithley705 driver's
+  # DDC channel-spec format (close/open commands) is UNVERIFIED against
+  # hardware (see cryosoft/drivers/keithley_705.py docstring). Do not add
+  # routes until the command syntax is confirmed against the 705 manual at
+  # the bench.
   keithley_705:
     class: cryosoft.drivers.keithley_705.Keithley705
     address: "GPIB0::17::INSTR"
@@ -43,7 +57,7 @@ real_drivers:
   # No separate driver entry needed — K6220 driver handles both instruments.
 
 virtual_instruments:
-  magnet_x:
+  magnet_z:
     class: cryosoft.virtual_instruments.magnet.superconducting_magnet_persistent.SuperconductingMagnetPersistentVI
     drivers: {main: mercury_ips}
     vi_type: system
@@ -53,24 +67,31 @@ virtual_instruments:
       min_current: -90.0
       default_ramp_rate: 1.2
       ramp_segments:
-        - {max_current_A: 44.0,  rate_A_per_min: 12.0}
-        - {max_current_A: 76.0,  rate_A_per_min: 6.0}
-        - {max_current_A: 84.0,  rate_A_per_min: 2.4}
-        - {max_current_A: 90.0,  rate_A_per_min: 1.2}
+        - {max_current_A: 44.0,  rate_A_per_min: 6.0}
+        - {max_current_A: 76.0,  rate_A_per_min: 4.0}
+        - {max_current_A: 84.0,  rate_A_per_min: 2.0}
+        - {max_current_A: 90.0,  rate_A_per_min: 1.0}
       switch_heater_warmup_s: 60
       switch_heater_cooldown_s: 60
 
-  # BLOCKED: Requires itc_vti driver (pymeasure issue)
-  # temperature_vti:
-  #   class: cryosoft.virtual_instruments.temperature.vti_temperature_controller.VTITemperatureControllerVI
-  #   drivers: {main: itc_vti}
-  #   vi_type: system
-  #   init_params:
-  #     default_ramp_rate: 2.0
-  #     tolerance: 0.5
-  #     min_temperature_K: 1.4
-  #     max_temperature_K: 320.0
-  #     max_ramp_rate_K_per_min: 20.0
+  temperature_vti:
+    class: cryosoft.virtual_instruments.temperature.vti_temperature_controller.VTITemperatureControllerVI
+    drivers: {main: itc_vti}
+    vi_type: system
+    init_params:
+      default_ramp_rate: 2.0
+      tolerance: 1.0
+      min_temperature_K: 1.4
+      max_temperature_K: 320.0
+      max_ramp_rate_K_per_min: 20.0
+
+  level_meter:
+    class: cryosoft.virtual_instruments.level.cryogen_level_meter.CryogenLevelMeterVI
+    drivers: {main: ilm_210}
+    vi_type: level
+    init_params:
+      helium_low_threshold: 35.0
+      buffer_size: 5
 
   temperature_sample:
     class: cryosoft.virtual_instruments.temperature.sample_temperature_controller.SampleTemperatureControllerVI
@@ -88,3 +109,39 @@ virtual_instruments:
     drivers: {source: keithley_6220, meter: keithley_6220}  # serial relay to K2182A
     vi_type: measurement
     init_params: {}
+
+# Cryogenics: the helium-fill operation, the consumption display, and the
+# automatic level recorder are all built around level_vi (docs/plans/
+# cryogenics-logbook.md §9).
+cryogenics:
+  level_vi: level_meter
+  # Advisory "a fill is coming due" level. Must sit ABOVE the level VI's
+  # helium_low_threshold (35.0) so the warning fires before the low alarm.
+  helium_warning_pct: 50.0
+  fill_target_pct: 90.0
+  fill_zero_field_eps_T: 0.005
+  fill_zero_field_window_s: 10.0
+  fill_complete_window_s: 120.0
+  max_fill_duration_s: 3600.0
+  sample_period_s: 10.0          # fill-time sampling (FAST mode)
+  history_sample_s: 3600.0       # helium record cadence -- hourly
+  # helium_volume_l intentionally omitted: the 12 T dewar's usable volume is
+  # not yet measured. Absence means "no L/h display", not "0 L". Add it once
+  # the figure is confirmed to enable consumption in litres/hour.
+
+servicing_logs:                  # which declared log kinds this setup keeps
+  - cryogenics
+
+# Cryostat-servicing operations (docs/plans/cryogenics-logbook.md §9). Each
+# named sub-block configures one OperationBase subclass; a setup that omits
+# an operation's block still gets that operation's class-level defaults.
+operations:
+  sample_change:
+    vti_vi: temperature_vti
+    target_temperature_K: 300.0
+    temperature_tolerance_K: 2.0
+    temperature_window_s: 60.0
+    zero_field_eps_T: 0.005
+    zero_field_window_s: 10.0
+    needle_valve: manual           # "manual" -> operator confirmation; a VI-capability ref is future work
+    postcondition_timeout_s: 7200.0
