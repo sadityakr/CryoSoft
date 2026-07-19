@@ -408,6 +408,34 @@ def test_confirm_operation_blocked_when_no_operation_running(orchestrator, stati
     assert "no operation" in blocked[0].lower()
 
 
+def test_confirm_operation_rejected_key_is_a_verdict_not_a_crash(
+    orchestrator, station, qtbot
+):
+    """A confirm() that raises (undeclared key) yields action_blocked, never raises.
+
+    confirm_operation() is called directly from GUI code, where an unhandled
+    exception in a Qt slot would abort the whole process — the guard turns a
+    rejected key into an explicit verdict instead.
+    """
+
+    class RejectingOperation(SimpleOperation):
+        def confirm(self, key: str) -> None:
+            raise ValueError(f"unknown confirmation key {key!r}")
+
+    blocked: list[str] = []
+    orchestrator.action_blocked.connect(blocked.append)
+    op = RejectingOperation(station)
+    orchestrator.run_operation(op)
+    assert orchestrator._procedure is op
+
+    orchestrator.confirm_operation("not_a_declared_key")  # must not raise
+    assert blocked
+    assert "not_a_declared_key" in blocked[0]
+
+    orchestrator.finish_operation()
+    qtbot.waitUntil(lambda: orchestrator._procedure is None, timeout=2000)
+
+
 # ── Capability-scope enforcement at dispatch ──────────────────────────────
 
 

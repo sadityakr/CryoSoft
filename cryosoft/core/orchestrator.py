@@ -666,7 +666,15 @@ class Orchestrator(QObject):
             return
         confirm = getattr(self._procedure, "confirm", None)
         if callable(confirm):
-            confirm(key)
+            # Guarded: this is called directly from GUI code, where an
+            # unhandled exception in a Qt slot would abort the process. An
+            # undeclared key is refused with a verdict, never raised.
+            try:
+                confirm(key)
+            except Exception as exc:  # noqa: BLE001 — verdict, not crash
+                logger.error("confirm_operation(%r) rejected: %s", key, exc)
+                self.action_blocked.emit(f"Cannot confirm {key!r}: {exc}")
+                return
         self._emit_status(f"Confirmed: {key}")
 
     def recover_from_error(self) -> None:
