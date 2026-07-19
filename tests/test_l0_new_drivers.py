@@ -177,6 +177,97 @@ class TestSimOxfordITC503NeedleValve:
         assert isinstance(d.get_heater_output(), float)
 
 
+class TestSimOxfordITC503PIDAndManualControl:
+    """Tests for the new control mode, manual output, and PID setting methods on SimOxfordITC503."""
+
+    def test_heater_mode_set_and_get(self):
+        from cryosoft.drivers.sim_oxford_itc503 import SimOxfordITC503
+        d = SimOxfordITC503("SIM")
+        assert d.get_heater_mode() == "AUTO"  # Default
+        d.set_heater_mode("MANUAL")
+        assert d.get_heater_mode() == "MANUAL"
+        d.set_heater_mode("AUTO")
+        assert d.get_heater_mode() == "AUTO"
+        with pytest.raises(ValueError):
+            d.set_heater_mode("INVALID")
+
+    def test_needle_valve_mode_set_and_get(self):
+        from cryosoft.drivers.sim_oxford_itc503 import SimOxfordITC503
+        d = SimOxfordITC503("SIM")
+        assert d.get_needle_valve_mode() == "AUTO"  # Default
+        d.set_needle_valve_mode("MANUAL")
+        assert d.get_needle_valve_mode() == "MANUAL"
+        d.set_needle_valve_mode("AUTO")
+        assert d.get_needle_valve_mode() == "AUTO"
+        with pytest.raises(ValueError):
+            d.set_needle_valve_mode("INVALID")
+
+    def test_manual_heater_output(self):
+        from cryosoft.drivers.sim_oxford_itc503 import SimOxfordITC503
+        d = SimOxfordITC503("SIM")
+        d.set_heater_output(55.5)
+        # In AUTO mode, heater output is calculated based on setpoint/temperature
+        assert d.get_heater_output() != pytest.approx(55.5)
+        
+        # Switch to MANUAL mode
+        d.set_heater_mode("MANUAL")
+        assert d.get_heater_output() == pytest.approx(55.5)
+
+        # Test limits
+        d.set_heater_output(150.0)
+        assert d.get_heater_output() == pytest.approx(99.9)  # clamped
+        d.set_heater_output(-10.0)
+        assert d.get_heater_output() == pytest.approx(0.0)   # clamped
+
+    def test_manual_heater_simulation_temperatures(self):
+        import time
+        from cryosoft.drivers.sim_oxford_itc503 import SimOxfordITC503
+        d = SimOxfordITC503("SIM")
+        d.set_heater_mode("MANUAL")
+        d.set_heater_output(50.0)
+        # T_target = 4.2 + (50 / 99.9) * 295.8 = ~152.2 K
+        d._temperature = 300.0
+        d._last_update = time.time() - 3600.0  # 1 hour
+        d._update_simulation()
+        assert d.get_temperature() == pytest.approx(152.2, abs=0.5)
+
+    def test_pid_settings(self):
+        from cryosoft.drivers.sim_oxford_itc503 import SimOxfordITC503
+        d = SimOxfordITC503("SIM")
+        
+        # Proportional Band
+        assert d.get_proportional_band() == pytest.approx(0.0)
+        d.set_proportional_band(100.5)
+        assert d.get_proportional_band() == pytest.approx(100.5)
+        d.set_proportional_band(2000.0)
+        assert d.get_proportional_band() == pytest.approx(1677.7)  # clamped
+        d.set_proportional_band(-5.0)
+        assert d.get_proportional_band() == pytest.approx(0.0)
+
+        # Integral Action Time
+        assert d.get_integral_action_time() == pytest.approx(0.0)
+        d.set_integral_action_time(35.0)
+        assert d.get_integral_action_time() == pytest.approx(35.0)
+        d.set_integral_action_time(200.0)
+        assert d.get_integral_action_time() == pytest.approx(140.0)  # clamped
+        d.set_integral_action_time(-2.0)
+        assert d.get_integral_action_time() == pytest.approx(0.0)
+
+        # Derivative Action Time
+        assert d.get_derivative_action_time() == pytest.approx(0.0)
+        d.set_derivative_action_time(45.0)
+        assert d.get_derivative_action_time() == pytest.approx(45.0)
+        d.set_derivative_action_time(300.0)
+        assert d.get_derivative_action_time() == pytest.approx(273.0)  # clamped
+        d.set_derivative_action_time(-10.0)
+        assert d.get_derivative_action_time() == pytest.approx(0.0)
+
+        # Auto-PID
+        assert d.get_auto_pid() is True
+        d.set_auto_pid(False)
+        assert d.get_auto_pid() is False
+
+
 class TestSimOxfordILM200ThreeMode:
     """Tests for the extended 3-mode standard on SimOxfordILM200."""
 

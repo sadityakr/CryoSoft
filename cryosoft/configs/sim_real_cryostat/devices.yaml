@@ -26,7 +26,7 @@ real_drivers:
     class: cryosoft.drivers.sim_oxford_itc503.SimOxfordITC503
     address: "SIM::ITC_VTI"
   lakeshore_sample:
-    class: cryosoft.drivers.sim_oxford_itc503.SimOxfordITC503
+    class: cryosoft.drivers.sim_lakeshore_335.SimLakeshore335
     address: "SIM::LAKESHORE_SAMPLE"
   ilm:
     class: cryosoft.drivers.sim_oxford_ilm200.SimOxfordILM200

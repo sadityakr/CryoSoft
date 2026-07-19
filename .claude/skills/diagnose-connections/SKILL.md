@@ -39,7 +39,7 @@ python .claude/skills/diagnose-connections/serial_scan.py --port COM3
 python .claude/skills/diagnose-connections/serial_scan.py --json
 ```
 
-Returns: available ports, device identity (if responds to `*IDN?`), open/unavailable status.
+Returns: available ports, device identity (if responds to `*IDN?` or falls back to an Oxford-specific legacy identity probe), open/unavailable status.
 
 ### `device-query` — send a read-only command to a specific instrument
 
@@ -69,7 +69,7 @@ python .claude/skills/diagnose-connections/connection_status.py --stdout
 python .claude/skills/diagnose-connections/connection_status.py --addresses "gpib0::5 gpib0::24 COM3"
 ```
 
-Returns: a JSON object with timestamp, each instrument's status (connected/unavailable), and last successful query.
+Returns: a JSON object with timestamp, each instrument's status (connected/unavailable), and last successful query. For serial ports, ITC503 devices are now detected even when they do not support `*IDN?` by falling back to Oxford-specific identity probes.
 
 ## How to use from agents
 

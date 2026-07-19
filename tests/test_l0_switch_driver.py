@@ -70,3 +70,20 @@ def test_simulate_error_raises():
         d.get_idn()
     with pytest.raises(CryoSoftCommunicationError):
         d.closed_channels()
+
+
+def test_four_point_mode():
+    d = SimKeithley705("SIM")
+    assert d._pole_mode == 2  # Default
+    d.set_four_point_mode()
+    assert d._pole_mode == 4
+
+
+def test_single_channel_close_and_open():
+    d = SimKeithley705("SIM")
+    d.close_channel("5")
+    assert d.closed_channels() == ["5"]
+    d.close_channel("12")
+    assert d.closed_channels() == ["12"]
+    d.open_channel("12")
+    assert d.closed_channels() == []

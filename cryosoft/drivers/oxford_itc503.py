@@ -66,7 +66,8 @@ class OxfordITC503:
             ) from exc
 
         try:
-            self._itc = ITC503(resource_string)
+            self._itc = ITC503(resource_string, clear_buffer=False)
+            self._itc.adapter.connection.write_termination = "\r"
             # Enable programmatic control — essential for set_setpoint() to work
             self._itc.control_mode = "RU"   # Remote Unlocked
             self._itc.heater_gas_mode = "AUTO"
@@ -162,10 +163,10 @@ class OxfordITC503:
             Float in [0.0, 100.0].
         """
         try:
-            return float(self._itc.gas_flow)
+            return float(self._itc.gasflow)
         except Exception as exc:
             raise CryoSoftCommunicationError(
-                f"ITC503: could not read gas_flow: {exc}",
+                f"ITC503: could not read gasflow: {exc}",
                 vi_name="OxfordITC503",
             ) from exc
 
@@ -177,9 +178,191 @@ class OxfordITC503:
         """
         clamped = max(0.0, min(99.9, position))
         try:
-            self._itc.gas_flow = clamped
+            self._itc.gasflow = clamped
         except Exception as exc:
             raise CryoSoftCommunicationError(
-                f"ITC503: could not set gas_flow to {clamped}: {exc}",
+                f"ITC503: could not set gasflow to {clamped}: {exc}",
+                vi_name="OxfordITC503",
+            ) from exc
+
+    def set_heater_output(self, output: float) -> None:
+        """Set the manual heater output percentage.
+
+        Args:
+            output: Percent of maximum voltage/power in [0.0, 99.9].
+        """
+        clamped = max(0.0, min(99.9, output))
+        try:
+            self._itc.heater = clamped
+        except Exception as exc:
+            raise CryoSoftCommunicationError(
+                f"ITC503: could not set heater output to {clamped}: {exc}",
+                vi_name="OxfordITC503",
+            ) from exc
+
+    def get_heater_mode(self) -> str:
+        """Return the heater control mode ('MANUAL' or 'AUTO')."""
+        try:
+            mode = self._itc.heater_gas_mode
+            if mode in ("AUTO", "AM"):
+                return "AUTO"
+            return "MANUAL"
+        except Exception as exc:
+            raise CryoSoftCommunicationError(
+                f"ITC503: could not read heater mode: {exc}",
+                vi_name="OxfordITC503",
+            ) from exc
+
+    def set_heater_mode(self, mode: str) -> None:
+        """Set the heater control mode to 'MANUAL' or 'AUTO'.
+
+        Args:
+            mode: Must be 'MANUAL' or 'AUTO'.
+        """
+        if mode not in ("MANUAL", "AUTO"):
+            raise ValueError(f"Heater mode must be 'MANUAL' or 'AUTO', got {mode}")
+        try:
+            current_gas = self.get_needle_valve_mode()
+            if mode == "AUTO":
+                new_mode = "AUTO" if current_gas == "AUTO" else "AM"
+            else:
+                new_mode = "MA" if current_gas == "AUTO" else "MANUAL"
+            self._itc.heater_gas_mode = new_mode
+        except Exception as exc:
+            raise CryoSoftCommunicationError(
+                f"ITC503: could not set heater mode to {mode}: {exc}",
+                vi_name="OxfordITC503",
+            ) from exc
+
+    def get_needle_valve_mode(self) -> str:
+        """Return the needle valve control mode ('MANUAL' or 'AUTO')."""
+        try:
+            mode = self._itc.heater_gas_mode
+            if mode in ("AUTO", "MA"):
+                return "AUTO"
+            return "MANUAL"
+        except Exception as exc:
+            raise CryoSoftCommunicationError(
+                f"ITC503: could not read needle valve mode: {exc}",
+                vi_name="OxfordITC503",
+            ) from exc
+
+    def set_needle_valve_mode(self, mode: str) -> None:
+        """Set the needle valve control mode to 'MANUAL' or 'AUTO'.
+
+        Args:
+            mode: Must be 'MANUAL' or 'AUTO'.
+        """
+        if mode not in ("MANUAL", "AUTO"):
+            raise ValueError(f"Needle valve mode must be 'MANUAL' or 'AUTO', got {mode}")
+        try:
+            current_heater = self.get_heater_mode()
+            if mode == "AUTO":
+                new_mode = "AUTO" if current_heater == "AUTO" else "MA"
+            else:
+                new_mode = "AM" if current_heater == "AUTO" else "MANUAL"
+            self._itc.heater_gas_mode = new_mode
+        except Exception as exc:
+            raise CryoSoftCommunicationError(
+                f"ITC503: could not set needle valve mode to {mode}: {exc}",
+                vi_name="OxfordITC503",
+            ) from exc
+
+    def get_proportional_band(self) -> float:
+        """Return the proportional band in Kelvin."""
+        try:
+            return float(self._itc.proportional_band)
+        except Exception as exc:
+            raise CryoSoftCommunicationError(
+                f"ITC503: could not read proportional band: {exc}",
+                vi_name="OxfordITC503",
+            ) from exc
+
+    def set_proportional_band(self, pb: float) -> None:
+        """Set the proportional band in Kelvin.
+
+        Args:
+            pb: Proportional band in Kelvin. Must be in [0.0, 1677.7].
+        """
+        clamped = max(0.0, min(1677.7, pb))
+        try:
+            self._itc.proportional_band = clamped
+        except Exception as exc:
+            raise CryoSoftCommunicationError(
+                f"ITC503: could not set proportional band to {clamped}: {exc}",
+                vi_name="OxfordITC503",
+            ) from exc
+
+    def get_integral_action_time(self) -> float:
+        """Return the integral action time in minutes."""
+        try:
+            return float(self._itc.integral_action_time)
+        except Exception as exc:
+            raise CryoSoftCommunicationError(
+                f"ITC503: could not read integral action time: {exc}",
+                vi_name="OxfordITC503",
+            ) from exc
+
+    def set_integral_action_time(self, iat: float) -> None:
+        """Set the integral action time in minutes.
+
+        Args:
+            iat: Integral action time in minutes. Must be in [0.0, 140.0].
+        """
+        clamped = max(0.0, min(140.0, iat))
+        try:
+            self._itc.integral_action_time = clamped
+        except Exception as exc:
+            raise CryoSoftCommunicationError(
+                f"ITC503: could not set integral action time to {clamped}: {exc}",
+                vi_name="OxfordITC503",
+            ) from exc
+
+    def get_derivative_action_time(self) -> float:
+        """Return the derivative action time in minutes."""
+        try:
+            return float(self._itc.derivative_action_time)
+        except Exception as exc:
+            raise CryoSoftCommunicationError(
+                f"ITC503: could not read derivative action time: {exc}",
+                vi_name="OxfordITC503",
+            ) from exc
+
+    def set_derivative_action_time(self, dat: float) -> None:
+        """Set the derivative action time in minutes.
+
+        Args:
+            dat: Derivative action time in minutes. Must be in [0.0, 273.0].
+        """
+        clamped = max(0.0, min(273.0, dat))
+        try:
+            self._itc.derivative_action_time = clamped
+        except Exception as exc:
+            raise CryoSoftCommunicationError(
+                f"ITC503: could not set derivative action time to {clamped}: {exc}",
+                vi_name="OxfordITC503",
+            ) from exc
+
+    def get_auto_pid(self) -> bool:
+        """Return whether Auto-PID is enabled."""
+        try:
+            return bool(self._itc.auto_pid)
+        except Exception as exc:
+            raise CryoSoftCommunicationError(
+                f"ITC503: could not read auto_pid status: {exc}",
+                vi_name="OxfordITC503",
+            ) from exc
+
+    def set_auto_pid(self, enabled: bool) -> None:
+        """Enable or disable Auto-PID control.
+
+        Args:
+            enabled: True to enable Auto-PID, False to disable.
+        """
+        try:
+            self._itc.auto_pid = bool(enabled)
+        except Exception as exc:
+            raise CryoSoftCommunicationError(
+                f"ITC503: could not set auto_pid to {enabled}: {exc}",
                 vi_name="OxfordITC503",
             ) from exc

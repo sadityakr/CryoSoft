@@ -302,11 +302,12 @@ def enumerate_serial_ports(test_query: bool = True, timeout_ms: int = 500) -> li
             "description": port_info.description,
             "available": True,
             "device": None,
+            "device_type": None,
             "error": None,
         }
 
         if test_query:
-            # Try a brief query; if it times out or errors, mark as unavailable
+            # Try a brief generic query; if it times out or errors, fallback to Oxford instrument discovery.
             try:
                 import serial
 
@@ -316,9 +317,15 @@ def enumerate_serial_ports(test_query: bool = True, timeout_ms: int = 500) -> li
                 ser.close()
                 if response:
                     port_data["device"] = response[:80]
+                    port_data["device_type"] = "Generic"
                 else:
-                    port_data["available"] = False
-                    port_data["error"] = "No response to *IDN?"
+                    oxford_info = discover_oxford_instrument(port_name, timeout_ms=timeout_ms)
+                    if oxford_info:
+                        port_data["device"] = f"{oxford_info['instrument_type']}: {oxford_info['parsed']}"
+                        port_data["device_type"] = oxford_info["instrument_type"]
+                    else:
+                        port_data["available"] = False
+                        port_data["error"] = "No response to *IDN? or Oxford identity commands"
             except Exception as e:
                 port_data["available"] = False
                 port_data["error"] = str(e)
@@ -415,6 +422,31 @@ def query_oxford_instrument(
         }
 
 
+def discover_oxford_instrument(port: str, baudrate: int = 9600, timeout_ms: int = 500) -> Optional[dict]:
+    """Try Oxford instrument identity commands on a serial port.
+
+    If a device does not respond to a generic *IDN? query, many Oxford instruments
+    can still be identified by type-specific legacy commands.
+
+    Args:
+        port: Serial port name (e.g., "COM12").
+        baudrate: Baud rate to use for all Oxford probes.
+        timeout_ms: Timeout in milliseconds for each probe.
+
+    Returns:
+        Dict with instrument_type, response, and parsed keys if detected; otherwise None.
+    """
+    for instrument_type in OXFORD_COMMANDS:
+        result = query_oxford_instrument(port, instrument_type, "identity", baudrate, timeout_ms)
+        if result["success"]:
+            return {
+                "instrument_type": instrument_type,
+                "response": result["response"],
+                "parsed": result["parsed"],
+            }
+    return None
+
+
 def parse_oxford_response(response: str, instrument_type: str, command: str) -> str:
     """Parse Oxford instrument response and extract readable info.
 
@@ -499,6 +531,8 @@ def format_human_readable(devices_or_ports, resource_type: str = "GPIB") -> str:
         for port_info in devices_or_ports:
             status = "✓" if port_info["available"] else "✗"
             lines.append(f"  {status} {port_info['port']:8s} - {port_info.get('description', 'N/A')}")
+            if port_info.get("device_type") and port_info["device_type"] != "Generic":
+                lines.append(f"       Type: {port_info['device_type']}")
             if port_info["device"]:
                 lines.append(f"       Device: {port_info['device']}")
             if port_info["error"]:

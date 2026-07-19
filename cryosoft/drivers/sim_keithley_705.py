@@ -55,6 +55,7 @@ class SimKeithley705:
         """
         _ = resource_string  # Explicitly ignored per driver contract
         self._closed: set[str] = set()
+        self._pole_mode: int = 2  # Default 2-pole configuration
         self._simulate_error: bool = False
 
     # ------------------------------------------------------------------
@@ -113,3 +114,27 @@ class SimKeithley705:
                 "Simulated communication error on Keithley 705",
                 vi_name="SimKeithley705",
             )
+
+    def set_four_point_mode(self) -> None:
+        """Set the simulated scanner to 4-pole (4-point) mode."""
+        self._check_error()
+        self._pole_mode = 4
+
+    def close_channel(self, channel: str) -> None:
+        """Open all channels first (exclusive mux) and close a single channel.
+
+        Args:
+            channel: Channel specification string (e.g. "1").
+        """
+        self._check_error()
+        self._closed.clear()
+        self._closed.add(str(channel))
+
+    def open_channel(self, channel: str) -> None:
+        """Open (disconnect) a single channel.
+
+        Args:
+            channel: Channel specification string (e.g. "1").
+        """
+        self._check_error()
+        self._closed.discard(str(channel))
