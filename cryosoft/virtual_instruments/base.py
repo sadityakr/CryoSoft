@@ -164,6 +164,9 @@ class BaseVirtualInstrument:
                     wrapped._is_control = True
                     wrapped._display_name = getattr(attr_value, "_display_name", attr_name)
                     wrapped._control_params = getattr(attr_value, "_control_params", {})
+                    wrapped._control_scope = getattr(
+                        attr_value, "_control_scope", "measurement"
+                    )
                 setattr(cls, attr_name, wrapped)
 
     # ------------------------------------------------------------------

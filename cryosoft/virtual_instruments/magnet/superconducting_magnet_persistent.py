@@ -305,7 +305,7 @@ class SuperconductingMagnetPersistentVI(SuperconductingMagnetVI):
     # @control methods — persistent-mode toggle and manual switch heater
     # ------------------------------------------------------------------
 
-    @control
+    @control(scope="operation")
     def enable_persistent_mode(self) -> None:
         """Enter persistent mode: unlock manual switch-heater / PSU control.
 
@@ -315,7 +315,7 @@ class SuperconductingMagnetPersistentVI(SuperconductingMagnetVI):
         """
         self._persistent_mode_enabled = True
 
-    @control
+    @control(scope="operation")
     def disable_persistent_mode(self) -> None:
         """Return to normal operation. Refused unless the switch heater is on.
 
@@ -336,7 +336,7 @@ class SuperconductingMagnetPersistentVI(SuperconductingMagnetVI):
             )
         self._persistent_mode_enabled = False
 
-    @control
+    @control(scope="operation")
     def switch_heater_on(self) -> None:
         """Energise the switch heater (manual; persistent mode only).
 
@@ -366,7 +366,7 @@ class SuperconductingMagnetPersistentVI(SuperconductingMagnetVI):
             )
         self._energize_heater()
 
-    @control
+    @control(scope="operation")
     def switch_heater_off(self) -> None:
         """De-energise the switch heater (manual; persistent mode only).
 

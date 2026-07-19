@@ -5,6 +5,9 @@
 #   process_system_targets() / check_ramps() / stop_ramps() used by the
 #   Orchestrator, and check_safety(state) which aggregates each VI's
 #   evaluate_safety() verdict from an existing snapshot (no extra poll).
+#   send_measurement_commands() also enforces the capability-scope standard:
+#   an "operation"-scope @control method is refused (CryoSoftSafetyError,
+#   nothing dispatched) unless the caller passes allowed_scope="operation".
 #   build_station() is the factory that constructs the full instrument stack
 #   from a YAML config directory.
 # entry_point: Not run directly; used by Orchestrator and GUI.
@@ -23,7 +26,7 @@
 #   After max_errors consecutive failures, _disconnected=True is added.
 # output: |
 #   Full station state dict {vi_name: {field: value, ...}} every poll cycle.
-# last_updated: 2026-07-13
+# last_updated: 2026-07-19
 # ---
 
 """Station class — runtime registry of all Virtual Instruments.
@@ -42,7 +45,11 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from cryosoft.core.exceptions import CryoSoftCommunicationError, CryoSoftConfigError
+from cryosoft.core.exceptions import (
+    CryoSoftCommunicationError,
+    CryoSoftConfigError,
+    CryoSoftSafetyError,
+)
 from cryosoft.core.plan import Command, Target
 from cryosoft.virtual_instruments.base import BaseVirtualInstrument
 from cryosoft.virtual_instruments.rampable import RampableVI
@@ -526,7 +533,9 @@ class Station:
     # Measurement command dispatch
     # ------------------------------------------------------------------
 
-    def send_measurement_commands(self, commands: Sequence[Command]) -> None:
+    def send_measurement_commands(
+        self, commands: Sequence[Command], *, allowed_scope: str = "measurement"
+    ) -> None:
         """Dispatch an ordered sequence of ``Command`` calls to VIs.
 
         Commands are dispatched in order (order is semantically meaningful —
@@ -534,14 +543,35 @@ class Station:
         or an unknown method is logged at WARNING and skipped; an exception
         raised by the VI method itself propagates to the caller.
 
+        Capability-scope enforcement (the standard in GLOSSARY.md's
+        "Capability scope" entry): every command's target method is resolved
+        and its ``@control`` scope checked BEFORE any command in the batch is
+        dispatched. A method requiring ``"operation"`` scope when
+        *allowed_scope* is ``"measurement"`` rejects the whole batch — the
+        plan is refused before any hardware is touched, exactly like an
+        envelope violation. An undecorated method (no ``@control``, e.g. a
+        measurement VI's ``initiate``/``standby`` lifecycle) defaults to
+        ``"measurement"`` scope.
+
         Args:
             commands: Ordered sequence of ``Command`` objects to dispatch.
+            allowed_scope: The submitting plan's capability scope —
+                ``"measurement"`` (default, procedures) or ``"operation"``
+                (operations; operation-scope plans may also carry
+                measurement-scope commands).
+
+        Raises:
+            CryoSoftSafetyError: If any command's target method requires a
+                capability scope not covered by *allowed_scope*. Nothing is
+                dispatched.
         """
+        resolved: list[tuple[Command, Any]] = []
         for cmd in commands:
-            if cmd.vi_name not in self._virtual_instruments:
+            vi = self._virtual_instruments.get(cmd.vi_name)
+            if vi is None:
                 logger.warning("send_measurement_commands: unknown VI '%s'", cmd.vi_name)
+                resolved.append((cmd, None))
                 continue
-            vi = self._virtual_instruments[cmd.vi_name]
             method = getattr(vi, cmd.method, None)
             if method is None:
                 logger.warning(
@@ -549,6 +579,20 @@ class Station:
                     cmd.vi_name,
                     cmd.method,
                 )
+                resolved.append((cmd, None))
+                continue
+            required_scope = getattr(method, "_control_scope", "measurement")
+            if required_scope == "operation" and allowed_scope != "operation":
+                raise CryoSoftSafetyError(
+                    f"send_measurement_commands: '{cmd.vi_name}.{cmd.method}' "
+                    f"requires operation-scope access, but this plan is "
+                    f"{allowed_scope}-scope. Command refused before dispatch."
+                )
+            resolved.append((cmd, method))
+
+        # Validated as a whole batch above — now dispatch, in order.
+        for cmd, method in resolved:
+            if method is None:
                 continue
             logger.debug("Calling %s.%s(%s)", cmd.vi_name, cmd.method, cmd.kwargs)
             method(**cmd.kwargs)

@@ -144,7 +144,7 @@ forbidden_modules = [
 [[tool.importlinter.contracts]]
 name = "C6: procedures are hardware-blind — no drivers, no VIs, no Orchestrator, no GUI"
 type = "forbidden"
-source_modules = ["cryosoft.procedures", "cryosoft.core.procedure"]
+source_modules = ["cryosoft.procedures", "cryosoft.core.procedure", "cryosoft.core.operation"]
 # Same pass-through exemption as C5: procedures may import the Station, and the
 # Station's own VI imports do not make procedures hardware-aware.
 ignore_imports = ["cryosoft.core.station -> cryosoft.virtual_instruments.*"]

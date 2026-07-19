@@ -99,7 +99,7 @@ class CryogenLevelMeterVI(LevelMeterBase):
     # @control methods
     # ------------------------------------------------------------------
 
-    @control
+    @control(scope="operation")
     def set_refresh_rate(self, mode: int) -> None:
         """Set the refresh rate mode.
 
