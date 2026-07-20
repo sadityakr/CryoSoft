@@ -33,8 +33,8 @@ a diagnosis is *derived*, not guessed.
    expected, what happened instead, when it started, what changed recently
    (check `LOGBOOK.md` and recent commits).
 2. **Gather passive evidence first** (no instrument I/O): tail
-   `cryosoft/logs/cryosoft.log` around the failure time; check
-   `cryosoft/logs/troubleshoot.jsonl` for recent diagnostics; look for
+   `<AppData>/CryoSoft/logs/cryosoft.log` around the failure time; check
+   `<AppData>/CryoSoft/logs/troubleshoot.jsonl` for recent diagnostics; look for
    `_stale` / `_disconnected` flags mentioned in the log.
 3. **Run the preflight:** `python -m cryosoft.troubleshoot check --json`.
    Branch on the FaultCodes using `references/triage-tree.md`.

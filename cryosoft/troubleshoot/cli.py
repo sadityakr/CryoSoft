@@ -4,7 +4,8 @@
 #   methods / idn / read / write / query / send, plus `status` (reads the
 #   running app's operational-status log). Built for agents first: every
 #   command terminates on its own, supports --json, returns exit code 0 (all
-#   OK) or 1 (any fault), and appends a JSONL transcript line to cryosoft/logs/.
+#   OK) or 1 (any fault), and appends a JSONL transcript line to
+#   <AppData>/CryoSoft/logs/.
 # entry_point: python -m cryosoft.troubleshoot <subcommand> ...
 # dependencies:
 #   - pyvisa (only for commands that touch a real bus)
@@ -19,7 +20,7 @@
 #   the outcome (table or --json), appends the transcript line, and exits.
 # output: |
 #   Structured results on stdout, log records on stderr and cryosoft.log, one
-#   JSONL line per invocation in cryosoft/logs/troubleshoot.jsonl.
+#   JSONL line per invocation in <AppData>/CryoSoft/logs/troubleshoot.jsonl.
 # ---
 
 """Troubleshoot CLI — one-shot diagnostic commands for agents and humans.
@@ -77,8 +78,17 @@ _rm_factory = engine.open_resource_manager
 
 
 def _transcript_dir() -> Path:
-    """Directory for the JSONL invocation transcript (cryosoft/logs)."""
-    return Path(cryosoft.__file__).parent / "logs"
+    """Directory for the JSONL invocation transcript (<AppData>/CryoSoft/logs).
+
+    Mirrors ``cryosoft.core.logging_config._default_log_dir()`` — same
+    ``<AppData>/CryoSoft/logs/`` root ``setup_logging()`` resolves to, kept as
+    a plain ``os.environ`` lookup (no PyQt6 import) since PyQt6 is optional
+    for this leaf tool. See ``_user_config_dir()`` above for the same pattern.
+    """
+    import os
+
+    appdata = os.environ.get("APPDATA", str(Path.home()))
+    return Path(appdata) / "CryoSoft" / "logs"
 
 
 # ── Config resolution ─────────────────────────────────────────────────────────
@@ -442,7 +452,7 @@ def _add_target_args(parser: argparse.ArgumentParser) -> None:
 def _cmd_status(args: argparse.Namespace) -> tuple[bool, dict[str, Any]]:
     """Summarize the running app's operational-status log (works while it runs).
 
-    Reads cryosoft/logs/status.jsonl (written by the Orchestrator each tick) and
+    Reads <AppData>/CryoSoft/logs/status.jsonl (written by the Orchestrator each tick) and
     reports the current state, per-instrument ramp progress and trend, and any
     watchdog alerts. Exit 0 only when a log exists and its verdict is OK, so an
     agent can gate on the exit code. This is the one troubleshoot command that
@@ -506,7 +516,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("status", parents=[common],
                        help="summarize the RUNNING app's operational-status log")
-    p.add_argument("--log", help="path to status.jsonl (default: cryosoft/logs/status.jsonl)")
+    p.add_argument(
+        "--log", help="path to status.jsonl (default: <AppData>/CryoSoft/logs/status.jsonl)"
+    )
     p.add_argument("--last", type=int, default=5,
                    help="recent records to fold in for the gap trend (default 5)")
     p.set_defaults(func=_cmd_status)

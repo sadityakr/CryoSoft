@@ -23,8 +23,8 @@ live in L0; `CONFIG_INVALID` lives in L2.
 
 | Artifact | Path | What it holds |
 |---|---|---|
-| Runtime log | `cryosoft/logs/cryosoft.log` (+ rotated `.1`…`.5`) | DEBUG-level everything: VI calls, comm errors, state changes, safety events |
-| Troubleshoot transcript | `cryosoft/logs/troubleshoot.jsonl` | one JSON line per past diagnostic command (ts, argv, ok, payload) |
+| Runtime log | `<AppData>/CryoSoft/logs/cryosoft.log` (+ rotated `.1`…`.5`) | DEBUG-level everything: VI calls, comm errors, state changes, safety events |
+| Troubleshoot transcript | `<AppData>/CryoSoft/logs/troubleshoot.jsonl` | one JSON line per past diagnostic command (ts, argv, ok, payload) |
 | Development log | `LOGBOOK.md` (project root) | what changed recently — read before diagnosing, write after |
 | Setup documentation | `<config dir>/setup.md` | instrument purposes, wiring, known quirks, safe-test limits |
 | Instrument cheat sheets | `<config dir>/manuals/notes/<instrument>.md` | command set, timing requirements, limits (from the manual) |

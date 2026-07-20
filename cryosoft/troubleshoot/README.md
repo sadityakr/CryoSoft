@@ -52,8 +52,8 @@ surfaces (CLI subcommands) go into `cli.py`. Anything Qt belongs in
 `python -m cryosoft.troubleshoot <subcommand>` — one-shot commands, each
 terminating on its own, with `--json` for machine-readable output and exit
 code 0 (all OK) / 1 (any fault). Every invocation appends a JSONL line to
-`cryosoft/logs/troubleshoot.jsonl` (the session transcript agents mine when
-hardening the triage skill).
+`<AppData>/CryoSoft/logs/troubleshoot.jsonl` (the session transcript agents
+mine when hardening the triage skill).
 
 | Subcommand | What it does | Allowlist-safe? |
 |---|---|---|

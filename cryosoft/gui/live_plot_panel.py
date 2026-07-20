@@ -15,8 +15,8 @@
 #   Constructor objectName strings (preserved so findChild-by-name still works),
 #   a list of available axis keys via set_available_keys(), per-slot
 #   reading-loop label maps via set_available_loop_labels() (optional; hidden
-#   by default), and a datapoint history (list of enriched dicts) via
-#   redraw().
+#   by default), a datapoint history (list of enriched dicts) via redraw(),
+#   and a previously exported selection dict via restore_selection().
 # process: |
 #   set_available_keys() repopulates X/Y selectors, preserving still-valid
 #   selections. set_available_loop_labels() shows/hides/enables each Loop
@@ -26,7 +26,10 @@
 #   progressive fallback for unsuffixed columns) from the datapoint history
 #   and feeds them to the curve.
 #   Changing any selector redraws against the last datapoint list the panel
-#   was handed.
+#   was handed. export_selection()/restore_selection() round-trip the X/Y/Loop
+#   choices as plain strings so ProcedureWindow can fold them into the GUI's
+#   form-autosave SessionState (gui/form_autosave.py) — restore is a no-op for
+#   any value not present in the selectors' current items.
 # output: |
 #   A QGroupBox embedded in ProcedureWindow's bottom splitter, updating live.
 # ---
@@ -249,6 +252,50 @@ class LivePlotPanel(QGroupBox):
                 index = selector.findData(prev)
                 selector.setCurrentIndex(index if index >= 0 else 0)
                 selector.blockSignals(False)
+        self._redraw()
+
+    def export_selection(self) -> dict[str, str]:
+        """Return this panel's current X/Y/Loop selections as plain strings.
+
+        Returns:
+            A dict with keys ``x``, ``y``, ``loop1``, ``loop2``. Loop values
+            are the selector's item data (the bare suffix label, e.g.
+            ``"A1"``), or ``""`` when that slot has no selection (hidden,
+            disabled, or empty).
+        """
+        return {
+            "x": self._x_selector.currentText(),
+            "y": self._y_selector.currentText(),
+            "loop1": str(self._loop_selectors[0].currentData() or ""),
+            "loop2": str(self._loop_selectors[1].currentData() or ""),
+        }
+
+    def restore_selection(self, selection: dict[str, str]) -> None:
+        """Apply a previously exported X/Y/Loop selection, defensively.
+
+        Safe to call any time after ``set_available_keys``/
+        ``set_available_loop_labels`` have populated the selectors: a value
+        not present among the current items is silently ignored, leaving
+        whatever default was already chosen.
+
+        Args:
+            selection: A dict as returned by ``export_selection`` (or a
+                loaded/partial one — missing or unrecognised keys are
+                no-ops).
+        """
+        x = selection.get("x")
+        if x and self._x_selector.findText(x) >= 0:
+            self._x_selector.setCurrentText(x)
+        y = selection.get("y")
+        if y and self._y_selector.findText(y) >= 0:
+            self._y_selector.setCurrentText(y)
+        for selector, key in zip(self._loop_selectors, ("loop1", "loop2")):
+            value = selection.get(key)
+            if not value:
+                continue
+            index = selector.findData(value)
+            if index >= 0:
+                selector.setCurrentIndex(index)
         self._redraw()
 
     def redraw(self, datapoints: list[dict]) -> None:

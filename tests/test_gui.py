@@ -754,6 +754,51 @@ def test_live_plot_loop_selectors_follow_reading_loop(procedure_win, station):
     assert not any("__A" in k or "__B" in k for k in keys)
 
 
+def test_live_plot_panel_export_restore_selection_round_trip():
+    """export_selection()/restore_selection() round-trip X/Y/Loop choices."""
+    from cryosoft.gui.live_plot_panel import LivePlotPanel
+
+    panel = LivePlotPanel(
+        "Plot", "#ffffff",
+        x_selector_name="x_sel", y_selector_name="y_sel",
+        plot_object_name="plot",
+        loop1_selector_name="loop1_sel", loop2_selector_name="loop2_sel",
+    )
+    panel.set_available_keys(["unix_time", "field_T", "voltage_V", "current_A"], "field_T", "voltage_V")
+    panel.set_available_loop_labels(({"A1": "A1 = Ch1", "A2": "A1 = Ch2"}, None))
+    panel._x_selector.setCurrentText("field_T")
+    panel._y_selector.setCurrentText("current_A")
+    panel._loop_selectors[0].setCurrentIndex(1)
+
+    exported = panel.export_selection()
+    assert exported == {"x": "field_T", "y": "current_A", "loop1": "A2", "loop2": ""}
+
+    restored = LivePlotPanel(
+        "Plot", "#ffffff",
+        x_selector_name="x_sel2", y_selector_name="y_sel2",
+        plot_object_name="plot2",
+        loop1_selector_name="loop1_sel2", loop2_selector_name="loop2_sel2",
+    )
+    restored.set_available_keys(["unix_time", "field_T", "voltage_V", "current_A"], "field_T", "voltage_V")
+    restored.set_available_loop_labels(({"A1": "A1 = Ch1", "A2": "A1 = Ch2"}, None))
+    restored.restore_selection(exported)
+    assert restored.export_selection() == exported
+
+
+def test_live_plot_panel_restore_selection_ignores_unknown_values():
+    """restore_selection() no-ops on values absent from the current items."""
+    from cryosoft.gui.live_plot_panel import LivePlotPanel
+
+    panel = LivePlotPanel(
+        "Plot", "#ffffff",
+        x_selector_name="x_sel3", y_selector_name="y_sel3", plot_object_name="plot3",
+    )
+    panel.set_available_keys(["unix_time", "field_T"], "field_T", None)
+    before = panel.export_selection()
+    panel.restore_selection({"x": "not_a_real_key", "y": "also_missing", "loop1": "A9"})
+    assert panel.export_selection() == before
+
+
 def test_param_form_renders_all_widget_kinds_and_round_trips(qtbot):
     """param_form maps each ParamSpec kind to the right widget and round-trips values.
 
@@ -1802,6 +1847,55 @@ def test_procedure_window_restores_selection_and_params(station, orchestrator, q
     qtbot.addWidget(win2)
     assert win2._params_panel._proc_selector.currentText() == proc_name
     assert win2._params_panel._param_inputs[param_key].text() == "42"
+
+
+def test_procedure_window_restores_plot_axis_selection(station, orchestrator, qtbot):
+    """A ProcedureWindow built with a session restores its plot X/Y axis choices."""
+    info, ddir = _sample_stub(), _data_dir_stub()
+    win = ProcedureWindow(station, orchestrator, info, ddir)
+    qtbot.addWidget(win)
+
+    y_selector = win._plot1._y_selector
+    keys = [y_selector.itemText(i) for i in range(y_selector.count())]
+    non_default_y = next(k for k in keys if k != y_selector.currentText())
+    y_selector.setCurrentText(non_default_y)
+
+    state = session_store.SessionState()
+    win.export_session_state(state)
+    assert state.plot_selections["plot1"]["y"] == non_default_y
+    assert state.plot_selections["plot1"]["x"] == win._plot1._x_selector.currentText()
+
+    win2 = ProcedureWindow(station, orchestrator, info, ddir, initial_session=state)
+    qtbot.addWidget(win2)
+    assert win2._plot1._y_selector.currentText() == non_default_y
+
+
+def test_procedure_window_restores_plot_loop_selection(station, orchestrator, qtbot):
+    """A ProcedureWindow built with a session restores its plots' Loop 1/2 picks."""
+    from cryosoft.procedures.field_sweep import FieldSweep
+
+    info, ddir = _sample_stub(), _data_dir_stub()
+    station.set_scanner_enabled(True)
+    win = ProcedureWindow(station, orchestrator, info, ddir)
+    qtbot.addWidget(win)
+    win._params_panel.select_procedure_by_name(FieldSweep.name)
+    _select_measurement(win, "dc_measurement")
+    _set_slot_parameter(win, "loop1_parameter", "switch_matrix.route")
+    win.findChild(QCheckBox, "param_loop1_pick_Mux-Ch1_input").setChecked(True)
+    win.findChild(QCheckBox, "param_loop1_pick_Mux-Ch2_input").setChecked(True)
+
+    loop1_selector = win._plot1._loop_selectors[0]
+    assert loop1_selector.isEnabled(), "loop1 selector should be enabled with >=2 route items"
+    loop1_selector.setCurrentIndex(1)
+    chosen = loop1_selector.currentData()
+
+    state = session_store.SessionState()
+    win.export_session_state(state)
+    assert state.plot_selections["plot1"]["loop1"] == chosen
+
+    win2 = ProcedureWindow(station, orchestrator, info, ddir, initial_session=state)
+    qtbot.addWidget(win2)
+    assert win2._plot1._loop_selectors[0].currentData() == chosen
 
 
 def test_procedure_window_exports_and_restores_queue(station, orchestrator, qtbot):

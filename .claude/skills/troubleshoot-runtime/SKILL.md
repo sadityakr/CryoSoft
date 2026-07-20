@@ -1,6 +1,6 @@
 ---
 name: troubleshoot-runtime
-description: Explain what a RUNNING CryoSoft measurement is doing and whether it is stuck, slow, or normal. Reads the live operational-status log (cryosoft/logs/status.jsonl, written by the Orchestrator each tick) via `python -m cryosoft.troubleshoot status` and interprets state, per-instrument ramp progress, ETA, and watchdog alerts in plain language for the operator. Use when the app is running and the user asks "why is this taking so long", "is it stuck", "what is it doing", "is this normal". NOT for setup-time instrument or config faults with the app closed — that is the setup-supervisor skill.
+description: Explain what a RUNNING CryoSoft measurement is doing and whether it is stuck, slow, or normal. Reads the live operational-status log (<AppData>/CryoSoft/logs/status.jsonl, written by the Orchestrator each tick) via `python -m cryosoft.troubleshoot status` and interprets state, per-instrument ramp progress, ETA, and watchdog alerts in plain language for the operator. Use when the app is running and the user asks "why is this taking so long", "is it stuck", "what is it doing", "is this normal". NOT for setup-time instrument or config faults with the app closed — that is the setup-supervisor skill.
 ---
 
 # troubleshoot-runtime — explain what a running measurement is doing
@@ -11,7 +11,7 @@ live status log and tell them, in plain language, what is happening and whether
 to worry.
 
 This works **while the app is running**. It only reads a log file
-(`cryosoft/logs/status.jsonl`), so it never touches an instrument and never
+(`<AppData>/CryoSoft/logs/status.jsonl`), so it never touches an instrument and never
 needs the app closed. That is the opposite of `setup-supervisor`, which
 diagnoses instruments with the app CLOSED.
 

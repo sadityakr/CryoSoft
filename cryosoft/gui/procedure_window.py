@@ -610,16 +610,37 @@ class ProcedureWindow(QMainWindow):
         return self._get_experiment_info()
 
     def _restore_session(self, session_state: SessionState) -> None:
-        """Apply a loaded session to the procedure form and queue."""
+        """Apply a loaded session to the procedure form, queue, and plots.
+
+        ``_params_panel.restore_session`` re-selects the saved procedure,
+        which fires one ``structure_changed`` for the DEFAULT structural
+        selection, then applies cached structural values (e.g. a non-default
+        measurement VI, reading-loop routing) with signals blocked so no
+        second ``structure_changed`` follows — by design, to avoid a
+        recursive signal cascade (see ``_apply_cached_params``). That leaves
+        the plots' axis-key list and Loop selector items built for the
+        pre-restore selection, not the one just restored, so this refreshes
+        them explicitly from the now-settled selection before applying the
+        saved axis/loop choices.
+        """
         self._params_panel.restore_session(session_state)
         self._queue_panel.restore_items(
             session_state.queue, self._params_panel.procedure_by_name
         )
+        cls = self._params_panel.current_class()
+        if cls is not None:
+            self._populate_axis_selectors(cls)
+        self._plot1.restore_selection(session_state.plot_selections.get("plot1", {}))
+        self._plot2.restore_selection(session_state.plot_selections.get("plot2", {}))
 
     def export_session_state(self, state: SessionState) -> None:
-        """Write this window's selection, params, and queue into ``state``."""
+        """Write this window's selection, params, queue, and plot axes into ``state``."""
         self._params_panel.export_session_state(state)
         state.queue = self._queue_panel.export_items()
+        state.plot_selections = {
+            "plot1": self._plot1.export_selection(),
+            "plot2": self._plot2.export_selection(),
+        }
 
     def reset_session(self) -> None:
         """Clear the queue and cached params, resetting the form to defaults."""

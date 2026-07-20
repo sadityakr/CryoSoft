@@ -26,6 +26,7 @@ def test_default_session_is_empty_with_default_data_dir():
     assert state.selected_procedure == ""
     assert state.procedure_params == {}
     assert state.queue == []
+    assert state.plot_selections == {}
 
 
 def test_session_to_dict_from_dict_round_trip():
@@ -47,6 +48,10 @@ def test_session_to_dict_from_dict_round_trip():
             ),
             QueueItemState(procedure="Field Sweep DC", status=session.STATUS_PENDING),
         ],
+        plot_selections={
+            "plot1": {"x": "field_T", "y": "voltage_V", "loop1": "A1", "loop2": ""},
+            "plot2": {"x": "field_T", "y": "current_A", "loop1": "", "loop2": "B2"},
+        },
     )
     restored = SessionState.from_dict(state.to_dict())
     assert restored == state
@@ -87,6 +92,25 @@ def test_from_dict_wrong_typed_queue_becomes_empty():
     """A queue that is not a list is defensively replaced with an empty list."""
     state = SessionState.from_dict({"queue": "not-a-list"})
     assert state.queue == []
+
+
+def test_from_dict_plot_selections_drops_non_string_values():
+    """A malformed plot_selections entry keeps only string values, per panel."""
+    state = SessionState.from_dict(
+        {
+            "plot_selections": {
+                "plot1": {"x": "field_T", "y": 123, "loop1": None},
+                "plot2": "not-a-dict",
+            }
+        }
+    )
+    assert state.plot_selections == {"plot1": {"x": "field_T"}, "plot2": {}}
+
+
+def test_from_dict_wrong_typed_plot_selections_becomes_empty():
+    """A plot_selections that is not a dict is defensively replaced with {}."""
+    state = SessionState.from_dict({"plot_selections": ["not", "a", "dict"]})
+    assert state.plot_selections == {}
 
 
 # ── load()/save() ─────────────────────────────────────────────────────────────

@@ -1,9 +1,9 @@
 # ---
 # description: |
 #   Logging configuration for CryoSoft. Sets up a rotating file handler
-#   that writes to cryosoft/logs/cryosoft.log, plus a console handler
-#   for development.
-# last_updated: 2026-04-06
+#   that writes to <AppData>/CryoSoft/logs/cryosoft.log, plus a console
+#   handler for development.
+# last_updated: 2026-07-20
 # ---
 
 """CryoSoft logging setup.
@@ -16,16 +16,45 @@ import logging
 import logging.handlers
 from pathlib import Path
 
+from PyQt6.QtCore import QCoreApplication, QStandardPaths
+
+# Foundation module (import-linter contract C1: zero cryosoft-internal
+# imports), so the AppData directory is resolved with the same Qt API
+# gui/app_settings.py uses rather than importing that module. Only
+# applicationName is set (never organizationName) so this resolves to the
+# same "%APPDATA%/CryoSoft/" root app_settings.py already uses for
+# last_session.json/users.json/configs, not a nested "CryoSoft/CryoSoft/".
+# QStandardPaths.AppDataLocation keys off applicationName, which main.py
+# normally sets on the QApplication instance — but setup_logging() runs
+# before that instance exists, so it is set here too (idempotent; harmless
+# if main.py sets the same value again later).
+_APPLICATION = "CryoSoft"
+
+
+def _default_log_dir() -> Path:
+    """Return the default log directory: <AppData>/CryoSoft/logs/.
+
+    Returns:
+        The platform per-installation application-data directory's ``logs``
+        subfolder, separate from both the repo/install location and the
+        user's measurement data directory.
+    """
+    if not QCoreApplication.applicationName():
+        QCoreApplication.setApplicationName(_APPLICATION)
+    base = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)
+    return Path(base) / "logs"
+
 
 def setup_logging(log_dir: str | Path | None = None, level: int = logging.DEBUG) -> None:
     """Configure CryoSoft logging with rotating file + console output.
 
     Args:
-        log_dir: Directory for log files. Defaults to cryosoft/logs/.
+        log_dir: Directory for log files. Defaults to
+            ``<AppData>/CryoSoft/logs/`` (see :func:`_default_log_dir`).
         level: Root logger level. DEBUG for development, INFO for production.
     """
     if log_dir is None:
-        log_dir = Path(__file__).parent.parent / "logs"
+        log_dir = _default_log_dir()
     log_dir = Path(log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
 

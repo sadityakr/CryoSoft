@@ -103,4 +103,4 @@ skip it).
 | `operational_status.py` | Pure builder of the per-tick runtime "why is the run slow/stuck" status record | `build_operational_status()`, `RunFaultCode`, `worst_code()`, `VIHealth` | `test_operational_status.py` |
 | `watchdog.py` | Deterministic stall detection layered on the status record (RAMP_STALLED, STALLED_RUN) | `apply_watchdog()`, `WatchdogState`, `WatchdogConfig` | `test_watchdog.py` |
 | `config_catalog.py` | Qt-free discovery and versioning of shipped vs user config directories (copy-on-edit fork, named history) | `ConfigCatalog`, `ConfigEntry`, `ConfigVersion` | `test_config_catalog.py` |
-| `logging_config.py` | Configures the rotating file + console handlers and the `cryosoft.status` JSONL stream | `setup_logging()` | none |
+| `logging_config.py` | Configures the rotating file + console handlers and the `cryosoft.status` JSONL stream; default log directory is `<AppData>/CryoSoft/logs/` (OS app-data dir, not the repo/install location — an explicit `log_dir` argument still overrides it) | `setup_logging()` | `tests/test_logging_config.py` |

@@ -5,9 +5,10 @@
 #   Management layer, which manages experiments/runs/users; this module is
 #   purely form persistence). A SessionState holds the content a user would
 #   otherwise retype on every launch — sample metadata, data directory, the
-#   last-selected procedure and its parameters, and the run queue with
-#   per-item status. It serialises to a single JSON file so a closed app is
-#   restored on the next open. Deliberately Qt-free (stdlib only) so it
+#   last-selected procedure and its parameters, the run queue with per-item
+#   status, and the live-plot panels' chosen X/Y/Loop selections. It
+#   serialises to a single JSON file so a closed app is restored on the next
+#   open. Deliberately Qt-free (stdlib only) so it
 #   unit-tests without a QApplication; the *location* of the file is resolved
 #   separately by app_settings.session_file_path().
 # entry_point: Not run directly. Constructed and (de)serialised by the GUI windows.
@@ -74,6 +75,13 @@ def _as_str(value: object, default: str = "") -> str:
 def _as_str_dict(value: object) -> dict[str, object]:
     """Return ``value`` if it is a dict, else an empty dict (defensive parse)."""
     return dict(value) if isinstance(value, dict) else {}
+
+
+def _as_str_str_dict(value: object) -> dict[str, str]:
+    """Return ``value`` as a ``dict[str, str]``, dropping non-string values."""
+    if not isinstance(value, dict):
+        return {}
+    return {str(k): str(v) for k, v in value.items() if isinstance(v, str)}
 
 
 @dataclass
@@ -144,6 +152,10 @@ class SessionState:
             procedure ``name`` (so switching procedures and back restores each
             one's values independently).
         queue: The run queue, oldest first, with per-item status.
+        plot_selections: ProcedureWindow's two live-plot panels' chosen X/Y
+            axes and Loop 1/Loop 2 selections, keyed by panel id (``"plot1"``,
+            ``"plot2"``); each value is ``LivePlotPanel.export_selection()``'s
+            ``{"x": ..., "y": ..., "loop1": ..., "loop2": ...}`` dict.
     """
 
     sample_name: str = ""
@@ -153,6 +165,7 @@ class SessionState:
     selected_procedure: str = ""
     procedure_params: dict[str, dict[str, object]] = field(default_factory=dict)
     queue: list[QueueItemState] = field(default_factory=list)
+    plot_selections: dict[str, dict[str, str]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, object]:
         """Return a JSON-safe dict, stamped with the current schema version."""
@@ -167,6 +180,10 @@ class SessionState:
                 name: dict(values) for name, values in self.procedure_params.items()
             },
             "queue": [item.to_dict() for item in self.queue],
+            "plot_selections": {
+                panel_id: dict(selection)
+                for panel_id, selection in self.plot_selections.items()
+            },
         }
 
     @classmethod
@@ -190,6 +207,11 @@ class SessionState:
             if isinstance(raw_queue, list)
             else []
         )
+        raw_plot_selections = data.get("plot_selections")
+        plot_selections: dict[str, dict[str, str]] = {}
+        if isinstance(raw_plot_selections, dict):
+            for panel_id, selection in raw_plot_selections.items():
+                plot_selections[str(panel_id)] = _as_str_str_dict(selection)
         return cls(
             sample_name=_as_str(data.get("sample_name")),
             sample_id=_as_str(data.get("sample_id")),
@@ -198,6 +220,7 @@ class SessionState:
             selected_procedure=_as_str(data.get("selected_procedure")),
             procedure_params=procedure_params,
             queue=queue,
+            plot_selections=plot_selections,
         )
 
 

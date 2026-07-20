@@ -1,7 +1,8 @@
 # ---
 # description: |
 #   Reader and summarizer for the runtime operational-status log
-#   (cryosoft/logs/status.jsonl, written by the Orchestrator each tick). Turns
+#   (<AppData>/CryoSoft/logs/status.jsonl, written by the Orchestrator each
+#   tick). Turns
 #   the raw JSONL into a compact digest — current state, per-instrument ramp
 #   progress and trend, watchdog alerts — and a plain-English rendering with a
 #   triage note per fault code. Consumed by the `troubleshoot status` CLI and by
@@ -122,7 +123,10 @@ def summarize(records: list[dict]) -> dict:
 def render_text(digest: dict) -> str:
     """Render a digest as a plain-English block for the CLI and for agents."""
     if not digest.get("available"):
-        return "No operational-status log found (is the app running? cryosoft/logs/status.jsonl)."
+        return (
+            "No operational-status log found (is the app running? "
+            "<AppData>/CryoSoft/logs/status.jsonl)."
+        )
 
     lines: list[str] = []
     lines.append(
