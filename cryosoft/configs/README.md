@@ -45,19 +45,38 @@ every `configs/<name>/` directory:
 
 `monitor.yaml` structure: a `monitor:` block with `tick_interval_ms` (the single
 QTimer tick period) and `max_vi_errors` (consecutive VI-error tolerance before
-escalation). Optionally a `panels:` block customizing which controls each VI's
-compact monitor card shows (display-only; every control stays available in the
-instrument's front panel, and safety limits are unaffected):
+escalation). Optionally a `panels:` block — see next section.
+
+### `panels:` — which controls a VI's monitor card shows
+
+Card visibility is a two-layer decision, and THIS file is the layer users
+edit; nobody edits a Virtual Instrument to customize their monitor:
+
+1. **VI default** (in code): each `@control` declares `panel=True` (shown on
+   the compact card, the default) or `panel=False` (front-panel window
+   only). This is the VI author's shipped judgment of common use.
+2. **Config override** (here): a `panels:` entry is a per-VI **allowlist
+   that replaces the defaults entirely** — it can surface a `panel=False`
+   control or hide a `panel=True` one. A VI absent from the block keeps its
+   defaults.
 
 ```yaml
 panels:
   temperature_vti:
-    controls: [set_temperature]   # allowlist; overrides the VI's panel= defaults
+    controls: [set_temperature, set_pid]  # card shows exactly these two
+  temperature_sample:
+    controls: []                          # card shows no controls at all
 ```
 
-A VI absent from `panels:` shows the controls its `@control` declarations mark
-`panel=True` (the default). Conformance checks every listed VI and control name
-against `devices.yaml`.
+Example: a lab that runs constant heater power lists `set_heater_power` for
+their temperature VI here; another setup omits it — same VI code, different
+cards. Visibility is presentation only: every control, listed or not, stays
+available in the per-VI instrument front panel (the sliders icon on the
+card), and `control_limits` safety enforcement is completely unaffected.
+Conformance checks every listed VI and control name against `devices.yaml`,
+so a typo fails CI instead of silently rendering a bare card. The companion
+write-up from the VI side is `cryosoft/virtual_instruments/README.md`
+("GUI presentation").
 
 ## How to add a new module
 1. Create `configs/<name>/` with a `devices.yaml` and a `monitor.yaml`.
