@@ -48,6 +48,41 @@ def test_base_vi_logging_and_state():
     assert state["mon_test"] == "monitored_val"
     assert vi.calls == 1
 
+def test_control_specs_and_panel_survive_subclass_wrapping():
+    """__init_subclass__ must propagate _control_specs/_control_panel onto the
+    limit+logging wrappers, or the GUI would see empty metadata on every VI."""
+    from cryosoft.core.decorators import get_control_panel, get_control_specs
+    from cryosoft.core.plan import ParamSpec
+
+    spec = ParamSpec(type=float, default=0.0, unit="W", min=0.0, max=40.0)
+
+    class SpecVI(BaseVirtualInstrument):
+        vi_type = "mock"
+
+        @control(params={"power_W": spec}, panel=False)
+        def set_heater_power(self, power_W: float = 0.0):
+            return power_W
+
+    vi = SpecVI({})
+    assert get_control_specs(vi.set_heater_power) == {"power_W": spec}
+    assert get_control_panel(vi.set_heater_power) is False
+    # Legacy bare @control: no specs, panel defaults True.
+    mock = MockBaseVI()
+    assert get_control_specs(mock.ctrl_test) == {}
+    assert get_control_panel(mock.ctrl_test) is True
+
+
+def test_control_specs_must_be_paramspec_instances():
+    """A non-ParamSpec spec value fails at class creation, not on click."""
+    with pytest.raises(TypeError, match="must be a ParamSpec"):
+        class BadSpecVI(BaseVirtualInstrument):
+            vi_type = "mock"
+
+            @control(params={"power_W": {"type": float, "default": 0.0}})
+            def set_heater_power(self, power_W: float = 0.0):
+                return power_W
+
+
 def test_base_vi_error_pass_through():
     vi = MockBaseVI()
     with pytest.raises(ValueError):

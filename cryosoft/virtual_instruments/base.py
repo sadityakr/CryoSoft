@@ -167,6 +167,21 @@ class BaseVirtualInstrument:
                     wrapped._control_scope = getattr(
                         attr_value, "_control_scope", "measurement"
                     )
+                    # Rich GUI metadata (widget specs + default card placement).
+                    # The decorator stores the specs opaquely (contract C1: it
+                    # may not import ParamSpec); this is the earliest layer
+                    # that knows the type, so enforce it here at class
+                    # creation — a wrong spec fails at import, not on click.
+                    specs = getattr(attr_value, "_control_specs", {})
+                    for param_name, spec in specs.items():
+                        if not isinstance(spec, ParamSpec):
+                            raise TypeError(
+                                f"{cls.__name__}.{attr_name}: @control params["
+                                f"{param_name!r}] must be a ParamSpec, got "
+                                f"{type(spec).__name__}"
+                            )
+                    wrapped._control_specs = specs
+                    wrapped._control_panel = getattr(attr_value, "_control_panel", True)
                 setattr(cls, attr_name, wrapped)
 
     # ------------------------------------------------------------------

@@ -41,6 +41,7 @@ from __future__ import annotations
 import importlib
 import inspect
 import pkgutil
+import typing
 from pathlib import Path
 
 import pytest
@@ -48,7 +49,12 @@ import pytest
 import cryosoft.drivers
 import cryosoft.procedures
 import cryosoft.virtual_instruments
-from cryosoft.core.decorators import VALID_CONTROL_SCOPES, get_control_scope
+from cryosoft.core.decorators import (
+    VALID_CONTROL_SCOPES,
+    get_control_panel,
+    get_control_scope,
+    get_control_specs,
+)
 from cryosoft.core.exceptions import CryoSoftSafetyError
 from cryosoft.core.operation import OperationBase, ReadinessCondition
 from cryosoft.core.plan import ParamSpec
@@ -677,6 +683,42 @@ def test_declared_finite_limits_reject_out_of_range(config_dir: Path) -> None:
         f"{config_dir.name}: no finite limits were exercised — expected at "
         f"least one limited @control method"
     )
+
+
+# ── Control-declaration standard (GUI metadata) ──────────────────────────────
+# See cryosoft.core.decorators: @control optionally declares params=
+# {name: ParamSpec} (widget shape, unit, bounds, choices) and panel=
+# (default monitor-card placement). The decorator enforces name matching and
+# the VI base class enforces the ParamSpec type at import; these tests bind
+# the semantic parts for every VI, present and future.
+
+
+@pytest.mark.parametrize("vi_cls", _all_vi_classes(), ids=lambda c: c.__name__)
+def test_control_declarations_are_consistent(vi_cls: type) -> None:
+    """Declared control ParamSpecs agree with the signature; panel is a bool."""
+    for method_name, method in _control_methods(vi_cls).items():
+        assert isinstance(get_control_panel(method), bool), (
+            f"{vi_cls.__name__}.{method_name}: _control_panel must be a bool"
+        )
+        specs = get_control_specs(method)
+        if not specs:
+            continue
+        try:
+            hints = typing.get_type_hints(inspect.unwrap(method))
+        except Exception:
+            hints = {}
+        for param_name, spec in specs.items():
+            assert isinstance(spec, ParamSpec), (
+                f"{vi_cls.__name__}.{method_name}: params[{param_name!r}] "
+                f"must be a ParamSpec, got {type(spec).__name__}"
+            )
+            annotated = hints.get(param_name)
+            if annotated in (float, int, str, bool):
+                assert spec.type is annotated, (
+                    f"{vi_cls.__name__}.{method_name}: params[{param_name!r}] "
+                    f"declares type {spec.type.__name__} but the signature "
+                    f"annotates {annotated.__name__} — they must agree"
+                )
 
 
 # ── Capability-scope standard ─────────────────────────────────────────────────

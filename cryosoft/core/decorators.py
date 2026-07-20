@@ -6,7 +6,7 @@
 #   and the GUI can auto-generate panels. @control also carries a capability
 #   scope ("measurement" or "operation", see docs/plans/cryogenics-logbook.md
 #   §5) enforced at dispatch by Station.send_measurement_commands().
-# last_updated: 2026-07-19
+# last_updated: 2026-07-20
 # ---
 
 """Decorators for Virtual Instrument methods.
@@ -74,30 +74,47 @@ def monitored(func: Callable) -> Callable:
     return wrapper
 
 
-def control(func: Callable | None = None, *, scope: str = "measurement") -> Callable:
+def control(
+    func: Callable | None = None,
+    *,
+    scope: str = "measurement",
+    params: dict[str, Any] | None = None,
+    panel: bool = True,
+) -> Callable:
     """Mark a method as a user-controllable action.
 
     Works both bare (``@control``, scope defaults to ``"measurement"``) and
     parametrized (``@control(scope="operation")``).
 
     The method will:
-    1. Appear as a button on the GUI panel.
-    2. Have text-box inputs auto-generated from its signature.
-    3. Be blocked when a procedure is running.
-    4. Be wrapped with logging by __init_subclass__.
-    5. Carry a capability scope enforced at plan-dispatch time (see the module
+    1. Appear as a widget row on the GUI panel (widget shape derived from the
+       declared ``params`` ParamSpecs; plain text boxes when none are given).
+    2. Be blocked when a procedure is running.
+    3. Be wrapped with logging by __init_subclass__.
+    4. Carry a capability scope enforced at plan-dispatch time (see the module
        docstring and GLOSSARY.md's "Capability scope" entry).
 
     Args:
         func: The method being decorated (bare-decorator form only; ``None``
             when called parametrized, e.g. ``@control(scope=...)``).
         scope: ``"measurement"`` (default) or ``"operation"``.
+        params: Optional ``{param_name: ParamSpec}`` describing each signature
+            parameter (unit, min/max, choices, description) for GUI
+            rendering. Keys must exactly match the method's parameters
+            (checked here at import time). Stored opaquely — this module
+            never imports ParamSpec (layer contract C1); the VI base class
+            type-checks the values at class-creation time.
+        panel: Default placement — ``True`` shows the control on the compact
+            monitor card, ``False`` keeps it in the instrument's front panel
+            only. A setup's ``monitor.yaml`` ``panels:`` block overrides this
+            per VI; the flag is display-only and never a safety mechanism.
 
     Returns:
         The wrapped method (bare form) or a decorator (parametrized form).
 
     Raises:
-        ValueError: If ``scope`` is not one of ``VALID_CONTROL_SCOPES``.
+        ValueError: If ``scope`` is not one of ``VALID_CONTROL_SCOPES``, or if
+            ``params`` keys do not exactly match the method's parameters.
     """
     if scope not in VALID_CONTROL_SCOPES:
         raise ValueError(
@@ -113,6 +130,19 @@ def control(func: Callable | None = None, *, scope: str = "measurement") -> Call
         wrapper._is_control = True
         wrapper._display_name = inner_func.__name__
         wrapper._control_scope = scope
+        wrapper._control_panel = panel
+
+        if params is not None:
+            sig_names = [
+                n for n in inspect.signature(inner_func).parameters if n != "self"
+            ]
+            if set(params) != set(sig_names):
+                raise ValueError(
+                    f"@control params for {inner_func.__name__}() name "
+                    f"{sorted(params)} but the signature has "
+                    f"{sorted(sig_names)} — they must match exactly."
+                )
+        wrapper._control_specs = dict(params) if params else {}
 
         # Resolve annotations (handles `from __future__ import annotations` string form).
         try:
@@ -121,7 +151,7 @@ def control(func: Callable | None = None, *, scope: str = "measurement") -> Call
             hints = {}
 
         sig = inspect.signature(inner_func)
-        params = {}
+        sig_param_info: dict[str, Any] = {}
         for name, param in sig.parameters.items():
             if name == "self":
                 continue
@@ -131,9 +161,9 @@ def control(func: Callable | None = None, *, scope: str = "measurement") -> Call
                 param_info["type"] = resolved_type
             if param.default != inspect.Parameter.empty:
                 param_info["default"] = param.default
-            params[name] = param_info
+            sig_param_info[name] = param_info
 
-        wrapper._control_params = params
+        wrapper._control_params = sig_param_info
         return wrapper
 
     if func is not None:
@@ -167,6 +197,34 @@ def get_control_methods(cls_or_instance) -> dict[str, dict]:
         if callable(attr) and getattr(attr, "_is_control", False):
             methods[name] = getattr(attr, "_control_params", {})
     return methods
+
+
+def get_control_specs(method: Callable) -> dict[str, Any]:
+    """Return a @control method's declared ``{param_name: ParamSpec}``.
+
+    Args:
+        method: A callable, typically a bound VI method.
+
+    Returns:
+        The ``params`` mapping given at decoration time, or ``{}`` when the
+        control declared none (the GUI then falls back to signature-derived
+        text inputs from ``_control_params``).
+    """
+    return getattr(method, "_control_specs", {})
+
+
+def get_control_panel(method: Callable) -> bool:
+    """Return a @control method's default monitor-card placement.
+
+    Args:
+        method: A callable, typically a bound VI method.
+
+    Returns:
+        ``True`` (the default for undecorated/legacy controls) when the
+        control should appear on the compact monitor card; ``False`` when it
+        belongs in the instrument front panel only.
+    """
+    return getattr(method, "_control_panel", True)
 
 
 def get_control_scope(method: Callable) -> str:

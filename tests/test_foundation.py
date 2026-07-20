@@ -20,7 +20,10 @@ from cryosoft.core.decorators import (
     control,
     get_monitored_methods,
     get_control_methods,
+    get_control_panel,
+    get_control_specs,
 )
+from cryosoft.core.plan import ParamSpec
 
 
 # ── Exception tests ──────────────────────────────────────────────────
@@ -128,6 +131,43 @@ class TestControlDecorator:
         vi = FakeVI()
         vi.set_field(5.0)
         assert vi.field == 5.0
+
+
+class TestControlSpecsAndPanel:
+    """Verify the @control params= (ParamSpec) and panel= declarations."""
+
+    def test_defaults_no_specs_panel_true(self):
+        @control
+        def set_field(self, target_T: float):
+            pass
+        assert get_control_specs(set_field) == {}
+        assert get_control_panel(set_field) is True
+
+    def test_specs_stored_and_retrievable(self):
+        spec = ParamSpec(type=float, default=4.2, unit="K", min=1.5, max=300.0)
+
+        @control(params={"target_K": spec})
+        def set_temperature(self, target_K: float = 4.2):
+            pass
+        assert get_control_specs(set_temperature) == {"target_K": spec}
+
+    def test_panel_false_stored(self):
+        @control(panel=False)
+        def set_pid(self, p: float, i: float, d: float):
+            pass
+        assert get_control_panel(set_pid) is False
+
+    def test_params_must_match_signature(self):
+        with pytest.raises(ValueError, match="must match exactly"):
+            @control(params={"wrong_name": ParamSpec(type=float, default=0.0)})
+            def set_temperature(self, target_K: float):
+                pass
+
+    def test_params_must_cover_every_signature_param(self):
+        with pytest.raises(ValueError, match="must match exactly"):
+            @control(params={"p": ParamSpec(type=float, default=0.0)})
+            def set_pid(self, p: float, i: float):
+                pass
 
 
 class TestDiscoveryFunctions:
