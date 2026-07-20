@@ -69,6 +69,7 @@ user-facing word for this L6 concept (`gui/session.py` was renamed to
     data/                # NEW — HDF5 files nest here instead of landing flat
         <sub-folders>/   # allowed — the user may organise runs freely (§ Format rules)
 <sessions_root>/active.json   # unchanged file, gains `schema_version`
+<sessions_root>/servicing/<config_name>/   # servicing + helium logs (Setup tier, § 8)
 ```
 
 `sessions_root` replaces the implicit `<data_dir>/experiments` root — it
@@ -227,15 +228,34 @@ chosen `experiment_id`.
   `form_autosave`'s existing version stamp — it becomes meaningful here).
 
 ### 8. `cryosoft/main.py`
-`ExperimentStore` rooted at `app_settings.sessions_root()` directly (no more
-`Path(autosave.data_dir) / "experiments"` — the record's location becomes a
-deliberate machine-level setting, never a form field's last value).
+- `ExperimentStore` rooted at `app_settings.sessions_root()` directly (no
+  more `Path(autosave.data_dir) / "experiments"` — the record's location
+  becomes a deliberate machine-level setting, never a form field's last
+  value).
+- **Servicing + helium stores move with it**: `HeliumRecordStore` and
+  `ServicingLogStore` are rerooted at
+  `app_settings.sessions_root() / "servicing"` instead of
+  `Path(autosave.data_dir) / "servicing"`. They are Setup-tier records
+  (they describe the rig across all sessions), so they follow the same
+  setting but live *beside* the session bundles, never inside one — and
+  they must not keep depending on the form field once the Data Dir box is
+  derived from the open session. Storage format, the per-`config_name`
+  subfolder, and `servicing_log.py` itself are untouched; only this one
+  root path in `main.py` changes. (Existing installs: the old
+  `<data_dir>/servicing` files stay where they are — hourly helium
+  history restarts at the new root, which is acceptable; a lab that cares
+  can move the folder by hand, since the layout inside is identical.)
+  `ExperimentStore.list_experiments()` already ignores the `servicing/`
+  directory because it only lists folders containing an
+  `experiment.json`.
 
 ## Explicitly out of scope (confirmed with user)
 - No Orchestrator/BaseProcedure/DataManager changes — no mid-run checkpoint/resume.
 - No rename of `ExperimentRecord`/`ExperimentStore`/`SessionManager`/`experiment_id`.
 - No Agent Gateway implementation (`session/gateway/`) — separate planned work.
-- No change to `servicing_log.py` storage (setup-level, orthogonal to experiments).
+- No change to `servicing_log.py` itself or its storage *format*
+  (setup-level, orthogonal to experiments) — only its root path moves to
+  `<sessions_root>/servicing` in `main.py` (§ 8).
 - No migration of existing flat HDF5 files into the new `data/` subfolders —
   additive only; old `RunRecord.data_file` absolute paths keep working via
   the resolution rules in § Format rules.
