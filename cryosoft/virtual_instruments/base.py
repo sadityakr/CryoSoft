@@ -325,6 +325,26 @@ class BaseVirtualInstrument:
     # Safety
     # ------------------------------------------------------------------
 
+    def control_param_specs(self, method_name: str) -> dict[str, ParamSpec]:
+        """Return the GUI ParamSpecs for one @control method, instance-aware.
+
+        The default returns the specs declared on the decorator
+        (``@control(params=...)``). A VI whose valid values only exist after
+        construction — e.g. a switch whose routes come from the config —
+        overrides this to inject dynamic ``choices``, and the GUI consults
+        this hook instead of the raw decorator metadata. Presentation only:
+        enforcement stays with ``control_limits`` and the method's own checks.
+
+        Args:
+            method_name: The @control method name.
+
+        Returns:
+            ``{param_name: ParamSpec}``; ``{}`` when the control declared none.
+        """
+        from cryosoft.core.decorators import get_control_specs
+
+        return get_control_specs(getattr(self, method_name))
+
     def evaluate_safety(self, state: dict) -> dict[str, bool]:
         """Judge this VI's own polled state for safety conditions.
 

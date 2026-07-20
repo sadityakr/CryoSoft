@@ -38,6 +38,7 @@ from typing import Any
 
 import qtawesome as qta
 from PyQt6.QtWidgets import (
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -51,7 +52,6 @@ from PyQt6.QtWidgets import (
 from cryosoft.core.decorators import (
     get_control_methods,
     get_control_panel,
-    get_control_specs,
     get_monitored_methods,
 )
 from cryosoft.core.orchestrator import Orchestrator
@@ -233,64 +233,113 @@ class InstrumentPanel(QGroupBox):
             return method_name in self._panel_controls
         return get_control_panel(getattr(self._vi, method_name))
 
-    def _build_control_row(self, method_name: str, params: dict) -> QWidget:
-        """Build one @control method row: button + input widgets.
+    def _build_param_input(
+        self, method_name: str, param_name: str, param_info: dict
+    ) -> tuple[QLabel, QWidget]:
+        """Build one parameter's label + input widget.
 
-        A parameter covered by a declared ``ParamSpec`` gets its widget from
-        ``param_form.build_param_widget`` (drop-down for ``choices``, checkbox
-        for ``bool``, else a line edit) with the unit in its label and the
-        description/default/range in a tooltip. Parameters without a spec keep
-        the legacy plain ``QLineEdit`` seeded from the signature default.
+        A parameter covered by a ``ParamSpec`` (from the VI's
+        ``control_param_specs()`` hook — decorator declaration or dynamic
+        override) gets its widget from ``param_form.build_param_widget``
+        (drop-down for ``choices``, checkbox for ``bool``, else a line edit)
+        with the unit in its label and the description/default/range in a
+        tooltip. Parameters without a spec keep the legacy plain ``QLineEdit``
+        seeded from the signature default.
+
+        Args:
+            method_name: The @control method the parameter belongs to.
+            param_name: The parameter name.
+            param_info: The signature-derived ``{"type", "default"}`` info.
+
+        Returns:
+            ``(label, field)``, the field's objectName already set.
+        """
+        spec = self._vi.control_param_specs(method_name).get(param_name)
+        if spec is not None:
+            label_text = (
+                f"{param_name} ({spec.unit}):" if spec.unit else f"{param_name}:"
+            )
+            lbl = QLabel(label_text)
+            field = build_param_widget(param_name, spec)
+            tooltip = build_param_tooltip(spec)
+            lbl.setToolTip(tooltip)
+            field.setToolTip(tooltip)
+            if isinstance(field, QLineEdit):
+                field.setMaximumWidth(90)
+        else:
+            lbl = QLabel(f"{param_name}:")
+            field = QLineEdit()
+            field.setPlaceholderText(param_name)
+            field.setMaximumWidth(90)
+            default = param_info.get("default")
+            if default is not None:
+                field.setText(str(default))
+        field.setObjectName(f"{self._vi_name}_{method_name}_{param_name}_input")
+        return lbl, field
+
+    def _build_control_row(self, method_name: str, params: dict) -> QWidget:
+        """Build one @control method's widget block: button + input widgets.
+
+        Layout scales with the parameter count: up to two parameters stay
+        inline next to the button (compact, like ``set_temperature``); more
+        stack beneath the button as a labelled grid — one column, or two once
+        the count exceeds ten — so a many-knob control (delta-mode arming,
+        lock-in arming) stays editable instead of stretching off-screen in a
+        single row.
 
         Args:
             method_name: Name of the @control method.
             params: ``{param_name: {"type": type, "default": value, ...}}``
 
         Returns:
-            A QWidget containing the assembled row.
+            A QWidget containing the assembled block.
         """
         container = QWidget()
         # Fixed vertical policy prevents the container from expanding when the
         # parent panel is given extra height, which would make the button thin.
         container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        row = QHBoxLayout(container)
-        row.setContentsMargins(0, 2, 0, 2)
 
         btn_label = method_name.replace("_", " ").title()
         btn = QPushButton(btn_label)
         btn.setObjectName(f"{self._vi_name}_{method_name}_btn")
-        row.addWidget(btn)
 
-        specs = get_control_specs(getattr(self._vi, method_name))
         inputs: dict[str, QWidget] = {}
-        for param_name, param_info in params.items():
-            spec = specs.get(param_name)
-            if spec is not None:
-                label_text = (
-                    f"{param_name} ({spec.unit}):" if spec.unit else f"{param_name}:"
-                )
-                lbl = QLabel(label_text)
-                field = build_param_widget(param_name, spec)
-                tooltip = build_param_tooltip(spec)
-                lbl.setToolTip(tooltip)
-                field.setToolTip(tooltip)
-                if isinstance(field, QLineEdit):
-                    field.setMaximumWidth(90)
-            else:
-                lbl = QLabel(f"{param_name}:")
-                field = QLineEdit()
-                field.setPlaceholderText(param_name)
-                field.setMaximumWidth(90)
-                default = param_info.get("default")
-                if default is not None:
-                    field.setText(str(default))
-            field.setObjectName(f"{self._vi_name}_{method_name}_{param_name}_input")
+        widgets = [
+            (param_name, *self._build_param_input(method_name, param_name, info))
+            for param_name, info in params.items()
+        ]
+        for param_name, _lbl, field in widgets:
             inputs[param_name] = field
-            row.addWidget(lbl)
-            row.addWidget(field)
+
+        if len(widgets) <= 2:
+            row = QHBoxLayout(container)
+            row.setContentsMargins(0, 2, 0, 2)
+            row.addWidget(btn)
+            for _param_name, lbl, field in widgets:
+                row.addWidget(lbl)
+                row.addWidget(field)
+            row.addStretch()
+        else:
+            outer = QVBoxLayout(container)
+            outer.setContentsMargins(0, 2, 0, 2)
+            outer.setSpacing(2)
+            btn_row = QHBoxLayout()
+            btn_row.addWidget(btn)
+            btn_row.addStretch()
+            outer.addLayout(btn_row)
+            grid = QGridLayout()
+            grid.setHorizontalSpacing(8)
+            grid.setVerticalSpacing(2)
+            columns = 2 if len(widgets) > 10 else 1
+            for idx, (_param_name, lbl, field) in enumerate(widgets):
+                grid_row, grid_col = divmod(idx, columns)
+                grid.addWidget(lbl, grid_row, grid_col * 2)
+                grid.addWidget(field, grid_row, grid_col * 2 + 1)
+            # Let the field columns absorb the slack so the grid hugs the left.
+            grid.setColumnStretch(columns * 2 - 1, 1)
+            outer.addLayout(grid)
 
         self._control_inputs[method_name] = inputs
-        row.addStretch()
 
         btn.clicked.connect(
             lambda checked=False, mn=method_name: self._submit_control(mn)
@@ -360,7 +409,7 @@ class InstrumentPanel(QGroupBox):
         inputs = self._control_inputs.get(method_name, {})
         vi_method = getattr(self._vi, method_name, None)
         params_meta = getattr(vi_method, "_control_params", {}) if vi_method else {}
-        specs = get_control_specs(vi_method) if vi_method else {}
+        specs = self._vi.control_param_specs(method_name) if vi_method else {}
 
         kwargs: dict[str, Any] = {}
         for param_name, field in inputs.items():

@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
     QFormLayout,
+    QGridLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -418,6 +419,85 @@ def test_monitor_window_threads_panels_config(station, orchestrator, qtbot):
     assert win.findChild(QPushButton, "magnet_z_set_field_btn") is None
     # An unlisted VI keeps its declared defaults.
     assert win.findChild(QPushButton, "magnet_y_set_field_btn") is not None
+
+
+def _control_grid(panel, vi_name, method_name):
+    """Return the QGridLayout of a stacked multi-param control block."""
+    btn = panel.findChild(QPushButton, f"{vi_name}_{method_name}_btn")
+    container = btn.parentWidget()
+    layout = container.layout()
+    for i in range(layout.count()):
+        item = layout.itemAt(i)
+        if isinstance(item.layout(), QGridLayout):
+            return item.layout()
+    return None
+
+
+def test_multi_param_control_stacks_in_one_column(orchestrator, qtbot):
+    """3-10 parameters render as a labelled grid under the button, one column."""
+
+    class _SevenParamVI(BaseVirtualInstrument):
+        vi_type = "mock"
+
+        @control
+        def arm(self, a: float = 1, b: float = 2, c: float = 3, d: float = 4,
+                e: float = 5, f: float = 6, g: float = 7):
+            pass
+
+    panel = InstrumentPanel("mock_vi", _SevenParamVI({}), orchestrator)
+    qtbot.addWidget(panel)
+    grid = _control_grid(panel, "mock_vi", "arm")
+    assert grid is not None, "7-param control must stack, not render inline"
+    assert grid.columnCount() == 2  # one label column + one field column
+    assert grid.rowCount() == 7
+
+
+def test_many_param_control_uses_two_columns(orchestrator, qtbot):
+    """More than 10 parameters split the grid into two label+field columns."""
+
+    class _ElevenParamVI(BaseVirtualInstrument):
+        vi_type = "mock"
+
+        @control
+        def arm(self, p1: float = 1, p2: float = 1, p3: float = 1, p4: float = 1,
+                p5: float = 1, p6: float = 1, p7: float = 1, p8: float = 1,
+                p9: float = 1, p10: float = 1, p11: float = 1):
+            pass
+
+    panel = InstrumentPanel("mock_vi", _ElevenParamVI({}), orchestrator)
+    qtbot.addWidget(panel)
+    grid = _control_grid(panel, "mock_vi", "arm")
+    assert grid is not None
+    assert grid.columnCount() == 4  # two label+field column pairs
+    assert grid.rowCount() == 6  # ceil(11 / 2)
+
+
+def test_two_param_control_stays_inline(orchestrator, qtbot):
+    """Up to two parameters keep the compact inline row (no grid)."""
+    panel = InstrumentPanel("mock_vi", _PanelFlagVI({}), orchestrator)
+    qtbot.addWidget(panel)
+    assert _control_grid(panel, "mock_vi", "set_temperature") is None
+
+
+def test_switch_select_route_renders_route_dropdown(station, orchestrator, qtbot):
+    """select_route's route renders as a drop-down of the config's route names
+    (via the control_param_specs instance hook), and submits the chosen name."""
+    vi = station._virtual_instruments["switch_matrix"]
+    panel = InstrumentPanel("switch_matrix", vi, orchestrator)
+    qtbot.addWidget(panel)
+
+    combo = panel.findChild(QComboBox, "switch_matrix_select_route_route_input")
+    assert combo is not None, "route input must be a QComboBox, not a text field"
+    items = [combo.itemText(i) for i in range(combo.count())]
+    assert items == vi.routes()
+
+    submitted: list[tuple] = []
+    orchestrator.submit_vi_action = lambda vi_name, method, **kw: submitted.append(
+        (vi_name, method, kw)
+    )
+    combo.setCurrentText(vi.routes()[1])
+    panel._submit_control("select_route")
+    assert submitted == [("switch_matrix", "select_route", {"route": vi.routes()[1]})]
 
 
 # ── Instrument front panel ────────────────────────────────────────────────────

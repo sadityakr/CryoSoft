@@ -195,6 +195,34 @@ class SwitchMatrixVI(BaseVirtualInstrument):
         """Return the configured route names, in config order."""
         return list(self._routes)
 
+    def control_param_specs(self, method_name: str) -> dict[str, ParamSpec]:
+        """Render ``select_route``'s route as a drop-down of the config's routes.
+
+        The route table only exists after construction (it is a setup
+        property), so the choices cannot live on the decorator — this
+        instance-level hook injects them, and the GUI renders a selection
+        list instead of a free-text field. Presentation only:
+        ``select_route`` still validates the name itself.
+
+        Args:
+            method_name: The @control method name being rendered.
+
+        Returns:
+            The dynamic spec for ``select_route``; the inherited declaration
+            for every other control.
+        """
+        if method_name == "select_route" and self._routes:
+            route_names = list(self._routes)
+            return {
+                "route": ParamSpec(
+                    type=str,
+                    default=route_names[0],
+                    choices={name: name for name in route_names},
+                    description="Config-named route to close (exclusive mux)",
+                )
+            }
+        return super().control_param_specs(method_name)
+
     # ------------------------------------------------------------------
     # @monitored — polled into get_state() every tick
     # ------------------------------------------------------------------
