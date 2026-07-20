@@ -180,6 +180,28 @@ def test_temperature_vi_ramp():
 
     assert vi.ramp_status() in ("RAMPING", "TARGET_REACHED")
 
+def test_temperature_vi_set_pid_forwards_to_driver_and_hides_from_card():
+    """set_pid programs all three PID values on the driver; front-panel only.
+
+    Covers both temperature VIs (the VTI VI inherits set_pid unchanged).
+    """
+    from cryosoft.core.decorators import get_control_panel
+    from cryosoft.virtual_instruments.temperature.sample_temperature_controller import (
+        SampleTemperatureControllerVI,
+    )
+
+    driver = SimOxfordITC503("SIM")
+    vi = SampleTemperatureControllerVI({"main": driver})
+
+    vi.set_pid(p_K=25.0, i_min=2.5, d_min=0.5)
+    assert driver.get_proportional_band() == pytest.approx(25.0)
+    assert driver.get_integral_action_time() == pytest.approx(2.5)
+    assert driver.get_derivative_action_time() == pytest.approx(0.5)
+
+    # panel=False: shown in the instrument front panel, never on the card.
+    assert get_control_panel(vi.set_pid) is False
+
+
 # 13. Level meter tests
 def test_level_vi_buffer():
     from cryosoft.virtual_instruments.level.cryogen_level_meter import CryogenLevelMeterVI

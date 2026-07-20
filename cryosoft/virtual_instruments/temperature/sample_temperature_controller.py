@@ -17,8 +17,9 @@
 #   temperature proximity to setpoint within tolerance.
 # output: |
 #   Logged temperature (K), setpoint (K), heater_output (%) via @monitored;
-#   set_temperature and set_ramp_rate available as @control.
-# last_updated: 2026-04-19
+#   set_temperature and set_ramp_rate available as @control; set_pid
+#   (@control(panel=False), grouped ParamSpecs) in the front panel only.
+# last_updated: 2026-07-21
 # ---
 
 """SampleTemperatureControllerVI — behavior-based VI for sample-stage temperature control."""
@@ -29,6 +30,7 @@ import time
 from typing import Any, Generator
 
 from cryosoft.core.decorators import control, monitored
+from cryosoft.core.plan import ParamSpec
 from cryosoft.virtual_instruments.base import TemperatureControllerBase
 from cryosoft.virtual_instruments.rampable import RampableVI
 
@@ -242,6 +244,47 @@ class SampleTemperatureControllerVI(TemperatureControllerBase, RampableVI):
             target_K: Desired temperature in kelvin.
         """
         self.start_ramp(target_K)
+
+    # panel=False: PID tuning is an occasional bench action — it lives in the
+    # instrument front panel, never on the compact monitor card. The min/max
+    # on the specs are the ITC 503's own protocol bounds (the driver clamps to
+    # the same ranges); they are instrument constants, not setup limits, so
+    # they do not go through control_limits/config.
+    @control(
+        panel=False,
+        params={
+            "p_K": ParamSpec(
+                type=float, default=10.0, unit="K", min=0.0, max=1677.7,
+                description="Proportional band",
+            ),
+            "i_min": ParamSpec(
+                type=float, default=1.0, unit="min", min=0.0, max=140.0,
+                description="Integral action time",
+            ),
+            "d_min": ParamSpec(
+                type=float, default=0.0, unit="min", min=0.0, max=273.0,
+                description="Derivative action time",
+            ),
+        },
+    )
+    def set_pid(
+        self, p_K: float = 10.0, i_min: float = 1.0, d_min: float = 0.0
+    ) -> None:
+        """Program the controller's PID loop parameters.
+
+        Extends the driver contract: the ``"main"`` driver must also implement
+        ``set_proportional_band(float)``, ``set_integral_action_time(float)``
+        and ``set_derivative_action_time(float)`` (the Oxford ITC 503 driver
+        and its sim twin both do).
+
+        Args:
+            p_K: Proportional band in kelvin.
+            i_min: Integral action time in minutes.
+            d_min: Derivative action time in minutes.
+        """
+        self._driver.set_proportional_band(float(p_K))  # type: ignore[attr-defined]
+        self._driver.set_integral_action_time(float(i_min))  # type: ignore[attr-defined]
+        self._driver.set_derivative_action_time(float(d_min))  # type: ignore[attr-defined]
 
     # ------------------------------------------------------------------
     # Lifecycle
