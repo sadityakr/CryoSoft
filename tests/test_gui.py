@@ -1423,6 +1423,30 @@ def test_ack_button_visible_in_emergency(procedure_win, orchestrator):
     assert not procedure_win._ack_btn.isVisible()
 
 
+def test_ack_button_visible_when_window_opened_after_emergency_already_active(
+    station, orchestrator, qtbot
+):
+    """Opening ProcedureWindow *after* EMERGENCY already fired must still show ACK.
+
+    Regression test: the window is created lazily (Procedures menu), often
+    well after an emergency has already put the Orchestrator into EMERGENCY.
+    state_changed only reports future transitions, so without an explicit
+    sync at construction time the button stayed hidden — the operator had no
+    way to acknowledge from a freshly opened window.
+    """
+    orchestrator._state = OrchestratorState.EMERGENCY  # simulate a pre-existing emergency
+
+    win = ProcedureWindow(
+        station, orchestrator,
+        get_sample_info=lambda: {"sample_name": "t", "sample_id": "T001", "comments": ""},
+        get_data_dir=lambda: "C:/CryoData",
+    )
+    qtbot.addWidget(win)
+    win.show()
+
+    assert win._ack_btn.isVisible()
+
+
 def test_progress_bar_updates(procedure_win, orchestrator):
     """Progress bar reflects procedure_progress signal."""
     orchestrator.procedure_progress.emit(0.42)

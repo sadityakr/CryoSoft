@@ -272,6 +272,18 @@ class Orchestrator(QObject):
         """Return True while the per-tick monitoring cycle is active."""
         return self._monitoring
 
+    @property
+    def state(self) -> str:
+        """Current state machine value (e.g. ``"IDLE"``, ``"EMERGENCY"``).
+
+        The GUI's only sanctioned way to read current state: widgets whose
+        visibility depends on state (e.g. the Acknowledge-Emergency button)
+        must read this once at construction time to sync with a state
+        entered before they existed — ``state_changed`` alone only reports
+        *future* transitions.
+        """
+        return self._state.value
+
     def start_monitoring(self) -> bool:
         """Begin the per-tick monitoring cycle (state polling + safety watchdog).
 

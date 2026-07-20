@@ -147,6 +147,11 @@ class ProcedureWindow(QMainWindow):
 
         self._build_ui()
         self._connect_signals()
+        # Sync state-dependent widgets (e.g. the Acknowledge-Emergency
+        # button) against whatever state the Orchestrator is already in —
+        # this window is opened lazily, often well after an EMERGENCY has
+        # already fired, and state_changed only reports future transitions.
+        self._on_state_changed(self._orchestrator.state)
 
         # Render the first procedure's form only now that the plot panels
         # exist and the params panel's structure_changed is connected — the
