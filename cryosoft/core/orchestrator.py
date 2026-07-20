@@ -211,6 +211,15 @@ class Orchestrator(QObject):
         # appropriate. Meaningless (and unread) for a plain procedure.
         self._operation_started_from_emergency: bool = False
 
+        # Set by acknowledge_emergency() when the operator acknowledges an
+        # EMERGENCY whose safety condition is still active: unlocks
+        # submit_vi_action() for manual front-panel recovery (e.g. cycling a
+        # switch heater by hand) without leaving EMERGENCY. Procedures and
+        # operations stay refused regardless — their gates check self._state,
+        # not this flag. Reset on every fresh EMERGENCY entry and on the
+        # eventual return to IDLE, so a new emergency always starts locked.
+        self._emergency_manual_override: bool = False
+
         # Scanner (switch VI) availability: an on/off flag procedures check
         # via Station.scanner_enabled() rather than assuming the first switch
         # VI a station exposes is theirs to use. Resolved once at construction
@@ -688,35 +697,56 @@ class Orchestrator(QObject):
             self._change_state(OrchestratorState.IDLE)
 
     def acknowledge_emergency(self) -> None:
-        """Return to IDLE after an EMERGENCY, once the cause has cleared.
+        """Acknowledge an EMERGENCY: unlock manual control, or return to IDLE.
 
-        Refused (with an error signal) while any safety condition is still
-        active — acknowledging an ongoing emergency would bounce straight
-        back on the next tick.
+        If the safety condition is still active, acknowledging cannot return
+        to IDLE (the next tick would bounce straight back), but it does
+        unlock ``submit_vi_action`` for manual front-panel recovery — e.g.
+        cycling a switch heater by hand — while remaining in EMERGENCY.
+        Starting a procedure or operation stays refused throughout: those
+        gates check the state itself, which is unchanged here.
+
+        Once the condition has cleared, acknowledging again (the same
+        button) returns to IDLE and relocks the override for the next
+        emergency.
         """
         if self._state != OrchestratorState.EMERGENCY:
             return
         safety = self._station.check_safety()
         active = sorted(flag for flag, tripped in safety.items() if tripped)
-        # A still-violated session envelope blocks acknowledgement for the same
-        # reason a safety flag does — the next tick would bounce straight back.
+        # A still-violated session envelope blocks the return to IDLE for the
+        # same reason a safety flag does — the next tick would bounce straight
+        # back.
         if self._session_envelope is not None:
             active.extend(self._session_envelope.check_state(self._station.cached_state))
         if active:
-            self._error(
-                "Cannot acknowledge emergency: condition still active "
-                f"({', '.join(active)})"
-            )
+            if not self._emergency_manual_override:
+                self._emergency_manual_override = True
+                self._emit_status(
+                    "Emergency acknowledged — front-panel manual control "
+                    f"unlocked. Condition still active: {', '.join(active)}"
+                )
+            else:
+                self._error(
+                    "Cannot return to IDLE: condition still active "
+                    f"({', '.join(active)})"
+                )
             return
+        self._emergency_manual_override = False
         self._change_state(OrchestratorState.IDLE)
 
     def submit_vi_action(self, vi_name: str, method_name: str, **kwargs: Any) -> None:
         """Submit a GUI action to a specific VI."""
-        # Allow actions in IDLE or during a manual ramp (RAMPING with no active procedure).
+        # Allow actions in IDLE, during a manual ramp (RAMPING with no active
+        # procedure), or in EMERGENCY once the operator has unlocked manual
+        # control via acknowledge_emergency() (see that method's docstring).
         manual_ramping = (
             self._state == OrchestratorState.RAMPING and self._procedure is None
         )
-        if self._state != OrchestratorState.IDLE and not manual_ramping:
+        emergency_override = (
+            self._state == OrchestratorState.EMERGENCY and self._emergency_manual_override
+        )
+        if self._state != OrchestratorState.IDLE and not (manual_ramping or emergency_override):
             msg = f"Cannot control {vi_name}: procedure is running in state {self._state.name}"
             logger.info("Blocked action: %s", msg)
             self.action_blocked.emit(msg)
@@ -1103,11 +1133,19 @@ class Orchestrator(QObject):
                         )
                         break
 
-        # 3. GUI Actions — processed in IDLE or during a manual ramp (no active procedure).
+        # 3. GUI Actions — processed in IDLE, during a manual ramp (no active
+        # procedure), or in EMERGENCY once the operator has unlocked manual
+        # control via acknowledge_emergency(). Mirrors the admission gate in
+        # submit_vi_action() — that gate decides what may be *queued*, this
+        # one decides what may be *drained*, and they must agree or a queued
+        # action would sit forever without a verdict.
         _manual_ramping = (
             self._state == OrchestratorState.RAMPING and self._procedure is None
         )
-        if self._state == OrchestratorState.IDLE or _manual_ramping:
+        _emergency_override = (
+            self._state == OrchestratorState.EMERGENCY and self._emergency_manual_override
+        )
+        if self._state == OrchestratorState.IDLE or _manual_ramping or _emergency_override:
             for action in self._gui_action_queue:
                 try:
                     self._station.execute_vi_action(
@@ -1374,6 +1412,7 @@ class Orchestrator(QObject):
         full switch-heater warmup/cooldown cycle every few seconds.
         """
         self._error(f"EMERGENCY: safety condition triggered ({reason})")
+        self._emergency_manual_override = False
         try:
             self._abort_active_procedure()
         except Exception:
