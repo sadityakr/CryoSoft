@@ -177,8 +177,20 @@ recovery.
 ### 4. `cryosoft/gui/app_settings.py`
 `sessions_root() -> Path` / `set_sessions_root(path) -> None` — QSettings-backed
 (same tier as `config_active`/`current_user_id`: machine-level, changes
-rarely), default equal to today's `_DEFAULT_DATA_DIR` value so a fresh
-install's default location is unchanged.
+rarely). **Default: `<Documents>/Cryo-data`**, resolved via
+`QStandardPaths.writableLocation(DocumentsLocation)` (e.g.
+`C:/Users/<name>/Documents/Cryo-data` on Windows) — platform-portable,
+always writable without admin rights, and covered by the user's normal
+Documents backup/sync. The store creates nothing until the first session
+is saved, so the folder appears only when actually used.
+The no-session fallback Data Dir aligns with it: `form_autosave` is
+deliberately Qt-free, so it cannot resolve Documents itself — its
+`_DEFAULT_DATA_DIR` becomes `""` meaning "no explicit choice", and the
+GUI substitutes `app_settings.sessions_root()`'s default wherever it
+displays or uses an empty `data_dir`. Existing autosave files carry
+their `data_dir` explicitly and are unaffected. (Because the default is
+resolved at runtime, `sessions_root()` returns the Documents path when
+the QSettings key is unset rather than persisting a hardcoded string.)
 
 ### 5. `cryosoft/gui/session_info_panel.py`
 - Data Dir field becomes derived-but-editable: on `experiment_changed`, if
