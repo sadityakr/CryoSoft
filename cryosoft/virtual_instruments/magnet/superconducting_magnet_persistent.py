@@ -218,6 +218,17 @@ class SuperconductingMagnetPersistentVI(SuperconductingMagnetVI):
                         return
                     yield
             self._energize_heater()
+        else:
+            # The heater is already energised at the driver, but this VI instance
+            # may not know it: normal mode deliberately leaves the heater ON, so
+            # after an app restart the driver reports "ON" while the freshly
+            # constructed SwitchHeater still tracks OFF. Without this adoption
+            # is_ready() can never become true and the warmup wait below spins
+            # forever (silently — "warmup" is a watchdog no-motion phase).
+            # turn_on() is a no-op when already tracked on, so a sweep still pays
+            # the warmup only once; on first adoption it starts the clock now,
+            # costing at most one extra warmup on an already-warm heater.
+            self._heater.turn_on()
 
         # Wait (wall-clock) until the switch is warm. No wait if already warm,
         # so a field sweep only pays the warmup on the first point.

@@ -285,6 +285,28 @@ class TestSuperConductingMagnetPersistentVI:
         assert self._drive_to_target_reached(vi, ips_driver)
         assert vi.get_field() == pytest.approx(1.0, abs=0.01)
 
+    def test_normal_ramp_completes_when_heater_already_on_at_construction(
+        self, ips_driver
+    ):
+        """Regression: an app restart leaves the heater ON at the driver while a
+        fresh VI's SwitchHeater tracks OFF. The ramp must adopt that state and
+        complete instead of spinning forever in the warmup wait."""
+        # Energise at the driver, matching how a prior session left the magnet,
+        # then build the VI — so its SwitchHeater starts out of sync.
+        ips_driver.set_switch_heater(True)
+        vi = self._make_vi(ips_driver, warmup_s=60.0)
+        clock = {"t": 0.0}
+        vi._heater = SwitchHeater(warmup_s=60.0, clock=lambda: clock["t"])
+
+        vi.start_ramp(1.0)
+        # First tick adopts the driver state and starts the warmup clock.
+        assert not self._drive_to_target_reached(vi, ips_driver, max_ticks=20)
+        assert vi.ramp_phase() == "warmup"
+        clock["t"] = 60.0
+        assert self._drive_to_target_reached(vi, ips_driver)
+        assert vi.get_field() == pytest.approx(1.0, abs=0.01)
+        assert vi.switch_heater_state() == "ON"
+
     def test_manual_switch_heater_refused_in_normal_mode(self, ips_driver):
         from cryosoft.core.exceptions import CryoSoftSafetyError
 
