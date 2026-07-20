@@ -177,9 +177,9 @@ recovery.
 ### 4. `cryosoft/gui/app_settings.py`
 `sessions_root() -> Path` / `set_sessions_root(path) -> None` — QSettings-backed
 (same tier as `config_active`/`current_user_id`: machine-level, changes
-rarely). **Default: `<Documents>/Cryo-data`**, resolved via
+rarely). **Default: `<Documents>/CryoData`**, resolved via
 `QStandardPaths.writableLocation(DocumentsLocation)` (e.g.
-`C:/Users/<name>/Documents/Cryo-data` on Windows) — platform-portable,
+`C:/Users/<name>/Documents/CryoData` on Windows) — platform-portable,
 always writable without admin rights, and covered by the user's normal
 Documents backup/sync. The store creates nothing until the first session
 is saved, so the folder appears only when actually used.
