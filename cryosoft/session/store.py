@@ -1,7 +1,9 @@
 # ---
 # description: |
 #   Persistence for the L6 Session Management layer. ExperimentStore keeps one
-#   folder per experiment under <root>/ (normally <data_dir>/experiments/) with
+#   folder per experiment under <root>/ (normally
+#   cryosoft.gui.app_settings.sessions_root(), default <Documents>/CryoData)
+#   with
 #   an experiment.json, a gui_state.json, and a data/ folder for the run's
 #   HDF5 files (sub-folders allowed), plus an active.json pointer so a restart
 #   resumes the open experiment. relativize_data_file()/resolve_data_file()
@@ -103,7 +105,7 @@ class ExperimentStore:
 
         Args:
             root: Directory holding the experiment folders (normally
-                ``<data_dir>/experiments``).
+                ``cryosoft.gui.app_settings.sessions_root()``).
         """
         self._root = Path(root)
 

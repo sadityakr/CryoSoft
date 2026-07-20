@@ -13,8 +13,15 @@
 #   session/geometry persistence — the quadrant content lives in the
 #   component modules above. Also owns the Setup tier's menu surfaces: the
 #   User menu (Log in as… — switches which per-user form-autosave file is
-#   loaded/saved) and the Config menu's Instrument Info… action (read-only
-#   devices.yaml metadata via cryosoft.gui.setup_dialogs).
+#   loaded/saved; Load Session… — cryosoft.gui.session_dialogs.LoadSessionDialog,
+#   switches the open L6 experiment via _switch_session; Sessions Folder… —
+#   browses app_settings.sessions_root()/set_sessions_root()) and the Config
+#   menu's Instrument Info… action (read-only devices.yaml metadata via
+#   cryosoft.gui.setup_dialogs). Also connects SessionManager.experiment_changed
+#   (loads a newly opened/switched session's own gui_state.json over the
+#   in-memory SessionState, skipping a brand-new experiment that has none
+#   yet) and store_health_changed (a save failure/recovery banner + status
+#   note) — see docs/plans/unified-session-record.md §7.
 # entry_point: Not run directly. Instantiated in main.py.
 # dependencies:
 #   - PyQt6 >= 6.5
@@ -23,13 +30,15 @@
 #   - cryosoft.gui.instrument_panel (InstrumentPanel)
 #   - cryosoft.gui.trends_quadrant (TrendsQuadrant)
 #   - cryosoft.gui.session_info_panel (SessionInfoPanel)
+#   - cryosoft.gui.session_dialogs (LoadSessionDialog)
 #   - cryosoft.gui.log_panel (LogPanel)
 #   - cryosoft.gui.config_menu (ConfigMenuController)
 #   - cryosoft.gui.setup_dialogs (LoginDialog, InstrumentInfoDialog)
 #   - cryosoft.gui.window_geometry (geometry persistence helpers)
 #   - cryosoft.session.manager (SessionManager, optional — forwarded to
 #     SessionInfoPanel, which owns the experiment lifecycle controls; also
-#     read here for the User menu's roster)
+#     read here for the User menu's roster, session switching, and the
+#     save-health banner)
 # input: |
 #   Station instance and Orchestrator instance.
 # process: |
@@ -56,6 +65,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction, QCloseEvent
 from PyQt6.QtWidgets import (
     QCheckBox,
+    QFileDialog,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -84,6 +94,7 @@ from cryosoft.gui.log_panel import LogPanel
 from cryosoft.gui.notification_banner import NotificationBanner
 from cryosoft.gui.operations_panel import OperationsPanel
 from cryosoft.gui.servicing_log_page import ServicingLogPage
+from cryosoft.gui.session_dialogs import LoadSessionDialog
 from cryosoft.gui.session_info_panel import SessionInfoPanel
 from cryosoft.gui.setup_dialogs import InstrumentInfoDialog, LoginDialog
 from cryosoft.gui.theme import (
@@ -238,6 +249,11 @@ class MonitorWindow(QMainWindow):
         # stamps built procedures; the experiment start/close/attendance/findings
         # controls live on the SessionInfoPanel, which owns session_manager directly.
         self._session_manager = session_manager
+        # Tracks the experiment_id last seen by _on_session_experiment_changed,
+        # so that handler (and the initial-resume check just below) only acts
+        # on an actual open/switch transition — never on a same-experiment
+        # re-emit (attendance/findings edits).
+        self._last_session_experiment_id: str | None = None
 
         # Config management (optional — absent in unit tests that build the
         # window without a catalog). The Config menu is only built when a
@@ -259,8 +275,32 @@ class MonitorWindow(QMainWindow):
         # Persistent session *content* (sample metadata, procedure params, run
         # queue) — a second persistence tier separate from the QSettings window
         # state. Loaded here and applied to the fields once they exist; re-saved
-        # on close and by the User menu.
-        self._session = session_store.load(app_settings.session_file_path(self._current_user_id))
+        # on close and by the User menu. When the SessionManager already has an
+        # experiment resumed from a previous run (crash/close recovery), its own
+        # gui_state.json — not the per-user AppData file — is the right source:
+        # this is what makes a resumed session's own sample fields/queue reappear
+        # rather than whoever's per-user autosave happens to be current. A
+        # resumed experiment with no gui_state.json yet (never saved before the
+        # app last stopped) starts from a blank SessionState, not the per-user
+        # file, so SessionInfoPanel's own data-dir forcing (see
+        # session_info_panel.py) is the one source of truth for its Data Dir.
+        resumed_experiment = (
+            self._session_manager.current_experiment()
+            if self._session_manager is not None
+            else None
+        )
+        if resumed_experiment is not None:
+            self._last_session_experiment_id = resumed_experiment.experiment_id
+            resumed_gui_state_path = self._session_manager.current_gui_state_path()
+            self._session = (
+                session_store.load(resumed_gui_state_path)
+                if resumed_gui_state_path is not None and resumed_gui_state_path.exists()
+                else session_store.SessionState()
+            )
+        else:
+            self._session = session_store.load(
+                app_settings.session_file_path(self._current_user_id)
+            )
 
         self.setWindowTitle("CryoSoft — Monitor")
         window_geometry.restore_or_center(self, _GEOMETRY_KEY, fraction=0.9)
@@ -308,6 +348,25 @@ class MonitorWindow(QMainWindow):
         )
         login_action.triggered.connect(self._open_login_dialog)
         user_menu.addAction(login_action)
+
+        # L6 session (experiment) surfaces — distinct from the per-user
+        # form-autosave content below: these operate on ExperimentRecord
+        # folders under app_settings.sessions_root(), not last_session.json.
+        load_session_action = QAction("Load Session…", self)
+        load_session_action.setToolTip(
+            "Switch to another open session (experiment)"
+        )
+        load_session_action.triggered.connect(self._open_load_session_dialog)
+        user_menu.addAction(load_session_action)
+
+        sessions_folder_action = QAction("Sessions Folder…", self)
+        sessions_folder_action.setToolTip(
+            "Choose where session (experiment) folders are stored — applies "
+            "fully on next launch"
+        )
+        sessions_folder_action.triggered.connect(self._open_sessions_folder_dialog)
+        user_menu.addAction(sessions_folder_action)
+
         user_menu.addSeparator()
         new_session_action = QAction("New Session", self)
         new_session_action.setToolTip(
@@ -749,7 +808,9 @@ class MonitorWindow(QMainWindow):
         """Return the configured data directory path.
 
         Returns:
-            Absolute path string; falls back to ``"C:/CryoData"`` if empty.
+            Absolute path string; falls back to the open session's own data
+            folder, or (no session open) ``app_settings.sessions_root()``, if
+            the field is empty (``SessionInfoPanel.get_data_dir``).
         """
         return self._session_info.get_data_dir()
 
@@ -791,14 +852,31 @@ class MonitorWindow(QMainWindow):
         return state
 
     def _save_session(self) -> None:
-        """Persist the current session to disk, tolerating write failures."""
+        """Persist the current session to disk, tolerating write failures.
+
+        When an experiment is open, GUI state follows the session bundle —
+        ``session_manager.current_gui_state_path()`` inside the session
+        folder — instead of the per-user AppData file, and the run queue is
+        additionally promoted into the experiment record itself via
+        ``set_queue`` so it survives independently of the autosave file. With
+        no experiment open, behavior is unchanged (the per-user AppData
+        file).
+        """
         self._session = self._collect_session_state()
+        session_manager = self._session_manager
+        is_session_open = (
+            session_manager is not None and session_manager.current_experiment() is not None
+        )
+        if is_session_open:
+            path = session_manager.current_gui_state_path()
+        else:
+            path = app_settings.session_file_path(self._current_user_id)
         try:
-            session_store.save(
-                self._session, app_settings.session_file_path(self._current_user_id)
-            )
+            session_store.save(self._session, path)
         except OSError as exc:
             logger.warning("MonitorWindow: could not save session: %s", exc)
+        if is_session_open:
+            session_manager.set_queue([item.to_dict() for item in self._session.queue])
 
     def _on_new_session(self) -> None:
         """Clear the session to defaults after user confirmation."""
@@ -850,6 +928,71 @@ class MonitorWindow(QMainWindow):
         self._session_info.apply_session(self._session)
         self._sync_current_user_label()
 
+    def _open_load_session_dialog(self) -> None:
+        """Open LoadSessionDialog and switch to the picked experiment, if any."""
+        if self._session_manager is None:
+            QMessageBox.information(
+                self, "Load Session", "Session management is not available."
+            )
+            return
+        dialog = LoadSessionDialog(self._session_manager, self)
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return
+        experiment_id = dialog.selected_experiment_id()
+        if experiment_id:
+            self._switch_session(experiment_id)
+
+    def _open_sessions_folder_dialog(self) -> None:
+        """Browse for a new sessions root; persists for the next launch only."""
+        if self._session_manager is None:
+            QMessageBox.information(
+                self, "Sessions Folder", "Session management is not available."
+            )
+            return
+        selected = QFileDialog.getExistingDirectory(
+            self, "Select Sessions Folder", str(app_settings.sessions_root())
+        )
+        if not selected:
+            return
+        app_settings.set_sessions_root(selected)
+        self._status_bar.showMessage(
+            "Sessions folder updated — applies fully on next launch", 5000
+        )
+
+    def _switch_session(self, experiment_id: str) -> None:
+        """Save the outgoing session's fields and load the incoming session's own.
+
+        Mirrors ``_switch_user``'s save-outgoing/load-incoming shape one
+        level up, at the L6 session-record level: (1) persist the current
+        GUI state to wherever it is currently targeted, (2) ask
+        ``SessionManager`` to switch — a ``ValueError`` (unknown id, or the
+        target is not open) surfaces as a warning and aborts before anything
+        else changes, (3) load the target's own ``gui_state.json`` (a default
+        ``SessionState`` when it has none yet) and apply it to the Session
+        Info panel. A ``ProcedureWindow`` already open keeps its in-memory
+        queue/params from before the switch — the same documented limitation
+        ``_switch_user`` has — it re-reads whoever is current only the next
+        time it is (re)built.
+
+        Args:
+            experiment_id: The store key of an open experiment to switch to.
+        """
+        if self._session_manager is None:
+            return
+        self._save_session()
+        try:
+            self._session_manager.switch_experiment(experiment_id)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Could not switch session", str(exc))
+            return
+        gui_state_path = self._session_manager.current_gui_state_path()
+        self._session = (
+            session_store.load(gui_state_path)
+            if gui_state_path is not None and gui_state_path.exists()
+            else session_store.SessionState()
+        )
+        self._session_info.apply_session(self._session)
+
     def _sync_current_user_label(self) -> None:
         """Reflect the current login in the header label."""
         if not self._current_user_id:
@@ -893,6 +1036,63 @@ class MonitorWindow(QMainWindow):
         self._orchestrator.run_finished.connect(self._on_run_finished_for_logs)
         if self._cryogenics_recorder is not None:
             self._cryogenics_recorder.cryo_warning.connect(self._on_cryo_warning)
+        if self._session_manager is not None:
+            self._session_manager.experiment_changed.connect(
+                self._on_session_experiment_changed
+            )
+            self._session_manager.store_health_changed.connect(
+                self._on_store_health_changed
+            )
+
+    def _on_session_experiment_changed(self, record: dict) -> None:
+        """Load a newly opened/switched session's gui_state.json, if it has one.
+
+        Connected to ``SessionManager.experiment_changed`` for every path
+        that can bring a *different* experiment live — Start Experiment,
+        ``switch_experiment``, and the resume-on-construction case already
+        handled once in ``__init__``. A brand-new experiment (just started
+        via Start Experiment) has no ``gui_state.json`` yet — doing nothing
+        in that case is what stops a default ``SessionState`` from wiping
+        the sample fields the physicist just typed. A same-experiment
+        re-emit (attendance/findings edits) is ignored outright.
+
+        Args:
+            record: ``ExperimentRecord.to_dict()``, or ``{}`` when none open.
+        """
+        experiment_id = record.get("experiment_id", "") if record else ""
+        if not experiment_id or experiment_id == self._last_session_experiment_id:
+            self._last_session_experiment_id = experiment_id or None
+            return
+        self._last_session_experiment_id = experiment_id
+        if self._session_manager is None:
+            return
+        gui_state_path = self._session_manager.current_gui_state_path()
+        if gui_state_path is None or not gui_state_path.exists():
+            return
+        self._session = session_store.load(gui_state_path)
+        self._session_info.apply_session(self._session)
+
+    def _on_store_health_changed(self, info: dict) -> None:
+        """Surface a session-record save failure/recovery via the banner + status bar.
+
+        ``ok=False`` shows a persistent banner error — the physicist should
+        know before losing work that the record is not reaching disk.
+        ``ok=True`` clears it (the banner's own dismiss, not another
+        message) and confirms recovery as a routine status-bar note instead
+        of a second banner.
+
+        Args:
+            info: ``{"ok": bool, "detail": str}`` from
+                ``SessionManager.store_health_changed``.
+        """
+        if info.get("ok"):
+            self._banner.dismiss()
+            self._status_bar.showMessage("Session record saving recovered", 5000)
+            return
+        detail = info.get("detail", "")
+        self._banner.show_message(
+            f"Session record is NOT being saved: {detail}", BANNER_SEVERITY_ERROR
+        )
 
     def _on_states_updated(self, state: dict) -> None:
         """Forward the per-tick state snapshot to the Trends and Operations panels.

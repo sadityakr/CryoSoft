@@ -2,15 +2,20 @@
 # description: |
 #   app_settings: a one-function factory for the application's QSettings object,
 #   plus machine-level identity persisted through it — which config is active
-#   (config_active/set_config_active) and who is currently logged in
-#   (current_user_id/set_current_user_id). It exists purely as a test seam.
-#   Windows persist their geometry via QSettings("CryoSoft", "CryoSoft"), which
-#   on Windows is backed by the real registry (HKCU\Software\CryoSoft\CryoSoft).
-#   Routing every construction through this factory lets GUI tests monkeypatch
-#   it to point at a throwaway .ini file, so a pytest run never overwrites the
-#   user's real saved geometry. session_file_path(user_id) is the per-user form
-#   autosave: with a logged-in user_id it resolves to that person's own file
-#   under sessions/, so switching users switches what's remembered.
+#   (config_active/set_config_active), who is currently logged in
+#   (current_user_id/set_current_user_id), and where L6 session (experiment)
+#   folders live (sessions_root/set_sessions_root). It exists purely as a test
+#   seam. Windows persist their geometry via QSettings("CryoSoft", "CryoSoft"),
+#   which on Windows is backed by the real registry
+#   (HKCU\Software\CryoSoft\CryoSoft). Routing every construction through this
+#   factory lets GUI tests monkeypatch it to point at a throwaway .ini file, so
+#   a pytest run never overwrites the user's real saved geometry.
+#   session_file_path(user_id) is the per-user form autosave (used only when no
+#   L6 session is open): with a logged-in user_id it resolves to that person's
+#   own file under sessions/, so switching users switches what's remembered.
+#   sessions_root() resolves to <Documents>/CryoData at runtime whenever the
+#   QSettings key is unset, so the default is never persisted by merely
+#   reading it — only set_sessions_root() writes the key.
 # entry_point: Not run directly. Called by MonitorWindow and ProcedureWindow.
 # dependencies:
 #   - PyQt6 >= 6.5
@@ -47,6 +52,8 @@ _SESSIONS_SUBDIR = "sessions"
 _ACTIVE_CONFIG_NAME_KEY = "ActiveConfig/name"
 _ACTIVE_CONFIG_SOURCE_KEY = "ActiveConfig/source"
 _CURRENT_USER_KEY = "CurrentUser/user_id"
+_SESSIONS_ROOT_KEY = "Sessions/root"
+_SESSIONS_ROOT_DEFAULT_DIRNAME = "CryoData"
 
 
 def get_settings() -> QSettings:
@@ -166,6 +173,43 @@ def current_user_id() -> str | None:
     """
     value = get_settings().value(_CURRENT_USER_KEY)
     return str(value) if value else None
+
+
+def sessions_root() -> Path:
+    """Return the configured root directory for L6 session (experiment) folders.
+
+    Machine-level like ``config_active``/``current_user_id`` — this changes
+    rarely, so it lives in ``QSettings``, not the per-user JSON tier. When the
+    key has never been set, resolves to ``<Documents>/CryoData`` via
+    ``QStandardPaths`` **at call time** rather than persisting that default —
+    only ``set_sessions_root`` ever writes the key, so a plain read never has
+    a side effect and a later OS/user-profile change is picked up
+    automatically. Nothing here creates the directory; the store creates it
+    lazily on the first actual save.
+
+    Returns:
+        The sessions root ``Path`` (may not exist yet).
+    """
+    value = get_settings().value(_SESSIONS_ROOT_KEY)
+    if value:
+        return Path(str(value))
+    base = QStandardPaths.writableLocation(
+        QStandardPaths.StandardLocation.DocumentsLocation
+    )
+    return Path(base) / _SESSIONS_ROOT_DEFAULT_DIRNAME
+
+
+def set_sessions_root(path: str | Path) -> None:
+    """Persist the sessions root for this and future launches.
+
+    Args:
+        path: The directory under which session (experiment) folders should
+            live going forward. Not validated or created here — an
+            already-running ``ExperimentStore`` keeps its old root until the
+            app is restarted (see ``gui/README.md`` / the User menu's
+            "Sessions Folder…" action).
+    """
+    get_settings().setValue(_SESSIONS_ROOT_KEY, str(path))
 
 
 def set_current_user_id(user_id: str | None) -> None:
