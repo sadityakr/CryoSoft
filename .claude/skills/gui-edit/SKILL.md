@@ -30,6 +30,7 @@ one allowed exception). CI runs `make lint + make contracts + make test`.
 | `cryosoft/gui/procedure_discovery.py` | Qt-free BaseProcedure auto-discovery |
 | `cryosoft/gui/window_geometry.py` | Shared geometry restore/save helpers for both windows |
 | `cryosoft/gui/instrument_panel.py` | Auto-generated per-VI panel (from decorator metadata) |
+| `cryosoft/gui/instrument_front_panel.py` | Per-VI full-capability child window (all monitored values + all controls) |
 | `cryosoft/gui/live_plot_panel.py` | Reusable X/Y live plot widget |
 | `cryosoft/gui/notification_banner.py` | Non-modal warning/error strip |
 | `cryosoft/gui/app_settings.py` | QSettings factory — the test seam |

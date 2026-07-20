@@ -36,6 +36,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+import qtawesome as qta
 from PyQt6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
@@ -60,6 +61,7 @@ from cryosoft.gui.param_form import (
     build_param_widget,
     collect_value,
 )
+from cryosoft.gui.theme import TEXT_PRIMARY
 from cryosoft.virtual_instruments.base import BaseVirtualInstrument
 
 logger = logging.getLogger(__name__)
@@ -82,6 +84,9 @@ class InstrumentPanel(QGroupBox):
             None, each control's own declared ``panel=`` default decides.
             Display-only — a hidden control stays fully functional in the
             instrument's front panel.
+        show_front_panel_button: Whether the header carries the icon that
+            opens the :class:`InstrumentFrontPanel`. False inside the front
+            panel itself (a front panel must not open another one).
     """
 
     def __init__(
@@ -91,12 +96,15 @@ class InstrumentPanel(QGroupBox):
         orchestrator: Orchestrator,
         parent: QWidget | None = None,
         panel_controls: list[str] | None = None,
+        show_front_panel_button: bool = True,
     ) -> None:
         super().__init__(parent)  # no native title — see module docstring
         self._vi_name = vi_name
         self._vi = vi
         self._orchestrator = orchestrator
         self._panel_controls = panel_controls
+        self._show_front_panel_button = show_front_panel_button
+        self._front_panel: QWidget | None = None  # lazily created
 
         # Maps field name → value label widget
         self._value_labels: dict[str, QLabel] = {}
@@ -135,6 +143,16 @@ class InstrumentPanel(QGroupBox):
         self._name_label.setProperty("class", "panel_name_label")
         header_row.addWidget(self._name_label)
         header_row.addStretch()
+        if self._show_front_panel_button:
+            fp_btn = QPushButton()
+            fp_btn.setObjectName(f"{self._vi_name}_front_panel_btn")
+            fp_btn.setIcon(qta.icon("fa5s.sliders-h", color=TEXT_PRIMARY))
+            fp_btn.setToolTip(
+                "Open the instrument front panel (all monitored values and "
+                "controls, including ones hidden from this card)"
+            )
+            fp_btn.clicked.connect(self._open_front_panel)
+            header_row.addWidget(fp_btn)
         self._lifecycle = LifecycleToggleButton(self._vi_name, self._submit_lifecycle, parent=self)
         header_row.addWidget(self._lifecycle)
         outer.addLayout(header_row)
@@ -165,6 +183,20 @@ class InstrumentPanel(QGroupBox):
         outer.addStretch()
 
         self.setLayout(outer)
+
+    def _open_front_panel(self) -> None:
+        """Lazily create and show this VI's full front-panel window."""
+        if self._front_panel is None:
+            # Local import: InstrumentFrontPanel embeds an InstrumentPanel,
+            # so a module-level import would be circular.
+            from cryosoft.gui.instrument_front_panel import InstrumentFrontPanel
+
+            self._front_panel = InstrumentFrontPanel(
+                self._vi_name, self._vi, self._orchestrator, parent=self.window()
+            )
+        self._front_panel.show()
+        self._front_panel.raise_()
+        self._front_panel.activateWindow()
 
     def _control_visible(self, method_name: str) -> bool:
         """Decide whether one @control appears on this compact card.

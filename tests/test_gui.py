@@ -421,6 +421,47 @@ def test_monitor_window_threads_panels_config(station, orchestrator, qtbot):
     assert win.findChild(QPushButton, "magnet_y_set_field_btn") is not None
 
 
+# ── Instrument front panel ────────────────────────────────────────────────────
+
+def test_front_panel_button_opens_full_control_surface(orchestrator, qtbot):
+    """The card's sliders icon opens a window showing every control —
+    including panel=False ones the card hides — and reuses it on re-click."""
+    card = InstrumentPanel("mock_vi", _PanelFlagVI({}), orchestrator)
+    qtbot.addWidget(card)
+
+    fp_btn = card.findChild(QPushButton, "mock_vi_front_panel_btn")
+    assert fp_btn is not None
+    fp_btn.click()
+
+    front = card._front_panel
+    assert front is not None
+    qtbot.addWidget(front)
+    assert front.isVisible()
+    # The card hides set_heater_power (panel=False); the front panel shows it.
+    assert front.findChild(QPushButton, "mock_vi_set_heater_power_btn") is not None
+    assert front.findChild(QPushButton, "mock_vi_set_temperature_btn") is not None
+    # No recursion: the embedded panel carries no front-panel icon of its own.
+    inner_buttons = front.findChildren(QPushButton, "mock_vi_front_panel_btn")
+    assert inner_buttons == []
+    # Second click reuses the same window.
+    fp_btn.click()
+    assert card._front_panel is front
+
+
+def test_front_panel_ignores_config_allowlist(orchestrator, qtbot):
+    """A monitor.yaml allowlist trims only the card; the front panel opened
+    from that card still shows everything."""
+    card = InstrumentPanel(
+        "mock_vi", _PanelFlagVI({}), orchestrator,
+        panel_controls=["set_temperature"],
+    )
+    qtbot.addWidget(card)
+    card.findChild(QPushButton, "mock_vi_front_panel_btn").click()
+    front = card._front_panel
+    qtbot.addWidget(front)
+    assert front.findChild(QPushButton, "mock_vi_set_heater_power_btn") is not None
+
+
 def test_instrument_panel_status_not_restyled_when_unchanged(
     station, orchestrator, qtbot, monkeypatch
 ):
