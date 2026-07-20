@@ -22,7 +22,7 @@ def test_default_session_is_empty_with_default_data_dir():
     assert state.sample_name == ""
     assert state.sample_id == ""
     assert state.comments == ""
-    assert state.data_dir == "C:/CryoData"
+    assert state.data_dir == ""
     assert state.selected_procedure == ""
     assert state.procedure_params == {}
     assert state.queue == []
@@ -67,7 +67,7 @@ def test_from_dict_ignores_unknown_keys_and_fills_missing():
         {"sample_name": "only_name", "future_field": 123}
     )
     assert state.sample_name == "only_name"
-    assert state.data_dir == "C:/CryoData"  # missing -> default
+    assert state.data_dir == ""  # missing -> default (no explicit choice)
     assert state.queue == []
 
 

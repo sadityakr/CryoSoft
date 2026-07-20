@@ -12,10 +12,15 @@
 #   time is snapshotted onto the ExperimentRecord for record-keeping. It is
 #   the single owner of session-level sample metadata in the GUI, read by
 #   ProcedureWindow through MonitorWindow's get_sample_info/get_data_dir
-#   callables.
+#   callables. Data Dir is derived-but-editable: opening/switching a session
+#   forces the field to that session's own data/ folder (remembering
+#   whatever it held before, to restore on close), and a plain status note
+#   (no stylesheet) appears whenever the field points outside the open
+#   session's folder — see docs/plans/unified-session-record.md §5.
 # entry_point: Not run directly. Hosted as MonitorWindow's bottom-left quadrant.
 # dependencies:
 #   - PyQt6 >= 6.5
+#   - cryosoft.gui.app_settings (sessions_root default fallback)
 #   - cryosoft.gui.form_autosave (SessionState)
 #   - cryosoft.gui.theme (button classes)
 #   - cryosoft.gui.experiment_dialogs (Start/Close experiment dialogs)
@@ -23,12 +28,15 @@
 # input: |
 #   A loaded SessionState (via apply_session) to prefill the fields, and an
 #   optional SessionManager whose experiment_changed signal drives the
-#   experiment status row.
+#   experiment status row and the Data Dir field.
 # process: |
 #   Builds the form inside a QScrollArea (objectNames session_info_quadrant /
 #   session_info_scroll and the *_input fields are preserved API for tests).
 #   The experiment row is always built; without a SessionManager its button
-#   stays disabled.
+#   stays disabled. On each experiment_changed, an open/switched experiment
+#   (a changed experiment_id) forces Data Dir to current_data_dir(); closing
+#   restores the field to whatever it held immediately before the session
+#   opened.
 # output: |
 #   get_sample_info()/get_data_dir() read the live field values.
 #   SessionManager.start_experiment()/close_experiment()/set_findings()/
@@ -38,6 +46,8 @@
 """SessionInfoPanel — the Session Information quadrant (experiment + sample metadata)."""
 
 from __future__ import annotations
+
+from pathlib import Path
 
 import qtawesome as qta
 from PyQt6.QtWidgets import (
@@ -57,13 +67,14 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from cryosoft.gui import app_settings
 from cryosoft.gui.experiment_dialogs import CloseExperimentDialog, StartExperimentDialog
 from cryosoft.gui.form_autosave import SessionState
 from cryosoft.gui.theme import TEXT_PRIMARY
 from cryosoft.session.manager import SessionManager
 
-_DEFAULT_DATA_DIR = "C:/CryoData"
 _ELN_NOT_CONFIGURED_TEXT = "eLab publishing is not configured yet"
+_OUTSIDE_SESSION_NOTE_TEXT = "saving outside the current session folder"
 
 
 class SessionInfoPanel(QWidget):
@@ -89,6 +100,13 @@ class SessionInfoPanel(QWidget):
     ) -> None:
         super().__init__(parent)
         self._session_manager = session_manager
+        # Data Dir transition tracking (rule 3, plan §5): _last_experiment_id
+        # detects an actual open/switch transition (vs. a same-experiment
+        # experiment_changed re-emit from e.g. an attendance/findings edit);
+        # _pre_session_data_dir remembers the field's manual value from just
+        # before the first such transition, so closing can restore it.
+        self._last_experiment_id: str | None = None
+        self._pre_session_data_dir: str | None = None
         self.setObjectName("session_info_quadrant")
         outer = QVBoxLayout(self)
         outer.setContentsMargins(4, 4, 4, 4)
@@ -198,6 +216,7 @@ class SessionInfoPanel(QWidget):
             self._start_close_btn.setText("Start Experiment…")
             self._attended_checkbox.setVisible(False)
             self._eln_status_label.setText(_ELN_NOT_CONFIGURED_TEXT)
+            self._restore_data_dir_on_close()
             return
 
         user_id = record.get("user_id", "")
@@ -224,6 +243,40 @@ class SessionInfoPanel(QWidget):
         else:
             self._eln_status_label.setText(f"Not published yet — {_ELN_NOT_CONFIGURED_TEXT}")
 
+        self._force_data_dir_on_open(record.get("experiment_id", ""))
+
+    def _force_data_dir_on_open(self, experiment_id: str) -> None:
+        """Force Data Dir to the (newly) active session's own folder.
+
+        Only acts on an actual transition — a different ``experiment_id``
+        than last seen (covers both a brand-new/switched-in open experiment
+        and, from ``None``, the very first one in this sequence). A
+        same-experiment re-emit (attendance/findings edits) leaves whatever
+        the physicist has since typed alone. The field's text just before
+        the first such transition is captured so closing can restore it.
+
+        Args:
+            experiment_id: The now-open experiment's id (never empty here).
+        """
+        if experiment_id == self._last_experiment_id:
+            return
+        if self._last_experiment_id is None:
+            self._pre_session_data_dir = self._data_dir_input.text()
+        self._last_experiment_id = experiment_id
+        if self._session_manager is not None:
+            data_dir = self._session_manager.current_data_dir()
+            if data_dir is not None:
+                self._data_dir_input.setText(str(data_dir))
+        self._update_data_dir_note()
+
+    def _restore_data_dir_on_close(self) -> None:
+        """Restore whatever Data Dir held immediately before the session opened."""
+        if self._last_experiment_id is not None and self._pre_session_data_dir is not None:
+            self._data_dir_input.setText(self._pre_session_data_dir)
+        self._last_experiment_id = None
+        self._pre_session_data_dir = None
+        self._update_data_dir_note()
+
     def _build_form(self) -> QWidget:
         """Build the sample-info form (session-level metadata).
 
@@ -249,8 +302,14 @@ class SessionInfoPanel(QWidget):
         form.addRow("Comments:", self._comments_input)
 
         dir_row = QHBoxLayout()
-        self._data_dir_input = QLineEdit(_DEFAULT_DATA_DIR)
+        # Starts empty ("no explicit choice yet"); apply_session() (called
+        # right after construction by MonitorWindow) and/or the SessionManager
+        # experiment_changed handler above fill in the right value — the
+        # session's own folder when one is open, else the sessions_root()
+        # default (see _default_data_dir_text()).
+        self._data_dir_input = QLineEdit()
         self._data_dir_input.setObjectName("data_dir_input")
+        self._data_dir_input.textChanged.connect(self._update_data_dir_note)
         browse_btn = QPushButton("Browse…")
         browse_btn.setObjectName("browse_btn")
         browse_btn.setIcon(qta.icon("fa5s.folder-open", color=TEXT_PRIMARY))
@@ -260,15 +319,55 @@ class SessionInfoPanel(QWidget):
         dir_row.addWidget(browse_btn)
         form.addRow("Data Dir:", dir_row)
 
+        self._data_dir_note = QLabel(_OUTSIDE_SESSION_NOTE_TEXT)
+        self._data_dir_note.setObjectName("data_dir_note")
+        self._data_dir_note.setWordWrap(True)
+        self._data_dir_note.hide()
+        form.addRow("", self._data_dir_note)
+
         return box
 
     def _on_browse_dir(self) -> None:
-        """Open a directory browser and fill the data-dir field."""
-        selected = QFileDialog.getExistingDirectory(
-            self, "Select Data Directory", self._data_dir_input.text()
-        )
+        """Open a directory browser and fill the data-dir field.
+
+        Opens at the open session's own data folder (rule 3) when one is
+        active, else at whatever the field currently holds.
+        """
+        start_dir = self._data_dir_input.text()
+        if self._session_manager is not None:
+            current_dir = self._session_manager.current_data_dir()
+            if current_dir is not None:
+                start_dir = str(current_dir)
+        selected = QFileDialog.getExistingDirectory(self, "Select Data Directory", start_dir)
         if selected:
             self._data_dir_input.setText(selected)
+
+    def _update_data_dir_note(self) -> None:
+        """Show/hide the "saving outside the current session folder" note.
+
+        Only meaningful while a session is open: compares the field's
+        current path against the session folder
+        (``current_data_dir().parent``, since ``current_data_dir()`` is that
+        folder's ``data/`` sub-directory). No session open, or an empty
+        field, both hide the note.
+        """
+        session_folder = self._current_session_folder()
+        text = self._data_dir_input.text().strip()
+        if session_folder is None or not text:
+            self._data_dir_note.hide()
+            return
+        try:
+            outside = not Path(text).resolve().is_relative_to(session_folder.resolve())
+        except (OSError, ValueError):
+            outside = True
+        self._data_dir_note.setVisible(outside)
+
+    def _current_session_folder(self) -> Path | None:
+        """Return the open experiment's session folder, or ``None`` when none is open."""
+        if self._session_manager is None:
+            return None
+        data_dir = self._session_manager.current_data_dir()
+        return data_dir.parent if data_dir is not None else None
 
     # ------------------------------------------------------------------
     # Public accessors (surfaced by MonitorWindow to ProcedureWindow)
@@ -290,9 +389,30 @@ class SessionInfoPanel(QWidget):
         """Return the configured data directory path.
 
         Returns:
-            Absolute path string; falls back to ``"C:/CryoData"`` if empty.
+            Absolute path string; falls back to the open session's own data
+            folder, or (no session open) ``app_settings.sessions_root()``, if
+            the field is empty.
         """
-        return self._data_dir_input.text().strip() or _DEFAULT_DATA_DIR
+        return self._data_dir_input.text().strip() or self._default_data_dir_text()
+
+    def _default_data_dir_text(self) -> str:
+        """Return the fallback Data Dir text for an empty field/session state.
+
+        The open session's own data folder when one is active (mirrors the
+        experiment_changed-driven forcing above), else
+        ``app_settings.sessions_root()`` — the same substitution
+        ``form_autosave``'s now-empty ``_DEFAULT_DATA_DIR`` relies on the GUI
+        to make (form_autosave itself stays Qt-free and cannot resolve a
+        platform Documents directory).
+        """
+        session_folder_data_dir = (
+            self._session_manager.current_data_dir()
+            if self._session_manager is not None
+            else None
+        )
+        if session_folder_data_dir is not None:
+            return str(session_folder_data_dir)
+        return str(app_settings.sessions_root())
 
     def apply_session(self, state: SessionState) -> None:
         """Populate the fields from a loaded session.
@@ -303,4 +423,5 @@ class SessionInfoPanel(QWidget):
         self._sample_name_input.setText(state.sample_name)
         self._sample_id_input.setText(state.sample_id)
         self._comments_input.setPlainText(state.comments)
-        self._data_dir_input.setText(state.data_dir or _DEFAULT_DATA_DIR)
+        self._data_dir_input.setText(state.data_dir or self._default_data_dir_text())
+        self._update_data_dir_note()

@@ -48,12 +48,14 @@ GUI imports session).
 
 ## Exit (what goes out)
 
-- Persisted records: `<data_dir>/experiments/<experiment_id>/experiment.json`
-  (+ the `active.json` resume pointer), and the setup-local `users.json`
-  roster next to the app settings. Each experiment folder also holds
-  `gui_state.json` (GUI-authored, opaque to this layer) and a `data/` folder
-  where the experiment's HDF5 files live (sub-folders allowed, e.g.
-  `data/heating_runs/`) — see **Format rules** below.
+- Persisted records: `<sessions_root>/<experiment_id>/experiment.json` (+ the
+  `active.json` resume pointer), and the setup-local `users.json` roster next
+  to the app settings. `sessions_root` is `cryosoft.gui.app_settings.
+  sessions_root()` — a dedicated, app-settings-backed location (default
+  `<Documents>/CryoData`), decoupled from any GUI form field. Each experiment
+  folder also holds `gui_state.json` (GUI-authored, opaque to this layer) and
+  a `data/` folder where the experiment's HDF5 files live (sub-folders
+  allowed, e.g. `data/heating_runs/`) — see **Format rules** below.
 - `Orchestrator.set_session_envelope()` — the experiment's sample bounds,
   enforced in the Orchestrator for every writer.
 - `experiment_context()` — the dict the GUI passes as `experiment_info` when
