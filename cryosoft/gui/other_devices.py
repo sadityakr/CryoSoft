@@ -2,8 +2,9 @@
 # description: |
 #   OtherDevicesPanel: the compact Other Devices section of MonitorWindow's
 #   bottom-right quadrant — one connection-check row per measurement VI
-#   (dot + status + Check button + LifecycleToggleButton) and one display-only
-#   row per switch/scanner VI (dot + status + live active-route label).
+#   (dot + status + Check button + LifecycleToggleButton) and one row per
+#   switch/scanner VI (dot + status + live active-route label + an Enable
+#   Scanner checkbox toggling Station.scanner_enabled()).
 #   Extracted from monitor_window.py.
 # entry_point: Not run directly. Hosted inside MonitorWindow's Other Devices /
 #   Log stacked quadrant.
@@ -19,16 +20,22 @@
 #   Rows stack vertically for up to three VIs total; a tight 3-column grid is
 #   used beyond that so the quadrant's natural height stays small. Switch rows
 #   refresh their connection dot/status and active route on every monitor tick.
+#   Toggling any switch row's Enable Scanner checkbox calls
+#   Orchestrator.set_scanner_enabled() and re-syncs every other switch row's
+#   checkbox, since scanner_enabled is one Station-wide bit shared by all
+#   switch VIs, not a per-VI setting.
 # output: |
-#   Live device-status rows; VI lifecycle actions submitted to the Orchestrator.
+#   Live device-status rows; VI lifecycle actions and the scanner-enabled
+#   toggle submitted to the Orchestrator.
 # ---
 
-"""OtherDevicesPanel — measurement-VI check rows and display-only switch rows."""
+"""OtherDevicesPanel — measurement-VI check rows and switch/scanner rows."""
 
 from __future__ import annotations
 
 import qtawesome as qta
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -47,9 +54,12 @@ class OtherDevicesPanel(QWidget):
     """Compact status rows for measurement and switch VIs.
 
     Each measurement row is name + connection dot/status + a Check button and
-    a LifecycleToggleButton; each switch row is the display-only analogue
-    (name + display label + connection dot/status + live active route, no
-    buttons) — a switch is monitored, not driven, from this section.
+    a LifecycleToggleButton; each switch row is name + display label +
+    connection dot/status + live active route + an "Enable Scanner" checkbox
+    — a switch is monitored, not driven, from this section, but its routes
+    are only offered as loopable Procedure parameters once the checkbox
+    turns on ``Station.scanner_enabled()`` (off by default; see
+    GLOSSARY.md's "scanner_enabled" entry).
 
     The hosting window connects the Orchestrator's ``states_updated`` signal
     to :meth:`on_states_updated` so the switch rows track the live route.
@@ -80,6 +90,11 @@ class OtherDevicesPanel(QWidget):
         self._switch_route_labels: dict[str, QLabel] = {}
         self._switch_conn_dots: dict[str, QLabel] = {}
         self._switch_conn_status: dict[str, QLabel] = {}
+        # scanner_enabled is a single Station-owned bit shared by every switch
+        # VI (see GLOSSARY.md "scanner_enabled"), so with more than one switch
+        # row every row's checkbox must track the same state even though each
+        # renders its own control.
+        self._scanner_enable_checks: list[QCheckBox] = []
 
         rows = [self._build_device_status_row(n) for n in measurement_vis]
         rows += [self._build_switch_status_row(n) for n in switch_vis]
@@ -187,19 +202,20 @@ class OtherDevicesPanel(QWidget):
         return row_widget
 
     def _build_switch_status_row(self, vi_name: str) -> QWidget:
-        """Build one display-only status row for a switch/scanner VI.
+        """Build one status row for a switch/scanner VI.
 
         Same visual house style as :meth:`_build_device_status_row` (connection
-        dot + status text), but with no Check button and no lifecycle toggle.
-        Adds the VI's ``display_label`` (e.g. "Scanner (mux)") and a live
-        active-route label that both refresh on the monitor tick via
-        :meth:`on_states_updated`.
+        dot + status text), but with no Check button or lifecycle toggle since
+        a switch is monitored, not driven, from this section. Adds the VI's
+        ``display_label`` (e.g. "Scanner (mux)"), a live active-route label
+        that refreshes on the monitor tick via :meth:`on_states_updated`, and
+        an Enable Scanner checkbox wired to :meth:`_on_scanner_toggled`.
 
         Args:
             vi_name: Registered switch VI name (e.g. ``"switch_matrix"``).
 
         Returns:
-            A QWidget containing the assembled display-only row.
+            A QWidget containing the assembled row.
         """
         row_widget = QWidget()
         row_widget.setObjectName(f"{vi_name}_switch_row")
@@ -235,11 +251,35 @@ class OtherDevicesPanel(QWidget):
         route_lbl.setObjectName(f"{vi_name}_active_route")
         row.addWidget(route_lbl)
 
+        enable_chk = QCheckBox("Enable Scanner")
+        enable_chk.setObjectName(f"{vi_name}_enable_scanner_chk")
+        enable_chk.setToolTip(
+            "Off by default. Required before the Procedure window offers "
+            "this scanner's routes as loopable measurement parameters."
+        )
+        enable_chk.setChecked(self._orchestrator.scanner_enabled())
+        enable_chk.toggled.connect(self._on_scanner_toggled)
+        self._scanner_enable_checks.append(enable_chk)
+        row.addWidget(enable_chk)
+
         self._switch_conn_dots[vi_name] = dot
         self._switch_conn_status[vi_name] = status_lbl
         self._switch_route_labels[vi_name] = route_lbl
 
         return row_widget
+
+    def _on_scanner_toggled(self, checked: bool) -> None:
+        """Apply the station-wide scanner toggle and keep every switch row in sync.
+
+        Args:
+            checked: New state of the checkbox that was toggled.
+        """
+        self._orchestrator.set_scanner_enabled(checked)
+        for chk in self._scanner_enable_checks:
+            if chk.isChecked() != checked:
+                chk.blockSignals(True)
+                chk.setChecked(checked)
+                chk.blockSignals(False)
 
     def on_states_updated(self, state: dict) -> None:
         """Refresh the display-only switch rows from a per-tick state snapshot.
