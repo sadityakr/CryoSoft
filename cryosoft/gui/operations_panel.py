@@ -3,19 +3,20 @@
 #   OperationsPanel: MonitorWindow page 1's bottom-right selector entry
 #   (renamed from "Cryogenics" to "Operations", plan §12 — absorbs, does not
 #   replace, the Phase 5 cryogenics status section). Built when cryogenics
-#   is enabled OR the operations: config is non-empty. Structure: an
-#   optional cryogenics status section (He/N2 levels, consumption readout +
-#   window combo, level plot with fill markers — unchanged from Phase 5,
-#   gated on the cryogenics: config block), followed by one generic
-#   OperationCard per available operation (the helium fill, iff cryogenics
-#   is configured; plus one per operations: config block whose declared
-#   config_key matches a discovered OperationBase subclass). A card renders
-#   its operation's readiness_conditions() as a live checklist, its
-#   next_due() as a header line, an operator-confirmations row while it is
-#   the active run, a ready banner once a run finishes done with every
-#   condition holding, and a start/finish button — all driven purely by the
-#   operation class's declarations, so adding an operation to a setup never
-#   touches this file.
+#   is enabled OR the operations: config is non-empty. Structure: when
+#   cryogenics is configured, a QSplitter divides the panel into a left pane
+#   (cryogenics status: He/N2 levels, consumption readout + window combo,
+#   level plot with fill markers — unchanged from Phase 5) and a right pane
+#   (one generic OperationCard per available operation); with no cryogenics
+#   config the panel is just the right pane's cards, unsplit. Cards: the
+#   helium fill (iff cryogenics is configured) plus one per operations:
+#   config block whose declared config_key matches a discovered
+#   OperationBase subclass. A card renders its operation's
+#   readiness_conditions() as a live checklist, its next_due() as a header
+#   line, an operator-confirmations row while it is the active run, a ready
+#   banner once a run finishes done with every condition holding, and a
+#   start/finish button — all driven purely by the operation class's
+#   declarations, so adding an operation to a setup never touches this file.
 # entry_point: Not run directly. Built by MonitorWindow._build_bottom_right_quadrant
 #   whenever cryogenics is enabled or an operations: config block exists.
 # dependencies:
@@ -59,7 +60,7 @@
 # output: |
 #   A QWidget hosted (scrolled) in MonitorWindow's bottom-right quadrant.
 #   Side effect: submits an operation to the Orchestrator.
-# last_updated: 2026-07-19
+# last_updated: 2026-07-20
 # ---
 
 """OperationsPanel — cryogenics status (optional) + generic operation cards."""
@@ -74,6 +75,7 @@ from typing import TYPE_CHECKING, Any
 
 import pyqtgraph as pg
 import qtawesome as qta
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -85,6 +87,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
@@ -120,7 +123,12 @@ _CONSUMPTION_WINDOWS: list[tuple[str, float]] = [
     ("6 h", 21600.0),
     ("24 h", 86400.0),
 ]
-_DEFAULT_WINDOW_LABEL = "1 h"
+# "1 h" would be the natural default but the helium record is sampled
+# hourly (history_sample_s, config-driven): two consecutive samples land
+# almost exactly 1 h apart, so a 1 h trailing window essentially never
+# contains 2 usable points and the consumption readout would sit at "--"
+# indefinitely. "6 h" reliably picks up multiple hourly samples.
+_DEFAULT_WINDOW_LABEL = "6 h"
 
 # Minimum real seconds between consumption/plot recomputes, so a fast
 # Orchestrator tick does not re-read the helium-record file every 3 s in
@@ -250,10 +258,17 @@ class OperationCard(QGroupBox):
         self._next_due_label = QLabel("")
         self._next_due_label.setObjectName(f"{self._slug}_next_due_label")
         self._next_due_label.setProperty("class", "value_readout")
+        self._next_due_label.setWordWrap(True)
         self._next_due_label.hide()
         outer.addWidget(self._next_due_label)
 
         for condition in self._conditions:
+            # Label and detail stack on separate lines (rather than one wide
+            # row) with the detail word-wrapped: the card now also renders in
+            # the ~half-width right pane of the split OperationsPanel layout,
+            # where a single-line "icon + label + detail" row clips text
+            # instead of wrapping (QLabel paints, but does not elide, text
+            # past its allotted width).
             row = QHBoxLayout()
             icon_label = QLabel()
             icon_label.setObjectName(f"{self._slug}_condition_{condition.key}_icon")
@@ -261,13 +276,18 @@ class OperationCard(QGroupBox):
             row.addWidget(icon_label)
             text_label = QLabel(condition.label)
             text_label.setObjectName(f"{self._slug}_condition_{condition.key}_label")
-            row.addWidget(text_label)
+            text_label.setWordWrap(True)
+            row.addWidget(text_label, stretch=1)
+            outer.addLayout(row)
+
             detail_label = QLabel("")
             detail_label.setObjectName(f"{self._slug}_condition_{condition.key}_detail")
             detail_label.setProperty("class", "value_readout")
-            row.addWidget(detail_label)
-            row.addStretch()
-            outer.addLayout(row)
+            detail_label.setWordWrap(True)
+            detail_row = QHBoxLayout()
+            detail_row.setContentsMargins(18, 0, 0, 0)  # indent under the icon column
+            detail_row.addWidget(detail_label)
+            outer.addLayout(detail_row)
             self._condition_rows[condition.key] = (icon_label, detail_label)
 
         self._confirmations: dict[str, str] = dict(
@@ -528,49 +548,87 @@ class OperationsPanel(QWidget):
         self._plot_widget: pg.PlotWidget | None = None
         self._curve = None
         self._fill_markers = None
-        if self._cryogenics_config:
-            self._build_cryogenics_status_section(outer)
-
-        self._build_operation_cards(outer)
-        outer.addStretch()
 
         if self._cryogenics_config:
+            # Two sub-panels side by side: cryogenic status (left) vs.
+            # operation options (right) — a splitter (not a fixed ratio) so
+            # the operator can favour the level plot or the cards on a given
+            # screen; minimum widths + setChildrenCollapsible(False) keep
+            # either side from vanishing (gui-edit layout rules).
+            splitter = QSplitter(Qt.Orientation.Horizontal)
+            splitter.setObjectName("operations_panel_splitter")
+            splitter.setChildrenCollapsible(False)
+
+            left_pane = QWidget()
+            left_pane.setObjectName("cryogenics_status_pane")
+            left_pane.setMinimumWidth(220)
+            left_layout = QVBoxLayout(left_pane)
+            left_layout.setContentsMargins(0, 0, 0, 0)
+            left_layout.setSpacing(8)
+            self._build_cryogenics_status_section(left_layout)
+            left_layout.addStretch()
+
+            right_pane = QWidget()
+            right_pane.setObjectName("operation_cards_pane")
+            right_pane.setMinimumWidth(220)
+            right_layout = QVBoxLayout(right_pane)
+            right_layout.setContentsMargins(0, 0, 0, 0)
+            right_layout.setSpacing(8)
+            right_layout.addWidget(QLabel("<b>Operations</b>"))
+            self._build_operation_cards(right_layout)
+            right_layout.addStretch()
+
+            splitter.addWidget(left_pane)
+            splitter.addWidget(right_pane)
+            splitter.setSizes([260, 260])
+            outer.addWidget(splitter)
+
             self._recompute()
+        else:
+            self._build_operation_cards(outer)
+            outer.addStretch()
 
     # ------------------------------------------------------------------
     # Construction helpers
     # ------------------------------------------------------------------
 
     def _build_cryogenics_status_section(self, outer: QVBoxLayout) -> None:
-        """Build the He/N2 readouts, consumption row, and level plot (Phase 5, unchanged)."""
+        """Build the He/N2 readouts, consumption row, and level plot (Phase 5).
+
+        Rows stack vertically rather than packing multiple labels per line:
+        this section now also renders in the ~half-width left pane of the
+        split OperationsPanel layout, where a single wide row (levels side
+        by side, window combo + consumption label inline) no longer fits and
+        would clip instead of wrap.
+        """
         outer.addWidget(QLabel("<b>Cryogenics</b>"))
 
-        levels_row = QHBoxLayout()
         self._helium_label = QLabel("He: — %")
         self._helium_label.setObjectName("cryo_helium_level_label")
         self._helium_label.setProperty("class", "value_readout")
-        levels_row.addWidget(self._helium_label)
+        outer.addWidget(self._helium_label)
+
         self._nitrogen_label = QLabel("N₂: — %")
         self._nitrogen_label.setObjectName("cryo_nitrogen_level_label")
         self._nitrogen_label.setProperty("class", "value_readout")
-        levels_row.addWidget(self._nitrogen_label)
-        levels_row.addStretch()
-        outer.addLayout(levels_row)
+        outer.addWidget(self._nitrogen_label)
 
-        consumption_row = QHBoxLayout()
-        consumption_row.addWidget(QLabel("Consumption window:"))
+        window_row = QHBoxLayout()
+        window_row.addWidget(QLabel("Window:"))
         self._window_combo = QComboBox()
         self._window_combo.setObjectName("cryo_window_combo")
         for label, _seconds in _CONSUMPTION_WINDOWS:
             self._window_combo.addItem(label)
         self._window_combo.setCurrentText(_DEFAULT_WINDOW_LABEL)
         self._window_combo.currentTextChanged.connect(self._recompute)
-        consumption_row.addWidget(self._window_combo)
+        window_row.addWidget(self._window_combo)
+        window_row.addStretch()
+        outer.addLayout(window_row)
+
         self._consumption_label = QLabel("Consumption: —")
         self._consumption_label.setObjectName("cryo_consumption_label")
-        consumption_row.addWidget(self._consumption_label)
-        consumption_row.addStretch()
-        outer.addLayout(consumption_row)
+        self._consumption_label.setWordWrap(True)
+        outer.addWidget(self._consumption_label)
 
         self._plot_widget = pg.PlotWidget(
             axisItems={"bottom": pg.DateAxisItem(orientation="bottom")}
