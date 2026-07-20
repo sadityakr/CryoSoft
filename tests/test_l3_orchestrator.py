@@ -381,6 +381,52 @@ def test_emergency_on_helium_low(orchestrator, station, qtbot):
     assert orchestrator._state == OrchestratorState.IDLE
 
 
+def test_emergency_acknowledge_unlocks_manual_front_panel(orchestrator, station, qtbot):
+    """Acknowledging an unresolved EMERGENCY unlocks submit_vi_action, not procedures.
+
+    Before acknowledging, a front-panel action is refused exactly like during
+    a procedure. Acknowledging once (condition still active) stays in
+    EMERGENCY but unlocks manual VI control — the operator's way to
+    intervene (e.g. cycling a switch heater by hand) without the condition
+    having cleared on its own. run_procedure() must still refuse to run
+    immediately: it only queues, same as any busy state.
+    """
+    station.level_meter._driver._force_helium_level = 5.0
+    qtbot.waitUntil(
+        lambda: orchestrator._state == OrchestratorState.EMERGENCY, timeout=2000
+    )
+
+    # Locked: front-panel action refused before acknowledging.
+    with qtbot.waitSignal(orchestrator.action_blocked, timeout=500):
+        orchestrator.submit_vi_action("magnet_z", "initiate")
+    assert orchestrator._state == OrchestratorState.EMERGENCY
+
+    # Condition is still active, so acknowledging cannot reach IDLE...
+    orchestrator.acknowledge_emergency()
+    assert orchestrator._state == OrchestratorState.EMERGENCY
+    assert orchestrator._emergency_manual_override is True
+
+    # ...but the front panel is now unlocked.
+    with qtbot.waitSignal(orchestrator.action_succeeded, timeout=500) as blocker:
+        orchestrator.submit_vi_action("magnet_z", "initiate")
+    assert blocker.args == ["magnet_z", "initiate"]
+    assert orchestrator._state == OrchestratorState.EMERGENCY
+
+    # A procedure is still refused from running immediately — it queues.
+    procedure = MockProcedure(station)
+    orchestrator.run_procedure(procedure)
+    assert orchestrator._state == OrchestratorState.EMERGENCY
+    assert orchestrator._procedure is None
+    assert procedure in orchestrator._procedure_queue
+
+    # Helium recovers; acknowledging again returns to IDLE and relocks.
+    station.level_meter._driver._force_helium_level = None
+    qtbot.waitUntil(lambda: not any(station.check_safety().values()), timeout=2000)
+    orchestrator.acknowledge_emergency()
+    assert orchestrator._state == OrchestratorState.IDLE
+    assert orchestrator._emergency_manual_override is False
+
+
 def test_emergency_shutdown_runs_once_not_every_tick(orchestrator, station, qtbot):
     """standby_all() must run once on EMERGENCY entry, not every tick.
 
