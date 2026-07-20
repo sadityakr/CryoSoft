@@ -393,3 +393,95 @@ class SuperconductingMagnetPersistentVI(SuperconductingMagnetVI):
                 "operation. Enable persistent mode for manual control."
             )
         self._deenergize_heater()
+
+    # ------------------------------------------------------------------
+    # Lifecycle — heater-safe standby
+    # ------------------------------------------------------------------
+
+    def standby(self) -> None:
+        """Safe park: read the live coil/PSU currents and drive both to zero.
+
+        Overrides the inherited ``standby()`` (``start_ramp(0.0)``), which is
+        gated on the ``persistent_mode_enabled`` toggle rather than the actual
+        hardware state. With that toggle at its default (False, "normal
+        mode") an OFF heater is treated as merely-unwarmed and energised
+        before ramping — including when there is nothing to ramp (a fresh
+        magnet: PSU and coil both already at 0 A). That is backwards for a
+        safe-shutdown path: the Orchestrator's EMERGENCY handler calls this
+        via ``Station.standby_all()``, and energising a heater the operator
+        left off is exactly the kind of action an emergency shutdown must
+        not take.
+
+        One function owns the whole sequence, driven only by live current
+        readbacks so it is correct regardless of how the magnet got here
+        (normal operation, a manually parked persistent field, or a fresh
+        instance after an app restart):
+
+        1. Heater OFF and coil already ~0 A — no trapped field, nothing to
+           energise for. Park the PSU at zero directly; the heater is never
+           touched.
+        2. Heater OFF and coil holds a nonzero field — match the PSU to the
+           coil (energising across a mismatch quenches), energise, wait for
+           warmup, then ramp the coil down.
+        3. Heater ON — ramp straight to zero, no heater changes needed.
+
+        In every case standby ends with the heater OFF and the PSU at zero:
+        a full park, not just wherever normal-mode ramping would leave it.
+        """
+        self._ramp_target_T = 0.0
+        self._ramp_gen = self._standby_generator()
+        self._ramp_exhausted = False
+        try:
+            next(self._ramp_gen)
+        except StopIteration:
+            self._ramp_exhausted = True
+
+    def _standby_generator(self) -> Generator:
+        driver = self._driver  # type: ignore[attr-defined]
+        self._phase = "matching"
+
+        coil_A = driver.get_coil_current()
+        heater_on = driver.get_switch_heater_state() == "ON"
+
+        if not heater_on and abs(coil_A) <= 0.01:
+            self._phase = "parking"
+            yield from self._ramp_generator(0.0)
+            while driver.get_status() == "RAMPING":
+                yield
+            return
+
+        if not heater_on:
+            # Trapped persistent field: match the PSU to the coil before
+            # energising, then energise and wait for warmup so the coil can
+            # be driven down. Mirrors _normal_ramp_generator's matching step.
+            if abs(driver.get_current() - coil_A) > 0.01:
+                driver.set_ramp_rate(self._default_ramp_rate)
+                driver.set_current_setpoint(coil_A)
+                while (
+                    driver.get_status() == "RAMPING"
+                    or abs(driver.get_current() - coil_A) > 0.01
+                ):
+                    if driver.get_status() == "QUENCH":
+                        return
+                    yield
+            self._energize_heater()
+            self._phase = "warmup"
+            while not self._heater.is_ready():
+                if driver.get_status() == "QUENCH":
+                    return
+                yield
+
+        # Heater is on now (already was, or just energised above): ramp the
+        # coil/PSU down together.
+        self._phase = "ramping"
+        yield from self._ramp_generator(0.0)
+        while driver.get_status() == "RAMPING":
+            yield
+        if driver.get_status() == "QUENCH":
+            return
+
+        # Full park: de-energise so standby always leaves the magnet at zero
+        # field with the switch cold, not merely wherever a normal-mode ramp
+        # (which deliberately leaves the heater on) would stop.
+        self._phase = "cooldown"
+        self._deenergize_heater()

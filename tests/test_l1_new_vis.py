@@ -457,6 +457,72 @@ class TestSuperConductingMagnetPersistentVI:
             ips_driver.get_current(), abs=0.01
         )
 
+    # -- standby(): heater-safe safe-park (bugfix — must never energise an
+    #    OFF heater for no reason, e.g. during EMERGENCY shutdown) ----------
+
+    def test_standby_with_heater_off_and_no_trapped_field_never_energises(
+        self, ips_driver
+    ):
+        """Fresh magnet: PSU and coil both already 0 A, heater off.
+
+        standby() must be a no-op on the heater — nothing needs to ramp.
+        """
+        vi = self._make_vi(ips_driver, warmup_s=0.0)
+        vi.standby()
+        self._drive_to_target_reached(vi, ips_driver)
+        assert vi.switch_heater_state() == "OFF"
+        assert ips_driver.get_current() == pytest.approx(0.0, abs=0.01)
+
+    def test_standby_parks_nonzero_psu_with_heater_off(self, ips_driver):
+        """Heater off, coil at 0 A, but the PSU itself is nonzero.
+
+        standby() must bring the PSU to zero without ever touching the
+        heater (ramping the PSU doesn't move the frozen coil field).
+        """
+        vi = self._make_vi(ips_driver, warmup_s=0.0)
+        ips_driver.set_current_setpoint(3.0)
+        self._drive_to_target_reached(vi, ips_driver)
+
+        vi.standby()
+        self._drive_to_target_reached(vi, ips_driver)
+        assert vi.switch_heater_state() == "OFF"
+        assert ips_driver.get_current() == pytest.approx(0.0, abs=0.01)
+
+    def test_standby_ramps_down_trapped_persistent_field_and_ends_deenergised(
+        self, ips_driver
+    ):
+        """Heater off with a nonzero trapped coil field (manually parked).
+
+        standby() must match the PSU to the coil, energise, ramp the field
+        to zero, then de-energise — a full park, never leaving the heater on.
+        """
+        vi = self._make_vi(ips_driver, warmup_s=0.0)
+        vi.enable_persistent_mode()
+        vi.switch_heater_on()
+        vi.start_ramp(2.0)  # 20 A
+        self._drive_to_target_reached(vi, ips_driver)
+        vi.switch_heater_off()  # freeze coil at 20 A, heater off
+        assert vi.coil_current() == pytest.approx(20.0, abs=0.01)
+
+        vi.standby()
+        self._drive_to_target_reached(vi, ips_driver)
+        assert vi.switch_heater_state() == "OFF"
+        assert vi.coil_current() == pytest.approx(0.0, abs=0.01)
+        assert ips_driver.get_current() == pytest.approx(0.0, abs=0.01)
+
+    def test_standby_with_heater_on_ramps_down_and_deenergises(self, ips_driver):
+        """Heater already on (normal mode, mid-operation): ramp straight to
+        zero with no re-energise, then de-energise for a full park."""
+        vi = self._make_vi(ips_driver, warmup_s=0.0)
+        vi.start_ramp(1.5)
+        self._drive_to_target_reached(vi, ips_driver)
+        assert vi.switch_heater_state() == "ON"
+
+        vi.standby()
+        self._drive_to_target_reached(vi, ips_driver)
+        assert vi.switch_heater_state() == "OFF"
+        assert ips_driver.get_current() == pytest.approx(0.0, abs=0.01)
+
 
 # ---------------------------------------------------------------------------
 # SampleTemperatureControllerVI
