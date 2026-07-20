@@ -89,21 +89,20 @@ def _fully_inside(viewport, widget) -> bool:
 
 
 def test_operations_panel_absent_without_any_config(station, orchestrator, qtbot):
-    """No cryogenics/operations kwargs -> no panel, no "Operations" selector entry."""
+    """No cryogenics/operations kwargs -> no panel; the quadrant shows a placeholder."""
     win = MonitorWindow(station, orchestrator)
     qtbot.addWidget(win)
     win.show()
 
     assert win._operations_panel_enabled is False
     assert win._operations_panel is None
-    items = [win._devices_log_selector.itemText(i) for i in range(win._devices_log_selector.count())]
-    assert items == ["Other Devices"]
+    assert win.findChild(QScrollArea, "operations_scroll") is None
 
 
 def test_operations_panel_present_with_cryogenics_config(
     station, orchestrator, cryogenics_config, operations_config, stores, qtbot
 ):
-    """A wired cryogenics config + stores + level VI builds the panel and selector entry."""
+    """A wired cryogenics config + stores + level VI builds the panel in its quadrant."""
     helium_store, servicing_store = stores
     win = MonitorWindow(
         station,
@@ -120,8 +119,7 @@ def test_operations_panel_present_with_cryogenics_config(
     assert win._cryogenics_enabled is True
     assert win._operations_panel_enabled is True
     assert win._operations_panel is not None
-    items = [win._devices_log_selector.itemText(i) for i in range(win._devices_log_selector.count())]
-    assert items == ["Other Devices", "Operations"]
+    assert win.findChild(QScrollArea, "operations_scroll") is not None
 
 
 def test_operations_panel_without_cryogenics_but_with_operations_builds_sample_change_only(
@@ -139,8 +137,7 @@ def test_operations_panel_without_cryogenics_but_with_operations_builds_sample_c
     assert win._cryogenics_enabled is False
     assert win._operations_panel_enabled is True
     assert win._operations_panel is not None
-    items = [win._devices_log_selector.itemText(i) for i in range(win._devices_log_selector.count())]
-    assert items == ["Other Devices", "Operations"]
+    assert win.findChild(QScrollArea, "operations_scroll") is not None
 
     cards = win._operations_panel._cards
     assert len(cards) == 1
@@ -152,7 +149,7 @@ def test_operations_panel_without_cryogenics_but_with_operations_builds_sample_c
 def test_operations_panel_geometry_fully_visible_when_selected(
     station, orchestrator, cryogenics_config, operations_config, stores, qtbot
 ):
-    """Selecting Operations shows the panel fully inside its scroll viewport."""
+    """The Operations quadrant shows the panel fully inside its scroll viewport."""
     helium_store, servicing_store = stores
     win = MonitorWindow(
         station,
@@ -167,9 +164,6 @@ def test_operations_panel_geometry_fully_visible_when_selected(
     win.resize(1280, 900)
     win.show()
     qtbot.waitExposed(win)
-
-    win._devices_log_selector.setCurrentIndex(1)
-    assert win._devices_log_stack.currentIndex() == 1
 
     scroll = win.findChild(QScrollArea, "operations_scroll")
     assert scroll is not None

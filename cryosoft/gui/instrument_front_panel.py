@@ -10,8 +10,8 @@
 #   actions (PID setting, auto-tune, heater power) live here, and every click
 #   still flows through Orchestrator.submit_vi_action() with control-limit
 #   validation intact.
-# entry_point: Not run directly. Lazily created by InstrumentPanel /
-#   OtherDevicesPanel via their front-panel icon buttons.
+# entry_point: Not run directly. Lazily created by InstrumentPanel via its
+#   front-panel header icon.
 # dependencies:
 #   - PyQt6 >= 6.5
 #   - cryosoft.core.decorators (get_control_methods)
@@ -32,12 +32,21 @@
 
 from __future__ import annotations
 
+import qtawesome as qta
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QScrollArea, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import (
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QScrollArea,
+    QVBoxLayout,
+    QWidget,
+)
 
 from cryosoft.core.decorators import get_control_methods
 from cryosoft.core.orchestrator import Orchestrator
 from cryosoft.gui.instrument_panel import InstrumentPanel
+from cryosoft.gui.theme import TEXT_PRIMARY
 from cryosoft.virtual_instruments.base import BaseVirtualInstrument
 
 
@@ -69,6 +78,27 @@ class InstrumentFrontPanel(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(8, 8, 8, 8)
 
+        # ── Connection check row: a harmless identity query (vi.ping()),
+        # never an arming/initiate action — the front panel's bench-test
+        # equivalent of the old Other Devices "Check" button. ─────────────
+        check_row = QHBoxLayout()
+        check_btn = QPushButton("Check connection")
+        check_btn.setObjectName(f"{vi_name}_check_btn")
+        check_btn.setIcon(qta.icon("fa5s.plug", color=TEXT_PRIMARY))
+        check_btn.setToolTip(
+            f"Send an identity query to test the {vi_name} connection "
+            "(does not initiate or arm anything)"
+        )
+        self._check_status = QLabel("")
+        self._check_status.setObjectName(f"{vi_name}_check_status")
+        self._check_status.setProperty("class", "secondary_label")
+        check_btn.clicked.connect(self._on_check)
+        check_row.addWidget(check_btn)
+        check_row.addWidget(self._check_status)
+        check_row.addStretch()
+        outer.addLayout(check_row)
+        self._vi = vi
+
         # The allowlist override shows EVERY control, regardless of each
         # control's panel= default or the setup's monitor.yaml allowlist.
         all_controls = list(get_control_methods(vi))
@@ -86,3 +116,11 @@ class InstrumentFrontPanel(QWidget):
         scroll.setWidgetResizable(True)
         scroll.setWidget(self._panel)
         outer.addWidget(scroll)
+
+    def _on_check(self) -> None:
+        """Ping the instrument and report the verdict inline."""
+        try:
+            ok = self._vi.ping()
+        except Exception:  # noqa: BLE001 — any failure means "not reachable"
+            ok = False
+        self._check_status.setText("Connected" if ok else "Not reachable")

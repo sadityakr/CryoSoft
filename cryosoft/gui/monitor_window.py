@@ -3,11 +3,11 @@
 #   MonitorWindow: the main CryoSoft window showing live instrument state.
 #   Content below the header/banner is a fixed 2x2 quadrant grid, built from
 #   nested QSplitters (one horizontal, two vertical): top-left is a scrollable
-#   2-column instrument monitor/control list, top-right is a TrendsQuadrant
-#   (cryosoft.gui.trends_quadrant), bottom-left is a SessionInfoPanel
-#   (cryosoft.gui.session_info_panel), and bottom-right is an OtherDevicesPanel
-#   / LogPanel pair behind a QComboBox selector (cryosoft.gui.other_devices,
-#   cryosoft.gui.log_panel). Splitter boundaries are draggable but nothing can
+#   2-column instrument monitor/control list (every VI: system/level plus
+#   measurement and switch cards, tagged by role), top-right is a
+#   TrendsQuadrant (cryosoft.gui.trends_quadrant), bottom-left is a
+#   SessionInfoPanel (cryosoft.gui.session_info_panel), and bottom-right is
+#   the optional OperationsPanel. Splitter boundaries are draggable but nothing can
 #   be closed, detached, or floated. This module is the composition shell:
 #   quadrant assembly, menus, status bar, Orchestrator signal wiring, and
 #   session/geometry persistence — the quadrant content lives in the
@@ -23,7 +23,6 @@
 #   - cryosoft.gui.instrument_panel (InstrumentPanel)
 #   - cryosoft.gui.trends_quadrant (TrendsQuadrant)
 #   - cryosoft.gui.session_info_panel (SessionInfoPanel)
-#   - cryosoft.gui.other_devices (OtherDevicesPanel)
 #   - cryosoft.gui.log_panel (LogPanel)
 #   - cryosoft.gui.config_menu (ConfigMenuController)
 #   - cryosoft.gui.setup_dialogs (LoginDialog, InstrumentInfoDialog)
@@ -34,12 +33,13 @@
 # input: |
 #   Station instance and Orchestrator instance.
 # process: |
-#   Splits system/level VIs into a 2-column instrument grid (top-left) and
-#   measurement plus switch VIs into the OtherDevicesPanel (bottom-right,
-#   behind the selector). Connects Orchestrator signals for the state-driven
-#   status bar, the notification banner (errors/blocked actions), the
-#   TrendsQuadrant's history recording, and the switch-row refresh. Owns
-#   ProcedureWindow and opens it lazily via the Procedures menu.
+#   Renders every VI as an InstrumentPanel card in the 2-column instrument
+#   grid (top-left): system/level first, then measurement and switch cards
+#   tagged by role (the switch card carries the station-wide Enable Scanner
+#   checkbox). Connects Orchestrator signals for the state-driven status
+#   bar, the notification banner (errors/blocked actions), the
+#   TrendsQuadrant's history recording, and the optional Operations panel.
+#   Owns ProcedureWindow and opens it lazily via the Procedures menu.
 # output: |
 #   A QMainWindow that stays open for the lifetime of the application.
 # ---
@@ -55,7 +55,7 @@ import qtawesome as qta
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction, QCloseEvent
 from PyQt6.QtWidgets import (
-    QComboBox,
+    QCheckBox,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -83,7 +83,6 @@ from cryosoft.gui.instrument_panel import InstrumentPanel
 from cryosoft.gui.log_panel import LogPanel
 from cryosoft.gui.notification_banner import NotificationBanner
 from cryosoft.gui.operations_panel import OperationsPanel
-from cryosoft.gui.other_devices import OtherDevicesPanel
 from cryosoft.gui.servicing_log_page import ServicingLogPage
 from cryosoft.gui.session_info_panel import SessionInfoPanel
 from cryosoft.gui.setup_dialogs import InstrumentInfoDialog, LoginDialog
@@ -142,11 +141,12 @@ class MonitorWindow(QMainWindow):
 
     A slim page tab bar in the header switches between two pages held in a
     central QStackedWidget. Page 1 (Monitor) is the fixed 2x2 quadrant grid
-    built from nested QSplitters, unchanged from before paging: top-left is
-    a scrollable 2-column instrument monitor/control list, top-right is the
+    built from nested QSplitters: top-left is a scrollable 2-column grid of
+    :class:`InstrumentPanel` cards for EVERY VI — system/level first, then
+    measurement and switch cards tagged by role (the switch card carries the
+    station-wide Enable Scanner checkbox) — top-right is the
     :class:`TrendsQuadrant`, bottom-left is the :class:`SessionInfoPanel`,
-    and bottom-right is the :class:`OtherDevicesPanel` (plus an optional
-    :class:`OperationsPanel`) behind a QComboBox selector. Every splitter
+    and bottom-right is the optional :class:`OperationsPanel`. Every splitter
     boundary is draggable; nothing in the grid can be closed, detached, or
     floated. Page 2 (Logs) is a :class:`ServicingLogPage` hosting one table
     per configured servicing-log kind plus the relocated :class:`LogPanel`.
@@ -206,6 +206,9 @@ class MonitorWindow(QMainWindow):
         self._panels_config = dict(panels_config or {})
         self._procedure_window = None  # lazily created
         self._diagnostics_window = None  # lazily created
+        # One Enable Scanner checkbox per switch card, kept in sync because
+        # scanner_enabled is a single Station-wide bit.
+        self._scanner_enable_checks: list[QCheckBox] = []
 
         # Cryogenics management (docs/plans/cryogenics-logbook.md §9/§10),
         # all optional — every existing construction site (and every prior
@@ -406,10 +409,10 @@ class MonitorWindow(QMainWindow):
         root.addWidget(self._banner)
 
         # ── Fixed 2x2 quadrant grid (Page 1 — Monitor) ───────────────
-        top_left = self._build_instruments_quadrant()
+        top_left = self._build_instruments_quadrant(measurement_vis, switch_vis)
         self._trends = TrendsQuadrant(self._station, parent=self)
         self._session_info = SessionInfoPanel(session_manager=self._session_manager)
-        bottom_right = self._build_bottom_right_quadrant(measurement_vis, switch_vis)
+        bottom_right = self._build_operations_quadrant()
 
         self._left_splitter = QSplitter(Qt.Orientation.Vertical)
         self._left_splitter.setObjectName("left_splitter")
@@ -563,12 +566,22 @@ class MonitorWindow(QMainWindow):
             "instruments have been initiated)"
         )
 
-    def _build_instruments_quadrant(self) -> QWidget:
-        """Build the top-left quadrant: a scrollable 2-column instrument grid.
+    def _build_instruments_quadrant(
+        self, measurement_vis: list[str], switch_vis: list[str]
+    ) -> QWidget:
+        """Build the top-left quadrant: a scrollable 2-column grid of ALL VI cards.
 
-        Panels are built once, in config order, and kept in self._panels for
-        the lifetime of the window — recreating them would drop their
+        System/level VIs come first (config order, untagged), then
+        measurement and switch VIs as tagged cards — full citizens of the
+        instrument grid since the Other Devices section was retired. The
+        switch card carries the station-wide Enable Scanner checkbox as its
+        extra widget. Panels are built once and kept in self._panels for the
+        lifetime of the window — recreating them would drop their
         Orchestrator signal connections.
+
+        Args:
+            measurement_vis: Names of measurement VIs, rendered tagged.
+            switch_vis: Names of switch/scanner VIs, rendered tagged.
 
         Returns:
             A QWidget containing the title, and a QScrollArea of InstrumentPanels.
@@ -580,18 +593,31 @@ class MonitorWindow(QMainWindow):
         outer.setSpacing(4)
         outer.addWidget(QLabel("<b>Instruments</b>"))
 
+        entries: list[tuple[str, str | None]] = [
+            (n, None) for n in self._system_vi_names
+        ]
+        entries += [(n, "Measurement") for n in measurement_vis]
+        entries += [(n, "Scanner") for n in switch_vis]
+
         self._panels: list[InstrumentPanel] = []
         grid_container = QWidget()
         grid = QGridLayout(grid_container)
         grid.setSpacing(6)
-        for idx, vi_name in enumerate(self._system_vi_names):
+        for idx, (vi_name, type_tag) in enumerate(entries):
             vi = self._station._virtual_instruments[vi_name]
+            extra = (
+                self._build_scanner_enable_checkbox(vi_name)
+                if vi_name in switch_vis
+                else None
+            )
             panel = InstrumentPanel(
                 vi_name,
                 vi,
                 self._orchestrator,
                 parent=self,
                 panel_controls=self._panels_config.get(vi_name),
+                type_tag=type_tag,
+                extra_widget=extra,
             )
             panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             self._panels.append(panel)
@@ -605,55 +631,60 @@ class MonitorWindow(QMainWindow):
         outer.addWidget(scroll)
         return container
 
-    def _build_bottom_right_quadrant(
-        self, measurement_vis: list[str], switch_vis: list[str]
-    ) -> QWidget:
-        """Build the bottom-right quadrant: Other Devices (+ optional Operations).
+    def _build_scanner_enable_checkbox(self, vi_name: str) -> QCheckBox:
+        """Build one switch card's Enable Scanner checkbox.
 
-        A QComboBox picks which of the always-built views is visible in the
-        QStackedWidget below it — this keeps the quadrant's footprint
-        constant regardless of how many measurement VIs a station has,
-        rather than showing both stacked and always-visible. The Log view
-        that used to live here has moved to the Logs page (page 2); the
-        Operations entry is added only when ``self._operations_panel_enabled``.
+        scanner_enabled is a single Station-owned bit shared by every switch
+        VI (see GLOSSARY.md "scanner_enabled"), so with more than one switch
+        card every card's checkbox tracks the same state.
 
         Args:
-            measurement_vis: Names of measurement VIs to display in Other Devices.
-            switch_vis: Names of switch/scanner VIs to display (display-only rows).
+            vi_name: The switch VI whose card hosts this checkbox.
 
         Returns:
-            A QWidget containing the selector row and the QStackedWidget.
+            The wired QCheckBox.
+        """
+        enable_chk = QCheckBox("Enable Scanner")
+        enable_chk.setObjectName(f"{vi_name}_enable_scanner_chk")
+        enable_chk.setToolTip(
+            "Off by default. Required before the Procedure window offers "
+            "this scanner's routes as loopable measurement parameters."
+        )
+        enable_chk.setChecked(self._orchestrator.scanner_enabled())
+        enable_chk.toggled.connect(self._on_scanner_toggled)
+        self._scanner_enable_checks.append(enable_chk)
+        return enable_chk
+
+    def _on_scanner_toggled(self, checked: bool) -> None:
+        """Apply the station-wide scanner toggle and keep every switch card in sync.
+
+        Args:
+            checked: New state of the checkbox that was toggled.
+        """
+        self._orchestrator.set_scanner_enabled(checked)
+        for chk in self._scanner_enable_checks:
+            if chk.isChecked() != checked:
+                chk.blockSignals(True)
+                chk.setChecked(checked)
+                chk.blockSignals(False)
+
+    def _build_operations_quadrant(self) -> QWidget:
+        """Build the bottom-right quadrant: the optional Operations panel.
+
+        The Other Devices section that used to share this quadrant is
+        retired — measurement and switch VIs are full cards in the
+        instrument grid now — so the quadrant holds the OperationsPanel when
+        ``self._operations_panel_enabled``, else a placeholder label.
+
+        Returns:
+            A QWidget containing the title and the panel (or placeholder).
         """
         container = QWidget()
-        container.setObjectName("other_devices_quadrant")
+        container.setObjectName("operations_quadrant")
         outer = QVBoxLayout(container)
         outer.setContentsMargins(4, 4, 4, 4)
         outer.setSpacing(4)
-
-        selector_row = QHBoxLayout()
-        selector_row.addWidget(QLabel("<b>View:</b>"))
-        self._devices_log_selector = QComboBox()
-        self._devices_log_selector.setObjectName("devices_log_selector")
-        selector_items = ["Other Devices"]
-        if self._operations_panel_enabled:
-            selector_items.append("Operations")
-        self._devices_log_selector.addItems(selector_items)
-        self._devices_log_selector.currentIndexChanged.connect(self._on_devices_log_selector_changed)
-        selector_row.addWidget(self._devices_log_selector)
-        selector_row.addStretch()
-        outer.addLayout(selector_row)
-
-        self._devices_log_stack = QStackedWidget()
-        self._devices_log_stack.setObjectName("devices_log_stack")
-
-        self._other_devices = OtherDevicesPanel(
-            self._station, self._orchestrator, measurement_vis, switch_vis
-        )
-        other_devices_scroll = QScrollArea()
-        other_devices_scroll.setObjectName("other_devices_scroll")
-        other_devices_scroll.setWidgetResizable(True)
-        other_devices_scroll.setWidget(self._other_devices)
-        self._devices_log_stack.addWidget(other_devices_scroll)
+        outer.addWidget(QLabel("<b>Operations</b>"))
 
         if self._operations_panel_enabled:
             self._operations_panel = OperationsPanel(
@@ -671,19 +702,13 @@ class MonitorWindow(QMainWindow):
             operations_scroll.setObjectName("operations_scroll")
             operations_scroll.setWidgetResizable(True)
             operations_scroll.setWidget(self._operations_panel)
-            self._devices_log_stack.addWidget(operations_scroll)
-
-        outer.addWidget(self._devices_log_stack)
+            outer.addWidget(operations_scroll)
+        else:
+            placeholder = QLabel("No operations configured for this setup.")
+            placeholder.setProperty("class", "secondary_label")
+            outer.addWidget(placeholder)
+            outer.addStretch()
         return container
-
-    def _on_devices_log_selector_changed(self, index: int) -> None:
-        """Switch the bottom-right quadrant between Other Devices and Operations.
-
-        Args:
-            index: The selector's new current index (0 = Other Devices,
-                1 = Operations, when present).
-        """
-        self._devices_log_stack.setCurrentIndex(index)
 
     def _on_page_changed(self, index: int) -> None:
         """Switch the central QStackedWidget's page and refresh Logs on show.
@@ -861,18 +886,16 @@ class MonitorWindow(QMainWindow):
         self._orchestrator.action_succeeded.connect(self._on_action_confirmed)
         # Separate from InstrumentPanel's own states_updated connections
         # (each panel connects itself in its constructor) — this slot only
-        # feeds the Trends quadrant, the Other Devices switch rows, and the
-        # optional Operations panel.
+        # feeds the Trends quadrant and the optional Operations panel.
         self._orchestrator.states_updated.connect(self._on_states_updated)
-        # run_finished fires only at run boundaries (not every tick), so —
-        # like OtherDevicesPanel's own direct action_succeeded connection —
+        # run_finished fires only at run boundaries (not every tick), so
         # there is no teardown-race concern connecting it here directly.
         self._orchestrator.run_finished.connect(self._on_run_finished_for_logs)
         if self._cryogenics_recorder is not None:
             self._cryogenics_recorder.cryo_warning.connect(self._on_cryo_warning)
 
     def _on_states_updated(self, state: dict) -> None:
-        """Forward the per-tick state snapshot to the Trends and Other Devices panels.
+        """Forward the per-tick state snapshot to the Trends and Operations panels.
 
         The WINDOW (not the child panels) is the connection receiver on
         purpose: Qt severs a receiver's connections at the start of its own
@@ -886,9 +909,6 @@ class MonitorWindow(QMainWindow):
             state: ``{vi_name: {field: value, ...}}`` from the Orchestrator.
         """
         self._trends.on_states_updated(state)
-        # Refresh the display-only switch/scanner rows (connection + active
-        # route) from the same per-tick snapshot.
-        self._other_devices.on_states_updated(state)
         if self._operations_panel is not None:
             self._operations_panel.on_states_updated(state)
 

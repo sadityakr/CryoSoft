@@ -2,7 +2,7 @@
 # description: |
 #   LifecycleToggleButton: one state-dependent button (+ status glow dot)
 #   replacing the old separate Initiate/Standby QPushButton pair. Shared by
-#   InstrumentPanel and MonitorWindow's compact Other Devices rows so both
+#   every InstrumentPanel card (system, measurement, and switch alike) so all
 #   places render and update identically.
 # entry_point: Not run directly. Instantiated by InstrumentPanel / MonitorWindow.
 # dependencies:

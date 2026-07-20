@@ -41,7 +41,7 @@
 #   and ServicingLogStore (both optional — None when cryogenics is absent),
 #   per-tick state snapshots via on_states_updated(), and the Orchestrator's
 #   run_started/run_finished signals (connected directly by each
-#   OperationCard, following the same precedent as OtherDevicesPanel's own
+#   OperationCard, following the same precedent as InstrumentPanel's own
 #   action_succeeded connection — only states_updated routes through the
 #   window, see monitor_window.py's teardown-race note).
 # process: |
@@ -207,8 +207,8 @@ class OperationCard(QGroupBox):
         orchestrator: The active Orchestrator (``run_operation``,
             ``finish_operation``, ``confirm_operation``, and the
             ``run_started``/``run_finished`` signals this card connects
-            directly, per the panel's existing OtherDevicesPanel-precedent
-            connection pattern).
+            directly, per the established direct-connection precedent for
+            run-boundary signals).
         display_instance: An operation instance constructed once by the
             panel, used only to read ``name``/``description``/
             ``ready_message``/``operator_confirmations`` and to call
@@ -336,7 +336,7 @@ class OperationCard(QGroupBox):
         # Direct connection (not routed through the window's states_updated
         # forwarding): run_started/run_finished fire only at run boundaries,
         # not on every tick, so there is no teardown-race concern — the same
-        # precedent OtherDevicesPanel's action_succeeded connection follows.
+        # precedent InstrumentPanel's action_succeeded connection follows.
         self._orchestrator.run_started.connect(self._on_run_started)
         self._orchestrator.run_finished.connect(self._on_run_finished)
 

@@ -32,20 +32,20 @@ quadrant grid, unchanged — the page split only moved that grid's root
 splitter into the stack, it did not touch its internal layout. **Page 2
 (Logs)** is `ServicingLogPage`: one table per configured servicing-log kind
 (from `ServicingLogStore`/`LogKindSpec`), the read-only `operations` audit
-table, and the relocated `LogPanel` (moved off page 1's bottom-right
-selector, which now offers only "Other Devices" and, when cryogenics is
-enabled OR an `operations:` config block is declared, "Operations" — plan
-§12; renamed from "Cryogenics", which it absorbs rather than replaces).
-Tables refresh on log-page-shown and `run_finished` — never on a timer.
-Child panels keep the established single-receiver `states_updated`
+table, and the relocated `LogPanel`. Page 1's bottom-right quadrant is the
+optional `OperationsPanel` (present when cryogenics is enabled OR an
+`operations:` config block is declared — plan §12; a placeholder label
+otherwise). The former Other Devices section is retired: measurement and
+switch VIs are full, role-tagged `InstrumentPanel` cards in the instrument
+grid. Tables refresh on log-page-shown and `run_finished` — never on a
+timer. Child panels keep the established single-receiver `states_updated`
 forwarding pattern (`MonitorWindow` receives the tick and forwards to
-`TrendsQuadrant` / `OtherDevicesPanel` / `OperationsPanel`; see the
-destruction-order rule above); signals that fire only at run boundaries
+`TrendsQuadrant` / `OperationsPanel`; see the destruction-order rule above);
+signals that fire only at run boundaries
 (`run_started`/`run_finished`/`action_succeeded`) are connected directly by
-the panel (or, for `OperationsPanel`, each `OperationCard`) that needs them,
-matching `OtherDevicesPanel`'s existing precedent — there is no teardown
-race for a signal that only fires while the window is alive and not
-mid-tick.
+the panel (or, for `OperationsPanel`, each `OperationCard`) that needs them
+— there is no teardown race for a signal that only fires while the window
+is alive and not mid-tick.
 
 ## Entry (what comes in)
 
@@ -141,7 +141,7 @@ mid-tick.
 | `sweep_axis_widget.py` | Sweep-shape editor for a Procedure's declared `SweepAxis`: mode selector (Linear / Segments / CSV) over a stacked sub-form, a 2-column segment breakpoint table (`field_segments`), and a hysteresis checkbox. The only GUI code sweep-shape support needs. | `SweepAxisWidget`, `get_params` | `tests/test_sweep_axis_widget.py` |
 | `instrument_panel.py` | Auto-generated per-VI `QGroupBox`: `@monitored` methods become live `QLabel`s, `@control` methods become button + input rows (spec-declared params render via `param_form`: combo/checkbox/tooltipped fields). Card visibility: a `panels:` config allowlist wins, else each control's `panel=` default. Header holds a `LifecycleToggleButton` and the front-panel icon. Updates on each `states_updated` tick; flips a QSS `status` property on ok/stale/disconnected change. | `InstrumentPanel` | `tests/test_gui.py` |
 | `instrument_front_panel.py` | Per-VI child window showing the FULL capability surface (every `@monitored` value + every `@control`, panel-hidden ones included) by embedding an all-controls `InstrumentPanel` in a scroll area. Opened from the sliders icon on cards and switch rows; lazily created, reused. | `InstrumentFrontPanel` | `tests/test_gui.py` |
-| `lifecycle_toggle.py` | One state-dependent Initiate/Standby button with a status glow dot, shared by `InstrumentPanel` and the Other Devices rows. State changes only on `action_succeeded`, never optimistically on click. | `LifecycleToggleButton`, `set_initiated`, `is_initiated` | `tests/test_lifecycle_toggle.py` |
+| `lifecycle_toggle.py` | One state-dependent Initiate/Standby button with a status glow dot, hosted in every `InstrumentPanel` header. State changes only on `action_succeeded`, never optimistically on click. | `LifecycleToggleButton`, `set_initiated`, `is_initiated` | `tests/test_lifecycle_toggle.py` |
 | `notification_banner.py` | Hidden-by-default inline strip for non-modal `warning`/`error` messages; a repeated identical message bumps a counter instead of stacking. Replaced the old modal `QMessageBox` storms. | `NotificationBanner`, `show_message` | `tests/test_gui.py` |
 | `live_plot_panel.py` | Reusable live X/Y plot panel (X + Y selectors, optional per-slot Loop 1 / Loop 2 selectors for looped measurements, themed `pyqtgraph` curve); axis keys stay plain and the panel composes `{key}__A{i}__B{j}` at draw time. ProcedureWindow hosts two, driven by `measurement_ready`. | `LivePlotPanel`, `set_available_keys`, `set_available_loop_labels`, `redraw`, `clear` | `tests/test_gui.py` (via ProcedureWindow `_plot1`/`_plot2`) |
 | `monitor_history.py` | Qt-free ring-buffer of time-series readings; flattens nested state dicts like `Station.last_state_flat()` into per-key bounded deques. Feeds the trend plots. | `MonitorHistory`, `record`, `series`, `keys` | `tests/test_monitor_history.py` |
@@ -151,7 +151,6 @@ mid-tick.
 | `session_info_panel.py` | The GUI surface for the Experiment tier: an experiment status/Start-Close control (SessionManager, optional), sample name/ID/comments and the data-directory field with Browse, and an eLab status line (reflects `ElnLink`; publish controls land with Track B). Setup-tier concerns (config identity, instrument metadata, user login) live in the menu bar instead — see `monitor_window.py`/`setup_dialogs.py`. Sample fields stay free-editable per run regardless of experiment state; whatever they hold at "Start Experiment" time is snapshotted onto the `ExperimentRecord`. | `SessionInfoPanel`, `get_sample_info`, `get_data_dir`, `apply_session` | `tests/test_gui.py` |
 | `experiment_dialogs.py` | Modal dialogs for the experiment lifecycle: `StartExperimentDialog` (title, user picker with inline "New user…", attendance checkbox) and `CloseExperimentDialog` (findings text), plus the shared `UserPickerWidget` (roster combo + inline "New user…" → `AddUserDialog`) reused by `setup_dialogs.LoginDialog`. Opened only by `SessionInfoPanel`; every `SessionManager` mutation happens in the panel after a dialog accepts. | `StartExperimentDialog`, `CloseExperimentDialog`, `AddUserDialog`, `UserPickerWidget` | `tests/test_gui.py` |
 | `setup_dialogs.py` | Modal dialogs for the Setup tier: `LoginDialog` (pick/create who's using the app, via the shared `UserPickerWidget`) and `InstrumentInfoDialog` (read-only view of each VI's `devices.yaml` `metadata:` block). Opened from MonitorWindow's User and Config menus respectively. | `LoginDialog`, `InstrumentInfoDialog` | `tests/test_gui.py` |
-| `other_devices.py` | Compact Other Devices rows: measurement VIs get dot + status + Check button + `LifecycleToggleButton`; switch VIs get display-only rows with a live active-route label refreshed each tick via `on_states_updated`. | `OtherDevicesPanel` | `tests/test_gui.py` |
 | `operations_panel.py` | Bottom-right quadrant entry (page 1, plan §12), built when cryogenics is configured OR an `operations:` config block is declared. An optional cryogenics status section (live He/N2 readouts, consumption %/h over a 1h/6h/24h window via `consumption_rate_pct_per_h`, a level-vs-time plot — gaps rendered as gaps, fill events overlaid — gated on `cryogenics:`), followed by one generic `OperationCard` per available operation: a live readiness checklist (from `readiness_conditions()`), a next-due line (from `next_due()`), an operator-confirmations row while active, a ready banner once done + all-green, and a start/finish button (`OperatorDialog` → fresh instance → `orchestrator.run_operation()`/`finish_operation()`/`confirm_operation()`). Zero per-operation code — cards are built from `OperationBase` declarations plus `discover_operations()`. | `OperationsPanel`, `OperationCard`, `OperatorDialog`, `on_states_updated` | `tests/test_operations_panel.py` |
 | `servicing_log_page.py` | Page 2 (Logs): one table per declared servicing-log kind (columns from its `LogKindSpec.fields`, newest first) with Add/Edit/Delete/History for editable kinds (dialogs built from `param_form.py`), the read-only `operations` audit table, and the relocated `LogPanel`. `refresh()` is called on log-page-shown and `run_finished` — never on a timer. | `ServicingLogPage`, `ServicingLogEntryDialog`, `RevisionHistoryDialog`, `refresh` | `tests/test_servicing_log_page.py` |
 | `trends_quadrant.py` | The Trends quadrant: 1-4 `TrendPlotPanel`s auto-arranged into a `ceil(sqrt(N))` grid, backed by the `MonitorHistory` it owns; Add button (cap 4), per-panel remove (floor 1), opportunistic temperature/level default keys, and QSettings persistence of the panel list. | `TrendsQuadrant`, `on_states_updated`, `save_settings`, `restore_settings` | `tests/test_gui.py` |

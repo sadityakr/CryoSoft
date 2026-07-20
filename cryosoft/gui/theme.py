@@ -554,7 +554,7 @@ QDockWidget::float-button:hover {{
     border-radius: 2px;
 }}
 
-/* ── Connection status dot (compact Other Devices rows) ───────────────── */
+/* ── Connection status dot (generic small status indicator) ───────────── */
 QLabel[class="conn_dot"] {{
     font-size: 16px;
     color: {TEXT_MUTED};

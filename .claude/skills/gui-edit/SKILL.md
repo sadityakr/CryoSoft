@@ -21,7 +21,6 @@ one allowed exception). CI runs `make lint + make contracts + make test`.
 | `cryosoft/gui/session_info_panel.py` | Experiment-tier quadrant (Start/Close control + name/ID/comments/data dir + eLab status line) |
 | `cryosoft/gui/experiment_dialogs.py` | Start/Close Experiment dialogs, shared `UserPickerWidget`, add-user dialog |
 | `cryosoft/gui/setup_dialogs.py` | Setup-tier dialogs: login (`LoginDialog`), read-only instrument info (`InstrumentInfoDialog`) |
-| `cryosoft/gui/other_devices.py` | Other Devices rows (measurement check rows, display-only switch rows) |
 | `cryosoft/gui/log_panel.py` | Log widget + `QtLogHandler` (attach/detach lifecycle) |
 | `cryosoft/gui/config_menu.py` | Config menu controller (select/switch/restart, editor launcher) |
 | `cryosoft/gui/procedure_window.py` | Procedure window (composition shell): quadrants, run/queue/abort flows, two `LivePlotPanel`s |
@@ -37,7 +36,7 @@ one allowed exception). CI runs `make lint + make contracts + make test`.
 | `tests/test_gui.py` | pytest-qt suite; run with `-p no:randomly` when run alone |
 
 Destruction-order rule: Orchestrator signals that feed child panels (e.g.
-`states_updated` → Trends / Other Devices) must connect to a WINDOW slot that
+`states_updated` → Trends / Operations) must connect to a WINDOW slot that
 forwards to the panels, never to the panel directly — Qt severs a receiver's
 connections at the start of its own destruction, so the window-as-receiver
 topology is what stops a live tick from reaching a partially destroyed child

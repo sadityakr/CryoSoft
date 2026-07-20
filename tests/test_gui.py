@@ -31,7 +31,6 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSplitter,
-    QStackedWidget,
     QTextEdit,
     QWidget,
 )
@@ -1420,31 +1419,36 @@ def test_monitor_quadrant_splitters_not_collapsible(monitor_win):
         assert splitter.count() == 2
 
 
-def test_monitor_instrument_panels_exist_for_system_vis(monitor_win, station):
-    """One InstrumentPanel exists per system/level VI, in the top-left quadrant."""
-    system_vis = [
-        n for n in station.get_vi_names() if station.get_vi_type(n) in {"system", "level"}
-    ]
-    assert system_vis, "sim_cryostat should have at least one system/level VI"
+def test_monitor_instrument_panels_exist_for_every_vi(monitor_win, station):
+    """One InstrumentPanel exists per VI — system/level, measurement, AND switch."""
+    all_vis = set(station.get_vi_names())
+    assert all_vis, "sim_cryostat should have VIs"
     panel_vi_names = {p._vi_name for p in monitor_win._panels}
-    assert panel_vi_names == set(system_vis)
+    assert panel_vi_names == all_vis
     for panel in monitor_win._panels:
         assert isinstance(panel, InstrumentPanel)
+    # Non-system cards are tagged with their role.
+    assert monitor_win.findChild(QLabel, "keithley_delta_mode_type_tag").text() == "Measurement"
+    assert monitor_win.findChild(QLabel, "switch_matrix_type_tag").text() == "Scanner"
+    # System cards carry no tag.
+    assert monitor_win.findChild(QLabel, "magnet_z_type_tag") is None
 
 
 def test_monitor_fixed_quadrants_exist_with_expected_content(monitor_win):
-    """Sample Info and the Other Devices stack contain the expected widgets.
+    """Sample Info and the Operations quadrant contain the expected widgets.
 
-    The Log view moved to page 2 (ServicingLogPage) in Phase 5; with no
-    cryogenics config wired, the bottom-right stack holds only Other Devices.
+    The Log view moved to page 2 (ServicingLogPage) in Phase 5; the Other
+    Devices section is retired (measurement/switch VIs are instrument cards
+    now), so the bottom-right quadrant is Operations — a placeholder label
+    when the setup declares no operations/cryogenics config.
     """
     sample_quadrant = monitor_win.findChild(QScrollArea, "session_info_scroll")
     assert sample_quadrant is not None
     assert sample_quadrant.widget().findChild(QLineEdit, "sample_name_input") is not None
 
-    stack = monitor_win.findChild(QStackedWidget, "devices_log_stack")
-    assert stack is not None
-    assert stack.count() == 1
+    operations_quadrant = monitor_win.findChild(QWidget, "operations_quadrant")
+    assert operations_quadrant is not None
+    assert monitor_win._operations_panel is None  # no operations config wired here
     assert monitor_win._log_panel is monitor_win._servicing_log_page.findChild(QTextEdit, "log_panel")
 
 
@@ -1524,53 +1528,30 @@ def test_monitor_page_switcher_swaps_pages(monitor_win):
     assert monitor_win._page_stack.currentWidget() is monitor_win._main_splitter
 
 
-def test_monitor_other_devices_lists_switch_vi_with_display_label(monitor_win, station):
-    """The Other Devices section shows a display-only row for each switch VI.
+def test_monitor_switch_card_has_scanner_toggle_and_live_route(monitor_win, station, orchestrator):
+    """The switch VI's card carries the Enable Scanner checkbox and tracks the route.
 
-    The sim_cryostat config has one switch VI (switch_matrix, a Keithley-705
-    scanner behind SwitchMatrixVI). Its row must carry the VI's display_label
-    ("Scanner (mux)") and a connection dot, but no Check/lifecycle buttons —
-    it is monitored, not driven, from this section.
+    The switch VI is a full instrument card now; its @monitored active_route
+    value label must follow the live route across monitor ticks, and its
+    Enable Scanner checkbox drives Orchestrator.set_scanner_enabled().
     """
-    switch_vis = [n for n in station.get_vi_names() if station.get_vi_type(n) == "switch"]
-    assert switch_vis, "sim_cryostat should have at least one switch VI"
+    chk = monitor_win.findChild(QCheckBox, "switch_matrix_enable_scanner_chk")
+    assert chk is not None
+    assert chk.isChecked() is False
+    chk.setChecked(True)
+    assert monitor_win._orchestrator.scanner_enabled() is True
+    chk.setChecked(False)
 
-    for vi_name in switch_vis:
-        row = monitor_win.findChild(QWidget, f"{vi_name}_switch_row")
-        assert row is not None, f"Missing switch row for {vi_name}"
-
-        label = monitor_win.findChild(QLabel, f"{vi_name}_display_label")
-        assert label is not None
-        assert label.text() == station.measurement_label(vi_name)
-
-        assert monitor_win.findChild(QLabel, f"{vi_name}_conn_dot") is not None
-        assert monitor_win.findChild(QLabel, f"{vi_name}_active_route") is not None
-        # Display-only: no Check button, no lifecycle toggle.
-        assert monitor_win.findChild(QPushButton, f"{vi_name}_check_btn") is None
-        assert monitor_win.findChild(QPushButton, f"{vi_name}_lifecycle_btn") is None
-
-
-def test_monitor_switch_row_active_route_updates_on_tick(monitor_win, station, orchestrator):
-    """A switch row's active-route label tracks the live route across a monitor tick.
-
-    Selecting a route on the sim station and emitting the resulting state
-    snapshot (as the Orchestrator tick does) must flip the label from the
-    no-route placeholder to the closed route's name, and mark the row
-    connected.
-    """
-    route_lbl = monitor_win.findChild(QLabel, "switch_matrix_active_route")
-    dot = monitor_win.findChild(QLabel, "switch_matrix_conn_dot")
-    assert route_lbl.text() == "Route: —"
+    route_lbl = monitor_win.findChild(QLabel, "switch_matrix_active_route_value")
+    assert route_lbl is not None
 
     station.switch_matrix.select_route("Mux-Ch2")
     orchestrator.states_updated.emit(station.get_state())
-
-    assert route_lbl.text() == "Route: Mux-Ch2"
-    assert dot.property("status") == "connected"
+    assert route_lbl.text() == "Mux-Ch2"
 
     station.switch_matrix.open_all()
     orchestrator.states_updated.emit(station.get_state())
-    assert route_lbl.text() == "Route: —"
+    assert route_lbl.text() in ("", "—")
 
 
 def test_monitor_states_updated_feeds_history_and_trend_combos(monitor_win, orchestrator):
@@ -1661,11 +1642,9 @@ def test_monitor_persistence_roundtrip_splitters_and_trends(
 
 def test_monitor_default_layout_when_settings_empty(monitor_win, station):
     """With no saved splitter state (fresh isolated settings), the DEFAULT layout stands."""
-    system_vis = [
-        n for n in station.get_vi_names() if station.get_vi_type(n) in {"system", "level"}
-    ]
     assert len(monitor_win._trends._trend_panels) == 2
-    assert len(monitor_win._panels) == len(system_vis)  # instrument panels were built and placed
+    # One card per VI — system/level plus measurement and switch cards.
+    assert len(monitor_win._panels) == len(station.get_vi_names())
     # setSizes([600, 600]) is a proportional hint, not exact pixels once shown
     # at the real window width — check the default is an even 50/50 split.
     left, right = monitor_win._main_splitter.sizes()

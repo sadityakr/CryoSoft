@@ -87,6 +87,13 @@ class InstrumentPanel(QGroupBox):
         show_front_panel_button: Whether the header carries the icon that
             opens the :class:`InstrumentFrontPanel`. False inside the front
             panel itself (a front panel must not open another one).
+        type_tag: Optional role label ("Measurement", "Scanner") shown next
+            to the VI name, so non-system cards in the instrument grid are
+            recognisable at a glance.
+        extra_widget: Optional caller-built widget appended below the control
+            rows — the hook for role-specific additions (e.g. the switch
+            card's station-wide Enable Scanner checkbox) without this class
+            learning any per-role logic.
     """
 
     def __init__(
@@ -97,6 +104,8 @@ class InstrumentPanel(QGroupBox):
         parent: QWidget | None = None,
         panel_controls: list[str] | None = None,
         show_front_panel_button: bool = True,
+        type_tag: str | None = None,
+        extra_widget: QWidget | None = None,
     ) -> None:
         super().__init__(parent)  # no native title — see module docstring
         self._vi_name = vi_name
@@ -104,6 +113,8 @@ class InstrumentPanel(QGroupBox):
         self._orchestrator = orchestrator
         self._panel_controls = panel_controls
         self._show_front_panel_button = show_front_panel_button
+        self._type_tag = type_tag
+        self._extra_widget = extra_widget
         self._front_panel: QWidget | None = None  # lazily created
 
         # Maps field name → value label widget
@@ -142,6 +153,11 @@ class InstrumentPanel(QGroupBox):
         self._name_label.setObjectName(f"{self._vi_name}_name_label")
         self._name_label.setProperty("class", "panel_name_label")
         header_row.addWidget(self._name_label)
+        if self._type_tag:
+            tag_lbl = QLabel(self._type_tag)
+            tag_lbl.setObjectName(f"{self._vi_name}_type_tag")
+            tag_lbl.setProperty("class", "secondary_label")
+            header_row.addWidget(tag_lbl)
         header_row.addStretch()
         if self._show_front_panel_button:
             fp_btn = QPushButton()
@@ -177,6 +193,9 @@ class InstrumentPanel(QGroupBox):
             if not self._control_visible(method_name):
                 continue
             outer.addWidget(self._build_control_row(method_name, params))
+
+        if self._extra_widget is not None:
+            outer.addWidget(self._extra_widget)
 
         # Absorb any extra vertical space so control rows never expand beyond
         # their natural height when the panel is stretched by the grid.
