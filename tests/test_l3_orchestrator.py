@@ -26,7 +26,7 @@ class MockProcedure:
 
     def initiate(self):
         return PhasePlan(
-            targets={"magnet_x": Target(self._sweep[0])},
+            targets={"magnet_z": Target(self._sweep[0])},
             commands=(),
             wait_s=0.0,  # instant
         )
@@ -35,13 +35,13 @@ class MockProcedure:
         self._index += 1
         if self._index >= len(self._sweep):
             return None
-        return StepPlan(targets={"magnet_x": Target(self._sweep[self._index])}, wait_s=0.0)
+        return StepPlan(targets={"magnet_z": Target(self._sweep[self._index])}, wait_s=0.0)
 
     def measure(self):
         self.measure_called += 1
 
     def standby(self):
-        return PhasePlan(targets={"magnet_x": Target(0.0)}, commands=(), wait_s=0.0)
+        return PhasePlan(targets={"magnet_z": Target(0.0)}, commands=(), wait_s=0.0)
 
     def get_progress(self):
         return self._index / len(self._sweep)
@@ -93,10 +93,10 @@ def test_operational_status_populated_after_tick(orchestrator, qtbot):
 
 def test_operational_status_reports_live_ramp_target(orchestrator, station, qtbot):
     """During a ramp, the record shows the VI's live target and a gap."""
-    station.process_system_targets({"magnet_x": Target(1.0)})
+    station.process_system_targets({"magnet_z": Target(1.0)})
     orchestrator._tick()
     status = orchestrator.get_operational_status()
-    magnet = next(v for v in status["vis"] if v["vi_name"] == "magnet_x")
+    magnet = next(v for v in status["vis"] if v["vi_name"] == "magnet_z")
     assert magnet["target"] == pytest.approx(1.0)
     assert magnet["ramp_status"] == "RAMPING"
     assert magnet["gap"] is not None
@@ -114,8 +114,8 @@ def test_full_procedure_cycle(orchestrator, station, qtbot):
     orchestrator.state_changed.connect(on_state)
     
     # Fast ramp: override VI config rate and clear segments so generator uses 6000 A/min
-    station.magnet_x._default_ramp_rate = 6000.0
-    station.magnet_x._ramp_segments = []
+    station.magnet_z._default_ramp_rate = 6000.0
+    station.magnet_z._ramp_segments = []
 
     orchestrator.run_procedure(procedure)
     
@@ -141,8 +141,8 @@ def test_status_messages_emitted_during_run(orchestrator, station, qtbot):
     formatting can never raise into the tick.
     """
     procedure = MockProcedure(station)
-    station.magnet_x._default_ramp_rate = 6000.0
-    station.magnet_x._ramp_segments = []
+    station.magnet_z._default_ramp_rate = 6000.0
+    station.magnet_z._ramp_segments = []
 
     messages: list[str] = []
     orchestrator.status_message.connect(messages.append)
@@ -164,7 +164,7 @@ def test_status_messages_emitted_during_run(orchestrator, station, qtbot):
 
 def test_station_setpoint_and_measurement_labels(station):
     """Station exposes each VI's declarative label/unit for status lines."""
-    assert station.system_setpoint_meta("magnet_x") == ("field", "T")
+    assert station.system_setpoint_meta("magnet_z") == ("field", "T")
     assert station.system_setpoint_meta("temperature_vti") == ("temperature", "K")
     assert station.measurement_label("dc_measurement") == "DC resistance"
     # Unknown VI degrades to (name, "") / name rather than raising.
@@ -181,17 +181,17 @@ def test_standby_waits_for_its_own_ramp_before_finishing(orchestrator, station, 
     ramping the magnet back to 0 T). By the time procedure_finished fired,
     the magnet was often still mid-ramp.
     """
-    procedure = MockProcedure(station)  # standby() ramps magnet_x to 0.0 T
-    station.magnet_x._default_ramp_rate = 6000.0
-    station.magnet_x._ramp_segments = []
+    procedure = MockProcedure(station)  # standby() ramps magnet_z to 0.0 T
+    station.magnet_z._default_ramp_rate = 6000.0
+    station.magnet_z._ramp_segments = []
 
     orchestrator.run_procedure(procedure)
 
     with qtbot.waitSignal(orchestrator.procedure_finished, timeout=5000):
         pass
 
-    assert station.magnet_x.ramp_status() in ("TARGET_REACHED", "IDLE")
-    assert station.magnet_x.get_field() == pytest.approx(0.0, abs=0.01)
+    assert station.magnet_z.ramp_status() in ("TARGET_REACHED", "IDLE")
+    assert station.magnet_z.get_field() == pytest.approx(0.0, abs=0.01)
 
 
 def test_wait_time_respected(orchestrator, station, qtbot):
@@ -201,12 +201,12 @@ def test_wait_time_respected(orchestrator, station, qtbot):
     # Override initiate to add wait time
     def delayed_initiate():
         return PhasePlan(
-            targets={"magnet_x": Target(1.0)}, commands=(), wait_s=0.1
+            targets={"magnet_z": Target(1.0)}, commands=(), wait_s=0.1
         )  # 100ms wait
 
     procedure.initiate = delayed_initiate
-    station.magnet_x._default_ramp_rate = 6000.0
-    station.magnet_x._ramp_segments = []
+    station.magnet_z._default_ramp_rate = 6000.0
+    station.magnet_z._ramp_segments = []
     
     orchestrator.run_procedure(procedure)
 
@@ -252,7 +252,7 @@ def test_action_blocking(orchestrator, station, qtbot):
     orchestrator.run_procedure(procedure)
     
     with qtbot.waitSignal(orchestrator.action_blocked, timeout=500):
-        orchestrator.submit_vi_action("magnet_x", "set_field", target_T=1.0)
+        orchestrator.submit_vi_action("magnet_z", "set_field", target_T=1.0)
     
     orchestrator.abort_procedure()
 
@@ -260,9 +260,9 @@ def test_action_blocking(orchestrator, station, qtbot):
 def test_action_succeeded_emitted_on_successful_gui_action(orchestrator, qtbot):
     """submit_vi_action() in IDLE, once executed by the tick loop, emits action_succeeded."""
     with qtbot.waitSignal(orchestrator.action_succeeded, timeout=500) as blocker:
-        orchestrator.submit_vi_action("magnet_x", "initiate")
+        orchestrator.submit_vi_action("magnet_z", "initiate")
 
-    assert blocker.args == ["magnet_x", "initiate"]
+    assert blocker.args == ["magnet_z", "initiate"]
 
 
 def test_action_succeeded_not_emitted_on_failed_gui_action(orchestrator, qtbot):
@@ -270,7 +270,7 @@ def test_action_succeeded_not_emitted_on_failed_gui_action(orchestrator, qtbot):
     received = []
     orchestrator.action_succeeded.connect(lambda vi, method: received.append((vi, method)))
 
-    orchestrator.submit_vi_action("magnet_x", "not_a_real_method")
+    orchestrator.submit_vi_action("magnet_z", "not_a_real_method")
     qtbot.wait(50)  # let one tick pass
 
     assert received == []
@@ -322,10 +322,10 @@ def test_action_failed_emitted_with_reason(orchestrator, qtbot):
     the limits wrapper and the reason reaches the GUI signal verbatim.
     """
     with qtbot.waitSignal(orchestrator.action_failed, timeout=500) as blocker:
-        orchestrator.submit_vi_action("magnet_x", "set_field", target_T=99.0)
+        orchestrator.submit_vi_action("magnet_z", "set_field", target_T=99.0)
 
     vi_name, method_name, reason = blocker.args
-    assert (vi_name, method_name) == ("magnet_x", "set_field")
+    assert (vi_name, method_name) == ("magnet_z", "set_field")
     assert "outside the allowed range" in reason
     # The refused command must not have started a ramp.
     assert orchestrator._state == OrchestratorState.IDLE
@@ -337,7 +337,7 @@ def test_stale_vi_during_procedure(orchestrator, station, qtbot):
     orchestrator.run_procedure(procedure)
     
     # Patch to simulate error
-    station.magnet_x._driver._simulate_error = True
+    station.magnet_z._driver._simulate_error = True
     
     # Because it is active, when get_state becomes stale it should go to ERROR
     # wait for ERROR state
@@ -410,7 +410,7 @@ def test_emergency_shutdown_runs_once_not_every_tick(orchestrator, station, qtbo
 
 def test_quench_triggers_emergency(orchestrator, station, qtbot):
     """A magnet QUENCH status must escalate to EMERGENCY."""
-    station.magnet_x._driver._simulate_quench = True
+    station.magnet_z._driver._simulate_quench = True
     qtbot.waitUntil(
         lambda: orchestrator._state == OrchestratorState.EMERGENCY,
         timeout=2000,
@@ -438,8 +438,8 @@ def test_abort_calls_procedure_abort_and_holds_magnet(orchestrator, station, qtb
     command a hardware hold leaves the field still moving.
     """
     proc = RecordingProcedure(station)
-    orchestrator.run_procedure(proc)  # ramps magnet_x toward 1.0 T (slow rate)
-    assert station.magnet_x.ramp_status() == "RAMPING"
+    orchestrator.run_procedure(proc)  # ramps magnet_z toward 1.0 T (slow rate)
+    assert station.magnet_z.ramp_status() == "RAMPING"
 
     orchestrator.abort_procedure()
 
@@ -448,8 +448,8 @@ def test_abort_calls_procedure_abort_and_holds_magnet(orchestrator, station, qtb
     assert orchestrator._procedure is None
     assert orchestrator._wait_started is False  # stale wait clock reset (H5)
     # Hardware held: PSU setpoint pinned to its present output.
-    assert station.magnet_x.ramp_status() == "IDLE"
-    drv = station.magnet_x._driver
+    assert station.magnet_z.ramp_status() == "IDLE"
+    drv = station.magnet_z._driver
     assert drv.get_status() == "HOLD"
     assert drv.get_current_setpoint() == pytest.approx(drv.get_current(), abs=0.01)
 
@@ -464,8 +464,8 @@ def test_measure_exception_degrades_to_error_not_crash(orchestrator, station, qt
         def measure(self):
             raise RuntimeError("simulated measurement failure")
 
-    station.magnet_x._default_ramp_rate = 6000.0
-    station.magnet_x._ramp_segments = []
+    station.magnet_z._default_ramp_rate = 6000.0
+    station.magnet_z._ramp_segments = []
     proc = ExplodingProcedure(station)
     orchestrator.run_procedure(proc)
 
@@ -506,7 +506,7 @@ def test_malformed_initiate_return_fails_loudly(orchestrator, station):
     class LegacyReturn(RecordingProcedure):
         def initiate(self):
             # The pre-Wave-2 shape — a bare tuple, not a PhasePlan.
-            return ({"magnet_x": {"target": 1.0}}, {}, 0.0)
+            return ({"magnet_z": {"target": 1.0}}, {}, 0.0)
 
     proc = LegacyReturn(station)
     orchestrator.run_procedure(proc)
@@ -521,18 +521,18 @@ def test_pause_holds_hardware_and_resume_redispatches(orchestrator, station, qtb
     """Pause must freeze the autonomous PSU; resume must restart the ramp."""
     proc = MockProcedure(station)
     orchestrator.run_procedure(proc)  # slow ramp toward 1.0 T
-    assert station.magnet_x.ramp_status() == "RAMPING"
+    assert station.magnet_z.ramp_status() == "RAMPING"
 
     orchestrator.pause_procedure()
     assert orchestrator._state == OrchestratorState.PAUSED
-    drv = station.magnet_x._driver
+    drv = station.magnet_z._driver
     assert drv.get_status() == "HOLD"  # field frozen, not still ramping
 
     orchestrator.resume_procedure()
     assert orchestrator._state in (
         OrchestratorState.INITIATING, OrchestratorState.RAMPING
     )
-    assert station.magnet_x.ramp_status() == "RAMPING"  # ramp re-dispatched
+    assert station.magnet_z.ramp_status() == "RAMPING"  # ramp re-dispatched
 
     orchestrator.abort_procedure()
 
@@ -542,8 +542,8 @@ def test_queue_procedures(orchestrator, station, qtbot):
     proc1 = MockProcedure(station)
     proc2 = MockProcedure(station)
     
-    station.magnet_x._default_ramp_rate = 6000.0
-    station.magnet_x._ramp_segments = []
+    station.magnet_z._default_ramp_rate = 6000.0
+    station.magnet_z._ramp_segments = []
 
     orchestrator.run_procedure(proc1)
     orchestrator.run_procedure(proc2)
@@ -565,7 +565,7 @@ def test_run_procedure_refused_when_magnet_in_persistent_mode(qtbot):
     action_blocked fires, the Orchestrator stays IDLE, nothing is dispatched."""
     # sim_real_cryostat has a persistent (switch-heater) magnet.
     station = build_station("cryosoft/configs/sim_real_cryostat")
-    station.magnet_x.enable_persistent_mode()
+    station.magnet_z.enable_persistent_mode()
     orch = Orchestrator(station, tick_interval_ms=10)
 
     blocked: list[str] = []
@@ -579,8 +579,8 @@ def test_run_procedure_refused_when_magnet_in_persistent_mode(qtbot):
     assert blocked and "persistent mode" in blocked[0]
 
     # With the magnet returned to normal mode, the procedure starts.
-    station.magnet_x.switch_heater_on()
-    station.magnet_x.disable_persistent_mode()
+    station.magnet_z.switch_heater_on()
+    station.magnet_z.disable_persistent_mode()
     orch.run_procedure(procedure)
     assert orch._procedure is procedure
     orch.abort_procedure()
@@ -648,10 +648,10 @@ def test_gui_actions_execute_while_monitoring_off(station, qtbot, monkeypatch):
     verdicts: list[tuple[str, str]] = []
     orch.action_succeeded.connect(lambda vi, m: verdicts.append((vi, m)))
 
-    orch.submit_vi_action("magnet_x", "initiate")
+    orch.submit_vi_action("magnet_z", "initiate")
     orch._tick()
 
-    assert ("magnet_x", "initiate") in verdicts
+    assert ("magnet_z", "initiate") in verdicts
     assert calls == []  # still no instrument polling
     orch.shutdown()
 
@@ -701,9 +701,9 @@ def test_shutdown_stops_ticking(station, qtbot):
 # ── Run manifests (run_started / run_finished) ───────────────────────────────
 
 def _fast_magnet(station):
-    """Make magnet_x ramps effectively instant for state-machine tests."""
-    station.magnet_x._default_ramp_rate = 6000.0
-    station.magnet_x._ramp_segments = []
+    """Make magnet_z ramps effectively instant for state-machine tests."""
+    station.magnet_z._default_ramp_rate = 6000.0
+    station.magnet_z._ramp_segments = []
 
 
 def test_run_manifests_full_cycle(orchestrator, station, qtbot):
@@ -781,7 +781,7 @@ def test_envelope_rejects_out_of_bounds_target(orchestrator, station, qtbot):
     from cryosoft.core.plan import EnvelopeBound
 
     orchestrator.set_session_envelope(
-        _envelope(magnet_x=EnvelopeBound(min_value=-0.5, max_value=0.5))
+        _envelope(magnet_z=EnvelopeBound(min_value=-0.5, max_value=0.5))
     )
     errors: list[str] = []
     started: list[dict] = []
@@ -792,9 +792,9 @@ def test_envelope_rejects_out_of_bounds_target(orchestrator, station, qtbot):
 
     assert orchestrator._state == OrchestratorState.ERROR
     assert started == [], "a rejected run must not report as started"
-    assert any("session envelope" in e and "magnet_x" in e for e in errors)
+    assert any("session envelope" in e and "magnet_z" in e for e in errors)
     # The magnet was never asked to move.
-    assert station.magnet_x.get_field() == pytest.approx(0.0, abs=1e-6)
+    assert station.magnet_z.get_field() == pytest.approx(0.0, abs=1e-6)
 
 
 def test_envelope_allows_within_bounds_and_clears(orchestrator, station, qtbot):
@@ -803,7 +803,7 @@ def test_envelope_allows_within_bounds_and_clears(orchestrator, station, qtbot):
 
     _fast_magnet(station)
     orchestrator.set_session_envelope(
-        _envelope(magnet_x=EnvelopeBound(min_value=-5.0, max_value=5.0))
+        _envelope(magnet_z=EnvelopeBound(min_value=-5.0, max_value=5.0))
     )
     orchestrator.run_procedure(MockProcedure(station))
     with qtbot.waitSignal(orchestrator.procedure_finished, timeout=5000):
@@ -896,10 +896,10 @@ def test_initiation_gate_replaces_wait_and_blocks_until_satisfied(orchestrator, 
     procedure.initiation_gates = lambda: (Gate("settle", check=check),)
     # A large wait_s that must be ignored once a gate is declared.
     procedure.initiate = lambda: PhasePlan(
-        targets={"magnet_x": Target(1.0)}, commands=(), wait_s=999.0
+        targets={"magnet_z": Target(1.0)}, commands=(), wait_s=999.0
     )
-    station.magnet_x._default_ramp_rate = 6000.0
-    station.magnet_x._ramp_segments = []
+    station.magnet_z._default_ramp_rate = 6000.0
+    station.magnet_z._ramp_segments = []
 
     orchestrator.run_procedure(procedure)
     # The sim magnet driver advances on real elapsed time, not tick count, so
@@ -938,8 +938,8 @@ def test_reading_gate_used_after_first_measurement_not_initiation(orchestrator, 
         return calls["n"] >= 2
 
     procedure.reading_gates = lambda: (Gate("settle", check=check),)
-    station.magnet_x._default_ramp_rate = 6000.0
-    station.magnet_x._ramp_segments = []
+    station.magnet_z._default_ramp_rate = 6000.0
+    station.magnet_z._ramp_segments = []
 
     orchestrator.run_procedure(procedure)
     for _ in range(1000):
@@ -971,8 +971,8 @@ def test_pause_resume_during_reading_gate_holds_and_resumes(orchestrator, statio
         return calls["n"] >= 5
 
     procedure.reading_gates = lambda: (Gate("settle", check=check),)
-    station.magnet_x._default_ramp_rate = 6000.0
-    station.magnet_x._ramp_segments = []
+    station.magnet_z._default_ramp_rate = 6000.0
+    station.magnet_z._ramp_segments = []
 
     orchestrator.run_procedure(procedure)
     for _ in range(1000):

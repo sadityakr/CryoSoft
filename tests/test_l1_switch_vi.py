@@ -19,21 +19,51 @@ from cryosoft.drivers.sim_keithley_705 import SimKeithley705
 from cryosoft.virtual_instruments.switch.switch_matrix import SwitchMatrixVI
 
 ROUTES = {
-    "Mux-Ch1": ["1!1"],
-    "Mux-Ch2": ["1!2"],
-    "Mux-Ch3": ["1!3", "1!4"],
+    "Mux-Ch1": ["1"],
+    "Mux-Ch2": ["2"],
+    "Mux-Ch3": ["3", "4"],
 }
 
 
-def _vi(routes=None, settle_time_s=0.0):
+def _vi(routes=None, settle_time_s=0.0, **extra):
     driver = SimKeithley705("SIM")
     vi = SwitchMatrixVI(
         {"main": driver},
         routes=ROUTES if routes is None else routes,
         settle_time_s=settle_time_s,
+        **extra,
     )
     vi.vi_name = "switch_matrix"
     return vi, driver
+
+
+# ── Pole mode (a config-owned wiring property) ───────────────────────────────
+
+def test_pole_mode_from_config_is_applied_to_the_instrument():
+    """pole_mode reaches the driver at construction, before any route runs.
+
+    The mode renumbers the scanner's channels, so it has to be applied before
+    the route table means anything.
+    """
+    vi, driver = _vi(pole_mode=4)
+    assert driver._pole_mode == 4
+    assert driver.first_last_channel() == (1, 10)
+
+
+def test_pole_mode_omitted_leaves_the_instrument_alone():
+    """No pole_mode in config -> the driver's mode is untouched."""
+    _, driver = _vi()
+    assert driver._pole_mode == 2  # the sim's power-up default
+
+
+def test_invalid_pole_mode_rejected():
+    with pytest.raises(CryoSoftConfigError, match="pole_mode"):
+        _vi(pole_mode=3)
+
+
+def test_non_integer_pole_mode_rejected():
+    with pytest.raises(CryoSoftConfigError, match="pole_mode"):
+        _vi(pole_mode="4")
 
 
 # ── Construction / validation ────────────────────────────────────────────────
@@ -46,17 +76,17 @@ def test_vi_type_and_routes_order():
 
 def test_empty_route_name_rejected():
     with pytest.raises(CryoSoftConfigError, match="non-empty"):
-        _vi(routes={"": ["1!1"]})
+        _vi(routes={"": ["1"]})
 
 
 def test_route_name_with_separator_rejected():
     with pytest.raises(CryoSoftConfigError, match="__"):
-        _vi(routes={"a__b": ["1!1"]})
+        _vi(routes={"a__b": ["1"]})
 
 
 def test_route_name_with_slash_rejected():
     with pytest.raises(CryoSoftConfigError, match="/"):
-        _vi(routes={"a/b": ["1!1"]})
+        _vi(routes={"a/b": ["1"]})
 
 
 def test_empty_channel_spec_list_rejected():
@@ -79,7 +109,7 @@ def test_bool_settle_time_rejected():
 def test_select_route_closes_only_that_route():
     vi, driver = _vi()
     vi.select_route("Mux-Ch1")
-    assert driver.closed_channels() == ["1!1"]
+    assert driver.closed_channels() == ["001"]
     assert vi.active_route() == "Mux-Ch1"
 
 
@@ -88,7 +118,7 @@ def test_select_route_is_exclusive():
     vi, driver = _vi()
     vi.select_route("Mux-Ch1")
     vi.select_route("Mux-Ch3")
-    assert driver.closed_channels() == ["1!3", "1!4"]  # Mux-Ch1's 1!1 is open again
+    assert driver.closed_channels() == ["003", "004"]  # Mux-Ch1's channel 1 is open again
 
 
 def test_select_unknown_route_raises():

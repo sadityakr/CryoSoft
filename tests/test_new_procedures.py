@@ -151,10 +151,10 @@ def test_field_sweep_rejects_non_measurement_vi(station, tmp_path):
     """Selecting a non-measurement VI is refused at construction."""
     from cryosoft.core.exceptions import CryoSoftConfigError
 
-    with pytest.raises(CryoSoftConfigError, match="magnet_x"):
+    with pytest.raises(CryoSoftConfigError, match="magnet_z"):
         FieldSweep(
             station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
-            measurement_vi="magnet_x", **FAST_FIELD,
+            measurement_vi="magnet_z", **FAST_FIELD,
         )
 
 
@@ -177,8 +177,8 @@ def test_field_sweep_initiate_full_phaseplan(station, tmp_path, meas):
     proc.standby()
 
     assert isinstance(plan, PhasePlan)
-    assert set(plan.targets) == {"magnet_x", "temperature_vti"}
-    assert plan.targets["magnet_x"] == Target(-0.1)
+    assert set(plan.targets) == {"magnet_z", "temperature_vti"}
+    assert plan.targets["magnet_z"] == Target(-0.1)
     assert plan.targets["temperature_vti"] == Target(300.0)
 
     assert len(plan.commands) == 1
@@ -208,7 +208,7 @@ def test_field_sweep_change_step(station, tmp_path, meas):
     proc.initiate()
     step = proc.change_sweep_step()
     assert isinstance(step, StepPlan)
-    assert step.targets["magnet_x"].target == pytest.approx(0.0)
+    assert step.targets["magnet_z"].target == pytest.approx(0.0)
     assert step.wait_s == pytest.approx(0.0)
     proc.standby()
 
@@ -250,7 +250,7 @@ def test_field_sweep_standby_parks_magnet(station, tmp_path, meas):
     proc = _field_proc(station, tmp_path, meas)
     proc.initiate()
     plan = proc.standby()
-    assert plan.targets["magnet_x"].target == pytest.approx(0.0)
+    assert plan.targets["magnet_z"].target == pytest.approx(0.0)
     cmd = next(c for c in plan.commands if c.vi_name == meas["measurement_vi"])
     assert cmd.method == "standby"
     assert proc._data_manager is None
@@ -271,8 +271,8 @@ def test_field_sweep_abort_disarms_selected_vi(station, tmp_path, meas):
 def test_field_sweep_full_orchestrator_loop(station, tmp_path, qtbot, meas):
     from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 
-    station.magnet_x._default_ramp_rate = 6000.0
-    station.magnet_x._ramp_segments = []
+    station.magnet_z._default_ramp_rate = 6000.0
+    station.magnet_z._ramp_segments = []
 
     proc = _field_proc(station, tmp_path, meas)
     orch = Orchestrator(station, tick_interval_ms=10)
@@ -300,8 +300,8 @@ def test_temp_sweep_initiate_full_phaseplan(station, tmp_path, meas):
     proc.standby()
 
     assert plan.targets["temperature_vti"] == Target(300.0, rate=6000.0)
-    # sim_cryostat has magnet_x + magnet_y; field_x/field_y default 0.0.
-    assert plan.targets["magnet_x"] == Target(0.0)
+    # sim_cryostat has magnet_z + magnet_y; field_z/field_y default 0.0.
+    assert plan.targets["magnet_z"] == Target(0.0)
     assert plan.targets["magnet_y"] == Target(0.0)
 
     assert len(plan.commands) == 1
@@ -374,14 +374,14 @@ def _partial_station(*keep: str):
 
 def test_temp_sweep_missing_magnet_with_zero_field_is_skipped(tmp_path):
     """A station without magnet_y still runs the sweep at field_y=0."""
-    station = _partial_station("magnet_x", "temperature_vti", "dc_measurement")
+    station = _partial_station("magnet_z", "temperature_vti", "dc_measurement")
     proc = TemperatureSweep(
         station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
         **FAST_TEMP, **DC,
     )
     plan = proc.initiate()
     assert "magnet_y" not in plan.targets
-    assert "magnet_x" in plan.targets
+    assert "magnet_z" in plan.targets
     assert "temperature_vti" in plan.targets
     proc.standby()
 
@@ -390,7 +390,7 @@ def test_temp_sweep_missing_magnet_with_nonzero_field_is_refused(tmp_path):
     """A NONZERO field on a missing magnet must fail at construction."""
     from cryosoft.core.exceptions import CryoSoftConfigError
 
-    station = _partial_station("magnet_x", "temperature_vti", "dc_measurement")
+    station = _partial_station("magnet_z", "temperature_vti", "dc_measurement")
     with pytest.raises(CryoSoftConfigError, match="magnet_y"):
         TemperatureSweep(
             station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
@@ -409,8 +409,8 @@ def test_wrong_shape_reading_degrades_to_error(station, tmp_path, qtbot, monkeyp
     """
     from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 
-    station.magnet_x._default_ramp_rate = 6000.0
-    station.magnet_x._ramp_segments = []
+    station.magnet_z._default_ramp_rate = 6000.0
+    station.magnet_z._ramp_segments = []
 
     proc = _field_proc(station, tmp_path, DC)
     vi = station.get_vi("dc_measurement")
@@ -644,9 +644,15 @@ def test_scanner_disabled_removes_channel_parameter(station, tmp_path):
             station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
             **FAST_FIELD, **DELTA, **ROUTES2,
         )
-    # And the form offers no channel parameter (delta VI: no group at all).
-    groups = FieldSweep.get_param_groups(station)
-    assert not any(g.key == "reading_loop" for g in groups)
+    # And the form offers no channel parameter. The delta VI's own current is
+    # still loopable, so the group itself remains — what must be absent is the
+    # switch route among the slot choices.
+    groups = FieldSweep.get_param_groups(station, {"measurement_vi": "keithley_delta_mode"})
+    loop_group = next((g for g in groups if g.key == "reading_loop"), None)
+    assert loop_group is not None
+    choices = loop_group.params["loop1_parameter"].choices
+    assert "switch_matrix.route" not in choices.values()
+    assert "keithley_delta_mode.current" in choices.values()
 
 
 # ── Value-list slot alone (± current) ────────────────────────────────────────
@@ -674,6 +680,36 @@ def test_value_slot_measure_writes_signed_current(station, tmp_path):
         assert f["data"]["voltage_V__A1"].shape == (1, 5)
         assert np.allclose(f["data"]["current_A__A1"][0], 1e-6)
         assert np.allclose(f["data"]["current_A__A2"][0], -1e-6)
+
+
+def test_value_slot_measure_rearms_delta_between_readings(station, tmp_path):
+    """The delta VI loops its peak current end-to-end through measure().
+
+    Delta re-arms the engine per loop step rather than setting the current in
+    place, so this covers the path the DC test cannot: each label's readings
+    must carry that label's current, and the engine must still be armed (in
+    DELTA mode) at the last looped value when measure() returns.
+    """
+    delta_currents = {
+        "loop1_parameter": "keithley_delta_mode.current",
+        "loop1_values": "1e-6, 5e-6",
+    }
+    proc = _field_proc(station, tmp_path, {**DELTA, **delta_currents})
+    assert proc._params["loop_labels"] == {"A1": 1e-6, "A2": 5e-6}
+
+    proc.initiate()
+    _arm(station, DELTA, proc)
+    proc.measure()
+    filepath = proc._data_manager.filepath
+
+    source = station.get_vi("keithley_delta_mode")._source
+    assert source._mode == "DELTA"
+    assert source._delta_high_current == pytest.approx(5e-6)
+
+    proc.standby()
+    with h5py.File(filepath, "r") as f:
+        assert np.allclose(f["data"]["current_A__A1"][0], 1e-6)
+        assert np.allclose(f["data"]["current_A__A2"][0], 5e-6)
 
 
 def test_value_slot_metadata_carries_label_map(station, tmp_path):
@@ -821,15 +857,20 @@ def test_reading_loop_group_offers_all_loopable_parameters(station):
 
 
 def test_reading_loop_group_absent_when_nothing_loopable(station):
-    """Scanner off + a VI without setters (delta): no Reading loop group."""
+    """Scanner off + a VI without setters (lock-in): no Reading loop group.
+
+    The lock-in is the station's only measurement VI declaring no
+    ``reading_setters``; delta and DC both declare one, so an empty registry
+    can only be reached through this VI with the scanner off.
+    """
     groups = FieldSweep.get_param_groups(
-        station, {"measurement_vi": "keithley_delta_mode"}
+        station, {"measurement_vi": "lockin_harmonic"}
     )
     assert not any(g.key == "reading_loop" for g in groups)
-    # Scanner on: even delta gets the group (the route is loopable).
+    # Scanner on: even the setter-less lock-in gets the group (route is loopable).
     station.set_scanner_enabled(True)
     groups = FieldSweep.get_param_groups(
-        station, {"measurement_vi": "keithley_delta_mode"}
+        station, {"measurement_vi": "lockin_harmonic"}
     )
     assert any(g.key == "reading_loop" for g in groups)
 
@@ -858,9 +899,9 @@ def test_live_plot_keys_stay_plain_and_loop_labels_drive_the_selectors(station):
 
 
 def test_live_plot_loop_labels_none_when_nothing_loopable(station):
-    """No switch (scanner off) + no setters (delta): (None, None) — hidden."""
+    """No switch (scanner off) + no setters (lock-in): (None, None) — hidden."""
     assert FieldSweep.live_plot_loop_labels(
-        station, {"measurement_vi": "keithley_delta_mode"}
+        station, {"measurement_vi": "lockin_harmonic"}
     ) == (None, None)
 
 
@@ -870,8 +911,8 @@ def test_full_orchestrator_run_channel_slot(station, tmp_path, qtbot):
     """A 2-route channel-slot sweep completes to IDLE with per-label datasets."""
     from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 
-    station.magnet_x._default_ramp_rate = 6000.0
-    station.magnet_x._ramp_segments = []
+    station.magnet_z._default_ramp_rate = 6000.0
+    station.magnet_z._ramp_segments = []
 
     proc = _field_proc_scanner(station, tmp_path, DELTA, ROUTES2)
     orch = Orchestrator(station, tick_interval_ms=10)
@@ -895,8 +936,8 @@ def test_full_orchestrator_run_value_slot(station, tmp_path, qtbot):
     """A +/- current sweep completes to IDLE with per-label datasets."""
     from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 
-    station.magnet_x._default_ramp_rate = 6000.0
-    station.magnet_x._ramp_segments = []
+    station.magnet_z._default_ramp_rate = 6000.0
+    station.magnet_z._ramp_segments = []
 
     proc = _field_proc(station, tmp_path, {**DC, **CURRENTS2})
     orch = Orchestrator(station, tick_interval_ms=10)
@@ -912,3 +953,103 @@ def test_full_orchestrator_run_value_slot(station, tmp_path, qtbot):
         assert f["data"]["field_T"].shape[0] == 3
         assert f["data"]["voltage_V__A1"].shape == (3, 5)
         assert np.allclose(f["data"]["current_A__A2"][:], -1e-6)
+
+
+# ── Temperature-channel on/off toggles ───────────────────────────────────────
+# Both sweep procedures expose set_vti_temperature / set_sample_temperature.
+# "Off" means the procedure emits no Target for that VI, so the Orchestrator
+# never ramps it and the controller holds where the operator left it. Reading
+# is unaffected — it comes from the monitor pass, not from targets.
+
+def test_field_sweep_sets_vti_and_not_sample_by_default(station, tmp_path):
+    """Default toggles preserve the pre-toggle behaviour exactly."""
+    proc = _field_proc(station, tmp_path, DC)
+    targets = proc.initiate().targets
+    assert targets["temperature_vti"].target == pytest.approx(FAST_FIELD["temperature"])
+    assert "temperature_sample" not in targets
+    proc.standby()
+
+
+def test_field_sweep_vti_off_emits_no_vti_target(station, tmp_path):
+    """set_vti_temperature=False drops the VTI target but keeps the field ramp."""
+    proc = FieldSweep(
+        station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
+        **{**FAST_FIELD, **DC, "set_vti_temperature": False},
+    )
+    targets = proc.initiate().targets
+    assert "temperature_vti" not in targets
+    assert "magnet_z" in targets
+    proc.standby()
+
+
+def test_field_sweep_sample_on_emits_sample_target(station, tmp_path):
+    """set_sample_temperature=True ramps temperature_sample to its own setpoint."""
+    proc = FieldSweep(
+        station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
+        **{**FAST_FIELD, **DC,
+           "set_sample_temperature": True, "sample_temperature": 42.0},
+    )
+    targets = proc.initiate().targets
+    assert targets["temperature_sample"].target == pytest.approx(42.0)
+    assert targets["temperature_vti"].target == pytest.approx(FAST_FIELD["temperature"])
+    proc.standby()
+
+
+def test_field_sweep_both_channels_off_emits_no_temperature_targets(station, tmp_path):
+    """Both toggles off leaves the field sweep with no temperature targets at all."""
+    proc = FieldSweep(
+        station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
+        **{**FAST_FIELD, **DC, "set_vti_temperature": False,
+           "set_sample_temperature": False},
+    )
+    targets = proc.initiate().targets
+    assert not {"temperature_vti", "temperature_sample"} & set(targets)
+    proc.standby()
+
+
+def test_field_sweep_enabled_channel_without_vi_is_refused(tmp_path):
+    """Switching a channel ON that the station lacks must fail at construction."""
+    from cryosoft.core.exceptions import CryoSoftConfigError
+
+    station = _partial_station("magnet_z", "temperature_vti", "dc_measurement")
+    with pytest.raises(CryoSoftConfigError, match="temperature_sample"):
+        FieldSweep(
+            station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
+            **{**FAST_FIELD, **DC, "set_sample_temperature": True},
+        )
+
+
+def test_field_sweep_disabled_channel_without_vi_is_allowed(tmp_path):
+    """A switched-OFF channel is not required to exist on the station."""
+    station = _partial_station("magnet_z", "temperature_vti", "dc_measurement")
+    proc = FieldSweep(
+        station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
+        **{**FAST_FIELD, **DC, "set_sample_temperature": False},
+    )
+    assert "temperature_sample" not in proc.initiate().targets
+    proc.standby()
+
+
+def test_temp_sweep_vti_off_emits_no_targets_on_initiate_or_step(station, tmp_path):
+    """With the swept channel off, the sweep measures without commanding the VTI."""
+    proc = TemperatureSweep(
+        station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
+        **{**FAST_TEMP, **DC, "set_vti_temperature": False},
+    )
+    assert "temperature_vti" not in proc.initiate().targets
+    step = proc.change_sweep_step()
+    assert step is not None and "temperature_vti" not in step.targets
+    proc.standby()
+
+
+def test_temp_sweep_holds_sample_setpoint_only_on_initiate(station, tmp_path):
+    """The sample stage is set once at initiate, not re-sent at every step."""
+    proc = TemperatureSweep(
+        station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
+        **{**FAST_TEMP, **DC,
+           "set_sample_temperature": True, "sample_temperature": 7.5},
+    )
+    assert proc.initiate().targets["temperature_sample"].target == pytest.approx(7.5)
+    step = proc.change_sweep_step()
+    assert step is not None and "temperature_sample" not in step.targets
+    proc.standby()

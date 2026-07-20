@@ -109,6 +109,48 @@ class TestSimOxfordIPS120:
         d._simulate_quench = True
         assert d.get_status() == "QUENCH"
 
+    def test_clamped_refuses_ramp(self):
+        """set_current_setpoint() raises while CLAMPED (mirrors real PSU denial)."""
+        from cryosoft.core.exceptions import CryoSoftSafetyError
+        from cryosoft.drivers.sim_oxford_ips120 import SimOxfordIPS120
+
+        d = SimOxfordIPS120("SIM")
+        d._simulate_clamp = True
+        with pytest.raises(CryoSoftSafetyError):
+            d.set_current_setpoint(10.0)
+        assert d.get_current_setpoint() == pytest.approx(0.0)  # write never applied
+
+    def test_clear_clamp_allows_ramp_again(self):
+        """clear_clamp() unclamps; a subsequent ramp then succeeds."""
+        from cryosoft.drivers.sim_oxford_ips120 import SimOxfordIPS120
+
+        d = SimOxfordIPS120("SIM")
+        d._simulate_clamp = True
+        d.clear_clamp()
+        assert d._simulate_clamp is False
+        assert d.get_status() == "HOLD"
+        d.set_current_setpoint(10.0)
+        assert d.get_status() == "RAMPING"
+
+    def test_clear_clamp_when_not_clamped_raises(self):
+        """clear_clamp() is not a silent no-op when nothing is clamped."""
+        from cryosoft.core.exceptions import CryoSoftSafetyError
+        from cryosoft.drivers.sim_oxford_ips120 import SimOxfordIPS120
+
+        d = SimOxfordIPS120("SIM")
+        with pytest.raises(CryoSoftSafetyError):
+            d.clear_clamp()
+
+    def test_get_status_never_clears_clamp(self):
+        """Reading status must never have a write side effect (see driver docstring)."""
+        from cryosoft.drivers.sim_oxford_ips120 import SimOxfordIPS120
+
+        d = SimOxfordIPS120("SIM")
+        d._simulate_clamp = True
+        for _ in range(5):
+            d.get_status()
+        assert d._simulate_clamp is True  # still clamped after repeated polling
+
     def test_no_ramp_when_setpoint_at_current(self):
         """No state transition when setpoint equals current (within 0.01 A)."""
         from cryosoft.drivers.sim_oxford_ips120 import SimOxfordIPS120
@@ -116,6 +158,14 @@ class TestSimOxfordIPS120:
         d = SimOxfordIPS120("SIM")
         d.set_current_setpoint(0.005)  # Difference < 0.01
         assert d.get_status() == "HOLD"
+
+    def test_get_ramp_rate_reads_back_set_value(self):
+        """get_ramp_rate() reflects the value passed to set_ramp_rate()."""
+        from cryosoft.drivers.sim_oxford_ips120 import SimOxfordIPS120
+
+        d = SimOxfordIPS120("SIM")
+        d.set_ramp_rate(12.5)
+        assert d.get_ramp_rate() == pytest.approx(12.5)
 
 
 class TestSimRotator:

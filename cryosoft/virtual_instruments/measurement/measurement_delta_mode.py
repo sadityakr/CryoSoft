@@ -68,10 +68,22 @@ class DeltaModeMeasurementVI(MeasurementInstrumentBase):
 
     ``take_reading()`` is deliberately **not** tagged ``@monitored`` because it
     is long-running and should only be triggered by the Procedure layer.
+
+    Reading loop: unlike the DC method, the delta engine is armed with a fixed
+    peak current by ``configure_and_start_delta()``, so the current cannot be
+    reprogrammed in place. ``set_delta_current()`` therefore stops and re-arms
+    the engine (see its docstring for the timing cost) — the reason the setter
+    is named for the operation it performs rather than mirroring the DC VI's
+    ``set_source_current``.
     """
 
     display_label: str = "delta-mode resistance"
     selector_label: ClassVar[str] = "Delta mode (6221 + 2182A)"
+
+    # Reading-loop declaration: the peak delta current. Re-arms the engine
+    # between readings (delta mode has no in-place current change), letting the
+    # generic sweep procedure loop a list of currents at every sweep point.
+    reading_setters: ClassVar[dict[str, str]] = {"current": "set_delta_current"}
 
     measurement_data_keys: ClassVar[list[str]] = ["voltage_V", "current_A"]
     measurement_scalar_columns: ClassVar[dict[str, str]] = {"n_valid": "int"}
@@ -135,6 +147,12 @@ class DeltaModeMeasurementVI(MeasurementInstrumentBase):
         self._current: float = 1e-6
         self._n_readings: int = 100
         self._delay_s: float = 0.01
+        # The remaining armed parameters, retained verbatim so
+        # set_delta_current() can re-arm the engine changing only the current.
+        self._voltmeter_range_V: float = 0.01
+        self._compliance_V: float = 1.0
+        self._compliance_abort: bool = True
+        self._cold_switch: bool = False
 
     # ------------------------------------------------------------------
     # Self-description
@@ -186,6 +204,10 @@ class DeltaModeMeasurementVI(MeasurementInstrumentBase):
         self._current = float(current)
         self._n_readings = int(n_readings)
         self._delay_s = float(delay_s)
+        self._voltmeter_range_V = float(voltmeter_range_V)
+        self._compliance_V = float(compliance_V)
+        self._compliance_abort = bool(compliance_abort)
+        self._cold_switch = bool(cold_switch)
 
         self._source.configure_and_start_delta(  # type: ignore[attr-defined]
             float(current),
@@ -195,6 +217,53 @@ class DeltaModeMeasurementVI(MeasurementInstrumentBase):
             float(voltmeter_range_V),
             bool(compliance_abort),
             bool(cold_switch),
+        )
+
+    # ------------------------------------------------------------------
+    # @control — the reading-loop setter
+    # ------------------------------------------------------------------
+
+    @control
+    def set_delta_current(self, current: float) -> None:
+        """Re-arm the delta engine at a new peak current.
+
+        The per-reading setter behind ``reading_setters["current"]``. Delta mode
+        has no in-place current change: the 6221 latches its peak amplitude when
+        ``configure_and_start_delta()`` arms the engine. This method therefore
+        stops the engine and re-arms it with every other armed parameter
+        (readings, delay, range, compliance, abort and cold-switch flags)
+        unchanged, so only the current differs.
+
+        Because it re-arms, each loop step pays a full delta start-up: the
+        engine discards its running average and the first readings after the
+        change include the source's settling transient. Callers that need
+        settled data should size ``n_readings`` accordingly rather than assuming
+        the DC method's cost-free current change.
+
+        The value is the *peak* amplitude of a current that delta mode reverses
+        each cycle (``+current`` / ``-current``), so looping the sign is
+        redundant — ``1e-6`` and ``-1e-6`` arm the same waveform.
+
+        Args:
+            current: New peak delta current in Amperes.
+
+        Raises:
+            RuntimeError: If ``initiate()`` has not been called first.
+        """
+        if self._armed is _NOT_INITIATED:
+            raise RuntimeError("initiate() must be called before set_delta_current().")
+
+        self._current = float(current)
+        source = self._source  # type: ignore[attr-defined]
+        source.stop_delta_mode()
+        source.configure_and_start_delta(
+            self._current,
+            self._n_readings,
+            self._delay_s,
+            self._compliance_V,
+            self._voltmeter_range_V,
+            self._compliance_abort,
+            self._cold_switch,
         )
 
     # ------------------------------------------------------------------

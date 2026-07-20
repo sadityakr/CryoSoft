@@ -43,11 +43,11 @@ class TestExceptionHierarchy:
     def test_communication_error_attributes(self):
         original = ValueError("VISA timeout")
         err = CryoSoftCommunicationError(
-            "Lost connection to magnet_x",
-            vi_name="magnet_x",
+            "Lost connection to magnet_z",
+            vi_name="magnet_z",
             original_error=original,
         )
-        assert err.vi_name == "magnet_x"
+        assert err.vi_name == "magnet_z"
         assert err.original_error is original
         assert "Lost connection" in str(err)
 

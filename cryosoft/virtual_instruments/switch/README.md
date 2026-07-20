@@ -16,9 +16,19 @@ L1 — Virtual Instruments.
 Driver dict and `init_params` from the config YAML:
 - `SwitchMatrixVI`: `{"main": <705-style switch driver>}`.
 - `init_params.routes`: `dict[str, list[str]]` — route name -> channel-spec
-  list (e.g. `{"Mux-Ch1": ["1!1"], "Mux-Ch2": ["1!2"]}`). Route names come
+  list (e.g. `{"Mux-Ch1": ["1"], "Mux-Ch2": ["2"]}` for a Keithley 705, whose
+  channels are plain numbers). Route names come
   verbatim from config and must contain neither `__` nor `/`.
 - `init_params.settle_time_s`: `float` dwell after a route change (default 0.0).
+- `init_params.pole_mode`: optional `int` (1, 2 or 4), applied to the
+  instrument at construction. On a scanner the pole mode decides how card
+  terminals group into channels, so it changes both the channel count and what
+  a channel number physically connects — a route table is only meaningful
+  alongside the mode it was written for. Use 4 for four-wire measurements,
+  where one channel switches all four leads together. On the Keithley 705 the
+  counts are 1-pole 40, 2-pole 20, 4-pole 10; a route naming channel 15 works
+  in 2-pole and silently never connects in 4-pole. Omit to leave the
+  instrument in whatever mode it powered up in.
 
 The VI never hardcodes channels; the config owns the wiring.
 

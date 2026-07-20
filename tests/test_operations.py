@@ -70,7 +70,7 @@ class SimpleOperation(OperationBase):
 
     def initiate(self) -> PhasePlan:
         return PhasePlan(
-            targets={"magnet_x": Target(0.0)},
+            targets={"magnet_z": Target(0.0)},
             commands=self._initiate_commands,
             wait_s=0.0,
         )
@@ -78,14 +78,14 @@ class SimpleOperation(OperationBase):
     def step(self) -> StepPlan | None:
         if not self._open_ended:
             return None
-        return StepPlan(targets={"magnet_x": Target(0.0)}, wait_s=0.0)
+        return StepPlan(targets={"magnet_z": Target(0.0)}, wait_s=0.0)
 
     def sample(self) -> None:
         self.sample_calls += 1
 
     def standby(self) -> PhasePlan:
         return PhasePlan(
-            targets={"magnet_x": Target(0.0)}, commands=self._standby_commands, wait_s=0.0
+            targets={"magnet_z": Target(0.0)}, commands=self._standby_commands, wait_s=0.0
         )
 
     def postcondition_gates(self):
@@ -109,7 +109,7 @@ class BlockingProcedure:
         self._station = station
 
     def initiate(self):
-        return PhasePlan(targets={"magnet_x": Target(1.0)}, commands=(), wait_s=0.0)
+        return PhasePlan(targets={"magnet_z": Target(1.0)}, commands=(), wait_s=0.0)
 
     def change_sweep_step(self):
         return None
@@ -118,13 +118,13 @@ class BlockingProcedure:
         pass
 
     def standby(self):
-        return PhasePlan(targets={"magnet_x": Target(0.0)}, commands=(), wait_s=0.0)
+        return PhasePlan(targets={"magnet_z": Target(0.0)}, commands=(), wait_s=0.0)
 
 
 def _fast_magnet(station):
-    """Make magnet_x ramps effectively instant."""
-    station.magnet_x._default_ramp_rate = 6000.0
-    station.magnet_x._ramp_segments = []
+    """Make magnet_z ramps effectively instant."""
+    station.magnet_z._default_ramp_rate = 6000.0
+    station.magnet_z._ramp_segments = []
 
 
 # ── Fixtures (mirrors tests/test_l3_orchestrator.py) ─────────────────────────
@@ -172,7 +172,7 @@ def test_quench_still_enters_emergency_and_aborts_operation(orchestrator, statio
     orchestrator.run_operation(op)
     assert orchestrator._procedure is op
 
-    station.magnet_x._driver._simulate_quench = True
+    station.magnet_z._driver._simulate_quench = True
     qtbot.waitUntil(
         lambda: orchestrator._state == OrchestratorState.EMERGENCY, timeout=2000
     )
@@ -187,7 +187,7 @@ def test_run_operation_refused_while_procedure_runs(orchestrator, station, qtbot
     proc = BlockingProcedure(station)
     orchestrator.run_procedure(proc)
     assert orchestrator._procedure is proc
-    assert station.magnet_x.ramp_status() == "RAMPING"
+    assert station.magnet_z.ramp_status() == "RAMPING"
 
     blocked: list[str] = []
     orchestrator.action_blocked.connect(blocked.append)
@@ -261,7 +261,7 @@ def test_operation_queue_drains_before_procedure_queue(orchestrator, station, qt
     """Queued operations run ahead of queued procedures once IDLE is reached."""
     _fast_magnet(station)
     blocker = BlockingProcedure(station)
-    station.magnet_x._default_ramp_rate = 5.0  # keep the blocker mid-ramp
+    station.magnet_z._default_ramp_rate = 5.0  # keep the blocker mid-ramp
     orchestrator.run_procedure(blocker)
     assert orchestrator._procedure is blocker
 

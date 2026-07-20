@@ -34,7 +34,7 @@ real_drivers:
     address: "SIM::LOCKIN"
 
 virtual_instruments:
-  magnet_x:
+  magnet_z:
     class: cryosoft.virtual_instruments.magnet.superconducting_magnet.SuperconductingMagnetVI
     drivers: {main: ips_x}
     vi_type: system
@@ -151,11 +151,17 @@ virtual_instruments:
     drivers: {main: k705}
     vi_type: switch
     init_params:
+      # 4-pole: one channel switches all four leads of a 4-wire measurement,
+      # mirroring the real 12t-cryo rack. This also halves the channel count
+      # (10 in 4-pole vs 20 in 2-pole), so route channels must be 1..10.
+      pole_mode: 4
+      # Keithley 705 channels are plain numbers (Cnnn), not crosspoint specs:
+      # verified against the manual and the instrument at bench commissioning.
       routes:
-        Mux-Ch1: ["1!1"]
-        Mux-Ch2: ["1!2"]
-        Mux-Ch3: ["1!3"]
-        Mux-Ch4: ["1!4"]
+        Mux-Ch1: ["1"]
+        Mux-Ch2: ["2"]
+        Mux-Ch3: ["3"]
+        Mux-Ch4: ["4"]
       settle_time_s: 0.0
     metadata:
       role: Sample multiplexer

@@ -15,12 +15,14 @@
 #   scan_bus() lists VISA resources. probe_address() opens a bare resource and
 #   sends an identify query. check_config() validates a config, constructs each
 #   declared driver, calls get_idn(), and classifies every failure with a
-#   FaultCode. DriverBench wraps one driver for introspection and calls, with
-#   read-only methods separated from writing methods.
+#   FaultCode. bench_l0() runs the same construct+idn step plus one extra
+#   passive getter per driver — the automated half of the commissioning
+#   skill's L0 rung. DriverBench wraps one driver for introspection and calls,
+#   with read-only methods separated from writing methods.
 # output: |
-#   ProbeResult / MethodInfo dataclasses (JSON-ready via as_dict()) and log
-#   records. The engine never writes files and every operation terminates on
-#   its own (bounded by VISA timeouts).
+#   ProbeResult / L0BenchResult / MethodInfo dataclasses (JSON-ready via
+#   as_dict()) and log records. The engine never writes files and every
+#   operation terminates on its own (bounded by VISA timeouts).
 # ---
 
 """Diagnostic engine: bus scan, config preflight, and driver bench.
@@ -120,6 +122,37 @@ class ProbeResult:
         data = asdict(self)
         data["code"] = self.code.value
         return data
+
+
+@dataclass
+class L0BenchResult:
+    """Outcome of the L0 bench (idn + one passive getter) for one driver.
+
+    Zero-excitation reads only: no approval needed per the setup-supervisor
+    skill's safe-testing ladder. Complements ``check_config()``'s
+    address/open/idn preflight with proof that at least one more real
+    reading actually parses — the desync/parsing class of bug that a clean
+    ``get_idn()`` alone does not catch.
+    """
+
+    alias: str
+    address: str
+    driver_class: str
+    idn_ok: bool
+    idn: str = ""
+    getter: str = ""            # name of the extra getter tried; "" if none found
+    getter_ok: bool = False
+    getter_value: str = ""      # repr() of the value, or "ExcType: message" on failure
+    detail: str = ""            # construction/idn failure text, if idn_ok is False
+
+    @property
+    def ok(self) -> bool:
+        """True if idn succeeded and (no getter was available, or it succeeded too)."""
+        return self.idn_ok and (not self.getter or self.getter_ok)
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return a JSON-ready plain dict."""
+        return asdict(self)
 
 
 @dataclass
@@ -377,6 +410,102 @@ def _check_one_driver(alias: str, cfg: dict, bus: list[str] | None) -> ProbeResu
         # enumerate) — worth surfacing, not worth failing.
         detail = "responds correctly but was not listed by the bus scan"
     return _result(FaultCode.OK, idn=idn, detail=detail)
+
+
+def bench_l0(config_path: str) -> list[L0BenchResult]:
+    """Run the L0 bench (idn + one passive getter) for every driver in a config.
+
+    Meant to run right after ``check_config()`` is green, as the automated
+    half of the commissioning skill's L0 rung: for each ``real_drivers``
+    entry, construct the driver, call ``get_idn()``, then call one more
+    zero-argument read-only getter (picked deterministically — alphabetically
+    first ``get_*``/``read_*``/``is_*`` method besides ``get_idn`` that takes
+    no arguments) to prove a real reading parses, not just the identity
+    string. A human still has to eyeball whether the returned values are
+    physically plausible; this only proves communication and parsing work.
+
+    Args:
+        config_path: Config directory (devices.yaml + monitor.yaml).
+
+    Returns:
+        One L0BenchResult per configured driver, in config order. If the
+        config itself is invalid, a single failing result is returned.
+    """
+    errors = validate_config_dir(config_path)
+    if errors:
+        return [
+            L0BenchResult(
+                alias="", address="", driver_class="",
+                idn_ok=False, detail="; ".join(errors),
+            )
+        ]
+
+    drivers = _load_real_drivers(config_path)
+    return [_bench_one_driver_l0(alias, cfg) for alias, cfg in drivers.items()]
+
+
+def _bench_one_driver_l0(alias: str, cfg: dict) -> L0BenchResult:
+    """Construct one driver, identify it, then try one extra passive getter."""
+    class_path = str(cfg["class"])
+    address = str(cfg.get("address", ""))
+
+    try:
+        driver = _import_class(class_path)(address)
+    except Exception as exc:  # noqa: BLE001 — any construction failure is L0-fail
+        return L0BenchResult(
+            alias=alias, address=address, driver_class=class_path,
+            idn_ok=False, detail=f"constructor raised {type(exc).__name__}: {exc}",
+        )
+
+    try:
+        idn = str(driver.get_idn()).strip()
+    except Exception as exc:  # noqa: BLE001 — communication or driver bug either way
+        _close_driver(driver)
+        return L0BenchResult(
+            alias=alias, address=address, driver_class=class_path,
+            idn_ok=False, detail=f"get_idn() raised {type(exc).__name__}: {exc}",
+        )
+
+    result = L0BenchResult(
+        alias=alias, address=address, driver_class=class_path,
+        idn_ok=bool(idn), idn=idn,
+        detail="" if idn else "get_idn() returned empty",
+    )
+
+    getter_name = _pick_l0_getter(driver)
+    if getter_name:
+        result.getter = getter_name
+        try:
+            value = getattr(driver, getter_name)()
+            result.getter_ok = True
+            result.getter_value = repr(value)
+        except Exception as exc:  # noqa: BLE001 — record and move on, don't abort the sweep
+            result.getter_ok = False
+            result.getter_value = f"{type(exc).__name__}: {exc}"
+
+    _close_driver(driver)
+    return result
+
+
+def _pick_l0_getter(driver: Any) -> str | None:
+    """Pick one zero-argument read-only getter (besides get_idn) to exercise.
+
+    Deterministic (alphabetical via inspect.getmembers) so repeated bench
+    runs pick the same method — reproducibility matters more than which
+    specific getter gets exercised.
+
+    Returns:
+        The method name, or None if the driver has no other zero-arg getter.
+    """
+    for name, func in inspect.getmembers(type(driver), inspect.isfunction):
+        if name == "get_idn" or name.startswith("_") or not is_read_only(name):
+            continue
+        params = [
+            p for p in inspect.signature(func).parameters.values() if p.name != "self"
+        ]
+        if not params:
+            return name
+    return None
 
 
 def _close_driver(driver: Any) -> None:

@@ -66,7 +66,7 @@ class Station:
     """Runtime registry and coordinator of all Virtual Instruments.
 
     Provides:
-    - VI registration and attribute-style access (``station.magnet_x``).
+    - VI registration and attribute-style access (``station.magnet_z``).
     - Polled state snapshot with stale-value caching.
     - Ramp dispatch and progress tracking.
     - Safety status aggregation.
@@ -90,7 +90,7 @@ class Station:
         """Register a Virtual Instrument with this Station.
 
         Args:
-            vi_name: Unique name for this VI (e.g. ``"magnet_x"``).
+            vi_name: Unique name for this VI (e.g. ``"magnet_z"``).
             vi: The VI instance.
             vi_type: Category string (``"system"`` or ``"measurement"``).
         """
@@ -107,7 +107,7 @@ class Station:
     def get_vi(self, vi_name: str) -> BaseVirtualInstrument:
         """Return the registered VI instance by name.
 
-        The named lookup counterpart to attribute access (``station.magnet_x``):
+        The named lookup counterpart to attribute access (``station.magnet_z``):
         used when the name is only known at runtime, e.g. a procedure resolving
         the measurement VI the user selected in the GUI.
 
@@ -283,7 +283,7 @@ class Station:
         )
 
     def __getattr__(self, name: str) -> BaseVirtualInstrument:
-        """Attribute-style access to VIs: ``station.magnet_x``.
+        """Attribute-style access to VIs: ``station.magnet_z``.
 
         Args:
             name: VI name.

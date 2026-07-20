@@ -60,6 +60,7 @@ hardening the triage skill).
 | `scan [--probe] [--probe-serial]` | list bus resources, optionally identify each | yes |
 | `probe <address>` | raw identify query to one bare address | yes |
 | `check [--config X] [--no-bus]` | preflight every driver in a config | yes |
+| `bench-l0 [--config X]` | L0 bench: idn + one passive getter per driver (zero excitation) | yes |
 | `methods <target>` | list a driver's public methods | yes |
 | `idn <target>` | identify one instrument via its driver | yes |
 | `read <target> <method> [args] [--repeat N] [--interval S]` | call a read-only driver method; repeats expose intermittent/timing faults | yes |
@@ -73,7 +74,8 @@ resolved against shipped and user config folders; default is the machine's
 saved active config, falling back to `sim_cryostat`.
 
 ## Files
-- `engine.py` — bus scan, config preflight (`check_config`), `DriverBench`
+- `engine.py` — bus scan, config preflight (`check_config`), the L0 bench
+  (`bench_l0` — idn + one passive getter per driver), `DriverBench`
   (introspect / call / raw query-send), `FaultCode` taxonomy.
 - `cli.py` — the one-shot argparse CLI over the engine (grammar above is API
   for skills and allowlists).

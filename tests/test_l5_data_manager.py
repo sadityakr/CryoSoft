@@ -43,8 +43,8 @@ def dm(tmp_path):
         procedure_name="Test_Sweep",
         procedure_params=PROCEDURE_PARAMS,
         sample_info=SAMPLE_INFO,
-        instrument_state={"magnet_x": {"field": 0.0}},
-        system_targets={"magnet_x": {"target": -1.0}},
+        instrument_state={"magnet_z": {"field": 0.0}},
+        system_targets={"magnet_z": {"target": -1.0}},
         measurement_commands={"keithley_delta_mode": {"configure": {}}},
         data_config=DATA_CONFIG,
         n_sweep_points=5,
@@ -66,7 +66,7 @@ def saved_dm(dm):
                 "voltage_V": [float(j) * 1e-6 for j in range(10)],
                 "current_A": [1e-6] * 10,
             },
-            station_snapshot={"magnet_x": {"field": float(i) * 0.5}},
+            station_snapshot={"magnet_z": {"field": float(i) * 0.5}},
         )
     return dm
 
@@ -224,7 +224,7 @@ def test_save_single_datapoint(dm):
             "voltage_V": voltages,
             "current_A": [1e-6] * 10,
         },
-        station_snapshot={"magnet_x": {"field": 0.5}},
+        station_snapshot={"magnet_z": {"field": 0.5}},
     )
     with h5py.File(dm.filepath, "r") as f:
         assert f["data"]["field_T"][2] == pytest.approx(0.5)
@@ -277,7 +277,7 @@ def test_snapshots_stored_as_json(saved_dm):
         for i in range(3):
             raw = f["snapshots"][str(i)][()]
             snap = json.loads(raw)
-            assert "magnet_x" in snap
+            assert "magnet_z" in snap
 
 
 def test_no_snapshot_for_unsaved_index(saved_dm):

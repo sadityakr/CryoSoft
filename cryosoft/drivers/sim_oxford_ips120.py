@@ -25,7 +25,7 @@
 
 import time
 
-from cryosoft.core.exceptions import CryoSoftCommunicationError
+from cryosoft.core.exceptions import CryoSoftCommunicationError, CryoSoftSafetyError
 
 
 class SimOxfordIPS120:
@@ -72,6 +72,7 @@ class SimOxfordIPS120:
         # Test control flags
         self._simulate_error: bool = False   # Raises CryoSoftCommunicationError on any get_
         self._simulate_quench: bool = False  # Forces status to "QUENCH"
+        self._simulate_clamp: bool = False   # Forces a hardware CLMP ("red Clamped") condition
 
     # ------------------------------------------------------------------
     # Public API
@@ -98,7 +99,16 @@ class SimOxfordIPS120:
 
         Args:
             setpoint: Desired current in Amperes.
+
+        Raises:
+            CryoSoftSafetyError: If ``_simulate_clamp`` is set, mirroring the
+                real driver's refusal to ramp while CLAMPED.
         """
+        if self._simulate_clamp:
+            raise CryoSoftSafetyError(
+                "Sim Mercury iPS-M is CLAMPED (red 'Clamped' indicator). "
+                "Ramping is refused until an operator calls clear_clamp().",
+            )
         if self._status == "QUENCH":
             return
         clamped = max(self.MIN_CURRENT, min(self.MAX_CURRENT, setpoint))
@@ -125,6 +135,11 @@ class SimOxfordIPS120:
         if rate <= 0:
             raise ValueError(f"Ramp rate must be positive, got {rate}")
         self._ramp_rate = rate
+
+    def get_ramp_rate(self) -> float:
+        """Return the current ramp rate in Amperes per minute."""
+        self._check_error()
+        return self._ramp_rate
 
     def get_status(self) -> str:
         """Return the current status string.
@@ -219,6 +234,23 @@ class SimOxfordIPS120:
         self._status = "HOLD"
         self._simulate_quench = False
         self._setpoint = self._current
+
+    def clear_clamp(self) -> None:
+        """Explicitly unclamp the PSU, mirroring the real driver's method.
+
+        Never called automatically by :meth:`get_status` or
+        :meth:`set_current_setpoint` — see the real driver's docstring for
+        why this must stay a deliberate, human-initiated action.
+
+        Raises:
+            CryoSoftSafetyError: If the PSU is not actually clamped.
+        """
+        if not self._simulate_clamp:
+            raise CryoSoftSafetyError(
+                "clear_clamp() called but sim Mercury iPS-M is not CLAMPED",
+            )
+        self._simulate_clamp = False
+        self.hold()
 
     # ------------------------------------------------------------------
     # Internal simulation logic

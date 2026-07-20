@@ -145,6 +145,28 @@ A procedure with a non sweep-and-measure shape can subclass `BaseProcedure`
 directly and implement the five lifecycle methods and its own `DataManager`;
 `SweepMeasureProcedure` is the recommended default.
 
+## Known issues
+
+**Magnet and temperature VI names are hardcoded in the procedures.**
+`FieldSweep` and `TemperatureSweep` address `magnet_z`, `magnet_y`,
+`temperature_vti` and `temperature_sample` as literal strings. A setup that
+names its instruments differently cannot run the shipped procedures without
+editing them — which is what forced the 2026-07-20 global `magnet_x` ->
+`magnet_z` rename across every config and test.
+
+This violates the "config files are the single source of truth" principle: the
+VI a procedure drives is a *setup* property and belongs in the config, exactly
+as `sample_change` already does it (`operations.sample_change.vti_vi`, defaulted
+in `station.py`). The intended fix is to derive the names from the Station
+(a `magnet_vi_names()` / `temperature_vi_names()` discovery pair, mirroring the
+existing `measurement_vi_names()` / `switch_vi_names()`) and expose them as
+procedure parameters, so adding an axis or renaming a magnet needs no procedure
+change.
+
+The same applies to the temperature on/off toggles below: both procedures
+declare them independently, so a third procedure wanting them must repeat the
+declaration. Both are the same underlying gap and should be fixed together.
+
 ## Files
 
 Each row: responsibility, key public class, and the test file(s) in `tests/`.
@@ -152,5 +174,26 @@ Each row: responsibility, key public class, and the test file(s) in `tests/`.
 | File | Responsibility | Key public API | Tests |
 |------|----------------|----------------|-------|
 | `__init__.py` | Package marker | (none) | none |
-| `field_sweep.py` | Sweeps magnetic field (`magnet_x`), holding `temperature_vti`, running any selected measurement VI at each point; parks `magnet_x` at 0 T on standby. Requires `magnet_x`, `temperature_vti`, and at least one measurement VI. | `FieldSweep` (axis hooks over `SweepMeasureProcedure`) | `test_new_procedures.py`, `test_l4_procedure.py`, `test_field_voltage_procedure.py` |
-| `temperature_sweep.py` | Sweeps temperature (`temperature_vti`) at a per-sweep ramp rate, holding optional `magnet_x` / `magnet_y` fields, running any selected measurement VI at each stable point. Requires `temperature_vti` and at least one measurement VI; magnets optional (skipped at 0, refused at nonzero when absent). | `TemperatureSweep` (axis hooks over `SweepMeasureProcedure`) | `test_new_procedures.py` |
+| `field_sweep.py` | Sweeps magnetic field (`magnet_z`), optionally holding `temperature_vti` and/or `temperature_sample` (see Temperature channels below), running any selected measurement VI at each point; parks `magnet_z` at 0 T on standby. Requires `magnet_z`, at least one measurement VI, and a VI for each switched-on temperature channel. | `FieldSweep` (axis hooks over `SweepMeasureProcedure`) | `test_new_procedures.py`, `test_l4_procedure.py`, `test_field_voltage_procedure.py` |
+| `temperature_sweep.py` | Sweeps temperature (`temperature_vti`) at a per-sweep ramp rate, optionally holding `temperature_sample` and optional `magnet_z` / `magnet_y` fields, running any selected measurement VI at each stable point. Requires at least one measurement VI; magnets optional (skipped at 0, refused at nonzero when absent). | `TemperatureSweep` (axis hooks over `SweepMeasureProcedure`) | `test_new_procedures.py` |
+
+### Temperature channels (on/off)
+
+Both sweep procedures control the VTI and the sample stage **independently**, each
+gated by a bool parameter:
+
+| Parameter | Default | Effect when on |
+|---|---|---|
+| `set_vti_temperature` | `True` | Emits a `temperature_vti` target — the fixed `temperature` in `FieldSweep`, the swept value in `TemperatureSweep` |
+| `set_sample_temperature` | `False` | Emits a `temperature_sample` target at `sample_temperature`, set once in `initiate()` and held |
+
+"Off" means the procedure emits **no `Target`** for that VI, so the Orchestrator
+never calls `start_ramp` on it and the controller holds exactly where the operator
+left it. Reading is unaffected: monitoring, logging and trends come from the tick
+loop's monitor pass, not from targets. A channel that is switched on but has no VI
+on the station is refused at construction (`CryoSoftConfigError`); a switched-off
+channel is not required to exist.
+
+Both procedures declare these parameters and build the conditional target dicts
+themselves — there is deliberately no shared framework mechanism yet, so a new
+procedure that wants the same toggles must declare them too.

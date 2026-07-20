@@ -33,7 +33,7 @@ _REFRESH_FAST = 2
 
 @pytest.fixture
 def station():
-    """Build a real simulated station (sim_cryostat: magnet_x, magnet_y, level_meter)."""
+    """Build a real simulated station (sim_cryostat: magnet_z, magnet_y, level_meter)."""
     return build_station("cryosoft/configs/sim_cryostat")
 
 
@@ -92,8 +92,8 @@ def _make_op(station, tmp_path, *, person: str = "Alex Tech", **overrides) -> He
 def test_helium_fill_end_to_end(orchestrator, station, tmp_path, qtbot):
     """Zero-field ramp + gate, FAST->SLOW refresh, datapoints, done manifest, HDF5 layout."""
     _fast_magnets(station)
-    station.magnet_x._driver._current = 5.0
-    station.magnet_x._driver._setpoint = 5.0
+    station.magnet_z._driver._current = 5.0
+    station.magnet_z._driver._setpoint = 5.0
     # Hold the sim ILM level fixed (bypassing its slow natural downward
     # drift) so every sample reads identically and the "level did not fall
     # below its start value" postcondition is unambiguous.
@@ -324,7 +324,7 @@ def test_quench_still_aborts_the_fill(orchestrator, station, tmp_path):
     orchestrator.run_operation(op)
     assert orchestrator._procedure is op
 
-    station.magnet_x._driver._simulate_quench = True
+    station.magnet_z._driver._simulate_quench = True
     _tick_until(
         orchestrator,
         lambda: orchestrator._state == OrchestratorState.EMERGENCY,

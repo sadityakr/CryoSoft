@@ -44,3 +44,6 @@ cryosoft/logs/*.jsonl
 # Exclude real experiment data; only sample files are tracked
 data/*.h5
 !data/sample_*.h5
+
+# Instrument manuals are copyrighted vendor material — keep local only
+cryosoft/configs/*/manuals/

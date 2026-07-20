@@ -35,9 +35,9 @@ real_drivers:
     address: "GPIB0::7::INSTR"    # PLACEHOLDER — confirm on hardware
 
 virtual_instruments:
-  # Named magnet_x (not magnet) so this config is a drop-in swap with
-  # sim_cryostat: FieldSweep and other procedures address station.magnet_x.
-  magnet_x:
+  # Named magnet_z (not magnet) so this config is a drop-in swap with
+  # sim_cryostat: FieldSweep and other procedures address station.magnet_z.
+  magnet_z:
     class: cryosoft.virtual_instruments.magnet.superconducting_magnet_persistent.SuperconductingMagnetPersistentVI
     drivers: {main: mercury_ips}
     vi_type: system

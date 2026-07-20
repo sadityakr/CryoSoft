@@ -92,7 +92,7 @@ class TestSuperConductingMagnetVI:
                 {"max_current_A": 90.0, "rate_A_per_min": 2.0},
             ],
         )
-        vi.vi_name = "magnet_x"
+        vi.vi_name = "magnet_z"
         return vi
 
     def test_initial_field_is_zero(self, ips_driver):
@@ -192,7 +192,7 @@ class TestSuperConductingMagnetPersistentVI:
             switch_heater_warmup_s=warmup_s,
             switch_heater_cooldown_s=cooldown_s,
         )
-        vi.vi_name = "magnet_x"
+        vi.vi_name = "magnet_z"
         return vi
 
     def test_initial_switch_heater_state(self, ips_driver):

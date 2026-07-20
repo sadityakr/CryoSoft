@@ -565,16 +565,16 @@ class TestSessionEnvelope:
 
     def test_rejects_wrong_value_type(self):
         with pytest.raises(TypeError):
-            SessionEnvelope(bounds={"magnet_x": (0.0, 1.0)})
+            SessionEnvelope(bounds={"magnet_z": (0.0, 1.0)})
 
     def test_check_target(self):
         env = SessionEnvelope(
-            bounds={"magnet_x": EnvelopeBound(min_value=-2.0, max_value=2.0)}
+            bounds={"magnet_z": EnvelopeBound(min_value=-2.0, max_value=2.0)}
         )
-        assert env.check_target("magnet_x", 1.0) is None
+        assert env.check_target("magnet_z", 1.0) is None
         assert env.check_target("other_vi", 99.0) is None  # unbounded VI
-        message = env.check_target("magnet_x", 3.0)
-        assert "session envelope" in message and "magnet_x" in message
+        message = env.check_target("magnet_z", 3.0)
+        assert "session envelope" in message and "magnet_z" in message
 
     def test_check_state_uses_state_key_and_skips_missing(self):
         env = SessionEnvelope(
@@ -582,11 +582,11 @@ class TestSessionEnvelope:
                 "temperature_sample": EnvelopeBound(
                     min_value=4.0, state_key="temperature"
                 ),
-                "magnet_x": EnvelopeBound(max_value=2.0),  # no state_key: skipped
+                "magnet_z": EnvelopeBound(max_value=2.0),  # no state_key: skipped
             }
         )
         violations = env.check_state(
-            {"temperature_sample": {"temperature": 2.0}, "magnet_x": {"get_field": 9.0}}
+            {"temperature_sample": {"temperature": 2.0}, "magnet_z": {"get_field": 9.0}}
         )
         assert len(violations) == 1
         assert "temperature_sample" in violations[0]

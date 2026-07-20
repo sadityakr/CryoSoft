@@ -33,10 +33,10 @@ def station():
     s = build_station(CONFIG_PATH)
     # Fast ramp + short heater dwell so the test completes quickly. This only
     # changes timing, not the switch-heater-aware sequence itself.
-    s.magnet_x._default_ramp_rate = 6000.0
-    s.magnet_x._ramp_segments = []
-    s.magnet_x._heater.warmup_s = 0.0
-    s.magnet_x._heater.cooldown_s = 0.0
+    s.magnet_z._default_ramp_rate = 6000.0
+    s.magnet_z._ramp_segments = []
+    s.magnet_z._heater.warmup_s = 0.0
+    s.magnet_z._heater.cooldown_s = 0.0
     return s
 
 
@@ -80,9 +80,9 @@ def test_field_voltage_sweep_full_orchestrator_loop(station, tmp_path, qtbot):
 
     # Procedures run in normal mode: standby() ramps the field to 0 T with the
     # switch heater left ON (persistent mode is a manual Monitor-window action).
-    assert station.magnet_x.switch_heater_state() == "ON"
-    assert station.magnet_x.is_persistent() is False
-    assert station.magnet_x.get_field() == pytest.approx(0.0, abs=1e-3)
+    assert station.magnet_z.switch_heater_state() == "ON"
+    assert station.magnet_z.is_persistent() is False
+    assert station.magnet_z.get_field() == pytest.approx(0.0, abs=1e-3)
 
     h5_files = list(tmp_path.glob("*.h5"))
     assert len(h5_files) == 1

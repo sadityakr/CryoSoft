@@ -96,7 +96,7 @@ def test_experiment_record_round_trips_with_content():
         config_name="sim_cryostat",
         created_utc="2026-07-17T12:00:00+00:00",
         attended=False,
-        envelope={"magnet_x": {"min_value": -2.0, "max_value": 2.0, "state_key": ""}},
+        envelope={"magnet_z": {"min_value": -2.0, "max_value": 2.0, "state_key": ""}},
         runs=[RunRecord(run_id="r1", procedure="Field Sweep", status=RUN_STATUS_DONE)],
         findings="looks superconducting",
         eln_link=ElnLink(backend="elabftw", entry_id="42", url="https://eln/42"),
@@ -120,7 +120,7 @@ def test_envelope_round_trip_and_junk_tolerance():
     """envelope_to_dict()/envelope_from_dict() round-trip; junk drops to None."""
     envelope = SessionEnvelope(
         bounds={
-            "magnet_x": EnvelopeBound(min_value=-2.0, max_value=2.0),
+            "magnet_z": EnvelopeBound(min_value=-2.0, max_value=2.0),
             "temperature_sample": EnvelopeBound(min_value=4.0, state_key="temperature"),
         }
     )
@@ -130,7 +130,7 @@ def test_envelope_round_trip_and_junk_tolerance():
     assert envelope_from_dict({}) is None
     assert envelope_from_dict("junk") is None
     # Structurally dict-like but invalid bounds -> dropped with a warning.
-    assert envelope_from_dict({"magnet_x": {"min_value": 5.0, "max_value": 1.0}}) is None
+    assert envelope_from_dict({"magnet_z": {"min_value": 5.0, "max_value": 1.0}}) is None
 
 
 # ── ExperimentStore / UserRoster ─────────────────────────────────────────────
@@ -208,7 +208,7 @@ def test_experiment_context_includes_instrument_metadata_from_config(
     )
     instruments = manager.experiment_context()["setup"]["instruments"]
     assert instruments  # sim_cryostat/devices.yaml carries metadata for every VI
-    assert instruments["magnet_x"]["role"] == "X-axis magnet"
+    assert instruments["magnet_z"]["role"] == "X-axis magnet"
 
 
 def test_experiment_context_tolerates_missing_config_path(store, roster, orchestrator, station):
@@ -225,7 +225,7 @@ def test_experiment_context_tolerates_missing_config_path(store, roster, orchest
 
 def test_start_experiment_persists_and_installs_envelope(manager, orchestrator, store):
     envelope = SessionEnvelope(
-        bounds={"magnet_x": EnvelopeBound(min_value=-2.0, max_value=2.0)}
+        bounds={"magnet_z": EnvelopeBound(min_value=-2.0, max_value=2.0)}
     )
     changed: list[dict] = []
     manager.experiment_changed.connect(changed.append)
@@ -256,7 +256,7 @@ def test_start_experiment_rejects_unknown_user_and_double_open(manager):
 
 
 def test_close_experiment_clears_envelope_and_context(manager, orchestrator, store):
-    envelope = SessionEnvelope(bounds={"magnet_x": EnvelopeBound(max_value=2.0)})
+    envelope = SessionEnvelope(bounds={"magnet_z": EnvelopeBound(max_value=2.0)})
     record = manager.start_experiment("X", "jdoe", SAMPLE_INFO, envelope=envelope)
     manager.close_experiment()
 
@@ -327,7 +327,7 @@ def test_resume_marks_stale_running_runs_failed(
         "X",
         "jdoe",
         SAMPLE_INFO,
-        envelope=SessionEnvelope(bounds={"magnet_x": EnvelopeBound(max_value=2.0)}),
+        envelope=SessionEnvelope(bounds={"magnet_z": EnvelopeBound(max_value=2.0)}),
     )
     # Simulate the app dying mid-run: a run stuck in "running" on disk.
     record.runs.append(RunRecord(run_id="r1", status=RUN_STATUS_RUNNING))
@@ -371,15 +371,15 @@ def test_end_to_end_run_recorded_and_stamped(
     manager, orchestrator, station, store, tmp_path, qtbot
 ):
     """A real FieldSweep run produces a RunRecord matching the HDF5 on disk."""
-    station.magnet_x._default_ramp_rate = 6000.0
-    station.magnet_x._ramp_segments = []
+    station.magnet_z._default_ramp_rate = 6000.0
+    station.magnet_z._ramp_segments = []
 
     record = manager.start_experiment(
         "SOT switching vs T",
         "jdoe",
         SAMPLE_INFO,
         envelope=SessionEnvelope(
-            bounds={"magnet_x": EnvelopeBound(min_value=-2.0, max_value=2.0)}
+            bounds={"magnet_z": EnvelopeBound(min_value=-2.0, max_value=2.0)}
         ),
     )
     # Exactly what the GUI does when building a procedure: stamp the context.
@@ -402,7 +402,7 @@ def test_end_to_end_run_recorded_and_stamped(
     assert run.procedure == "Field Sweep"
     assert run.params["field_steps"] == 3
     assert run.settings_snapshot, "expected an initiate-time settings snapshot"
-    assert "magnet_x" in run.settings_snapshot
+    assert "magnet_z" in run.settings_snapshot
 
     # The record's data_file is the real HDF5 file, stamped with the context.
     with h5py.File(run.data_file, "r") as f:

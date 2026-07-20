@@ -220,6 +220,104 @@ def test_delta_mode_vi_forwards_all_config_params():
     assert source._delta_cold_switch is True
 
 
+def test_delta_mode_initiate_raises_when_meter_not_detected():
+    """initiate() surfaces a clear error when the 2182A isn't on the relay.
+
+    Regression guard for the 12t-cryo delta-mode hang incident: silently
+    arming without the 2182A produced confusing overflow/timeout symptoms
+    several calls later instead of an immediate, actionable failure.
+    """
+    from cryosoft.virtual_instruments.measurement.measurement_delta_mode import DeltaModeMeasurementVI
+
+    source = SimKeithley6221("SIM")
+    meter = SimKeithley2182A("SIM")
+    source._paired_meter = meter
+    source._meter_present = False
+    vi = DeltaModeMeasurementVI({"source": source, "meter": meter})
+
+    with pytest.raises(CryoSoftCommunicationError):
+        vi.initiate(current=1e-6, n_readings=10, delay_s=0.001)
+
+
+def test_delta_mode_declares_current_reading_setter():
+    """current is loopable via set_delta_current (the reading-loop standard)."""
+    from cryosoft.virtual_instruments.measurement.measurement_delta_mode import DeltaModeMeasurementVI
+
+    assert DeltaModeMeasurementVI.reading_setters == {"current": "set_delta_current"}
+
+
+def test_delta_mode_set_current_before_initiate_raises():
+    """The reading-loop setter refuses to run against an unarmed engine."""
+    from cryosoft.virtual_instruments.measurement.measurement_delta_mode import DeltaModeMeasurementVI
+
+    source = SimKeithley6221("SIM")
+    meter = SimKeithley2182A("SIM")
+    source._paired_meter = meter
+    vi = DeltaModeMeasurementVI({"source": source, "meter": meter})
+
+    with pytest.raises(RuntimeError):
+        vi.set_delta_current(1e-6)
+
+
+def test_delta_mode_set_current_rearms_and_reports_new_current():
+    """set_delta_current() re-arms the engine and take_reading() reports it.
+
+    Delta mode latches its peak current at arm time, so the setter must leave
+    the sim in DELTA mode at the new amplitude — a plain stop (or a stop with
+    no re-arm) would leave the source in DC and yield no delta readings.
+    """
+    from cryosoft.virtual_instruments.measurement.measurement_delta_mode import DeltaModeMeasurementVI
+
+    source = SimKeithley6221("SIM")
+    meter = SimKeithley2182A("SIM")
+    source._paired_meter = meter
+    vi = DeltaModeMeasurementVI({"source": source, "meter": meter})
+
+    vi.initiate(current=1e-6, n_readings=4, delay_s=0.001)
+    vi.set_delta_current(5e-6)
+
+    assert source._mode == "DELTA"
+    assert source._delta_high_current == pytest.approx(5e-6)
+
+    data = vi.take_reading()
+    assert all(c == pytest.approx(5e-6) for c in data["current_A"])
+    assert data["n_valid"] == 4
+
+
+def test_delta_mode_set_current_preserves_other_armed_params():
+    """Re-arming changes only the current; every other armed parameter holds.
+
+    Regression guard for the reading loop: rebuilding the delta configuration
+    from defaults instead of the armed values would silently reset compliance,
+    range and the abort/cold-switch flags partway through a sweep.
+    """
+    from cryosoft.virtual_instruments.measurement.measurement_delta_mode import DeltaModeMeasurementVI
+
+    source = SimKeithley6221("SIM")
+    meter = SimKeithley2182A("SIM")
+    source._paired_meter = meter
+    vi = DeltaModeMeasurementVI({"source": source, "meter": meter})
+
+    vi.initiate(
+        current=2e-6,
+        n_readings=5,
+        delay_s=0.002,
+        compliance_V=3.0,
+        voltmeter_range_V=0.1,
+        compliance_abort=False,
+        cold_switch=True,
+    )
+    vi.set_delta_current(-7e-6)
+
+    assert source._delta_high_current == pytest.approx(-7e-6)
+    assert source._delta_n_readings == 5
+    assert source._delta_delay == pytest.approx(0.002)
+    assert source._delta_compliance == pytest.approx(3.0)
+    assert source._delta_range_2182a == pytest.approx(0.1)
+    assert source._delta_compliance_abort is False
+    assert source._delta_cold_switch is True
+
+
 def test_delta_mode_short_return_is_nan_padded():
     """A short delta acquisition is padded to n_readings with NaN + n_valid.
 

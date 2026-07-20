@@ -12,8 +12,11 @@
 #   configure_and_start_delta() must be called before acquire_delta_readings().
 #   DC set_current() can be used independently (e.g. during initiate/standby).
 # process: |
-#   Delta mode: programs 6221 + 2182A via serial relay, arms (:SOUR:DELT:ARM),
-#   initiates (:INIT:IMM), then polls :CALC1:DATA:FRES? for each reading.
+#   Delta mode: forces the serial relay to known-good settings, verifies the
+#   2182A responds on it (:SOUR:DELT:NVPR?), enables the CALC1 stage that
+#   produces delta readings, programs 6221 + 2182A via serial relay, arms
+#   (:SOUR:DELT:ARM), initiates (:INIT:IMM), then polls :CALC1:DATA:FRES?
+#   for each reading.
 #   DC mode: direct :SOUR:CURR writes with OUTP ON/OFF.
 # output: |
 #   Returns float/bool state values and list[float] delta readings via public API.
@@ -21,7 +24,7 @@
 #   the instrument recovers to plain DC mode regardless of what mode a prior
 #   measurement VI sharing this driver left it in (shared-instrument mode
 #   discipline).
-# last_updated: 2026-07-18
+# last_updated: 2026-07-20
 # ---
 
 """Real Keithley 6221 AC/DC current source driver."""
@@ -213,6 +216,10 @@ class Keithley6221:
                 (``:SOUR:DELT:CAB``).
             cold_switch: Enable cold-switching between current reversals
                 (``:SOUR:DELT:CSW``).
+
+        Raises:
+            CryoSoftCommunicationError: If the 6221 does not detect a 2182A
+                on its RS-232 serial relay (``:SOUR:DELT:NVPR?`` returns 0).
         """
         self._delta_high_current = high_current
         self._delta_n_readings = n_readings
@@ -266,6 +273,14 @@ class Keithley6221:
     # Private SCPI helpers
     # ------------------------------------------------------------------
 
+    # RS-232 relay parameters the 2182A must be configured to match (Tektronix/
+    # Keithley's documented delta-mode setup: 19.2k baud, XON/XOFF flow
+    # control, CR terminator — see "How to configure the Model 6220-6221 and
+    # 2182A for Delta Mode"). Fixed protocol constants, not a per-setup value.
+    _RELAY_BAUD = 19200
+    _RELAY_TERM = "CR"
+    _RELAY_PACE = "XON"
+
     def _program_delta_mode(
         self,
         high_current: float,
@@ -279,16 +294,64 @@ class Keithley6221:
         """Send the full delta-mode configuration SCPI sequence.
 
         Ported from configure_delta_mode() + configure_2182a_delta_mode()
-        in simple_delta_tk_logic.py.  The 2182A is programmed via the
-        6221's serial relay (:SYST:COMM:SER:SEND).
+        in simple_delta_tk_logic.py, with two additions found necessary on
+        real hardware (see commissioning incident
+        2026-07-20-delta-mode-hang-12t-cryo.md):
+
+        1. The 6221's serial relay port is explicitly forced to the
+           documented baud/terminator/flow-control settings on every call,
+           instead of trusting whatever was last left on the instrument —
+           a flow-control mismatch here manifests on the 2182A as
+           intermittent "DATA CORRUPT/STALE" and produces garbage readings.
+        2. ``:SOUR:DELT:NVPR?`` is checked before arming and raises a clear
+           ``CryoSoftCommunicationError`` if the 6221 does not see a 2182A on
+           the relay — this turns a silent misconfiguration (2182A powered
+           off, cabled wrong, or left in GPIB mode on its own front panel)
+           into an immediate, actionable failure instead of a confusing
+           overflow/timeout discovered several calls later.
+
+        The 2182A itself is programmed via the 6221's serial relay
+        (:SYST:COMM:SER:SEND); nothing here opens a direct GPIB session to
+        the 2182A, by design — the 2182A must be left on RS-232 for delta
+        mode to reach it at all.
         """
         low_current = -high_current
 
         self._write(":SOUR:SWE:ABOR")                           # abort any running sweep
+        time.sleep(0.3)                                         # let a prior run actually stop cycling
+                                                                 # before reconfiguring — re-arming while
+                                                                 # the old delta cycle is still winding down
+                                                                 # produced "Query INTERRUPTED" (-410) on
+                                                                 # the very next query below.
+        self._write("*CLS")                                     # clean state: clear stale errors/events
+
+        # Force the relay's serial settings to the documented values so a
+        # leftover mismatch from a prior session can't silently corrupt data.
+        self._write(f":SYST:COMM:SER:BAUD {self._RELAY_BAUD}")
+        self._write(f":SYST:COMM:SER:TERM {self._RELAY_TERM}")
+        self._write(f":SYST:COMM:SER:PACE {self._RELAY_PACE}")
+
+        if self._query(":SOUR:DELT:NVPR?").strip() != "1":
+            raise CryoSoftCommunicationError(
+                "Keithley 6221: no 2182A detected on the RS-232 serial relay "
+                "(:SOUR:DELT:NVPR? returned 0). Check that the 2182A is "
+                "powered on, cabled to the 6221's RS-232 port, and set to "
+                "RS-232 (not GPIB) on its own front panel.",
+                vi_name="Keithley6221",
+            )
+
+        # The mX+b/delta calculation stage (CALC1) must be enabled or every
+        # subsequent :CALC1:DATA:FRESh? read blocks forever waiting for a
+        # reading that can never arrive — and because SCPI commands are
+        # processed in order, that one stuck query jams the 6221's entire
+        # command queue behind it (looks like a dead instrument on GPIB,
+        # requires a power cycle to clear).
+        self._write(":CALC1:STAT ON")
+
         self._write(f":SOUR:DELT:HIGH {high_current:.9e}")
         self._write(f":SOUR:DELT:LOW  {low_current:.9e}")
         self._write(f":SOUR:CURR:COMP {compliance:.4e}")
-        self._write(":SOUR:DELT:UNIT V")                        # delta reading units (pymeasure delta_unit)
+        self._write(":UNIT V")                                  # reading units (pymeasure delta_unit); NOT :SOUR:DELT:UNIT — that header doesn't exist and errors -113
 
         if delay == 0.0:
             self._write(":SOUR:DELT:DELay INF")
@@ -298,6 +361,7 @@ class Keithley6221:
         self._write(":SOUR:DELT:COUN INF")                      # run continuously across sweep points
         self._write(f":SOUR:DELT:CAB {'ON' if compliance_abort else 'OFF'}")  # compliance abort
         self._write(f":SOUR:DELT:CSW {'ON' if cold_switch else 'OFF'}")       # cold switch
+        self._write(":TRAC:CLE")                                # drop any stale buffer contents
         self._write(":TRAC:POIN 65536")
         self._write(":TRAC:FEED:CONT NEXT")
 

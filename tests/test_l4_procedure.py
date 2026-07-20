@@ -264,9 +264,9 @@ def test_initiate_returns_correct_structure(procedure, tmp_path):
 
     assert isinstance(plan, PhasePlan)
 
-    assert "magnet_x" in plan.targets
-    assert isinstance(plan.targets["magnet_x"], Target)
-    assert plan.targets["magnet_x"].target == pytest.approx(-0.1)
+    assert "magnet_z" in plan.targets
+    assert isinstance(plan.targets["magnet_z"], Target)
+    assert plan.targets["magnet_z"].target == pytest.approx(-0.1)
 
     assert "temperature_vti" in plan.targets
     assert plan.targets["temperature_vti"].target == pytest.approx(300.0)
@@ -283,8 +283,8 @@ def test_initiate_full_phaseplan_content_and_command_order(procedure, tmp_path):
     procedure.standby()  # Close file
 
     # Exactly the two system targets, both plain field/temperature targets.
-    assert set(plan.targets) == {"magnet_x", "temperature_vti"}
-    assert plan.targets["magnet_x"] == Target(-0.1)
+    assert set(plan.targets) == {"magnet_z", "temperature_vti"}
+    assert plan.targets["magnet_z"] == Target(-0.1)
     assert plan.targets["temperature_vti"] == Target(300.0)
 
     # Exactly one command: arm the delta-mode measurement, first in order.
@@ -353,8 +353,8 @@ def test_change_sweep_step_returns_targets(procedure, tmp_path):
     step = procedure.change_sweep_step()
     assert step is not None
     assert isinstance(step, StepPlan)
-    assert "magnet_x" in step.targets
-    assert step.targets["magnet_x"].target == pytest.approx(0.0)
+    assert "magnet_z" in step.targets
+    assert step.targets["magnet_z"].target == pytest.approx(0.0)
     assert step.wait_s == pytest.approx(0.0)
 
     procedure.standby()
@@ -443,8 +443,8 @@ def test_standby_returns_correct_structure(procedure, tmp_path):
     plan = procedure.standby()
 
     assert isinstance(plan, PhasePlan)
-    assert "magnet_x" in plan.targets
-    assert plan.targets["magnet_x"].target == pytest.approx(0.0)
+    assert "magnet_z" in plan.targets
+    assert plan.targets["magnet_z"].target == pytest.approx(0.0)
     assert any(c.vi_name == "keithley_delta_mode" for c in plan.commands)
     assert plan.wait_s == pytest.approx(0.0)
 
@@ -475,8 +475,8 @@ def test_full_orchestrator_loop(station, tmp_path, qtbot):
     from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 
     # Fast ramp rates so the test completes quickly
-    station.magnet_x._default_ramp_rate = 6000.0
-    station.magnet_x._ramp_segments = []
+    station.magnet_z._default_ramp_rate = 6000.0
+    station.magnet_z._ramp_segments = []
     # temperature_vti starts at 300 K; target is also 300 K → instant settle
 
     procedure = FieldSweep(
@@ -585,8 +585,8 @@ def test_full_orchestrator_loop_emits_run_manifests(station, tmp_path, qtbot):
     """A real run emits run_started/run_finished manifests with the file path."""
     from cryosoft.core.orchestrator import Orchestrator
 
-    station.magnet_x._default_ramp_rate = 6000.0
-    station.magnet_x._ramp_segments = []
+    station.magnet_z._default_ramp_rate = 6000.0
+    station.magnet_z._ramp_segments = []
 
     procedure = FieldSweep(
         station=station,

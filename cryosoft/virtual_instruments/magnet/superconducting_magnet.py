@@ -114,7 +114,7 @@ class SuperconductingMagnetVI(MagnetBase, RampableVI):
                 heater. Accepted so callers (e.g. Station.process_system_targets,
                 or a Procedure written against either magnet VI flavor) can
                 pass ``persistent=`` uniformly regardless of whether the
-                configured magnet_x is this class or
+                configured magnet_z is this class or
                 ``SuperconductingMagnetPersistentVI``.
         """
         _ = persistent

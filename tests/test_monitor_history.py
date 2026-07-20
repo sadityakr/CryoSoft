@@ -14,7 +14,7 @@ def test_flattening_matches_last_state_flat_convention():
     """Nested two-VI state flattens to {vi}_{field} keys; bools/strings/_-fields excluded."""
     history = MonitorHistory()
     state = {
-        "magnet_x": {
+        "magnet_z": {
             "get_field": 0.5,
             "magnet_current": 12.3,
             "ramp_status": "ramping",  # string -> excluded
@@ -29,15 +29,15 @@ def test_flattening_matches_last_state_flat_convention():
     history.record(state, timestamp=100.0)
 
     assert history.keys() == sorted(
-        ["magnet_x_get_field", "magnet_x_magnet_current", "temperature_vti_temperature_K"]
+        ["magnet_z_get_field", "magnet_z_magnet_current", "temperature_vti_temperature_K"]
     )
 
     # Hand-computed expectation matching Station.last_state_flat()'s output shape
     # for this same state (excluding the measurement-VI filter, which is a
     # Station-level concern, not a MonitorHistory concern).
     expected_flat = {
-        "magnet_x_get_field": 0.5,
-        "magnet_x_magnet_current": 12.3,
+        "magnet_z_get_field": 0.5,
+        "magnet_z_magnet_current": 12.3,
         "temperature_vti_temperature_K": 4.2,
     }
     for key, value in expected_flat.items():

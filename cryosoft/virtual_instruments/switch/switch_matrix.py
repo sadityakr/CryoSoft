@@ -46,7 +46,7 @@ class SwitchMatrixVI(BaseVirtualInstrument):
     """Matrix-switch / scanner VI that multiplexes measurement channels by route.
 
     A **route** is a named connection (its name comes verbatim from config)
-    mapping to a list of instrument-format channel specs (e.g. ``["1!1"]``). The
+    mapping to a list of instrument channel specs (e.g. ``["1"]`` for a 705). The
     VI implements the **EXCLUSIVE-MUX** policy: at most one route is connected at
     a time, so :meth:`select_route` always opens every channel first and then
     closes the selected route's channels. This models a scanner where a single
@@ -63,6 +63,14 @@ class SwitchMatrixVI(BaseVirtualInstrument):
     Config ``init_params``:
         ``routes``: ``dict[str, list[str]]`` — route name -> channel-spec list.
         ``settle_time_s``: ``float`` — dwell after a route change (default 0.0).
+        ``pole_mode``: ``int`` — optional wiring mode (1, 2 or 4) applied to the
+            instrument at construction. On a scanner the pole mode determines
+            how card terminals group into channels, so it changes both the
+            channel count and what a channel number physically connects; a
+            route table is only meaningful alongside the mode it was written
+            for. Use 4 for four-wire measurements, where one channel switches
+            all four leads together. Omitted -> the instrument is left in
+            whatever mode it powered up in.
 
     The VI never hardcodes channels; the config owns the wiring.
     """
@@ -161,6 +169,23 @@ class SwitchMatrixVI(BaseVirtualInstrument):
         self._routes: dict[str, list[str]] = validated
         self._settle_time_s: float = float(settle)
         self._active_route: str = ""
+
+        # Pole mode is a wiring property of the setup, so it lives in config and
+        # is applied here — before any route is selected, since it renumbers the
+        # channels the route table names.
+        pole_mode = init_params.get("pole_mode")
+        if pole_mode is not None:
+            if isinstance(pole_mode, bool) or not isinstance(pole_mode, int):
+                raise CryoSoftConfigError(
+                    f"SwitchMatrixVI 'pole_mode' must be an int (1, 2 or 4), "
+                    f"got {pole_mode!r}"
+                )
+            if pole_mode not in (1, 2, 4):
+                raise CryoSoftConfigError(
+                    f"SwitchMatrixVI 'pole_mode' must be 1, 2 or 4, got {pole_mode!r}"
+                )
+            self._driver.set_pole_mode(pole_mode)
+        self._pole_mode: int | None = pole_mode
 
     # ------------------------------------------------------------------
     # Route table

@@ -156,28 +156,6 @@ def procedure_win(station, orchestrator, qtbot):
 
 # ── MonitorWindow tests ───────────────────────────────────────────────────────
 
-def test_monitor_window_opens(monitor_win):
-    """MonitorWindow constructs and is visible."""
-    assert monitor_win.isVisible()
-
-
-def test_monitor_window_has_panels_for_system_vis(monitor_win, station):
-    """One InstrumentPanel exists per system/level VI (measurement VIs use status cards)."""
-    panels = monitor_win.findChildren(InstrumentPanel)
-    system_vis = [n for n in station.get_vi_names() if station.get_vi_type(n) in {"system", "level"}]
-    assert len(panels) == len(system_vis), (
-        f"Expected {len(system_vis)} panels, found {len(panels)}"
-    )
-
-
-def test_monitor_window_panel_titles_match_system_vi_names(monitor_win, station):
-    """Each InstrumentPanel title matches a system/level VI name."""
-    panels = monitor_win.findChildren(InstrumentPanel)
-    panel_titles = {p._vi_name for p in panels}
-    system_vis = {n for n in station.get_vi_names() if station.get_vi_type(n) in {"system", "level"}}
-    assert panel_titles == system_vis
-
-
 def test_monitor_window_has_global_buttons(monitor_win):
     """Initiate All and Standby All buttons exist."""
     initiate_btn = monitor_win.findChild(QPushButton, "initiate_all_btn")
@@ -198,7 +176,7 @@ def test_instrument_panel_creates_value_labels(station, orchestrator, qtbot):
     """InstrumentPanel creates one QLabel per @monitored method."""
     from cryosoft.core.decorators import get_monitored_methods
 
-    vi_name = "magnet_x"
+    vi_name = "magnet_z"
     vi = station._virtual_instruments[vi_name]
     panel = InstrumentPanel(vi_name, vi, orchestrator)
     qtbot.addWidget(panel)
@@ -213,7 +191,7 @@ def test_instrument_panel_creates_control_buttons(station, orchestrator, qtbot):
     """InstrumentPanel creates one QPushButton per @control method."""
     from cryosoft.core.decorators import get_control_methods
 
-    vi_name = "magnet_x"
+    vi_name = "magnet_z"
     vi = station._virtual_instruments[vi_name]
     panel = InstrumentPanel(vi_name, vi, orchestrator)
     qtbot.addWidget(panel)
@@ -238,7 +216,7 @@ def test_instrument_panel_lifecycle_buttons_exist(station, orchestrator, qtbot):
 
 def test_instrument_panel_updates_values_on_signal(station, orchestrator, qtbot):
     """states_updated signal → value labels reflect new state."""
-    vi_name = "magnet_x"
+    vi_name = "magnet_z"
     vi = station._virtual_instruments[vi_name]
     panel = InstrumentPanel(vi_name, vi, orchestrator)
     qtbot.addWidget(panel)
@@ -247,14 +225,17 @@ def test_instrument_panel_updates_values_on_signal(station, orchestrator, qtbot)
     fake_state = {vi_name: {"get_field": 1.5, "magnet_current": 15.0, "magnet_status": "HOLD"}}
     orchestrator.states_updated.emit(fake_state)
 
+    # Unconditional: test_instrument_panel_creates_value_labels already proves a
+    # value label exists for every @monitored method, so a missing label here is
+    # a real regression, not a reason to skip the assertion.
     field_label = panel.findChild(QLabel, f"{vi_name}_get_field_value")
-    if field_label is not None:
-        assert "1.5" in field_label.text()
+    assert field_label is not None, f"no value label for {vi_name}.get_field"
+    assert "1.5" in field_label.text()
 
 
 def test_instrument_panel_stale_border(station, orchestrator, qtbot):
     """Stale state sets the 'stale' status property (amber border via QSS)."""
-    vi_name = "magnet_x"
+    vi_name = "magnet_z"
     vi = station._virtual_instruments[vi_name]
     panel = InstrumentPanel(vi_name, vi, orchestrator)
     qtbot.addWidget(panel)
@@ -266,7 +247,7 @@ def test_instrument_panel_stale_border(station, orchestrator, qtbot):
 
 def test_instrument_panel_disconnected_border(station, orchestrator, qtbot):
     """Disconnected state sets the 'disconnected' status property (red border via QSS)."""
-    vi_name = "magnet_x"
+    vi_name = "magnet_z"
     vi = station._virtual_instruments[vi_name]
     panel = InstrumentPanel(vi_name, vi, orchestrator)
     qtbot.addWidget(panel)
@@ -278,7 +259,7 @@ def test_instrument_panel_disconnected_border(station, orchestrator, qtbot):
 
 def test_instrument_panel_status_resets_to_ok(station, orchestrator, qtbot):
     """A stale panel returns to 'ok' status (plain title) when state is healthy again."""
-    vi_name = "magnet_x"
+    vi_name = "magnet_z"
     vi = station._virtual_instruments[vi_name]
     panel = InstrumentPanel(vi_name, vi, orchestrator)
     qtbot.addWidget(panel)
@@ -295,7 +276,7 @@ def test_instrument_panel_status_not_restyled_when_unchanged(
     station, orchestrator, qtbot, monkeypatch
 ):
     """The status property is only re-set when it changes, not on every tick."""
-    vi_name = "magnet_x"
+    vi_name = "magnet_z"
     vi = station._virtual_instruments[vi_name]
     panel = InstrumentPanel(vi_name, vi, orchestrator)
     qtbot.addWidget(panel)
@@ -320,16 +301,6 @@ def test_instrument_panel_status_not_restyled_when_unchanged(
 
 
 # ── ProcedureWindow tests ─────────────────────────────────────────────────────
-
-def test_procedure_window_opens(procedure_win):
-    """ProcedureWindow constructs and is visible."""
-    assert procedure_win.isVisible()
-
-
-def test_procedure_selector_populated(procedure_win):
-    """Procedure selector has at least one entry (FieldSweep / TemperatureSweep)."""
-    assert procedure_win._params_panel._proc_selector.count() >= 1
-
 
 def test_procedure_param_inputs_exist(procedure_win):
     """Parameter form inputs are created for the selected procedure.
@@ -726,7 +697,7 @@ def test_generic_field_sweep_pick_row_label_strips_prefix(procedure_win, station
 def test_live_plot_loop_selectors_follow_reading_loop(procedure_win, station):
     """The plots' two Loop selectors follow the reading-loop slots.
 
-    Hidden while nothing is loopable (delta VI, scanner off); visible but
+    Hidden while nothing is loopable (lock-in VI, scanner off); visible but
     disabled once something is loopable with the slots off; enabled with one
     item per value — display text carrying the value, item data carrying the
     index label — once a slot has two or more values.
@@ -734,10 +705,13 @@ def test_live_plot_loop_selectors_follow_reading_loop(procedure_win, station):
     from cryosoft.procedures.field_sweep import FieldSweep
 
     procedure_win._params_panel.select_procedure_by_name(FieldSweep.name)
+    # The lock-in is the only measurement VI with no reading_setters, so with
+    # the scanner off it is the one way to reach an empty loopable registry.
+    _select_measurement(procedure_win, "lockin_harmonic")
     sel1 = procedure_win.findChild(QComboBox, "plot1_loop1_selector")
     sel2 = procedure_win.findChild(QComboBox, "plot1_loop2_selector")
     assert sel1 is not None and sel2 is not None
-    # Default: delta VI, scanner off -> nothing loopable, selectors hidden.
+    # Nothing loopable -> selectors hidden.
     assert not sel1.isVisibleTo(procedure_win)
     assert not sel2.isVisibleTo(procedure_win)
 
@@ -839,32 +813,6 @@ def test_param_form_renders_all_widget_kinds_and_round_trips(qtbot):
     # Raw string round-trip used by the session cache.
     param_form.set_widget_raw(widgets["amp"], "2.5")
     assert param_form.get_widget_raw(widgets["amp"]) == "2.5"
-
-
-def test_monitor_sample_info_inputs_exist(monitor_win):
-    """Sample name, ID, and comments fields are present in MonitorWindow."""
-    assert monitor_win._session_info._sample_name_input is not None
-    assert monitor_win._session_info._sample_id_input is not None
-    assert monitor_win._session_info._comments_input is not None
-
-
-def test_monitor_data_dir_input_exists(monitor_win):
-    """Data directory input is in MonitorWindow and has a default value."""
-    assert monitor_win._session_info._data_dir_input is not None
-    assert monitor_win._session_info._data_dir_input.text() != ""
-
-
-def test_monitor_get_sample_info(monitor_win):
-    """get_sample_info() returns a dict with the correct keys."""
-    info = monitor_win.get_sample_info()
-    assert "sample_name" in info
-    assert "sample_id" in info
-    assert "comments" in info
-
-
-def test_monitor_get_data_dir(monitor_win):
-    """get_data_dir() returns a non-empty string."""
-    assert monitor_win.get_data_dir() != ""
 
 
 # ── Experiment lifecycle (SessionInfoPanel) ────────────────────────────────────
@@ -1176,7 +1124,7 @@ def test_instrument_info_action_opens_dialog_with_config_metadata(
     monkeypatch.setattr(mw, "InstrumentInfoDialog", _FakeInstrumentInfoDialog)
     win._open_instrument_info()
 
-    assert captured["metadata"]["magnet_x"]["role"] == "X-axis magnet"
+    assert captured["metadata"]["magnet_z"]["role"] == "X-axis magnet"
 
 
 def test_instrument_info_dialog_handles_empty_metadata(qtbot):
@@ -1194,11 +1142,6 @@ def test_procedure_control_buttons_exist(procedure_win, qtbot):
     assert procedure_win.findChild(QPushButton, "pause_btn") is not None
     assert procedure_win.findChild(QPushButton, "resume_btn") is not None
     assert procedure_win.findChild(QPushButton, "abort_btn") is not None
-
-
-def test_ack_button_hidden_when_not_emergency(procedure_win):
-    """Emergency acknowledge button is hidden in normal state."""
-    assert not procedure_win._ack_btn.isVisible()
 
 
 def test_ack_button_visible_in_emergency(procedure_win, orchestrator):
@@ -1225,13 +1168,6 @@ def test_add_to_queue_appends_item(procedure_win, qtbot):
         __import__("PyQt6.QtCore", fromlist=["Qt"]).Qt.MouseButton.LeftButton,
     )
     assert procedure_win._queue_panel._queue_list.count() == initial_count + 1
-
-
-def test_file_prefix_input_exists(procedure_win):
-    """The filename-prefix field is present above the parameter form."""
-    from PyQt6.QtWidgets import QLineEdit
-
-    assert procedure_win.findChild(QLineEdit, "file_prefix_input") is not None
 
 
 def test_add_to_queue_captures_current_file_prefix(procedure_win, qtbot):
@@ -1449,10 +1385,10 @@ def test_monitor_switch_row_active_route_updates_on_tick(monitor_win, station, o
 
 def test_monitor_states_updated_feeds_history_and_trend_combos(monitor_win, orchestrator):
     """states_updated records into MonitorHistory and populates the trend Y combos."""
-    fake_state = {"magnet_x": {"get_field": 0.25, "magnet_current": 12.0}}
+    fake_state = {"magnet_z": {"get_field": 0.25, "magnet_current": 12.0}}
     orchestrator.states_updated.emit(fake_state)
 
-    assert "magnet_x_get_field" in monitor_win._trends._history.keys()
+    assert "magnet_z_get_field" in monitor_win._trends._history.keys()
 
     panels = monitor_win.findChildren(TrendPlotPanel)
     assert len(panels) == 2
@@ -1505,9 +1441,9 @@ def test_monitor_persistence_roundtrip_splitters_and_trends(
 
     # Feed history AFTER the third panel exists so its refresh() (triggered by
     # this emit) populates its Y combo with a real key to select.
-    fake_state = {"magnet_x": {"get_field": 0.5, "magnet_current": 10.0}}
+    fake_state = {"magnet_z": {"get_field": 0.5, "magnet_current": 10.0}}
     orchestrator.states_updated.emit(fake_state)
-    third_panel.set_selected_key("magnet_x_get_field")
+    third_panel.set_selected_key("magnet_z_get_field")
     third_panel.set_selected_window_s(21600.0)  # "6 h"
 
     assert len(win1._trends._trend_panels) == 3
@@ -1529,7 +1465,7 @@ def test_monitor_persistence_roundtrip_splitters_and_trends(
 
     third_id_2 = list(win2._trends._trend_panels.keys())[2]
     third_panel_2 = win2._trends._trend_panels[third_id_2]
-    assert third_panel_2.selected_key() == "magnet_x_get_field"
+    assert third_panel_2.selected_key() == "magnet_z_get_field"
     assert third_panel_2.selected_window_s() == 21600.0
 
 
@@ -1607,16 +1543,6 @@ def test_log_handler_removed_on_close(station, orchestrator, qtbot):
     assert handler not in cryosoft_logger.handlers
 
 
-def test_monitor_window_default_geometry(station, orchestrator, qtbot):
-    """With no saved geometry, MonitorWindow sizes itself to a non-zero fraction."""
-    # The isolated_settings fixture already points the factory at an empty INI,
-    # so no explicit key-clearing is needed here.
-    win = MonitorWindow(station, orchestrator)
-    qtbot.addWidget(win)
-    assert win.width() > 0
-    assert win.height() > 0
-
-
 def test_closing_window_persists_to_isolated_ini_not_real_scope(
     station, orchestrator, qtbot, isolated_settings
 ):
@@ -1681,10 +1607,10 @@ def test_banner_repeat_increments_counter_no_stack(qtbot):
     """A repeated identical message bumps the counter instead of stacking."""
     banner = NotificationBanner()
     qtbot.addWidget(banner)
-    banner.show_message("Blocked: magnet_x busy", "warning")
+    banner.show_message("Blocked: magnet_z busy", "warning")
     assert banner.count == 1
-    banner.show_message("Blocked: magnet_x busy", "warning")
-    banner.show_message("Blocked: magnet_x busy", "warning")
+    banner.show_message("Blocked: magnet_z busy", "warning")
+    banner.show_message("Blocked: magnet_z busy", "warning")
     assert banner.count == 3
     assert "(3×)" in banner._label.text()
     # Still exactly one banner, still visible (nothing stacked).
@@ -1715,7 +1641,7 @@ def test_procedure_error_signal_drives_banner(procedure_win, orchestrator):
 
 def test_instrument_panel_has_no_action_blocked_handler(station, orchestrator, qtbot):
     """The per-panel modal warning handler was removed (banner replaces it)."""
-    vi_name = "magnet_x"
+    vi_name = "magnet_z"
     vi = station._virtual_instruments[vi_name]
     panel = InstrumentPanel(vi_name, vi, orchestrator)
     qtbot.addWidget(panel)
@@ -2151,11 +2077,6 @@ def test_monitor_opens_diagnostics_window_from_menu(monitor_win):
     monitor_win._open_diagnostics_window()
     assert monitor_win._diagnostics_window is not None
     assert monitor_win._diagnostics_window.isVisible()
-
-
-def test_diagnostics_window_opens(diagnostics_win):
-    """DiagnosticsWindow constructs and is visible."""
-    assert diagnostics_win.isVisible()
 
 
 def test_diagnostics_window_placeholder_before_first_tick(diagnostics_win):

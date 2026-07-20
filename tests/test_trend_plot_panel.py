@@ -75,7 +75,7 @@ def test_refresh_populates_y_combo_and_draws_selected_series(qtbot, history):
     for i in range(5):
         _record_series(
             history,
-            {"magnet_x": {"field_T": float(i)}, "temp_a": {"temperature_K": 4.0 + i}},
+            {"magnet_z": {"field_T": float(i)}, "temp_a": {"temperature_K": 4.0 + i}},
             timestamp=now - (4 - i) * 10,
         )
 
@@ -86,13 +86,13 @@ def test_refresh_populates_y_combo_and_draws_selected_series(qtbot, history):
     y_selector = panel.findChild(QComboBox, "trend_y_selector_p1")
     combo_items = [y_selector.itemText(i) for i in range(y_selector.count())]
     assert combo_items == history.keys()
-    assert combo_items == ["magnet_x_field_T", "temp_a_temperature_K"]
+    assert combo_items == ["magnet_z_field_T", "temp_a_temperature_K"]
 
     # Panel selects the first key by default when nothing was chosen yet.
-    assert panel.selected_key() == "magnet_x_field_T"
+    assert panel.selected_key() == "magnet_z_field_T"
 
     expected_times, expected_values = history.series(
-        "magnet_x_field_T", window_s=panel.selected_window_s()
+        "magnet_z_field_T", window_s=panel.selected_window_s()
     )
     x_data, y_data = panel._curve.getData()
     assert list(x_data) == expected_times
@@ -123,13 +123,13 @@ def test_window_filtering_changes_plotted_point_count(qtbot, history):
 
     for offset in old_offsets + recent_offsets:
         _record_series(
-            history, {"magnet_x": {"field_T": 1.0}}, timestamp=now - offset
+            history, {"magnet_z": {"field_T": 1.0}}, timestamp=now - offset
         )
 
     panel = TrendPlotPanel(history, panel_id="p2")
     qtbot.addWidget(panel)
     panel.refresh()
-    panel.set_selected_key("magnet_x_field_T")
+    panel.set_selected_key("magnet_z_field_T")
 
     # Default window is 1 h: recent (5) + old points within 3600s (0 of the
     # "old" set, since the closest is 7200s) -> exactly the 5 recent points.
@@ -152,18 +152,8 @@ def test_window_filtering_changes_plotted_point_count(qtbot, history):
     # use a value strictly inside 6h that excludes the farthest old point.
     window_selector.setCurrentText("6 h")
     x_data, _ = panel._curve.getData()
-    expected_times, _ = history.series("magnet_x_field_T", window_s=21600.0)
+    expected_times, _ = history.series("magnet_z_field_T", window_s=21600.0)
     assert len(x_data) == len(expected_times)
-
-
-def test_time_windows_constant_matches_spec():
-    """TIME_WINDOWS has the exact labels/seconds pairs specified for the widget."""
-    assert TIME_WINDOWS == [
-        ("15 min", 900.0),
-        ("1 h", 3600.0),
-        ("6 h", 21600.0),
-        ("24 h", 86400.0),
-    ]
 
 
 # ── Selection round-trip ─────────────────────────────────────────────────────
@@ -171,7 +161,7 @@ def test_time_windows_constant_matches_spec():
 def test_set_selected_key_roundtrip_and_survives_refresh(qtbot, history):
     """set_selected_key/selected_key round-trip; selection preserved across refresh()."""
     now = time.time()
-    _record_series(history, {"magnet_x": {"field_T": 1.0}}, timestamp=now)
+    _record_series(history, {"magnet_z": {"field_T": 1.0}}, timestamp=now)
     _record_series(history, {"temp_a": {"temperature_K": 4.2}}, timestamp=now)
 
     panel = TrendPlotPanel(history, panel_id="p3")

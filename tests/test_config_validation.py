@@ -25,7 +25,7 @@ real_drivers:
     class: cryosoft.drivers.sim_oxford_ips120.SimOxfordIPS120
     address: "SIM::IPS_X"
 virtual_instruments:
-  magnet_x:
+  magnet_z:
     class: cryosoft.virtual_instruments.magnet.superconducting_magnet.SuperconductingMagnetVI
     drivers: {main: ips_x}
     vi_type: system
@@ -115,7 +115,7 @@ real_drivers:
     class: cryosoft.drivers.sim_oxford_ips120.SimOxfordIPS120
     address: "SIM::IPS_X"
 virtual_instruments:
-  magnet_x:
+  magnet_z:
     class: cryosoft.virtual_instruments.magnet.superconducting_magnet.SuperconductingMagnetVI
     drivers: {main: ips_x}
     vi_type: system
@@ -135,7 +135,7 @@ def test_read_instrument_metadata_returns_only_vis_with_a_block(tmp_path):
     d = _write(tmp_path / "cfg", _DEVICES_WITH_METADATA)
     result = read_instrument_metadata(str(d))
     assert result == {
-        "magnet_x": {
+        "magnet_z": {
             "role": "X-axis magnet",
             "manufacturer": "Oxford Instruments",
             "model": "IPS120-10",
@@ -182,7 +182,7 @@ def test_read_instrument_metadata_ignores_empty_metadata_block(tmp_path):
     """A VI with an empty metadata: {} block is omitted, not included as {}."""
     devices = """\
 virtual_instruments:
-  magnet_x:
+  magnet_z:
     class: cryosoft.virtual_instruments.magnet.superconducting_magnet.SuperconductingMagnetVI
     drivers: {}
     vi_type: system

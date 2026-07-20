@@ -118,7 +118,12 @@ shared-6221 handoff test for the pattern.
   `tests/test_l1_new_vis.py` (`TestDCSingleInstrumentVI`).
 - `measurement_delta_mode.py` — `DeltaModeMeasurementVI`: Keithley 6221 + 2182A in
   delta-mode (reverses current polarity each reading for offset cancellation).
-  Pads short delta returns to `n_readings` with NaN and reports `n_valid`. tests:
+  Pads short delta returns to `n_readings` with NaN and reports `n_valid`.
+  Declares `reading_setters` `{"current": "set_delta_current"}`; unlike the DC
+  VI the setter **stops and re-arms** the engine (delta latches its peak current
+  at arm time), so each loop step pays a delta start-up and its first readings
+  include the settling transient. `current` is a peak amplitude that delta
+  reverses each cycle, so looping the sign is redundant. tests:
   `tests/test_l1_virtual_instruments.py`.
 - `lockin_harmonic.py` — `LockInHarmonicMeasurementVI`: lock-in first/second
   harmonic (1f/2f) measurement, sourced by the lock-in's own internal

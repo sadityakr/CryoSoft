@@ -31,7 +31,7 @@ import time
 
 import pyvisa
 
-from cryosoft.core.exceptions import CryoSoftCommunicationError
+from cryosoft.core.exceptions import CryoSoftCommunicationError, CryoSoftSafetyError
 
 log = logging.getLogger(__name__)
 
@@ -115,7 +115,21 @@ class OxfordMercuryiPS:
 
         Args:
             setpoint: Desired current in Amperes.
+
+        Raises:
+            CryoSoftSafetyError: If the PSU is CLAMPED. The Mercury asserts
+                this after power-up, an external power failure, or a quench
+                decaying below 1 A (manual Sec 5.4); ramping is refused until
+                an operator explicitly calls :meth:`clear_clamp`.
         """
+        if self._get_actn() == "CLMP":
+            raise CryoSoftSafetyError(
+                "Mercury iPS-M is CLAMPED (red 'Clamped' indicator on the "
+                "front panel). This is the PSU's fault response to power-up, "
+                "an external power failure, or a quench — not something to "
+                "clear automatically. An operator must review why it clamped "
+                "and call clear_clamp() to proceed.",
+            )
         clamped = max(self.MIN_CURRENT, min(self.MAX_CURRENT, setpoint))
         self._write(f"SET:DEV:GRPZ:PSU:SIG:CSET:{clamped:.6f}")
         time.sleep(0.1)
@@ -131,6 +145,11 @@ class OxfordMercuryiPS:
             raise ValueError(f"Ramp rate must be positive, got {rate}")
         self._write(f"SET:DEV:GRPZ:PSU:SIG:RCST:{rate:.4f}")
 
+    def get_ramp_rate(self) -> float:
+        """Return the target current ramp rate in Amperes per minute."""
+        resp = self._query("READ:DEV:GRPZ:PSU:SIG:RCST?")
+        return self._parse_float(resp, "DEV:GRPZ:PSU:SIG:RCST", "A/min")
+
     def hold(self) -> None:
         """Freeze the output where it is (ACTN:HOLD).
 
@@ -142,17 +161,34 @@ class OxfordMercuryiPS:
     def get_status(self) -> str:
         """Return the magnet status.
 
+        A pure read: never issues a write, even when the PSU is CLAMPED. See
+        :meth:`clear_clamp` for the explicit, human-initiated way to clear it.
+
         Returns:
             One of ``'HOLD'``, ``'RAMPING'``, or ``'QUENCH'``.
         """
-        resp = self._query("READ:DEV:GRPZ:PSU:ACTN?")
-        # Response: STAT:DEV:GRPZ:PSU:ACTN:HOLD  (or RTOS / RTOZ / CLMP)
-        try:
-            actn = resp.split(":")[-1].strip()
-            return _ACTN_TO_STATUS.get(actn, "HOLD")
-        except Exception:
-            log.warning("Could not parse Mercury status from %r", resp)
-            return "HOLD"
+        return _ACTN_TO_STATUS.get(self._get_actn(), "HOLD")
+
+    def clear_clamp(self) -> None:
+        """Explicitly unclamp the PSU after an operator has reviewed why it clamped.
+
+        Mirrors the manual's documented recovery (Sec 5.4): "To clear the
+        Quench mode, unclamp and reset the power supply group, tap 'Hold'."
+        This is never called automatically by :meth:`get_status` or
+        :meth:`set_current_setpoint` — CLMP is the PSU's fault response to
+        power-up, a power failure, or a quench, so clearing it is a
+        deliberate human decision, not something a status read should do as
+        a side effect.
+
+        Raises:
+            CryoSoftSafetyError: If the PSU is not actually clamped.
+        """
+        if self._get_actn() != "CLMP":
+            raise CryoSoftSafetyError(
+                "clear_clamp() called but Mercury iPS-M is not CLAMPED",
+            )
+        log.warning("Mercury iPS-M: operator-initiated clear of CLAMP state")
+        self.hold()
 
     # ------------------------------------------------------------------
     # Switch heater / persistent mode API  (matches SimOxfordIPS120)
@@ -246,13 +282,27 @@ class OxfordMercuryiPS:
             ) from exc
 
     def _write(self, cmd: str) -> None:
+        """Write a SET: command and drain its STAT: acknowledgment reply.
+
+        Every SET: command on this instrument is answered with a STAT: line
+        (mirroring the READ: query protocol); leaving it unread desyncs every
+        later query, which then receives this stale reply instead of its own
+        answer. A ``DENIED`` acknowledgment (the instrument refusing the
+        action, e.g. ACTN:RTOS while clamped) is raised immediately rather
+        than surfacing later as a confusing parse failure elsewhere.
+        """
         try:
-            self._instr.write(cmd)
+            ack = self._instr.query(cmd).strip()
         except pyvisa.VisaIOError as exc:
             raise CryoSoftCommunicationError(
                 f"Mercury iPS write failed ({cmd!r}): {exc}",
                 vi_name="OxfordMercuryiPS",
             ) from exc
+        if ack.endswith("DENIED"):
+            raise CryoSoftCommunicationError(
+                f"Mercury iPS denied command {cmd!r}: {ack}",
+                vi_name="OxfordMercuryiPS",
+            )
 
     def _query(self, cmd: str) -> str:
         try:
@@ -262,3 +312,17 @@ class OxfordMercuryiPS:
                 f"Mercury iPS query failed ({cmd!r}): {exc}",
                 vi_name="OxfordMercuryiPS",
             ) from exc
+
+    def _get_actn(self) -> str:
+        """Query the raw ACTN code (HOLD / RTOS / RTOZ / CLMP).
+
+        Shared by :meth:`get_status`, :meth:`set_current_setpoint`, and
+        :meth:`clear_clamp` so all three see the same live PSU action state.
+        """
+        resp = self._query("READ:DEV:GRPZ:PSU:ACTN?")
+        # Response: STAT:DEV:GRPZ:PSU:ACTN:HOLD  (or RTOS / RTOZ / CLMP)
+        try:
+            return resp.split(":")[-1].strip()
+        except Exception:
+            log.warning("Could not parse Mercury ACTN from %r", resp)
+            return "HOLD"

@@ -59,16 +59,16 @@ def test_build_station_success(sim_station: Station):
     assert sim_station is not None
     # Check that expected VIs are registered
     vi_names = sim_station.get_vi_names()
-    expected = ["magnet_x", "magnet_y", "temperature_vti", "temperature_sample", "level_meter", "keithley_delta_mode", "dc_measurement"]
+    expected = ["magnet_z", "magnet_y", "temperature_vti", "temperature_sample", "level_meter", "keithley_delta_mode", "dc_measurement"]
     for name in expected:
         assert name in vi_names
 
 
 def test_station_getattr(sim_station: Station):
-    """station.magnet_x returns correct VI instance."""
-    magnet_x = sim_station.magnet_x
-    assert magnet_x.vi_name == "magnet_x"
-    assert magnet_x.__class__.__name__ == "SuperconductingMagnetVI"
+    """station.magnet_z returns correct VI instance."""
+    magnet_z = sim_station.magnet_z
+    assert magnet_z.vi_name == "magnet_z"
+    assert magnet_z.__class__.__name__ == "SuperconductingMagnetVI"
 
     # Check another one to be sure
     temp_vti = sim_station.temperature_vti
@@ -90,7 +90,7 @@ def _registry_stub():
 
 def test_station_get_vi_returns_named_instance(sim_station: Station):
     """get_vi(name) returns the same instance as attribute access."""
-    assert sim_station.get_vi("magnet_x") is sim_station.magnet_x
+    assert sim_station.get_vi("magnet_z") is sim_station.magnet_z
     with pytest.raises(KeyError):
         sim_station.get_vi("no_such_vi")
 
@@ -110,7 +110,7 @@ def test_station_measurement_vi_names_registration_order(sim_station: Station):
 def test_station_measurement_vi_names_empty_when_none_registered():
     """A station with no measurement VIs reports an empty list."""
     station = Station()
-    station.register_vi("magnet_x", _registry_stub(), "system")
+    station.register_vi("magnet_z", _registry_stub(), "system")
     assert station.measurement_vi_names() == []
 
 
@@ -122,7 +122,7 @@ def test_station_switch_vi_names_registration_order(sim_station: Station):
 def test_station_switch_vi_names_empty_when_none_registered():
     """A station with no switch VIs reports an empty list."""
     station = Station()
-    station.register_vi("magnet_x", _registry_stub(), "system")
+    station.register_vi("magnet_z", _registry_stub(), "system")
     assert station.switch_vi_names() == []
 
 
@@ -132,14 +132,14 @@ def test_get_ramp_status_covers_system_rampables(sim_station: Station):
     a None target."""
     ramps = sim_station.get_ramp_status()
 
-    assert "magnet_x" in ramps
+    assert "magnet_z" in ramps
     assert "temperature_sample" in ramps
     for entry in ramps.values():
         assert {"target", "rate", "ramp_status"} <= set(entry)
 
     # Nothing commanded yet: idle, no target.
-    assert ramps["magnet_x"]["ramp_status"] == "IDLE"
-    assert ramps["magnet_x"]["target"] is None
+    assert ramps["magnet_z"]["ramp_status"] == "IDLE"
+    assert ramps["magnet_z"]["target"] is None
 
     # Measurement VIs are not ramp targets and must not appear.
     assert "dc_measurement" not in ramps
@@ -147,10 +147,10 @@ def test_get_ramp_status_covers_system_rampables(sim_station: Station):
 
 def test_get_ramp_status_reports_active_target(sim_station: Station):
     """After a system VI starts ramping, its live target shows up in the aggregate."""
-    sim_station.process_system_targets({"magnet_x": Target(1.0)})
+    sim_station.process_system_targets({"magnet_z": Target(1.0)})
     ramps = sim_station.get_ramp_status()
-    assert ramps["magnet_x"]["ramp_status"] == "RAMPING"
-    assert ramps["magnet_x"]["target"] == pytest.approx(1.0)
+    assert ramps["magnet_z"]["ramp_status"] == "RAMPING"
+    assert ramps["magnet_z"]["target"] == pytest.approx(1.0)
 
 
 def test_get_state_format(sim_station: Station):
@@ -162,7 +162,7 @@ def test_get_state_format(sim_station: Station):
         assert name in state
     
     # Assert a specific VI state contains its @monitored variables
-    magnet_state = state["magnet_x"]
+    magnet_state = state["magnet_z"]
     assert "magnet_current" in magnet_state
     assert "get_field" in magnet_state
     assert "magnet_status" in magnet_state
@@ -174,49 +174,49 @@ def test_get_state_error_handling(sim_station: Station):
     sim_station.get_state()
     
     # Force the simulated magnet driver to simulate an error
-    magnet_x = sim_station.magnet_x
-    magnet_x._driver._simulate_error = True
+    magnet_z = sim_station.magnet_z
+    magnet_z._driver._simulate_error = True
     
     # 1st error -> should return stale data with _stale: True
     state = sim_station.get_state()
-    assert state["magnet_x"]["_stale"] is True
-    assert "_disconnected" not in state["magnet_x"]
-    assert sim_station._error_counts["magnet_x"] == 1
+    assert state["magnet_z"]["_stale"] is True
+    assert "_disconnected" not in state["magnet_z"]
+    assert sim_station._error_counts["magnet_z"] == 1
     
     # 2nd error
     sim_station.get_state()
-    assert sim_station._error_counts["magnet_x"] == 2
+    assert sim_station._error_counts["magnet_z"] == 2
     
     # 3rd error -> should now also have _disconnected: True
     state = sim_station.get_state()
-    assert state["magnet_x"]["_stale"] is True
-    assert state["magnet_x"].get("_disconnected") is True
-    assert sim_station._error_counts["magnet_x"] == 3
+    assert state["magnet_z"]["_stale"] is True
+    assert state["magnet_z"].get("_disconnected") is True
+    assert sim_station._error_counts["magnet_z"] == 3
 
 
 def test_process_system_targets_forwards_persistent_key(sim_station: Station):
     """An optional 'persistent' key in a target dict is forwarded to start_ramp().
 
-    sim_cryostat's magnet_x is a plain SuperconductingMagnetVI, which accepts
+    sim_cryostat's magnet_z is a plain SuperconductingMagnetVI, which accepts
     persistent= as a no-op — this must not raise, so any procedure can include
     'persistent' in a magnet target regardless of which magnet VI flavor a
     config wires up.
     """
-    sim_station.process_system_targets({"magnet_x": Target(1.0, persistent=False)})
-    assert sim_station.magnet_x.ramp_status() == "RAMPING"
+    sim_station.process_system_targets({"magnet_z": Target(1.0, persistent=False)})
+    assert sim_station.magnet_z.ramp_status() == "RAMPING"
 
 
 def test_process_system_targets_dispatch(sim_station: Station):
     """process_system_targets dispatches to correct VIs only."""
     targets = {
-        "magnet_x": Target(1.0),
+        "magnet_z": Target(1.0),
         "temperature_vti": Target(150.0)
     }
 
     sim_station.process_system_targets(targets)
 
     # Verify that the ramps have started
-    assert sim_station.magnet_x.ramp_status() == "RAMPING"
+    assert sim_station.magnet_z.ramp_status() == "RAMPING"
     assert sim_station.temperature_vti.ramp_status() == "RAMPING"
 
     # Verify that un-targeted system VIs are NOT ramping
@@ -234,17 +234,17 @@ def test_check_ramps(sim_station: Station):
     assert sim_station.check_ramps() is True
     
     # Start a ramp
-    sim_station.process_system_targets({"magnet_x": Target(1.0)})
+    sim_station.process_system_targets({"magnet_z": Target(1.0)})
 
     # While ramping, should return False
     assert sim_station.check_ramps() is False
     
     # Force the ramp to complete
-    # For magnet_x, it uses a generator and advances the actual value. We can force the target.
+    # For magnet_z, it uses a generator and advances the actual value. We can force the target.
     # We will simulate enough ticks until the magnet reaches the setpoint.
     # The sim driver has a ramp_rate (5.0 A/min = 0.083 A/s).
     # Target 1.0 T = 10 A. By setting the driver's current to the target, we make it reach HOLD immediately.
-    magnet_driver = sim_station.magnet_x._driver
+    magnet_driver = sim_station.magnet_z._driver
     magnet_driver._current = 10.0
     magnet_driver._setpoint = 10.0
     magnet_driver._status = "HOLD"
@@ -326,7 +326,7 @@ def test_check_safety_flags_magnet_quench(sim_station: Station):
     sim_station.get_state()
     assert sim_station.check_safety().get("quench", False) is False
 
-    sim_station.magnet_x._driver._simulate_quench = True
+    sim_station.magnet_z._driver._simulate_quench = True
     state = sim_station.get_state()
     safety = sim_station.check_safety(state)
     assert safety["quench"] is True

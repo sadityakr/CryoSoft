@@ -60,7 +60,7 @@ class InstrumentPanel(QGroupBox):
     per-instrument widget lists.
 
     Args:
-        vi_name: The VI's registered name (e.g. ``"magnet_x"``).
+        vi_name: The VI's registered name (e.g. ``"magnet_z"``).
         vi: The VI instance (used for introspection only).
         orchestrator: Orchestrator whose ``states_updated`` signal drives updates.
         parent: Optional Qt parent widget.

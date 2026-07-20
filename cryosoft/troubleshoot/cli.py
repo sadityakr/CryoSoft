@@ -1,10 +1,10 @@
 # ---
 # description: |
-#   One-shot CLI over the troubleshoot engine: scan / probe / check / methods /
-#   idn / read / write / query / send, plus `status` (reads the running app's
-#   operational-status log). Built for agents first: every command
-#   terminates on its own, supports --json, returns exit code 0 (all OK) or
-#   1 (any fault), and appends a JSONL transcript line to cryosoft/logs/.
+#   One-shot CLI over the troubleshoot engine: scan / probe / check / bench-l0 /
+#   methods / idn / read / write / query / send, plus `status` (reads the
+#   running app's operational-status log). Built for agents first: every
+#   command terminates on its own, supports --json, returns exit code 0 (all
+#   OK) or 1 (any fault), and appends a JSONL transcript line to cryosoft/logs/.
 # entry_point: python -m cryosoft.troubleshoot <subcommand> ...
 # dependencies:
 #   - pyvisa (only for commands that touch a real bus)
@@ -28,8 +28,9 @@ Command grammar is API: the setup-supervisor skills and permission allowlists
 hard-code it, so subcommand names and their meanings must stay stable.
 
 Read/write split for permission gating: ``scan``, ``probe``, ``check``,
-``methods``, ``idn``, ``read``, and ``status`` never change instrument state and
-are safe to allowlist (``status`` only reads a log file). ``write`` calls state-changing driver methods and ``query`` /
+``bench-l0``, ``methods``, ``idn``, ``read``, and ``status`` never change
+instrument state and are safe to allowlist (``status`` only reads a log
+file). ``write`` calls state-changing driver methods and ``query`` /
 ``send`` transmit arbitrary raw bytes (a raw query can mutate state too), so
 those three should stay behind a permission prompt.
 
@@ -52,7 +53,9 @@ from cryosoft.core.logging_config import setup_logging
 from cryosoft.troubleshoot import engine, status_reader
 from cryosoft.troubleshoot.engine import (
     DriverBench,
+    L0BenchResult,
     ProbeResult,
+    bench_l0,
     check_config,
     probe_address,
     scan_bus,
@@ -244,6 +247,43 @@ def _cmd_check(args: argparse.Namespace) -> tuple[bool, dict[str, Any]]:
         print(f"Config: {config}")
         _print_probe_table(results)
         print(f"=> {_summarize(results)}")
+    return ok, payload
+
+
+def _print_l0_bench_table(results: list[L0BenchResult]) -> None:
+    for r in results:
+        idn_mark = "OK  " if r.idn_ok else "FAIL"
+        print(f"{r.alias:<20} idn={idn_mark}  {r.idn or r.detail}")
+        if r.getter:
+            getter_mark = "OK  " if r.getter_ok else "FAIL"
+            print(f"{'':<20} {r.getter}()={getter_mark}  {r.getter_value}")
+        elif r.idn_ok:
+            print(f"{'':<20} (no extra zero-arg getter found besides get_idn)")
+
+
+def _cmd_bench_l0(args: argparse.Namespace) -> tuple[bool, dict[str, Any]]:
+    """L0 bench: idn + one passive getter for every driver in a config.
+
+    The automated half of the commissioning skill's L0 rung — zero
+    excitation, no approval needed. Run after `check` is green; a human
+    still has to eyeball whether the returned values are physically
+    plausible (this only proves communication and parsing).
+    """
+    config = resolve_config(args.config)
+    results = bench_l0(config)
+    ok = all(r.ok for r in results)
+    payload = {
+        "config": config,
+        "ok": ok,
+        "results": [r.as_dict() for r in results],
+    }
+    if args.json:
+        _print_json(payload)
+    else:
+        print(f"Config: {config}")
+        _print_l0_bench_table(results)
+        n_ok = sum(1 for r in results if r.ok)
+        print(f"=> {n_ok}/{len(results)} passed L0")
     return ok, payload
 
 
@@ -457,6 +497,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-bus", action="store_true",
                    help="skip the bus-presence scan (probe by opening only)")
     p.set_defaults(func=_cmd_check)
+
+    p = sub.add_parser("bench-l0", parents=[common],
+                       help="L0 bench for every driver in a config: idn + one "
+                            "passive getter (zero excitation, no approval needed)")
+    _add_config_arg(p)
+    p.set_defaults(func=_cmd_bench_l0)
 
     p = sub.add_parser("status", parents=[common],
                        help="summarize the RUNNING app's operational-status log")

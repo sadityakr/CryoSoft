@@ -20,9 +20,9 @@ from cryosoft.core.operational_status import RunFaultCode, build_operational_sta
 
 
 def test_normal_ramp_reports_gap_eta_and_ok():
-    state = {"magnet_x": {"get_field": 0.5, "magnet_status": "RAMPING"}}
+    state = {"magnet_z": {"get_field": 0.5, "magnet_status": "RAMPING"}}
     ramp_info = {
-        "magnet_x": {"value": 0.5, "target": 1.0, "rate": 0.5, "ramp_status": "RAMPING"},
+        "magnet_z": {"value": 0.5, "target": 1.0, "rate": 0.5, "ramp_status": "RAMPING"},
     }
     record, gaps = build_operational_status(
         orch_state="RAMPING",
@@ -34,12 +34,12 @@ def test_normal_ramp_reports_gap_eta_and_ok():
     assert record["orch_state"] == "RAMPING"
     assert record["verdict"] == "OK"
     vi = record["vis"][0]
-    assert vi["vi_name"] == "magnet_x"
+    assert vi["vi_name"] == "magnet_z"
     assert vi["gap"] == pytest.approx(0.5)
     # eta = gap / (rate/60) = 0.5 / (0.5/60) = 60 s
     assert vi["eta_s"] == pytest.approx(60.0)
     assert vi["closing"] is None  # no previous gap
-    assert gaps["magnet_x"] == pytest.approx(0.5)
+    assert gaps["magnet_z"] == pytest.approx(0.5)
 
 
 def test_closing_is_gap_decrease_from_prev_tick():
@@ -78,8 +78,8 @@ def test_disconnected_outranks_stale():
 
 
 def test_quench_sets_verdict():
-    state = {"magnet_x": {"magnet_status": "QUENCH"}}
-    ramp_info = {"magnet_x": {"value": 1.0, "target": 2.0, "rate": 0.5, "ramp_status": "RAMPING"}}
+    state = {"magnet_z": {"magnet_status": "QUENCH"}}
+    ramp_info = {"magnet_z": {"value": 1.0, "target": 2.0, "rate": 0.5, "ramp_status": "RAMPING"}}
     record, _ = build_operational_status(
         orch_state="RAMPING", elapsed_in_state_s=1.0, state=state,
         ramp_info=ramp_info, prev_gaps={},

@@ -42,15 +42,19 @@ real_drivers:
     address: "GPIB0::19::INSTR"
     expect_idn: "KEITHLEY INSTRUMENTS INC.,MODEL 6220"
   
-  # NOTE: no switch_matrix VI wired to this yet — the real Keithley705 driver's
-  # DDC channel-spec format (close/open commands) is UNVERIFIED against
-  # hardware (see cryosoft/drivers/keithley_705.py docstring). Do not add
-  # routes until the command syntax is confirmed against the 705 manual at
-  # the bench.
+  # DDC command set verified against the 705 manual (705-901-01F) and this
+  # instrument at the bench on 2026-07-20: channels are plain numbers 1..20
+  # (U8X reports F001,L020), closed with Cnnn / opened with Nnnn.
+  #
+  # expect_idn is "705", the model prefix of the U4X status word. It was
+  # previously "C001,S0" — that string is the U0X CHANNEL readback (present
+  # channel 001, status 0 = open), i.e. live scanner state, not an identity.
+  # It would have started failing preflight the moment the scanner held a
+  # different channel.
   keithley_705:
     class: cryosoft.drivers.keithley_705.Keithley705
     address: "GPIB0::17::INSTR"
-    expect_idn: "C001,S0"
+    expect_idn: "705"
   
   # NOTE: Keithley 2182A is connected via RS232 serial to the K6220.
   # Delta mode uses the internal serial relay in K6220.configure_and_start_delta().

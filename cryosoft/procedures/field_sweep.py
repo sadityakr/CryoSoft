@@ -12,7 +12,7 @@
 #   - cryosoft.core.procedure (SweepMeasureProcedure)
 #   - cryosoft.core.plan (Target)
 #   - cryosoft.core.sweep_builder (SweepAxis)
-#   - Station must have: magnet_x (system VI), temperature_vti (system VI), and
+#   - Station must have: magnet_z (system VI), temperature_vti (system VI), and
 #     at least one measurement VI (vi_type == "measurement").
 # input: |
 #   station, sample_info, data_directory, and keyword params: measurement_vi
@@ -21,11 +21,11 @@
 #   parameters, and the sweep_axis-generated field_mode/field_start/field_end/
 #   field_steps/field_segments/field_csv_path/field_hysteresis.
 # process: |
-#   initiate() ramps magnet_x to the first field and temperature_vti to the
+#   initiate() ramps magnet_z to the first field and temperature_vti to the
 #   target temperature, arms the selected measurement VI, and assembles the
-#   DataSchema. change_sweep_step() steps magnet_x through the fields. measure()
+#   DataSchema. change_sweep_step() steps magnet_z through the fields. measure()
 #   reads the VI, tags on the field read-back, validates, and saves. standby()
-#   parks magnet_x at 0 T.
+#   parks magnet_z at 0 T.
 # output: |
 #   initiate()/standby() return a PhasePlan, change_sweep_step() a StepPlan|None,
 #   abort() a tuple[Command, ...]. Side effect: an HDF5 file with /data/field_T[N],
@@ -38,6 +38,9 @@
 
 from __future__ import annotations
 
+from typing import Any
+
+from cryosoft.core.exceptions import CryoSoftConfigError
 from cryosoft.core.plan import ParamSpec, Target
 from cryosoft.core.procedure import SweepMeasureProcedure
 from cryosoft.core.sweep_builder import SweepAxis
@@ -54,14 +57,14 @@ class FieldSweep(SweepMeasureProcedure):
     supplies the ramp targets and the axis read-back.
 
     Procedure flow:
-    1. ``initiate()``: ramp ``magnet_x`` to the first field, ``temperature_vti``
+    1. ``initiate()``: ramp ``magnet_z`` to the first field, ``temperature_vti``
        to the target temperature, arm the selected measurement VI.
     2. ``measure()``: read the VI, tag on the field read-back, save.
-    3. ``change_sweep_step()``: step ``magnet_x`` to the next field.
-    4. ``standby()``: park ``magnet_x`` at 0 T, disarm the VI.
+    3. ``change_sweep_step()``: step ``magnet_z`` to the next field.
+    4. ``standby()``: park ``magnet_z`` at 0 T, disarm the VI.
 
     Required VIs in Station:
-        ``magnet_x`` (system), ``temperature_vti`` (system), and at least one
+        ``magnet_z`` (system), ``temperature_vti`` (system), and at least one
         measurement VI. In normal (non-persistent) mode the magnet keeps its
         switch heater energised across the whole sweep, so the per-point ramps
         are plain field targets.
@@ -82,11 +85,30 @@ class FieldSweep(SweepMeasureProcedure):
     default_x_key = sweep_axis.data_key
 
     system_parameters = {
+        "set_vti_temperature": ParamSpec(
+            type=bool,
+            default=True,
+            description="Set the VTI temperature during this run (off = leave it alone)",
+        ),
         "temperature": ParamSpec(
             type=float,
             default=10.0,
             unit="K",
-            description="Sample temperature",
+            description="VTI temperature setpoint (ignored when 'set_vti_temperature' is off)",
+        ),
+        "set_sample_temperature": ParamSpec(
+            type=bool,
+            default=False,
+            description="Set the sample-stage temperature during this run",
+        ),
+        "sample_temperature": ParamSpec(
+            type=float,
+            default=10.0,
+            unit="K",
+            description=(
+                "Sample-stage temperature setpoint "
+                "(ignored when 'set_sample_temperature' is off)"
+            ),
         ),
         "init_wait": ParamSpec(
             type=float,
@@ -106,24 +128,55 @@ class FieldSweep(SweepMeasureProcedure):
     # Axis-specific hooks (SweepMeasureProcedure owns the four-method loop)
     # ------------------------------------------------------------------
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Build the procedure, then check the switched-on temperature channels exist.
+
+        A channel the user switched ON must actually be present on the station.
+        Failing here, at construction, beats discovering it mid-run: silently
+        measuring while a requested setpoint was never applied would corrupt a
+        dataset whose metadata claims that temperature. A switched-OFF channel
+        is not required to exist, so a station with no sample loop runs fine.
+
+        Raises:
+            CryoSoftConfigError: If an enabled temperature channel has no VI.
+        """
+        super().__init__(*args, **kwargs)
+        for toggle, vi_name in (
+            ("set_vti_temperature", "temperature_vti"),
+            ("set_sample_temperature", "temperature_sample"),
+        ):
+            if self._params[toggle] and not self._station.has_vi(vi_name):
+                raise CryoSoftConfigError(
+                    f"'{toggle}' is on, but this station has no '{vi_name}' VI. "
+                    f"Switch {toggle} off, or configure that controller."
+                )
+
     def _initial_system_targets(self) -> dict[str, Target]:
-        """Ramp ``magnet_x`` to the first field and ``temperature_vti`` to target T."""
-        return {
-            "magnet_x": Target(self._sweep[0]),
-            "temperature_vti": Target(self._params["temperature"]),
-        }
+        """Ramp ``magnet_z`` to the first field and any enabled temperature channels.
+
+        A channel whose toggle is off is simply absent from the returned dict, so
+        the Orchestrator never ramps it and the controller holds wherever the
+        operator left it. Monitoring is unaffected — readings come from the tick
+        loop's monitor pass, not from targets.
+        """
+        targets = {"magnet_z": Target(self._sweep[0])}
+        if self._params["set_vti_temperature"]:
+            targets["temperature_vti"] = Target(self._params["temperature"])
+        if self._params["set_sample_temperature"]:
+            targets["temperature_sample"] = Target(self._params["sample_temperature"])
+        return targets
 
     def _step_targets(self, index: int) -> dict[str, Target]:
-        """Ramp ``magnet_x`` to the field at *index*."""
-        return {"magnet_x": Target(self._sweep[index])}
+        """Ramp ``magnet_z`` to the field at *index*."""
+        return {"magnet_z": Target(self._sweep[index])}
 
     def _standby_targets(self) -> dict[str, Target]:
-        """Park ``magnet_x`` at 0 T (switch heater stays on — see class docstring)."""
-        return {"magnet_x": Target(0.0)}
+        """Park ``magnet_z`` at 0 T (switch heater stays on — see class docstring)."""
+        return {"magnet_z": Target(0.0)}
 
     def _axis_readback(self) -> float:
-        """Read the current field from ``magnet_x``."""
-        return self._station.magnet_x.get_field()
+        """Read the current field from ``magnet_z``."""
+        return self._station.magnet_z.get_field()
 
     def _initiate_wait_s(self) -> float:
         """Settle time after the initial ramp (``init_wait``)."""

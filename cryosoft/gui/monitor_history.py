@@ -120,7 +120,7 @@ class MonitorHistory:
         """Return the recorded time series for a flat key.
 
         Args:
-            key: Flat key as produced by ``record()`` (e.g. ``"magnet_x_get_field"``).
+            key: Flat key as produced by ``record()`` (e.g. ``"magnet_z_get_field"``).
             window_s: If given, only include points with ``t >= now - window_s``.
                 ``None`` (the default) returns the full retained history.
             now: Reference time for windowing. Defaults to ``time.time()``

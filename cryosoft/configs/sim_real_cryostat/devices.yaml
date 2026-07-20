@@ -39,7 +39,7 @@ real_drivers:
     address: "SIM::K2182A"
 
 virtual_instruments:
-  magnet_x:
+  magnet_z:
     class: cryosoft.virtual_instruments.magnet.superconducting_magnet_persistent.SuperconductingMagnetPersistentVI
     drivers: {main: mercury_ips}
     vi_type: system

@@ -48,7 +48,7 @@ from cryosoft.session.servicing_log import (
 
 @pytest.fixture
 def station():
-    """Build a real simulated station (sim_cryostat: magnet_x, magnet_y, ...)."""
+    """Build a real simulated station (sim_cryostat: magnet_z, magnet_y, ...)."""
     return build_station("cryosoft/configs/sim_cryostat")
 
 
@@ -122,7 +122,7 @@ class _BlockingProcedure:
         self._station = station
 
     def initiate(self):
-        return PhasePlan(targets={"magnet_x": Target(1.0)}, commands=(), wait_s=0.0)
+        return PhasePlan(targets={"magnet_z": Target(1.0)}, commands=(), wait_s=0.0)
 
     def change_sweep_step(self):
         return None
@@ -131,7 +131,7 @@ class _BlockingProcedure:
         pass
 
     def standby(self):
-        return PhasePlan(targets={"magnet_x": Target(0.0)}, commands=(), wait_s=0.0)
+        return PhasePlan(targets={"magnet_z": Target(0.0)}, commands=(), wait_s=0.0)
 
 
 # ── Construction ─────────────────────────────────────────────────────────────
@@ -182,8 +182,8 @@ def test_sample_change_end_to_end(orchestrator, station, qtbot):
     """Zero-field + 300 K ramps, all postconditions held, done manifest, no data file."""
     _fast_magnets(station)
     _fast_vti(station)
-    station.magnet_x._driver._current = 5.0
-    station.magnet_x._driver._setpoint = 5.0
+    station.magnet_z._driver._current = 5.0
+    station.magnet_z._driver._setpoint = 5.0
     station.temperature_vti._driver._temperature = 250.0
     station.temperature_vti._driver._setpoint = 250.0
 
@@ -355,7 +355,7 @@ def test_sample_change_refused_while_procedure_runs(orchestrator, station, qtbot
     proc = _BlockingProcedure(station)
     orchestrator.run_procedure(proc)
     assert orchestrator._procedure is proc
-    assert station.magnet_x.ramp_status() == "RAMPING"
+    assert station.magnet_z.ramp_status() == "RAMPING"
 
     blocked: list[str] = []
     orchestrator.action_blocked.connect(blocked.append)

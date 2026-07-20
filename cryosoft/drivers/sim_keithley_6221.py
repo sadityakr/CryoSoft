@@ -18,8 +18,10 @@
 #   return to exercise the delta VI's NaN-padding + n_valid contract. A private
 #   _mode ("DC"/"DELTA") test hook mirrors the real instrument's SCPI function
 #   mode so tests can catch a measurement VI that assumes a starting mode
-#   instead of asserting its own (shared-instrument mode discipline).
-# last_updated: 2026-07-18
+#   instead of asserting its own (shared-instrument mode discipline). A
+#   private _meter_present test hook mirrors the real driver's NVPR-absent
+#   failure (2182A unreachable on the RS-232 relay).
+# last_updated: 2026-07-20
 # ---
 
 """Simulated Keithley 6221 AC/DC Current Source driver."""
@@ -83,6 +85,12 @@ class SimKeithley6221:
         # tests can exercise the VI's NaN-padding + n_valid contract. Private,
         # so it is not part of the public API parity check.
         self._delta_return_count: int | None = None
+
+        # Mirrors the real driver's :SOUR:DELT:NVPR? check — set False to
+        # model a 2182A that is powered off, uncabled, or left in GPIB mode
+        # on its own front panel (unreachable via the 6221's RS-232 relay).
+        # Private test hook, not part of the public API parity check.
+        self._meter_present: bool = True
 
     # ------------------------------------------------------------------
     # Public API
@@ -209,7 +217,17 @@ class SimKeithley6221:
             range_2182a: 2182A range (V) — stored but unused in sim.
             compliance_abort: Delta compliance-abort flag — stored but unused in sim.
             cold_switch: Delta cold-switch flag — stored but unused in sim.
+
+        Raises:
+            CryoSoftCommunicationError: If ``_meter_present`` has been set
+                False, mirroring the real driver's NVPR-absent failure.
         """
+        if not self._meter_present:
+            raise CryoSoftCommunicationError(
+                "Simulated Keithley 6221: no 2182A detected on the RS-232 "
+                "serial relay.",
+                vi_name="SimKeithley6221",
+            )
         self._mode = "DELTA"
         self._delta_high_current = float(high_current)
         self._delta_n_readings = int(n_readings)
