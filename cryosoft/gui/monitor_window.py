@@ -176,6 +176,10 @@ class MonitorWindow(QMainWindow):
             keeps (``Station.read_servicing_logs_config()``), or None/empty.
         cryogenics_recorder: The active CryogenicsRecorder, or None — only
             used to connect its ``cryo_warning`` signal to the banner.
+        panels_config: The active config's ``panels:`` block
+            (``Station.read_panels_config()``): per-VI allowlists of the
+            controls shown on the compact instrument cards. None/empty means
+            every VI keeps its declared ``panel=`` defaults.
     """
 
     def __init__(
@@ -194,10 +198,12 @@ class MonitorWindow(QMainWindow):
         servicing_store: ServicingLogStore | None = None,
         servicing_log_kinds: list[str] | None = None,
         cryogenics_recorder: CryogenicsRecorder | None = None,
+        panels_config: dict[str, list[str]] | None = None,
     ) -> None:
         super().__init__(parent)
         self._station = station
         self._orchestrator = orchestrator
+        self._panels_config = dict(panels_config or {})
         self._procedure_window = None  # lazily created
         self._diagnostics_window = None  # lazily created
 
@@ -580,7 +586,13 @@ class MonitorWindow(QMainWindow):
         grid.setSpacing(6)
         for idx, vi_name in enumerate(self._system_vi_names):
             vi = self._station._virtual_instruments[vi_name]
-            panel = InstrumentPanel(vi_name, vi, self._orchestrator, parent=self)
+            panel = InstrumentPanel(
+                vi_name,
+                vi,
+                self._orchestrator,
+                parent=self,
+                panel_controls=self._panels_config.get(vi_name),
+            )
             panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             self._panels.append(panel)
             row, col = divmod(idx, 2)

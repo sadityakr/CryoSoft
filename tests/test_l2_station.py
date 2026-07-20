@@ -54,6 +54,46 @@ def test_build_station_passes_address_to_driver(tmp_path):
     assert _AddressCapturingDriver.last_resource == "GPIB0::19::INSTR"
 
 
+def test_read_panels_config_well_formed(tmp_path):
+    """read_panels_config returns per-VI control allowlists from monitor.yaml."""
+    from cryosoft.core.station import read_panels_config
+
+    (tmp_path / "monitor.yaml").write_text(
+        "monitor:\n  tick_interval_ms: 1000\n"
+        "panels:\n"
+        "  temperature_vti:\n"
+        "    controls: [set_temperature]\n"
+        "  magnet_z:\n"
+        "    controls: [set_field, set_ramp_rate]\n"
+    )
+    assert read_panels_config(str(tmp_path)) == {
+        "temperature_vti": ["set_temperature"],
+        "magnet_z": ["set_field", "set_ramp_rate"],
+    }
+
+
+def test_read_panels_config_tolerates_absent_or_malformed(tmp_path):
+    """Absent block, malformed entries, or a missing file yield {} / skip, never raise."""
+    from cryosoft.core.station import read_panels_config
+
+    # No monitor.yaml at all.
+    assert read_panels_config(str(tmp_path / "nowhere")) == {}
+    # No panels block.
+    (tmp_path / "monitor.yaml").write_text("monitor:\n  tick_interval_ms: 1000\n")
+    assert read_panels_config(str(tmp_path)) == {}
+    # Malformed entries are skipped; the well-formed one survives.
+    (tmp_path / "monitor.yaml").write_text(
+        "monitor:\n  tick_interval_ms: 1000\n"
+        "panels:\n"
+        "  bad_scalar: just_a_string\n"
+        "  bad_no_controls:\n"
+        "    other_key: 1\n"
+        "  good_vi:\n"
+        "    controls: [set_x]\n"
+    )
+    assert read_panels_config(str(tmp_path)) == {"good_vi": ["set_x"]}
+
+
 def test_build_station_success(sim_station: Station):
     """build_station('cryosoft/configs/sim_cryostat') works without errors."""
     assert sim_station is not None

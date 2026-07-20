@@ -45,7 +45,19 @@ every `configs/<name>/` directory:
 
 `monitor.yaml` structure: a `monitor:` block with `tick_interval_ms` (the single
 QTimer tick period) and `max_vi_errors` (consecutive VI-error tolerance before
-escalation).
+escalation). Optionally a `panels:` block customizing which controls each VI's
+compact monitor card shows (display-only; every control stays available in the
+instrument's front panel, and safety limits are unaffected):
+
+```yaml
+panels:
+  temperature_vti:
+    controls: [set_temperature]   # allowlist; overrides the VI's panel= defaults
+```
+
+A VI absent from `panels:` shows the controls its `@control` declarations mark
+`panel=True` (the default). Conformance checks every listed VI and control name
+against `devices.yaml`.
 
 ## How to add a new module
 1. Create `configs/<name>/` with a `devices.yaml` and a `monitor.yaml`.

@@ -984,6 +984,76 @@ def _load_devices_yaml(config_path: str) -> dict[str, Any] | None:
         return None
 
 
+def _load_monitor_yaml(config_path: str) -> dict[str, Any] | None:
+    """Parse ``monitor.yaml`` under *config_path*, GUI-safe.
+
+    Mirrors ``_load_devices_yaml`` for the display-side config file: YAML-parse
+    only, never instantiates anything, never raises.
+
+    Args:
+        config_path: Path to the config directory containing ``monitor.yaml``.
+
+    Returns:
+        The parsed mapping, or ``None`` if ruamel.yaml is unavailable, the
+        file is missing/unreadable, or the YAML is malformed.
+    """
+    try:
+        from ruamel.yaml import YAML  # type: ignore
+    except ImportError:
+        return None
+
+    monitor_file = Path(config_path) / "monitor.yaml"
+    try:
+        with monitor_file.open("r", encoding="utf-8") as f:
+            return dict(YAML().load(f) or {})
+    except OSError:
+        return None
+    except Exception:  # noqa: BLE001 — malformed YAML must not break the GUI
+        return None
+
+
+def read_panels_config(config_path: str) -> dict[str, list[str]]:
+    """Read the optional ``panels:`` block of ``monitor.yaml``, GUI-safe.
+
+    Which controls a setup's operators use day-to-day is a display property
+    of the setup, so it lives in the config: each entry allowlists the
+    controls shown on that VI's compact monitor card, overriding the
+    ``panel=`` defaults the VI's ``@control`` declarations carry. A VI absent
+    from the block keeps its declared defaults; every control, listed or
+    not, remains available in the instrument's front panel. Display-only —
+    hiding a control never disables it, and safety stays with
+    ``control_limits``.
+
+    Expected shape::
+
+        panels:
+          temperature_vti:
+            controls: [set_temperature]
+
+    Args:
+        config_path: Path to the config directory containing ``monitor.yaml``.
+
+    Returns:
+        ``{vi_name: [control_method_name, ...]}`` for every well-formed
+        entry (a ``controls:`` list of strings). ``{}`` when the block is
+        absent or the file/YAML is unreadable — never raises.
+    """
+    monitor_config = _load_monitor_yaml(config_path)
+    if monitor_config is None:
+        return {}
+    block = monitor_config.get("panels")
+    if not isinstance(block, dict):
+        return {}
+    result: dict[str, list[str]] = {}
+    for vi_name, entry in block.items():
+        if not isinstance(entry, dict):
+            continue
+        controls = entry.get("controls")
+        if isinstance(controls, list):
+            result[str(vi_name)] = [str(name) for name in controls]
+    return result
+
+
 def read_cryogenics_config(config_path: str) -> dict[str, Any]:
     """Read the optional ``cryogenics:`` block, GUI-safe, with defaults applied.
 

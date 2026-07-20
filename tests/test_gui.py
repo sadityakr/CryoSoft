@@ -374,6 +374,53 @@ def test_spec_controls_unparseable_value_aborts_submit(spec_panel, monkeypatch):
     assert len(warnings) == 1
 
 
+class _PanelFlagVI(BaseVirtualInstrument):
+    """Mock VI with one card-default control and one front-panel-only control."""
+
+    vi_type = "mock"
+
+    @control
+    def set_temperature(self, target_K: float = 4.2):
+        return target_K
+
+    @control(panel=False)
+    def set_heater_power(self, power_W: float = 0.0):
+        return power_W
+
+
+def test_panel_false_control_hidden_by_default(orchestrator, qtbot):
+    """Without a config allowlist, panel=False controls stay off the card."""
+    panel = InstrumentPanel("mock_vi", _PanelFlagVI({}), orchestrator)
+    qtbot.addWidget(panel)
+    assert panel.findChild(QPushButton, "mock_vi_set_temperature_btn") is not None
+    assert panel.findChild(QPushButton, "mock_vi_set_heater_power_btn") is None
+
+
+def test_config_allowlist_overrides_panel_defaults(orchestrator, qtbot):
+    """A panels: allowlist wins in both directions: it can surface a
+    panel=False control and hide a panel=True one."""
+    panel = InstrumentPanel(
+        "mock_vi", _PanelFlagVI({}), orchestrator,
+        panel_controls=["set_heater_power"],
+    )
+    qtbot.addWidget(panel)
+    assert panel.findChild(QPushButton, "mock_vi_set_heater_power_btn") is not None
+    assert panel.findChild(QPushButton, "mock_vi_set_temperature_btn") is None
+
+
+def test_monitor_window_threads_panels_config(station, orchestrator, qtbot):
+    """MonitorWindow passes each VI's panels: allowlist into its card."""
+    win = MonitorWindow(
+        station, orchestrator,
+        panels_config={"magnet_z": []},  # hide every magnet_z control
+    )
+    qtbot.addWidget(win)
+    win.show()
+    assert win.findChild(QPushButton, "magnet_z_set_field_btn") is None
+    # An unlisted VI keeps its declared defaults.
+    assert win.findChild(QPushButton, "magnet_y_set_field_btn") is not None
+
+
 def test_instrument_panel_status_not_restyled_when_unchanged(
     station, orchestrator, qtbot, monkeypatch
 ):

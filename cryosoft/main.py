@@ -55,6 +55,7 @@ from cryosoft.core.station import (
     build_station_with_fallback,
     read_cryogenics_config,
     read_operations_config,
+    read_panels_config,
     read_servicing_logs_config,
 )
 from cryosoft.gui import app_settings, form_autosave
@@ -212,6 +213,7 @@ def main() -> None:
         servicing_store=servicing_store,
         servicing_log_kinds=servicing_log_kinds,
         cryogenics_recorder=cryogenics_recorder,
+        panels_config=read_panels_config(used_path),
     )
     monitor.show()
 

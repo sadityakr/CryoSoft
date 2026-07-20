@@ -452,6 +452,35 @@ def test_config_schema(config_dir: Path) -> None:
             )
 
 
+@pytest.mark.parametrize("config_dir", _config_dirs(), ids=lambda p: p.name)
+def test_panels_config_names_real_vis_and_controls(config_dir: Path) -> None:
+    """Every monitor.yaml panels: entry names a declared VI and its @control methods.
+
+    A typo'd VI or control name would otherwise fail silently — the card
+    would just render without the control the operator expected.
+    """
+    from cryosoft.core.station import read_panels_config
+
+    panels = read_panels_config(str(config_dir))
+    if not panels:
+        return
+    devices = _load_yaml(config_dir / "devices.yaml")
+    declared_vis = devices.get("virtual_instruments", {})
+    for vi_name, controls in panels.items():
+        assert vi_name in declared_vis, (
+            f"{config_dir.name}/monitor.yaml panels: names VI '{vi_name}', "
+            f"which devices.yaml does not declare"
+        )
+        vi_cls = _import_class(declared_vis[vi_name]["class"])
+        control_names = set(_control_methods(vi_cls))
+        for control_name in controls:
+            assert control_name in control_names, (
+                f"{config_dir.name}/monitor.yaml panels: {vi_name} lists "
+                f"'{control_name}', which is not a @control method on "
+                f"{vi_cls.__name__}"
+            )
+
+
 # ── Cryogenics config block ───────────────────────────────────────────────────
 # See docs/plans/cryogenics-logbook.md §9: an optional cryogenics: block plus
 # a servicing_logs: list. A config that declares neither carries zero

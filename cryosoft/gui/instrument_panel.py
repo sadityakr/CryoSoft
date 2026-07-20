@@ -49,6 +49,7 @@ from PyQt6.QtWidgets import (
 
 from cryosoft.core.decorators import (
     get_control_methods,
+    get_control_panel,
     get_control_specs,
     get_monitored_methods,
 )
@@ -76,6 +77,11 @@ class InstrumentPanel(QGroupBox):
         vi: The VI instance (used for introspection only).
         orchestrator: Orchestrator whose ``states_updated`` signal drives updates.
         parent: Optional Qt parent widget.
+        panel_controls: Optional allowlist of @control method names to show
+            (a setup's ``monitor.yaml`` ``panels:`` entry for this VI). When
+            None, each control's own declared ``panel=`` default decides.
+            Display-only — a hidden control stays fully functional in the
+            instrument's front panel.
     """
 
     def __init__(
@@ -84,11 +90,13 @@ class InstrumentPanel(QGroupBox):
         vi: BaseVirtualInstrument,
         orchestrator: Orchestrator,
         parent: QWidget | None = None,
+        panel_controls: list[str] | None = None,
     ) -> None:
         super().__init__(parent)  # no native title — see module docstring
         self._vi_name = vi_name
         self._vi = vi
         self._orchestrator = orchestrator
+        self._panel_controls = panel_controls
 
         # Maps field name → value label widget
         self._value_labels: dict[str, QLabel] = {}
@@ -148,6 +156,8 @@ class InstrumentPanel(QGroupBox):
 
         # ── Control methods ───────────────────────────────────────────
         for method_name, params in get_control_methods(self._vi).items():
+            if not self._control_visible(method_name):
+                continue
             outer.addWidget(self._build_control_row(method_name, params))
 
         # Absorb any extra vertical space so control rows never expand beyond
@@ -155,6 +165,22 @@ class InstrumentPanel(QGroupBox):
         outer.addStretch()
 
         self.setLayout(outer)
+
+    def _control_visible(self, method_name: str) -> bool:
+        """Decide whether one @control appears on this compact card.
+
+        A config allowlist (``panels:`` in ``monitor.yaml``) wins when given;
+        otherwise the control's own ``panel=`` declaration decides.
+
+        Args:
+            method_name: The @control method name.
+
+        Returns:
+            True when the control's row should be built.
+        """
+        if self._panel_controls is not None:
+            return method_name in self._panel_controls
+        return get_control_panel(getattr(self._vi, method_name))
 
     def _build_control_row(self, method_name: str, params: dict) -> QWidget:
         """Build one @control method row: button + input widgets.
