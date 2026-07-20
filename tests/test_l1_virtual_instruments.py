@@ -1,4 +1,4 @@
-# ---
+﻿# ---
 # description: |
 #   Complete test suite for Layer 1 Virtual Instruments.
 # entry_point: pytest tests/test_l1_virtual_instruments.py -v
@@ -214,7 +214,7 @@ def test_delta_mode_vi():
     with pytest.raises(RuntimeError):
         vi.take_reading()
 
-    vi.initiate(current=1e-6, n_readings=10, delay_s=0.001)
+    vi.initiate_measurement(current=1e-6, n_readings=10, delay_s=0.001)
 
     data = vi.take_reading()
     assert "voltage_V" in data
@@ -238,7 +238,7 @@ def test_delta_mode_vi_forwards_all_config_params():
     source._paired_meter = meter
     vi = DeltaModeMeasurementVI({"source": source, "meter": meter})
 
-    vi.initiate(
+    vi.initiate_measurement(
         current=2e-6,
         n_readings=5,
         delay_s=0.002,
@@ -271,7 +271,7 @@ def test_delta_mode_initiate_raises_when_meter_not_detected():
     vi = DeltaModeMeasurementVI({"source": source, "meter": meter})
 
     with pytest.raises(CryoSoftCommunicationError):
-        vi.initiate(current=1e-6, n_readings=10, delay_s=0.001)
+        vi.initiate_measurement(current=1e-6, n_readings=10, delay_s=0.001)
 
 
 def test_delta_mode_declares_current_reading_setter():
@@ -308,7 +308,7 @@ def test_delta_mode_set_current_rearms_and_reports_new_current():
     source._paired_meter = meter
     vi = DeltaModeMeasurementVI({"source": source, "meter": meter})
 
-    vi.initiate(current=1e-6, n_readings=4, delay_s=0.001)
+    vi.initiate_measurement(current=1e-6, n_readings=4, delay_s=0.001)
     vi.set_delta_current(5e-6)
 
     assert source._mode == "DELTA"
@@ -333,7 +333,7 @@ def test_delta_mode_set_current_preserves_other_armed_params():
     source._paired_meter = meter
     vi = DeltaModeMeasurementVI({"source": source, "meter": meter})
 
-    vi.initiate(
+    vi.initiate_measurement(
         current=2e-6,
         n_readings=5,
         delay_s=0.002,
@@ -372,7 +372,7 @@ def test_delta_mode_short_return_is_nan_padded():
     source._delta_return_count = 3
 
     vi = DeltaModeMeasurementVI({"source": source, "meter": meter})
-    vi.initiate(current=1e-6, n_readings=10, delay_s=0.001)
+    vi.initiate_measurement(current=1e-6, n_readings=10, delay_s=0.001)
     data = vi.take_reading()
 
     assert len(data["voltage_V"]) == 10
@@ -410,11 +410,11 @@ def test_dc_separate_initiate_recovers_from_stale_delta_arm():
     source._paired_meter = meter
 
     delta_vi = DeltaModeMeasurementVI({"source": source, "meter": meter})
-    delta_vi.initiate(current=1e-6, n_readings=5)
+    delta_vi.initiate_measurement(current=1e-6, n_readings=5)
     assert source._mode == "DELTA"
 
     dc_vi = DCSeparateMeasurementVI({"source": source, "meter": meter})
-    dc_vi.initiate(current_A=5e-6)
+    dc_vi.initiate_measurement(current_A=5e-6)
 
     assert source._mode == "DC"
     assert source.get_current() == pytest.approx(5e-6)
@@ -440,11 +440,11 @@ def test_delta_mode_initiate_recovers_from_prior_dc_current():
     source._paired_meter = meter
 
     dc_vi = DCSeparateMeasurementVI({"source": source, "meter": meter})
-    dc_vi.initiate(current_A=5e-6)
+    dc_vi.initiate_measurement(current_A=5e-6)
     assert source._mode == "DC"
 
     delta_vi = DeltaModeMeasurementVI({"source": source, "meter": meter})
-    delta_vi.initiate(current=1e-6, n_readings=5, delay_s=0.001)
+    delta_vi.initiate_measurement(current=1e-6, n_readings=5, delay_s=0.001)
     assert source._mode == "DELTA"
 
     data = delta_vi.take_reading()

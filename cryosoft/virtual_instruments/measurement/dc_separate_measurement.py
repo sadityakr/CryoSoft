@@ -1,8 +1,8 @@
-# ---
+﻿# ---
 # description: |
 #   DCSeparateMeasurementVI: behavior-based VI for DC resistance measurements
 #   using a dedicated current source and a separate voltmeter.
-#   initiate() arms the source with a fixed current, compliance, voltmeter
+#   initiate_measurement() arms the source with a fixed current, compliance, voltmeter
 #   range and readings-per-point. take_reading() collects that many voltage
 #   samples at the fixed current. Declares reading_setters
 #   {"current_A": "set_source_current"} so the generic sweep procedure's
@@ -14,10 +14,10 @@
 #   - cryosoft.core.decorators (control)
 # input: |
 #   drivers = {"source": <current source driver>, "meter": <voltmeter driver>}
-#   initiate(current_A, compliance_A, voltmeter_range_V, readings_per_point)
+#   initiate_measurement(current_A, compliance_A, voltmeter_range_V, readings_per_point)
 #   must be called before the argument-less take_reading().
 # process: |
-#   initiate() stores measurement parameters and programs both instruments.
+#   initiate_measurement() stores measurement parameters and programs both instruments.
 #   take_reading() acquires readings_per_point voltage samples and returns them
 #   alongside a constant current array. set_source_current() reprograms only
 #   the source current between readings (the reading loop's setter command).
@@ -48,7 +48,7 @@ class DCSeparateMeasurementVI(DCMeasurementBase):
 
     Workflow::
 
-        vi.initiate(current_A=1e-6, compliance_A=1e-3, voltmeter_range_V=0.1,
+        vi.initiate_measurement(current_A=1e-6, compliance_A=1e-3, voltmeter_range_V=0.1,
                     readings_per_point=50)
         data = vi.take_reading()
         # data = {"voltage_V": list[float](50,), "current_A": list[float](50,)}
@@ -93,8 +93,10 @@ class DCSeparateMeasurementVI(DCMeasurementBase):
     # DCMeasurementBase implementation
     # ------------------------------------------------------------------
 
-    @control
-    def initiate(
+    # panel=False: arming is a deliberate act — reachable from the front
+    # panel and from procedures, never from the compact monitor card.
+    @control(panel=False)
+    def initiate_measurement(
         self,
         current_A: float = 1e-6,
         compliance_A: float = 1e-3,
@@ -126,13 +128,13 @@ class DCSeparateMeasurementVI(DCMeasurementBase):
 
         Returns:
             ``{"voltage_V": list[float], "current_A": list[float]}`` of length
-            ``readings_per_point`` (fixed at ``initiate()``).
+            ``readings_per_point`` (fixed at ``initiate_measurement()``).
 
         Raises:
-            RuntimeError: If ``initiate()`` has not been called first.
+            RuntimeError: If ``initiate_measurement()`` has not been called first.
         """
         if self._current_A is _NOT_INITIATED:
-            raise RuntimeError("initiate() must be called before take_reading().")
+            raise RuntimeError("initiate_measurement() must be called before take_reading().")
 
         current = float(self._current_A)
         meter = self._meter  # type: ignore[attr-defined]
@@ -157,10 +159,10 @@ class DCSeparateMeasurementVI(DCMeasurementBase):
             current_A: New DC source current in Amperes (may be negative).
 
         Raises:
-            RuntimeError: If ``initiate()`` has not been called first.
+            RuntimeError: If ``initiate_measurement()`` has not been called first.
         """
         if self._current_A is _NOT_INITIATED:
-            raise RuntimeError("initiate() must be called before set_source_current().")
+            raise RuntimeError("initiate_measurement() must be called before set_source_current().")
         self._current_A = float(current_A)
         self._source.set_current(self._current_A)  # type: ignore[attr-defined]
 

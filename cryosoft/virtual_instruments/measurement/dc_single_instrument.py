@@ -1,4 +1,4 @@
-# ---
+﻿# ---
 # description: |
 #   DCSingleInstrumentVI: behavior-based VI for DC resistance measurements
 #   using a single source-measure unit (SMU) that both sources current and
@@ -10,10 +10,10 @@
 #   - cryosoft.core.decorators (control)
 # input: |
 #   drivers = {"main": <SMU driver instance, e.g. Keithley 2400>}
-#   initiate(current_A, compliance_A, voltmeter_range_V, readings_per_point)
+#   initiate_measurement(current_A, compliance_A, voltmeter_range_V, readings_per_point)
 #   must be called before the argument-less take_reading().
 # process: |
-#   initiate() programs the SMU with source current, compliance and range and
+#   initiate_measurement() programs the SMU with source current, compliance and range and
 #   stores readings_per_point. take_reading() reads voltage that many times at
 #   constant current and returns arrays of voltages and currents.
 # output: |
@@ -41,7 +41,7 @@ class DCSingleInstrumentVI(DCMeasurementBase):
 
     Workflow::
 
-        vi.initiate(current_A=1e-6, compliance_A=1e-3, voltmeter_range_V=0.1,
+        vi.initiate_measurement(current_A=1e-6, compliance_A=1e-3, voltmeter_range_V=0.1,
                     readings_per_point=50)
         data = vi.take_reading()
         # data = {"voltage_V": list[float](50,), "current_A": list[float](50,)}
@@ -77,8 +77,10 @@ class DCSingleInstrumentVI(DCMeasurementBase):
     # DCMeasurementBase implementation
     # ------------------------------------------------------------------
 
-    @control
-    def initiate(
+    # panel=False: arming is a deliberate act — reachable from the front
+    # panel and from procedures, never from the compact monitor card.
+    @control(panel=False)
+    def initiate_measurement(
         self,
         current_A: float = 1e-6,
         compliance_A: float = 1e-3,
@@ -109,13 +111,13 @@ class DCSingleInstrumentVI(DCMeasurementBase):
 
         Returns:
             ``{"voltage_V": list[float], "current_A": list[float]}`` of length
-            ``readings_per_point`` (fixed at ``initiate()``).
+            ``readings_per_point`` (fixed at ``initiate_measurement()``).
 
         Raises:
-            RuntimeError: If ``initiate()`` has not been called first.
+            RuntimeError: If ``initiate_measurement()`` has not been called first.
         """
         if self._current_A is _NOT_INITIATED:
-            raise RuntimeError("initiate() must be called before take_reading().")
+            raise RuntimeError("initiate_measurement() must be called before take_reading().")
 
         instr = self._instrument  # type: ignore[attr-defined]
         current = float(self._current_A)

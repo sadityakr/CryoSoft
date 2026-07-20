@@ -1,4 +1,4 @@
-# ---
+﻿# ---
 # description: |
 #   LockInHarmonicMeasurementVI: single-driver Virtual Instrument for lock-in
 #   first- and second-harmonic (1f/2f) transport measurements, sourced by the
@@ -15,11 +15,11 @@
 #   drivers = {"lockin": <lock-in driver>}
 #   init_params keys: series_resistance_ohm (the excitation series resistor,
 #   a setup wiring constant; default 1e6).
-#   initiate() must be called before take_reading(). Parameters (all keyword,
+#   initiate_measurement() must be called before take_reading(). Parameters (all keyword,
 #   all defaulted): oscillator_amplitude_V, oscillator_frequency_Hz,
 #   time_constant_s, n_readings.
 # process: |
-#   initiate() sets the lock-in to its internal reference and programs the
+#   initiate_measurement() sets the lock-in to its internal reference and programs the
 #   oscillator + time constant. take_reading() switches the demodulator
 #   harmonic between 1 and 2 for each of n_readings pairs (a single-
 #   demodulator lock-in reports one harmonic at a time), reading X/Y at each.
@@ -60,7 +60,7 @@ class LockInHarmonicMeasurementVI(MeasurementInstrumentBase):
 
     Workflow (always run by a Procedure, never the GUI directly)::
 
-        vi.initiate(oscillator_amplitude_V=1.0, oscillator_frequency_Hz=977.0)
+        vi.initiate_measurement(oscillator_amplitude_V=1.0, oscillator_frequency_Hz=977.0)
         data = vi.take_reading()
         # data = {"x_1f_V": [...], "y_1f_V": [...], "x_2f_V": [...],
         #         "y_2f_V": [...], "current_A": [...]}, all length n_readings
@@ -132,7 +132,7 @@ class LockInHarmonicMeasurementVI(MeasurementInstrumentBase):
             init_params.get("series_resistance_ohm", 1e6)
         )
 
-        # Configuration state — set by initiate().
+        # Configuration state — set by initiate_measurement().
         self._armed: object = _NOT_INITIATED
         self._oscillator_amplitude_V: float = 1.0
         self._n_readings: int = 10
@@ -157,8 +157,10 @@ class LockInHarmonicMeasurementVI(MeasurementInstrumentBase):
     # @control — arm the measurement
     # ------------------------------------------------------------------
 
-    @control
-    def initiate(
+    # panel=False: arming is a deliberate act — reachable from the front
+    # panel and from procedures, never from the compact monitor card.
+    @control(panel=False)
+    def initiate_measurement(
         self,
         oscillator_amplitude_V: float = 1.0,
         oscillator_frequency_Hz: float = 977.0,
@@ -197,10 +199,10 @@ class LockInHarmonicMeasurementVI(MeasurementInstrumentBase):
             "current_A": list(n_readings,)}``.
 
         Raises:
-            RuntimeError: If ``initiate()`` has not been called first.
+            RuntimeError: If ``initiate_measurement()`` has not been called first.
         """
         if self._armed is _NOT_INITIATED:
-            raise RuntimeError("initiate() must be called before take_reading().")
+            raise RuntimeError("initiate_measurement() must be called before take_reading().")
 
         lockin = self._lockin  # type: ignore[attr-defined]
         current = self._oscillator_amplitude_V / self._series_resistance_ohm

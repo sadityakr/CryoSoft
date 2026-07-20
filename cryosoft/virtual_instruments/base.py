@@ -11,7 +11,9 @@
 #   MeasurementInstrumentBase, DCMeasurementBase). MeasurementInstrumentBase also defines the
 #   self-describing measurement-method standard (measurement_parameters /
 #   measurement_data_keys / measurement_scalar_columns / reading_setters class
-#   attrs plus the data_arrays / initiate / take_reading / standby lifecycle).
+#   attrs plus the data_arrays / initiate_measurement / take_reading / standby
+#   lifecycle; plain initiate() on a measurement VI is a harmless connection
+#   check, never an arming action).
 # entry_point: Not run directly; imported by all concrete VI modules.
 # dependencies:
 #   - cryosoft.core.exceptions
@@ -416,17 +418,24 @@ class MeasurementInstrumentBase(BaseVirtualInstrument):
     Uniform lifecycle (methods)
     ---------------------------
     * ``data_arrays(params) -> dict[str, int]`` — declared array name → its
-      per-point length, computed from the SAME ``params`` mapping ``initiate()``
-      will receive. Lets a procedure size its HDF5 layout before arming the
-      hardware. Base raises ``NotImplementedError``.
-    * ``initiate(**params) -> None`` — arm / configure the hardware. Accepts the
-      ``measurement_parameters`` keys as keyword arguments, each with a default
-      (so ``initiate()`` with no arguments is valid, e.g. for a bulk
-      Initiate-All). Concrete VIs keep the ``@control`` decoration where the VI
-      exposes arming to the GUI.
+      per-point length, computed from the SAME ``params`` mapping
+      ``initiate_measurement()`` will receive. Lets a procedure size its HDF5
+      layout before arming the hardware. Base raises ``NotImplementedError``.
+    * ``initiate_measurement(**params) -> None`` — arm / configure the
+      hardware. Accepts the ``measurement_parameters`` keys as keyword
+      arguments, each with a default. Concrete VIs keep the ``@control``
+      decoration where the VI exposes arming to the GUI (with ``panel=False``
+      so arming lives in the front panel, not the compact card). Deliberately
+      NOT named ``initiate``: the plain instrument-lifecycle ``initiate()``
+      (below) is harmless by construction, so a bulk Initiate-All can never
+      start a source current.
+    * ``initiate() -> None`` — the instrument-lifecycle verb every VI has,
+      overridden here as a CONNECTION CHECK: pings the drivers and raises
+      ``CryoSoftCommunicationError`` when unreachable. Never arms, never
+      sources.
     * ``take_reading() -> dict[str, list[float]]`` — take ONE datapoint. Takes
-      NO arguments: everything it needs was fixed at ``initiate()``. It MUST
-      return exactly ``measurement_data_keys`` (plus every
+      NO arguments: everything it needs was fixed at ``initiate_measurement()``.
+      It MUST return exactly ``measurement_data_keys`` (plus every
       ``measurement_scalar_columns`` key) and each array MUST have exactly the
       length ``data_arrays(params)`` declared for the same ``params`` — always.
       A VI whose instrument may return fewer points pads with ``float("nan")``
@@ -467,9 +476,9 @@ class MeasurementInstrumentBase(BaseVirtualInstrument):
 
     Adding a new measurement method: subclass this base (or ``DCMeasurementBase``
     for a DC-resistance method), declare the three class attributes, and
-    implement ``data_arrays`` / ``initiate`` / ``take_reading`` / ``standby``
-    (plus ``reading_setters`` entries for any parameter the reading loop may
-    vary per point).
+    implement ``data_arrays`` / ``initiate_measurement`` / ``take_reading`` /
+    ``standby`` (plus ``reading_setters`` entries for any parameter the
+    reading loop may vary per point).
     """
 
     vi_type: str = "measurement"
@@ -506,8 +515,8 @@ class MeasurementInstrumentBase(BaseVirtualInstrument):
         """Return declared array name → per-point length for these *params*.
 
         Args:
-            params: The same parameter mapping ``initiate()`` will be called
-                with (the ``measurement_parameters`` keys).
+            params: The same parameter mapping ``initiate_measurement()`` will
+                be called with (the ``measurement_parameters`` keys).
 
         Returns:
             ``{array_name: length}`` for every name in ``measurement_data_keys``.
@@ -517,8 +526,42 @@ class MeasurementInstrumentBase(BaseVirtualInstrument):
         """
         raise NotImplementedError
 
+    def initiate_measurement(self, **params: Any) -> None:
+        """Arm / configure the hardware for taking readings.
+
+        The ARMING half of the old overloaded ``initiate``: accepts the
+        ``measurement_parameters`` keys as keyword arguments. Only procedures
+        (and an explicit front-panel action) call this — never a bulk
+        Initiate-All.
+
+        Args:
+            **params: The ``measurement_parameters`` keys, each defaulted.
+
+        Raises:
+            NotImplementedError: If not overridden by a concrete VI.
+        """
+        raise NotImplementedError
+
+    def initiate(self) -> None:
+        """Check the instrument connection — harmless by construction.
+
+        Overrides the generic VI lifecycle verb so a bulk Initiate-All (or
+        the card's lifecycle toggle) verifies communication without arming
+        anything: no source current, no output, no configuration change.
+
+        Raises:
+            CryoSoftCommunicationError: If any driver fails to respond to an
+                identity query (``ping()`` returned False).
+        """
+        if not self.ping():
+            raise CryoSoftCommunicationError(
+                f"{self.vi_name or type(self).__name__}: instrument did not "
+                f"respond to an identity query — check the connection.",
+                vi_name=self.vi_name,
+            )
+
     def take_reading(self) -> dict[str, list[float]]:
-        """Acquire one datapoint at the configuration fixed by ``initiate()``.
+        """Acquire one datapoint at the configuration fixed by ``initiate_measurement()``.
 
         Returns:
             A dict containing exactly ``measurement_data_keys`` (arrays sized as
@@ -550,14 +593,15 @@ class DCMeasurementBase(MeasurementInstrumentBase):
     DCSeparateMeasurementVI (Keithley 6221 + 2182A) and DCSingleInstrumentVI
     (Keithley 2400 SMU) are interchangeable via the YAML config alone. Both
     inherit the ``measurement_parameters`` / ``measurement_data_keys`` /
-    ``data_arrays`` declared here and implement only ``initiate()`` /
-    ``take_reading()`` / ``standby()``.
+    ``data_arrays`` declared here and implement only ``initiate_measurement()``
+    / ``take_reading()`` / ``standby()``.
 
     The full lifecycle contract is documented on ``MeasurementInstrumentBase``;
     this class adds nothing new, it only fixes the DC-resistance shape
     (``readings_per_point`` samples of ``voltage_V`` and ``current_A``). The
-    ``initiate`` / ``take_reading`` stubs raise ``NotImplementedError`` so a
-    missing implementation fails loudly at first use.
+    ``initiate_measurement`` / ``take_reading`` stubs raise
+    ``NotImplementedError`` so a missing implementation fails loudly at first
+    use.
     """
 
     display_label: str = "DC resistance"
@@ -599,7 +643,7 @@ class DCMeasurementBase(MeasurementInstrumentBase):
         n = int(params["readings_per_point"])
         return {"voltage_V": n, "current_A": n}
 
-    def initiate(
+    def initiate_measurement(
         self,
         current_A: float = 1e-6,
         compliance_A: float = 1e-3,
@@ -622,6 +666,6 @@ class DCMeasurementBase(MeasurementInstrumentBase):
 
         Returns:
             ``{"voltage_V": list[float], "current_A": list[float]}`` with length
-            ``readings_per_point`` (fixed at ``initiate()``).
+            ``readings_per_point`` (fixed at ``initiate_measurement()``).
         """
         raise NotImplementedError

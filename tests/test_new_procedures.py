@@ -1,4 +1,4 @@
-# ---
+﻿# ---
 # description: |
 #   Behavioral tests for the generic sweep procedures FieldSweep and
 #   TemperatureSweep (core.procedure.SweepMeasureProcedure), parametrized over
@@ -109,7 +109,7 @@ def _temp_proc(station, tmp_path, meas):
 
 def _arm(station, meas, proc):
     """Arm the measurement VI directly (normally done via the Orchestrator)."""
-    station.get_vi(meas["measurement_vi"]).initiate(**proc._measurement_params)
+    station.get_vi(meas["measurement_vi"]).initiate_measurement(**proc._measurement_params)
 
 
 # ── set_ramp_rate @control on temperature VI ─────────────────────────────────
@@ -185,7 +185,7 @@ def test_field_sweep_initiate_full_phaseplan(station, tmp_path, meas):
     cmd = plan.commands[0]
     assert isinstance(cmd, Command)
     assert cmd.vi_name == meas["measurement_vi"]
-    assert cmd.method == "initiate"
+    assert cmd.method == "initiate_measurement"
     current_key = MEAS_META[meas["measurement_vi"]]["current_key"]
     assert cmd.kwargs[current_key] == pytest.approx(1e-6)
 
@@ -307,7 +307,7 @@ def test_temp_sweep_initiate_full_phaseplan(station, tmp_path, meas):
     assert len(plan.commands) == 1
     cmd = plan.commands[0]
     assert cmd.vi_name == meas["measurement_vi"]
-    assert cmd.method == "initiate"
+    assert cmd.method == "initiate_measurement"
     assert plan.wait_s == pytest.approx(0.0)
 
 
@@ -477,7 +477,7 @@ def test_channel_slot_initiate_selects_first_route_before_arming(station, tmp_pa
     assert plan.commands[0].method == "select_route"
     assert plan.commands[0].kwargs == {"route": "Mux-Ch1"}
     assert plan.commands[1].vi_name == "keithley_delta_mode"
-    assert plan.commands[1].method == "initiate"
+    assert plan.commands[1].method == "initiate_measurement"
 
 
 def test_channel_slot_schema_uses_index_labels(station, tmp_path):
@@ -569,7 +569,7 @@ def test_static_measurement_slot_dispatches_after_arm(station, tmp_path):
     proc.standby()
 
     assert [(c.vi_name, c.method) for c in plan.commands] == [
-        ("dc_measurement", "initiate"),
+        ("dc_measurement", "initiate_measurement"),
         ("dc_measurement", "set_source_current"),
     ]
     assert plan.commands[1].kwargs == {"current_A": 2e-6}

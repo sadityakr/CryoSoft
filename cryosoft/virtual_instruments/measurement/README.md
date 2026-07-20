@@ -1,4 +1,4 @@
-# virtual_instruments/measurement/
+﻿# virtual_instruments/measurement/
 
 ## Purpose
 Virtual instruments for electrical transport measurements. Every class here is a
@@ -33,10 +33,14 @@ Self-description (class attributes)
 
 Uniform lifecycle (methods)
 - `data_arrays(params) → {array_name: length}` — output shape for the same
-  `params` `initiate()` will receive, computed before arming the hardware.
-- `initiate(**params) → None` — arm/configure the hardware. Accepts the
-  `measurement_parameters` keys, all defaulted (so `initiate()` is valid for a
-  bulk Initiate-All). `@control`-decorated where the VI exposes arming to the GUI.
+  `params` `initiate_measurement()` will receive, computed before arming the hardware.
+- `initiate_measurement(**params) → None` — arm/configure the hardware. Accepts
+  the `measurement_parameters` keys, all defaulted. `@control(panel=False)`-
+  decorated where the VI exposes arming to the GUI (front panel only, never the
+  compact card). Deliberately NOT named `initiate`: the plain lifecycle
+  `initiate()` on a measurement VI is a harmless connection check (pings the
+  drivers, raises `CryoSoftCommunicationError` when unreachable), so a bulk
+  Initiate-All can never start a source current.
 - `take_reading() → dict` — take ONE datapoint. No arguments. Returns exactly
   `measurement_data_keys` (arrays sized as `data_arrays` declared) plus every
   `measurement_scalar_columns` key. A VI whose instrument can return fewer points
@@ -81,7 +85,8 @@ state left over from whichever VI ran last. This is the primary defense (see
 how `_program_delta_mode()` already always leads with `:SOUR:SWE:ABOR`).
 `stop_delta_mode()`-style teardown methods should still also return the
 instrument to a documented idle baseline as defense-in-depth (useful for a
-human inspecting the instrument between runs), but a VI's `initiate()` must
+human inspecting the instrument between runs), but a VI's
+`initiate_measurement()` must
 never *rely* on a previous VI's `standby()` having been called correctly. A
 sim driver modeling more than one such mode should track it (e.g.
 `SimKeithley6221._mode`) so a VI that skips the defensive reassertion fails in
@@ -94,8 +99,9 @@ shared-6221 handoff test for the pattern.
 2. Declare `measurement_parameters` (ParamSpecs), `measurement_data_keys`, and —
    only if the instrument can return fewer readings than requested —
    `measurement_scalar_columns`.
-3. Implement `data_arrays(params)`, `initiate(**params)`, `take_reading()`,
-   `standby()` (and `ping()`). Keep `@control` on `initiate()` if the GUI should
+3. Implement `data_arrays(params)`, `initiate_measurement(**params)`,
+   `take_reading()`, `standby()` (and `ping()`). Keep `@control(panel=False)` on
+   `initiate_measurement()` if the GUI should
    be able to arm it. Pad short returns to the declared length with
    `float("nan")` and report the true count in a scalar column. Declare a
    `reading_setters` entry (parameter → setter method) for any parameter the

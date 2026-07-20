@@ -1,4 +1,4 @@
-# ---
+﻿# ---
 # description: |
 #   Auto-discovering conformance tests for the CryoSoft layer interfaces.
 #   These tests iterate over the drivers, virtual_instruments, procedures, and
@@ -26,7 +26,7 @@ import-linter, see pyproject.toml [tool.importlinter]):
 * Measurement methods (MeasurementInstrumentBase subclasses): declare the
   self-describing class attributes (``measurement_parameters`` of ParamSpec,
   ``measurement_data_keys``, valid ``measurement_scalar_columns`` dtypes),
-  implement the ``data_arrays`` / ``initiate`` / ``take_reading`` / ``standby``
+  implement the ``data_arrays`` / ``initiate_measurement`` / ``take_reading`` / ``standby``
   lifecycle, and round-trip against their sim drivers so the returned keys and
   array lengths match what they declare.
 * Procedures: subclass BaseProcedure, have a name, declare a default for every
@@ -835,14 +835,14 @@ def test_reading_setters_are_measurement_scope() -> None:
     ids=lambda c: c.__name__,
 )
 def test_measurement_lifecycle_is_measurement_scope(vi_cls: type) -> None:
-    """A measurement VI's initiate()/standby() lifecycle is measurement-scope.
+    """A measurement VI's initiate_measurement()/standby() lifecycle is measurement-scope.
 
-    Some concrete VIs keep @control on initiate() so the GUI can arm it
+    Some concrete VIs keep @control on initiate_measurement() so the GUI can arm it
     manually (MeasurementInstrumentBase docstring); that @control must never
     carry operation scope. standby() is typically undecorated, which
     defaults to measurement-scope — checked here too for completeness.
     """
-    for method_name in ("initiate", "standby"):
+    for method_name in ("initiate_measurement", "standby"):
         method = getattr(vi_cls, method_name)
         scope = get_control_scope(method)
         assert scope == "measurement", (
@@ -925,7 +925,7 @@ def test_operation_config_key_unique_across_operations() -> None:
 # ── Measurement-method standard ───────────────────────────────────────────────
 # See MeasurementInstrumentBase: every concrete measurement VI is self-describing
 # (measurement_parameters / measurement_data_keys / measurement_scalar_columns)
-# and implements one uniform lifecycle (data_arrays / initiate / take_reading /
+# and implements one uniform lifecycle (data_arrays / initiate_measurement / take_reading /
 # standby). These tests make that standard binding for every future measurement
 # VI the moment its file exists.
 
@@ -998,7 +998,7 @@ def test_measurement_vi_self_description(vi_cls: type) -> None:
 )
 def test_measurement_vi_lifecycle_methods(vi_cls: type) -> None:
     """Every measurement VI implements the lifecycle; take_reading takes no args."""
-    for method_name in ("data_arrays", "initiate", "take_reading", "standby"):
+    for method_name in ("data_arrays", "initiate_measurement", "take_reading", "standby"):
         assert callable(getattr(vi_cls, method_name, None)), (
             f"{vi_cls.__name__} lacks the '{method_name}' lifecycle method"
         )
@@ -1012,7 +1012,7 @@ def test_measurement_vi_lifecycle_methods(vi_cls: type) -> None:
     ]
     assert not required, (
         f"{vi_cls.__name__}.take_reading() must take no required arguments "
-        f"(everything is fixed at initiate()), got {[p.name for p in required]}"
+        f"(everything is fixed at initiate_measurement()), got {[p.name for p in required]}"
     )
 
 
@@ -1022,7 +1022,7 @@ def test_measurement_vi_lifecycle_methods(vi_cls: type) -> None:
 def test_measurement_vi_round_trip(vi_cls: type) -> None:
     """Built from sim drivers, a measurement VI returns exactly what it declares.
 
-    initiate(**defaults) then take_reading() must yield exactly
+    initiate_measurement(**defaults) then take_reading() must yield exactly
     measurement_data_keys (each with the length data_arrays declared) plus every
     measurement_scalar_columns key — the machine check that a measurement method
     is plug-compatible the day its file exists.
@@ -1030,7 +1030,7 @@ def test_measurement_vi_round_trip(vi_cls: type) -> None:
     vi = vi_cls(_build_sim_measurement_drivers())
     defaults = {name: spec.default for name, spec in vi_cls.measurement_parameters.items()}
 
-    vi.initiate(**defaults)
+    vi.initiate_measurement(**defaults)
     data = vi.take_reading()
 
     expected_keys = set(vi_cls.measurement_data_keys) | set(vi_cls.measurement_scalar_columns)
@@ -1195,7 +1195,7 @@ def test_measurement_vi_reading_setter_round_trip(vi_cls: type) -> None:
     defaults = {
         name: spec.default for name, spec in vi_cls.measurement_parameters.items()
     }
-    vi.initiate(**defaults)
+    vi.initiate_measurement(**defaults)
     arrays = vi.data_arrays(defaults)
     expected_keys = (
         set(vi_cls.measurement_data_keys) | set(vi_cls.measurement_scalar_columns)

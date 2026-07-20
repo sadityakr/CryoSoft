@@ -1,9 +1,9 @@
-# ---
+﻿# ---
 # description: |
 #   DeltaModeMeasurementVI: multi-driver Virtual Instrument pairing a Keithley
 #   6221 current source with a Keithley 2182A nanovoltmeter for delta-mode
 #   resistance measurements. Implements the self-describing measurement-method
-#   standard (see MeasurementInstrumentBase): initiate() arms the delta engine
+#   standard (see MeasurementInstrumentBase): initiate_measurement() arms the delta engine
 #   and take_reading() collects one datapoint. take_reading() is NOT @monitored
 #   — it is long-running and only driven by the Procedure layer.
 # entry_point: Not run directly; instantiated by Station factory.
@@ -13,12 +13,12 @@
 #   - cryosoft.core.plan (ParamSpec)
 # input: |
 #   drivers = {"source": <K6221 driver>, "meter": <K2182A driver>}
-#   initiate() must be called before take_reading(). Parameters (all keyword,
+#   initiate_measurement() must be called before take_reading(). Parameters (all keyword,
 #   all defaulted): current (A), n_readings (int), voltmeter_range_V (V,
 #   enumerated 2182A range), compliance_V (V), delay_s (s), compliance_abort
 #   (bool), cold_switch (bool).
 # process: |
-#   initiate() arms the delta engine via source.configure_and_start_delta().
+#   initiate_measurement() arms the delta engine via source.configure_and_start_delta().
 #   take_reading() calls source.acquire_delta_readings() to collect samples;
 #   the delta engine can return FEWER than n_readings values (compliance abort
 #   / repeated read failures), so the arrays are padded with NaN to n_readings
@@ -54,7 +54,7 @@ class DeltaModeMeasurementVI(MeasurementInstrumentBase):
 
     Workflow (always run by a Procedure, never the GUI directly)::
 
-        vi.initiate(current=1e-6, n_readings=100)
+        vi.initiate_measurement(current=1e-6, n_readings=100)
         data = vi.take_reading()
         # data = {"voltage_V": list(100,), "current_A": list(100,), "n_valid": int}
 
@@ -142,7 +142,7 @@ class DeltaModeMeasurementVI(MeasurementInstrumentBase):
         self._source = drivers["source"]
         self._meter = drivers["meter"]
 
-        # Configuration state — set by initiate().
+        # Configuration state — set by initiate_measurement().
         self._armed: object = _NOT_INITIATED
         self._current: float = 1e-6
         self._n_readings: int = 100
@@ -174,8 +174,10 @@ class DeltaModeMeasurementVI(MeasurementInstrumentBase):
     # @control — arm the measurement
     # ------------------------------------------------------------------
 
-    @control
-    def initiate(
+    # panel=False: arming is a deliberate act — reachable from the front
+    # panel and from procedures, never from the compact monitor card.
+    @control(panel=False)
+    def initiate_measurement(
         self,
         current: float = 1e-6,
         n_readings: int = 100,
@@ -248,10 +250,10 @@ class DeltaModeMeasurementVI(MeasurementInstrumentBase):
             current: New peak delta current in Amperes.
 
         Raises:
-            RuntimeError: If ``initiate()`` has not been called first.
+            RuntimeError: If ``initiate_measurement()`` has not been called first.
         """
         if self._armed is _NOT_INITIATED:
-            raise RuntimeError("initiate() must be called before set_delta_current().")
+            raise RuntimeError("initiate_measurement() must be called before set_delta_current().")
 
         self._current = float(current)
         source = self._source  # type: ignore[attr-defined]
@@ -284,10 +286,10 @@ class DeltaModeMeasurementVI(MeasurementInstrumentBase):
             arrays.
 
         Raises:
-            RuntimeError: If ``initiate()`` has not been called first.
+            RuntimeError: If ``initiate_measurement()`` has not been called first.
         """
         if self._armed is _NOT_INITIATED:
-            raise RuntimeError("initiate() must be called before take_reading().")
+            raise RuntimeError("initiate_measurement() must be called before take_reading().")
 
         n = self._n_readings
         raw: list[float] = self._source.acquire_delta_readings(  # type: ignore[attr-defined]

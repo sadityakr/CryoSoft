@@ -54,7 +54,7 @@ switch config fails at build time, not mid-run.
 
 `SweepMeasureProcedure` uses the first switch VI a station exposes: it renders
 one checkbox per route ("Measure route <name>"), commands `select_route` before
-arming the measurement VI at `initiate()`, and — when two or more routes are
+arming the measurement VI at `initiate_measurement()`, and — when two or more routes are
 selected — loops the routes at each datapoint, suffixing every measurement key
 with `__{route}` (e.g. `voltage_V__Mux-Ch1`). Procedures reach the switch only
 through the `Station` instance (contract C6).

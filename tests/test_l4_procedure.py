@@ -1,4 +1,4 @@
-# ---
+﻿# ---
 # description: |
 #   Integration tests for Layer 4 (Procedures). Tests BaseProcedure subclassing,
 #   FieldSweep method contracts, DataManager integration, and a full
@@ -272,7 +272,7 @@ def test_initiate_returns_correct_structure(procedure, tmp_path):
     assert plan.targets["temperature_vti"].target == pytest.approx(300.0)
 
     arm = next(c for c in plan.commands if c.vi_name == "keithley_delta_mode")
-    assert arm.method == "initiate"
+    assert arm.method == "initiate_measurement"
 
     assert plan.wait_s == pytest.approx(0.0)
 
@@ -292,7 +292,7 @@ def test_initiate_full_phaseplan_content_and_command_order(procedure, tmp_path):
     cmd = plan.commands[0]
     assert isinstance(cmd, Command)
     assert cmd.vi_name == "keithley_delta_mode"
-    assert cmd.method == "initiate"
+    assert cmd.method == "initiate_measurement"
     assert cmd.kwargs["current"] == pytest.approx(1e-6)
     assert cmd.kwargs["n_readings"] == 5
     assert cmd.kwargs["voltmeter_range_V"] == pytest.approx(0.01)
@@ -404,7 +404,7 @@ def test_measure_saves_datapoint(procedure, tmp_path):
     """measure() writes data to the HDF5 file at the correct sweep index."""
     procedure.initiate()
     # Arm the measurement VI (normally done via station.send_measurement_commands)
-    procedure._station.keithley_delta_mode.initiate(
+    procedure._station.keithley_delta_mode.initiate_measurement(
         current=1e-6, n_readings=5
     )
 
@@ -422,7 +422,7 @@ def test_measure_saves_datapoint(procedure, tmp_path):
 def test_measure_stores_snapshot(procedure, tmp_path):
     """measure() stores a JSON station snapshot."""
     procedure.initiate()
-    procedure._station.keithley_delta_mode.initiate(
+    procedure._station.keithley_delta_mode.initiate_measurement(
         current=1e-6, n_readings=5
     )
     procedure.measure()
@@ -531,7 +531,7 @@ def test_last_datapoint_empty_before_measure(procedure, tmp_path):
     assert procedure.last_datapoint == {}
     procedure.initiate()
     assert procedure.last_datapoint == {}
-    procedure._station.keithley_delta_mode.initiate(current=1e-6, n_readings=5)
+    procedure._station.keithley_delta_mode.initiate_measurement(current=1e-6, n_readings=5)
     procedure.measure()
     point = procedure.last_datapoint
     assert point, "expected a datapoint after measure()"

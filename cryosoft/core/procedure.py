@@ -1299,7 +1299,7 @@ class SweepMeasureProcedure(BaseProcedure):
         vi = self._station.get_vi(self._measurement_vi)
         targets = self._initial_system_targets()
         arm_command = Command(
-            self._measurement_vi, "initiate", dict(self._measurement_params)
+            self._measurement_vi, "initiate_measurement", dict(self._measurement_params)
         )
         # Loop-slot setup around the arm (command order is semantically
         # meaningful). Slots on OTHER VIs (e.g. the switch's route) dispatch

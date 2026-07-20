@@ -1,4 +1,4 @@
-# ---
+﻿# ---
 # description: |
 #   Test suite for the new behavior-based Virtual Instruments created in the
 #   VI refactor (Stage 2). Covers SuperconductingMagnetVI,
@@ -922,7 +922,7 @@ class TestDCSeparateMeasurementVI:
 
     def test_initiate_and_take_reading(self, source_driver, meter_driver):
         vi = self._make_vi(source_driver, meter_driver)
-        vi.initiate(current_A=1e-6, compliance_A=1e-3, voltmeter_range_V=0.1, readings_per_point=5)
+        vi.initiate_measurement(current_A=1e-6, compliance_A=1e-3, voltmeter_range_V=0.1, readings_per_point=5)
         data = vi.take_reading()
         assert "voltage_V" in data
         assert "current_A" in data
@@ -931,7 +931,7 @@ class TestDCSeparateMeasurementVI:
 
     def test_current_constant_across_readings(self, source_driver, meter_driver):
         vi = self._make_vi(source_driver, meter_driver)
-        vi.initiate(current_A=2e-6, readings_per_point=10)
+        vi.initiate_measurement(current_A=2e-6, readings_per_point=10)
         data = vi.take_reading()
         assert all(abs(c - 2e-6) < 1e-12 for c in data["current_A"])
 
@@ -942,7 +942,7 @@ class TestDCSeparateMeasurementVI:
 
     def test_standby_resets_state(self, source_driver, meter_driver):
         vi = self._make_vi(source_driver, meter_driver)
-        vi.initiate(current_A=1e-6)
+        vi.initiate_measurement(current_A=1e-6)
         vi.standby()
         with pytest.raises(RuntimeError):
             vi.take_reading()
@@ -965,7 +965,7 @@ class TestDCSeparateMeasurementVI:
 
     def test_set_source_current_changes_reported_current(self, source_driver, meter_driver):
         vi = self._make_vi(source_driver, meter_driver)
-        vi.initiate(current_A=1e-6, readings_per_point=4)
+        vi.initiate_measurement(current_A=1e-6, readings_per_point=4)
         vi.set_source_current(-1e-6)
         data = vi.take_reading()
         assert all(abs(c + 1e-6) < 1e-12 for c in data["current_A"])
@@ -996,7 +996,7 @@ class TestDCSingleInstrumentVI:
 
     def test_initiate_and_take_reading(self, smu_driver):
         vi = self._make_vi(smu_driver)
-        vi.initiate(current_A=1e-6, compliance_A=1e-3, voltmeter_range_V=0.1, readings_per_point=5)
+        vi.initiate_measurement(current_A=1e-6, compliance_A=1e-3, voltmeter_range_V=0.1, readings_per_point=5)
         data = vi.take_reading()
         assert "voltage_V" in data
         assert "current_A" in data
@@ -1005,7 +1005,7 @@ class TestDCSingleInstrumentVI:
 
     def test_current_constant_across_readings(self, smu_driver):
         vi = self._make_vi(smu_driver)
-        vi.initiate(current_A=3e-6, readings_per_point=10)
+        vi.initiate_measurement(current_A=3e-6, readings_per_point=10)
         data = vi.take_reading()
         assert all(abs(c - 3e-6) < 1e-12 for c in data["current_A"])
 
@@ -1016,7 +1016,7 @@ class TestDCSingleInstrumentVI:
 
     def test_standby_resets_state(self, smu_driver):
         vi = self._make_vi(smu_driver)
-        vi.initiate(current_A=1e-6)
+        vi.initiate_measurement(current_A=1e-6)
         vi.standby()
         with pytest.raises(RuntimeError):
             vi.take_reading()
@@ -1041,7 +1041,7 @@ class TestDCSingleInstrumentVI:
         vi_smu.vi_name = "dc_smu"
 
         for vi in (vi_sep, vi_smu):
-            vi.initiate(current_A=1e-6, compliance_A=1e-3, voltmeter_range_V=0.1, readings_per_point=3)
+            vi.initiate_measurement(current_A=1e-6, compliance_A=1e-3, voltmeter_range_V=0.1, readings_per_point=3)
             data = vi.take_reading()
             assert set(data.keys()) == {"voltage_V", "current_A"}
             assert len(data["voltage_V"]) == 3
@@ -1073,19 +1073,19 @@ class TestLockInHarmonicMeasurementVI:
 
     def test_initiate_sets_internal_reference(self, lockin_driver):
         vi = self._make_vi(lockin_driver)
-        vi.initiate(oscillator_amplitude_V=0.5)
+        vi.initiate_measurement(oscillator_amplitude_V=0.5)
         assert lockin_driver.get_reference_source() == "INT"
         assert lockin_driver.get_oscillator_amplitude() == pytest.approx(0.5)
 
     def test_initiate_sets_oscillator_frequency_and_time_constant(self, lockin_driver):
         vi = self._make_vi(lockin_driver)
-        vi.initiate(oscillator_frequency_Hz=1234.0, time_constant_s=0.3)
+        vi.initiate_measurement(oscillator_frequency_Hz=1234.0, time_constant_s=0.3)
         assert lockin_driver.get_oscillator_frequency() == pytest.approx(1234.0)
         assert lockin_driver.get_time_constant() == pytest.approx(0.3)
 
     def test_take_reading_returns_correct_n_points(self, lockin_driver):
         vi = self._make_vi(lockin_driver)
-        vi.initiate(n_readings=7)
+        vi.initiate_measurement(n_readings=7)
         data = vi.take_reading()
         for key in ("x_1f_V", "y_1f_V", "x_2f_V", "y_2f_V", "current_A"):
             assert key in data
@@ -1095,7 +1095,7 @@ class TestLockInHarmonicMeasurementVI:
         """A single-demodulator lock-in reports one harmonic at a time."""
         vi = self._make_vi(lockin_driver)
         lockin_driver._noise_std = 0.0  # deterministic
-        vi.initiate(oscillator_amplitude_V=1.0, n_readings=1)
+        vi.initiate_measurement(oscillator_amplitude_V=1.0, n_readings=1)
         data = vi.take_reading()
         # 1f response is linear in amplitude, 2f is quadratic (see SimLockIn) —
         # different values confirm take_reading() actually switched harmonics.
@@ -1104,19 +1104,19 @@ class TestLockInHarmonicMeasurementVI:
 
     def test_current_computed_from_amplitude_and_series_resistance(self, lockin_driver):
         vi = self._make_vi(lockin_driver, series_resistance_ohm=2e6)
-        vi.initiate(oscillator_amplitude_V=1.0, n_readings=3)
+        vi.initiate_measurement(oscillator_amplitude_V=1.0, n_readings=3)
         data = vi.take_reading()
         assert all(c == pytest.approx(0.5e-6) for c in data["current_A"])
 
     def test_standby_zeros_oscillator_amplitude(self, lockin_driver):
         vi = self._make_vi(lockin_driver)
-        vi.initiate(oscillator_amplitude_V=1.0)
+        vi.initiate_measurement(oscillator_amplitude_V=1.0)
         vi.standby()
         assert lockin_driver.get_oscillator_amplitude() == pytest.approx(0.0)
 
     def test_standby_blocks_subsequent_take_reading(self, lockin_driver):
         vi = self._make_vi(lockin_driver)
-        vi.initiate()
+        vi.initiate_measurement()
         vi.standby()
         with pytest.raises(RuntimeError):
             vi.take_reading()
