@@ -17,15 +17,20 @@
 #   - cryosoft.session.store / cryosoft.session.models
 # input: |
 #   Orchestrator signals (run manifests) and GUI lifecycle calls
-#   (start_experiment/close_experiment/set_findings/set_attended).
+#   (start_experiment/close_experiment/set_findings/set_attended/set_queue/
+#   switch_experiment).
 # process: |
 #   On construction, resumes the store's active experiment (marking runs left
 #   "running" by a crash as failed). Each run_started manifest opens a
-#   RunRecord with a station settings snapshot; run_finished completes it.
-#   Every mutation saves the record and re-emits it on experiment_changed.
+#   RunRecord (data_file relativized against the session folder) with a
+#   station settings snapshot; run_finished completes it. Every mutation
+#   saves the record and re-emits it on experiment_changed; a save that
+#   fails/recovers is surfaced once via store_health_changed. switch_experiment
+#   swaps the live experiment without closing the outgoing one.
 # output: |
 #   Persisted experiment records (via ExperimentStore) and the
-#   experiment_changed / run_recorded signals the GUI renders.
+#   experiment_changed / run_recorded / store_health_changed signals the GUI
+#   renders.
 # ---
 
 """SessionManager — the L6 façade and single writer of experiment state."""
@@ -34,6 +39,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from PyQt6.QtCore import QObject, pyqtSignal
@@ -46,6 +52,7 @@ from cryosoft.session.models import (
     EXPERIMENT_STATUS_OPEN,
     RUN_STATUS_FAILED,
     RUN_STATUS_RUNNING,
+    SCHEMA_VERSION,
     ExperimentRecord,
     RunRecord,
     envelope_from_dict,
@@ -77,10 +84,16 @@ class SessionManager(QObject):
         run_recorded (dict): One ``RunRecord`` as a dict, emitted when a run
             is opened by a ``run_started`` manifest and again when its
             ``run_finished`` manifest completes it.
+        store_health_changed (dict): ``{"ok": bool, "detail": str}``, emitted
+            by ``_save_current()`` the first time a save fails (``ok=False``,
+            ``detail`` the ``OSError`` text) and again the first time a save
+            succeeds after failures (``ok=True``). One boolean of internal
+            state; no retry machinery.
     """
 
     experiment_changed = pyqtSignal(dict)
     run_recorded = pyqtSignal(dict)
+    store_health_changed = pyqtSignal(dict)
 
     def __init__(
         self,
@@ -117,6 +130,7 @@ class SessionManager(QObject):
             read_instrument_metadata(config_path) if config_path else {}
         )
         self._experiment: ExperimentRecord | None = None
+        self._store_save_ok = True
 
         orchestrator.run_started.connect(self._on_run_started)
         orchestrator.run_finished.connect(self._on_run_finished)
@@ -292,6 +306,79 @@ class SessionManager(QObject):
         )
         self.experiment_changed.emit(self._experiment.to_dict())
 
+    def set_queue(self, items: list[dict[str, Any]]) -> None:
+        """Replace the open experiment's run queue. No-op when none is open.
+
+        The queue is GUI-authored, opaque JSON — this layer stores and
+        round-trips it but never interprets its shape (the GUI's
+        ``QueueItemState`` is the only place that knows it; contract C11
+        forbids this package from importing ``cryosoft.gui``).
+
+        Args:
+            items: The queue items, each an opaque JSON-safe dict.
+        """
+        if self._experiment is None:
+            return
+        self._experiment.queue = items
+        self._save_current()
+
+    def switch_experiment(self, experiment_id: str) -> ExperimentRecord:
+        """Switch to a different **open** experiment without closing the current one.
+
+        Deactivates the current in-memory experiment by simply ceasing to
+        track it — its own record is left exactly as last saved (still
+        ``status == "open"`` on disk); ``close_experiment()``'s
+        finalize-and-prompt-findings semantics are untouched and remain the
+        only way to actually close an experiment. Re-installs the target's
+        envelope on the Orchestrator the same way ``start_experiment``/
+        ``_resume_active_experiment`` do, and updates the store's active
+        pointer.
+
+        Args:
+            experiment_id: The store key of an open experiment to switch to.
+
+        Returns:
+            The newly active ``ExperimentRecord``.
+
+        Raises:
+            ValueError: If ``experiment_id`` is unknown, its record's
+                ``status`` is not ``"open"``, or its ``schema_version`` is
+                newer than this app's ``SCHEMA_VERSION`` — a future-format
+                record must never become the live, mutable experiment of an
+                older app.
+        """
+        record = self._store.load(experiment_id)
+        if record is None:
+            raise ValueError(f"Unknown experiment {experiment_id!r}")
+        if record.status != EXPERIMENT_STATUS_OPEN:
+            raise ValueError(
+                f"Experiment {experiment_id!r} is not open (status={record.status!r})"
+            )
+        if record.schema_version > SCHEMA_VERSION:
+            raise ValueError(
+                f"Experiment {experiment_id!r} was written by a newer app "
+                f"(schema_version={record.schema_version} > {SCHEMA_VERSION}); "
+                "refusing to switch to it"
+            )
+        self._experiment = record
+        self._store.set_active(record.experiment_id)
+        self._orchestrator.set_session_envelope(envelope_from_dict(record.envelope))
+        logger.info("Switched to experiment %s", record.experiment_id)
+        self.experiment_changed.emit(record.to_dict())
+        return record
+
+    def current_data_dir(self) -> Path | None:
+        """Return the open experiment's data folder, or ``None`` when none is open."""
+        if self._experiment is None:
+            return None
+        return self._store.data_dir(self._experiment.experiment_id)
+
+    def current_gui_state_path(self) -> Path | None:
+        """Return the open experiment's GUI-state file path, or ``None`` when none is open."""
+        if self._experiment is None:
+            return None
+        return self._store.gui_state_path(self._experiment.experiment_id)
+
     # ------------------------------------------------------------------
     # Run recording (driven by the Orchestrator's manifests)
     # ------------------------------------------------------------------
@@ -308,12 +395,18 @@ class SessionManager(QObject):
             vi_name: dict(vi_state)
             for vi_name, vi_state in self._station.cached_state.items()
         }
+        raw_data_file = str(manifest.get("data_file", ""))
+        data_file = (
+            self._store.relativize_data_file(self._experiment.experiment_id, raw_data_file)
+            if raw_data_file
+            else ""
+        )
         run = RunRecord(
             run_id=str(manifest.get("run_id", "")),
             procedure=str(manifest.get("procedure", "")),
             kind=str(manifest.get("kind", "run")),
             params=dict(manifest.get("params") or {}),
-            data_file=str(manifest.get("data_file", "")),
+            data_file=data_file,
             started_utc=str(manifest.get("started_utc", "")),
             status=RUN_STATUS_RUNNING,
             settings_snapshot=settings,
@@ -345,17 +438,40 @@ class SessionManager(QObject):
     def _save_current(self) -> None:
         """Persist the current record, tolerating write failures.
 
-        A failed save must not crash a running measurement — it is logged and
-        the in-memory record stays authoritative until the next save attempt.
+        A failed save must not crash a running measurement — it is logged,
+        the in-memory record stays authoritative until the next save
+        attempt, and ``store_health_changed`` tells the GUI so a stale disk
+        copy is never silent (emitted once on the first failure, and once
+        again on the first successful save after failures — no retry
+        machinery, one boolean of internal state).
+
+        A record whose ``schema_version`` is newer than this app's
+        ``SCHEMA_VERSION`` is never written back — belt-and-suspenders for
+        the read-only rule; such a record should never have become
+        ``self._experiment`` in the first place (see ``switch_experiment``).
         """
         if self._experiment is None:
             return
+        if self._experiment.schema_version > SCHEMA_VERSION:
+            logger.warning(
+                "Refusing to overwrite experiment %s: its schema_version=%d > %d",
+                self._experiment.experiment_id,
+                self._experiment.schema_version,
+                SCHEMA_VERSION,
+            )
+            return
         try:
             self._store.save(self._experiment)
-        except OSError:
-            logger.exception(
-                "Could not save experiment %s", self._experiment.experiment_id
-            )
+        except OSError as exc:
+            logger.error("Could not save experiment %s: %s", self._experiment.experiment_id, exc)
+            if self._store_save_ok:
+                self._store_save_ok = False
+                self.store_health_changed.emit({"ok": False, "detail": str(exc)})
+            return
+        if not self._store_save_ok:
+            self._store_save_ok = True
+            logger.info("Experiment %s save recovered", self._experiment.experiment_id)
+            self.store_health_changed.emit({"ok": True, "detail": ""})
 
     def _resume_active_experiment(self) -> None:
         """Resume the store's active experiment on construction, if any.

@@ -11,6 +11,7 @@
 # ---
 
 import json
+import shutil
 
 import h5py
 import pytest
@@ -22,9 +23,11 @@ from cryosoft.procedures.field_sweep import FieldSweep
 from cryosoft.session.manager import SessionManager
 from cryosoft.session.models import (
     EXPERIMENT_STATUS_CLOSED,
+    EXPERIMENT_STATUS_OPEN,
     RUN_STATUS_DONE,
     RUN_STATUS_FAILED,
     RUN_STATUS_RUNNING,
+    SCHEMA_VERSION,
     ElnLink,
     ExperimentRecord,
     RunRecord,
@@ -100,8 +103,31 @@ def test_experiment_record_round_trips_with_content():
         runs=[RunRecord(run_id="r1", procedure="Field Sweep", status=RUN_STATUS_DONE)],
         findings="looks superconducting",
         eln_link=ElnLink(backend="elabftw", entry_id="42", url="https://eln/42"),
+        queue=[{"procedure": "Field Sweep", "params": {"field_end": 1.0}}],
     )
-    assert ExperimentRecord.from_dict(record.to_dict()) == record
+    assert record.schema_version == SCHEMA_VERSION
+    payload = record.to_dict()
+    assert payload["schema_version"] == SCHEMA_VERSION
+    assert payload["queue"] == record.queue
+    assert ExperimentRecord.from_dict(payload) == record
+
+
+def test_experiment_record_schema_version_absent_defaults_to_one():
+    """A record written before schema_version existed loads as version 1."""
+    record = ExperimentRecord.from_dict({"experiment_id": "x"})
+    assert record.schema_version == 1
+
+
+def test_experiment_record_schema_version_tolerates_future_value():
+    """A record from a newer app loads (tolerant-parse) with its stated version kept."""
+    record = ExperimentRecord.from_dict({"experiment_id": "x", "schema_version": 999})
+    assert record.schema_version == 999
+
+
+def test_experiment_record_queue_tolerates_junk():
+    """Non-list/non-dict queue entries degrade to [] / are dropped, never raise."""
+    assert ExperimentRecord.from_dict({"queue": "not-a-list"}).queue == []
+    assert ExperimentRecord.from_dict({"queue": [{"a": 1}, "junk", 5]}).queue == [{"a": 1}]
 
 
 def test_run_record_untrusted_status_degrades_to_failed():
@@ -172,6 +198,93 @@ def test_store_make_experiment_id_slug_and_collisions(store):
     assert first == "20260717_hall_bar_a3_sot"
     store.save(ExperimentRecord(experiment_id=first))
     assert store.make_experiment_id("Hall bar A3 — SOT!", created) == f"{first}_2"
+
+
+def test_store_load_warns_on_future_schema_version(store, caplog):
+    """A record from a newer app still loads (tolerant), but logs a WARNING."""
+    record = ExperimentRecord(experiment_id="20260717_future")
+    store.save(record)
+    # Hand-edit the file to simulate a newer app's format version.
+    path = store.root / "20260717_future" / "experiment.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["schema_version"] = 999
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    with caplog.at_level("WARNING"):
+        loaded = store.load("20260717_future")
+    assert loaded.schema_version == 999
+    assert any("newer app" in message for message in caplog.messages)
+
+
+def test_store_data_dir_and_gui_state_path(store):
+    assert store.data_dir("exp1") == store.root / "exp1" / "data"
+    assert store.gui_state_path("exp1") == store.root / "exp1" / "gui_state.json"
+    # Neither call creates anything on disk.
+    assert not store.root.exists()
+
+
+def test_relativize_and_resolve_data_file_plain_and_subfolder(store):
+    store.save(ExperimentRecord(experiment_id="exp1"))
+    data_dir = store.data_dir("exp1")
+    data_dir.mkdir(parents=True)
+    plain_file = data_dir / "run1.h5"
+    plain_file.write_text("x", encoding="utf-8")
+    sub_dir = data_dir / "heating_runs"
+    sub_dir.mkdir()
+    sub_file = sub_dir / "run2.h5"
+    sub_file.write_text("x", encoding="utf-8")
+
+    rel_plain = store.relativize_data_file("exp1", plain_file)
+    assert rel_plain == "data/run1.h5"
+    assert store.resolve_data_file("exp1", rel_plain) == plain_file
+
+    rel_sub = store.relativize_data_file("exp1", sub_file)
+    assert rel_sub == "data/heating_runs/run2.h5"
+    assert store.resolve_data_file("exp1", rel_sub) == sub_file
+
+
+def test_relativize_and_resolve_data_file_outside_bundle_stays_absolute(store, tmp_path):
+    outside = tmp_path / "elsewhere" / "run.h5"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("x", encoding="utf-8")
+
+    stored = store.relativize_data_file("exp1", outside)
+    assert stored == str(outside.resolve())
+    resolved = store.resolve_data_file("exp1", stored)
+    assert resolved == outside.resolve()
+
+
+def test_resolve_data_file_survives_session_folder_relocation(tmp_path):
+    """A dangling absolute path falls back to a basename search under data/."""
+    old_root = tmp_path / "old_root"
+    store = ExperimentStore(old_root)
+    store.save(ExperimentRecord(experiment_id="exp1"))
+    data_dir = store.data_dir("exp1")
+    data_dir.mkdir(parents=True)
+    data_file = data_dir / "run1.h5"
+    data_file.write_text("x", encoding="utf-8")
+
+    # Record the run with its (then-valid) absolute path, as an old-format
+    # record would have stored it before bundle-relative paths existed.
+    record = store.load("exp1")
+    record.runs.append(RunRecord(run_id="r1", data_file=str(data_file)))
+    store.save(record)
+
+    # Move the whole session folder elsewhere.
+    new_root = tmp_path / "new_root"
+    shutil.move(str(old_root), str(new_root))
+
+    new_store = ExperimentStore(new_root)
+    stored = new_store.load("exp1")
+    resolved = new_store.resolve_data_file("exp1", stored.runs[0].data_file)
+    assert resolved == new_root / "exp1" / "data" / "run1.h5"
+    assert resolved.is_file()
+
+
+def test_resolve_data_file_dangling_absolute_no_match_returns_unchanged(store):
+    missing = store.root.parent / "gone" / "nope.h5"
+    resolved = store.resolve_data_file("exp1", str(missing))
+    assert resolved == missing
 
 
 def test_roster_add_get_replace(tmp_path):
@@ -363,6 +476,134 @@ def test_resume_with_missing_record_clears_pointer(store, roster, orchestrator, 
     )
     assert manager.current_experiment() is None
     assert store.get_active() is None
+
+
+# ── set_queue / current_data_dir / current_gui_state_path ────────────────────
+
+def test_set_queue_persists_and_is_noop_when_nothing_open(manager, store):
+    assert manager.current_experiment() is None
+    manager.set_queue([{"procedure": "Field Sweep"}])  # no-op, no experiment
+    assert manager.current_experiment() is None
+
+    record = manager.start_experiment("X", "jdoe", SAMPLE_INFO)
+    queue = [{"procedure": "Field Sweep", "params": {"field_end": 1.0}}]
+    manager.set_queue(queue)
+    assert store.load(record.experiment_id).queue == queue
+
+
+def test_current_data_dir_and_gui_state_path(manager, store):
+    assert manager.current_data_dir() is None
+    assert manager.current_gui_state_path() is None
+
+    record = manager.start_experiment("X", "jdoe", SAMPLE_INFO)
+    assert manager.current_data_dir() == store.data_dir(record.experiment_id)
+    assert manager.current_gui_state_path() == store.gui_state_path(record.experiment_id)
+
+
+# ── switch_experiment ─────────────────────────────────────────────────────────
+
+def test_switch_experiment_happy_path(manager, store, orchestrator):
+    envelope_a = SessionEnvelope(bounds={"magnet_z": EnvelopeBound(max_value=1.0)})
+    envelope_b = SessionEnvelope(bounds={"magnet_z": EnvelopeBound(max_value=2.0)})
+    first = manager.start_experiment("First", "jdoe", SAMPLE_INFO, envelope=envelope_a)
+
+    # A second, independently-open experiment exists in the store (as if
+    # created in an earlier session) — written directly since start_experiment
+    # refuses to open a second one while one is already open.
+    second = ExperimentRecord(
+        experiment_id="20260717_second",
+        title="Second",
+        user_id="jdoe",
+        status=EXPERIMENT_STATUS_OPEN,
+        envelope=envelope_to_dict(envelope_b),
+    )
+    store.save(second)
+
+    changed: list[dict] = []
+    manager.experiment_changed.connect(changed.append)
+
+    result = manager.switch_experiment(second.experiment_id)
+    assert result.experiment_id == second.experiment_id
+    assert manager.current_experiment().experiment_id == second.experiment_id
+    assert store.get_active() == second.experiment_id
+    assert changed and changed[-1]["experiment_id"] == second.experiment_id
+    assert orchestrator._session_envelope == envelope_b
+    # The experiment switched away from is untouched: still "open" on disk.
+    assert store.load(first.experiment_id).status == EXPERIMENT_STATUS_OPEN
+
+    back = manager.switch_experiment(first.experiment_id)
+    assert back.experiment_id == first.experiment_id
+    assert manager.current_experiment().experiment_id == first.experiment_id
+    assert store.get_active() == first.experiment_id
+    assert orchestrator._session_envelope == envelope_a
+
+
+def test_switch_experiment_rejects_unknown_id(manager):
+    with pytest.raises(ValueError, match="Unknown experiment"):
+        manager.switch_experiment("nope")
+
+
+def test_switch_experiment_rejects_closed_target(manager, store):
+    record = manager.start_experiment("X", "jdoe", SAMPLE_INFO)
+    manager.close_experiment()
+    assert store.load(record.experiment_id).status == EXPERIMENT_STATUS_CLOSED
+    with pytest.raises(ValueError, match="not open"):
+        manager.switch_experiment(record.experiment_id)
+
+
+def test_switch_experiment_rejects_future_schema_version(manager, store):
+    manager.start_experiment("Current", "jdoe", SAMPLE_INFO)
+    # to_dict() always stamps the *current* SCHEMA_VERSION (see models.py), so
+    # simulating a newer app's file means hand-editing the JSON, exactly like
+    # the store-level future-schema test does.
+    store.save(ExperimentRecord(experiment_id="future_one", status=EXPERIMENT_STATUS_OPEN))
+    path = store.root / "future_one" / "experiment.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["schema_version"] = 999
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="newer app"):
+        manager.switch_experiment("future_one")
+
+
+# ── Save-failure surfacing (store_health_changed) ─────────────────────────────
+
+def test_store_health_changed_fires_once_on_failure_and_once_on_recovery(manager, store, monkeypatch):
+    manager.start_experiment("X", "jdoe", SAMPLE_INFO)
+    events: list[dict] = []
+    manager.store_health_changed.connect(events.append)
+
+    def _boom(record):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(store, "save", _boom)
+    manager.set_findings("first failure")
+    manager.set_findings("second failure")  # still failing — must not re-emit
+    assert events == [{"ok": False, "detail": "disk full"}]
+
+    monkeypatch.undo()
+    manager.set_findings("recovered")
+    manager.set_findings("still fine")  # already ok — must not re-emit
+    assert events == [
+        {"ok": False, "detail": "disk full"},
+        {"ok": True, "detail": ""},
+    ]
+
+
+# ── Future schema_version belt-and-suspenders on _save_current ───────────────
+
+def test_save_current_refuses_to_overwrite_future_schema_version(manager, store, caplog):
+    record = manager.start_experiment("X", "jdoe", SAMPLE_INFO)
+    on_disk_before = store.load(record.experiment_id)
+
+    # Simulate the in-memory record somehow carrying a future schema_version
+    # (belt-and-suspenders: switch_experiment already refuses this at the
+    # door, but _save_current must never write one back regardless).
+    manager._experiment.schema_version = 999
+    with caplog.at_level("WARNING"):
+        manager.set_findings("should not be written")
+    assert any("Refusing to overwrite" in message for message in caplog.messages)
+    assert store.load(record.experiment_id) == on_disk_before
 
 
 # ── End-to-end: a real run recorded and cross-checked against HDF5 ───────────
