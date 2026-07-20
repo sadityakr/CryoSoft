@@ -37,7 +37,9 @@ from PyQt6.QtWidgets import (
 )
 
 from cryosoft.core.config_catalog import ConfigCatalog
+from cryosoft.core.decorators import control
 from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
+from cryosoft.core.plan import ParamSpec
 from cryosoft.core.station import build_station
 from cryosoft.gui import app_settings as _app_settings
 from cryosoft.gui import form_autosave as session_store
@@ -55,6 +57,7 @@ from cryosoft.gui.theme import (
     build_stylesheet,
 )
 from cryosoft.gui.trend_plot_panel import TrendPlotPanel
+from cryosoft.virtual_instruments.base import BaseVirtualInstrument
 
 
 CONFIG_PATH = "cryosoft/configs/sim_cryostat"
@@ -270,6 +273,105 @@ def test_instrument_panel_status_resets_to_ok(station, orchestrator, qtbot):
     orchestrator.states_updated.emit({vi_name: {}})
     assert panel.property("status") == "ok"
     assert panel._name_label.text() == f"<b>{vi_name}</b>"
+
+
+class _SpecControlVI(BaseVirtualInstrument):
+    """Hand-made VI exercising every spec-driven widget shape on one card."""
+
+    vi_type = "mock"
+
+    @control(params={
+        "target_K": ParamSpec(
+            type=float, default=4.2, unit="K", min=1.5, max=300.0,
+            description="Temperature setpoint.",
+        ),
+        "auto_pid": ParamSpec(type=bool, default=True),
+        "sensor": ParamSpec(
+            type=int, default=1, choices={"Sample": 1, "VTI": 2},
+        ),
+    })
+    def set_temperature(self, target_K: float = 4.2, auto_pid: bool = True,
+                        sensor: int = 1):
+        return target_K
+
+    @control  # legacy bare control: must keep the plain QLineEdit path
+    def set_heater_power(self, power_W: float = 0.0):
+        return power_W
+
+
+@pytest.fixture
+def spec_panel(orchestrator, qtbot):
+    """InstrumentPanel over the spec-declaring mock VI, plus a submit spy."""
+    vi = _SpecControlVI({})
+    panel = InstrumentPanel("mock_vi", vi, orchestrator)
+    qtbot.addWidget(panel)
+    submitted: list[tuple] = []
+    orchestrator.submit_vi_action = lambda vi_name, method, **kw: submitted.append(
+        (vi_name, method, kw)
+    )
+    return panel, submitted
+
+
+def test_spec_controls_render_typed_widgets(spec_panel):
+    """Declared ParamSpecs render combo/checkbox/line-edit, not all-QLineEdit."""
+    panel, _ = spec_panel
+    assert isinstance(
+        panel.findChild(QWidget, "mock_vi_set_temperature_target_K_input"), QLineEdit
+    )
+    assert isinstance(
+        panel.findChild(QWidget, "mock_vi_set_temperature_auto_pid_input"), QCheckBox
+    )
+    assert isinstance(
+        panel.findChild(QWidget, "mock_vi_set_temperature_sensor_input"), QComboBox
+    )
+    # Legacy bare control still renders a plain line edit.
+    assert isinstance(
+        panel.findChild(QWidget, "mock_vi_set_heater_power_power_W_input"), QLineEdit
+    )
+    # Spec-built field carries the tooltip (description + default + range).
+    field = panel.findChild(QWidget, "mock_vi_set_temperature_target_K_input")
+    assert "Temperature setpoint" in field.toolTip()
+    assert "1.5 to 300.0" in field.toolTip()
+
+
+def test_spec_controls_submit_typed_values(spec_panel):
+    """Collected kwargs are typed: float from text, bool from checkbox, mapped
+    choice value (not its label) from the combo."""
+    panel, submitted = spec_panel
+    panel.findChild(QWidget, "mock_vi_set_temperature_target_K_input").setText("77")
+    panel.findChild(QWidget, "mock_vi_set_temperature_auto_pid_input").setChecked(False)
+    panel.findChild(QWidget, "mock_vi_set_temperature_sensor_input").setCurrentText("VTI")
+
+    panel._submit_control("set_temperature")
+    assert submitted == [
+        ("mock_vi", "set_temperature",
+         {"target_K": 77.0, "auto_pid": False, "sensor": 2}),
+    ]
+
+
+def test_spec_controls_emptied_field_falls_back_to_method_default(spec_panel):
+    """Clearing a spec-built line edit omits the kwarg (method default applies)."""
+    panel, submitted = spec_panel
+    panel.findChild(QWidget, "mock_vi_set_temperature_target_K_input").setText("")
+    panel._submit_control("set_temperature")
+    assert len(submitted) == 1
+    assert "target_K" not in submitted[0][2]
+
+
+def test_spec_controls_unparseable_value_aborts_submit(spec_panel, monkeypatch):
+    """A non-numeric entry in a float field warns and submits nothing."""
+    from PyQt6.QtWidgets import QMessageBox
+
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox, "warning",
+        staticmethod(lambda *args: warnings.append(args[2])),
+    )
+    panel, submitted = spec_panel
+    panel.findChild(QWidget, "mock_vi_set_temperature_target_K_input").setText("abc")
+    panel._submit_control("set_temperature")
+    assert submitted == []
+    assert len(warnings) == 1
 
 
 def test_instrument_panel_status_not_restyled_when_unchanged(

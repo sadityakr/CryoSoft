@@ -2,8 +2,11 @@
 # description: |
 #   InstrumentPanel: auto-generated QGroupBox for one Virtual Instrument.
 #   Reads @monitored methods to create live-updating QLabel displays and
-#   @control methods to create QPushButton + QLineEdit widgets. Connects
-#   to Orchestrator.states_updated for live updates each monitor tick.
+#   @control methods to create control rows: a QPushButton plus one input
+#   widget per parameter. Controls that declare ParamSpecs render through
+#   gui/param_form (combo for choices, checkbox for bool, tooltipped and
+#   unit-labelled fields); bare @control methods keep plain QLineEdits.
+#   Connects to Orchestrator.states_updated for live updates each monitor tick.
 # entry_point: Not run directly. Instantiated by MonitorWindow.
 # dependencies:
 #   - PyQt6 >= 6.5
@@ -44,9 +47,18 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from cryosoft.core.decorators import get_control_methods, get_monitored_methods
+from cryosoft.core.decorators import (
+    get_control_methods,
+    get_control_specs,
+    get_monitored_methods,
+)
 from cryosoft.core.orchestrator import Orchestrator
 from cryosoft.gui.lifecycle_toggle import LifecycleToggleButton
+from cryosoft.gui.param_form import (
+    build_param_tooltip,
+    build_param_widget,
+    collect_value,
+)
 from cryosoft.virtual_instruments.base import BaseVirtualInstrument
 
 logger = logging.getLogger(__name__)
@@ -80,8 +92,10 @@ class InstrumentPanel(QGroupBox):
 
         # Maps field name → value label widget
         self._value_labels: dict[str, QLabel] = {}
-        # Maps method_name → {param_name → QLineEdit}
-        self._control_inputs: dict[str, dict[str, QLineEdit]] = {}
+        # Maps method_name → {param_name → input widget}. Widgets built by
+        # param_form when the control declares ParamSpecs (combo/checkbox/
+        # line-edit), plain QLineEdits otherwise.
+        self._control_inputs: dict[str, dict[str, QWidget]] = {}
         # Current status ("ok"/"stale"/"disconnected"). Drives the QSS
         # `status` property; tracked so styling is only re-applied on change.
         self._status = "ok"
@@ -143,7 +157,13 @@ class InstrumentPanel(QGroupBox):
         self.setLayout(outer)
 
     def _build_control_row(self, method_name: str, params: dict) -> QWidget:
-        """Build one @control method row: button + input fields.
+        """Build one @control method row: button + input widgets.
+
+        A parameter covered by a declared ``ParamSpec`` gets its widget from
+        ``param_form.build_param_widget`` (drop-down for ``choices``, checkbox
+        for ``bool``, else a line edit) with the unit in its label and the
+        description/default/range in a tooltip. Parameters without a spec keep
+        the legacy plain ``QLineEdit`` seeded from the signature default.
 
         Args:
             method_name: Name of the @control method.
@@ -164,16 +184,30 @@ class InstrumentPanel(QGroupBox):
         btn.setObjectName(f"{self._vi_name}_{method_name}_btn")
         row.addWidget(btn)
 
-        inputs: dict[str, QLineEdit] = {}
+        specs = get_control_specs(getattr(self._vi, method_name))
+        inputs: dict[str, QWidget] = {}
         for param_name, param_info in params.items():
-            lbl = QLabel(f"{param_name}:")
-            field = QLineEdit()
+            spec = specs.get(param_name)
+            if spec is not None:
+                label_text = (
+                    f"{param_name} ({spec.unit}):" if spec.unit else f"{param_name}:"
+                )
+                lbl = QLabel(label_text)
+                field = build_param_widget(param_name, spec)
+                tooltip = build_param_tooltip(spec)
+                lbl.setToolTip(tooltip)
+                field.setToolTip(tooltip)
+                if isinstance(field, QLineEdit):
+                    field.setMaximumWidth(90)
+            else:
+                lbl = QLabel(f"{param_name}:")
+                field = QLineEdit()
+                field.setPlaceholderText(param_name)
+                field.setMaximumWidth(90)
+                default = param_info.get("default")
+                if default is not None:
+                    field.setText(str(default))
             field.setObjectName(f"{self._vi_name}_{method_name}_{param_name}_input")
-            field.setPlaceholderText(param_name)
-            field.setMaximumWidth(90)
-            default = param_info.get("default")
-            if default is not None:
-                field.setText(str(default))
             inputs[param_name] = field
             row.addWidget(lbl)
             row.addWidget(field)
@@ -249,9 +283,32 @@ class InstrumentPanel(QGroupBox):
         inputs = self._control_inputs.get(method_name, {})
         vi_method = getattr(self._vi, method_name, None)
         params_meta = getattr(vi_method, "_control_params", {}) if vi_method else {}
+        specs = get_control_specs(vi_method) if vi_method else {}
 
         kwargs: dict[str, Any] = {}
         for param_name, field in inputs.items():
+            spec = specs.get(param_name)
+            if spec is not None:
+                # Spec-built widget: an emptied line edit falls back to the
+                # method's own default (a ParamSpec always declares one); an
+                # unparseable entry aborts the submit with an explicit verdict
+                # instead of sending a wrong-typed value onward.
+                if isinstance(field, QLineEdit) and not field.text().strip():
+                    continue
+                try:
+                    kwargs[param_name] = collect_value(field, spec)
+                except (ValueError, TypeError):
+                    from PyQt6.QtWidgets import QMessageBox
+                    QMessageBox.warning(
+                        self,
+                        "Invalid Parameter",
+                        f"'{field.text().strip()}' is not a valid "
+                        f"{spec.type.__name__} for '{param_name}' "
+                        f"({method_name}).",
+                    )
+                    return
+                continue
+
             raw = field.text().strip()
             meta = params_meta.get(param_name, {})
             param_type = meta.get("type", str)
