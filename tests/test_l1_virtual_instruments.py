@@ -1,4 +1,4 @@
-﻿# ---
+# ---
 # description: |
 #   Complete test suite for Layer 1 Virtual Instruments.
 # entry_point: pytest tests/test_l1_virtual_instruments.py -v
@@ -404,6 +404,85 @@ def test_delta_mode_short_return_is_nan_padded():
     assert all(not math.isnan(v) for v in data["voltage_V"][:3])
     assert all(math.isnan(v) for v in data["voltage_V"][3:])
     assert all(math.isnan(c) for c in data["current_A"][3:])
+
+
+def test_dc_mode_measurement_vi_lifecycle():
+    from cryosoft.virtual_instruments.measurement.measurement_dc_mode import DCModeMeasurementVI
+
+    source = SimKeithley6221("SIM")
+    meter = SimKeithley2182A("SIM")
+    source._paired_meter = meter
+    vi = DCModeMeasurementVI({"source": source, "meter": meter})
+
+    assert vi.ping() is True
+
+    # Before initiate, take_reading/set_dc_current should raise RuntimeError
+    with pytest.raises(RuntimeError):
+        vi.take_reading()
+
+    with pytest.raises(RuntimeError):
+        vi.set_dc_current(1e-6)
+
+    # Initiate
+    vi.initiate_measurement(
+        current=2e-6,
+        n_readings=10,
+        voltmeter_range_V=0.1,
+        compliance_V=2.0,
+        delay_s=0.001,
+        compliance_abort=True
+    )
+    assert source._mode == "DC"
+    assert source.get_current() == pytest.approx(2e-6)
+    assert source.get_compliance() == pytest.approx(2.0)
+    assert meter.get_range() == pytest.approx(0.1)
+
+    # Take reading
+    data = vi.take_reading()
+    assert len(data["voltage_V"]) == 10
+    assert len(data["current_A"]) == 10
+    assert data["n_valid"] == 10
+    assert all(c == pytest.approx(2e-6) for c in data["current_A"])
+
+    # Test reading-loop setter
+    vi.set_dc_current(5e-6)
+    assert source.get_current() == pytest.approx(5e-6)
+    data = vi.take_reading()
+    assert all(c == pytest.approx(5e-6) for c in data["current_A"])
+
+    # Test standby
+    vi.standby()
+    assert source.get_current() == pytest.approx(0.0)
+    with pytest.raises(RuntimeError):
+        vi.take_reading()
+
+
+def test_dc_mode_measurement_compliance_abort():
+    import math
+    from cryosoft.virtual_instruments.measurement.measurement_dc_mode import DCModeMeasurementVI
+
+    source = SimKeithley6221("SIM")
+    meter = SimKeithley2182A("SIM")
+    source._paired_meter = meter
+    vi = DCModeMeasurementVI({"source": source, "meter": meter})
+
+    # Trigger compliance abort. Since paired meter simulates 1500 Ohm load,
+    # sourcing 1 mA (1e-3 A) yields 1.5 V. With compliance at 1.0 V, it will
+    # trigger compliance abort.
+    vi.initiate_measurement(
+        current=1e-3,
+        n_readings=5,
+        voltmeter_range_V=1.0,
+        compliance_V=1.0,
+        delay_s=0.001,
+        compliance_abort=True
+    )
+
+    data = vi.take_reading()
+    # It should abort at the first reading since compliance is checked before the read
+    assert data["n_valid"] == 0
+    assert all(math.isnan(v) for v in data["voltage_V"])
+    assert all(math.isnan(c) for c in data["current_A"])
 
 
 # 16. Shared-instrument mode discipline (see GLOSSARY.md and

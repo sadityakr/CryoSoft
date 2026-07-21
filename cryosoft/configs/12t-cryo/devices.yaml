@@ -114,6 +114,12 @@ virtual_instruments:
     vi_type: measurement
     init_params: {}
 
+  keithley_dc_mode:
+    class: cryosoft.virtual_instruments.measurement.measurement_dc_mode.DCModeMeasurementVI
+    drivers: {source: keithley_6220, meter: keithley_6220}  # serial relay to K2182A
+    vi_type: measurement
+    init_params: {}
+
   # Generic pass-through routes (ch1..ch20, one per raw 705 channel) rather
   # than fixed per-sample names: no sample-to-channel mapping is documented
   # yet, so the operator/procedure selects whichever channel is physically

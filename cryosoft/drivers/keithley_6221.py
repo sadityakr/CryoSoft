@@ -443,7 +443,56 @@ class Keithley6221:
         finally:
             self._instr.timeout = orig
 
-        return readings
+    def is_in_compliance(self) -> bool:
+        """Return True if the current source is currently in compliance."""
+        cond = int(self._query(":STATus:QUEStionable:CONDition?"))
+        return bool(cond & 2)
+
+    def _ensure_serial_relay_configured(self) -> None:
+        """Force the relay's serial settings to the documented values."""
+        self._write(f":SYST:COMM:SER:BAUD {self._RELAY_BAUD}")
+        self._write(f":SYST:COMM:SER:TERM {self._RELAY_TERM}")
+        self._write(f":SYST:COMM:SER:PACE {self._RELAY_PACE}")
+
+    def get_voltage(self) -> float:
+        """Trigger and return a single DC voltage reading in Volts via serial relay.
+
+        Sends the MEAS? query to the 2182A over RS-232, waits for the response,
+        and retrieves it.
+        """
+        self._ensure_serial_relay_configured()
+        self._write(':SYST:COMM:SER:SEND "MEAS?"')
+        # Wait 800 ms for serial transmission and voltmeter integration time
+        time.sleep(0.8)
+        raw = self._query(":SYST:COMM:SER:ENT?").strip()
+        vals = [v.strip() for v in raw.split(",") if v.strip()]
+        try:
+            return float(vals[0])
+        except (IndexError, ValueError) as exc:
+            raise CryoSoftCommunicationError(
+                f"Keithley 6221: unparseable serial meter response: {raw!r}",
+                vi_name="Keithley6221",
+            ) from exc
+
+    def set_range(self, range_v: float) -> None:
+        """Set the 2182A measurement range via the serial relay."""
+        self._ensure_serial_relay_configured()
+        self._write(f':SYST:COMM:SER:SEND ":SENS1:VOLT:RANG {range_v:.4e}"')
+        time.sleep(0.15)
+
+    def get_range(self) -> float:
+        """Return the current 2182A voltage range via the serial relay."""
+        self._ensure_serial_relay_configured()
+        self._write(':SYST:COMM:SER:SEND ":SENS1:VOLT:RANG?"')
+        time.sleep(0.15)
+        raw = self._query(":SYST:COMM:SER:ENT?").strip()
+        try:
+            return float(raw)
+        except ValueError as exc:
+            raise CryoSoftCommunicationError(
+                f"Keithley 6221: unparseable serial range response: {raw!r}",
+                vi_name="Keithley6221",
+            ) from exc
 
     def _write(self, cmd: str) -> None:
         """Write a SCPI command, translating VISA errors to CryoSoft exceptions."""

@@ -276,9 +276,36 @@ class SimKeithley6221:
         self._source_enabled = False
         self._delta_readings = []
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
+    def is_in_compliance(self) -> bool:
+        """Return True if the simulated current source is in compliance."""
+        self._check_error()
+        if self._paired_meter is not None:
+            # Sourced current * 1500 Ohm load compared against compliance
+            v_est = self._current * 1500.0
+            return abs(v_est) >= self._compliance
+        return False
+
+    def get_voltage(self) -> float:
+        """Read voltage from the paired simulated meter."""
+        self._check_error()
+        if self._paired_meter is not None:
+            self._paired_meter._base_voltage = self._current * 1500.0
+            return self._paired_meter.get_voltage()
+        import random
+        return random.gauss(1.5e-6, 1e-8)
+
+    def set_range(self, range_v: float) -> None:
+        """Set range on the paired simulated meter."""
+        self._check_error()
+        if self._paired_meter is not None:
+            self._paired_meter.set_range(range_v)
+
+    def get_range(self) -> float:
+        """Get range from the paired simulated meter."""
+        self._check_error()
+        if self._paired_meter is not None:
+            return self._paired_meter.get_range()
+        return 0.01
 
     def _check_error(self) -> None:
         """Raise CryoSoftCommunicationError if error simulation is active."""
