@@ -625,7 +625,6 @@ def test_operations_config_block(config_dir: Path) -> None:
         "temperature_window_s",
         "zero_field_eps_T",
         "zero_field_window_s",
-        "postcondition_timeout_s",
     )
     for key in positive_keys:
         if key not in sample_change:

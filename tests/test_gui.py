@@ -3,9 +3,13 @@
 #   Smoke tests for the CryoSoft GUI layer (Layer 6).
 #   Verifies that MonitorWindow and ProcedureWindow open without errors,
 #   that InstrumentPanel widgets are auto-generated for all registered VIs,
-#   and that Orchestrator signals (state_changed, procedure_progress,
-#   measurement_ready) update the GUI correctly.
-# last_updated: 2026-07-13
+#   that Orchestrator signals (state_changed, procedure_progress,
+#   measurement_ready) update the GUI correctly, and that ProcedureWindow is
+#   operation-blind (docs/plans/operation-concurrency-and-error-scoping.md
+#   §2's hard status separation): its status log stays empty and its
+#   Pause/Resume/Abort no-op while an operation, rather than a procedure, is
+#   the active run.
+# last_updated: 2026-07-21
 # ---
 
 """GUI smoke tests — Layer 6.
@@ -1996,6 +2000,64 @@ def test_status_log_appends_status_messages(procedure_win, orchestrator):
     status_log = procedure_win.findChild(QTextEdit, "status_log")
     orchestrator.status_message.emit("Measuring point 3/11")
     assert "Measuring point 3/11" in status_log.toPlainText()
+
+
+# ── ProcedureWindow is operation-blind (docs/plans/operation-concurrency-
+# and-error-scoping.md §2's hard status separation) ──────────────────────
+
+
+class _StubOperation:
+    """A minimal duck-typed active-run stand-in with command_scope='operation'."""
+
+    name = "Helium Fill"
+    command_scope = "operation"
+
+
+def test_status_log_stays_empty_while_operation_runs(procedure_win, orchestrator):
+    """_emit_status() routes to operation_status, never status_message, for an operation run."""
+    status_log = procedure_win.findChild(QTextEdit, "status_log")
+    orchestrator._procedure = _StubOperation()
+    try:
+        orchestrator._emit_status("Ramping magnet_z to 0 T")
+    finally:
+        orchestrator._procedure = None
+    assert status_log.toPlainText() == ""
+
+
+def test_abort_button_does_not_act_while_operation_runs(procedure_win, orchestrator, monkeypatch):
+    """The Abort button no-ops (no confirmation dialog, no abort_procedure()) for an operation."""
+    called = []
+    monkeypatch.setattr(orchestrator, "abort_procedure", lambda: called.append(True))
+    orchestrator._procedure = _StubOperation()
+    try:
+        procedure_win._on_abort()
+    finally:
+        orchestrator._procedure = None
+    assert called == []
+
+
+def test_pause_resume_do_not_act_while_operation_runs(procedure_win, orchestrator, monkeypatch):
+    """Pause/Resume no-op while a helium fill (an operation) is the active run."""
+    pause_calls = []
+    resume_calls = []
+    monkeypatch.setattr(orchestrator, "pause_procedure", lambda: pause_calls.append(True))
+    monkeypatch.setattr(orchestrator, "resume_procedure", lambda: resume_calls.append(True))
+    orchestrator._procedure = _StubOperation()
+    try:
+        procedure_win._on_pause_clicked()
+        procedure_win._on_resume_clicked()
+    finally:
+        orchestrator._procedure = None
+    assert pause_calls == []
+    assert resume_calls == []
+
+
+def test_pause_resume_abort_still_act_on_a_procedure(procedure_win, orchestrator, monkeypatch):
+    """Regression: the same buttons still delegate normally for a plain procedure run."""
+    pause_calls = []
+    monkeypatch.setattr(orchestrator, "pause_procedure", lambda: pause_calls.append(True))
+    procedure_win._on_pause_clicked()
+    assert pause_calls == [True]
 
 
 def test_procedure_quadrant_splitters_correctly_oriented(procedure_win):

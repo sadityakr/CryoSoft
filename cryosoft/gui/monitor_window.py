@@ -1031,6 +1031,11 @@ class MonitorWindow(QMainWindow):
         # (each panel connects itself in its constructor) — this slot only
         # feeds the Trends quadrant and the optional Operations panel.
         self._orchestrator.states_updated.connect(self._on_states_updated)
+        # operation_status fires every tick while an operation runs (like
+        # states_updated), so it routes through this window too rather than
+        # connecting the panel directly (gui-edit skill's destruction-order
+        # rule).
+        self._orchestrator.operation_status.connect(self._on_operation_status)
         # run_finished fires only at run boundaries (not every tick), so
         # there is no teardown-race concern connecting it here directly.
         self._orchestrator.run_finished.connect(self._on_run_finished_for_logs)
@@ -1111,6 +1116,19 @@ class MonitorWindow(QMainWindow):
         self._trends.on_states_updated(state)
         if self._operations_panel is not None:
             self._operations_panel.on_states_updated(state)
+
+    def _on_operation_status(self, text: str) -> None:
+        """Forward one operation_status milestone line to the Operations panel.
+
+        Routed through the window for the same teardown-race reason as
+        ``_on_states_updated`` — ``operation_status`` fires every tick while
+        an operation runs, never at a safe run-boundary-only cadence.
+
+        Args:
+            text: The milestone line (``Orchestrator.operation_status``).
+        """
+        if self._operations_panel is not None:
+            self._operations_panel.on_operation_status(text)
 
     def _on_run_finished_for_logs(self, _manifest: dict) -> None:
         """Refresh the Logs page's tables after any run finishes.

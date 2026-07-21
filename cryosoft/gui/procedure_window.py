@@ -11,7 +11,13 @@
 #   the same nested-QSplitter pattern as MonitorWindow. Sample info is read from
 #   MonitorWindow via callables. This module owns the quadrant assembly, the
 #   Orchestrator signal wiring, the run/queue/abort flows, the live plots, and
-#   session/geometry persistence.
+#   session/geometry persistence. Operation-blind by design (docs/plans/
+#   operation-concurrency-and-error-scoping.md §2's hard status separation):
+#   status_message/procedure_progress/procedure_finished/measurement_ready
+#   fire only for a procedure run at the Orchestrator level, and Pause/
+#   Resume/Abort additionally gate on Orchestrator.active_run_kind() so this
+#   window never acts on a running operation — operation status and control
+#   live exclusively on the Operations panel's OperationCard.
 # entry_point: Not run directly. Opened via MonitorWindow Procedures menu.
 # dependencies:
 #   - PyQt6 >= 6.5
@@ -34,7 +40,8 @@
 #   orchestrator.run_procedure()/queue_procedure(), and keeps the plot axis
 #   and reading-loop selectors in sync with the selected procedure.
 # output: |
-#   A QMainWindow. Two live plots update via orchestrator.measurement_ready.
+#   A QMainWindow. Two live plots update via orchestrator.measurement_ready
+#   (never emitted for an operation run).
 # ---
 
 """ProcedureWindow — procedure builder, queue, and live-data monitor (shell)."""
@@ -323,14 +330,14 @@ class ProcedureWindow(QMainWindow):
         pause_btn.setProperty("class", BTN_CLASS_SECONDARY)
         pause_btn.setIcon(qta.icon("fa5s.pause", color=TEXT_PRIMARY))
         pause_btn.setToolTip("Pause the running procedure at the next safe point")
-        pause_btn.clicked.connect(self._orchestrator.pause_procedure)
+        pause_btn.clicked.connect(self._on_pause_clicked)
 
         resume_btn = QPushButton("Resume")
         resume_btn.setObjectName("resume_btn")
         resume_btn.setProperty("class", BTN_CLASS_SECONDARY)
         resume_btn.setIcon(qta.icon("fa5s.play", color=TEXT_PRIMARY))
         resume_btn.setToolTip("Resume the paused procedure")
-        resume_btn.clicked.connect(self._orchestrator.resume_procedure)
+        resume_btn.clicked.connect(self._on_resume_clicked)
 
         abort_btn = QPushButton("Abort")
         abort_btn.setObjectName("abort_btn")
@@ -485,8 +492,39 @@ class ProcedureWindow(QMainWindow):
         self._reset_plot(proc)
         self._orchestrator.run_procedure(proc)
 
+    def _on_pause_clicked(self) -> None:
+        """Pause the running procedure — a no-op while an operation is active.
+
+        This window is operation-blind (design doc operation-concurrency-
+        and-error-scoping.md §2's hard status separation): its Pause button
+        must never arm because an operation (e.g. a helium fill) happens to
+        be RAMPING. Operation control lives on the Operations panel's
+        OperationCard exclusively.
+        """
+        if self._orchestrator.active_run_kind() == "operation":
+            return
+        self._orchestrator.pause_procedure()
+
+    def _on_resume_clicked(self) -> None:
+        """Resume the paused procedure — a no-op while an operation is active.
+
+        Mirrors ``_on_pause_clicked``'s run-kind gate; see its docstring.
+        """
+        if self._orchestrator.active_run_kind() == "operation":
+            return
+        self._orchestrator.resume_procedure()
+
     def _on_abort(self) -> None:
-        """Ask for confirmation, then abort the running procedure."""
+        """Ask for confirmation, then abort the running procedure.
+
+        A no-op while an operation is active — this window is operation-
+        blind (design doc operation-concurrency-and-error-scoping.md §2):
+        its Abort button must never act on a running operation (e.g. a
+        helium fill mid-RAMPING). An operation ends via its own OperationCard
+        "Finish" control, never from here.
+        """
+        if self._orchestrator.active_run_kind() == "operation":
+            return
         answer = QMessageBox.question(
             self,
             "Abort Procedure",

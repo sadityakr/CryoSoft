@@ -579,10 +579,15 @@ class HeliumFillOperation(OperationBase):
     def postcondition_gates(self) -> tuple[Gate, ...]:
         """Verify SLOW refresh is restored and the level did not fall below start.
 
+        The Orchestrator evaluates each gate exactly once, immediately, as
+        the run ends (docs/plans/operation-concurrency-and-error-scoping.md
+        §2); an unmet gate is recorded on the run manifest's
+        ``postconditions_unmet`` list rather than blocking completion.
+
         Returns:
-            Two immediately-checked (``window_s=0``) gates: ``refresh_slow``
-            (from cached state) and ``level_held_or_rose`` (comparing the
-            last sampled level to the first).
+            Two gates (``window_s=0``, matching the one-shot evaluation):
+            ``refresh_slow`` (from cached state) and ``level_held_or_rose``
+            (comparing the last sampled level to the first).
         """
 
         def _refresh_slow() -> bool:

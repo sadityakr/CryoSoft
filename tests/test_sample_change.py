@@ -4,14 +4,16 @@
 #   (cryosoft/procedures/operations/sample_change.py, plan §8.2), driven by a
 #   real Orchestrator (ticked directly, not via the QTimer) against the
 #   sim_cryostat station: full run to zero field + 300 K with every
-#   postcondition held, the needle-valve operator-confirmation gate blocking
-#   completion until Orchestrator.confirm_operation("needle_valve") is
-#   called, postcondition timeout naming the unmet gate, measurement-VI
-#   standby + switch-VI open_all dispatch, an end-to-end run through a real
-#   CryogenicsRecorder (writing only the "operations" stream, never
-#   "cryogenics" — that is the fill's entry, not this operation's), refusal
-#   while a procedure is running, construction-time validation, and the
-#   operator-confirmation declaration standard itself (confirm()/confirmed()).
+#   postcondition held (empty postconditions_unmet), the needle-valve
+#   operator-confirmation gate — one-shot evaluated as the run ends
+#   (docs/plans/operation-concurrency-and-error-scoping.md §2): unconfirmed
+#   finishes promptly with "needle_valve_confirmed" named in
+#   postconditions_unmet, never blocking — measurement-VI standby + switch-VI
+#   open_all dispatch, an end-to-end run through a real CryogenicsRecorder
+#   (writing only the "operations" stream, never "cryogenics" — that is the
+#   fill's entry, not this operation's), refusal while a procedure is
+#   running, construction-time validation, and the operator-confirmation
+#   declaration standard itself (confirm()/confirmed()).
 #
 #   The sim ITC503 (cryosoft/drivers/sim_oxford_itc503.py) starts at 300 K
 #   already (its "room temperature" default) with a 60 s thermal time
@@ -22,7 +24,7 @@
 #   `driver._tau`) so the settle completes in test time — the same
 #   monkeypatch-the-sim-internals idiom test_helium_fill.py uses for the
 #   ILM's `_force_helium_level`.
-# last_updated: 2026-07-19
+# last_updated: 2026-07-21
 # ---
 
 from __future__ import annotations
@@ -102,7 +104,6 @@ def _make_op(station, *, person: str = "Alex Tech", **overrides) -> SampleChange
     config = dict(
         zero_field_window_s=0.0,
         temperature_window_s=0.03,
-        postcondition_timeout_s=30.0,
     )
     config.update(overrides)
     return SampleChangeOperation(station, person=person, **config)
@@ -142,7 +143,6 @@ def test_constructs_from_defaults(station):
     op = SampleChangeOperation(station)
     assert op.name == "Sample Change"
     assert op.tolerated_safety_flags == frozenset()
-    assert op.postcondition_timeout_s == 7200.0
 
 
 def test_construction_rejects_missing_vti_vi(station):
@@ -207,6 +207,7 @@ def test_sample_change_end_to_end(orchestrator, station, qtbot):
     assert finished[0]["kind"] == "operation"
     assert finished[0]["procedure"] == "Sample Change"
     assert not finished[0]["data_file"]  # no DataManager -> manifest data_file stays empty
+    assert finished[0]["postconditions_unmet"] == []  # every gate held, confirmed in time
 
     for name in station.magnet_vi_names():
         assert abs(station.get_vi(name).get_field()) < 0.01, f"{name} did not reach zero field"
@@ -215,60 +216,30 @@ def test_sample_change_end_to_end(orchestrator, station, qtbot):
     assert orchestrator._state == OrchestratorState.IDLE
 
 
-# ── Needle-valve operator-confirmation gate ───────────────────────────────
+# ── Needle-valve operator-confirmation gate: one-shot evaluation (plan
+# operation-concurrency-and-error-scoping.md §2 — never held, never timed
+# out) ─────────────────────────────────────────────────────────────────────
 
 
-def test_needle_valve_gate_blocks_until_confirmed(orchestrator, station, qtbot):
-    """The run holds at the needle-valve gate until confirm_operation() is called."""
+def test_needle_valve_not_confirmed_finishes_promptly_with_unmet_postcondition(
+    orchestrator, station, qtbot
+):
+    """An unconfirmed needle valve does not block finish; it is named unmet."""
     _fast_magnets(station)
     _fast_vti(station)
-
+    # Defaults: magnets already at 0 T, VTI already at 300 K (the sim
+    # ITC503's start temperature) -> zero_field and vti_at_target hold
+    # immediately, so needle_valve_confirmed is the only gate that can be
+    # unmet, isolating it in the assertion below.
     op = _make_op(station, temperature_window_s=0.0, zero_field_window_s=0.0)
 
     finished: list[dict] = []
     orchestrator.run_finished.connect(finished.append)
     orchestrator.run_operation(op)
 
-    # Let zero_field / vti_at_target settle (defaults: already at target) —
-    # only needle_valve_confirmed should still be blocking.
-    for _ in range(30):
-        orchestrator._tick()
-        time.sleep(0.005)
-    assert not finished, "the run must not finish before the needle valve is confirmed"
-    assert orchestrator._state == OrchestratorState.STANDBY
-
-    orchestrator.confirm_operation("needle_valve")
-    _tick_until(orchestrator, lambda: bool(finished), max_ticks=1000, sleep_s=0.01)
+    _tick_until(orchestrator, lambda: bool(finished), max_ticks=1000, sleep_s=0.005)
     assert finished[0]["status"] == "done"
-
-
-# ── Postcondition timeout ─────────────────────────────────────────────────
-
-
-def test_postcondition_timeout_never_confirmed_degrades_to_error(orchestrator, station, qtbot):
-    """An unconfirmed needle valve past postcondition_timeout_s degrades to ERROR."""
-    _fast_magnets(station)
-    _fast_vti(station)
-    # Defaults: magnets already at 0 T, VTI already at 300 K (the sim
-    # ITC503's start temperature) -> zero_field and vti_at_target hold
-    # immediately, so the ONLY gate that can time out is
-    # needle_valve_confirmed, isolating the failure to it.
-    op = _make_op(station, postcondition_timeout_s=0.05, temperature_window_s=0.0)
-
-    errors: list[str] = []
-    orchestrator.error_occurred.connect(errors.append)
-    orchestrator.run_operation(op)
-
-    _tick_until(
-        orchestrator,
-        lambda: orchestrator._state == OrchestratorState.ERROR,
-        max_ticks=2000,
-        sleep_s=0.005,
-    )
-    assert any("needle_valve_confirmed" in e for e in errors)
-    assert orchestrator._procedure is None
-
-    orchestrator.recover_from_error()
+    assert finished[0]["postconditions_unmet"] == ["needle_valve_confirmed"]
     assert orchestrator._state == OrchestratorState.IDLE
 
 

@@ -1,14 +1,20 @@
 # ---
 # description: |
-#   Behavior tests for the operation substrate (Phase 2, plan §4/§5/§7):
-#   OperationBase driven by the real Orchestrator against a real simulated
-#   Station. Covers the helium_low-tolerated vs quench safety matrix, the
-#   EMERGENCY carve-out and its end-state, run_operation refusal while a
-#   procedure is active, operation-before-procedure queue priority,
-#   postcondition gates (hold + timeout), finish_operation()'s graceful
-#   STANDBY path, and capability-scope enforcement at command dispatch.
-# last_updated: 2026-07-19
+#   Behavior tests for the operation substrate (Phase 2, plan §4/§5/§7), and
+#   the immediate-finish/one-shot-postcondition contract (docs/plans/
+#   operation-concurrency-and-error-scoping.md §2): OperationBase driven by
+#   the real Orchestrator against a real simulated Station. Covers the
+#   helium_low-tolerated vs quench safety matrix, the EMERGENCY carve-out and
+#   its end-state, run_operation refusal while a procedure is active,
+#   operation-before-procedure queue priority, postcondition gates (one-shot
+#   evaluation — a never-true gate is recorded as unmet rather than blocking;
+#   an all-true set finishes with an empty postconditions_unmet),
+#   finish_operation()'s immediate STANDBY path, and capability-scope
+#   enforcement at command dispatch.
+# last_updated: 2026-07-21
 # ---
+
+import time
 
 import pytest
 
@@ -44,7 +50,6 @@ class SimpleOperation(OperationBase):
         initiate_commands=(),
         standby_commands=(),
         postcondition_gates_factory=None,
-        postcondition_timeout_s=600.0,
         open_ended=True,
     ) -> None:
         super().__init__()
@@ -53,7 +58,6 @@ class SimpleOperation(OperationBase):
         self._initiate_commands = tuple(initiate_commands)
         self._standby_commands = tuple(standby_commands)
         self._postcondition_gates_factory = postcondition_gates_factory
-        self.postcondition_timeout_s = postcondition_timeout_s
         self._open_ended = open_ended
         self.sample_calls = 0
         self.postcondition_gates_calls = 0
@@ -302,59 +306,55 @@ def test_operation_queue_drains_before_procedure_queue(orchestrator, station, qt
     orchestrator.abort_procedure()
 
 
-# ── Postcondition gates ──────────────────────────────────────────────────────
+# ── Postcondition gates: one-shot evaluation (plan operation-concurrency-
+# and-error-scoping.md §2 — never held, never timed out) ────────────────────
 
 
-def test_postcondition_gate_holds_completion_until_satisfied(orchestrator, station, qtbot):
-    """The run only reaches 'done' once every postcondition gate holds."""
-    _fast_magnet(station)
-    calls = {"n": 0}
-
-    def check():
-        calls["n"] += 1
-        return calls["n"] >= 3
-
-    op = SimpleOperation(
-        station,
-        open_ended=False,
-        postcondition_gates_factory=lambda: (Gate("settled", check=check),),
-    )
-    orchestrator.run_operation(op)
-
-    finished = []
-    orchestrator.run_finished.connect(finished.append)
-
-    qtbot.waitUntil(lambda: op.postcondition_gates_calls >= 1, timeout=2000)
-    assert orchestrator._state == OrchestratorState.STANDBY
-    assert finished == []
-
-    qtbot.waitUntil(lambda: bool(finished), timeout=2000)
-    assert finished[0]["status"] == "done"
-    assert orchestrator._state == OrchestratorState.IDLE
-
-
-def test_postcondition_timeout_degrades_to_error_naming_the_gate(orchestrator, station, qtbot):
-    """An unmet postcondition gate past its timeout degrades the run to ERROR."""
+def test_postcondition_gate_never_true_finishes_promptly_with_unmet_name(
+    orchestrator, station, qtbot
+):
+    """A never-satisfied postcondition gate does not block finish; it is named unmet."""
     _fast_magnet(station)
 
     op = SimpleOperation(
         station,
         open_ended=False,
         postcondition_gates_factory=lambda: (Gate("never_settles", check=lambda: False),),
-        postcondition_timeout_s=0.05,
+    )
+    start = time.monotonic()
+    orchestrator.run_operation(op)
+
+    finished = []
+    orchestrator.run_finished.connect(finished.append)
+
+    qtbot.waitUntil(lambda: bool(finished), timeout=2000)
+    # "Well under a second of sim time" — no hold, no wait for the gate.
+    assert time.monotonic() - start < 1.0
+    assert op.postcondition_gates_calls == 1  # evaluated exactly once
+    assert finished[0]["status"] == "done"
+    assert finished[0]["postconditions_unmet"] == ["never_settles"]
+    assert orchestrator._state == OrchestratorState.IDLE
+
+
+def test_postcondition_gates_all_true_finish_with_empty_unmet_list(
+    orchestrator, station, qtbot
+):
+    """Every postcondition gate holding -> an empty postconditions_unmet list."""
+    _fast_magnet(station)
+
+    op = SimpleOperation(
+        station,
+        open_ended=False,
+        postcondition_gates_factory=lambda: (Gate("settled", check=lambda: True),),
     )
     orchestrator.run_operation(op)
 
-    errors: list[str] = []
-    orchestrator.error_occurred.connect(errors.append)
+    finished = []
+    orchestrator.run_finished.connect(finished.append)
 
-    qtbot.waitUntil(
-        lambda: orchestrator._state == OrchestratorState.ERROR, timeout=3000
-    )
-    assert any("never_settles" in e for e in errors)
-    assert orchestrator._procedure is None
-
-    orchestrator.recover_from_error()
+    qtbot.waitUntil(lambda: bool(finished), timeout=2000)
+    assert finished[0]["status"] == "done"
+    assert finished[0]["postconditions_unmet"] == []
     assert orchestrator._state == OrchestratorState.IDLE
 
 

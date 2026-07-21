@@ -53,7 +53,7 @@ section — `measure()`/`change_sweep_step()` are final adapters over
 | `standby()` | `PhasePlan` | Operation ending — park hardware |
 | `abort()` | `tuple[Command, ...]` | User abort / ERROR / EMERGENCY |
 | `initiation_gates()` | `tuple[Gate, ...]` | Once, before the first `sample()` |
-| `postcondition_gates()` | `tuple[Gate, ...]` | After `standby()`'s ramp completes |
+| `postcondition_gates()` | `tuple[Gate, ...]` | Evaluated once, immediately, as the run ends (right after `standby()`'s plan is dispatched) |
 
 An operation's plans may carry BOTH `"measurement"`- and `"operation"`-scope
 `@control` commands (`Station.send_measurement_commands(..., allowed_scope=
@@ -102,9 +102,13 @@ operation) — the capability a plain procedure's plan does not have.
   narrower than "everything" only on a station with instruments it never
   touches (e.g. a rotator).
 - `postcondition_gates()` is the operation-specific addition over the
-  procedure contract: gates stepped once parking completes, verifying the
-  cryostat actually reached the promised state (not just that the commands
-  were sent) before the run is declared `done`.
+  procedure contract: gates verifying the cryostat actually reached the
+  promised state (not just that the commands were sent). The Orchestrator
+  evaluates each gate exactly ONCE (`Gate.check_once()`), immediately, as
+  the run ends — no holding, no timeout (docs/plans/operation-concurrency-
+  and-error-scoping.md §2, "immediate finish"). An unmet gate never blocks
+  the run; it is named in the run manifest's `postconditions_unmet` list and
+  logged at WARNING.
 - An operation that wants a dataset creates its own `DataManager` in
   `initiate()` exactly as `BaseProcedure` does, and exposes `data_filepath`
   so the Orchestrator's run manifest captures the path; a data file is never
@@ -146,8 +150,9 @@ the postcondition or hardcode a GUI checkbox, an operation **declares** it:
   `"Needle valve closed"`).
 - Instance methods `confirm(key)` (raises `ValueError` on an undeclared key)
   and `confirmed(key) -> bool` set and read the per-run flag.
-- `postcondition_gates()` includes a gate that reads `confirmed(key)` — the
-  run cannot reach `done` until the flag is set.
+- `postcondition_gates()` includes a gate that reads `confirmed(key)` —
+  unconfirmed at the one-shot evaluation, the gate is simply named in
+  `postconditions_unmet` rather than blocking `done`.
 - `Orchestrator.confirm_operation(key)` (mirroring `finish_operation()`,
   same duck-typed-active-operation / `action_blocked` pattern) is the single
   entry point a caller uses to set it.
