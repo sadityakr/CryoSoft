@@ -59,6 +59,7 @@ from cryosoft.gui.theme import (
     build_stylesheet,
 )
 from cryosoft.gui.trend_plot_panel import TrendPlotPanel
+from cryosoft.gui.param_form import LoopValuesWidget
 from cryosoft.virtual_instruments.base import BaseVirtualInstrument
 
 
@@ -1003,9 +1004,15 @@ def test_live_plot_loop_selectors_follow_reading_loop(procedure_win, station):
     _set_slot_parameter(
         procedure_win, "loop2_parameter", "dc_measurement.current_A"
     )
-    values_edit = procedure_win.findChild(QLineEdit, "param_loop2_values_input")
-    values_edit.setText("1e-6, -1e-6")
-    values_edit.editingFinished.emit()
+    values_widget = procedure_win.findChild(LoopValuesWidget, "")
+    # LoopValuesWidget doesn't have an objectName match by text — locate by type within the form
+    # and populate its table directly.
+    from cryosoft.gui import param_form
+    loop2_values_widget = procedure_win._params_panel._param_inputs.get("loop2_values")
+    assert loop2_values_widget is not None, "loop2_values widget not found"
+    loop2_values_widget.set_raw("1e-6, -1e-6")
+    # Trigger structural re-render since the loop values widget is structural
+    procedure_win._params_panel._on_structural_changed()
 
     sel1 = procedure_win.findChild(QComboBox, "plot1_loop1_selector")
     sel2 = procedure_win.findChild(QComboBox, "plot1_loop2_selector")

@@ -835,7 +835,7 @@ class SweepMeasureProcedure(BaseProcedure):
                 )
             else:
                 values = self._parse_loop_values(
-                    param_name, spec, param_values.get(f"{slot}_values")
+                    param_name, spec, str(param_values.get(f"{slot}_values") or "")
                 )
             if not values:
                 raise CryoSoftConfigError(
@@ -921,19 +921,20 @@ class SweepMeasureProcedure(BaseProcedure):
         return registry
 
     @staticmethod
-    def _parse_loop_values(param_name: str, spec: ParamSpec, text: Any) -> list:
-        """Parse a loop-value list against a parameter's spec.
+    def _parse_loop_values(param_name: str, spec: ParamSpec, text: str) -> list:
+        """Parse a comma-separated loop-value list against a parameter's spec.
 
-        Supports a comma-separated string, a colon-separated range generator,
-        or a Python list/tuple/array directly.
+        Each entry is converted with the spec's ``type`` and checked against
+        its ``min``/``max`` bounds or ``choices``, so a loop value obeys
+        exactly the constraints the single-value form field would enforce.
 
         Args:
             param_name: The looped parameter's name (for error messages).
             spec: The looped parameter's ``ParamSpec``.
-            text: The user-entered values (string, range generator, or iterable).
+            text: The user-entered comma-separated list (e.g. ``"1e-6, -1e-6"``).
 
         Returns:
-            The parsed values, in entry order.
+            The parsed values, in entry order (empty for blank *text*).
 
         Raises:
             CryoSoftConfigError: If the parameter is a bool (not loopable), an
@@ -945,62 +946,17 @@ class SweepMeasureProcedure(BaseProcedure):
                 f"reading loop: parameter {param_name!r} is a bool and cannot "
                 f"be looped over a value list."
             )
-        if text is None:
-            return []
-
-        raw_entries: list[Any] = []
-        if isinstance(text, str):
-            is_numeric = spec.type in (float, int)
-            for entry in (e.strip() for e in text.split(",")):
-                if not entry:
-                    continue
-                # Remove all whitespace from within the entry (e.g. "- 0.000001" -> "-0.000001")
-                cleaned_entry = "".join(entry.split())
-                if is_numeric and ":" in cleaned_entry:
-                    parts = cleaned_entry.split(":")
-                    if len(parts) == 3:
-                        try:
-                            start = float(parts[0])
-                            end = float(parts[1])
-                            steps = int(parts[2])
-                        except ValueError as exc:
-                            raise CryoSoftConfigError(
-                                f"reading loop: range generator {entry!r} is invalid. "
-                                f"Must be format 'start:end:steps' (e.g. '-1e-6:1e-6:21')."
-                            ) from exc
-                        if steps < 2:
-                            raise CryoSoftConfigError(
-                                f"reading loop: range generator {entry!r} steps must be >= 2."
-                            )
-                        for k in range(steps):
-                            val = start + k * (end - start) / (steps - 1)
-                            raw_entries.append(spec.type(val))
-                    else:
-                        raise CryoSoftConfigError(
-                            f"reading loop: range generator {entry!r} must have 3 colon-separated parts (start:end:steps)."
-                        )
-                else:
-                    try:
-                        raw_entries.append(spec.type(cleaned_entry))
-                    except (TypeError, ValueError) as exc:
-                        raise CryoSoftConfigError(
-                            f"reading loop: {entry!r} is not a valid "
-                            f"{spec.type.__name__} for parameter {param_name!r}."
-                        ) from exc
-        else:
-            try:
-                raw_entries = [spec.type(x) for x in text]
-            except TypeError:
-                try:
-                    raw_entries = [spec.type(text)]
-                except (TypeError, ValueError) as exc:
-                    raise CryoSoftConfigError(
-                        f"reading loop: {text!r} is not a valid "
-                        f"{spec.type.__name__} for parameter {param_name!r}."
-                    ) from exc
-
         values: list = []
-        for value in raw_entries:
+        for entry in (e.strip() for e in text.split(",")):
+            if not entry:
+                continue
+            try:
+                value = spec.type(entry)
+            except (TypeError, ValueError) as exc:
+                raise CryoSoftConfigError(
+                    f"reading loop: {entry!r} is not a valid "
+                    f"{spec.type.__name__} for parameter {param_name!r}."
+                ) from exc
             if spec.choices is not None and value not in spec.choices.values():
                 raise CryoSoftConfigError(
                     f"reading loop: {value!r} is not one of {param_name!r}'s "
@@ -1144,6 +1100,7 @@ class SweepMeasureProcedure(BaseProcedure):
                         type=str,
                         default=str(selections.get(f"{slot}_values") or ""),
                         structural=True,
+                        widget_hint="array",
                         description=(
                             "Comma-separated values; one value sets it once, "
                             "two or more loop it at every sweep point"
@@ -1243,7 +1200,7 @@ class SweepMeasureProcedure(BaseProcedure):
                     values = cls._parse_loop_values(
                         param_name,
                         spec,
-                        selections.get(f"{slot}_values"),
+                        str(selections.get(f"{slot}_values") or ""),
                     )
                 except CryoSoftConfigError:
                     values = []
@@ -1474,6 +1431,48 @@ class SweepMeasureProcedure(BaseProcedure):
             A ``PhasePlan`` with ``_standby_targets()``, disarming the selected
             measurement VI, with ``wait_s=0.0``.
         """
+        if self._data_manager is not None:
+            self._data_manager.close()
+            self._data_manager = None
+        return PhasePlan(
+            targets=self._standby_targets(),
+            commands=self._safe_off_commands(),
+            wait_s=0.0,
+        )
+
+    def abort(self) -> tuple[Command, ...]:
+        """Close the data file and disarm the measurement VI (+ loop safe-offs).
+
+        Returns:
+            The measurement safe-off command(s) for the Orchestrator to
+            dispatch, plus each participating loop VI's ``reading_safe_off``.
+        """
+        super().abort()
+        return self._safe_off_commands()
+
+    def _safe_off_commands(self) -> tuple[Command, ...]:
+        """Return the measurement standby command plus the loop VIs' safe-offs.
+
+        Shared by ``standby()`` and ``abort()``: disarm the measurement VI
+        and, for every OTHER VI that took part in a loop slot (static or
+        looping) and declares a ``reading_safe_off`` method (e.g. the switch's
+        ``open_all``), dispatch it so nothing is left connected.
+
+        Returns:
+            Ordered ``tuple[Command, ...]`` — the measurement ``standby``
+            first, then one safe-off per participating loop VI.
+        """
+        commands = [Command(self._measurement_vi, "standby", {})]
+        seen: set[str] = set()
+        for slot in self._loop_slots:
+            slot_vi = slot["vi_name"]
+            if slot_vi == self._measurement_vi or slot_vi in seen:
+                continue
+            seen.add(slot_vi)
+            safe_off = self._station.get_vi(slot_vi).reading_safe_off
+            if safe_off:
+                commands.append(Command(slot_vi, safe_off, {}))
+        return tuple(commands)
         if self._data_manager is not None:
             self._data_manager.close()
             self._data_manager = None
