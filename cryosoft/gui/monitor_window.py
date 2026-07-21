@@ -92,6 +92,7 @@ from cryosoft.gui.diagnostics_window import DiagnosticsWindow
 from cryosoft.gui.instrument_panel import InstrumentPanel
 from cryosoft.gui.log_panel import LogPanel
 from cryosoft.gui.notification_banner import NotificationBanner
+from cryosoft.gui.offline_panel import OfflineInstrumentPanel
 from cryosoft.gui.operations_panel import OperationsPanel
 from cryosoft.gui.servicing_log_page import ServicingLogPage
 from cryosoft.gui.session_dialogs import LoadSessionDialog
@@ -315,11 +316,25 @@ class MonitorWindow(QMainWindow):
         # a duplicate if the window is ever reconstructed in-process).
         self._log_panel.attach()
 
-        # Surface a startup config fallback (a bad active config was skipped).
+        # Surface a startup config fallback (a bad active config was skipped)
+        # and/or instruments that failed to connect (degraded build). One
+        # combined banner: show_message replaces, so two calls would hide the
+        # first message.
+        startup_notes: list[str] = []
         if self._startup_warning:
+            startup_notes.append(
+                f"Config fallback in effect — {self._startup_warning}"
+            )
+        offline_names = self._station.offline_vi_names()
+        if offline_names:
+            startup_notes.append(
+                f"{len(offline_names)} instrument(s) offline: "
+                f"{', '.join(offline_names)}. Everything else is operational — "
+                "open the instrument's details (sliders icon) to retry."
+            )
+        if startup_notes:
             self._banner.show_message(
-                f"Config fallback in effect — {self._startup_warning}",
-                BANNER_SEVERITY_WARNING,
+                " | ".join(startup_notes), BANNER_SEVERITY_WARNING
             )
 
     # ------------------------------------------------------------------
@@ -659,29 +674,36 @@ class MonitorWindow(QMainWindow):
         entries += [(n, "Scanner") for n in switch_vis]
 
         self._panels: list[InstrumentPanel] = []
+        self._offline_cards: dict[str, OfflineInstrumentPanel] = {}
         grid_container = QWidget()
         grid = QGridLayout(grid_container)
         grid.setSpacing(6)
+        self._instruments_grid = grid
         for idx, (vi_name, type_tag) in enumerate(entries):
-            vi = self._station._virtual_instruments[vi_name]
-            extra = (
-                self._build_scanner_enable_checkbox(vi_name)
-                if vi_name in switch_vis
-                else None
-            )
-            panel = InstrumentPanel(
-                vi_name,
-                vi,
-                self._orchestrator,
-                parent=self,
-                panel_controls=self._panels_config.get(vi_name),
-                type_tag=type_tag,
-                extra_widget=extra,
-            )
-            panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            panel = self._make_live_panel(vi_name, type_tag)
             self._panels.append(panel)
             row, col = divmod(idx, 2)
             grid.addWidget(panel, row, col)
+
+        # Offline instruments (degraded build) render after the live cards as
+        # control-free fault cards; a successful reconnect swaps the card for
+        # a live panel in place (_on_instrument_reconnected).
+        tag_by_type = {"measurement": "Measurement", "switch": "Scanner"}
+        for offset, vi_name in enumerate(self._station.offline_vi_names()):
+            info = self._station.get_offline_info(vi_name)
+            card = OfflineInstrumentPanel(
+                vi_name,
+                info,
+                self._orchestrator,
+                parent=self,
+                type_tag=tag_by_type.get(info.vi_type),
+            )
+            card.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+            )
+            self._offline_cards[vi_name] = card
+            row, col = divmod(len(entries) + offset, 2)
+            grid.addWidget(card, row, col)
 
         scroll = QScrollArea()
         scroll.setObjectName("instruments_scroll")
@@ -689,6 +711,59 @@ class MonitorWindow(QMainWindow):
         scroll.setWidget(grid_container)
         outer.addWidget(scroll)
         return container
+
+    def _make_live_panel(
+        self, vi_name: str, type_tag: str | None
+    ) -> InstrumentPanel:
+        """Construct one live VI card (shared by initial build and reconnect).
+
+        Args:
+            vi_name: The registered VI's name.
+            type_tag: Role label for tagged cards ("Measurement", "Scanner"),
+                None for system/level cards.
+
+        Returns:
+            The wired InstrumentPanel, size policy applied.
+        """
+        vi = self._station.get_vi(vi_name)
+        extra = (
+            self._build_scanner_enable_checkbox(vi_name)
+            if self._station.get_vi_type(vi_name) == "switch"
+            else None
+        )
+        panel = InstrumentPanel(
+            vi_name,
+            vi,
+            self._orchestrator,
+            parent=self,
+            panel_controls=self._panels_config.get(vi_name),
+            type_tag=type_tag,
+            extra_widget=extra,
+        )
+        panel.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        return panel
+
+    def _on_instrument_reconnected(self, vi_name: str) -> None:
+        """Swap an offline card for a live InstrumentPanel in place.
+
+        Args:
+            vi_name: The VI just brought live by Orchestrator.retry_reconnect().
+        """
+        card = self._offline_cards.pop(vi_name, None)
+        if card is None:
+            return
+        tag_by_type = {"measurement": "Measurement", "switch": "Scanner"}
+        panel = self._make_live_panel(
+            vi_name, tag_by_type.get(self._station.get_vi_type(vi_name))
+        )
+        self._panels.append(panel)
+        self._instruments_grid.replaceWidget(card, panel)
+        panel.show()
+        card.close_details()
+        card.deleteLater()
+        logger.info("Offline card for '%s' replaced by live panel", vi_name)
 
     def _build_scanner_enable_checkbox(self, vi_name: str) -> QCheckBox:
         """Build one switch card's Enable Scanner checkbox.
@@ -1021,6 +1096,9 @@ class MonitorWindow(QMainWindow):
     def _connect_signals(self) -> None:
         self._orchestrator.monitoring_changed.connect(
             lambda _on: self._sync_monitoring_btn()
+        )
+        self._orchestrator.instrument_reconnected.connect(
+            self._on_instrument_reconnected
         )
         self._orchestrator.state_changed.connect(self._on_state_changed)
         self._orchestrator.error_occurred.connect(self._on_error)

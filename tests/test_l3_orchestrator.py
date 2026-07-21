@@ -70,6 +70,87 @@ def orchestrator(station, qtbot):
     orch.shutdown()
 
 
+def _degraded_station(tmp_path, vi_type: str = "measurement"):
+    """Build a station whose one instrument failed to connect but will
+    succeed on the next attempt (reuses the L2 flaky-driver double)."""
+    from tests.test_l2_station import _FlakyDriver
+
+    _FlakyDriver.fail_times = 1
+    _FlakyDriver.attempts = 0
+    (tmp_path / "devices.yaml").write_text(
+        "real_drivers:\n"
+        "  flaky_drv:\n"
+        "    class: tests.test_l2_station._FlakyDriver\n"
+        '    address: "GPIB0::12::INSTR"\n'
+        "virtual_instruments:\n"
+        "  flaky_vi:\n"
+        "    class: tests.test_l2_station._StubVI\n"
+        "    drivers: {main: flaky_drv}\n"
+        f"    vi_type: {vi_type}\n"
+    )
+    (tmp_path / "monitor.yaml").write_text(
+        "monitor:\n  tick_interval_ms: 1000\n  max_vi_errors: 3\n"
+    )
+    return build_station(str(tmp_path))
+
+
+def test_retry_reconnect_success_emits_signals(tmp_path, qtbot):
+    """retry_reconnect() in IDLE brings the VI live and reports the verdict."""
+    orch = Orchestrator(_degraded_station(tmp_path), tick_interval_ms=10)
+    try:
+        with qtbot.waitSignals(
+            [orch.instrument_reconnected, orch.action_succeeded], timeout=500
+        ):
+            orch.retry_reconnect("flaky_vi")
+        assert orch._station.has_vi("flaky_vi") is True
+        assert orch._station.offline_vi_names() == []
+    finally:
+        orch.shutdown()
+
+
+def test_retry_reconnect_blocked_outside_idle(tmp_path, qtbot):
+    """Reconnect is refused while a run is in flight (action_blocked verdict)."""
+    orch = Orchestrator(_degraded_station(tmp_path), tick_interval_ms=10)
+    try:
+        orch._state = OrchestratorState.MEASURING
+        with qtbot.waitSignal(orch.action_blocked, timeout=500):
+            orch.retry_reconnect("flaky_vi")
+        assert orch._station.has_vi("flaky_vi") is False
+    finally:
+        orch._state = OrchestratorState.IDLE
+        orch.shutdown()
+
+
+def test_retry_reconnect_failure_emits_action_failed(tmp_path, qtbot):
+    """A still-unreachable instrument yields action_failed with the reason."""
+    from tests.test_l2_station import _FlakyDriver
+
+    orch = Orchestrator(_degraded_station(tmp_path), tick_interval_ms=10)
+    _FlakyDriver.fail_times = 99  # next attempt fails again
+    _FlakyDriver.attempts = 0
+    try:
+        with qtbot.waitSignal(orch.action_failed, timeout=500) as blocker:
+            orch.retry_reconnect("flaky_vi")
+        assert "flaky_drv" in blocker.args[2]
+        assert orch._station.offline_vi_names() == ["flaky_vi"]
+    finally:
+        orch.shutdown()
+
+
+def test_retry_reconnect_adopts_reconnected_scanner(tmp_path, qtbot):
+    """A reconnected switch VI becomes the scanner (same first-switch rule
+    the constructor applies)."""
+    orch = Orchestrator(
+        _degraded_station(tmp_path, vi_type="switch"), tick_interval_ms=10
+    )
+    try:
+        assert orch._scanner_vi_name is None
+        orch.retry_reconnect("flaky_vi")
+        assert orch._scanner_vi_name == "flaky_vi"
+    finally:
+        orch.shutdown()
+
+
 def test_basic_ticking(orchestrator, qtbot):
     """Orchestrator starts, ticks at interval, emits states_updated."""
     with qtbot.waitSignal(orchestrator.states_updated, timeout=500) as blocker:

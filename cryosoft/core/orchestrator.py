@@ -196,6 +196,7 @@ class Orchestrator(QObject):
     action_blocked = pyqtSignal(str)
     action_succeeded = pyqtSignal(str, str)
     action_failed = pyqtSignal(str, str, str)
+    instrument_reconnected = pyqtSignal(str)  # offline VI brought live via retry_reconnect()
     measurement_ready = pyqtSignal(dict)  # emitted after each measure() with last_datapoint
     operational_status = pyqtSignal(dict)  # per-tick runtime status record (troubleshooting)
     status_message = pyqtSignal(str)  # concise, human-readable PROCEDURE milestone line
@@ -937,6 +938,61 @@ class Orchestrator(QObject):
             self._gui_action_queue.append(
                 {"vi_name": vi_name, "method_name": method, "kwargs": {}}
             )
+
+    def retry_reconnect(self, vi_name: str) -> None:
+        """Try to bring an offline instrument online (GUI reconnect action).
+
+        Delegates to ``Station.retry_instrument()`` and reports the verdict
+        through the standard action signals: ``action_succeeded(vi_name,
+        "reconnect")`` plus ``instrument_reconnected(vi_name)`` on success,
+        ``action_failed`` with the reason otherwise.
+
+        Allowed only in IDLE: a VI joining the station mid-procedure would
+        bypass the run's safety review. Runs synchronously rather than via the
+        GUI action queue — the queue dispatches to *registered* VIs, which an
+        offline one is not, and everything is on the one thread anyway, so no
+        tick can interleave with the reconnect (the single-writer guarantee
+        holds).
+
+        Args:
+            vi_name: Name of the offline VI to reconnect.
+        """
+        if self._state != OrchestratorState.IDLE:
+            msg = (
+                f"Cannot reconnect {vi_name}: Orchestrator is in state "
+                f"{self._state.name}, reconnect requires IDLE"
+            )
+            logger.info("Blocked reconnect: %s", msg)
+            self.action_blocked.emit(msg)
+            return
+        ok, message = self._station.retry_instrument(vi_name)
+        if ok:
+            # A reconnected switch VI must be adoptable as the scanner —
+            # re-run the same first-switch resolution done at construction.
+            if self._scanner_vi_name is None:
+                switch_names = self._station.switch_vi_names()
+                self._scanner_vi_name = switch_names[0] if switch_names else None
+            logger.info("Reconnect succeeded for '%s'", vi_name)
+            self.instrument_reconnected.emit(vi_name)
+            self.action_succeeded.emit(vi_name, "reconnect")
+        else:
+            logger.warning("Reconnect failed for '%s': %s", vi_name, message)
+            self.action_failed.emit(vi_name, "reconnect", message)
+
+    def offline_reason(self, vi_name: str) -> str:
+        """Return the current failure reason for an offline VI, GUI-safe.
+
+        Args:
+            vi_name: Name of the VI to look up.
+
+        Returns:
+            The offline record's human-readable reason, or ``""`` when the VI
+            is not offline (e.g. it has just been reconnected).
+        """
+        try:
+            return self._station.get_offline_info(vi_name).reason
+        except KeyError:
+            return ""
 
     def set_scanner_enabled(self, enabled: bool) -> None:
         """Toggle scanner availability for scanner-sensitive procedures.

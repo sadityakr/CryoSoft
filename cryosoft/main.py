@@ -143,6 +143,12 @@ def main() -> None:
     if warnings:
         for warning in warnings:
             logger.warning("Startup config fallback: %s", warning)
+    for offline_name in station.offline_vi_names():
+        logger.warning(
+            "Instrument offline at startup: %s (%s)",
+            offline_name,
+            station.get_offline_info(offline_name).reason,
+        )
 
     orchestrator = Orchestrator(station, tick_interval_ms=3000)
 

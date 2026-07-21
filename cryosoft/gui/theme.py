@@ -173,11 +173,19 @@ QGroupBox[status="stale"] {{
 QGroupBox[status="disconnected"] {{
     border: 2px solid {STATUS_ERROR};
 }}
+/* Offline (failed to connect at build time; OfflineInstrumentPanel) shares
+   the disconnected color: same severity, different lifecycle stage. */
+QGroupBox[status="offline"] {{
+    border: 2px solid {STATUS_ERROR};
+}}
 
 /* ── Panel name label (InstrumentPanel's custom header row) ───────────── */
 /* Replaces QGroupBox::title now that the toggle button sits next to it —
    QGroupBox can't embed a widget next to its native title. */
 QLabel[class="panel_name_label"][status="disconnected"] {{
+    color: {STATUS_ERROR};
+}}
+QLabel[class="panel_name_label"][status="offline"] {{
     color: {STATUS_ERROR};
 }}
 
