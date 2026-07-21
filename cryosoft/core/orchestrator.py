@@ -844,6 +844,21 @@ class Orchestrator(QObject):
             logger.warning("Reconnect failed for '%s': %s", vi_name, message)
             self.action_failed.emit(vi_name, "reconnect", message)
 
+    def offline_reason(self, vi_name: str) -> str:
+        """Return the current failure reason for an offline VI, GUI-safe.
+
+        Args:
+            vi_name: Name of the VI to look up.
+
+        Returns:
+            The offline record's human-readable reason, or ``""`` when the VI
+            is not offline (e.g. it has just been reconnected).
+        """
+        try:
+            return self._station.get_offline_info(vi_name).reason
+        except KeyError:
+            return ""
+
     def set_scanner_enabled(self, enabled: bool) -> None:
         """Toggle scanner availability for scanner-sensitive procedures.
 

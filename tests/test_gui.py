@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QGridLayout,
+    QGroupBox,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -2684,3 +2685,90 @@ def test_diagnostics_window_geometry_persists_on_close(orchestrator, qtbot, isol
 
     settings = QSettings(str(isolated_settings), QSettings.Format.IniFormat)
     assert settings.value("DiagnosticsWindow/geometry") is not None
+
+
+# ── Offline instruments (degraded build) ───────────────────────────────────────
+
+
+def _degraded_monitor_setup(tmp_path, fail_times: int):
+    """Station with one live VI and one offline VI, plus its Orchestrator.
+
+    Reuses the L2 flaky-driver double: the offline VI's driver fails at build
+    and succeeds (or keeps failing) on retry depending on ``fail_times``.
+    """
+    from tests.test_l2_station import _FlakyDriver, _write_degraded_config
+
+    _FlakyDriver.fail_times = 1
+    _FlakyDriver.attempts = 0
+    station = build_station(
+        _write_degraded_config(tmp_path, "tests.test_l2_station._FlakyDriver")
+    )
+    _FlakyDriver.fail_times = fail_times  # governs the retry attempts
+    _FlakyDriver.attempts = 0
+    orch = Orchestrator(station, tick_interval_ms=50)
+    return station, orch
+
+
+def test_offline_instrument_gets_fault_card_and_banner(tmp_path, qtbot):
+    """An offline VI renders a control-free fault card and a startup banner."""
+    station, orch = _degraded_monitor_setup(tmp_path, fail_times=0)
+    try:
+        win = MonitorWindow(station, orch)
+        qtbot.addWidget(win)
+        win.show()
+
+        card = win.findChild(QGroupBox, "bad_vi_offline_card")
+        assert card is not None
+        assert card.property("status") == "offline"
+        reason = win.findChild(QLabel, "bad_vi_offline_reason")
+        assert "bad_drv" in reason.text()
+        # No lifecycle toggle or control buttons on a fault card.
+        assert card.findChild(QPushButton, "bad_vi_offline_details_btn") is not None
+        # Banner announces the degraded state.
+        assert win._banner.isVisible()
+        assert "bad_vi" in win._banner._label.text()
+        assert "offline" in win._banner._label.text()
+    finally:
+        orch.shutdown()
+
+
+def test_offline_reconnect_swaps_card_for_live_panel(tmp_path, qtbot):
+    """A successful Try Reconnect replaces the fault card with a live panel."""
+    station, orch = _degraded_monitor_setup(tmp_path, fail_times=0)
+    try:
+        win = MonitorWindow(station, orch)
+        qtbot.addWidget(win)
+        win.show()
+
+        card = win.findChild(QGroupBox, "bad_vi_offline_card")
+        card._open_details()
+        reconnect_btn = win.findChild(QPushButton, "bad_vi_reconnect_btn")
+        assert reconnect_btn is not None
+        reconnect_btn.click()
+
+        assert station.has_vi("bad_vi") is True
+        assert win._offline_cards == {}
+        assert any(p._vi_name == "bad_vi" for p in win._panels)
+    finally:
+        orch.shutdown()
+
+
+def test_offline_reconnect_failure_reports_inline(tmp_path, qtbot):
+    """A failed reconnect keeps the fault card and reports the fresh reason."""
+    station, orch = _degraded_monitor_setup(tmp_path, fail_times=99)
+    try:
+        win = MonitorWindow(station, orch)
+        qtbot.addWidget(win)
+        win.show()
+
+        win.findChild(QGroupBox, "bad_vi_offline_card")._open_details()
+        win.findChild(QPushButton, "bad_vi_reconnect_btn").click()
+
+        status = win.findChild(QLabel, "bad_vi_reconnect_status")
+        assert "not reachable" in status.text()
+        assert station.has_vi("bad_vi") is False
+        assert win.findChild(QGroupBox, "bad_vi_offline_card") is not None
+        detail_reason = win.findChild(QLabel, "bad_vi_offline_detail_reason")
+        assert "bad_drv" in detail_reason.text()
+    finally:
+        orch.shutdown()

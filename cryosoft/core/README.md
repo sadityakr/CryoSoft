@@ -25,7 +25,12 @@ is the typed currency shared by all of them.
 ## Entry (how control/data enters this folder)
 
 - `build_station(config_path)` reads a YAML config directory (`devices.yaml`,
-  `monitor.yaml`) and constructs the driver + VI stack into a `Station`.
+  `monitor.yaml`) and constructs the driver + VI stack into a `Station`. The
+  build is degraded-tolerant: an instrument that fails to *connect* lands in
+  the Station's offline registry (`OfflineInstrument`, `offline_vi_names()`)
+  instead of aborting, and `Station.retry_instrument()` /
+  `Orchestrator.retry_reconnect()` can bring it live later; only *config*
+  errors abort the build (and trigger the startup fallback chain).
 - `Orchestrator(station, tick_interval_ms)` receives a `Station`; the GUI then
   submits `Procedure` objects and VI/global action requests to it.
 - A `Procedure` is constructed with a `Station`, `sample_info`,
