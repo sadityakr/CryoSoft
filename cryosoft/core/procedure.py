@@ -835,7 +835,7 @@ class SweepMeasureProcedure(BaseProcedure):
                 )
             else:
                 values = self._parse_loop_values(
-                    param_name, spec, str(param_values.get(f"{slot}_values") or "")
+                    param_name, spec, param_values.get(f"{slot}_values")
                 )
             if not values:
                 raise CryoSoftConfigError(
@@ -921,20 +921,19 @@ class SweepMeasureProcedure(BaseProcedure):
         return registry
 
     @staticmethod
-    def _parse_loop_values(param_name: str, spec: ParamSpec, text: str) -> list:
-        """Parse a comma-separated loop-value list against a parameter's spec.
+    def _parse_loop_values(param_name: str, spec: ParamSpec, text: Any) -> list:
+        """Parse a loop-value list against a parameter's spec.
 
-        Each entry is converted with the spec's ``type`` and checked against
-        its ``min``/``max`` bounds or ``choices``, so a loop value obeys
-        exactly the constraints the single-value form field would enforce.
+        Supports a comma-separated string, a colon-separated range generator,
+        or a Python list/tuple/array directly.
 
         Args:
             param_name: The looped parameter's name (for error messages).
             spec: The looped parameter's ``ParamSpec``.
-            text: The user-entered comma-separated list (e.g. ``"1e-6, -1e-6"``).
+            text: The user-entered values (string, range generator, or iterable).
 
         Returns:
-            The parsed values, in entry order (empty for blank *text*).
+            The parsed values, in entry order.
 
         Raises:
             CryoSoftConfigError: If the parameter is a bool (not loopable), an
@@ -946,63 +945,78 @@ class SweepMeasureProcedure(BaseProcedure):
                 f"reading loop: parameter {param_name!r} is a bool and cannot "
                 f"be looped over a value list."
             )
-        values: list = []
-        is_numeric = spec.type in (float, int)
-        for entry in (e.strip() for e in text.split(",")):
-            if not entry:
-                continue
-            # Remove all whitespace from within the entry (e.g. "- 0.000001" -> "-0.000001")
-            cleaned_entry = "".join(entry.split())
-            if is_numeric and ":" in cleaned_entry:
-                parts = cleaned_entry.split(":")
-                if len(parts) == 3:
-                    try:
-                        start = float(parts[0])
-                        end = float(parts[1])
-                        steps = int(parts[2])
-                    except ValueError as exc:
+        if text is None:
+            return []
+
+        raw_entries: list[Any] = []
+        if isinstance(text, str):
+            is_numeric = spec.type in (float, int)
+            for entry in (e.strip() for e in text.split(",")):
+                if not entry:
+                    continue
+                # Remove all whitespace from within the entry (e.g. "- 0.000001" -> "-0.000001")
+                cleaned_entry = "".join(entry.split())
+                if is_numeric and ":" in cleaned_entry:
+                    parts = cleaned_entry.split(":")
+                    if len(parts) == 3:
+                        try:
+                            start = float(parts[0])
+                            end = float(parts[1])
+                            steps = int(parts[2])
+                        except ValueError as exc:
+                            raise CryoSoftConfigError(
+                                f"reading loop: range generator {entry!r} is invalid. "
+                                f"Must be format 'start:end:steps' (e.g. '-1e-6:1e-6:21')."
+                            ) from exc
+                        if steps < 2:
+                            raise CryoSoftConfigError(
+                                f"reading loop: range generator {entry!r} steps must be >= 2."
+                            )
+                        for k in range(steps):
+                            val = start + k * (end - start) / (steps - 1)
+                            raw_entries.append(spec.type(val))
+                    else:
                         raise CryoSoftConfigError(
-                            f"reading loop: range generator {entry!r} is invalid. "
-                            f"Must be format 'start:end:steps' (e.g. '-1e-6:1e-6:21')."
-                        ) from exc
-                    if steps < 2:
-                        raise CryoSoftConfigError(
-                            f"reading loop: range generator {entry!r} steps must be >= 2."
+                            f"reading loop: range generator {entry!r} must have 3 colon-separated parts (start:end:steps)."
                         )
-                    generated = []
-                    for k in range(steps):
-                        val = start + k * (end - start) / (steps - 1)
-                        generated.append(spec.type(val))
                 else:
-                    raise CryoSoftConfigError(
-                        f"reading loop: range generator {entry!r} must have 3 colon-separated parts (start:end:steps)."
-                    )
-            else:
+                    try:
+                        raw_entries.append(spec.type(cleaned_entry))
+                    except (TypeError, ValueError) as exc:
+                        raise CryoSoftConfigError(
+                            f"reading loop: {entry!r} is not a valid "
+                            f"{spec.type.__name__} for parameter {param_name!r}."
+                        ) from exc
+        else:
+            try:
+                raw_entries = [spec.type(x) for x in text]
+            except TypeError:
                 try:
-                    generated = [spec.type(cleaned_entry)]
+                    raw_entries = [spec.type(text)]
                 except (TypeError, ValueError) as exc:
                     raise CryoSoftConfigError(
-                        f"reading loop: {entry!r} is not a valid "
+                        f"reading loop: {text!r} is not a valid "
                         f"{spec.type.__name__} for parameter {param_name!r}."
                     ) from exc
 
-            for value in generated:
-                if spec.choices is not None and value not in spec.choices.values():
-                    raise CryoSoftConfigError(
-                        f"reading loop: {value!r} is not one of {param_name!r}'s "
-                        f"allowed choices {list(spec.choices.values())}."
-                    )
-                if spec.min is not None and value < spec.min:
-                    raise CryoSoftConfigError(
-                        f"reading loop: {value!r} is below {param_name!r}'s "
-                        f"minimum {spec.min!r}."
-                    )
-                if spec.max is not None and value > spec.max:
-                    raise CryoSoftConfigError(
-                        f"reading loop: {value!r} is above {param_name!r}'s "
-                        f"maximum {spec.max!r}."
-                    )
-                values.append(value)
+        values: list = []
+        for value in raw_entries:
+            if spec.choices is not None and value not in spec.choices.values():
+                raise CryoSoftConfigError(
+                    f"reading loop: {value!r} is not one of {param_name!r}'s "
+                    f"allowed choices {list(spec.choices.values())}."
+                )
+            if spec.min is not None and value < spec.min:
+                raise CryoSoftConfigError(
+                    f"reading loop: {value!r} is below {param_name!r}'s "
+                    f"minimum {spec.min!r}."
+                )
+            if spec.max is not None and value > spec.max:
+                raise CryoSoftConfigError(
+                    f"reading loop: {value!r} is above {param_name!r}'s "
+                    f"maximum {spec.max!r}."
+                )
+            values.append(value)
         return values
 
     # ------------------------------------------------------------------
@@ -1229,7 +1243,7 @@ class SweepMeasureProcedure(BaseProcedure):
                     values = cls._parse_loop_values(
                         param_name,
                         spec,
-                        str(selections.get(f"{slot}_values") or ""),
+                        selections.get(f"{slot}_values"),
                     )
                 except CryoSoftConfigError:
                     values = []

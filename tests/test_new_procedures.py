@@ -766,6 +766,32 @@ def test_value_slot_colon_range_generator(station, tmp_path):
     }
 
 
+def test_value_slot_direct_iterable_values(station, tmp_path):
+    """A direct python list/tuple is parsed successfully without conversion."""
+    import numpy as np
+    proc = _field_proc(
+        station, tmp_path,
+        {**DC, "loop1_parameter": "dc_measurement.current_A",
+         "loop1_values": [2e-6, -2e-6]},
+    )
+    assert proc._params["loop_labels"] == {
+        "A1": 2e-6,
+        "A2": -2e-6,
+    }
+
+    # Should also work with numpy array
+    proc2 = _field_proc(
+        station, tmp_path,
+        {**DC, "loop1_parameter": "dc_measurement.current_A",
+         "loop1_values": np.array([3e-6, -3e-6])},
+    )
+    assert proc2._params["loop_labels"] == {
+        "A1": 3e-6,
+        "A2": -3e-6,
+    }
+
+
+
 
 
 def test_non_loopable_parameter_refused(station, tmp_path):
