@@ -19,19 +19,22 @@
 # process: |
 #   Initialises logging, creates QApplication, builds the ConfigCatalog, resolves
 #   the Station via build_station_with_fallback(), persists the config that
-#   actually loaded, constructs the session layer (ExperimentStore rooted in the
-#   data dir + UserRoster + SessionManager wired to the Orchestrator), then —
-#   only when the active config declares a cryogenics: block AND the station
-#   has the level VI it names (docs/plans/cryogenics-logbook.md §9) — builds a
-#   HeliumRecordStore/ServicingLogStore rooted in a "servicing" directory
-#   sibling to the experiment store, constructs a CryogenicsRecorder, and
-#   connects it to the Orchestrator's states_updated/run_started/run_finished
-#   signals. Reads the operations: config block (read_operations_config(),
-#   GUI-safe, {} when undeclared) unconditionally. Opens the Monitor (passing
-#   the catalog, session manager, a restart callback, any fallback warning,
-#   the operations: config, and — when cryogenics is active — the same store
-#   instances, config, and recorder, so the Monitor window's Operations panel
-#   and Logs page share the recorder's data), and enters the Qt event loop.
+#   actually loaded, constructs the session layer (ExperimentStore rooted at
+#   app_settings.sessions_root() + UserRoster + SessionManager wired to the
+#   Orchestrator — sessions_root() is a dedicated, app-settings-backed
+#   location, decoupled from the Data Directory form field), then — only when
+#   the active config declares a cryogenics: block AND the station has the
+#   level VI it names (docs/plans/cryogenics-logbook.md §9) — builds a
+#   HeliumRecordStore/ServicingLogStore rooted at sessions_root()/"servicing"
+#   (a sibling of the experiment folders, never inside one), constructs a
+#   CryogenicsRecorder, and connects it to the Orchestrator's
+#   states_updated/run_started/run_finished signals. Reads the operations:
+#   config block (read_operations_config(), GUI-safe, {} when undeclared)
+#   unconditionally. Opens the Monitor (passing the catalog, session manager,
+#   a restart callback, any fallback warning, the operations: config, and —
+#   when cryogenics is active — the same store instances, config, and
+#   recorder, so the Monitor window's Operations panel and Logs page share
+#   the recorder's data), and enters the Qt event loop.
 # output: |
 #   The running CryoSoft desktop application. Exits when all windows are closed.
 # ---
@@ -58,7 +61,7 @@ from cryosoft.core.station import (
     read_panels_config,
     read_servicing_logs_config,
 )
-from cryosoft.gui import app_settings, form_autosave
+from cryosoft.gui import app_settings
 from cryosoft.gui.monitor_window import MonitorWindow
 from cryosoft.gui.theme import PLOT_AXIS, PLOT_BG, build_stylesheet
 from cryosoft.session.manager import SessionManager
@@ -143,13 +146,14 @@ def main() -> None:
 
     orchestrator = Orchestrator(station, tick_interval_ms=3000)
 
-    # Session layer (L6). Experiment records live inside the data directory
-    # (they archive with the data they describe); the user roster is
-    # setup-local, next to the app-settings files. The data directory comes
-    # from the form autosave — the same value the GUI restores into its field.
-    autosave = form_autosave.load(app_settings.session_file_path())
+    # Session layer (L6). Experiment records live under the dedicated,
+    # app-settings-backed sessions_root() — a deliberate machine-level
+    # setting, never derived from the Data Directory form field (which is
+    # itself now *derived from* the open session — see
+    # docs/plans/unified-session-record.md §4/§8). The user roster stays
+    # setup-local, next to the app-settings files.
     session_manager = SessionManager(
-        store=ExperimentStore(Path(autosave.data_dir) / "experiments"),
+        store=ExperimentStore(app_settings.sessions_root()),
         roster=UserRoster(app_settings.session_file_path().parent / "users.json"),
         orchestrator=orchestrator,
         station=station,
@@ -160,12 +164,13 @@ def main() -> None:
     # Cryogenics management (Phase 3/5, docs/plans/cryogenics-logbook.md §9/§10):
     # config-gated like every optional feature — a setup without a
     # cryogenics: block (or without the level VI it names) carries zero
-    # footprint and this whole block is a no-op. Stores are rooted in a
-    # "servicing" directory sibling to the experiment store (both live under
-    # the same data directory, so a servicing record archives alongside the
-    # data it describes). The same store instances feed both the automatic
-    # recorder and the Monitor window's Cryogenics panel / Logs page, so both
-    # always see the same data.
+    # footprint and this whole block is a no-op. Stores are rooted at
+    # sessions_root()/"servicing" — a Setup-tier location sibling to (never
+    # inside) any one experiment folder, since these records describe the rig
+    # across all sessions and must not keep depending on the Data Directory
+    # form field now that it is derived from whichever session is open. The
+    # same store instances feed both the automatic recorder and the Monitor
+    # window's Cryogenics panel / Logs page, so both always see the same data.
     cryogenics_config = read_cryogenics_config(used_path)
     # Operations panel (plan §12): declared operations.<key>: config blocks,
     # GUI-safe to read unconditionally (empty {} when the setup declares
@@ -176,7 +181,7 @@ def main() -> None:
     servicing_store: ServicingLogStore | None = None
     servicing_log_kinds: list[str] = []
     if cryogenics_config and station.has_vi(cryogenics_config["level_vi"]):
-        servicing_root = Path(autosave.data_dir) / "servicing"
+        servicing_root = app_settings.sessions_root() / "servicing"
         config_identity = (
             used_entry.name if used_entry is not None else Path(used_path).name
         )

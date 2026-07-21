@@ -59,6 +59,12 @@ _VALID_EXPERIMENT_STATUSES = frozenset(
     {EXPERIMENT_STATUS_OPEN, EXPERIMENT_STATUS_CLOSED}
 )
 
+# The on-disk format version stamped into experiment.json/gui_state.json/
+# active.json. Bump only when the JSON shape changes in a way older code
+# cannot tolerantly parse; a value greater than this on load means "written
+# by a newer app" and the record is treated read-only (see store.py/manager.py).
+SCHEMA_VERSION = 1
+
 
 def _as_str(value: object, default: str = "") -> str:
     """Coerce a JSON value to ``str``, falling back to ``default`` on ``None``."""
@@ -87,6 +93,17 @@ def _as_int(value: object, default: int) -> int:
 def _as_dict(value: object) -> dict[str, Any]:
     """Return ``value`` if it is a dict, else an empty dict (defensive parse)."""
     return dict(value) if isinstance(value, dict) else {}
+
+
+def _as_dict_list(value: object) -> list[dict[str, Any]]:
+    """Return a list of dicts from ``value``, tolerating junk (defensive parse).
+
+    Non-list input yields ``[]``; non-dict items within the list are dropped
+    rather than raising, so one bad queue entry cannot brick loading.
+    """
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]
 
 
 def envelope_to_dict(envelope: SessionEnvelope | None) -> dict[str, Any]:
@@ -335,6 +352,16 @@ class ExperimentRecord:
         runs: The experiment's runs, oldest first.
         findings: Free-text science notes (markdown).
         eln_link: The ELN entry this experiment publishes to, or ``None``.
+        queue: The GUI's run queue, as opaque JSON dicts. The session layer
+            stores and round-trips this list but never interprets it — the
+            GUI (``gui.form_autosave.QueueItemState``) is the only place that
+            knows its shape (contract C11: session never imports gui).
+        schema_version: The on-disk format version this record was loaded
+            from (see ``SCHEMA_VERSION``). Absent on disk ⇒ ``1``. A value
+            greater than the running app's ``SCHEMA_VERSION`` means the
+            record was written by a newer app; callers must treat it as
+            read-only rather than silently tolerant-parsing an unknown
+            future shape.
     """
 
     experiment_id: str = ""
@@ -350,9 +377,18 @@ class ExperimentRecord:
     runs: list[RunRecord] = field(default_factory=list)
     findings: str = ""
     eln_link: ElnLink | None = None
+    queue: list[dict[str, Any]] = field(default_factory=list)
+    schema_version: int = SCHEMA_VERSION
 
     def to_dict(self) -> dict[str, Any]:
-        """Return a JSON-safe dict representation."""
+        """Return a JSON-safe dict representation.
+
+        ``schema_version`` is always stamped as the running app's
+        ``SCHEMA_VERSION`` (never ``self.schema_version``) — this is the
+        write side of the format-version contract; a future-version record
+        loaded read-only is never actually re-saved (see
+        ``SessionManager._save_current``), so this constant stamp is safe.
+        """
         return {
             "experiment_id": self.experiment_id,
             "title": self.title,
@@ -367,6 +403,8 @@ class ExperimentRecord:
             "runs": [run.to_dict() for run in self.runs],
             "findings": self.findings,
             "eln_link": self.eln_link.to_dict() if self.eln_link else None,
+            "queue": [dict(item) for item in self.queue],
+            "schema_version": SCHEMA_VERSION,
         }
 
     @classmethod
@@ -403,6 +441,10 @@ class ExperimentRecord:
             runs=runs,
             findings=_as_str(data.get("findings")),
             eln_link=eln_link,
+            queue=_as_dict_list(data.get("queue")),
+            # Absent on disk means "today's files" — version 1, not whatever
+            # SCHEMA_VERSION the running app happens to define.
+            schema_version=_as_int(data.get("schema_version"), 1),
         )
 
     def find_run(self, run_id: str) -> RunRecord | None:

@@ -1,5 +1,14 @@
 # Unify GUI form-autosave into the L6 Experiment/Session record
 
+**Rev. 2 (2026-07-20):** folds in the three format-critical hardening
+items from `session-handling-architecture.md` (`schema_version` fields,
+bundle-relative data paths, save-failure surfacing) plus explicit
+support for sub-folders inside the session's `data/` directory. All
+other hardening from that document (store lock, migration harness,
+snapshot cap, sealing extras, the `runs/` escape hatch) is **deliberately
+deferred** — none of it changes the file format, so it can land later
+without touching anything built here.
+
 ## Context
 
 Today CryoSoft splits "session" content across three disconnected places:
@@ -28,12 +37,21 @@ mid-step), the L6 experiment record becomes the canonical "session," one
 session active at a time, a configurable-but-overridable sessions root, and
 the run queue is promoted into the record.
 
+What the physicist gets, in their terms:
+
+- **One folder = one experiment, complete** — data, run history, notes, and
+  GUI state together; backup or hand-off = copy one folder.
+- **The app resumes exactly where it was left** after a crash or normal
+  close: same session, queue, form fields, plot settings.
+- **Several named sessions, switchable** without one overwriting another.
+- **No accidentally scattered data** — the data directory follows the
+  session — and **a visible warning if recording to disk ever fails**.
+
 This is directly the "records & store" foundation `docs/plans/session-management-layer.md`
 already called Phase 1 for, and the substrate `docs/plans/agent-native-architecture.md`'s
 planned Agent Gateway (`list_experiments()/get_experiment()/read_run_data()`)
-is meant to read from — this change makes that substrate actually complete
-(today it's missing GUI state, the queue, and co-located data) without
-building the Gateway itself.
+is meant to read from. `docs/plans/session-handling-architecture.md` is the
+long-term umbrella; this plan is its implementation slice 1.
 
 **Naming**: keep every existing Python identifier (`ExperimentRecord`,
 `ExperimentStore`, `SessionManager`, `experiment_id`, `start_experiment`/
@@ -46,10 +64,12 @@ user-facing word for this L6 concept (`gui/session.py` was renamed to
 
 ```
 <sessions_root>/<experiment_id>/
-    experiment.json      # unchanged file, gains a `queue` field
-    gui_state.json        # NEW — was %APPDATA%/CryoSoft/(sessions/<user>.json
-    data/                 # NEW — HDF5 files nest here instead of landing flat
-<sessions_root>/active.json   # unchanged (already exists)
+    experiment.json      # unchanged file, gains `queue` + `schema_version`
+    gui_state.json       # NEW — was %APPDATA%/CryoSoft/sessions/<user>.json
+    data/                # NEW — HDF5 files nest here instead of landing flat
+        <sub-folders>/   # allowed — the user may organise runs freely (§ Format rules)
+<sessions_root>/active.json   # unchanged file, gains `schema_version`
+<sessions_root>/servicing/<config_name>/   # servicing + helium logs (Setup tier, § 8)
 ```
 
 `sessions_root` replaces the implicit `<data_dir>/experiments` root — it
@@ -59,19 +79,63 @@ is open, GUI state keeps falling back to today's per-user
 `%APPDATA%/CryoSoft/...` file — this is purely additive, nothing breaks for
 someone who never starts an experiment.
 
+## Format rules (the part to get right in the first commit)
+
+These three rules shape the files everything downstream writes, which is
+why they land first and are non-negotiable in this slice:
+
+1. **`schema_version: 1`** at the top level of `experiment.json`,
+   `gui_state.json`, and `active.json`. Written always; on load, a value
+   *greater* than the app's known version logs a WARNING and the record is
+   treated read-only (no silent tolerant-parse of a future format). Absent
+   ⇒ treated as version 1 (today's files).
+2. **Bundle-relative data paths.** `RunRecord.data_file` is stored
+   relative to the session folder (`data/xyz.h5`, or
+   `data/heating_runs/xyz.h5` — sub-folders are first-class). The
+   `SessionManager` relativises the manifest's absolute path against the
+   session folder before recording. Resolution on read: relative paths
+   resolve against the session folder; absolute paths (old records, or
+   runs deliberately saved outside the session — see rule 3) are used
+   as-is, with a basename fallback against `data/` when they dangle.
+   This is what makes "copy the folder elsewhere and everything still
+   opens" true.
+3. **Sub-folders yes, outside quietly flagged.** The Data Dir field stays
+   an editable `QLineEdit` + Browse. Any target *inside* the session's
+   `data/` tree (the `DataManager` already `mkdir -p`s it) is normal use
+   and stored relative. A target *outside* the session folder is allowed
+   — the physicist may have a reason — but stored absolute and marked by
+   a small non-blocking status note ("saving outside the current session
+   folder"), so it is never accidental. The Browse dialog opens at the
+   session's `data/` folder, so "make a sub-folder for this series" is
+   two clicks and stays inside the bundle naturally.
+
 ## Changes, bottom-up
 
 ### 1. `cryosoft/session/models.py`
-Add `queue: list[dict[str, Any]] = field(default_factory=list)` to
-`ExperimentRecord` (tolerant `to_dict`/`from_dict`, same defensive-dict-filter
-pattern already used for `RunRecord.params`/`settings_snapshot`). Stored as
-opaque JSON dicts — the session layer never imports `gui.form_autosave`
-(contract C11); the GUI is the only place that knows `QueueItemState`.
+- Add `queue: list[dict[str, Any]] = field(default_factory=list)` to
+  `ExperimentRecord` (tolerant `to_dict`/`from_dict`, same
+  defensive-dict-filter pattern already used for `RunRecord.params`/
+  `settings_snapshot`). Stored as opaque JSON dicts — the session layer
+  never imports `gui.form_autosave` (contract C11); the GUI is the only
+  place that knows `QueueItemState`.
+- `ExperimentRecord.to_dict()` stamps `"schema_version": 1` (a module
+  constant `SCHEMA_VERSION`); `from_dict()` reads it tolerantly and keeps
+  it on the instance so a future-version check is one comparison.
 
 ### 2. `cryosoft/session/store.py`
-`ExperimentStore` gains two path helpers (no change to existing save/load):
-`data_dir(experiment_id) -> Path` (`<root>/<experiment_id>/data`) and
-`gui_state_path(experiment_id) -> Path` (`<root>/<experiment_id>/gui_state.json`).
+`ExperimentStore` gains (no change to existing save/load):
+- `data_dir(experiment_id) -> Path` (`<root>/<experiment_id>/data`) and
+  `gui_state_path(experiment_id) -> Path`
+  (`<root>/<experiment_id>/gui_state.json`).
+- `relativize_data_file(experiment_id, path) -> str` — returns a
+  bundle-relative string when `path` is inside the session folder, else
+  the absolute string unchanged.
+- `resolve_data_file(experiment_id, stored) -> Path` — the read-side
+  counterpart implementing rule 2's resolution order (relative → join
+  with session folder; absolute → as-is; dangling absolute → basename
+  search under `data/`).
+- `active.json` writes gain the `schema_version` field (read stays
+  tolerant of the old shape).
 
 ### 3. `cryosoft/session/manager.py`
 - `set_queue(items: list[dict]) -> None` — no-op if nothing open, else
@@ -89,25 +153,56 @@ opaque JSON dicts — the session layer never imports `gui.form_autosave`
 - `current_data_dir() -> Path | None` / `current_gui_state_path() -> Path | None`
   — thin passthroughs to the store helpers for the current experiment, so
   GUI code never reaches into `store` internals directly.
+- `_on_run_started` records `data_file` through
+  `store.relativize_data_file(...)` (rule 2).
+- **Save-failure surfacing**: a new signal
+  `store_health_changed(dict)` — `{"ok": bool, "detail": str}`. Emitted
+  by `_save_current()` on the first *failed* save (`ok=False`, with the
+  OSError text) and again on the first *successful* save after failures
+  (`ok=True`). Internal state is one boolean; no retry machinery, no
+  behavior change to the measurement itself.
 
 Tests (`tests/test_session_layer.py`): extend
-`test_experiment_record_round_trips_with_content` for `queue`; new tests for
-`set_queue`, `switch_experiment` (happy path, rejects closed target, rejects
-unknown id, deactivate-without-closing verified via `store.load()` still
-showing `status == open`).
+`test_experiment_record_round_trips_with_content` for `queue` and
+`schema_version`; new tests for `set_queue`, `switch_experiment` (happy
+path, rejects closed target, rejects unknown id,
+deactivate-without-closing verified via `store.load()` still showing
+`status == open`); `relativize`/`resolve` round-trip incl. a sub-folder
+path and an outside-the-bundle absolute path; **relocation test** — build
+a session with a recorded run, `shutil.move` the whole session folder,
+assert `resolve_data_file` still finds the file; `store_health_changed`
+fires once on failure (monkeypatched save raising OSError) and once on
+recovery.
 
 ### 4. `cryosoft/gui/app_settings.py`
 `sessions_root() -> Path` / `set_sessions_root(path) -> None` — QSettings-backed
 (same tier as `config_active`/`current_user_id`: machine-level, changes
-rarely), default equal to today's `_DEFAULT_DATA_DIR` value so a fresh
-install's default location is unchanged.
+rarely). **Default: `<Documents>/CryoData`**, resolved via
+`QStandardPaths.writableLocation(DocumentsLocation)` (e.g.
+`C:/Users/<name>/Documents/CryoData` on Windows) — platform-portable,
+always writable without admin rights, and covered by the user's normal
+Documents backup/sync. The store creates nothing until the first session
+is saved, so the folder appears only when actually used.
+The no-session fallback Data Dir aligns with it: `form_autosave` is
+deliberately Qt-free, so it cannot resolve Documents itself — its
+`_DEFAULT_DATA_DIR` becomes `""` meaning "no explicit choice", and the
+GUI substitutes `app_settings.sessions_root()`'s default wherever it
+displays or uses an empty `data_dir`. Existing autosave files carry
+their `data_dir` explicitly and are unaffected. (Because the default is
+resolved at runtime, `sessions_root()` returns the Documents path when
+the QSettings key is unset rather than persisting a hardcoded string.)
 
 ### 5. `cryosoft/gui/session_info_panel.py`
-Data Dir field becomes derived-but-editable: on `experiment_changed`, if an
-experiment is now open, set the field to `session_manager.current_data_dir()`;
-if none, leave/restore whatever the field held before (today's manual
-default). The field stays a plain editable `QLineEdit` + Browse — no
-structural widget change, only what drives its text on session switch.
+- Data Dir field becomes derived-but-editable: on `experiment_changed`, if
+  an experiment is now open, set the field to
+  `session_manager.current_data_dir()`; if none, leave/restore whatever
+  the field held before (today's manual default). The field stays a plain
+  editable `QLineEdit` + Browse — no structural widget change, only what
+  drives its text on session switch.
+- Browse opens at `current_data_dir()` when a session is open (rule 3).
+- When a session is open and the field's path is outside the session
+  folder, show the non-blocking "saving outside the current session
+  folder" note (plain status label, theme tokens — no modal, no refusal).
 
 ### 6. New `cryosoft/gui/session_dialogs.py`
 `LoadSessionDialog(QDialog)` — lists every experiment from
@@ -132,46 +227,85 @@ chosen `experiment_id`.
   (`SessionInfoPanel` already listens to it for the status label) to trigger
   the Data Dir refresh and, on start/switch, load that session's
   `gui_state.json` over the current in-memory `SessionState`.
+- Connect `session_manager.store_health_changed` to the existing
+  notification-banner mechanism: `ok=False` shows a persistent warning
+  ("session record is NOT being saved: <detail>"); `ok=True` clears it
+  and confirms recovery in the status bar.
 - `_save_session()`: when a session is open, write to
   `session_manager.current_gui_state_path()` instead of the per-user AppData
   path, and additionally call
   `session_manager.set_queue([item.to_dict() for item in queue_items])`.
   When no session is open, behavior is unchanged (per-user AppData file).
+  `gui_state.json` is written with `"schema_version": 1` (reuse
+  `form_autosave`'s existing version stamp — it becomes meaningful here).
 
 ### 8. `cryosoft/main.py`
-`ExperimentStore` rooted at `app_settings.sessions_root()` directly (no more
-`Path(autosave.data_dir) / "experiments"` — the extra nesting existed only to
-keep flat data files and experiment folders apart, which is no longer needed
-once Data Dir is derived from the session).
+- `ExperimentStore` rooted at `app_settings.sessions_root()` directly (no
+  more `Path(autosave.data_dir) / "experiments"` — the record's location
+  becomes a deliberate machine-level setting, never a form field's last
+  value).
+- **Servicing + helium stores move with it**: `HeliumRecordStore` and
+  `ServicingLogStore` are rerooted at
+  `app_settings.sessions_root() / "servicing"` instead of
+  `Path(autosave.data_dir) / "servicing"`. They are Setup-tier records
+  (they describe the rig across all sessions), so they follow the same
+  setting but live *beside* the session bundles, never inside one — and
+  they must not keep depending on the form field once the Data Dir box is
+  derived from the open session. Storage format, the per-`config_name`
+  subfolder, and `servicing_log.py` itself are untouched; only this one
+  root path in `main.py` changes. (Existing installs: the old
+  `<data_dir>/servicing` files stay where they are — hourly helium
+  history restarts at the new root, which is acceptable; a lab that cares
+  can move the folder by hand, since the layout inside is identical.)
+  `ExperimentStore.list_experiments()` already ignores the `servicing/`
+  directory because it only lists folders containing an
+  `experiment.json`.
 
 ## Explicitly out of scope (confirmed with user)
 - No Orchestrator/BaseProcedure/DataManager changes — no mid-run checkpoint/resume.
 - No rename of `ExperimentRecord`/`ExperimentStore`/`SessionManager`/`experiment_id`.
 - No Agent Gateway implementation (`session/gateway/`) — separate planned work.
-- No change to `servicing_log.py` storage (setup-level, orthogonal to experiments).
+- No change to `servicing_log.py` itself or its storage *format*
+  (setup-level, orthogonal to experiments) — only its root path moves to
+  `<sessions_root>/servicing` in `main.py` (§ 8).
 - No migration of existing flat HDF5 files into the new `data/` subfolders —
-  additive only; old `RunRecord.data_file` absolute paths keep working as-is.
+  additive only; old `RunRecord.data_file` absolute paths keep working via
+  the resolution rules in § Format rules.
 - Switching to a *closed* experiment (read-only review) — not built; the JSON
   stays directly readable regardless.
+- **Deferred hardening** (see `session-handling-architecture.md`): store
+  lock / multi-instance protection, the migration harness
+  (`session/migrations.py`), settings-snapshot size cap, sealed-bundle
+  enforcement beyond the existing "switch only open" rule, and the
+  reserved `runs/` per-run sidecar layout. None of these change the file
+  format written by this slice.
 
 ## Docs (same commits as the code, per the folder-README standard)
 - `cryosoft/session/README.md`: Exit section (new `data/`, `gui_state.json`),
-  Files table (`manager.py`'s new methods), a line noting `queue` is
-  GUI-authored opaque data the session layer stores but never interprets.
+  Files table (`manager.py`'s new methods and `store_health_changed`), the
+  format rules (`schema_version`, relative paths, resolution order), a line
+  noting `queue` is GUI-authored opaque data the session layer stores but
+  never interprets.
 - `cryosoft/gui/README.md`: update rows for `session_info_panel.py`,
   `monitor_window.py`, `app_settings.py`; add `session_dialogs.py`.
 - `GLOSSARY.md`: extend the **Experiment** entry (queue field, `data/`/
-  `gui_state.json` now part of the folder); note **Setup tier**/User menu
-  gains "Sessions Folder".
+  `gui_state.json` now part of the folder, relative data paths); note
+  **Setup tier**/User menu gains "Sessions Folder".
 
 ## Verification
 - `make check` (ruff, lint-imports/contracts, pytest -m "not hardware") green.
-- New/extended tests: `test_session_layer.py` (queue round-trip, `set_queue`,
-  `switch_experiment` happy/error paths), `test_gui.py` (LoadSessionDialog
-  picker, `_switch_session` save-outgoing/load-incoming round trip mirroring
+- New/extended tests: `test_session_layer.py` (queue + `schema_version`
+  round-trip, `set_queue`, `switch_experiment` happy/error paths,
+  relativize/resolve incl. sub-folder and outside-bundle cases, the
+  relocation test, `store_health_changed`), `test_gui.py`
+  (LoadSessionDialog picker, `_switch_session` save-outgoing/load-incoming
+  round trip mirroring
   `test_switch_user_saves_outgoing_and_loads_incoming_session`, Data Dir
-  auto-populate on start/switch, queue persisted through a session switch and
-  restored).
+  auto-populate on start/switch, Browse default + outside-session note,
+  queue persisted through a session switch and restored, save-failure
+  banner shown and cleared).
 - Manual/offscreen GUI smoke: start a session, add to queue, switch to a
   second session, switch back — confirm queue and plot axes reappear exactly
-  as left; confirm `<sessions_root>/<id>/data/` receives a run's HDF5 file.
+  as left; confirm `<sessions_root>/<id>/data/` receives a run's HDF5 file;
+  save one run into `data/test_series/` via Browse and confirm the record's
+  path is relative and the file opens after moving the session folder.
