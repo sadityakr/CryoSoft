@@ -363,6 +363,31 @@ class OperationBase:
         """
         return {}
 
+    def claimed_vi_names(self) -> set[str] | None:
+        """Return the VI names this operation exclusively owns while running.
+
+        Concurrency-scope hook (docs/plans/operation-concurrency-and-error-
+        scoping.md §1): the Orchestrator captures this once, at run start,
+        into ``_active_claims`` and consults it to decide whether a manual
+        front-panel action submitted while this operation is running may be
+        admitted. A VI named in the returned set is refused (the refusal
+        names this operation as the owner); every VI NOT in the set stays
+        under manual control exactly as in IDLE — e.g. the helium fill
+        claims only its level meter, so the VTI and every other instrument
+        stay manually controllable during a fill.
+
+        Returns:
+            A set of VI names, as registered on the station
+            (``Station.get_vi_names()``), this operation claims — or
+            ``None`` (the default) to claim every system VI. ``None`` is the
+            safe default: narrowing what a run blocks is an explicit
+            per-class opt-in, never assumed, so a subclass that does not
+            override this behaves exactly as if it locked the whole
+            instrument (unchanged behavior for every operation written
+            before this hook existed).
+        """
+        return None
+
     def readiness_conditions(self) -> tuple[ReadinessCondition, ...]:
         """Return this operation's live readiness checklist (plan §12).
 

@@ -250,6 +250,22 @@ class HeliumFillOperation(OperationBase):
             return None
         return str(self._data_manager.filepath)
 
+    def claimed_vi_names(self) -> set[str]:
+        """Claim the level meter and every magnet (plan's admission gate, §1).
+
+        The fill commands the level meter (FAST/SLOW refresh) and drives
+        every magnet to zero field at ``initiate()``, holding zero field as
+        an invariant for the whole fill — a manual ``set_field`` mid-fill
+        would silently break it, so the magnets must be claimed even though
+        they are commanded via system targets rather than manual actions.
+        Everything else (notably the VTI temperature) stays unclaimed and
+        manually controllable while the fill runs.
+
+        Returns:
+            ``{level_vi}`` plus every ``Station.magnet_vi_names()`` entry.
+        """
+        return {self._level_vi_name} | set(self._magnets)
+
     def get_params(self) -> dict[str, Any]:
         """Return the fill's parameters, for the run manifest.
 

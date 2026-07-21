@@ -251,6 +251,26 @@ class SampleChangeOperation(OperationBase):
     # OperationBase lifecycle
     # ------------------------------------------------------------------
 
+    def claimed_vi_names(self) -> set[str]:
+        """Claim every VI this operation actually commands in ``initiate()``.
+
+        A sample change ramps every magnet and the VTI, opens the switch (if
+        any), and stands by every measurement VI — on a typical station that
+        is everything except the level meter, so this narrowing yields
+        little extra concurrency; it is still exact (a station with an
+        instrument this operation never touches, e.g. a rotator, stays
+        manually controllable during a sample change) and cheaper to keep
+        correct than a hand-picked subset.
+
+        Returns:
+            The magnets, the configured VTI VI, the first switch VI (if the
+            station has one), and every measurement VI.
+        """
+        claimed = set(self._magnets) | {self._vti_vi_name} | set(self._measurement_vis)
+        if self._switch_vi_name is not None:
+            claimed.add(self._switch_vi_name)
+        return claimed
+
     def get_params(self) -> dict[str, Any]:
         """Return the sample change's parameters, for the run manifest.
 

@@ -18,6 +18,7 @@ from cryosoft.core.operation import OperationBase
 from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 from cryosoft.core.plan import Command, PhasePlan, StepPlan, Target
 from cryosoft.core.station import build_station
+from cryosoft.procedures.operations.helium_fill import HeliumFillOperation
 
 
 # ── Test doubles ────────────────────────────────────────────────────────────
@@ -125,6 +126,29 @@ def _fast_magnet(station):
     """Make magnet_z ramps effectively instant."""
     station.magnet_z._default_ramp_rate = 6000.0
     station.magnet_z._ramp_segments = []
+
+
+def _fast_magnets(station):
+    """Make every magnet's ramps effectively instant (mirrors test_helium_fill.py)."""
+    for name in station.magnet_vi_names():
+        vi = station.get_vi(name)
+        vi._default_ramp_rate = 6000.0
+        vi._ramp_segments = []
+
+
+def _make_fill(station, tmp_path, **overrides) -> HeliumFillOperation:
+    """Build a fast, test-friendly HeliumFillOperation (mirrors test_helium_fill.py)."""
+    config = dict(
+        fill_target_pct=50.0,  # sim ILM starts at 80% helium -> already "at target"
+        fill_zero_field_eps_T=0.01,
+        fill_zero_field_window_s=0.0,
+        fill_complete_window_s=0.03,
+        max_fill_duration_s=30.0,
+        sample_period_s=0.0,
+        data_directory=str(tmp_path),
+    )
+    config.update(overrides)
+    return HeliumFillOperation(station, person="Alex Tech", **config)
 
 
 # ── Fixtures (mirrors tests/test_l3_orchestrator.py) ─────────────────────────
@@ -494,3 +518,168 @@ def test_operation_scope_command_in_procedure_plan_is_rejected_before_dispatch(
     assert station.level_meter.get_refresh_rate() == before  # nothing dispatched
 
     orchestrator.recover_from_error()
+
+
+# ── Claims + admission gate (plan operation-concurrency-and-error-scoping.md
+# §1) ─────────────────────────────────────────────────────────────────────
+# HeliumFillOperation.claimed_vi_names() returns its configured level meter
+# plus every magnet (the fill drives them to zero field and holds that as an
+# invariant — see the class docstring), so a running fill must admit a
+# manual action on any other VI (e.g. the VTI) while refusing one on the
+# level meter or a magnet, naming the fill as the owner.
+
+
+def test_manual_action_on_unclaimed_vi_admitted_during_helium_fill(
+    orchestrator, station, tmp_path, qtbot
+):
+    """A manual action on a VI the fill does NOT claim (the VTI) is admitted and executes."""
+    _fast_magnets(station)
+    op = _make_fill(station, tmp_path)
+    orchestrator.run_operation(op)
+    assert orchestrator._procedure is op
+    assert orchestrator._active_claims == {"level_meter", *station.magnet_vi_names()}
+
+    blocked: list[str] = []
+    succeeded: list[tuple[str, str]] = []
+    orchestrator.action_blocked.connect(blocked.append)
+    orchestrator.action_succeeded.connect(lambda vi, m: succeeded.append((vi, m)))
+
+    orchestrator.submit_vi_action("temperature_vti", "set_needle_valve", position=25.0)
+
+    qtbot.waitUntil(lambda: bool(succeeded), timeout=2000)
+    assert not blocked
+    assert succeeded == [("temperature_vti", "set_needle_valve")]
+
+    orchestrator.finish_operation()
+    qtbot.waitUntil(lambda: orchestrator._procedure is None, timeout=5000)
+
+
+def test_manual_action_on_claimed_vi_refused_during_helium_fill(
+    orchestrator, station, tmp_path, qtbot
+):
+    """A manual action on the fill's claimed VI (the level meter) is refused, naming the fill."""
+    _fast_magnets(station)
+    op = _make_fill(station, tmp_path)
+    orchestrator.run_operation(op)
+    assert orchestrator._procedure is op
+
+    blocked: list[str] = []
+    orchestrator.action_blocked.connect(blocked.append)
+
+    with qtbot.waitSignal(orchestrator.action_blocked, timeout=500):
+        orchestrator.submit_vi_action("level_meter", "set_refresh_rate", mode=1)
+
+    assert blocked
+    assert "level_meter" in blocked[0]
+    assert "helium fill" in blocked[0].lower()
+
+    # A magnet is claimed too: the fill holds zero field as an invariant, so
+    # a manual set_field mid-fill must be refused, not fight the fill.
+    with qtbot.waitSignal(orchestrator.action_blocked, timeout=500):
+        orchestrator.submit_vi_action("magnet_z", "set_field", field_T=1.0)
+    assert "magnet_z" in blocked[1]
+    assert "helium fill" in blocked[1].lower()
+
+    orchestrator.finish_operation()
+    qtbot.waitUntil(lambda: orchestrator._procedure is None, timeout=5000)
+
+
+def test_manual_action_refused_during_running_procedure_claim_all(
+    orchestrator, station, qtbot
+):
+    """Regression guard: a plain procedure (default claim-all) still refuses every VI."""
+    proc = BlockingProcedure(station)
+    orchestrator.run_procedure(proc)
+    assert orchestrator._procedure is proc
+    assert orchestrator._active_claims is None  # claim-everything default
+
+    blocked: list[str] = []
+    orchestrator.action_blocked.connect(blocked.append)
+
+    # Even a VI the procedure never touches (magnet_y) is refused: a plain
+    # procedure claims everything.
+    with qtbot.waitSignal(orchestrator.action_blocked, timeout=500):
+        orchestrator.submit_vi_action("magnet_y", "initiate")
+
+    assert blocked
+    assert "blocking procedure" in blocked[0].lower()
+
+    orchestrator.abort_procedure()
+
+
+def test_claims_cleared_after_finish(orchestrator, station, tmp_path, qtbot):
+    """Claims are cleared once the run finishes — a claimed VI becomes controllable again."""
+    _fast_magnets(station)
+    op = _make_fill(station, tmp_path)
+    orchestrator.run_operation(op)
+    assert orchestrator._active_claims == {"level_meter", *station.magnet_vi_names()}
+
+    orchestrator.finish_operation()
+    qtbot.waitUntil(lambda: orchestrator._procedure is None, timeout=5000)
+    assert orchestrator._active_claims is None
+    assert orchestrator._state == OrchestratorState.IDLE
+
+    succeeded: list[tuple[str, str]] = []
+    orchestrator.action_succeeded.connect(lambda vi, m: succeeded.append((vi, m)))
+    orchestrator.submit_vi_action("level_meter", "set_refresh_rate", mode=1)
+    qtbot.waitUntil(lambda: bool(succeeded), timeout=2000)
+    assert succeeded == [("level_meter", "set_refresh_rate")]
+
+
+def test_claims_cleared_after_abort(orchestrator, station, tmp_path, qtbot):
+    """Claims are cleared on abort too — a claimed VI becomes controllable again."""
+    op = _make_fill(station, tmp_path, max_fill_duration_s=3600.0)
+    orchestrator.run_operation(op)
+    assert orchestrator._active_claims == {"level_meter", *station.magnet_vi_names()}
+
+    orchestrator.abort_procedure()
+    assert orchestrator._active_claims is None
+    assert orchestrator._state == OrchestratorState.IDLE
+
+    succeeded: list[tuple[str, str]] = []
+    orchestrator.action_succeeded.connect(lambda vi, m: succeeded.append((vi, m)))
+    orchestrator.submit_vi_action("level_meter", "set_refresh_rate", mode=1)
+    qtbot.waitUntil(lambda: bool(succeeded), timeout=2000)
+    assert succeeded == [("level_meter", "set_refresh_rate")]
+
+
+def test_queued_action_drained_during_operation_gets_verdict(
+    orchestrator, station, tmp_path, qtbot
+):
+    """A queued action is admitted/refused by the SAME predicate when the tick drains it.
+
+    Submits both a claimed-VI action and an unclaimed-VI action while the
+    fill is mid-ramp (RAMPING, before monitoring's per-tick state has
+    settled) so both land on the GUI-action queue before the very next tick
+    drains it — proving the drain gate (not just submit_vi_action) applies
+    claims per action.
+    """
+    _fast_magnets(station)
+    op = _make_fill(station, tmp_path)
+    orchestrator.run_operation(op)
+    assert orchestrator._procedure is op
+
+    blocked: list[str] = []
+    succeeded: list[tuple[str, str]] = []
+    orchestrator.action_blocked.connect(blocked.append)
+    orchestrator.action_succeeded.connect(lambda vi, m: succeeded.append((vi, m)))
+
+    # Queue both directly (bypassing the timer race) so the very next tick
+    # must drain them together and give each its own verdict.
+    orchestrator._gui_action_queue.append(
+        {"vi_name": "level_meter", "method_name": "set_refresh_rate", "kwargs": {"mode": 1}}
+    )
+    orchestrator._gui_action_queue.append(
+        {
+            "vi_name": "temperature_vti",
+            "method_name": "set_needle_valve",
+            "kwargs": {"position": 10.0},
+        }
+    )
+
+    qtbot.waitUntil(lambda: bool(blocked) and bool(succeeded), timeout=2000)
+    assert blocked and "level_meter" in blocked[0]
+    assert succeeded == [("temperature_vti", "set_needle_valve")]
+
+    orchestrator.finish_operation()
+    qtbot.waitUntil(lambda: orchestrator._procedure is None, timeout=5000)

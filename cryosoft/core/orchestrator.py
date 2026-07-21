@@ -245,6 +245,15 @@ class Orchestrator(QObject):
         self._active_run_manifest: dict[str, Any] | None = None
         self._run_counter = 0
 
+        # Claims + admission gate (docs/plans/operation-concurrency-and-
+        # error-scoping.md §1): the active run's claimed_vi_names(), captured
+        # once at _start_run() and cleared on EVERY teardown path (finish,
+        # abort, fail, emergency — see _abort_active_procedure()/
+        # _finish_run()). None while no run is active, or while the active
+        # run claims everything (the default for every procedure and for an
+        # operation that does not override claimed_vi_names()).
+        self._active_claims: set[str] | None = None
+
         self._pre_pause_state = OrchestratorState.IDLE
         self._paused_wait_elapsed = 0.0
         # Last targets dispatched to the Station — re-dispatched on resume,
@@ -492,6 +501,12 @@ class Orchestrator(QObject):
                 and the error message on setup failure.
         """
         self._procedure = procedure
+        # Claims + admission gate (plan §1): captured here, duck-typed (never
+        # importing BaseProcedure/OperationBase — contract C5) so a test
+        # double without claimed_vi_names() behaves exactly like the
+        # claim-everything default.
+        claimed_vi_names = getattr(procedure, "claimed_vi_names", None)
+        self._active_claims = claimed_vi_names() if callable(claimed_vi_names) else None
         self._standby_dispatched = False
         self._wait_started = False
         self._first_measurement = True
@@ -747,21 +762,98 @@ class Orchestrator(QObject):
         self._emergency_manual_override = False
         self._change_state(OrchestratorState.IDLE)
 
-    def submit_vi_action(self, vi_name: str, method_name: str, **kwargs: Any) -> None:
-        """Submit a GUI action to a specific VI."""
-        # Allow actions in IDLE, during a manual ramp (RAMPING with no active
-        # procedure), or in EMERGENCY once the operator has unlocked manual
-        # control via acknowledge_emergency() (see that method's docstring).
+    def _active_run_label(self) -> str:
+        """Return a human-readable ``"<kind> '<name>'"`` label for the active run.
+
+        Used only to compose admission-refusal messages (plan §1) — never
+        called with no active run.
+
+        Returns:
+            E.g. ``"operation 'Helium Fill'"`` or ``"procedure 'Field Sweep'"``.
+        """
+        procedure = self._procedure
+        kind = (
+            "operation"
+            if getattr(procedure, "command_scope", "measurement") == "operation"
+            else "procedure"
+        )
+        name = getattr(procedure, "name", "") or type(procedure).__name__
+        return f"{kind} {name!r}"
+
+    def _manual_action_admissible(self, vi_name: str) -> tuple[bool, str]:
+        """Decide whether a manual action on *vi_name* may be admitted right now.
+
+        The single admission predicate (plan §1's "Claims + admission gate"),
+        shared verbatim by ``submit_vi_action()`` (what may be *queued*) and
+        the ``_tick_body()`` GUI-action drain gate (what may be *drained*) —
+        they must agree, or a queued action could sit forever without a
+        verdict.
+
+        Admission rules, in order:
+
+        1. IDLE, or a manual ramp (RAMPING with no active run), or EMERGENCY
+           once ``acknowledge_emergency()`` unlocked manual override: always
+           admitted (unchanged from before claims existed).
+        2. ERROR, or EMERGENCY without the override: always refused, naming
+           the state.
+        3. Otherwise a run is active. Admitted iff the active run's
+           ``claimed_vi_names()`` is not "claim everything" (``None``) AND
+           *vi_name* is not in it. A claimed VI, or a run that claims
+           everything (every procedure today), is refused naming the owning
+           run.
+
+        Args:
+            vi_name: The VI the action targets.
+
+        Returns:
+            ``(True, "")`` when admitted; ``(False, reason)`` when refused,
+            with a human-readable reason naming why (and, for a claim
+            refusal, the owning run).
+        """
+        if self._state == OrchestratorState.IDLE:
+            return True, ""
         manual_ramping = (
             self._state == OrchestratorState.RAMPING and self._procedure is None
         )
+        if manual_ramping:
+            return True, ""
         emergency_override = (
             self._state == OrchestratorState.EMERGENCY and self._emergency_manual_override
         )
-        if self._state != OrchestratorState.IDLE and not (manual_ramping or emergency_override):
-            msg = f"Cannot control {vi_name}: procedure is running in state {self._state.name}"
-            logger.info("Blocked action: %s", msg)
-            self.action_blocked.emit(msg)
+        if emergency_override:
+            return True, ""
+        if self._state in (OrchestratorState.ERROR, OrchestratorState.EMERGENCY):
+            return False, (
+                f"Cannot control {vi_name}: procedure is running in state {self._state.name}"
+            )
+        if self._procedure is None:
+            # Defensive: no other non-IDLE, non-manual-ramp state should be
+            # reachable with no active run. Refuse conservatively rather than
+            # admit on an assumption that turned out false.
+            return False, (
+                f"Cannot control {vi_name}: procedure is running in state {self._state.name}"
+            )
+        if self._active_claims is None:
+            return False, f"Cannot control {vi_name}: {self._active_run_label()} is running"
+        if vi_name in self._active_claims:
+            return False, (
+                f"Cannot control {vi_name}: claimed by running {self._active_run_label()}"
+            )
+        return True, ""
+
+    def submit_vi_action(self, vi_name: str, method_name: str, **kwargs: Any) -> None:
+        """Submit a GUI action to a specific VI.
+
+        Admission is decided by ``_manual_action_admissible()`` (plan §1):
+        IDLE / a manual ramp / an EMERGENCY manual override always admit;
+        ERROR / EMERGENCY (without override) always refuse; otherwise a run
+        is active and the action is admitted iff *vi_name* is not one of the
+        active run's claimed VIs.
+        """
+        admitted, reason = self._manual_action_admissible(vi_name)
+        if not admitted:
+            logger.info("Blocked action: %s", reason)
+            self.action_blocked.emit(reason)
             return
 
         self._gui_action_queue.append({
@@ -1145,39 +1237,39 @@ class Orchestrator(QObject):
                         )
                         break
 
-        # 3. GUI Actions — processed in IDLE, during a manual ramp (no active
-        # procedure), or in EMERGENCY once the operator has unlocked manual
-        # control via acknowledge_emergency(). Mirrors the admission gate in
-        # submit_vi_action() — that gate decides what may be *queued*, this
-        # one decides what may be *drained*, and they must agree or a queued
-        # action would sit forever without a verdict.
-        _manual_ramping = (
-            self._state == OrchestratorState.RAMPING and self._procedure is None
-        )
-        _emergency_override = (
-            self._state == OrchestratorState.EMERGENCY and self._emergency_manual_override
-        )
-        if self._state == OrchestratorState.IDLE or _manual_ramping or _emergency_override:
-            for action in self._gui_action_queue:
-                try:
-                    self._station.execute_vi_action(
-                        action["vi_name"],
-                        action["method_name"],
-                        **action["kwargs"]
-                    )
-                    self.action_succeeded.emit(action["vi_name"], action["method_name"])
-                except Exception as e:
-                    # Every user action gets an explicit verdict: rejections
-                    # (limit violations, safety guards) and failures surface
-                    # to the GUI with the reason, never silently.
-                    logger.error("Error executing GUI action on %s: %s", action["vi_name"], e)
-                    self.action_failed.emit(
-                        action["vi_name"], action["method_name"], str(e)
-                    )
-            self._gui_action_queue.clear()
-            # If a GUI action started (or restarted) a manual ramp, enter RAMPING.
-            if self._state == OrchestratorState.IDLE and not self._station.check_ramps():
-                self._change_state(OrchestratorState.RAMPING)
+        # 3. GUI Actions — each queued action gets the SAME verdict
+        # submit_vi_action() would give it right now, via the shared
+        # _manual_action_admissible() predicate (plan §1): the run may have
+        # started/finished/changed claims since it was queued, and a claim
+        # refusal during an active run only refuses the CLAIMED VIs, not the
+        # whole queue — so admission is decided per action, not once for the
+        # batch. Every action gets a verdict this tick; none is left queued.
+        pending_actions = list(self._gui_action_queue)
+        self._gui_action_queue.clear()
+        for action in pending_actions:
+            admitted, reason = self._manual_action_admissible(action["vi_name"])
+            if not admitted:
+                logger.info("Blocked queued action on %s: %s", action["vi_name"], reason)
+                self.action_blocked.emit(reason)
+                continue
+            try:
+                self._station.execute_vi_action(
+                    action["vi_name"],
+                    action["method_name"],
+                    **action["kwargs"]
+                )
+                self.action_succeeded.emit(action["vi_name"], action["method_name"])
+            except Exception as e:
+                # Every user action gets an explicit verdict: rejections
+                # (limit violations, safety guards) and failures surface
+                # to the GUI with the reason, never silently.
+                logger.error("Error executing GUI action on %s: %s", action["vi_name"], e)
+                self.action_failed.emit(
+                    action["vi_name"], action["method_name"], str(e)
+                )
+        # If a GUI action started (or restarted) a manual ramp, enter RAMPING.
+        if self._state == OrchestratorState.IDLE and not self._station.check_ramps():
+            self._change_state(OrchestratorState.RAMPING)
 
         # 4. State Machine matching
         if self._state == OrchestratorState.IDLE:
@@ -1317,7 +1409,9 @@ class Orchestrator(QObject):
 
         Safe to call with no procedure active (stops manual ramps then).
         Each cleanup step is individually guarded so one failure (e.g. a dead
-        instrument) cannot prevent the others.
+        instrument) cannot prevent the others. Also clears ``_active_claims``
+        (plan §1) — the shared teardown path for user abort, ``_fail_to_error``,
+        and ``_enter_emergency``, so a claim can never outlive its run.
         """
         procedure = self._procedure
         if procedure is not None and hasattr(procedure, "abort"):
@@ -1338,6 +1432,7 @@ class Orchestrator(QObject):
             logger.exception("Stopping ramps during abort failed")
 
         self._procedure = None
+        self._active_claims = None
         self._active_system_vis.clear()
         self._standby_dispatched = False
         self._wait_started = False
@@ -1391,6 +1486,7 @@ class Orchestrator(QObject):
         self.procedure_finished.emit()
         end_state = self._operation_end_state(procedure)
         self._procedure = None
+        self._active_claims = None
         self._active_system_vis.clear()
         self._standby_dispatched = False
         self._postcondition_active = False
