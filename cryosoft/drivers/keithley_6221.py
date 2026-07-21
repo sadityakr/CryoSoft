@@ -442,6 +442,7 @@ class Keithley6221:
                     time.sleep(period)
         finally:
             self._instr.timeout = orig
+        return readings
 
     def is_in_compliance(self) -> bool:
         """Return True if the current source is currently in compliance."""

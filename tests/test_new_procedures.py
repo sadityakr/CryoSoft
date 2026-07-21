@@ -751,6 +751,22 @@ def test_value_slot_resilient_to_spaces(station, tmp_path):
     assert proc._params["loop_labels"] == {"A1": 1e-6, "A2": -1e-6}
 
 
+def test_value_slot_colon_range_generator(station, tmp_path):
+    """A range entry like '-1e-6:1e-6:3' is expanded to float elements correctly."""
+    proc = _field_proc(
+        station, tmp_path,
+        {**DC, "loop1_parameter": "dc_measurement.current_A",
+         "loop1_values": "-1e-6:1e-6:3, 5e-6"},
+    )
+    assert proc._params["loop_labels"] == {
+        "A1": -1e-6,
+        "A2": 0.0,
+        "A3": 1e-6,
+        "A4": 5e-6,
+    }
+
+
+
 
 def test_non_loopable_parameter_refused(station, tmp_path):
     """Looping a parameter no VI advertised a setter for fails at construction."""
