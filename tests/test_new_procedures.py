@@ -1,4 +1,4 @@
-﻿# ---
+# ---
 # description: |
 #   Behavioral tests for the generic sweep procedures FieldSweep and
 #   TemperatureSweep (core.procedure.SweepMeasureProcedure), parametrized over
@@ -739,6 +739,17 @@ def test_value_slot_bad_entry_refused(station, tmp_path):
             {**DC, "loop1_parameter": "dc_measurement.current_A",
              "loop1_values": "1e-6, abc"},
         )
+
+
+def test_value_slot_resilient_to_spaces(station, tmp_path):
+    """An entry with spaces (e.g. '- 0.000001') is parsed successfully after stripping."""
+    proc = _field_proc(
+        station, tmp_path,
+        {**DC, "loop1_parameter": "dc_measurement.current_A",
+         "loop1_values": "0.000001, - 0.000001"},
+    )
+    assert proc._params["loop_labels"] == {"A1": 1e-6, "A2": -1e-6}
+
 
 
 def test_non_loopable_parameter_refused(station, tmp_path):

@@ -950,8 +950,10 @@ class SweepMeasureProcedure(BaseProcedure):
         for entry in (e.strip() for e in text.split(",")):
             if not entry:
                 continue
+            # Remove all whitespace from within the entry (e.g. "- 0.000001" -> "-0.000001")
+            cleaned_entry = "".join(entry.split())
             try:
-                value = spec.type(entry)
+                value = spec.type(cleaned_entry)
             except (TypeError, ValueError) as exc:
                 raise CryoSoftConfigError(
                     f"reading loop: {entry!r} is not a valid "
