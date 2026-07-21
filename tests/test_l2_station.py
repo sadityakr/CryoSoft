@@ -385,3 +385,199 @@ def test_scanner_enabled_round_trip(sim_station: Station):
 
     sim_station.set_scanner_enabled(False)
     assert sim_station.scanner_enabled() is False
+
+
+# ---------------------------------------------------------------------------
+# Degraded build: offline instruments and reconnection
+# ---------------------------------------------------------------------------
+
+
+class _UnreachableDriver:
+    """Test double for a driver whose instrument never answers."""
+
+    def __init__(self, resource_string: str) -> None:
+        from cryosoft.core.exceptions import CryoSoftCommunicationError
+
+        raise CryoSoftCommunicationError(
+            f"Cannot open instrument at {resource_string}"
+        )
+
+
+class _FlakyDriver:
+    """Test double that fails construction ``fail_times`` times, then succeeds.
+
+    Models "the user plugged the cable back in between startup and retry".
+    Class-level counter so build_station's import-by-dotted-path sees the
+    same state as the test; reset it in each test that uses this class.
+    """
+
+    fail_times: int = 0
+    attempts: int = 0
+
+    def __init__(self, resource_string: str) -> None:
+        from cryosoft.core.exceptions import CryoSoftCommunicationError
+
+        type(self).attempts += 1
+        if type(self).attempts <= type(self).fail_times:
+            raise CryoSoftCommunicationError(
+                f"Cannot open instrument at {resource_string}"
+            )
+
+
+class _StubVI:
+    """Minimal VI test double satisfying the build contract."""
+
+    def __init__(self, drivers: dict, **init_params) -> None:
+        self._drivers = drivers
+        self._init_params = init_params
+
+
+class _CommFailVI(_StubVI):
+    """VI test double whose own bring-up cannot talk to the hardware."""
+
+    def __init__(self, drivers: dict, **init_params) -> None:
+        from cryosoft.core.exceptions import CryoSoftCommunicationError
+
+        raise CryoSoftCommunicationError("VI bring-up query got no response")
+
+
+def _write_degraded_config(
+    tmp_path: Path, driver_class: str, vi_class: str = "tests.test_l2_station._StubVI"
+) -> str:
+    """Write a two-driver / two-VI config: one healthy pair, one under test."""
+    (tmp_path / "devices.yaml").write_text(
+        "real_drivers:\n"
+        "  good_drv:\n"
+        "    class: tests.test_l2_station._AddressCapturingDriver\n"
+        '    address: "GPIB0::10::INSTR"\n'
+        "  bad_drv:\n"
+        f"    class: {driver_class}\n"
+        '    address: "GPIB0::12::INSTR"\n'
+        "virtual_instruments:\n"
+        "  good_vi:\n"
+        "    class: tests.test_l2_station._StubVI\n"
+        "    drivers: {main: good_drv}\n"
+        "    vi_type: system\n"
+        "  bad_vi:\n"
+        f"    class: {vi_class}\n"
+        "    drivers: {main: bad_drv}\n"
+        "    vi_type: measurement\n"
+    )
+    (tmp_path / "monitor.yaml").write_text(
+        "monitor:\n  tick_interval_ms: 1000\n  max_vi_errors: 3\n"
+    )
+    return str(tmp_path)
+
+
+def test_build_station_degrades_on_unreachable_driver(tmp_path):
+    """One unreachable instrument must not abort the build: it goes offline."""
+    station = build_station(
+        _write_degraded_config(tmp_path, "tests.test_l2_station._UnreachableDriver")
+    )
+
+    assert station.get_vi_names() == ["good_vi"]
+    assert station.offline_vi_names() == ["bad_vi"]
+    info = station.get_offline_info("bad_vi")
+    assert info.vi_type == "measurement"
+    assert "bad_drv" in info.reason
+    assert "GPIB0::12::INSTR" in info.reason
+    assert info.failed_drivers == ("bad_drv",)
+    # Offline VIs are invisible to the live enumerators.
+    assert station.has_vi("bad_vi") is False
+    assert station.measurement_vi_names() == []
+
+
+def test_build_station_degrades_on_vi_communication_error(tmp_path):
+    """A VI whose own bring-up raises a communication error goes offline too."""
+    station = build_station(
+        _write_degraded_config(
+            tmp_path,
+            "tests.test_l2_station._AddressCapturingDriver",
+            vi_class="tests.test_l2_station._CommFailVI",
+        )
+    )
+
+    assert station.offline_vi_names() == ["bad_vi"]
+    info = station.get_offline_info("bad_vi")
+    assert "no response" in info.reason
+    assert info.failed_drivers == ()
+
+
+def test_build_station_still_raises_on_unknown_driver_reference(tmp_path):
+    """Config errors must still abort the build (they are not connection faults)."""
+    from cryosoft.core.exceptions import CryoSoftConfigError
+
+    (tmp_path / "devices.yaml").write_text(
+        "real_drivers: {}\n"
+        "virtual_instruments:\n"
+        "  broken_vi:\n"
+        "    class: tests.test_l2_station._StubVI\n"
+        "    drivers: {main: no_such_driver}\n"
+    )
+    (tmp_path / "monitor.yaml").write_text("monitor:\n  tick_interval_ms: 1000\n")
+
+    with pytest.raises(CryoSoftConfigError, match="no_such_driver"):
+        build_station(str(tmp_path))
+
+
+def test_fallback_keeps_config_with_unreachable_instrument(tmp_path):
+    """An unreachable instrument must NOT trigger the config fallback chain."""
+    from cryosoft.core.station import build_station_with_fallback
+
+    real_cfg = tmp_path / "real"
+    real_cfg.mkdir()
+    _write_degraded_config(real_cfg, "tests.test_l2_station._UnreachableDriver")
+    sim_cfg = str(
+        Path(__file__).parent.parent / "cryosoft" / "configs" / "sim_cryostat"
+    )
+
+    station, used_path, warnings = build_station_with_fallback(
+        [str(real_cfg), sim_cfg]
+    )
+
+    assert used_path == str(real_cfg)
+    assert warnings == []
+    assert station.offline_vi_names() == ["bad_vi"]
+
+
+def test_retry_instrument_reconnects_after_transient_failure(tmp_path):
+    """retry_instrument() brings a VI live once its driver becomes reachable."""
+    _FlakyDriver.fail_times = 1
+    _FlakyDriver.attempts = 0
+    station = build_station(
+        _write_degraded_config(tmp_path, "tests.test_l2_station._FlakyDriver")
+    )
+    assert station.offline_vi_names() == ["bad_vi"]
+
+    ok, message = station.retry_instrument("bad_vi")
+
+    assert ok is True
+    assert "bad_vi" in message
+    assert station.offline_vi_names() == []
+    assert station.has_vi("bad_vi") is True
+    assert station.measurement_vi_names() == ["bad_vi"]
+
+
+def test_retry_instrument_failure_updates_reason_and_stays_offline(tmp_path):
+    """A failed retry keeps the VI offline and refreshes the failure reason."""
+    station = build_station(
+        _write_degraded_config(tmp_path, "tests.test_l2_station._UnreachableDriver")
+    )
+
+    ok, message = station.retry_instrument("bad_vi")
+
+    assert ok is False
+    assert "bad_drv" in message
+    assert station.offline_vi_names() == ["bad_vi"]
+    assert station.has_vi("bad_vi") is False
+    assert "bad_drv" in station.get_offline_info("bad_vi").reason
+
+
+def test_retry_instrument_rejects_non_offline_name(sim_station: Station):
+    """Retrying a live or unknown VI returns an explicit failure verdict."""
+    ok, message = sim_station.retry_instrument("magnet_z")
+    assert ok is False
+    assert "not offline" in message
+
+    ok, message = sim_station.retry_instrument("no_such_vi")
+    assert ok is False

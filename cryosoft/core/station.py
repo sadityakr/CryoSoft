@@ -9,7 +9,11 @@
 #   an "operation"-scope @control method is refused (CryoSoftSafetyError,
 #   nothing dispatched) unless the caller passes allowed_scope="operation".
 #   build_station() is the factory that constructs the full instrument stack
-#   from a YAML config directory. magnet_vi_names() mirrors switch_vi_names()
+#   from a YAML config directory; it builds DEGRADED on connection failures —
+#   unreachable instruments land in the offline registry (OfflineInstrument,
+#   offline_vi_names(), get_offline_info()) instead of aborting the build, and
+#   retry_instrument() can bring one back later from the retained build
+#   recipe. magnet_vi_names() mirrors switch_vi_names()
 #   for registry-system VIs whose class vi_type == "magnet". read_cryogenics_
 #   config()/read_servicing_logs_config()/read_operations_config() mirror
 #   read_instrument_metadata()'s GUI-safe YAML-only pattern for the optional
@@ -47,6 +51,7 @@ from __future__ import annotations
 import importlib
 import logging
 from collections.abc import Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +65,36 @@ from cryosoft.virtual_instruments.base import BaseVirtualInstrument
 from cryosoft.virtual_instruments.rampable import RampableVI
 
 logger = logging.getLogger(__name__)
+
+
+# `@dataclass(frozen=True)` generates an immutable value class: __init__,
+# __eq__ and __repr__ come for free, and instances cannot be mutated after
+# creation — updates go through `dataclasses.replace()`, which returns a new
+# instance. Immutability keeps the offline registry safe to hand out to the
+# GUI without defensive copies.
+@dataclass(frozen=True)
+class OfflineInstrument:
+    """Record of a configured VI that could not be brought up at build time.
+
+    Produced by ``build_station()`` when a driver (or the VI itself) fails to
+    connect. The Station keeps these in a registry parallel to the live VIs so
+    upper layers can show *what* is missing and *why*, and offer a reconnect.
+
+    Attributes:
+        vi_name: The VI's configured name (e.g. ``"magnet_z"``).
+        vi_type: The registry vi_type from config (``"system"``,
+            ``"measurement"``, ``"switch"``, ``"level"``).
+        reason: Human-readable connection-failure description, suitable for
+            direct display in the GUI.
+        failed_drivers: Config aliases of the drivers that failed to
+            construct. Empty when the drivers were fine but the VI's own
+            construction raised a communication error.
+    """
+
+    vi_name: str
+    vi_type: str
+    reason: str
+    failed_drivers: tuple[str, ...] = field(default=())
 
 
 class Station:
@@ -81,6 +116,13 @@ class Station:
         self._error_counts: dict[str, int] = {}
         self._max_errors: int = 3
         self._scanner_enabled: bool = False
+        # Degraded-build support: VIs whose hardware failed to connect at
+        # build time, plus the build recipes and live driver instances that
+        # retry_instrument() needs to bring one back without a restart.
+        self._offline_vis: dict[str, OfflineInstrument] = {}
+        self._driver_specs: dict[str, dict] = {}   # {alias: driver config}
+        self._vi_specs: dict[str, dict] = {}       # {vi_name: vi config}
+        self._drivers: dict[str, Any] = {}         # {alias: live driver}
 
     # ------------------------------------------------------------------
     # VI registration and access
@@ -182,6 +224,114 @@ class Station:
     def has_vi(self, vi_name: str) -> bool:
         """Return True if a VI with this name is registered."""
         return vi_name in self._virtual_instruments
+
+    # ------------------------------------------------------------------
+    # Offline instruments (degraded build) and reconnection
+    # ------------------------------------------------------------------
+
+    def register_offline_vi(self, info: OfflineInstrument) -> None:
+        """Record a configured VI that failed to connect at build time.
+
+        An offline VI is *not* in the live registry: ``get_vi_names()`` and
+        the typed enumerators never return it, so the Orchestrator, procedures
+        and safety evaluation transparently see a smaller station.
+
+        Args:
+            info: The offline record (name, type, human-readable reason).
+        """
+        self._offline_vis[info.vi_name] = info
+        logger.warning(
+            "VI '%s' registered OFFLINE (type=%s): %s",
+            info.vi_name,
+            info.vi_type,
+            info.reason,
+        )
+
+    def offline_vi_names(self) -> list[str]:
+        """Return the names of all offline VIs, in config order."""
+        return list(self._offline_vis.keys())
+
+    def get_offline_info(self, vi_name: str) -> OfflineInstrument:
+        """Return the offline record for a VI.
+
+        Args:
+            vi_name: Name of the offline VI.
+
+        Returns:
+            The :class:`OfflineInstrument` record.
+
+        Raises:
+            KeyError: If no offline VI with that name exists.
+        """
+        return self._offline_vis[vi_name]
+
+    def retry_instrument(self, vi_name: str) -> tuple[bool, str]:
+        """Try to bring an offline VI online: rebuild its drivers, then the VI.
+
+        Re-runs the same construction ``build_station()`` performed, from the
+        retained build recipe: each of the VI's drivers that is not already
+        live is constructed (its ``__init__`` opens the hardware connection),
+        then the VI itself. On success the VI joins the live registry exactly
+        as if it had connected at startup; on failure the offline record's
+        ``reason`` is refreshed with the latest error.
+
+        A driver brought up here is shared: another offline VI referencing the
+        same alias will find it already live on its own retry.
+
+        Args:
+            vi_name: Name of the offline VI to reconnect.
+
+        Returns:
+            An explicit ``(ok, message)`` verdict for the GUI, mirroring the
+            control-validation standard: ``message`` is the human-readable
+            success confirmation or failure reason.
+        """
+        info = self._offline_vis.get(vi_name)
+        if info is None:
+            return False, f"'{vi_name}' is not offline"
+        spec = self._vi_specs.get(vi_name)
+        if spec is None:
+            return False, f"No build recipe retained for '{vi_name}'"
+
+        role_aliases = dict(spec.get("drivers") or {})
+        # dict.fromkeys: order-preserving de-dup of the alias list.
+        for alias in dict.fromkeys(role_aliases.values()):
+            if alias in self._drivers:
+                continue
+            driver_cfg = self._driver_specs.get(alias, {})
+            try:
+                cls = _import_class(driver_cfg["class"])
+                self._drivers[alias] = cls(driver_cfg.get("address", "SIM"))
+            except Exception as exc:  # noqa: BLE001 — verdict, never a crash, in GUI context
+                reason = f"driver '{alias}': {exc}"
+                still_failed = tuple(
+                    a for a in dict.fromkeys(role_aliases.values())
+                    if a not in self._drivers
+                )
+                self._offline_vis[vi_name] = replace(
+                    info, reason=reason, failed_drivers=still_failed
+                )
+                logger.warning("Reconnect of '%s' failed: %s", vi_name, reason)
+                return False, reason
+
+        driver_refs = {role: self._drivers[alias] for role, alias in role_aliases.items()}
+        init_params = dict(spec.get("init_params", {}) or {})
+        try:
+            cls = _import_class(spec["class"])
+            vi = cls(driver_refs, **init_params)
+        except Exception as exc:  # noqa: BLE001 — verdict, never a crash, in GUI context
+            self._offline_vis[vi_name] = replace(
+                info, reason=str(exc), failed_drivers=()
+            )
+            logger.warning(
+                "Reconnect of '%s' failed in VI construction: %s", vi_name, exc
+            )
+            return False, str(exc)
+
+        del self._offline_vis[vi_name]
+        self.register_vi(vi_name, vi, spec.get("vi_type", "system"))
+        logger.info("Instrument '%s' reconnected", vi_name)
+        return True, f"'{vi_name}' reconnected"
 
     def set_scanner_enabled(self, enabled: bool) -> None:
         """Toggle whether scanner-sensitive procedures may use the switch VI.
@@ -703,11 +853,20 @@ def build_station(config_path: str) -> Station:
           devices.yaml   — driver and VI definitions
           monitor.yaml   — tick interval and error threshold
 
+    Degraded build: an instrument that fails to *connect* never aborts the
+    build. Each driver whose ``__init__`` raises is recorded, and every VI
+    that needs it (or whose own construction raises a communication error) is
+    registered offline via ``Station.register_offline_vi()`` instead of live —
+    the GUI shows why and offers a reconnect. Config errors (missing files,
+    unimportable classes, unknown driver references) still raise, because a
+    broken config is a software fault the degraded mode cannot reason about.
+
     Args:
         config_path: Path to the directory containing devices.yaml and monitor.yaml.
 
     Returns:
-        A ``Station`` instance with all VIs registered and error threshold set.
+        A ``Station`` instance with every connectable VI registered live,
+        every unconnectable one registered offline, and error threshold set.
 
     Raises:
         CryoSoftConfigError: If required config keys are missing or imports fail.
@@ -742,34 +901,78 @@ def build_station(config_path: str) -> Station:
     station._max_errors = int(mon.get("max_vi_errors", 3))
 
     # --- Build all real drivers ---
+    # A driver __init__'s job is to open the hardware connection, so ANY
+    # construction failure here is treated as a connection fault: recorded,
+    # never raised. Import errors (config faults) still raise via _import_class.
     drivers_map: dict[str, Any] = {}
-    for driver_name, driver_cfg in devices_config.get("real_drivers", {}).items():
+    offline_drivers: dict[str, str] = {}  # {alias: failure reason}
+    for driver_name, driver_cfg in (devices_config.get("real_drivers") or {}).items():
         cls = _import_class(driver_cfg["class"])
         resource = driver_cfg.get("address", "SIM")
-        drivers_map[driver_name] = cls(resource)
+        station._driver_specs[driver_name] = dict(driver_cfg)
+        try:
+            drivers_map[driver_name] = cls(resource)
+        except Exception as exc:  # noqa: BLE001 — any driver-construction failure degrades, see above
+            offline_drivers[driver_name] = str(exc)
+            logger.warning(
+                "Driver '%s' (%s) failed to connect: %s",
+                driver_name,
+                driver_cfg["class"],
+                exc,
+            )
+            continue
         logger.info("Built driver '%s' (%s)", driver_name, driver_cfg["class"])
+    station._drivers = drivers_map
 
     # --- Build all VIs ---
-    for vi_name, vi_cfg in devices_config.get("virtual_instruments", {}).items():
+    for vi_name, vi_cfg in (devices_config.get("virtual_instruments") or {}).items():
         cls = _import_class(vi_cfg["class"])
+        station._vi_specs[vi_name] = dict(vi_cfg)
+        vi_type = vi_cfg.get("vi_type", "system")
 
-        # Resolve driver references
+        # Resolve driver references. An unknown alias is a config error and
+        # raises; an alias whose driver failed to connect sends this VI to
+        # the offline registry instead.
         driver_refs: dict[str, Any] = {}
-        for role, driver_name in vi_cfg.get("drivers", {}).items():
-            if driver_name not in drivers_map:
+        failed_aliases: list[str] = []
+        for role, driver_name in (vi_cfg.get("drivers") or {}).items():
+            if driver_name in offline_drivers:
+                failed_aliases.append(driver_name)
+            elif driver_name not in drivers_map:
                 raise CryoSoftConfigError(
                     f"VI '{vi_name}' references unknown driver '{driver_name}'"
                 )
-            driver_refs[role] = drivers_map[driver_name]
+            else:
+                driver_refs[role] = drivers_map[driver_name]
+
+        if failed_aliases:
+            unique = list(dict.fromkeys(failed_aliases))
+            reason = "; ".join(
+                f"driver '{alias}': {offline_drivers[alias]}" for alias in unique
+            )
+            station.register_offline_vi(
+                OfflineInstrument(vi_name, vi_type, reason, tuple(unique))
+            )
+            continue
 
         init_params = dict(vi_cfg.get("init_params", {}) or {})
-        vi = cls(driver_refs, **init_params)
-        vi_type = vi_cfg.get("vi_type", "system")
+        try:
+            vi = cls(driver_refs, **init_params)
+        except CryoSoftCommunicationError as exc:
+            # Drivers came up but the VI's own bring-up could not talk to the
+            # hardware. Other exceptions (bad init_params, limit-validation
+            # errors) are config/software faults and propagate.
+            station.register_offline_vi(
+                OfflineInstrument(vi_name, vi_type, str(exc), ())
+            )
+            continue
         station.register_vi(vi_name, vi, vi_type)
 
+    offline = station.offline_vi_names()
     logger.info(
-        "Station built with %d VIs from '%s'",
-        len(station.get_vi_names()),
+        "Station built with %d VIs (%d offline) from '%s'",
+        len(station.get_vi_names()) + len(offline),
+        len(offline),
         config_dir,
     )
     return station
@@ -781,9 +984,13 @@ def build_station_with_fallback(
     """Build a Station from the first usable config, falling back in order.
 
     Each candidate is validated (``validate_config_dir``) and then built; the
-    first that succeeds wins. This is the startup safety net: a corrupted or
-    hardware-missing active config no longer crashes the app, because a later
+    first that succeeds wins. This is the startup safety net for *config*
+    faults: a corrupted config no longer crashes the app, because a later
     candidate (ultimately the always-loadable ``sim_cryostat``) takes over.
+
+    Unreachable instruments never trigger a fallback: ``build_station()``
+    degrades them to the offline registry and still succeeds, so the user
+    stays on their own setup's config with everything else working.
 
     Args:
         candidate_paths: Config directories to try, most-preferred first.
