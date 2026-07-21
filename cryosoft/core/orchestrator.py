@@ -27,12 +27,22 @@
 # process: |
 #   On _tick() (inside an exception boundary that degrades to ERROR instead
 #   of crashing the app): while monitoring is active, gets state from
-#   station, evaluates safety flags on that same snapshot — subtracting the
-#   active operation's tolerated_safety_flags first, if one is running — (any
-#   remaining tripped flag -> one-shot EMERGENCY entry: abort procedure, stop
-#   ramps, standby_all once) and checks for stale active system VIs; then
-#   (monitoring or not) processes IDLE gui actions and runs the state
-#   machine. STANDBY forks on the active run's kind (duck-typed via
+#   station (which also populates/clears its runtime FaultRecord registry —
+#   docs/plans/operation-concurrency-and-error-scoping.md §3), emits a
+#   warning-severity error_event for each newly faulted VI the active run
+#   does not claim (no state change), evaluates safety flags on that same
+#   snapshot — subtracting the active operation's tolerated_safety_flags
+#   first, if one is running — (any remaining tripped flag -> one-shot
+#   EMERGENCY entry, its reason/ErrorEvent naming the originating VI(s) via
+#   Station.safety_flag_sources(): abort procedure, stop ramps, standby_all
+#   once), and checks for stale ACTIVE (claimed) system VIs — a stale
+#   claimed VI fails the run (_fail_run_for_fault(): run_finished "failed",
+#   error_event kind="run_failure") and returns the machine to IDLE (NOT
+#   global ERROR — only that VI is quarantined; the queue does not
+#   auto-continue). _manual_action_admissible() refuses any VI with an
+#   active fault outright, before its other admission rules, including in
+#   IDLE. Then (monitoring or not) processes IDLE gui actions and runs the
+#   state machine. STANDBY forks on the active run's kind (duck-typed via
 #   command_scope, docs/plans/operation-concurrency-and-error-scoping.md §2):
 #   a PROCEDURE keeps the original two-phase wait (for any ramp already in
 #   flight when SWEEPING ended, then — after dispatching procedure.standby()'s
@@ -91,10 +101,11 @@ from typing import Any
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
+from cryosoft.core.events import ErrorEvent
 from cryosoft.core.exceptions import CryoSoftSafetyError
 from cryosoft.core.operational_status import build_operational_status
 from cryosoft.core.plan import Command, SessionEnvelope, Target
-from cryosoft.core.station import Station
+from cryosoft.core.station import FaultRecord, Station
 from cryosoft.core.watchdog import WatchdogConfig, WatchdogState, apply_watchdog
 # Procedures will be imported/type-checked but for now we expect a BaseProcedure mock.
 # We don't import BaseProcedure directly to avoid circular dependency.
@@ -160,8 +171,27 @@ class Orchestrator(QObject):
             names an operation's one-shot ``postcondition_gates()``
             evaluation found unmet at finish — always ``[]`` for a procedure,
             or for an operation with none declared/all held) added.
-        error_occurred (str): Emitted when ERROR or EMERGENCY state entered.
-            Not run-scoped — fires regardless of run kind.
+        error_occurred (str): Emitted when ERROR or EMERGENCY state entered,
+            or a run fails (plan operation-concurrency-and-error-scoping.md
+            §3). Not run-scoped — fires regardless of run kind. Kept as a
+            thin compat wrapper: every emission here has a matching, richer
+            ``error_event`` emitted alongside it.
+        error_event (ErrorEvent): Structured counterpart of
+            ``error_occurred``/a VI-scoped fault (plan §3, ``core.events.
+            ErrorEvent``): ``vi_name`` (the originating instrument, or
+            ``None``/comma-joined for a machine-wide or multi-VI event),
+            ``kind`` (``"fault"`` — VI-scoped, quarantines only that VI;
+            ``"run_failure"`` — the active run's claimed VI faulted, the run
+            fails and the machine returns to IDLE; ``"safety"`` — a tripped
+            safety flag, global EMERGENCY; ``"internal"`` — an unhandled
+            tick-boundary exception, global ERROR), ``severity``
+            (``"warning"``/``"error"``/``"emergency"``), ``message``, and
+            ``timestamp``. A plain per-VI fault (``kind="fault"``,
+            ``severity="warning"``) fires ONLY this signal, deliberately NOT
+            ``error_occurred`` — mere staleness on an unclaimed VI was never
+            an ``error_occurred``-worthy event before this plan and must not
+            become banner-noisy in every window that still only listens to
+            the compat signal (e.g. ProcedureWindow).
         action_blocked (str): Emitted if GUI action submitted while busy.
         action_succeeded (str, str): Emitted (vi_name, method_name) after a
             submit_vi_action() GUI action executes without raising — the
@@ -193,6 +223,7 @@ class Orchestrator(QObject):
     run_started = pyqtSignal(dict)  # run manifest at successful setup
     run_finished = pyqtSignal(dict)  # same manifest + finished_utc/status/reason
     error_occurred = pyqtSignal(str)
+    error_event = pyqtSignal(object)  # ErrorEvent — structured error/fault payload (plan §3)
     action_blocked = pyqtSignal(str)
     action_succeeded = pyqtSignal(str, str)
     action_failed = pyqtSignal(str, str, str)
@@ -277,6 +308,13 @@ class Orchestrator(QObject):
         # run claims everything (the default for every procedure and for an
         # operation that does not override claimed_vi_names()).
         self._active_claims: set[str] | None = None
+
+        # Runtime fault registry tracking (plan §3): the set of VI names
+        # with an active Station fault as of the last tick, used to detect
+        # NEW faults (emit one warning error_event, not one per tick) and
+        # recoveries. Station is the source of truth; this is only a
+        # transition-detection cache.
+        self._known_fault_vis: set[str] = set()
 
         self._pre_pause_state = OrchestratorState.IDLE
         self._paused_wait_elapsed = 0.0
@@ -835,6 +873,11 @@ class Orchestrator(QObject):
 
         Admission rules, in order:
 
+        0. A VI with an active runtime fault (plan §3) is ALWAYS refused,
+           regardless of state — including IDLE — until it recovers or
+           ``retry_fault()`` succeeds. Checked first, and here (not as a
+           parallel check) so every caller (``submit_vi_action()``, the
+           drain gate) inherits it for free.
         1. IDLE, or a manual ramp (RAMPING with no active run), or EMERGENCY
            once ``acknowledge_emergency()`` unlocked manual override: always
            admitted (unchanged from before claims existed).
@@ -854,6 +897,12 @@ class Orchestrator(QObject):
             with a human-readable reason naming why (and, for a claim
             refusal, the owning run).
         """
+        fault = self._station.vi_faults().get(vi_name)
+        if fault is not None:
+            return False, (
+                f"Cannot control {vi_name}: instrument fault ({fault.kind}) — "
+                f"{fault.message}. Retry the instrument or wait for it to recover."
+            )
         if self._state == OrchestratorState.IDLE:
             return True, ""
         manual_ramping = (
@@ -993,6 +1042,55 @@ class Orchestrator(QObject):
             return self._station.get_offline_info(vi_name).reason
         except KeyError:
             return ""
+
+    def vi_faults(self) -> dict[str, FaultRecord]:
+        """Return the Station's current runtime fault registry, GUI-safe.
+
+        Returns:
+            ``{vi_name: FaultRecord}`` for every VI with an active
+            stale/disconnected fault.
+        """
+        return self._station.vi_faults()
+
+    def acknowledge_fault(self, vi_name: str) -> None:
+        """Acknowledge a VI's active runtime fault (calms the Monitor UI).
+
+        A no-op (logged) if the VI has no active fault — acknowledging
+        something already clear is harmless. Emits ``action_succeeded`` so
+        the Monitor's per-panel Acknowledge button gets the same confirmed-
+        state feedback as every other GUI action.
+
+        Args:
+            vi_name: Name of the faulted VI.
+        """
+        if self._station.acknowledge_fault(vi_name):
+            logger.info("Fault on '%s' acknowledged", vi_name)
+            self.action_succeeded.emit(vi_name, "acknowledge_fault")
+        else:
+            logger.info("acknowledge_fault('%s') ignored: no active fault", vi_name)
+
+    def retry_fault(self, vi_name: str) -> None:
+        """Retry a VI's active runtime fault: reset counters, poll once (plan §3).
+
+        The runtime counterpart of ``retry_reconnect()``: it never rebuilds
+        a driver (the VI is already live) — only ``Station.retry_fault()``'s
+        counter-reset-and-repoll. Unlike ``retry_reconnect()`` this is not
+        restricted to IDLE: an unclaimed VI's fault (the common case this
+        exists for) does not require aborting whatever run is in progress
+        to retry it, and everything still runs on the one tick-driven
+        thread so there is no concurrency hazard in doing this synchronously
+        mid-run.
+
+        Args:
+            vi_name: Name of the faulted VI to retry.
+        """
+        ok, message = self._station.retry_fault(vi_name)
+        if ok:
+            logger.info("Retry succeeded for faulted VI '%s'", vi_name)
+            self.action_succeeded.emit(vi_name, "retry_fault")
+        else:
+            logger.warning("Retry failed for faulted VI '%s': %s", vi_name, message)
+            self.action_failed.emit(vi_name, "retry_fault", message)
 
     def set_scanner_enabled(self, enabled: bool) -> None:
         """Toggle scanner availability for scanner-sensitive procedures.
@@ -1308,6 +1406,37 @@ class Orchestrator(QObject):
             # from this tick's snapshot, emitted, and appended to logs/status.jsonl.
             self._update_operational_status(state)
 
+            # Runtime fault registry (plan §3): Station.get_state() (just
+            # called above) already populated/cleared FaultRecords for
+            # anything stale/disconnected this tick. Detect NEW faults (one
+            # warning event each, not one per tick) for VIs the active run
+            # does not claim — a claimed VI's fault is handled by the
+            # run-failure path below instead, with a matching, more severe
+            # event, so it must not ALSO get a warning here.
+            current_faults = self._station.vi_faults()
+            new_fault_names = set(current_faults) - self._known_fault_vis
+            self._known_fault_vis = set(current_faults)
+            run_active = self._state not in (
+                OrchestratorState.IDLE,
+                OrchestratorState.PAUSED,
+                OrchestratorState.ERROR,
+                OrchestratorState.EMERGENCY,
+            )
+            # The run's watched VIs: its system (target-receiving) VIs plus
+            # its EXPLICIT claims — a claimed non-system VI (e.g. the helium
+            # fill's level meter) faulting must fail the run too, not merely
+            # warn while the run keeps trusting a dead instrument. Claims of
+            # None (claim-everything, every plain procedure) deliberately do
+            # NOT widen this beyond the system VIs: a procedure's unrelated
+            # VI going stale was never a run-failure before and stays a
+            # warning-only fault.
+            watched_vis = set(self._active_system_vis) | (self._active_claims or set())
+            for vi_name in sorted(new_fault_names):
+                if run_active and vi_name in watched_vis:
+                    continue  # handled as a run failure below, this same tick
+                record = current_faults[vi_name]
+                self._emit_fault_event(vi_name, record.kind, record.message)
+
             # Safety check — reuses this tick's snapshot (no second hardware poll).
             # An active operation's tolerated_safety_flags (plan §7) are
             # subtracted before deciding on EMERGENCY: a tolerated flag (e.g.
@@ -1327,7 +1456,11 @@ class Orchestrator(QObject):
                 tripped_flags = tripped_flags - tolerated
             active_flags = sorted(tripped_flags)
             if active_flags and self._state != OrchestratorState.EMERGENCY:
-                self._enter_emergency(", ".join(active_flags))
+                sources = self._station.safety_flag_sources(state)
+                vi_names = tuple(sorted({
+                    vi_name for flag in active_flags for vi_name in sources.get(flag, [])
+                }))
+                self._enter_emergency(", ".join(active_flags), vi_names)
                 return  # emergency entry already cleaned up; nothing else this tick
 
             # Session-envelope check — same snapshot, same consequence as a tripped
@@ -1339,16 +1472,19 @@ class Orchestrator(QObject):
                     self._enter_emergency("; ".join(envelope_violations))
                     return
 
-            # Stale check during procedure
-            if self._state not in (OrchestratorState.IDLE, OrchestratorState.PAUSED,
-                                   OrchestratorState.ERROR, OrchestratorState.EMERGENCY):
-                for vi_name in self._active_system_vis:
+            # Stale ACTIVE (claimed/system) VI during a run (plan §3): the
+            # run fails and its VI's fault stands in the Station registry,
+            # but — unlike the old behavior — the machine returns to IDLE
+            # rather than global ERROR, so every other instrument stays
+            # usable. A stale UNCLAIMED VI never reaches here at all: it was
+            # already handled (as a warning-severity fault, no state change)
+            # by the fault-transition block above.
+            if run_active:
+                for vi_name in sorted(watched_vis):
                     vi_state = state.get(vi_name, {})
                     if vi_state.get("_stale"):
-                        self._fail_to_error(
-                            f"Active VI '{vi_name}' became stale during procedure."
-                        )
-                        break
+                        self._fail_run_for_fault(vi_name)
+                        return
 
         # 3. GUI Actions — each queued action gets the SAME verdict
         # submit_vi_action() would give it right now, via the shared
@@ -1689,7 +1825,15 @@ class Orchestrator(QObject):
             self.run_queue()
 
     def _fail_to_error(self, message: str) -> None:
-        """Contain a failure: clean up the run and degrade to ERROR."""
+        """Contain a failure: clean up the run and degrade to ERROR.
+
+        Reserved for unknown-blast-radius failures (plan §3): an unhandled
+        exception at the tick boundary, or a run whose ``initiate()``/setup
+        itself raised (the run never got far enough to know which VI, if
+        any, is to blame). A stale CLAIMED VI mid-run has a KNOWN, narrow
+        blast radius and uses ``_fail_run_for_fault()`` instead — it does
+        not degrade to global ERROR.
+        """
         self._error(message)
         try:
             self._abort_active_procedure()
@@ -1698,14 +1842,59 @@ class Orchestrator(QObject):
         self._emit_run_finished("failed", reason=message)
         self._change_state(OrchestratorState.ERROR)
 
-    def _enter_emergency(self, reason: str) -> None:
+    def _fail_run_for_fault(self, vi_name: str) -> None:
+        """Fail the active run because its claimed VI faulted (plan §3).
+
+        Unlike ``_fail_to_error()``, this does NOT degrade to global ERROR:
+        the blast radius is known (one VI, already recorded in the Station's
+        fault registry by ``get_state()``), so only the run ends — every
+        other instrument, including this one once it recovers or is
+        retried, stays usable. Deliberately does NOT call ``run_queue()``
+        afterward: a run failing for an instrument fault must not silently
+        auto-continue to the next queued run, the same conservative
+        behavior the old global-ERROR path had.
+
+        Args:
+            vi_name: The claimed VI that went stale during the run.
+        """
+        message = (
+            f"Run failed: active VI '{vi_name}' became stale. The instrument "
+            "is quarantined; every other instrument stays usable."
+        )
+        self._error(message, vi_name=vi_name, kind="run_failure", severity="error")
+        try:
+            self._abort_active_procedure()
+        except Exception:
+            logger.exception("Cleanup while failing run for VI fault also failed")
+        self._emit_run_finished("failed", reason=message)
+        self._change_state(OrchestratorState.IDLE)
+
+    def _enter_emergency(self, reason: str, vi_names: tuple[str, ...] = ()) -> None:
         """One-shot emergency entry: clean up the run, then safe shutdown.
 
         The shutdown runs exactly once here (not every tick): repeating
         standby_all() each tick would, for a persistent magnet, restart the
         full switch-heater warmup/cooldown cycle every few seconds.
+
+        Args:
+            reason: Human-readable description of the tripped condition(s)
+                (e.g. flag names or an envelope-violation message).
+            vi_names: The VI(s) that originated the condition (plan §3,
+                from ``Station.safety_flag_sources()``), so the reason and
+                its ``ErrorEvent`` name the instrument. Empty when no
+                per-VI attribution is available (e.g. a session-envelope
+                violation, which is checked against a live reading rather
+                than a VI-tagged safety flag).
         """
-        self._error(f"EMERGENCY: safety condition triggered ({reason})")
+        message = f"EMERGENCY: safety condition triggered ({reason})"
+        if vi_names:
+            message += f" — instrument(s): {', '.join(vi_names)}"
+        self._error(
+            message,
+            vi_name=", ".join(vi_names) if vi_names else None,
+            kind="safety",
+            severity="emergency",
+        )
         self._emergency_manual_override = False
         try:
             self._abort_active_procedure()
@@ -1720,13 +1909,86 @@ class Orchestrator(QObject):
             logger.exception("standby_all during emergency entry failed")
             self._error("Emergency shutdown could not complete — check instruments.")
 
-    def _error(self, message: str) -> None:
+    def _error(
+        self,
+        message: str,
+        *,
+        vi_name: str | None = None,
+        kind: str = "internal",
+        severity: str = "error",
+    ) -> None:
+        """Report an error: log it, emit the compat + structured signals.
+
+        Every call here emits BOTH ``error_occurred`` (compat, unchanged
+        shape) and the richer ``error_event`` (plan §3) — see the class
+        docstring's ``error_event`` entry for why a plain per-VI fault
+        (``kind="fault"``, severity ``"warning"``) does NOT go through this
+        method (see ``_emit_fault_event()`` instead).
+
+        Args:
+            message: Human-readable description.
+            vi_name: The originating VI, if any (``None`` for a machine-wide
+                event, or a comma-joined list for more than one VI).
+            kind: ``"internal"`` (default, unhandled tick-boundary
+                exception), ``"run_failure"``, or ``"safety"``.
+            severity: ``"error"`` (default) or ``"emergency"``.
+        """
         logger.error(message)
         self.error_occurred.emit(message)
+        try:
+            self.error_event.emit(
+                ErrorEvent(
+                    vi_name=vi_name,
+                    kind=kind,
+                    severity=severity,
+                    message=message,
+                    timestamp=time.time(),
+                )
+            )
+        except Exception:  # noqa: BLE001 — a signal-emit failure must never disrupt the run
+            logger.exception("error_event emit failed in _error")
         # Also surface in the concise status log as a persistent history line.
         # logger.error above already wrote it to file, so emit the signal
-        # directly (bypassing _emit_status) to avoid double file logging.
+        # directly (bypassing _emit_status's logger) to avoid double file
+        # logging — but keep _emit_status's run-kind ROUTING (plan §2's hard
+        # status separation): an operation's failure line belongs on its
+        # card, never in the Procedure window's status log.
         try:
-            self.status_message.emit(message)
+            if self._is_operation_active():
+                self.operation_status.emit(message)
+            else:
+                self.status_message.emit(message)
         except Exception:  # noqa: BLE001 — status must never disrupt the run
-            logger.exception("status_message emit failed in _error")
+            logger.exception("status emit failed in _error")
+
+    def _emit_fault_event(self, vi_name: str, kind: str, message: str) -> None:
+        """Emit a warning-severity ``ErrorEvent`` for an unclaimed VI's runtime fault.
+
+        Deliberately does NOT call ``_error()`` — a stale/disconnected VI
+        outside the active run's claim (or with no run active at all) is a
+        per-instrument warning, not a run- or machine-wide error, and mere
+        staleness never fired ``error_occurred`` before this plan. Keeping
+        this a separate, quieter path preserves that for any window still
+        only listening to the compat signal (ProcedureWindow) while giving
+        fault-aware Monitor UI (instrument panels, banner) the structured
+        event.
+
+        Args:
+            vi_name: The faulted VI.
+            kind: ``"stale"`` or ``"disconnected"`` (the Station
+                ``FaultRecord.kind``).
+            message: Human-readable description of the fault.
+        """
+        logger.warning("VI fault: %s (%s) — %s", vi_name, kind, message)
+        try:
+            self.error_event.emit(
+                ErrorEvent(
+                    vi_name=vi_name,
+                    kind="fault",
+                    severity="warning",
+                    message=message,
+                    timestamp=time.time(),
+                )
+            )
+        except Exception:  # noqa: BLE001 — a signal-emit failure must never disrupt the run
+            logger.exception("error_event emit failed in _emit_fault_event")

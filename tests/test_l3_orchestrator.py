@@ -412,22 +412,111 @@ def test_action_failed_emitted_with_reason(orchestrator, qtbot):
     assert orchestrator._state == OrchestratorState.IDLE
 
 
-def test_stale_vi_during_procedure(orchestrator, station, qtbot):
-    """Patched driver fails -> ERROR state."""
+def test_stale_claimed_vi_during_procedure_fails_run_to_idle(orchestrator, station, qtbot):
+    """A stale ACTIVE (claimed) VI fails the run, but returns to IDLE, not ERROR.
+
+    Rev. per docs/plans/operation-concurrency-and-error-scoping.md §3: a
+    claimed VI's fault has a KNOWN, narrow blast radius (that one
+    instrument), so it must not park the whole machine in global ERROR —
+    only the run fails, and every other instrument (and this one, once it
+    recovers or is retried) stays usable. This replaces the old
+    test_stale_vi_during_procedure, which asserted the pre-plan global-ERROR
+    behavior; that behavior is now reserved for unknown-blast-radius
+    failures (unhandled tick-boundary exceptions), verified separately by
+    test_unhandled_tick_exception_still_enters_error.
+    """
     procedure = MockProcedure(station)
+    finished: list[dict] = []
+    events: list = []
+    orchestrator.run_finished.connect(lambda manifest: finished.append(manifest))
+    orchestrator.error_event.connect(lambda ev: events.append(ev))
     orchestrator.run_procedure(procedure)
-    
-    # Patch to simulate error
+
+    # Patch to simulate error on the VI the run is actively driving.
     station.magnet_z._driver._simulate_error = True
-    
-    # Because it is active, when get_state becomes stale it should go to ERROR
-    # wait for ERROR state
-    def check_state():
-        return orchestrator._state == OrchestratorState.ERROR
-        
-    qtbot.waitUntil(check_state, timeout=1000)
+
+    def check_idle_again():
+        return orchestrator._state == OrchestratorState.IDLE and bool(finished)
+
+    qtbot.waitUntil(check_idle_again, timeout=1000)
+
+    assert orchestrator._state == OrchestratorState.IDLE
+    manifest = finished[-1]
+    assert manifest["status"] == "failed"
+    assert "magnet_z" in manifest["reason"]
+
+    # The VI's fault stands in the Station registry — quarantined, not the
+    # whole machine.
+    faults = station.vi_faults()
+    assert "magnet_z" in faults
+    assert faults["magnet_z"].kind in ("stale", "disconnected")
+
+    # A matching structured run_failure event named the instrument.
+    run_failure_events = [e for e in events if e.kind == "run_failure"]
+    assert run_failure_events
+    assert run_failure_events[-1].vi_name == "magnet_z"
+    assert run_failure_events[-1].severity == "error"
+
+    # Every OTHER instrument stays usable: a manual action on an unfaulted
+    # VI is admitted immediately (no run is active any more).
+    admitted, _ = orchestrator._manual_action_admissible("temperature_vti")
+    assert admitted is True
+
+    # The faulted VI itself is refused until it recovers or is retried.
+    admitted, reason = orchestrator._manual_action_admissible("magnet_z")
+    assert admitted is False
+    assert "fault" in reason.lower()
+
+    # The queue must NOT auto-continue after a run failure (conservative,
+    # same as the old ERROR behavior).
+    orchestrator.queue_procedure(MockProcedure(station))
+    assert orchestrator._procedure_queue  # still queued, not auto-started
+    assert orchestrator._state == OrchestratorState.IDLE
+
+    # Clear the fault so nothing leaks into other tests.
+    station.magnet_z._driver._simulate_error = False
+
+
+def test_stale_unclaimed_vi_while_monitoring_is_warning_only(orchestrator, station, qtbot):
+    """A stale UNCLAIMED VI (no run using it) never changes state — just a fault + warning."""
+    events: list = []
+    orchestrator.error_event.connect(lambda ev: events.append(ev))
+
+    assert orchestrator._state == OrchestratorState.IDLE
+    station.temperature_sample._driver._simulate_error = True
+
+    def has_fault():
+        return "temperature_sample" in station.vi_faults()
+
+    qtbot.waitUntil(has_fault, timeout=1000)
+
+    # No state change at all.
+    assert orchestrator._state == OrchestratorState.IDLE
+
+    fault_events = [e for e in events if e.kind == "fault" and e.vi_name == "temperature_sample"]
+    assert fault_events
+    assert fault_events[-1].severity == "warning"
+
+    station.temperature_sample._driver._simulate_error = False
+
+
+def test_unhandled_tick_exception_still_enters_error(orchestrator, qtbot, monkeypatch):
+    """An unhandled tick-boundary exception (unknown blast radius) still -> ERROR.
+
+    The one case global ERROR survives (plan §3): recover_from_error() is
+    unchanged.
+    """
+    def boom():
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(orchestrator, "_tick_body", boom)
+
+    with qtbot.waitSignal(orchestrator.error_occurred, timeout=1000):
+        orchestrator._tick()
+
     assert orchestrator._state == OrchestratorState.ERROR
-    orchestrator.abort_procedure()
+    orchestrator.recover_from_error()
+    assert orchestrator._state == OrchestratorState.IDLE
 
 
 def test_emergency_on_helium_low(orchestrator, station, qtbot):

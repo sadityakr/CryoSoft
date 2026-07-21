@@ -372,6 +372,99 @@ def test_check_safety_flags_magnet_quench(sim_station: Station):
     assert safety["quench"] is True
 
 
+# ---------------------------------------------------------------------------
+# Runtime fault registry (docs/plans/operation-concurrency-and-error-scoping.md §3)
+# ---------------------------------------------------------------------------
+
+def test_fault_recorded_on_stale_then_disconnected(sim_station: Station):
+    """A comm-error streak records a FaultRecord: 'stale' then 'disconnected'."""
+    sim_station.get_state()
+    assert sim_station.vi_faults() == {}
+
+    sim_station.magnet_z._driver._simulate_error = True
+    sim_station.get_state()
+    faults = sim_station.vi_faults()
+    assert faults["magnet_z"].kind == "stale"
+    assert faults["magnet_z"].acknowledged is False
+    since_first = faults["magnet_z"].since
+
+    sim_station.get_state()
+    sim_station.get_state()  # 3rd consecutive error -> disconnected
+    faults = sim_station.vi_faults()
+    assert faults["magnet_z"].kind == "disconnected"
+    # Escalating the SAME incident preserves 'since'.
+    assert faults["magnet_z"].since == since_first
+
+
+def test_fault_auto_clears_on_successful_poll(sim_station: Station):
+    """A successful poll removes the fault record entirely — ack or not."""
+    sim_station.magnet_z._driver._simulate_error = True
+    sim_station.get_state()
+    assert "magnet_z" in sim_station.vi_faults()
+    sim_station.acknowledge_fault("magnet_z")
+    assert sim_station.vi_faults()["magnet_z"].acknowledged is True
+
+    sim_station.magnet_z._driver._simulate_error = False
+    sim_station.get_state()
+    assert "magnet_z" not in sim_station.vi_faults()
+
+
+def test_acknowledge_fault(sim_station: Station):
+    """acknowledge_fault() flags an existing record; no-ops on a healthy VI."""
+    assert sim_station.acknowledge_fault("magnet_z") is False
+
+    sim_station.magnet_z._driver._simulate_error = True
+    sim_station.get_state()
+    assert sim_station.acknowledge_fault("magnet_z") is True
+    assert sim_station.vi_faults()["magnet_z"].acknowledged is True
+
+
+def test_retry_fault_both_outcomes(sim_station: Station):
+    """retry_fault() resets the counter and forces one poll, verdict both ways."""
+    sim_station.magnet_z._driver._simulate_error = True
+    sim_station.get_state()
+    sim_station.get_state()
+    sim_station.get_state()
+    assert sim_station.vi_faults()["magnet_z"].kind == "disconnected"
+
+    # Still broken: retry fails, fault stands (downgraded to 'stale' — the
+    # counter was reset and only failed once).
+    ok, message = sim_station.retry_fault("magnet_z")
+    assert ok is False
+    assert "magnet_z" in message
+    assert sim_station.vi_faults()["magnet_z"].kind == "stale"
+
+    # Recovers: retry succeeds and clears the fault.
+    sim_station.magnet_z._driver._simulate_error = False
+    ok, message = sim_station.retry_fault("magnet_z")
+    assert ok is True
+    assert "magnet_z" not in sim_station.vi_faults()
+
+    # Unknown VI: explicit refusal, not a KeyError.
+    ok, message = sim_station.retry_fault("no_such_vi")
+    assert ok is False
+
+
+def test_level_meter_disconnect_still_force_trips_helium_low_with_fault(sim_station: Station):
+    """A disconnected level meter still force-trips helium_low AND records a fault.
+
+    Guards the interplay called out in plan §3: the runtime fault registry
+    must not have displaced check_safety()'s existing disconnected-level-
+    meter safety guard.
+    """
+    level_driver = sim_station.level_meter._driver
+    level_driver._simulate_error = True
+    state = sim_station.get_state()
+    state = sim_station.get_state()
+    state = sim_station.get_state()
+
+    assert sim_station.vi_faults()["level_meter"].kind == "disconnected"
+    safety = sim_station.check_safety(state)
+    assert safety["helium_low"] is True
+    sources = sim_station.safety_flag_sources(state)
+    assert "level_meter" in sources.get("helium_low", [])
+
+
 
 def test_scanner_enabled_defaults_false(sim_station: Station):
     """A freshly built Station has the scanner disabled by default."""

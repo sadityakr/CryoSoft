@@ -44,6 +44,7 @@ from PyQt6.QtWidgets import (
 
 from cryosoft.core.config_catalog import ConfigCatalog
 from cryosoft.core.decorators import control
+from cryosoft.core.events import ErrorEvent
 from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 from cryosoft.core.plan import ParamSpec
 from cryosoft.core.station import build_station
@@ -279,6 +280,88 @@ def test_instrument_panel_status_resets_to_ok(station, orchestrator, qtbot):
     orchestrator.states_updated.emit({vi_name: {}})
     assert panel.property("status") == "ok"
     assert panel._name_label.text() == f"<b>{vi_name}</b>"
+
+
+def test_instrument_panel_fault_row_disables_controls_and_wires_ack_retry(
+    station, orchestrator, qtbot
+):
+    """A real runtime fault shows the fault row, disables controls, and wires
+    Acknowledge/Retry through Orchestrator (docs/plans/operation-concurrency-
+    and-error-scoping.md §3) — the RUNTIME sibling of the offline fault card.
+    """
+    vi_name = "magnet_z"
+    vi = station._virtual_instruments[vi_name]
+    panel = InstrumentPanel(vi_name, vi, orchestrator)
+    qtbot.addWidget(panel)
+    panel.show()
+    assert not panel._fault_row.isVisible()
+    assert panel._control_buttons  # sanity: at least one @control button exists
+    for btn in panel._control_buttons.values():
+        assert btn.isEnabled()
+
+    # Force a real fault via the Station's fault registry (not a synthetic
+    # states_updated payload) so Orchestrator.vi_faults() actually reports it.
+    vi._driver._simulate_error = True
+    state = station.get_state()
+    orchestrator.states_updated.emit(state)
+
+    assert panel._fault_row.isVisible()
+    for btn in panel._control_buttons.values():
+        assert not btn.isEnabled()
+    ack_btn = panel.findChild(QPushButton, f"{vi_name}_ack_fault_btn")
+    retry_btn = panel.findChild(QPushButton, f"{vi_name}_retry_fault_btn")
+    assert ack_btn is not None and ack_btn.isEnabled()
+    assert retry_btn is not None
+
+    ack_btn.click()
+    assert station.vi_faults()[vi_name].acknowledged is True
+    # Re-emit the same tick's snapshot: the Acknowledge button reflects the
+    # now-acknowledged fault (disabled — nothing left to acknowledge).
+    orchestrator.states_updated.emit(state)
+    assert not ack_btn.isEnabled()
+
+    # Retry while still broken: action_failed, fault stands (still faulted).
+    with qtbot.waitSignal(orchestrator.action_failed, timeout=500):
+        retry_btn.click()
+    assert vi_name in station.vi_faults()
+
+    # Instrument recovers; retry now succeeds and the fault clears — the
+    # panel reflects that on the next states_updated (a real poll here).
+    vi._driver._simulate_error = False
+    with qtbot.waitSignal(orchestrator.action_succeeded, timeout=500):
+        retry_btn.click()
+    assert vi_name not in station.vi_faults()
+    state = station.get_state()
+    orchestrator.states_updated.emit(state)
+    assert not panel._fault_row.isVisible()
+    for btn in panel._control_buttons.values():
+        assert btn.isEnabled()
+
+
+def test_monitor_window_banner_shows_and_clears_vi_fault_warning(
+    station, orchestrator, monitor_win, qtbot
+):
+    """MonitorWindow's banner shows a per-VI fault warning (error_event) and
+    calms once every runtime fault clears (plan §3)."""
+    vi_name = "magnet_z"
+    vi = station._virtual_instruments[vi_name]
+
+    vi._driver._simulate_error = True
+    state = station.get_state()
+    fault = station.vi_faults()[vi_name]
+    event = ErrorEvent(
+        vi_name=vi_name, kind="fault", severity="warning",
+        message=fault.message, timestamp=fault.since,
+    )
+    with qtbot.waitSignal(orchestrator.error_event, timeout=500):
+        orchestrator.error_event.emit(event)
+    assert monitor_win._banner.isVisible()
+    assert vi_name in monitor_win._banner._label.text()
+
+    vi._driver._simulate_error = False
+    station.get_state()  # clears the Station-side fault record
+    orchestrator.states_updated.emit(state)  # MonitorWindow polls vi_faults() here
+    assert not monitor_win._banner.isVisible()
 
 
 class _SpecControlVI(BaseVirtualInstrument):
@@ -1634,38 +1717,48 @@ def test_procedure_control_buttons_exist(procedure_win, qtbot):
     assert procedure_win.findChild(QPushButton, "abort_btn") is not None
 
 
-def test_ack_button_visible_in_emergency(procedure_win, orchestrator):
-    """Emergency acknowledge button appears when EMERGENCY state is emitted."""
+def test_ack_button_visible_in_emergency(monitor_win, orchestrator):
+    """Emergency acknowledge button appears when EMERGENCY state is emitted.
+
+    Single home is the Monitor window (docs/plans/operation-concurrency-
+    and-error-scoping.md §3) — see
+    test_ack_button_absent_from_procedure_window for the ProcedureWindow side.
+    """
     orchestrator.state_changed.emit(OrchestratorState.EMERGENCY.value)
-    assert procedure_win._ack_btn.isVisible()
+    assert monitor_win._ack_btn.isVisible()
 
     # Disappears on acknowledge
     orchestrator.state_changed.emit(OrchestratorState.IDLE.value)
-    assert not procedure_win._ack_btn.isVisible()
+    assert not monitor_win._ack_btn.isVisible()
 
 
 def test_ack_button_visible_when_window_opened_after_emergency_already_active(
     station, orchestrator, qtbot
 ):
-    """Opening ProcedureWindow *after* EMERGENCY already fired must still show ACK.
+    """Opening MonitorWindow *after* EMERGENCY already fired must still show ACK.
 
-    Regression test: the window is created lazily (Procedures menu), often
-    well after an emergency has already put the Orchestrator into EMERGENCY.
-    state_changed only reports future transitions, so without an explicit
-    sync at construction time the button stayed hidden — the operator had no
-    way to acknowledge from a freshly opened window.
+    Regression test (moved from ProcedureWindow, plan §3): a window can be
+    (re)created well after an emergency has already put the Orchestrator
+    into EMERGENCY. state_changed only reports future transitions, so
+    without an explicit sync at construction time the button stayed hidden
+    — the operator had no way to acknowledge from a freshly opened window.
     """
     orchestrator._state = OrchestratorState.EMERGENCY  # simulate a pre-existing emergency
 
-    win = ProcedureWindow(
-        station, orchestrator,
-        get_sample_info=lambda: {"sample_name": "t", "sample_id": "T001", "comments": ""},
-        get_data_dir=lambda: "C:/CryoData",
-    )
+    win = MonitorWindow(station, orchestrator)
     qtbot.addWidget(win)
     win.show()
 
     assert win._ack_btn.isVisible()
+
+
+def test_ack_button_absent_from_procedure_window(procedure_win):
+    """ProcedureWindow no longer carries the Emergency-Acknowledge button.
+
+    Single home is the Monitor window now (plan §3).
+    """
+    from PyQt6.QtWidgets import QPushButton
+    assert procedure_win.findChild(QPushButton, "ack_emergency_btn") is None
 
 
 def test_progress_bar_updates(procedure_win, orchestrator):

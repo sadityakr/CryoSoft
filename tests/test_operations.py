@@ -643,6 +643,41 @@ def test_claims_cleared_after_abort(orchestrator, station, tmp_path, qtbot):
     assert succeeded == [("level_meter", "set_refresh_rate")]
 
 
+def test_stale_claimed_nonsystem_vi_fails_operation_run(
+    orchestrator, station, tmp_path, qtbot
+):
+    """A claimed NON-system VI (the fill's level meter) going stale fails the run.
+
+    Regression for the plan-§3 review fix: the run-failure stale check covers
+    the run's system VIs PLUS its explicit claims — the level meter receives
+    no system targets, but a fill must not keep "monitoring" a dead level
+    meter as a mere warning (its helium_low force-trip is tolerated by the
+    fill, so the safety path would not stop it either).
+    """
+    _fast_magnets(station)
+    op = _make_fill(station, tmp_path, max_fill_duration_s=3600.0)
+    finished: list[dict] = []
+    orchestrator.run_finished.connect(lambda manifest: finished.append(manifest))
+    orchestrator.run_operation(op)
+    assert orchestrator._procedure is op
+
+    station.level_meter._driver._simulate_error = True
+
+    qtbot.waitUntil(lambda: bool(finished), timeout=2000)
+    assert finished[-1]["status"] == "failed"
+    assert "level_meter" in finished[-1]["reason"]
+
+    # With the fill gone, its helium_low toleration is gone too — the still-
+    # disconnected level meter force-trips helium_low ("can't monitor it,
+    # assume unsafe"), so the machine correctly proceeds to EMERGENCY on a
+    # following tick rather than resting in IDLE.
+    qtbot.waitUntil(
+        lambda: orchestrator._state == OrchestratorState.EMERGENCY, timeout=2000
+    )
+
+    station.level_meter._driver._simulate_error = False
+
+
 def test_queued_action_drained_during_operation_gets_verdict(
     orchestrator, station, tmp_path, qtbot
 ):

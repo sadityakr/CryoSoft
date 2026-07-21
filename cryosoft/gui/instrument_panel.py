@@ -7,6 +7,13 @@
 #   gui/param_form (combo for choices, checkbox for bool, tooltipped and
 #   unit-labelled fields); bare @control methods keep plain QLineEdits.
 #   Connects to Orchestrator.states_updated for live updates each monitor tick.
+#   A runtime fault (stale/disconnected — the SAME status the QSS border
+#   already reflects) additionally shows a fault row (message + Acknowledge +
+#   Retry) and disables the @control rows — the RUNTIME sibling of
+#   OfflineInstrumentPanel's build-time fault card (docs/plans/operation-
+#   concurrency-and-error-scoping.md §3): reuses its "controls disabled,
+#   state the fault, offer one recovery action" idiom rather than
+#   duplicating it.
 # entry_point: Not run directly. Instantiated by MonitorWindow.
 # dependencies:
 #   - PyQt6 >= 6.5
@@ -18,8 +25,12 @@
 # process: |
 #   __init__ introspects the VI for @monitored and @control methods and builds
 #   the layout. _on_states_updated() updates values each tick and, only when the
-#   connection status changes, flips the QSS `status` property (ok/stale/disconnected).
-#   The panel uses no native QGroupBox title — QGroupBox can't embed a widget
+#   connection status changes, flips the QSS `status` property (ok/stale/disconnected)
+#   and shows/hides the fault row (Orchestrator.vi_faults()), disabling every
+#   @control button/input while a fault is active — Acknowledge calls
+#   Orchestrator.acknowledge_fault(), Retry calls Orchestrator.retry_fault(),
+#   both reporting through the existing action_succeeded/action_failed verdict
+#   signals. The panel uses no native QGroupBox title — QGroupBox can't embed a widget
 #   next to its title text, so the name + status suffix live in a QLabel in a
 #   custom header row alongside the LifecycleToggleButton, keeping the toggle
 #   compact instead of its own full-width row. The toggle's state only
@@ -61,7 +72,7 @@ from cryosoft.gui.param_form import (
     build_param_widget,
     collect_value,
 )
-from cryosoft.gui.theme import TEXT_PRIMARY
+from cryosoft.gui.theme import BTN_CLASS_DANGER, BTN_CLASS_SECONDARY, TEXT_PRIMARY
 from cryosoft.virtual_instruments.base import BaseVirtualInstrument
 
 logger = logging.getLogger(__name__)
@@ -123,9 +134,18 @@ class InstrumentPanel(QGroupBox):
         # param_form when the control declares ParamSpecs (combo/checkbox/
         # line-edit), plain QLineEdits otherwise.
         self._control_inputs: dict[str, dict[str, QWidget]] = {}
+        # Maps method_name → the control's QPushButton, so a runtime fault
+        # can disable every @control row (inputs above, buttons here) in
+        # one pass — mirroring OfflineInstrumentPanel's "deliberately
+        # control-free" idiom for a VI that DID connect but has since faulted.
+        self._control_buttons: dict[str, QPushButton] = {}
         # Current status ("ok"/"stale"/"disconnected"). Drives the QSS
         # `status` property; tracked so styling is only re-applied on change.
         self._status = "ok"
+        # Whether the fault row is currently shown — tracked so it is only
+        # toggled (and controls only enabled/disabled) on an actual
+        # fault/recovery transition, not every tick.
+        self._faulted = False
 
         self._build_layout()
 
@@ -172,6 +192,35 @@ class InstrumentPanel(QGroupBox):
         self._lifecycle = LifecycleToggleButton(self._vi_name, self._submit_lifecycle, parent=self)
         header_row.addWidget(self._lifecycle)
         outer.addLayout(header_row)
+
+        # ── Fault row (runtime fault registry, plan §3) ────────────────
+        # Hidden until _on_states_updated() detects an active fault via
+        # Orchestrator.vi_faults() — the RUNTIME sibling of
+        # OfflineInstrumentPanel's build-time fault card.
+        self._fault_row = QWidget()
+        fault_layout = QHBoxLayout(self._fault_row)
+        fault_layout.setContentsMargins(0, 2, 0, 2)
+        self._fault_label = QLabel("")
+        self._fault_label.setObjectName(f"{self._vi_name}_fault_badge")
+        self._fault_label.setProperty("class", "secondary_label")
+        self._fault_label.setWordWrap(True)
+        fault_layout.addWidget(self._fault_label, stretch=1)
+        self._ack_fault_btn = QPushButton("Acknowledge")
+        self._ack_fault_btn.setObjectName(f"{self._vi_name}_ack_fault_btn")
+        self._ack_fault_btn.setProperty("class", BTN_CLASS_SECONDARY)
+        self._ack_fault_btn.setToolTip("Acknowledge this fault (calms the banner)")
+        self._ack_fault_btn.clicked.connect(self._on_acknowledge_fault_clicked)
+        fault_layout.addWidget(self._ack_fault_btn)
+        self._retry_fault_btn = QPushButton("Retry")
+        self._retry_fault_btn.setObjectName(f"{self._vi_name}_retry_fault_btn")
+        self._retry_fault_btn.setProperty("class", BTN_CLASS_DANGER)
+        self._retry_fault_btn.setToolTip(
+            "Reset the error counter and poll this instrument once more"
+        )
+        self._retry_fault_btn.clicked.connect(self._on_retry_fault_clicked)
+        fault_layout.addWidget(self._retry_fault_btn)
+        self._fault_row.setVisible(False)
+        outer.addWidget(self._fault_row)
 
         # ── Monitored fields ──────────────────────────────────────────
         for method_name in get_monitored_methods(self._vi):
@@ -340,6 +389,7 @@ class InstrumentPanel(QGroupBox):
             outer.addLayout(grid)
 
         self._control_inputs[method_name] = inputs
+        self._control_buttons[method_name] = btn
 
         btn.clicked.connect(
             lambda checked=False, mn=method_name: self._submit_control(mn)
@@ -395,6 +445,43 @@ class InstrumentPanel(QGroupBox):
                 self._name_label.setText(f"<b>{self._vi_name}</b>  [stale]")
             else:
                 self._name_label.setText(f"<b>{self._vi_name}</b>")
+
+        self._sync_fault_row()
+
+    def _sync_fault_row(self) -> None:
+        """Show/hide the fault row and enable/disable controls from the fault registry.
+
+        Reads ``Orchestrator.vi_faults()`` (backed by the Station's runtime
+        fault registry, plan §3) every tick, but only actually toggles
+        widget state on a fault/recovery TRANSITION — matching the existing
+        status-border repolish discipline (never restyle unless something
+        changed).
+        """
+        fault = self._orchestrator.vi_faults().get(self._vi_name)
+        is_faulted = fault is not None
+        if is_faulted != self._faulted:
+            self._faulted = is_faulted
+            self._fault_row.setVisible(is_faulted)
+            for btn in self._control_buttons.values():
+                btn.setEnabled(not is_faulted)
+            for inputs in self._control_inputs.values():
+                for widget in inputs.values():
+                    widget.setEnabled(not is_faulted)
+        if fault is not None:
+            self._fault_label.setText(f"Fault ({fault.kind}): {fault.message}")
+            self._ack_fault_btn.setEnabled(not fault.acknowledged)
+
+    # ------------------------------------------------------------------
+    # Fault row actions (runtime fault registry, plan §3)
+    # ------------------------------------------------------------------
+
+    def _on_acknowledge_fault_clicked(self) -> None:
+        """Acknowledge this VI's active fault — calms the Monitor banner."""
+        self._orchestrator.acknowledge_fault(self._vi_name)
+
+    def _on_retry_fault_clicked(self) -> None:
+        """Retry this VI's active fault: reset the error counter, poll once."""
+        self._orchestrator.retry_fault(self._vi_name)
 
     # ------------------------------------------------------------------
     # Action dispatch
