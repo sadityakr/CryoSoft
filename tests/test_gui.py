@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QFileDialog,
     QFormLayout,
     QGridLayout,
     QLabel,
@@ -1331,6 +1332,221 @@ def test_switch_user_saves_outgoing_and_loads_incoming_session(
     assert win._session_info._sample_name_input.text() == "SampleB"
 
 
+# ── L6 session switching (Load Session…, Sessions Folder…) ────────────────────
+
+def test_load_session_dialog_lists_open_and_closed(station, orchestrator, qtbot, tmp_path):
+    """Open experiments are selectable; closed ones are grayed out and disabled."""
+    from cryosoft.gui.session_dialogs import LoadSessionDialog
+    from cryosoft.session.manager import SessionManager
+    from cryosoft.session.models import User
+    from cryosoft.session.store import ExperimentStore, UserRoster
+
+    roster = UserRoster(tmp_path / "users.json")
+    roster.add(User(user_id="jdoe", name="J. Doe"))
+    manager = SessionManager(
+        store=ExperimentStore(tmp_path / "experiments"),
+        roster=roster,
+        orchestrator=orchestrator,
+        station=station,
+        config_name="sim_cryostat",
+    )
+    manager.start_experiment(title="Closed One", user_id="jdoe", sample_info={})
+    manager.close_experiment()
+    manager.start_experiment(title="Open One", user_id="jdoe", sample_info={})
+
+    dialog = LoadSessionDialog(manager)
+    qtbot.addWidget(dialog)
+
+    assert dialog._list.count() == 2
+    items = [dialog._list.item(i) for i in range(dialog._list.count())]
+    closed_item = next(i for i in items if "(closed)" in i.text())
+    open_item = next(i for i in items if "(closed)" not in i.text())
+
+    assert not (closed_item.flags() & Qt.ItemFlag.ItemIsEnabled)
+    assert bool(open_item.flags() & Qt.ItemFlag.ItemIsEnabled)
+
+    dialog._list.setCurrentItem(open_item)
+    dialog.accept()
+    assert dialog.selected_experiment_id() == open_item.data(Qt.ItemDataRole.UserRole)
+
+
+def test_switch_session_saves_outgoing_and_loads_incoming(
+    station, orchestrator, qtbot, tmp_path
+):
+    """_switch_session() persists the outgoing session's fields, loads the incoming
+    session's own, and round-trips the queue through set_queue()."""
+    from cryosoft.gui.form_autosave import QueueItemState, STATUS_PENDING
+    from cryosoft.session.manager import SessionManager
+    from cryosoft.session.models import EXPERIMENT_STATUS_OPEN, ExperimentRecord, User
+    from cryosoft.session.store import ExperimentStore, UserRoster
+
+    roster = UserRoster(tmp_path / "users.json")
+    roster.add(User(user_id="jdoe", name="J. Doe"))
+    store = ExperimentStore(tmp_path / "experiments")
+    manager = SessionManager(
+        store=store,
+        roster=roster,
+        orchestrator=orchestrator,
+        station=station,
+        config_name="sim_cryostat",
+    )
+    win = MonitorWindow(station, orchestrator, session_manager=manager)
+    qtbot.addWidget(win)
+    win.show()
+
+    first = manager.start_experiment(title="Session A", user_id="jdoe", sample_info={})
+    # A second, independently-open experiment (as if created earlier) —
+    # written directly since start_experiment refuses a second concurrent one.
+    second = ExperimentRecord(
+        experiment_id="session_b", title="Session B", user_id="jdoe",
+        status=EXPERIMENT_STATUS_OPEN,
+    )
+    store.save(second)
+
+    win._session_info._sample_name_input.setText("SampleA")
+    win._session.queue = [QueueItemState(procedure="Field Sweep", status=STATUS_PENDING)]
+
+    win._switch_session(second.experiment_id)
+
+    assert manager.current_experiment().experiment_id == second.experiment_id
+    assert win._session_info._sample_name_input.text() == ""  # Session B's file is fresh
+
+    saved_a = store.load(first.experiment_id)
+    assert saved_a.queue and saved_a.queue[0]["procedure"] == "Field Sweep"
+    saved_a_gui_state = session_store.load(store.gui_state_path(first.experiment_id))
+    assert saved_a_gui_state.sample_name == "SampleA"
+
+    win._session_info._sample_name_input.setText("SampleB")
+    win._switch_session(first.experiment_id)
+
+    assert manager.current_experiment().experiment_id == first.experiment_id
+    assert win._session_info._sample_name_input.text() == "SampleA"
+
+
+def test_switch_session_rejects_unknown_id_with_warning(
+    station, orchestrator, qtbot, tmp_path, monkeypatch
+):
+    """An unknown/closed target surfaces QMessageBox.warning instead of crashing."""
+    from cryosoft.session.manager import SessionManager
+    from cryosoft.session.models import User
+    from cryosoft.session.store import ExperimentStore, UserRoster
+
+    roster = UserRoster(tmp_path / "users.json")
+    roster.add(User(user_id="jdoe", name="J. Doe"))
+    manager = SessionManager(
+        store=ExperimentStore(tmp_path / "experiments"),
+        roster=roster,
+        orchestrator=orchestrator,
+        station=station,
+        config_name="sim_cryostat",
+    )
+    win = MonitorWindow(station, orchestrator, session_manager=manager)
+    qtbot.addWidget(win)
+    win.show()
+
+    shown = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: shown.append(a))
+    win._switch_session("does_not_exist")
+    assert shown
+
+
+def test_open_load_session_dialog_without_session_manager_shows_message(monitor_win, monkeypatch):
+    """No SessionManager wired: Load Session informs rather than crashing."""
+    shown = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: shown.append(a))
+    monitor_win._open_load_session_dialog()
+    assert shown
+
+
+def test_open_sessions_folder_dialog_without_session_manager_shows_message(monitor_win, monkeypatch):
+    """No SessionManager wired: Sessions Folder informs rather than crashing."""
+    shown = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: shown.append(a))
+    monitor_win._open_sessions_folder_dialog()
+    assert shown
+
+
+def test_open_sessions_folder_dialog_sets_root_and_notes_status(
+    monitor_win_session, monkeypatch, tmp_path
+):
+    """Picking a folder persists it via set_sessions_root and notes the status bar."""
+    chosen = tmp_path / "new_sessions_root"
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *a, **k: str(chosen))
+    monitor_win_session._open_sessions_folder_dialog()
+    assert _app_settings.sessions_root() == chosen
+
+
+# ── Data Dir: derived-but-editable from the open session ───────────────────────
+
+def test_data_dir_auto_populates_on_start_and_restores_on_close(
+    monitor_win_session, session_manager, monkeypatch
+):
+    """Data Dir is forced to the session's own folder on open, restored on close."""
+    panel = monitor_win_session._session_info
+    panel._data_dir_input.setText("D:/manual_choice")
+
+    _stub_start_dialog(monkeypatch, "Hall bar A3", "jdoe")
+    panel._start_close_btn.click()
+
+    assert panel._data_dir_input.text() == str(session_manager.current_data_dir())
+
+    _stub_close_dialog(monkeypatch, "")
+    panel._start_close_btn.click()
+
+    assert panel._data_dir_input.text() == "D:/manual_choice"
+
+
+def test_data_dir_note_hidden_inside_session_visible_outside(
+    monitor_win_session, session_manager, monkeypatch, tmp_path
+):
+    """The outside-session note toggles with whether Data Dir is inside data/."""
+    _stub_start_dialog(monkeypatch, "Hall bar A3", "jdoe")
+    panel = monitor_win_session._session_info
+    panel._start_close_btn.click()
+    assert not panel._data_dir_note.isVisible()
+
+    outside_dir = tmp_path / "elsewhere"
+    panel._data_dir_input.setText(str(outside_dir))
+    assert panel._data_dir_note.isVisible()
+
+    panel._data_dir_input.setText(str(session_manager.current_data_dir()))
+    assert not panel._data_dir_note.isVisible()
+
+
+# ── store_health_changed → banner ───────────────────────────────────────────────
+
+def test_store_health_changed_shows_and_clears_banner(monitor_win_session, session_manager):
+    """A save failure shows a persistent banner error; recovery clears it."""
+    win = monitor_win_session
+    session_manager.store_health_changed.emit({"ok": False, "detail": "disk full"})
+    assert win._banner.isVisible()
+    assert "disk full" in win._banner._label.text()
+
+    session_manager.store_health_changed.emit({"ok": True, "detail": ""})
+    assert not win._banner.isVisible()
+
+
+# ── _save_session targets the correct tier ──────────────────────────────────────
+
+def test_save_session_targets_session_folder_when_open_else_per_user_file(
+    monitor_win_session, session_manager, monkeypatch
+):
+    """gui_state.json inside the session folder when open, else the AppData file."""
+    win = monitor_win_session
+    win._session_info._sample_name_input.setText("NoSessionYet")
+    win._save_session()
+    per_user_path = _app_settings.session_file_path(win._current_user_id)
+    assert session_store.load(per_user_path).sample_name == "NoSessionYet"
+
+    _stub_start_dialog(monkeypatch, "Hall bar A3", "jdoe")
+    win._session_info._start_close_btn.click()
+    win._session_info._sample_name_input.setText("WithSessionOpen")
+    win._save_session()
+
+    gui_state_path = session_manager.current_gui_state_path()
+    assert session_store.load(gui_state_path).sample_name == "WithSessionOpen"
+
+
 def test_open_login_dialog_full_flow(station, orchestrator, qtbot, tmp_path, monkeypatch):
     """Confirming LoginDialog switches the current user."""
     from cryosoft.gui import monitor_window as mw
@@ -2049,7 +2265,33 @@ def test_new_session_clears_fields(monitor_win, monkeypatch):
     )
     monitor_win._on_new_session()
     assert monitor_win._session_info._sample_name_input.text() == ""
-    assert monitor_win._session_info._data_dir_input.text() == "C:/CryoData"
+    assert monitor_win._session_info._data_dir_input.text() == str(_app_settings.sessions_root())
+
+
+# ── app_settings.sessions_root() / set_sessions_root() ─────────────────────────
+
+def test_sessions_root_defaults_to_documents_cryodata(isolated_settings):
+    """With the key unset, sessions_root() resolves <Documents>/CryoData at call time."""
+    from PyQt6.QtCore import QStandardPaths
+
+    expected_base = QStandardPaths.writableLocation(
+        QStandardPaths.StandardLocation.DocumentsLocation
+    )
+    assert _app_settings.sessions_root() == Path(expected_base) / "CryoData"
+
+
+def test_sessions_root_round_trips_with_set_sessions_root(isolated_settings, tmp_path):
+    """set_sessions_root() persists the value; sessions_root() reads it back."""
+    custom = tmp_path / "custom_sessions"
+    _app_settings.set_sessions_root(custom)
+    assert _app_settings.sessions_root() == custom
+
+
+def test_sessions_root_read_does_not_persist_the_default(isolated_settings):
+    """Merely reading the unset default must not write it into QSettings."""
+    _app_settings.sessions_root()
+    settings = QSettings(str(isolated_settings), QSettings.Format.IniFormat)
+    assert settings.value("Sessions/root") is None
 
 
 def test_procedure_window_restores_selection_and_params(station, orchestrator, qtbot):

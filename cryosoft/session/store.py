@@ -1,13 +1,19 @@
 # ---
 # description: |
 #   Persistence for the L6 Session Management layer. ExperimentStore keeps one
-#   folder per experiment under <root>/ (normally <data_dir>/experiments/) with
-#   an experiment.json, plus an active.json pointer so a restart resumes the
-#   open experiment. UserRoster keeps the setup-local users.json. Both follow
-#   the proven disk discipline of gui/form_autosave.py and the ConfigCatalog:
-#   atomic writes (.tmp + os.replace), tolerant loads (corrupt/missing files
-#   degrade instead of raising), lazy directory creation (nothing is created
-#   until something is actually saved).
+#   folder per experiment under <root>/ (normally
+#   cryosoft.gui.app_settings.sessions_root(), default <Documents>/CryoData)
+#   with
+#   an experiment.json, a gui_state.json, and a data/ folder for the run's
+#   HDF5 files (sub-folders allowed), plus an active.json pointer so a restart
+#   resumes the open experiment. relativize_data_file()/resolve_data_file()
+#   implement the bundle-relative data-path rule (see GLOSSARY.md/README.md)
+#   so a session folder copied or moved elsewhere still resolves. UserRoster
+#   keeps the setup-local users.json. Both follow the proven disk discipline of
+#   gui/form_autosave.py and the ConfigCatalog: atomic writes (.tmp +
+#   os.replace), tolerant loads (corrupt/missing files degrade instead of
+#   raising), lazy directory creation (nothing is created until something is
+#   actually saved).
 # entry_point: Not run directly. Constructed in cryosoft.main, owned by the
 #   SessionManager.
 # dependencies: []  # stdlib + cryosoft.session.models
@@ -16,10 +22,12 @@
 #   by save()/set_active(); missing or malformed files yield None/[]/defaults.
 # process: |
 #   Records round-trip through models.to_dict()/from_dict(); every write goes
-#   to a sibling .tmp path and is os.replace()-d over the target.
+#   to a sibling .tmp path and is os.replace()-d over the target. A loaded
+#   record whose schema_version is newer than models.SCHEMA_VERSION logs a
+#   WARNING but still loads tolerantly — callers enforce read-only behavior.
 # output: |
-#   <root>/<experiment_id>/experiment.json, <root>/active.json, and the roster
-#   file passed to UserRoster.
+#   <root>/<experiment_id>/experiment.json, gui_state.json, data/,
+#   <root>/active.json, and the roster file passed to UserRoster.
 # ---
 
 """Disk persistence for experiments and the user roster (L6)."""
@@ -32,12 +40,14 @@ import os
 import re
 from pathlib import Path
 
-from cryosoft.session.models import ExperimentRecord, User
+from cryosoft.session.models import SCHEMA_VERSION, ExperimentRecord, User
 
 logger = logging.getLogger(__name__)
 
 _EXPERIMENT_FILENAME = "experiment.json"
 _ACTIVE_FILENAME = "active.json"
+_GUI_STATE_FILENAME = "gui_state.json"
+_DATA_DIRNAME = "data"
 
 
 def _write_json_atomic(path: Path, payload: object) -> None:
@@ -77,8 +87,12 @@ class ExperimentStore:
     Layout::
 
         <root>/
-            active.json                     {"active": "<experiment_id>"}
-            <experiment_id>/experiment.json
+            active.json                     {"active": "<experiment_id>", ...}
+            <experiment_id>/
+                experiment.json
+                gui_state.json              # GUI-authored, opaque to this store
+                data/                       # HDF5 files; sub-folders allowed
+                    <sub-folders>/
 
     The store creates nothing on construction — directories appear on the
     first ``save()``, so pointing it at a data directory that does not exist
@@ -91,7 +105,7 @@ class ExperimentStore:
 
         Args:
             root: Directory holding the experiment folders (normally
-                ``<data_dir>/experiments``).
+                ``cryosoft.gui.app_settings.sessions_root()``).
         """
         self._root = Path(root)
 
@@ -141,12 +155,101 @@ class ExperimentStore:
             experiment_id: The store key.
 
         Returns:
-            The record, or ``None`` when missing/unreadable/not JSON.
+            The record, or ``None`` when missing/unreadable/not JSON. The
+            record still loads (tolerant-parse) even when its
+            ``schema_version`` is newer than this app's ``SCHEMA_VERSION``
+            (logged at WARNING) — callers that must not silently re-save a
+            future-format record check ``record.schema_version`` themselves
+            (see ``SessionManager.switch_experiment``/``_save_current``).
         """
         data = _read_json(self._root / experiment_id / _EXPERIMENT_FILENAME)
         if data is None:
             return None
-        return ExperimentRecord.from_dict(data)
+        record = ExperimentRecord.from_dict(data)
+        if record.schema_version > SCHEMA_VERSION:
+            logger.warning(
+                "Experiment %s was written by a newer app (schema_version=%d > %d); "
+                "loading read-only",
+                experiment_id,
+                record.schema_version,
+                SCHEMA_VERSION,
+            )
+        return record
+
+    def data_dir(self, experiment_id: str) -> Path:
+        """Return the experiment's data folder (``<root>/<experiment_id>/data``).
+
+        Args:
+            experiment_id: The store key.
+
+        Returns:
+            The path, which may not exist yet — nothing here creates it; the
+            data manager ``mkdir -p``s it lazily when a run actually saves.
+        """
+        return self._root / experiment_id / _DATA_DIRNAME
+
+    def gui_state_path(self, experiment_id: str) -> Path:
+        """Return the experiment's GUI-state file path.
+
+        Args:
+            experiment_id: The store key.
+
+        Returns:
+            ``<root>/<experiment_id>/gui_state.json`` (may not exist yet).
+        """
+        return self._root / experiment_id / _GUI_STATE_FILENAME
+
+    def relativize_data_file(self, experiment_id: str, path: str | Path) -> str:
+        """Return ``path`` relative to the experiment's session folder, when inside it.
+
+        The write side of the bundle-relative data-path rule: a run saved
+        anywhere under ``<root>/<experiment_id>`` (normally inside ``data/``,
+        sub-folders included) is stored relative so the whole folder can be
+        copied or moved elsewhere and still resolve. A path outside the
+        session folder (the physicist deliberately pointed Data Dir
+        elsewhere) is stored absolute, unchanged.
+
+        Args:
+            experiment_id: The store key.
+            path: The run's data file path, normally absolute.
+
+        Returns:
+            A POSIX-style bundle-relative string (e.g. ``"data/xyz.h5"`` or
+            ``"data/heating_runs/xyz.h5"``) when ``path`` is inside
+            ``<root>/<experiment_id>``, else the absolute path string
+            unchanged.
+        """
+        session_folder = (self._root / experiment_id).resolve()
+        resolved = Path(path).resolve()
+        if resolved.is_relative_to(session_folder):
+            return resolved.relative_to(session_folder).as_posix()
+        return str(resolved)
+
+    def resolve_data_file(self, experiment_id: str, stored: str) -> Path:
+        """Resolve a stored ``data_file`` string back to a real path, tolerantly.
+
+        The read side of the bundle-relative data-path rule. Resolution
+        order: a relative stored path joins the session folder; an absolute
+        path is used as-is when it still exists; a dangling absolute path
+        (an old record whose session folder was moved) falls back to a
+        recursive basename search under ``<root>/<experiment_id>/data``; if
+        nothing is found there either, the original path is returned
+        unchanged.
+
+        Args:
+            experiment_id: The store key.
+            stored: The ``RunRecord.data_file`` string as read from disk.
+
+        Returns:
+            The best-effort real path to the data file.
+        """
+        candidate = Path(stored)
+        if not candidate.is_absolute():
+            return self._root / experiment_id / candidate
+        if candidate.exists():
+            return candidate
+        match = next(self.data_dir(experiment_id).rglob(candidate.name), None)
+        return match if match is not None else candidate
 
     def save(self, record: ExperimentRecord) -> None:
         """Persist ``record`` atomically under its ``experiment_id``.
@@ -181,7 +284,8 @@ class ExperimentStore:
             OSError: If the pointer file cannot be written.
         """
         _write_json_atomic(
-            self._root / _ACTIVE_FILENAME, {"active": experiment_id or ""}
+            self._root / _ACTIVE_FILENAME,
+            {"active": experiment_id or "", "schema_version": SCHEMA_VERSION},
         )
 
 
