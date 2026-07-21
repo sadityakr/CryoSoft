@@ -70,6 +70,12 @@ axis hooks.
   selected VI's own `measurement_parameters`, and, when anything is loopable,
   the Reading loop slot group (see below).
 - SI units everywhere: tesla, kelvin, amperes, volts, seconds.
+- `claimed_vi_names() -> set[str] | None` (`BaseProcedure`, docs/plans/
+  operation-concurrency-and-error-scoping.md §1's **Claim** — see
+  GLOSSARY.md): declares which VIs a running procedure exclusively owns, so
+  the Orchestrator knows what a manual front-panel action may touch while
+  it runs. Default `None` (claim everything) — procedures stay exclusive in
+  this iteration; no shipped procedure overrides it.
 
 ### Generic sweep and the reading loop (owned by the base, no per-procedure code)
 

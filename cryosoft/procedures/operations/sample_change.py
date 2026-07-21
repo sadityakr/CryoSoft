@@ -26,32 +26,34 @@
 #   **config carrying the docs/plans/cryogenics-logbook.md §9
 #   operations.sample_change: keys (vti_vi, target_temperature_K,
 #   temperature_tolerance_K, temperature_window_s, zero_field_eps_T,
-#   zero_field_window_s, needle_valve, postcondition_timeout_s), each with a
-#   class-matching default so this constructs from a sim station alone.
-#   magnet_vi_names()/measurement_vi_names()/switch_vi_names() resolve the
-#   VI lists; vti_vi (default "temperature_vti") must be a registered VI.
+#   zero_field_window_s, needle_valve), each with a class-matching default so
+#   this constructs from a sim station alone. magnet_vi_names()/
+#   measurement_vi_names()/switch_vi_names() resolve the VI lists; vti_vi
+#   (default "temperature_vti") must be a registered VI.
 # process: |
 #   initiate() ramps every magnet to 0 T and the VTI to target_temperature_K,
 #   sends open_all to the first switch VI (if the station has one) and
 #   standby to every measurement VI. No initiation_gates() (the default empty
 #   tuple is exactly right — nothing must hold before parking begins).
 #   step() returns None immediately: the whole duration is carried by the
-#   ramps (RAMPING) and postcondition_gates() (STANDBY), not by an
-#   open-ended sampling loop. standby() is an empty PhasePlan — initiate()
-#   already parked everything. postcondition_gates() reads only cached
-#   state: zero_field (every magnet, held zero_field_window_s), heater_off
-#   (only for magnets whose cached state exposes switch_heater_state — plain
+#   ramps (RAMPING) and postcondition_gates() — evaluated once, immediately,
+#   as the run ends (docs/plans/operation-concurrency-and-error-scoping.md
+#   §2) — not by an open-ended sampling loop. standby() is an empty
+#   PhasePlan — initiate() already parked everything. postcondition_gates()
+#   reads only cached state: zero_field (every magnet), heater_off (only for
+#   magnets whose cached state exposes switch_heater_state — plain
 #   SuperconductingMagnetVI has no such field and is silently skipped; if no
-#   magnet exposes one, no such gate is added at all), vti_at_target (held
-#   temperature_window_s), and — only when needle_valve == "manual" —
-#   needle_valve_confirmed, reading the confirm()/confirmed() operator-ack
-#   flag the GUI (Phase 5) renders as a checkbox per declared
-#   operator_confirmations entry.
+#   magnet exposes one, no such gate is added at all), vti_at_target, and —
+#   only when needle_valve == "manual" — needle_valve_confirmed, reading the
+#   confirm()/confirmed() operator-ack flag the GUI (Phase 5) renders as a
+#   checkbox per declared operator_confirmations entry. An unmet gate never
+#   blocks completion; it is named in the run manifest's
+#   postconditions_unmet list.
 # output: |
 #   PhasePlan/StepPlan/Command/Gate objects consumed by the Orchestrator. No
 #   HDF5 side effect — the manifest's data_file stays empty, exactly as for
 #   any run with no DataManager.
-# last_updated: 2026-07-19
+# last_updated: 2026-07-21
 # ---
 
 """SampleChangeOperation — verify the cryostat is safe to open."""
@@ -151,9 +153,9 @@ class SampleChangeOperation(OperationBase):
                 ``vti_vi``, ``target_temperature_K``,
                 ``temperature_tolerance_K``, ``temperature_window_s``,
                 ``zero_field_eps_T``, ``zero_field_window_s``,
-                ``needle_valve``, ``postcondition_timeout_s`` — each with a
-                sane default matching §9 so this constructs from a sim
-                station alone. Unrecognised keys are silently ignored, so
+                ``needle_valve`` — each with a sane default matching §9 so
+                this constructs from a sim station alone. Unrecognised keys
+                are silently ignored, so
                 ``**read_operations_config(config_path)["sample_change"]``
                 can be passed verbatim.
 
@@ -180,12 +182,6 @@ class SampleChangeOperation(OperationBase):
             config.get("zero_field_window_s", 10.0)
         )
         self._needle_valve: str = str(config.get("needle_valve", _NEEDLE_VALVE_MANUAL))
-        # Not a §9 default of OperationBase's own (600 s) — a sample change
-        # legitimately takes a long time (a room-temperature warm-up), so
-        # the instance overrides the class attribute here.
-        self.postcondition_timeout_s: float = float(
-            config.get("postcondition_timeout_s", 7200.0)
-        )
 
         if not station.has_vi(self._vti_vi_name):
             raise CryoSoftConfigError(
@@ -250,6 +246,26 @@ class SampleChangeOperation(OperationBase):
     # ------------------------------------------------------------------
     # OperationBase lifecycle
     # ------------------------------------------------------------------
+
+    def claimed_vi_names(self) -> set[str]:
+        """Claim every VI this operation actually commands in ``initiate()``.
+
+        A sample change ramps every magnet and the VTI, opens the switch (if
+        any), and stands by every measurement VI — on a typical station that
+        is everything except the level meter, so this narrowing yields
+        little extra concurrency; it is still exact (a station with an
+        instrument this operation never touches, e.g. a rotator, stays
+        manually controllable during a sample change) and cheaper to keep
+        correct than a hand-picked subset.
+
+        Returns:
+            The magnets, the configured VTI VI, the first switch VI (if the
+            station has one), and every measurement VI.
+        """
+        claimed = set(self._magnets) | {self._vti_vi_name} | set(self._measurement_vis)
+        if self._switch_vi_name is not None:
+            claimed.add(self._switch_vi_name)
+        return claimed
 
     def get_params(self) -> dict[str, Any]:
         """Return the sample change's parameters, for the run manifest.
@@ -457,7 +473,14 @@ class SampleChangeOperation(OperationBase):
         """Verify zero field, switch heater(s) off, VTI at target, valve confirmed.
 
         All four checks read only cached state (or, for the valve, the
-        operator-confirmation flag) — no extra hardware poll.
+        operator-confirmation flag) — no extra hardware poll. The
+        Orchestrator evaluates each gate exactly once, immediately, as the
+        run ends (docs/plans/operation-concurrency-and-error-scoping.md
+        §2) — an unmet gate is recorded on the run manifest's
+        ``postconditions_unmet`` list, never held or timed out. The
+        ``window_s`` each ``Gate`` still declares below has no effect there
+        (it only matters if this method's gates are ever stepped instead —
+        they are not, by any current caller).
 
         Returns:
             ``zero_field`` (always); ``heater_off`` (only if at least one

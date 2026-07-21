@@ -16,11 +16,15 @@
 #   given, step() then polls check() each call; any False resets the
 #   stability clock. step() returns True once check() has held True
 #   continuously for window_s seconds (or immediately, if no check was
-#   given).
+#   given). check_once() is the one-shot alternative: it runs the action
+#   once (if not already run) and returns a single check() reading,
+#   ignoring window_s entirely — used by the Orchestrator's operation-finish
+#   one-shot postcondition evaluation (docs/plans/operation-concurrency-and-
+#   error-scoping.md §2), never combined with step() on the same instance.
 # output: |
 #   step() -> bool, True exactly once the gate is satisfied and forever
-#   after.
-# last_updated: 2026-07-17
+#   after. check_once() -> bool, a single point-in-time read.
+# last_updated: 2026-07-21
 # ---
 
 """Gate: the tick-driven wait primitive behind procedure initiation/reading gates."""
@@ -114,3 +118,27 @@ class Gate:
         if self._stable_since is None:
             self._stable_since = now
         return now - self._stable_since >= self._window_s
+
+    def check_once(self) -> bool:
+        """Evaluate this gate a single time, ignoring ``window_s`` entirely.
+
+        Runs ``action`` once (if not already run) exactly like ``step()``,
+        then reads ``check()`` a single time and returns it verbatim — no
+        stability window, no holding, no timeout. Used by the Orchestrator's
+        operation-finish one-shot postcondition evaluation (design doc
+        ``docs/plans/operation-concurrency-and-error-scoping.md`` §2), where
+        holding for ``window_s`` would defeat "finish is immediate". Call
+        this instead of (never together with) ``step()`` on a given ``Gate``
+        instance.
+
+        Returns:
+            ``True`` if there is no ``check`` (action-only gate), else the
+            single current ``check()`` reading.
+        """
+        if not self._action_done:
+            if self._action is not None:
+                self._action()
+            self._action_done = True
+        if self._check is None:
+            return True
+        return bool(self._check())

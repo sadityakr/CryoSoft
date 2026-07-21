@@ -3,16 +3,23 @@
 #   OperationBase: the L4 contract for multi-step cryostat-servicing actions
 #   (helium fill, sample change — see docs/plans/cryogenics-logbook.md §4).
 #   Distinct from BaseProcedure: operation-scope command access, tolerated
-#   safety flags, verified postconditions, an optional (not required) data
-#   file, and higher submission priority. Drives the same Orchestrator state
-#   machine as a procedure via a thin adapter (measure()/change_sweep_step())
-#   so the Orchestrator needs almost no branching to support both request
-#   types — it detects an operation purely by duck-typing
-#   (``command_scope == "operation"``) and never imports this module (keeps
-#   import-linter contract C5 clean). Also declares the readiness/next-due
-#   contract (plan §12) the GUI's Operations panel renders generically:
-#   ReadinessCondition/NextDue dataclasses plus the readiness_conditions()/
-#   next_due() hooks and the ready_message/config_key class attributes.
+#   safety flags, one-shot verified postconditions, an optional (not
+#   required) data file, and higher submission priority. Drives the same
+#   Orchestrator state machine as a procedure via a thin adapter
+#   (measure()/change_sweep_step()) so the Orchestrator needs almost no
+#   branching to support both request types — it detects an operation purely
+#   by duck-typing (``command_scope == "operation"``) and never imports this
+#   module (keeps import-linter contract C5 clean). Also declares the
+#   readiness/next-due contract (plan §12) the GUI's Operations panel renders
+#   generically: ReadinessCondition/NextDue dataclasses plus the
+#   readiness_conditions()/next_due() hooks and the ready_message/config_key
+#   class attributes. Finish is immediate (docs/plans/operation-concurrency-
+#   and-error-scoping.md §2): postcondition_gates() is evaluated exactly once
+#   as the run ends, never held or timed out. A duck-typed run_summary()
+#   hook (same plan, §4) lets a subclass hand a small JSON-serialisable
+#   summary (e.g. the helium fill's bounded in-memory level curve) to the
+#   session layer without an HDF5 file — the Orchestrator merges it into the
+#   run manifest's "summary" key on run_finished.
 # entry_point: Not run directly. Subclassed by concrete operations
 #   (``cryosoft.procedures.operations.*``).
 # dependencies:
@@ -21,10 +28,11 @@
 # input: |
 #   Concrete subclasses implement initiate()/step()/standby() (and optionally
 #   sample()/abort()/initiation_gates()/postcondition_gates()/
-#   readiness_conditions()/next_due()); the Orchestrator drives the lifecycle
-#   exactly like a BaseProcedure, submitted via Orchestrator.run_operation() /
-#   queue_operation(); the GUI's Operations panel drives readiness_conditions()
-#   /next_due() against per-tick state snapshots, never touching hardware.
+#   readiness_conditions()/next_due()/run_summary()); the Orchestrator drives
+#   the lifecycle exactly like a BaseProcedure, submitted via
+#   Orchestrator.run_operation() / queue_operation(); the GUI's Operations
+#   panel drives readiness_conditions()/next_due() against per-tick state
+#   snapshots, never touching hardware.
 # process: |
 #   measure() (final) forwards to sample(). change_sweep_step() (final)
 #   returns None once request_finish() has set the graceful-finish flag,
@@ -35,8 +43,10 @@
 #   PhasePlan / StepPlan / Command / Gate objects consumed by the
 #   Orchestrator, exactly like a BaseProcedure's. readiness_conditions() /
 #   next_due() output ReadinessCondition / NextDue objects consumed only by
-#   the GUI (never by the Orchestrator).
-# last_updated: 2026-07-19
+#   the GUI (never by the Orchestrator). run_summary() outputs a plain dict
+#   consumed by the Orchestrator (merged into the run manifest) and, from
+#   there, the session layer (e.g. CryogenicsRecorder).
+# last_updated: 2026-07-21
 # ---
 
 """OperationBase — the L4 contract for cryostat-servicing operations."""
@@ -203,22 +213,23 @@ class OperationBase:
         command_scope: Fixed at ``"operation"`` — the capability tier this
             operation's plans may carry (see
             ``Station.send_measurement_commands``). Do not override.
-        postcondition_timeout_s: Seconds ``postcondition_gates()`` may take to
-            all hold before the Orchestrator degrades the run to ERROR,
-            naming the unmet gate(s). Default 600 s (10 minutes).
 
     Lifecycle (override in a concrete subclass):
         initiate() -> PhasePlan: Initial targets/commands, mirroring
             ``BaseProcedure.initiate()``. A DataManager is NOT required — an
-            operation that wants a dataset (e.g. the fill's level curve) may
-            create one and its manifest then carries the path like any run.
+            operation that wants an HDF5 dataset may still create one and its
+            manifest then carries the path like any run, but a small,
+            bounded, in-memory series (e.g. the helium fill's level curve,
+            handed to the session layer via ``run_summary()`` instead of a
+            data file) is preferred for anything that does not need HDF5's
+            random-access/column layout.
         step() -> StepPlan | None: Next tick's targets/wait, or ``None`` to
             end the operation (park via ``standby()``). Honoured only while
             ``request_finish()`` has not been called (see the adapter note
             above — once finish is requested, ``step()`` is never called
             again).
         sample() -> None: Optional per-tick observation hook (e.g. the fill
-            logs a level point). Default: no-op.
+            appends one bounded in-memory level point). Default: no-op.
         standby() -> PhasePlan: Park / safe-off plan, mirroring
             ``BaseProcedure.standby()``.
         abort() -> tuple[Command, ...]: Cleanup commands on user abort or
@@ -227,23 +238,39 @@ class OperationBase:
         initiation_gates() -> tuple[Gate, ...]: As for procedures — gates that
             must pass once, before the operation's first ``sample()``.
             Default: none.
-        postcondition_gates() -> tuple[Gate, ...]: Stepped by the Orchestrator
-            after ``standby()``'s ramps complete, before the run is declared
-            ``done`` (plan §4.1). Only once every gate holds does the run
-            finish successfully; a timeout degrades to ERROR naming the
-            unmet gate(s). Default: none (the run finishes immediately once
-            parking completes, exactly like a procedure with no gates).
+        postcondition_gates() -> tuple[Gate, ...]: Evaluated by the
+            Orchestrator exactly ONCE, immediately after ``standby()`` is
+            dispatched, as the run ends (docs/plans/operation-concurrency-
+            and-error-scoping.md §2 — "immediate finish"). Each gate's
+            ``check()`` is read a single time (via ``Gate.check_once()``);
+            there is no holding and no timeout. Unmet gates never block the
+            run from finishing — they are recorded on the run manifest's
+            ``postconditions_unmet`` list (gate names) and logged at
+            WARNING. Default: none (an empty ``postconditions_unmet``).
         get_progress() -> float: Fractional progress, 0.0 to 1.0. Default 0.0
             (operations are not required to report progress).
         get_params() -> dict: Parameter values recorded in the run manifest,
             mirroring ``BaseProcedure.get_params()``. Default ``{}``.
+        run_summary() -> dict: A small, JSON-serialisable hand-off to the
+            session layer, merged into the run manifest's ``summary`` key
+            when the run ends (docs/plans/operation-concurrency-and-error-
+            scoping.md §4 — e.g. the helium fill's bounded in-memory level
+            curve). Default ``{}`` (nothing to hand off). Read duck-typed by
+            the Orchestrator via ``getattr`` — it never imports
+            ``OperationBase`` (contract C5) — and guarded by a broad
+            try/except there, so a broken override can never prevent the run
+            from finishing.
 
-    Graceful finish (plan §4.3):
+    Graceful finish (plan §4.3; immediate finish, operation-concurrency-and-
+    error-scoping.md §2):
         ``Orchestrator.finish_operation()`` calls ``request_finish()`` on the
         active operation. The very next ``change_sweep_step()`` (the adapter
         above) then returns ``None`` regardless of what ``step()`` would have
-        returned, ending the open-ended loop and running the normal
-        STANDBY -> postcondition path.
+        returned, ending the open-ended loop. The Orchestrator then dispatches
+        ``standby()``'s plan, evaluates ``postcondition_gates()`` once, and
+        ends the run — all without waiting for any ramp (in flight, or one
+        ``standby()`` itself starts) to complete; a ramp still moving after
+        the run ends continues under the existing manual-ramp handling.
     """
 
     name: str = ""
@@ -253,7 +280,6 @@ class OperationBase:
     run_kind: str = "operation"
     tolerated_safety_flags: frozenset[str] = frozenset()
     command_scope: str = "operation"
-    postcondition_timeout_s: float = 600.0
 
     def __init__(self) -> None:
         """Initialise the graceful-finish flag.
@@ -335,15 +361,18 @@ class OperationBase:
         return ()
 
     def postcondition_gates(self) -> tuple[Gate, ...]:
-        """Gates stepped after ``standby()``'s ramps complete, before ``done``.
+        """Gates evaluated once, immediately, as the run ends.
 
-        Only once every gate holds does the Orchestrator declare the run
-        ``done``; a timeout (``postcondition_timeout_s``) degrades the run to
-        ERROR, naming the unmet gate(s) (plan §4.1).
+        The Orchestrator reads each gate's ``check()`` exactly once (via
+        ``Gate.check_once()``) right after dispatching ``standby()``'s plan —
+        no holding, no timeout (docs/plans/operation-concurrency-and-error-
+        scoping.md §2). An unmet gate never blocks the run; it is named in
+        the run manifest's ``postconditions_unmet`` list and logged at
+        WARNING.
 
         Returns:
-            An ordered ``tuple[Gate, ...]``; empty by default (the run
-            finishes immediately once parking completes).
+            An ordered ``tuple[Gate, ...]``; empty by default (nothing to
+            verify, so ``postconditions_unmet`` is always empty).
         """
         return ()
 
@@ -362,6 +391,50 @@ class OperationBase:
             ``{}`` by default.
         """
         return {}
+
+    def run_summary(self) -> dict[str, Any]:
+        """Return a small, JSON-serialisable hand-off for the session layer.
+
+        Called once by the Orchestrator when it emits ``run_finished``
+        (docs/plans/operation-concurrency-and-error-scoping.md §4), duck-typed
+        via ``getattr`` — the Orchestrator never imports ``OperationBase``
+        (contract C5) — and merged into the run manifest's ``summary`` key.
+        The call is guarded there by a broad try/except, so a subclass
+        override that raises can never prevent the run from finishing; it
+        just yields an empty ``summary``. Keep the return value small and
+        plain (``float``/``str``/``bool``/``list``/``dict`` only — no numpy
+        arrays, no HDF5 handles) since it round-trips through the manifest
+        signal and, from there, into a session-layer store.
+
+        Returns:
+            ``{}`` by default (nothing to hand off).
+        """
+        return {}
+
+    def claimed_vi_names(self) -> set[str] | None:
+        """Return the VI names this operation exclusively owns while running.
+
+        Concurrency-scope hook (docs/plans/operation-concurrency-and-error-
+        scoping.md §1): the Orchestrator captures this once, at run start,
+        into ``_active_claims`` and consults it to decide whether a manual
+        front-panel action submitted while this operation is running may be
+        admitted. A VI named in the returned set is refused (the refusal
+        names this operation as the owner); every VI NOT in the set stays
+        under manual control exactly as in IDLE — e.g. the helium fill
+        claims only its level meter, so the VTI and every other instrument
+        stay manually controllable during a fill.
+
+        Returns:
+            A set of VI names, as registered on the station
+            (``Station.get_vi_names()``), this operation claims — or
+            ``None`` (the default) to claim every system VI. ``None`` is the
+            safe default: narrowing what a run blocks is an explicit
+            per-class opt-in, never assumed, so a subclass that does not
+            override this behaves exactly as if it locked the whole
+            instrument (unchanged behavior for every operation written
+            before this hook existed).
+        """
+        return None
 
     def readiness_conditions(self) -> tuple[ReadinessCondition, ...]:
         """Return this operation's live readiness checklist (plan §12).

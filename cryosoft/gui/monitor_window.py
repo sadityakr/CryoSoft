@@ -21,7 +21,10 @@
 #   (loads a newly opened/switched session's own gui_state.json over the
 #   in-memory SessionState, skipping a brand-new experiment that has none
 #   yet) and store_health_changed (a save failure/recovery banner + status
-#   note) — see docs/plans/unified-session-record.md §7.
+#   note) — see docs/plans/unified-session-record.md §7. Also the single
+#   home of the ACKNOWLEDGE EMERGENCY button (moved off ProcedureWindow,
+#   docs/plans/operation-concurrency-and-error-scoping.md §3) and of the
+#   per-VI runtime-fault banner, driven by Orchestrator.error_event.
 # entry_point: Not run directly. Instantiated in main.py.
 # dependencies:
 #   - PyQt6 >= 6.5
@@ -82,6 +85,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from cryosoft.core.events import ErrorEvent
 from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 from cryosoft.core.station import Station, read_instrument_metadata
 from cryosoft.gui import app_settings  # import the module (not the function) so tests can monkeypatch the factory
@@ -311,6 +315,11 @@ class MonitorWindow(QMainWindow):
         self._build_menu()
         self._connect_signals()
         self._restore_monitor_state()
+        # Sync state-dependent widgets (the Acknowledge-Emergency button)
+        # against whatever state the Orchestrator is already in:
+        # state_changed only reports FUTURE transitions, and an EMERGENCY
+        # may already be active by the time this window is constructed.
+        self._on_state_changed(self._orchestrator.state)
 
         # Attach the log handler after the UI exists (LogPanel guards against
         # a duplicate if the window is ever reconstructed in-process).
@@ -481,6 +490,22 @@ class MonitorWindow(QMainWindow):
         # ── Notification banner (hidden until a warning/error arrives) ─
         self._banner = NotificationBanner()
         root.addWidget(self._banner)
+
+        # ── Emergency acknowledge (single home — plan §3; moved off
+        # ProcedureWindow) ──────────────────────────────────────────────
+        ack_row = QHBoxLayout()
+        ack_row.addStretch()
+        self._ack_btn = QPushButton("ACKNOWLEDGE EMERGENCY")
+        self._ack_btn.setObjectName("ack_emergency_btn")
+        self._ack_btn.setVisible(False)
+        self._ack_btn.clicked.connect(self._orchestrator.acknowledge_emergency)
+        ack_row.addWidget(self._ack_btn)
+        root.addLayout(ack_row)
+
+        # Tracks the last per-VI fault warning message shown on the banner
+        # (plan §3), so states_updated can dismiss it once every fault
+        # clears without stomping on an unrelated banner message.
+        self._last_fault_message: str | None = None
 
         # ── Fixed 2x2 quadrant grid (Page 1 — Monitor) ───────────────
         top_left = self._build_instruments_quadrant(measurement_vis, switch_vis)
@@ -1102,6 +1127,7 @@ class MonitorWindow(QMainWindow):
         )
         self._orchestrator.state_changed.connect(self._on_state_changed)
         self._orchestrator.error_occurred.connect(self._on_error)
+        self._orchestrator.error_event.connect(self._on_error_event)
         self._orchestrator.action_blocked.connect(self._on_action_blocked)
         self._orchestrator.action_failed.connect(self._on_action_failed)
         self._orchestrator.action_succeeded.connect(self._on_action_confirmed)
@@ -1109,6 +1135,11 @@ class MonitorWindow(QMainWindow):
         # (each panel connects itself in its constructor) — this slot only
         # feeds the Trends quadrant and the optional Operations panel.
         self._orchestrator.states_updated.connect(self._on_states_updated)
+        # operation_status fires every tick while an operation runs (like
+        # states_updated), so it routes through this window too rather than
+        # connecting the panel directly (gui-edit skill's destruction-order
+        # rule).
+        self._orchestrator.operation_status.connect(self._on_operation_status)
         # run_finished fires only at run boundaries (not every tick), so
         # there is no teardown-race concern connecting it here directly.
         self._orchestrator.run_finished.connect(self._on_run_finished_for_logs)
@@ -1190,6 +1221,47 @@ class MonitorWindow(QMainWindow):
         if self._operations_panel is not None:
             self._operations_panel.on_states_updated(state)
 
+        # Calm a shown fault-warning banner once every runtime fault has
+        # cleared (plan §3) — but only if THIS banner is the one showing
+        # (never steal a dismiss from an unrelated message, e.g. the
+        # save-health error).
+        if self._last_fault_message is not None and not self._orchestrator.vi_faults():
+            self._banner.dismiss()
+            self._last_fault_message = None
+
+    def _on_error_event(self, event: ErrorEvent) -> None:
+        """Show a per-VI fault warning on the banner (plan §3).
+
+        Only ``kind="fault"``/``severity="warning"`` events are handled
+        here — everything more severe (``run_failure``, ``safety``,
+        ``internal``) already reaches the banner via the compat
+        ``error_occurred`` -> ``_on_error`` path, which fires alongside
+        every such ``error_event`` (see ``Orchestrator._error()``).
+
+        Args:
+            event: The structured error/fault payload.
+        """
+        if event.severity != "warning" or event.kind != "fault":
+            return
+        message = f"{event.vi_name}: {event.message}" if event.vi_name else event.message
+        if message == self._last_fault_message:
+            return
+        self._last_fault_message = message
+        self._banner.show_message(message, BANNER_SEVERITY_WARNING)
+
+    def _on_operation_status(self, text: str) -> None:
+        """Forward one operation_status milestone line to the Operations panel.
+
+        Routed through the window for the same teardown-race reason as
+        ``_on_states_updated`` — ``operation_status`` fires every tick while
+        an operation runs, never at a safe run-boundary-only cadence.
+
+        Args:
+            text: The milestone line (``Orchestrator.operation_status``).
+        """
+        if self._operations_panel is not None:
+            self._operations_panel.on_operation_status(text)
+
     def _on_run_finished_for_logs(self, _manifest: dict) -> None:
         """Refresh the Logs page's tables after any run finishes.
 
@@ -1216,6 +1288,8 @@ class MonitorWindow(QMainWindow):
         """
         self._state_label.setText(f"State: {state_name}")
         logger.debug("MonitorWindow: orchestrator state → %s", state_name)
+
+        self._ack_btn.setVisible(state_name == OrchestratorState.EMERGENCY.value)
 
         if state_name in _ERROR_STATES:
             level = "error"

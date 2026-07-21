@@ -9,9 +9,13 @@
 #   flipping on a snapshot change, the start/finish button toggling on
 #   run_started/run_finished, the operator-confirmation checkbox calling
 #   confirm_operation(), the ready banner appearing only once a run is done
-#   and every condition holds, and a cryogenics-less/operations-only panel
-#   building only the sample-change card.
-# last_updated: 2026-07-19
+#   and every condition holds, a cryogenics-less/operations-only panel
+#   building only the sample-change card, and the immediate-finish contract
+#   (docs/plans/operation-concurrency-and-error-scoping.md §2): Finish click
+#   -> instant disabled "Finishing…" state, the live operation_status label
+#   (only for the currently-running card), and the unmet-postcondition
+#   warning badge on run_finished.
+# last_updated: 2026-07-21
 # ---
 
 """Behavior tests for OperationsPanel / OperationCard / OperatorDialog."""
@@ -507,3 +511,114 @@ def test_ready_banner_clears_when_new_run_starts(station, operations_config, qtb
 
     card._on_run_started({"procedure": SampleChangeOperation.name})
     assert card._ready_banner.isHidden()
+
+
+# ── Immediate finish + status line + unmet-postcondition warning (design
+# doc operation-concurrency-and-error-scoping.md §2) ─────────────────────
+
+
+def test_finish_click_immediately_shows_disabled_finishing_state(
+    station, cryogenics_config, stores, qtbot, tmp_path
+):
+    """Clicking Finish disables the button into 'Finishing…' before run_finished arrives."""
+    helium_store, servicing_store = stores
+    mock_orch = MagicMock(spec=Orchestrator)
+    panel = OperationsPanel(
+        station,
+        mock_orch,
+        cryogenics_config,
+        {},
+        helium_store,
+        servicing_store,
+        get_data_dir=lambda: str(tmp_path),
+    )
+    qtbot.addWidget(panel)
+    card = panel._cards[0]
+
+    card._on_run_started({"procedure": HeliumFillOperation.name})
+    assert card._action_btn.isEnabled()
+
+    card._action_btn.click()
+    mock_orch.finish_operation.assert_called_once()
+    assert card._finishing is True
+    assert not card._action_btn.isEnabled()
+    assert "Finishing" in card._action_btn.text()
+
+    # run_finished flips it back to idle, whatever the terminal status.
+    card._on_run_finished(
+        {"procedure": HeliumFillOperation.name, "status": "done", "postconditions_unmet": []}
+    )
+    assert card._finishing is False
+    assert card._action_btn.isEnabled()
+    assert card._action_btn.text() == "Helium Fill…"
+
+
+def test_status_label_shows_operation_status_only_while_running(
+    station, cryogenics_config, stores, qtbot, tmp_path
+):
+    """on_operation_status() updates the label only for the currently-running card."""
+    helium_store, servicing_store = stores
+    mock_orch = MagicMock(spec=Orchestrator)
+    panel = OperationsPanel(
+        station,
+        mock_orch,
+        cryogenics_config,
+        {},
+        helium_store,
+        servicing_store,
+        get_data_dir=lambda: str(tmp_path),
+    )
+    qtbot.addWidget(panel)
+    card = panel._cards[0]
+
+    # Not running yet -> ignored.
+    panel.on_operation_status("Ramping magnet_z to 0 T")
+    assert card._status_label.isHidden()
+
+    card._on_run_started({"procedure": HeliumFillOperation.name})
+    panel.on_operation_status("Ramping magnet_z to 0 T")
+    assert not card._status_label.isHidden()
+    assert card._status_label.toolTip() == "Ramping magnet_z to 0 T"
+
+    card._on_run_finished({"procedure": HeliumFillOperation.name, "status": "done"})
+    assert card._status_label.isHidden()
+
+
+def test_unmet_postcondition_warning_shown_on_run_finished(
+    station, cryogenics_config, stores, qtbot, tmp_path
+):
+    """A non-empty postconditions_unmet on run_finished shows the warning badge."""
+    helium_store, servicing_store = stores
+    mock_orch = MagicMock(spec=Orchestrator)
+    panel = OperationsPanel(
+        station,
+        mock_orch,
+        cryogenics_config,
+        {},
+        helium_store,
+        servicing_store,
+        get_data_dir=lambda: str(tmp_path),
+    )
+    qtbot.addWidget(panel)
+    card = panel._cards[0]
+
+    card._on_run_started({"procedure": HeliumFillOperation.name})
+    assert card._postcondition_warning.isHidden()
+
+    card._on_run_finished(
+        {
+            "procedure": HeliumFillOperation.name,
+            "status": "done",
+            "postconditions_unmet": ["refresh_slow"],
+        }
+    )
+    assert not card._postcondition_warning.isHidden()
+    assert "refresh_slow" in card._postcondition_warning.text()
+
+    # A clean finish (or a fresh run) clears it.
+    card._on_run_started({"procedure": HeliumFillOperation.name})
+    assert card._postcondition_warning.isHidden()
+    card._on_run_finished(
+        {"procedure": HeliumFillOperation.name, "status": "done", "postconditions_unmet": []}
+    )
+    assert card._postcondition_warning.isHidden()

@@ -4,19 +4,20 @@
 #   (cryosoft/procedures/operations/helium_fill.py, plan §8.1), driven by a
 #   real Orchestrator (ticked directly, not via the QTimer) against the
 #   sim_cryostat station: zero-field ramp + initiation gate, FAST/SLOW
-#   refresh, datapoint accumulation and HDF5 layout, the completion
-#   condition (monkeypatching the sim ILM's private _force_helium_level, not
-#   a new sim-only public method), max-duration termination, abort mid-fill,
-#   the helium_low-tolerated-but-quench-not safety matrix, and an end-to-end
-#   run through a real CryogenicsRecorder.
-# last_updated: 2026-07-19
+#   refresh, the bounded in-memory level curve + run_summary() hand-off (no
+#   HDF5 file — docs/plans/operation-concurrency-and-error-scoping.md §4),
+#   the completion condition (monkeypatching the sim ILM's private
+#   _force_helium_level, not a new sim-only public method), max-duration
+#   termination, abort mid-fill, the helium_low-tolerated-but-quench-not
+#   safety matrix, and an end-to-end run through a real CryogenicsRecorder.
+# last_updated: 2026-07-22
 # ---
 
 from __future__ import annotations
 
+import json
 import time
 
-import h5py
 import pytest
 
 from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
@@ -71,8 +72,13 @@ def _tick_until(orchestrator, predicate, *, max_ticks: int = 2000, sleep_s: floa
     raise AssertionError(f"condition not satisfied within {max_ticks} ticks")
 
 
-def _make_op(station, tmp_path, *, person: str = "Alex Tech", **overrides) -> HeliumFillOperation:
-    """Build a HeliumFillOperation with fast, test-friendly timing defaults."""
+def _make_op(station, tmp_path=None, *, person: str = "Alex Tech", **overrides) -> HeliumFillOperation:
+    """Build a HeliumFillOperation with fast, test-friendly timing defaults.
+
+    ``tmp_path`` is accepted (and ignored) for compatibility with existing
+    call sites — the fill no longer writes a data file, so it is not passed
+    through as ``data_directory``.
+    """
     config = dict(
         fill_target_pct=50.0,  # sim ILM starts at 80% helium -> already "at target"
         fill_zero_field_eps_T=0.01,
@@ -80,7 +86,6 @@ def _make_op(station, tmp_path, *, person: str = "Alex Tech", **overrides) -> He
         fill_complete_window_s=0.03,
         max_fill_duration_s=30.0,
         sample_period_s=0.0,
-        data_directory=str(tmp_path),
     )
     config.update(overrides)
     return HeliumFillOperation(station, person=person, **config)
@@ -90,7 +95,7 @@ def _make_op(station, tmp_path, *, person: str = "Alex Tech", **overrides) -> He
 
 
 def test_helium_fill_end_to_end(orchestrator, station, tmp_path, qtbot):
-    """Zero-field ramp + gate, FAST->SLOW refresh, datapoints, done manifest, HDF5 layout."""
+    """Zero-field ramp + gate, FAST->SLOW refresh, no data file, level-curve summary."""
     _fast_magnets(station)
     station.magnet_z._driver._current = 5.0
     station.magnet_z._driver._setpoint = 5.0
@@ -113,35 +118,34 @@ def test_helium_fill_end_to_end(orchestrator, station, tmp_path, qtbot):
     # set_refresh_rate(FAST) is dispatched synchronously by initiate(), before
     # the first tick even runs.
     assert station.level_meter.get_refresh_rate() == _REFRESH_FAST
+    # No data file at any point in the run (plan §4) — the manifest's
+    # data_file is always empty for this operation.
+    assert started[0]["data_file"] == ""
 
     _tick_until(orchestrator, lambda: bool(finished), max_ticks=1000, sleep_s=0.005)
 
     assert finished[0]["status"] == "done"
     assert finished[0]["kind"] == "operation"
     assert finished[0]["procedure"] == "Helium Fill"
+    assert finished[0]["data_file"] == ""
+    assert not hasattr(op, "data_filepath")
 
     for name in station.magnet_vi_names():
         assert abs(station.get_vi(name).get_field()) < 0.01, f"{name} did not reach zero field"
 
     assert station.level_meter.get_refresh_rate() == _REFRESH_SLOW
     assert orchestrator._state == OrchestratorState.IDLE
-    assert op.data_filepath is None  # closed by standby()
 
-    data_file = finished[0]["data_file"]
-    assert data_file
-    with h5py.File(data_file, "r") as f:
-        data = f["data"]
-        assert "unix_time" in data
-        assert "helium_pct" in data
-        for name in station.magnet_vi_names():
-            assert f"field_T_{name}" in data
-        # At least one point was actually saved (trimmed to actual count on close).
-        assert data["helium_pct"].shape[0] >= 1
-        assert data["unix_time"].shape[0] == data["helium_pct"].shape[0]
+    summary = finished[0]["summary"]
+    curve = summary["level_curve"]
+    assert curve["unix_time"] and curve["helium_pct"]  # at least one point sampled
+    assert len(curve["unix_time"]) == len(curve["helium_pct"])
+    assert summary["start_pct"] == pytest.approx(70.0)
+    assert summary["end_pct"] == pytest.approx(70.0)
 
 
-def test_helium_fill_accumulates_multiple_datapoints(orchestrator, station, tmp_path):
-    """A fill that takes a few sample cycles to settle saves more than one point."""
+def test_helium_fill_accumulates_multiple_curve_points(orchestrator, station, tmp_path):
+    """A fill that takes a few sample cycles to settle accumulates more than one point."""
     _fast_magnets(station)
     station.level_meter._driver._force_helium_level = 70.0
     op = _make_op(
@@ -158,8 +162,58 @@ def test_helium_fill_accumulates_multiple_datapoints(orchestrator, station, tmp_
 
     _tick_until(orchestrator, lambda: bool(finished), max_ticks=1000, sleep_s=0.01)
 
-    with h5py.File(finished[0]["data_file"], "r") as f:
-        assert f["data"]["helium_pct"].shape[0] >= 2
+    assert len(finished[0]["summary"]["level_curve"]["helium_pct"]) >= 2
+
+
+# ── Bounded in-memory level curve (decimation strategy) ───────────────────
+
+
+def test_level_curve_decimates_once_bound_exceeded(station, monkeypatch):
+    """Once the curve exceeds _MAX_CURVE_POINTS, it halves and the stride doubles.
+
+    A focused unit test against sample() directly (no Orchestrator tick
+    loop needed) — forces the bound low so the decimation path triggers
+    deterministically within a handful of calls.
+    """
+    monkeypatch.setattr(HeliumFillOperation, "_MAX_CURVE_POINTS", 4)
+    op = _make_op(station, fill_zero_field_window_s=0.0)
+    op.initiate()
+
+    for _ in range(10):
+        op.sample()
+
+    curve = op.run_summary()["level_curve"]
+    assert len(curve["unix_time"]) <= 4
+    assert len(curve["unix_time"]) == len(curve["helium_pct"])
+    assert op._curve_stride > 1  # decimation ran at least once
+    assert op._curve_raw_count == 10  # every raw sample() call is still counted
+
+
+def test_level_curve_stays_under_default_bound(station):
+    """Well under the default 4000-point bound, every sample is kept (no decimation)."""
+    op = _make_op(station, fill_zero_field_window_s=0.0)
+    op.initiate()
+
+    for _ in range(50):
+        op.sample()
+
+    curve = op.run_summary()["level_curve"]
+    assert len(curve["unix_time"]) == 50
+    assert op._curve_stride == 1
+
+
+# ── run_summary() shape ────────────────────────────────────────────────────
+
+
+def test_run_summary_before_any_sample_is_json_safe_and_empty(station):
+    """run_summary() called before initiate()/sample() still returns a valid, empty shape."""
+    op = _make_op(station)
+    summary = op.run_summary()
+    assert summary == {
+        "level_curve": {"unix_time": [], "helium_pct": []},
+        "start_pct": 0.0,
+        "end_pct": 0.0,
+    }
 
 
 # ── Completion condition (monkeypatched sim ILM level) ────────────────────
@@ -275,9 +329,9 @@ def test_abort_mid_fill_restores_slow_and_closes_file(orchestrator, station, tmp
     orchestrator.abort_procedure()
 
     assert station.level_meter.get_refresh_rate() == _REFRESH_SLOW
-    assert op.data_filepath is None
     assert orchestrator._state == OrchestratorState.IDLE
     assert finished and finished[0]["status"] == "aborted"
+    assert finished[0]["data_file"] == ""
 
 
 # ── Safety matrix: helium_low tolerated, quench is not ────────────────────
@@ -331,7 +385,6 @@ def test_quench_still_aborts_the_fill(orchestrator, station, tmp_path):
         max_ticks=2000,
     )
     assert orchestrator._procedure is None
-    assert op.data_filepath is None  # abort() closed the file
     assert station.level_meter.get_refresh_rate() == _REFRESH_SLOW
 
 
@@ -375,6 +428,13 @@ def test_cryogenics_recorder_records_the_finished_fill(orchestrator, station, tm
     assert entry.source == "operation"
     assert entry.run_id == finished[0]["run_id"]
     assert entry.values["person"] == "Dr. Fill"
+
+    # The level curve made the full round trip: HeliumFillOperation.sample()
+    # -> run_summary() -> Orchestrator manifest["summary"] ->
+    # CryogenicsRecorder -> the stored cryogenics-log entry.
+    curve = json.loads(entry.values["level_curve"])
+    assert curve["unix_time"] and curve["helium_pct"]
+    assert len(curve["unix_time"]) == len(curve["helium_pct"])
 
     ops_entries = servicing_store.entries("operations")
     assert len(ops_entries) == 1

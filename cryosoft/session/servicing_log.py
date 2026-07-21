@@ -7,7 +7,14 @@
 #   sample stream (HeliumRecordStore), a pure consumption-rate function, and
 #   the automatic writer driven by Orchestrator signals (CryogenicsRecorder).
 #   One generic engine, N declared kinds: adding a servicing log for another
-#   setup is one LogKindSpec, no new store or GUI code.
+#   setup is one LogKindSpec, no new store or GUI code. The cryogenics kind's
+#   level_curve field (docs/plans/operation-concurrency-and-error-scoping.md
+#   §4) carries HeliumFillOperation's bounded in-memory level curve, handed
+#   off via the run manifest's duck-typed "summary" key instead of an HDF5
+#   file — added as a new ParamSpec field, so old cryogenics-log lines
+#   (written before this field existed) stay readable exactly as they are
+#   (ServicingLogStore never rewrites a line; the field is simply absent from
+#   their .values dict).
 # entry_point: Not run directly. Stores are constructed in cryosoft.main
 #   (Phase 3+) beside the SessionManager; CryogenicsRecorder is connected to
 #   Orchestrator signals there. In Phase 1 all four classes are exercised
@@ -19,7 +26,9 @@
 # input: |
 #   ServicingLogStore/HeliumRecordStore: plain values passed by callers (the
 #   GUI's add/edit dialogs, CryogenicsRecorder). CryogenicsRecorder: the
-#   Orchestrator's states_updated / run_started / run_finished payloads.
+#   Orchestrator's states_updated / run_started / run_finished payloads
+#   (run_finished's "summary" key, when present, carries the fill's level
+#   curve).
 # process: |
 #   LogKindSpec validates eagerly at construction (ValueError naming the
 #   offender), mirroring core/plan.py. ServicingLogStore coerces every write
@@ -30,7 +39,9 @@
 #   file exceeds ~2 MB — the machine record may rotate; servicing logs never
 #   do. consumption_rate_pct_per_h() is a pure least-squares fit, no I/O.
 #   CryogenicsRecorder never raises out of a slot (broad try/except + log),
-#   exactly like SessionManager's manifest handlers.
+#   exactly like SessionManager's manifest handlers; extracting the level
+#   curve from a run_finished manifest (_extract_level_curve_json) is
+#   likewise fully tolerant of a missing/malformed "summary" key.
 # output: |
 #   Append-only JSONL files under <root>/<config_name>/{<kind>.jsonl,
 #   helium_record.jsonl}; the cryo_warning(str) Qt signal for GUI banners.
@@ -238,6 +249,19 @@ _CRYOGENICS_KIND = LogKindSpec(
         ),
         "notes": ParamSpec(
             type=str, default="", description="Free-text notes / corrections"
+        ),
+        # Machine-populated only (docs/plans/operation-concurrency-and-error-
+        # scoping.md §4): HeliumFillOperation's bounded in-memory level curve,
+        # JSON-encoded ({"unix_time": [...], "helium_pct": [...]}), handed
+        # off via run_summary() and written by CryogenicsRecorder alongside
+        # this entry. "" for a manual entry (no run behind it) and for any
+        # entry written before this field existed — ServicingLogStore never
+        # rewrites old lines, so those simply lack the key entirely; readers
+        # must use .get("level_curve", "") rather than indexing it.
+        "level_curve": ParamSpec(
+            type=str,
+            default="",
+            description="Level-vs-time curve sampled during the fill (JSON, machine-written)",
         ),
     },
     editable=True,
@@ -987,9 +1011,46 @@ class CryogenicsRecorder(QObject):
                     "helium_end_pct": self._last_helium_pct or 0.0,
                     "ln2_filled": False,
                     "notes": notes,
+                    "level_curve": self._extract_level_curve_json(manifest),
                 },
                 source="operation",
                 run_id=str(manifest.get("run_id", "")),
             )
             self._fill_start_helium_pct = None
             self._fill_start_utc = ""
+
+    @staticmethod
+    def _extract_level_curve_json(manifest: dict[str, Any]) -> str:
+        """Extract the fill's level curve from the run manifest's ``summary``.
+
+        Reads ``manifest["summary"]["level_curve"]`` (the Orchestrator's
+        duck-typed ``run_summary()`` hand-off, docs/plans/operation-
+        concurrency-and-error-scoping.md §4) — ``HeliumFillOperation``'s
+        shape is ``{"unix_time": [...], "helium_pct": [...]}``. Tolerant of
+        every malformed shape (missing ``summary``, non-dict curve, non-list
+        series): this is a best-effort observer, never a reason to lose the
+        rest of the cryogenics-log entry.
+
+        Args:
+            manifest: The Orchestrator's ``run_finished`` manifest.
+
+        Returns:
+            A compact JSON string of the curve, or ``""`` if unavailable/
+            malformed (the ``cryogenics`` kind's ``level_curve`` field
+            default).
+        """
+        summary = manifest.get("summary")
+        if not isinstance(summary, dict):
+            return ""
+        curve = summary.get("level_curve")
+        if not isinstance(curve, dict):
+            return ""
+        unix_time = curve.get("unix_time")
+        helium_pct = curve.get("helium_pct")
+        if not isinstance(unix_time, list) or not isinstance(helium_pct, list):
+            return ""
+        try:
+            return json.dumps({"unix_time": unix_time, "helium_pct": helium_pct})
+        except (TypeError, ValueError):
+            logger.warning("CryogenicsRecorder: level_curve not JSON-serialisable; dropping it")
+            return ""

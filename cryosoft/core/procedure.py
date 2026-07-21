@@ -449,6 +449,31 @@ class BaseProcedure:
         """
         return dict(self._params)
 
+    def claimed_vi_names(self) -> set[str] | None:
+        """Return the VI names this procedure exclusively owns while running.
+
+        Concurrency-scope hook (docs/plans/operation-concurrency-and-error-
+        scoping.md §1): the Orchestrator captures this once, at run start,
+        into ``_active_claims`` and consults it to decide whether a manual
+        front-panel action submitted while this procedure is running may be
+        admitted. A VI named in the returned set is refused (the refusal
+        names this procedure as the owner); every VI NOT in the set stays
+        under manual control exactly as in IDLE.
+
+        Every procedure today keeps the default (claim everything) —
+        procedures remain exclusive in this iteration (plan's "Concurrency
+        scope: manual controls only" decision); only operations narrow
+        their claims.
+
+        Returns:
+            A set of VI names, as registered on the station
+            (``Station.get_vi_names()``), this procedure claims — or
+            ``None`` (the default) to claim every system VI. ``None`` is the
+            safe default: narrowing what a run blocks is an explicit
+            per-class opt-in, never assumed.
+        """
+        return None
+
     def get_data_keys(self) -> list[str]:
         """Return all datapoint keys available for live-plot axis selection.
 
