@@ -147,6 +147,13 @@ virtual_instruments:
         ch20: ["20"]
       settle_time_s: 1.0
       pole_mode: 4
+      # Hot-switching (default True, also runtime-toggleable via
+      # set_hot_switching): close the new channel before opening the old one
+      # so the K6220 current source never briefly sees an open circuit
+      # between routes and rails to compliance. Set False for cold-switching
+      # (open before close) if a run needs to guarantee no two channels are
+      # ever connected together, even for an instant.
+      hot_switching: true
 
 # Cryogenics: the helium-fill operation, the consumption display, and the
 # automatic level recorder are all built around level_vi (docs/plans/
