@@ -62,8 +62,10 @@
 # output: |
 #   Emits signals: states_updated, state_changed, run_started/run_finished
 #   (run manifests: id, procedure, kind, params, data file path, timestamps,
-#   terminal status, postconditions_unmet — consumed by the session layer;
-#   kind is "operation" for an operation via its run_kind class attribute),
+#   terminal status, postconditions_unmet, summary (duck-typed
+#   procedure.run_summary(), {} by default — plan operation-concurrency-and-
+#   error-scoping.md §4) — consumed by the session layer; kind is
+#   "operation" for an operation via its run_kind class attribute),
 #   error_occurred, action_blocked, action_succeeded, action_failed (vi,
 #   method, reason — the uniform per-action verdict). Run-scoped UI signals
 #   are routed by run kind (hard status separation, plan §2): status_message,
@@ -167,10 +169,14 @@ class Orchestrator(QObject):
         run_finished (dict): The same manifest re-emitted exactly once when the
             run ends, with ``finished_utc``, terminal ``status`` (``done`` /
             ``aborted`` / ``failed``), ``reason`` (error text, empty for
-            ``done``/``aborted``), and ``postconditions_unmet`` (list of gate
+            ``done``/``aborted``), ``postconditions_unmet`` (list of gate
             names an operation's one-shot ``postcondition_gates()``
             evaluation found unmet at finish — always ``[]`` for a procedure,
-            or for an operation with none declared/all held) added.
+            or for an operation with none declared/all held), and ``summary``
+            (docs/plans/operation-concurrency-and-error-scoping.md §4: the
+            dict ``procedure.run_summary()`` returned — duck-typed, ``{}``
+            for a procedure or an operation that does not override it, and
+            ``{}`` rather than propagating if the override raised) added.
         error_occurred (str): Emitted when ERROR or EMERGENCY state entered,
             or a run fails (plan operation-concurrency-and-error-scoping.md
             §3). Not run-scoped — fires regardless of run kind. Kept as a
@@ -299,6 +305,15 @@ class Orchestrator(QObject):
         # gone by the time the run ends) and re-emitted once on run_finished.
         self._active_run_manifest: dict[str, Any] | None = None
         self._run_counter = 0
+
+        # run_summary() hand-off (docs/plans/operation-concurrency-and-
+        # error-scoping.md §4): collected from self._procedure by
+        # _emit_run_finished() for the "done" path, where self._procedure is
+        # still set. The abort/fail/emergency paths clear self._procedure in
+        # _abort_active_procedure() BEFORE calling _emit_run_finished(), so
+        # that method caches the summary here first — _emit_run_finished()
+        # prefers self._procedure when present, else falls back to this.
+        self._pending_run_summary: dict[str, Any] = {}
 
         # Claims + admission gate (docs/plans/operation-concurrency-and-
         # error-scoping.md §1): the active run's claimed_vi_names(), captured
@@ -1145,6 +1160,38 @@ class Orchestrator(QObject):
         }
         self.run_started.emit(dict(self._active_run_manifest))
 
+    def _collect_run_summary(self, procedure: Any) -> dict[str, Any]:
+        """Return ``procedure.run_summary()``'s result, or ``{}`` on any problem.
+
+        Duck-typed (docs/plans/operation-concurrency-and-error-scoping.md
+        §4): looked up via ``getattr`` so this module never imports
+        ``OperationBase`` (contract C5) — a plain ``BaseProcedure`` or a test
+        double without ``run_summary()`` simply yields ``{}``. Guarded by a
+        broad try/except plus a return-type check, so a broken or
+        misbehaving override can never prevent the run from finishing.
+
+        Args:
+            procedure: The procedure/operation to query (may be ``None``).
+
+        Returns:
+            The dict ``run_summary()`` returned, or ``{}`` if the method is
+            absent, raises, or does not return a dict.
+        """
+        run_summary_fn = getattr(procedure, "run_summary", None)
+        if not callable(run_summary_fn):
+            return {}
+        try:
+            summary = run_summary_fn()
+        except Exception:
+            logger.exception("run_summary() raised")
+            return {}
+        if not isinstance(summary, dict):
+            logger.warning(
+                "run_summary() returned %r (expected a dict); ignoring", type(summary)
+            )
+            return {}
+        return summary
+
     def _emit_run_finished(
         self,
         status: str,
@@ -1174,6 +1221,17 @@ class Orchestrator(QObject):
         manifest["status"] = status
         manifest["reason"] = reason
         manifest["postconditions_unmet"] = list(postconditions_unmet or ())
+        # run_summary() hand-off (plan §4): self._procedure is still set on
+        # the "done" path (_finish_run() clears it AFTER this call); the
+        # abort/fail/emergency paths already cleared it via
+        # _abort_active_procedure(), which cached the summary into
+        # self._pending_run_summary first — see that method's docstring.
+        if self._procedure is not None:
+            summary = self._collect_run_summary(self._procedure)
+        else:
+            summary = self._pending_run_summary
+        self._pending_run_summary = {}
+        manifest["summary"] = summary
         self.run_finished.emit(manifest)
 
     # ------------------------------------------------------------------
@@ -1647,8 +1705,16 @@ class Orchestrator(QObject):
         instrument) cannot prevent the others. Also clears ``_active_claims``
         (plan §1) — the shared teardown path for user abort, ``_fail_to_error``,
         and ``_enter_emergency``, so a claim can never outlive its run.
+
+        Caches ``procedure.run_summary()`` (plan §4) into
+        ``self._pending_run_summary`` BEFORE clearing ``self._procedure``
+        below: the subsequent ``_emit_run_finished()`` call on every one of
+        these teardown paths (abort/fail/emergency) runs with
+        ``self._procedure`` already ``None``, so it could not call
+        ``run_summary()`` itself.
         """
         procedure = self._procedure
+        self._pending_run_summary = self._collect_run_summary(procedure)
         if procedure is not None and hasattr(procedure, "abort"):
             try:
                 commands = procedure.abort()

@@ -2,17 +2,19 @@
 # description: |
 #   HeliumFillOperation: the first concrete OperationBase (L4) subclass —
 #   forces every magnet to zero field, switches the level meter to FAST
-#   refresh, samples the helium level once per sample_period_s into an HDF5
-#   curve, and finishes once the level holds at/above fill_target_pct for
-#   fill_complete_window_s (or max_fill_duration_s elapses). Restores SLOW
-#   refresh on standby/abort so an aborted fill never leaves the meter in
-#   FAST, and verifies that restoration (plus that the level actually rose)
-#   via postcondition_gates(). Tolerates the helium_low safety flag — see
-#   docs/plans/cryogenics-logbook.md §8.1.
+#   refresh, samples the helium level once per sample_period_s into a
+#   bounded in-memory curve, and finishes once the level holds at/above
+#   fill_target_pct for fill_complete_window_s (or max_fill_duration_s
+#   elapses). Restores SLOW refresh on standby/abort so an aborted fill
+#   never leaves the meter in FAST, and verifies that restoration (plus that
+#   the level actually rose) via postcondition_gates(). Tolerates the
+#   helium_low safety flag — see docs/plans/cryogenics-logbook.md §8.1. No
+#   HDF5 file: the level curve is handed to the session layer via
+#   run_summary() instead (docs/plans/operation-concurrency-and-error-
+#   scoping.md §4).
 # entry_point: Not run directly. Constructed by the GUI's fill dialog (Phase
 #   5) or a test, submitted via Orchestrator.run_operation()/queue_operation().
 # dependencies:
-#   - cryosoft.core.data_manager (DataManager)
 #   - cryosoft.core.exceptions (CryoSoftConfigError)
 #   - cryosoft.core.gates (Gate)
 #   - cryosoft.core.operation (OperationBase)
@@ -26,27 +28,33 @@
 #   fill_zero_field_window_s, fill_complete_window_s, max_fill_duration_s,
 #   sample_period_s), each with a class-matching default — main.py can pass
 #   **read_cryogenics_config(config_path) verbatim (its extra keys, e.g.
-#   helium_warning_pct, are simply ignored). magnet_vi_names() resolves the
-#   magnet list; level_vi (default "level_meter") must be a registered VI.
+#   helium_warning_pct, are simply ignored — this now also covers the
+#   retired data_directory kwarg some older callers may still pass).
+#   magnet_vi_names() resolves the magnet list; level_vi (default
+#   "level_meter") must be a registered VI.
 # process: |
 #   initiate() ramps every magnet to 0 T and switches the level meter to
-#   FAST, creating a DataManager for the level curve. initiation_gates()
-#   holds until every magnet reads |B| < eps for fill_zero_field_window_s
-#   (from cached state — no extra hardware poll). sample() reads the level +
-#   every magnet's field and saves one datapoint, tracking the start level
-#   and a "stable since" clock that resets whenever the level rises. step()
-#   keeps sampling every sample_period_s until the level has held at/above
-#   fill_target_pct and non-rising for fill_complete_window_s (done), or
-#   max_fill_duration_s has elapsed (done, with a WARNING logged — the
-#   graceful-finish flag is handled by the OperationBase adapter, nothing
-#   extra needed here). standby()/abort() close the data file and restore
-#   SLOW refresh. postcondition_gates() verifies SLOW refresh and that the
-#   level did not fall below its start value.
+#   FAST. initiation_gates() holds until every magnet reads |B| < eps for
+#   fill_zero_field_window_s (from cached state — no extra hardware poll).
+#   sample() reads the level, appends (unix_time, helium_pct) to a bounded
+#   in-memory series (decimated once it exceeds _MAX_CURVE_POINTS — see
+#   run_summary()'s docstring), and tracks the start level and a "stable
+#   since" clock that resets whenever the level rises. step() keeps sampling
+#   every sample_period_s until the level has held at/above fill_target_pct
+#   and non-rising for fill_complete_window_s (done), or max_fill_duration_s
+#   has elapsed (done, with a WARNING logged — the graceful-finish flag is
+#   handled by the OperationBase adapter, nothing extra needed here).
+#   standby()/abort() restore SLOW refresh. postcondition_gates() verifies
+#   SLOW refresh and that the level did not fall below its start value.
+#   run_summary() (called once by the Orchestrator on run_finished) returns
+#   the accumulated curve plus start/end level.
 # output: |
 #   PhasePlan/StepPlan/Command/Gate objects consumed by the Orchestrator.
-#   Side effect: an HDF5 file (when initiate() runs) with columns
-#   unix_time, helium_pct, and field_T_<magnet> per magnet.
-# last_updated: 2026-07-19
+#   run_summary() -> dict consumed by the Orchestrator (merged into the run
+#   manifest's "summary" key) and, from there, CryogenicsRecorder. No data
+#   file: data_filepath is not defined (getattr default is None/"" on the
+#   manifest), matching OperationBase's "data file is optional" contract.
+# last_updated: 2026-07-21
 # ---
 
 """HeliumFillOperation — force all magnets to zero field and fill helium."""
@@ -54,13 +62,9 @@
 from __future__ import annotations
 
 import logging
-import math
-import tempfile
 import time
-from pathlib import Path
 from typing import Any
 
-from cryosoft.core.data_manager import DataManager
 from cryosoft.core.exceptions import CryoSoftConfigError
 from cryosoft.core.gates import Gate
 from cryosoft.core.operation import NextDue, OperationBase, ReadinessCondition
@@ -80,11 +84,6 @@ _REFRESH_FAST = 2
 # samples) is treated as flat/noise rather than "rising" — avoids the
 # completion clock resetting on floating-point/sim jitter.
 _RISE_NOISE_FLOOR_PCT = 1e-6
-
-# Safety margin (extra sample slots) added on top of the nominal
-# max_fill_duration_s / sample_period_s sample count when sizing the HDF5
-# file, so tick-interval jitter never overruns the pre-allocated dataset.
-_SAMPLE_COUNT_MARGIN = 5
 
 # Default advisory helium warning threshold (%), used by next_due() when the
 # config omits "helium_warning_pct" — matches read_cryogenics_config()'s own
@@ -106,18 +105,6 @@ def _humanize_duration_hours(hours: float) -> str:
     if hours >= 24.0:
         return f"{hours / 24.0:.1f} d"
     return f"{hours:.1f} h"
-
-
-def _default_data_directory() -> str:
-    """Return a safe fallback data directory for a fill with no caller-given one.
-
-    Never touched unless ``initiate()`` actually runs (construction alone —
-    the conformance suite's zero-argument-beyond-station check — never
-    creates it), so a plain temp subfolder is fine: a real deployment (or a
-    test) is expected to pass ``data_directory`` explicitly, exactly as
-    ``BaseProcedure`` callers always pass one.
-    """
-    return str(Path(tempfile.gettempdir()) / "cryosoft_operations")
 
 
 class HeliumFillOperation(OperationBase):
@@ -144,12 +131,26 @@ class HeliumFillOperation(OperationBase):
     has no magnets); ``next_due()`` predicts when the level will cross the
     configured warning threshold from the measured consumption rate passed
     in via ``context``.
+
+    No HDF5 file (docs/plans/operation-concurrency-and-error-scoping.md §4):
+    ``sample()`` appends to a bounded in-memory level curve instead of
+    writing a dataset, and ``run_summary()`` hands that curve to the session
+    layer (``CryogenicsRecorder``) when the run ends.
     """
 
     name = "Helium Fill"
     description = "Force all magnets to zero field and fill the helium reservoir"
     ready_message = "Ready — helium transfer can begin"
     tolerated_safety_flags = frozenset({"helium_low"})
+
+    #: Upper bound on the in-memory level curve (docs/plans/operation-
+    #: concurrency-and-error-scoping.md §4). Once ``sample()`` would exceed
+    #: this many points, the curve is decimated: every other point is
+    #: dropped (``series[::2]``) and the effective sample stride doubles, so
+    #: memory stays bounded for arbitrarily long/slow fills while the curve
+    #: still spans the whole run. A class attribute (not a config key) so a
+    #: test can lower it to force the decimation path deterministically.
+    _MAX_CURVE_POINTS: int = 4000
 
     def __init__(
         self,
@@ -173,9 +174,9 @@ class HeliumFillOperation(OperationBase):
                 ``helium_warning_pct`` (read by ``next_due()``, plan §12 —
                 the same key the recorder's advisory warning uses) — each
                 with a sane default matching §9 so this constructs from a
-                sim station alone. ``data_directory`` (not a §9 key) may
-                also be passed to control where the level-curve HDF5 file is
-                written; unrecognised keys are silently ignored, so
+                sim station alone. Unrecognised keys (including the retired
+                ``data_directory``, kept accepted-but-ignored for any caller
+                still passing it) are silently ignored, so
                 ``**read_cryogenics_config(config_path)`` can be passed
                 verbatim.
 
@@ -211,9 +212,6 @@ class HeliumFillOperation(OperationBase):
         self._warning_pct: float = float(
             config.get("helium_warning_pct", _DEFAULT_WARNING_PCT)
         )
-        self._data_directory: str = str(
-            config.get("data_directory") or _default_data_directory()
-        )
 
         if not station.has_vi(self._level_vi_name):
             raise CryoSoftConfigError(
@@ -222,9 +220,6 @@ class HeliumFillOperation(OperationBase):
             )
         self._magnets: list[str] = station.magnet_vi_names()
 
-        self._data_manager: DataManager | None = None
-        self._n_sweep_points: int = 1
-        self._sample_index: int = 0
         self._start_time: float | None = None
         self._start_level_pct: float | None = None
         self._last_level_pct: float | None = None
@@ -233,22 +228,47 @@ class HeliumFillOperation(OperationBase):
         # unmet. Reset to None on any rise (see sample()).
         self._stable_since: float | None = None
 
+        # Bounded in-memory level curve (plan §4): parallel lists, appended
+        # to by sample(), decimated (see _MAX_CURVE_POINTS) rather than
+        # written to an HDF5 file. _curve_stride is the "keep every Nth raw
+        # sample" factor, doubled each time decimation runs;
+        # _curve_raw_count counts raw sample() calls since the last stride
+        # change so the stride is actually honoured going forward (not just
+        # at the moment of decimation).
+        self._curve_unix_time: list[float] = []
+        self._curve_helium_pct: list[float] = []
+        self._curve_stride: int = 1
+        self._curve_raw_count: int = 0
+
     # ------------------------------------------------------------------
-    # Public read-only surface (mirrors BaseProcedure.data_filepath)
+    # Session hand-off (docs/plans/operation-concurrency-and-error-
+    # scoping.md §4)
     # ------------------------------------------------------------------
 
-    @property
-    def data_filepath(self) -> str | None:
-        """Absolute path of this fill's level-curve HDF5 file, or ``None``.
+    def run_summary(self) -> dict[str, Any]:
+        """Return the bounded level curve plus start/end level, for the run manifest.
 
-        Remains available while the file is open; ``standby()``/``abort()``
-        close it and this reverts to ``None`` — callers that need the path
-        across the whole run (the Orchestrator's run manifest) capture it at
-        start, exactly as for a procedure.
+        Called once by the Orchestrator on ``run_finished`` (see
+        ``OperationBase.run_summary()``); ``CryogenicsRecorder`` reads this
+        back off ``manifest["summary"]`` and stores the curve alongside the
+        cryogenics-log entry it already writes for a finished fill.
+
+        Returns:
+            ``{"level_curve": {"unix_time": [...], "helium_pct": [...]},
+            "start_pct": float, "end_pct": float}`` — every value JSON-safe
+            (plain floats and lists). ``start_pct``/``end_pct`` are ``0.0``
+            if the fill ended before its first sample (mirrors the ``or
+            0.0`` fallback ``CryogenicsRecorder`` already uses for a level
+            it never observed).
         """
-        if self._data_manager is None:
-            return None
-        return str(self._data_manager.filepath)
+        return {
+            "level_curve": {
+                "unix_time": list(self._curve_unix_time),
+                "helium_pct": list(self._curve_helium_pct),
+            },
+            "start_pct": float(self._start_level_pct or 0.0),
+            "end_pct": float(self._last_level_pct or 0.0),
+        }
 
     def claimed_vi_names(self) -> set[str]:
         """Claim the level meter and every magnet (plan's admission gate, §1).
@@ -392,44 +412,20 @@ class HeliumFillOperation(OperationBase):
     # ------------------------------------------------------------------
 
     def initiate(self) -> PhasePlan:
-        """Ramp every magnet to zero field, switch to FAST refresh, open the file.
+        """Ramp every magnet to zero field and switch the level meter to FAST.
 
         Returns:
             A ``PhasePlan`` with every magnet targeted at 0 T and the level
             meter's ``set_refresh_rate(mode=FAST)`` command.
         """
-        self._n_sweep_points = max(
-            1,
-            math.ceil(self._max_fill_duration_s / max(self._sample_period_s, 0.1))
-            + _SAMPLE_COUNT_MARGIN,
-        )
-        sweep_columns = {
-            "unix_time": "float",
-            "helium_pct": "float",
-            **{f"field_T_{magnet}": "float" for magnet in self._magnets},
-        }
-        self._data_manager = DataManager(
-            data_directory=self._data_directory,
-            procedure_name=self.name,
-            procedure_params=self.get_params(),
-            sample_info={},
-            instrument_state=self._station.cached_state,
-            system_targets={magnet: {"target": 0.0} for magnet in self._magnets},
-            measurement_commands=[
-                {
-                    "vi_name": self._level_vi_name,
-                    "method": "set_refresh_rate",
-                    "kwargs": {"mode": _REFRESH_FAST},
-                }
-            ],
-            data_config={"sweep_columns": sweep_columns, "measurement_arrays": {}},
-            n_sweep_points=self._n_sweep_points,
-        )
-        self._sample_index = 0
         self._start_time = time.time()
         self._start_level_pct = None
         self._last_level_pct = None
         self._stable_since = None
+        self._curve_unix_time = []
+        self._curve_helium_pct = []
+        self._curve_stride = 1
+        self._curve_raw_count = 0
 
         logger.info(
             "HeliumFillOperation.initiate(): %d magnet(s) to zero field, "
@@ -473,17 +469,20 @@ class HeliumFillOperation(OperationBase):
         )
 
     def sample(self) -> None:
-        """Read the helium level + every magnet's field, and save one datapoint.
+        """Read the helium level and append it to the bounded in-memory curve.
 
         Tracks the start level (first sample), the last level, and the
         "stable since" clock the completion condition in ``step()`` reads:
         the clock resets on any rise and (re)starts once the level is both
-        non-rising and at/above ``fill_target_pct``.
+        non-rising and at/above ``fill_target_pct``. Magnet fields are not
+        recorded: zero field is this operation's own invariant (see
+        ``claimed_vi_names()``), and the curve's purpose is level-vs-time,
+        not a full station snapshot.
 
         Raises:
             RuntimeError: If called before ``initiate()``.
         """
-        if self._data_manager is None:
+        if self._start_time is None:
             raise RuntimeError("HeliumFillOperation.sample() called before initiate()")
 
         level_vi = self._station.get_vi(self._level_vi_name)
@@ -506,19 +505,33 @@ class HeliumFillOperation(OperationBase):
             self._stable_since = None
         self._last_level_pct = helium_pct
 
-        datapoint: dict[str, Any] = {"unix_time": now, "helium_pct": helium_pct}
-        for magnet in self._magnets:
-            datapoint[f"field_T_{magnet}"] = float(
-                self._station.get_vi(magnet).get_field()
-            )
+        self._append_curve_point(now, helium_pct)
 
-        sweep_index = min(self._sample_index, self._n_sweep_points - 1)
-        self._data_manager.save_datapoint(
-            sweep_index=sweep_index,
-            measured_data=datapoint,
-            station_snapshot=self._station.cached_state,
-        )
-        self._sample_index += 1
+    def _append_curve_point(self, unix_time: float, helium_pct: float) -> None:
+        """Append one point to the bounded in-memory level curve, decimating if full.
+
+        Decimation strategy (docs/plans/operation-concurrency-and-error-
+        scoping.md §4): only every ``_curve_stride``-th raw sample is kept
+        (starting at 1, i.e. every sample). Once the kept series would grow
+        past ``_MAX_CURVE_POINTS``, it is halved by keeping every other
+        point (``series[::2]``) and ``_curve_stride`` doubles — halving
+        both the current series and the future intake rate keeps the curve
+        bounded for arbitrarily long fills while still spanning the whole
+        run (never just the tail).
+
+        Args:
+            unix_time: The sample's wall-clock time.
+            helium_pct: The sample's helium level, in percent.
+        """
+        self._curve_raw_count += 1
+        if self._curve_raw_count % self._curve_stride != 0:
+            return
+        self._curve_unix_time.append(unix_time)
+        self._curve_helium_pct.append(helium_pct)
+        if len(self._curve_unix_time) > self._MAX_CURVE_POINTS:
+            self._curve_unix_time = self._curve_unix_time[::2]
+            self._curve_helium_pct = self._curve_helium_pct[::2]
+            self._curve_stride *= 2
 
     def step(self) -> StepPlan | None:
         """Keep sampling until the fill completes or times out.
@@ -552,13 +565,12 @@ class HeliumFillOperation(OperationBase):
         return StepPlan(targets={}, wait_s=self._sample_period_s)
 
     def standby(self) -> PhasePlan:
-        """Close the data file and restore SLOW refresh.
+        """Restore SLOW refresh.
 
         Returns:
             A ``PhasePlan`` with the level meter's
             ``set_refresh_rate(mode=SLOW)`` command.
         """
-        self._close_data_file()
         return PhasePlan(
             targets={},
             commands=(
@@ -568,12 +580,11 @@ class HeliumFillOperation(OperationBase):
         )
 
     def abort(self) -> tuple[Command, ...]:
-        """Close the data file and restore SLOW refresh (never leave it in FAST).
+        """Restore SLOW refresh (never leave the level meter in FAST).
 
         Returns:
             The level meter's ``set_refresh_rate(mode=SLOW)`` command.
         """
-        self._close_data_file()
         return (Command(self._level_vi_name, "set_refresh_rate", {"mode": _REFRESH_SLOW}),)
 
     def postcondition_gates(self) -> tuple[Gate, ...]:
@@ -619,13 +630,3 @@ class HeliumFillOperation(OperationBase):
             return 1.0
         progress = (self._last_level_pct - self._start_level_pct) / span
         return max(0.0, min(1.0, progress))
-
-    # ------------------------------------------------------------------
-    # Internal
-    # ------------------------------------------------------------------
-
-    def _close_data_file(self) -> None:
-        """Close the level-curve data file, if open (idempotent)."""
-        if self._data_manager is not None:
-            self._data_manager.close()
-            self._data_manager = None

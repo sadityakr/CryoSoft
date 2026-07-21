@@ -15,12 +15,16 @@ higher submission priority than a queued measurement procedure. See
 ## Architecture layer
 
 L4 (Operations — same layer as Procedures, a parallel contract). Sits above
-L3 (Orchestrator) and L2 (Station); an operation that wants a dataset (the
-fill's level curve) uses `DataManager` (L5) exactly like a procedure does.
+L3 (Orchestrator) and L2 (Station); an operation that wants an HDF5 dataset
+may still use `DataManager` (L5) exactly like a procedure does, but a small
+bounded in-memory series handed to the session layer via `run_summary()`
+(docs/plans/operation-concurrency-and-error-scoping.md §4 — e.g. the helium
+fill's level curve) is preferred when HDF5's column layout is not needed.
 
 ```
 GUI -> Orchestrator.run_operation()/queue_operation() -> Operation -> Station -> Virtual Instruments -> Drivers
                                                                 \-> DataManager -> HDF5 (optional)
+                                                                \-> run_summary() -> run manifest "summary" -> session layer
 ```
 
 ## Entry (how control/data enters this folder)
@@ -54,6 +58,7 @@ section — `measure()`/`change_sweep_step()` are final adapters over
 | `abort()` | `tuple[Command, ...]` | User abort / ERROR / EMERGENCY |
 | `initiation_gates()` | `tuple[Gate, ...]` | Once, before the first `sample()` |
 | `postcondition_gates()` | `tuple[Gate, ...]` | Evaluated once, immediately, as the run ends (right after `standby()`'s plan is dispatched) |
+| `run_summary()` | `dict` (JSON-safe) | Once, by the Orchestrator, when it emits `run_finished` — merged into the run manifest's `summary` key |
 
 An operation's plans may carry BOTH `"measurement"`- and `"operation"`-scope
 `@control` commands (`Station.send_measurement_commands(..., allowed_scope=
@@ -112,7 +117,12 @@ operation) — the capability a plain procedure's plan does not have.
 - An operation that wants a dataset creates its own `DataManager` in
   `initiate()` exactly as `BaseProcedure` does, and exposes `data_filepath`
   so the Orchestrator's run manifest captures the path; a data file is never
-  required (`OperationBase` has no default `DataManager`).
+  required (`OperationBase` has no default `DataManager`). An operation with
+  a small, bounded time series (e.g. the helium fill's level curve) should
+  prefer `run_summary() -> dict` instead: no file at all, no
+  `data_filepath` property needed — the Orchestrator merges the returned
+  dict into the run manifest's `summary` key on `run_finished` (duck-typed,
+  default `{}`, guarded so a broken override can never block the run).
 
 ## How to add a new module
 
@@ -171,5 +181,5 @@ already supports both, which is why this is declared, not hardcoded.
 | File | Responsibility | Key public API | Tests |
 |------|----------------|-----------------|-------|
 | `__init__.py` | Package marker | (none) | none |
-| `helium_fill.py` | Ramps every magnet (`Station.magnet_vi_names()`) to zero field, switches the level meter to FAST refresh, samples the helium level once per `sample_period_s` into an HDF5 curve, and finishes once the level holds at/above `fill_target_pct` for `fill_complete_window_s` (or `max_fill_duration_s` elapses); restores SLOW refresh on standby/abort and verifies it via `postcondition_gates()`. Tolerates `helium_low` (its whole purpose). `readiness_conditions()` exposes one aggregate `zero_field` row; `next_due()` predicts time-to-`helium_warning_pct` from the panel-supplied consumption rate (plan §12). `claimed_vi_names()` returns just the configured level meter — the VTI and everything else stays manually controllable during a fill. | `HeliumFillOperation` | `tests/test_helium_fill.py`, `tests/test_operation_readiness.py`, `tests/test_operations.py` |
+| `helium_fill.py` | Ramps every magnet (`Station.magnet_vi_names()`) to zero field, switches the level meter to FAST refresh, samples the helium level once per `sample_period_s` into a bounded in-memory curve (no HDF5 file — plan operation-concurrency-and-error-scoping.md §4), and finishes once the level holds at/above `fill_target_pct` for `fill_complete_window_s` (or `max_fill_duration_s` elapses); restores SLOW refresh on standby/abort and verifies it via `postcondition_gates()`. Tolerates `helium_low` (its whole purpose). `readiness_conditions()` exposes one aggregate `zero_field` row; `next_due()` predicts time-to-`helium_warning_pct` from the panel-supplied consumption rate (plan §12). `run_summary()` hands the level curve plus start/end level to the run manifest. `claimed_vi_names()` returns the configured level meter AND every magnet (it holds zero field as an invariant for the whole fill) — the VTI and everything else stays manually controllable during a fill. | `HeliumFillOperation` | `tests/test_helium_fill.py`, `tests/test_operation_readiness.py`, `tests/test_operations.py` |
 | `sample_change.py` | "Verify the cryostat is safe to open": ramps every magnet (`Station.magnet_vi_names()`) to zero field and the configured VTI VI to `target_temperature_K` (default 300 K), opens the first switch VI (if any), and sends `standby` to every measurement VI (`Station.measurement_vi_names()`). No sampling loop (`step()` returns `None` immediately) and no data file. `postcondition_gates()` verifies `zero_field`, `heater_off` (only for magnets whose cached state exposes `switch_heater_state`), `vti_at_target`, and — for the only supported `needle_valve: manual` mode — an **operator confirmation** (`needle_valve_confirmed`). `tolerated_safety_flags` is empty. `readiness_conditions()` mirrors the same four checks as live checklist rows; `config_key = "sample_change"` (plan §12). `claimed_vi_names()` returns exactly the magnets, VTI, switch (if any), and measurement VIs it commands in `initiate()`. | `SampleChangeOperation` | `tests/test_sample_change.py`, `tests/test_operation_readiness.py` |

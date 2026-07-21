@@ -11,6 +11,7 @@
 # last_updated: 2026-07-19
 # ---
 
+import json
 import logging
 import time
 
@@ -53,9 +54,12 @@ def test_declared_cryogenics_kind_shape():
         "helium_end_pct",
         "ln2_filled",
         "notes",
+        "level_curve",
     ]
     assert spec.fields["helium_start_pct"].type is float
     assert spec.fields["ln2_filled"].default is False
+    assert spec.fields["level_curve"].type is str
+    assert spec.fields["level_curve"].default == ""
 
 
 def test_declared_operations_kind_is_not_editable():
@@ -507,6 +511,11 @@ def test_recorder_writes_cryogenics_entry_for_fill(recorder, servicing_store):
             "finished_utc": "2026-07-19T10:45:00+00:00",
             "status": "done",
             "reason": "",
+            "summary": {
+                "level_curve": {"unix_time": [1.0, 2.0], "helium_pct": [40.0, 90.0]},
+                "start_pct": 40.0,
+                "end_pct": 90.0,
+            },
         }
     )
 
@@ -520,11 +529,103 @@ def test_recorder_writes_cryogenics_entry_for_fill(recorder, servicing_store):
     assert entry.values["helium_end_pct"] == 90.0
     assert entry.values["ln2_filled"] is False
     assert entry.values["notes"] == ""
+    assert json.loads(entry.values["level_curve"]) == {
+        "unix_time": [1.0, 2.0],
+        "helium_pct": [40.0, 90.0],
+    }
 
     # And the fill also produced an operations-stream audit entry.
     ops = servicing_store.entries("operations")
     assert len(ops) == 1
     assert ops[0].values["operation"] == "Helium Fill"
+
+
+def test_recorder_writes_empty_level_curve_when_summary_missing(recorder, servicing_store):
+    """A run_finished manifest with no "summary" key still writes a valid entry."""
+    recorder.on_run_started(
+        {"run_id": "fill3", "procedure": "Helium Fill", "started_utc": "2026-07-19T10:00:00+00:00"}
+    )
+    recorder.on_run_finished(
+        {
+            "run_id": "fill3",
+            "procedure": "Helium Fill",
+            "kind": "operation",
+            "params": {},
+            "started_utc": "2026-07-19T10:00:00+00:00",
+            "finished_utc": "2026-07-19T10:05:00+00:00",
+            "status": "done",
+            "reason": "",
+        }
+    )
+    entry = servicing_store.entries("cryogenics")[0]
+    assert entry.values["level_curve"] == ""
+
+
+@pytest.mark.parametrize(
+    "summary",
+    [
+        None,
+        "not a dict",
+        {"level_curve": "not a dict"},
+        {"level_curve": {"unix_time": "not a list", "helium_pct": [1.0]}},
+        {"level_curve": {"unix_time": [1.0]}},  # missing helium_pct
+    ],
+)
+def test_recorder_ignores_malformed_level_curve_summary(recorder, servicing_store, summary):
+    """A malformed/partial "summary" never raises; level_curve just defaults to ""."""
+    recorder.on_run_started(
+        {"run_id": "fill4", "procedure": "Helium Fill", "started_utc": "2026-07-19T10:00:00+00:00"}
+    )
+    recorder.on_run_finished(
+        {
+            "run_id": "fill4",
+            "procedure": "Helium Fill",
+            "kind": "operation",
+            "params": {},
+            "started_utc": "2026-07-19T10:00:00+00:00",
+            "finished_utc": "2026-07-19T10:05:00+00:00",
+            "status": "done",
+            "reason": "",
+            "summary": summary,
+        }
+    )
+    entry = servicing_store.entries("cryogenics")[0]
+    assert entry.values["level_curve"] == ""
+
+
+def test_old_format_cryogenics_line_without_level_curve_still_reads(servicing_store):
+    """A pre-existing JSONL line with no level_curve key stays readable (no rewrite)."""
+    path = servicing_store._path("cryogenics")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    old_line = {
+        "entry_id": "abc123",
+        "kind": "cryogenics",
+        "values": {
+            "person": "jdoe",
+            "start_utc": "2026-07-19T10:00:00+00:00",
+            "end_utc": "2026-07-19T11:00:00+00:00",
+            "helium_start_pct": 40.0,
+            "helium_end_pct": 90.0,
+            "ln2_filled": False,
+            "notes": "",
+            # deliberately no "level_curve" key — pre-dates this field
+        },
+        "source": "operation",
+        "run_id": "old_run",
+        "created_utc": "2026-07-19T11:00:00+00:00",
+        "revised_utc": "",
+        "revised_by": "",
+        "revision": 1,
+        "deleted": False,
+    }
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(old_line) + "\n")
+
+    entries = servicing_store.entries("cryogenics")
+    assert len(entries) == 1
+    assert entries[0].values["person"] == "jdoe"
+    assert "level_curve" not in entries[0].values
+    assert entries[0].values.get("level_curve", "") == ""
 
 
 def test_recorder_marks_unverified_fill_in_notes(recorder, servicing_store):

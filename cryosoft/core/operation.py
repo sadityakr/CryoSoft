@@ -15,7 +15,11 @@
 #   readiness_conditions()/next_due() hooks and the ready_message/config_key
 #   class attributes. Finish is immediate (docs/plans/operation-concurrency-
 #   and-error-scoping.md §2): postcondition_gates() is evaluated exactly once
-#   as the run ends, never held or timed out.
+#   as the run ends, never held or timed out. A duck-typed run_summary()
+#   hook (same plan, §4) lets a subclass hand a small JSON-serialisable
+#   summary (e.g. the helium fill's bounded in-memory level curve) to the
+#   session layer without an HDF5 file — the Orchestrator merges it into the
+#   run manifest's "summary" key on run_finished.
 # entry_point: Not run directly. Subclassed by concrete operations
 #   (``cryosoft.procedures.operations.*``).
 # dependencies:
@@ -24,10 +28,11 @@
 # input: |
 #   Concrete subclasses implement initiate()/step()/standby() (and optionally
 #   sample()/abort()/initiation_gates()/postcondition_gates()/
-#   readiness_conditions()/next_due()); the Orchestrator drives the lifecycle
-#   exactly like a BaseProcedure, submitted via Orchestrator.run_operation() /
-#   queue_operation(); the GUI's Operations panel drives readiness_conditions()
-#   /next_due() against per-tick state snapshots, never touching hardware.
+#   readiness_conditions()/next_due()/run_summary()); the Orchestrator drives
+#   the lifecycle exactly like a BaseProcedure, submitted via
+#   Orchestrator.run_operation() / queue_operation(); the GUI's Operations
+#   panel drives readiness_conditions()/next_due() against per-tick state
+#   snapshots, never touching hardware.
 # process: |
 #   measure() (final) forwards to sample(). change_sweep_step() (final)
 #   returns None once request_finish() has set the graceful-finish flag,
@@ -38,7 +43,9 @@
 #   PhasePlan / StepPlan / Command / Gate objects consumed by the
 #   Orchestrator, exactly like a BaseProcedure's. readiness_conditions() /
 #   next_due() output ReadinessCondition / NextDue objects consumed only by
-#   the GUI (never by the Orchestrator).
+#   the GUI (never by the Orchestrator). run_summary() outputs a plain dict
+#   consumed by the Orchestrator (merged into the run manifest) and, from
+#   there, the session layer (e.g. CryogenicsRecorder).
 # last_updated: 2026-07-21
 # ---
 
@@ -210,15 +217,19 @@ class OperationBase:
     Lifecycle (override in a concrete subclass):
         initiate() -> PhasePlan: Initial targets/commands, mirroring
             ``BaseProcedure.initiate()``. A DataManager is NOT required — an
-            operation that wants a dataset (e.g. the fill's level curve) may
-            create one and its manifest then carries the path like any run.
+            operation that wants an HDF5 dataset may still create one and its
+            manifest then carries the path like any run, but a small,
+            bounded, in-memory series (e.g. the helium fill's level curve,
+            handed to the session layer via ``run_summary()`` instead of a
+            data file) is preferred for anything that does not need HDF5's
+            random-access/column layout.
         step() -> StepPlan | None: Next tick's targets/wait, or ``None`` to
             end the operation (park via ``standby()``). Honoured only while
             ``request_finish()`` has not been called (see the adapter note
             above — once finish is requested, ``step()`` is never called
             again).
         sample() -> None: Optional per-tick observation hook (e.g. the fill
-            logs a level point). Default: no-op.
+            appends one bounded in-memory level point). Default: no-op.
         standby() -> PhasePlan: Park / safe-off plan, mirroring
             ``BaseProcedure.standby()``.
         abort() -> tuple[Command, ...]: Cleanup commands on user abort or
@@ -240,6 +251,15 @@ class OperationBase:
             (operations are not required to report progress).
         get_params() -> dict: Parameter values recorded in the run manifest,
             mirroring ``BaseProcedure.get_params()``. Default ``{}``.
+        run_summary() -> dict: A small, JSON-serialisable hand-off to the
+            session layer, merged into the run manifest's ``summary`` key
+            when the run ends (docs/plans/operation-concurrency-and-error-
+            scoping.md §4 — e.g. the helium fill's bounded in-memory level
+            curve). Default ``{}`` (nothing to hand off). Read duck-typed by
+            the Orchestrator via ``getattr`` — it never imports
+            ``OperationBase`` (contract C5) — and guarded by a broad
+            try/except there, so a broken override can never prevent the run
+            from finishing.
 
     Graceful finish (plan §4.3; immediate finish, operation-concurrency-and-
     error-scoping.md §2):
@@ -369,6 +389,25 @@ class OperationBase:
 
         Returns:
             ``{}`` by default.
+        """
+        return {}
+
+    def run_summary(self) -> dict[str, Any]:
+        """Return a small, JSON-serialisable hand-off for the session layer.
+
+        Called once by the Orchestrator when it emits ``run_finished``
+        (docs/plans/operation-concurrency-and-error-scoping.md §4), duck-typed
+        via ``getattr`` — the Orchestrator never imports ``OperationBase``
+        (contract C5) — and merged into the run manifest's ``summary`` key.
+        The call is guarded there by a broad try/except, so a subclass
+        override that raises can never prevent the run from finishing; it
+        just yields an empty ``summary``. Keep the return value small and
+        plain (``float``/``str``/``bool``/``list``/``dict`` only — no numpy
+        arrays, no HDF5 handles) since it round-trips through the manifest
+        signal and, from there, into a session-layer store.
+
+        Returns:
+            ``{}`` by default (nothing to hand off).
         """
         return {}
 

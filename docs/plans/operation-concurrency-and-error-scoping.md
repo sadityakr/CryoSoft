@@ -1,8 +1,10 @@
 # Operation concurrency and per-instrument error scoping
 
 Status: design agreed 2026-07-21 (Aditya + Claude); rev. 2 same day
-(immediate finish, hard ProcedureWindow separation). Implementation in
-progress on branch `claude/ops-concurrency`.
+(immediate finish, hard ProcedureWindow separation). IMPLEMENTED — all four
+phases landed on branch `claude/ops-concurrency` (2026-07-21/22), each with
+a green harness. Known follow-up: `operations_panel.py` still passes the
+retired `data_directory` kwarg into the fill factory (silently ignored).
 Builds on `docs/plans/cryogenics-logbook.md` (the operations design). This plan
 does not change the operation/procedure class split; it changes what an active
 run blocks and what an error blocks.

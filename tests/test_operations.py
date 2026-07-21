@@ -51,6 +51,7 @@ class SimpleOperation(OperationBase):
         standby_commands=(),
         postcondition_gates_factory=None,
         open_ended=True,
+        run_summary_factory=None,
     ) -> None:
         super().__init__()
         self._station = station
@@ -59,8 +60,10 @@ class SimpleOperation(OperationBase):
         self._standby_commands = tuple(standby_commands)
         self._postcondition_gates_factory = postcondition_gates_factory
         self._open_ended = open_ended
+        self._run_summary_factory = run_summary_factory
         self.sample_calls = 0
         self.postcondition_gates_calls = 0
+        self.run_summary_calls = 0
         # Minimal operator-confirmation surface, mirroring
         # SampleChangeOperation's confirm()/confirmed() (plan §8.2) closely
         # enough to exercise Orchestrator.confirm_operation()'s duck-typed
@@ -98,6 +101,12 @@ class SimpleOperation(OperationBase):
         if self._postcondition_gates_factory is None:
             return ()
         return self._postcondition_gates_factory()
+
+    def run_summary(self):
+        self.run_summary_calls += 1
+        if self._run_summary_factory is None:
+            return {}
+        return self._run_summary_factory()
 
 
 class BlockingProcedure:
@@ -141,7 +150,11 @@ def _fast_magnets(station):
 
 
 def _make_fill(station, tmp_path, **overrides) -> HeliumFillOperation:
-    """Build a fast, test-friendly HeliumFillOperation (mirrors test_helium_fill.py)."""
+    """Build a fast, test-friendly HeliumFillOperation (mirrors test_helium_fill.py).
+
+    ``tmp_path`` is accepted (and ignored) for call-site compatibility — the
+    fill no longer writes a data file.
+    """
     config = dict(
         fill_target_pct=50.0,  # sim ILM starts at 80% helium -> already "at target"
         fill_zero_field_eps_T=0.01,
@@ -149,7 +162,6 @@ def _make_fill(station, tmp_path, **overrides) -> HeliumFillOperation:
         fill_complete_window_s=0.03,
         max_fill_duration_s=30.0,
         sample_period_s=0.0,
-        data_directory=str(tmp_path),
     )
     config.update(overrides)
     return HeliumFillOperation(station, person="Alex Tech", **config)
@@ -397,6 +409,105 @@ def test_finish_operation_blocked_when_no_operation_running(orchestrator, statio
     orchestrator.finish_operation()
     assert blocked
     assert "no operation" in blocked[0].lower()
+
+
+# ── run_summary() hand-off (docs/plans/operation-concurrency-and-error-
+# scoping.md §4) ──────────────────────────────────────────────────────────
+
+
+def test_run_summary_merged_into_manifest_on_done(orchestrator, station, qtbot):
+    """A declared run_summary() lands under manifest["summary"] on a "done" finish."""
+    _fast_magnet(station)
+    op = SimpleOperation(
+        station,
+        open_ended=False,
+        run_summary_factory=lambda: {"level_curve": {"unix_time": [1.0], "helium_pct": [50.0]}},
+    )
+    orchestrator.run_operation(op)
+
+    finished = []
+    orchestrator.run_finished.connect(finished.append)
+    qtbot.waitUntil(lambda: bool(finished), timeout=2000)
+
+    assert op.run_summary_calls == 1
+    assert finished[0]["summary"] == {
+        "level_curve": {"unix_time": [1.0], "helium_pct": [50.0]}
+    }
+
+
+def test_run_summary_absent_yields_empty_summary(orchestrator, station, qtbot):
+    """An operation that never overrides run_summary() gets an empty (not missing) summary."""
+    _fast_magnet(station)
+    op = SimpleOperation(station, open_ended=False)
+    orchestrator.run_operation(op)
+
+    finished = []
+    orchestrator.run_finished.connect(finished.append)
+    qtbot.waitUntil(lambda: bool(finished), timeout=2000)
+
+    assert finished[0]["summary"] == {}
+
+
+def test_procedure_manifest_has_empty_summary(orchestrator, station, qtbot):
+    """A plain BaseProcedure-shaped run (no run_summary() at all) is unaffected."""
+    proc = BlockingProcedure(station)
+    orchestrator.run_procedure(proc)
+    assert orchestrator._procedure is proc
+
+    finished = []
+    orchestrator.run_finished.connect(finished.append)
+    orchestrator.abort_procedure()
+
+    assert finished[0]["summary"] == {}
+
+
+def test_run_summary_raising_does_not_prevent_run_finished(orchestrator, station, qtbot):
+    """A run_summary() override that raises never blocks run_finished; summary is empty."""
+    _fast_magnet(station)
+
+    def _broken_summary():
+        raise RuntimeError("boom")
+
+    op = SimpleOperation(station, open_ended=False, run_summary_factory=_broken_summary)
+    orchestrator.run_operation(op)
+
+    finished = []
+    orchestrator.run_finished.connect(finished.append)
+    qtbot.waitUntil(lambda: bool(finished), timeout=2000)
+
+    assert finished[0]["status"] == "done"
+    assert finished[0]["summary"] == {}
+
+
+def test_run_summary_non_dict_return_yields_empty_summary(orchestrator, station, qtbot):
+    """A run_summary() that returns a non-dict is treated as broken, not propagated."""
+    _fast_magnet(station)
+    op = SimpleOperation(station, open_ended=False, run_summary_factory=lambda: ["not", "a", "dict"])
+    orchestrator.run_operation(op)
+
+    finished = []
+    orchestrator.run_finished.connect(finished.append)
+    qtbot.waitUntil(lambda: bool(finished), timeout=2000)
+
+    assert finished[0]["summary"] == {}
+
+
+def test_run_summary_merged_into_manifest_on_abort(orchestrator, station, qtbot):
+    """The abort path also collects run_summary() (before self._procedure is cleared)."""
+    op = SimpleOperation(
+        station,
+        open_ended=True,
+        run_summary_factory=lambda: {"partial": True},
+    )
+    orchestrator.run_operation(op)
+    assert orchestrator._procedure is op
+
+    finished = []
+    orchestrator.run_finished.connect(finished.append)
+    orchestrator.abort_procedure()
+
+    assert finished[0]["status"] == "aborted"
+    assert finished[0]["summary"] == {"partial": True}
 
 
 # ── confirm_operation() (plan §8.2) ───────────────────────────────────────

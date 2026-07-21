@@ -133,6 +133,16 @@ file-format change, not a routine edit.
 - **Log kinds are declarations.** Adding a servicing log for a new setup is
   one `LogKindSpec` in `DECLARED_LOG_KINDS`, never new store or GUI code —
   see `LogKindSpec`'s docstring and `docs/plans/cryogenics-logbook.md` §6.1.
+- **Operation data hand-off without a file** (docs/plans/operation-
+  concurrency-and-error-scoping.md §4): `CryogenicsRecorder.on_run_finished`
+  reads the duck-typed `run_summary()` result off the Orchestrator's
+  `run_finished` manifest (`manifest["summary"]`) and persists it alongside
+  the record it already writes — e.g. the `cryogenics` kind's `level_curve`
+  field carries `HeliumFillOperation`'s bounded in-memory level curve as a
+  JSON string, with no HDF5 file involved. Adding a new field to an existing
+  kind is backward-compatible by construction: `ServicingLogStore` never
+  rewrites an existing line, so an old entry simply lacks the new key —
+  readers must use `.get(field, default)`, never index it directly.
 
 ## How to add a new module
 
