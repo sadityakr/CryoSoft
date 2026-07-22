@@ -52,6 +52,24 @@ Overrides the default in `setup-supervisor/references/safe-testing.md`
 
 ## Known Quirks & Setup-Specific Notes
 
+- 2026-07-22: DC mode (K6220 + 2182A on its own GPIB address) hit `-221
+  "Settings conflict"` on every `set_current()` call at real currents (e.g.
+  ±100 µA), while completely silent at nA-scale test currents — no exception
+  anywhere, only visible on the K6220's own front-panel display (the driver
+  never polled `:SYST:ERR?`). Root cause, confirmed live: delta mode fixes
+  the current range to match its configured high-current
+  (`:SOUR:DELT:HIGH`/`:SOUR:DELT:LOW`) and leaves `:SOUR:CURR:RANG:AUTO`
+  OFF, with nothing to undo it — verified `:SOUR:CURR:RANG:AUTO?` reading
+  `0` and `:SOUR:CURR:RANG?` fixed at `2e-6` A after an earlier delta run,
+  which silently rejects any later DC-mode current above that leftover
+  ceiling. `Keithley6221.set_current()` now unconditionally sends
+  `:SOUR:CURR:RANG:AUTO ON` before every `:SOUR:CURR` write (same
+  defense-in-depth already applied to `:SOUR:SWE:ABOR`), and logs a WARNING
+  via a new `:SYST:ERR?` check if a command is still rejected for any other
+  reason. Full diagnosis in `LOGBOOK.md` (2026-07-22 entries) and
+  `cryosoft/drivers/keithley_6221.py::set_current()`. Live-verified: forcing
+  autorange ON immediately resolved ±100 µA sourcing with the error queue
+  staying clean.
 - 2026-07-20: Delta mode (K6220 + 2182A via serial relay) hung intermittently
   and looked like a GPIB-vs-RS-232 comm problem, but the real cause was the
   K6220's `CALC1` calculation stage being disabled — the driver now forces it

@@ -113,23 +113,40 @@ class Keithley6221:
 
         Unconditionally aborts any running sweep/delta/pulse-delta engine
         first (``:SOUR:SWE:ABOR`` — the same documented recovery command
-        ``_program_delta_mode()`` leads with and ``stop_delta_mode()`` uses).
-        This makes the call self-recovering regardless of whether the
-        instrument was previously left in delta mode by another measurement
-        VI sharing this same physical 6221 (see the "shared-instrument mode
-        discipline" standard in ``virtual_instruments/measurement/README.md``)
-        — callers never need to know or care what mode the instrument was
-        last in. (Previously sent ``:SOUR:CURR:MODE FIX``, which is not a
-        documented 622x command — see Table 14-6, Source command summary, in
-        the 622x SCPI reference; ``:SOUR:SWE:ABOR`` is the actual documented
-        abort mechanism and is already proven elsewhere in this file.)
+        ``_program_delta_mode()`` leads with and ``stop_delta_mode()`` uses)
+        and unconditionally re-enables autorange (``:SOUR:CURR:RANG:AUTO
+        ON``). Both make the call self-recovering regardless of what a prior
+        measurement VI sharing this same physical 6221 left behind (see the
+        "shared-instrument mode discipline" standard in
+        ``virtual_instruments/measurement/README.md``) — callers never need
+        to know or care what mode/range the instrument was last in.
+        (Previously sent ``:SOUR:CURR:MODE FIX``, which is not a documented
+        622x command — see Table 14-6, Source command summary, in the 622x
+        SCPI reference; ``:SOUR:SWE:ABOR`` is the actual documented abort
+        mechanism and is already proven elsewhere in this file.)
+
+        Live commissioning against a real 6221 (2026-07-22) found ``-221
+        "Settings conflict"`` on every DC-mode current-set call after delta
+        mode had run earlier in the session: delta mode fixes the current
+        range to match its configured high-current and leaves autorange OFF
+        (``:SOUR:DELT:HIGH``/``:SOUR:DELT:LOW`` do this as a side effect,
+        with nothing to undo it afterward), so a later DC-mode current far
+        outside that leftover fixed range was rejected outright — the
+        source silently stayed at its previous value (readback confirmed via
+        ``:SOUR:CURR?``) with no exception raised, since a SCPI-level error
+        is only visible on the instrument's own front panel or by polling
+        ``:SYST:ERR?`` (see ``_check_error_queue()``). Re-asserting autorange
+        here every call closes that gap the same way ``:SOUR:SWE:ABOR``
+        already closes the analogous armed-engine gap.
 
         Args:
             current: Desired current in Amperes.
         """
         self._write(":SOUR:SWE:ABOR")
+        self._write(":SOUR:CURR:RANG:AUTO ON")
         self._write(f":SOUR:CURR {current:.9e}")
         self._write("OUTP " + ("ON" if current != 0.0 else "OFF"))
+        self._check_error_queue(f"set_current({current!r})")
 
     def set_compliance(self, compliance_v: float) -> None:
         """Set the voltage compliance limit.
@@ -138,6 +155,7 @@ class Keithley6221:
             compliance_v: Maximum output voltage in Volts.
         """
         self._write(f":SOUR:CURR:COMP {compliance_v:.4e}")
+        self._check_error_queue(f"set_compliance({compliance_v!r})")
 
     def get_compliance(self) -> float:
         """Return the configured voltage compliance limit in Volts."""
@@ -590,3 +608,28 @@ class Keithley6221:
                 f"Keithley 6221: unparseable response to {cmd!r}: {raw!r}",
                 vi_name="Keithley6221",
             ) from exc
+
+    def _check_error_queue(self, context: str) -> None:
+        """Poll the error queue and log any SCPI error the last command queued.
+
+        A rejected SCPI command (e.g. "-221,Settings conflict") is never
+        raised by ``_write()`` — the 622x accepts the write over GPIB and
+        queues the error internally without complaint, so a conflicting
+        command has historically been invisible to CryoSoft, showing only on
+        the instrument's own front panel (live commissioning, 2026-07-22:
+        DC-mode current-source calls were being silently rejected on real
+        hardware with no trace in ``cryosoft.log``). Logs a WARNING tagged
+        with what was just attempted instead of raising, so a single rejected
+        point does not abort an otherwise-recoverable run — this is
+        diagnostic visibility, not a new correctness guarantee.
+
+        Args:
+            context: Human-readable description of the command just sent,
+                e.g. ``"set_current(0.0001)"``.
+        """
+        try:
+            reply = self._query(":SYST:ERR?").strip()
+        except CryoSoftCommunicationError:
+            return
+        if not reply.startswith("0,"):
+            log.warning("Keithley 6221: SCPI error after %s: %s", context, reply)
