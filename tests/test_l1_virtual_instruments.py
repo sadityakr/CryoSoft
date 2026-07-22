@@ -518,6 +518,48 @@ def test_dc_mode_measurement_vi_lifecycle():
         vi.take_reading()
 
 
+def test_dc_mode_initiate_resets_source_before_compliance():
+    """initiate_measurement() must force a known-idle source before arming.
+
+    Live commissioning against a real 6221 (2026-07-22) hit -221 "Settings
+    conflict" on the very first command of a second run of the same DC-mode
+    loop, even though the prior run's standby() had already zeroed the
+    source — initiate_measurement() set compliance first, with nothing of
+    its own to abort a state standby() might have left armed. Pins the fix:
+    a reset-to-zero call (which drives the real driver's :SOUR:SWE:ABORt)
+    must land before compliance is (re)programmed on every initiate_measurement()
+    call, not just relying on the previous run's standby() to have done it.
+    """
+    from cryosoft.virtual_instruments.measurement.measurement_dc_mode import DCModeMeasurementVI
+
+    class RecordingSource(SimKeithley6221):
+        def __init__(self, resource_string: str) -> None:
+            super().__init__(resource_string)
+            self.calls: list[str] = []
+
+        def set_current(self, current: float) -> None:
+            self.calls.append(f"set_current({current!r})")
+            super().set_current(current)
+
+        def set_compliance(self, compliance_v: float) -> None:
+            self.calls.append(f"set_compliance({compliance_v!r})")
+            super().set_compliance(compliance_v)
+
+    source = RecordingSource("SIM")
+    meter = SimKeithley2182A("SIM")
+    source._paired_meter = meter
+    vi = DCModeMeasurementVI({"source": source, "meter": meter})
+
+    vi.initiate_measurement(current=2e-6, n_readings=1, compliance_V=2.0)
+
+    # A reset-to-zero must precede compliance being (re)armed, then the real
+    # target current is set last.
+    reset_idx = source.calls.index("set_current(0.0)")
+    compliance_idx = source.calls.index("set_compliance(2.0)")
+    target_idx = source.calls.index("set_current(2e-06)")
+    assert reset_idx < compliance_idx < target_idx
+
+
 def test_dc_mode_measurement_compliance_abort():
     import math
     from cryosoft.virtual_instruments.measurement.measurement_dc_mode import DCModeMeasurementVI

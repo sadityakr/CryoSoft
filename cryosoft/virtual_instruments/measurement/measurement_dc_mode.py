@@ -16,7 +16,10 @@
 #   drivers = {"source": <K6221 driver>, "meter": <K2182A driver>}
 #   initiate_measurement() must be called before take_reading() or read_now().
 # process: |
-#   initiate_measurement() sets compliance and range and starts sourcing current.
+#   initiate_measurement() first forces the source to a known-idle state
+#   (set_current(0.0), which drives the real driver's :SOUR:SWE:ABORt) —
+#   never assumes a previous standby() left it idle (shared-instrument mode
+#   discipline) — then sets compliance and range and starts sourcing current.
 #   take_reading() collects n_readings voltage samples. If compliance_abort is
 #   enabled, it monitors source.is_in_compliance() before each reading and
 #   stops early if triggered, padding remaining spots with NaN. read_now()
@@ -230,6 +233,18 @@ class DCModeMeasurementVI(MeasurementInstrumentBase):
         source = self._source  # type: ignore[attr-defined]
         meter = self._meter    # type: ignore[attr-defined]
 
+        # Force a known-idle baseline (aborts any armed sweep/delta/pulse
+        # engine — set_current()'s :SOUR:SWE:ABOR) before touching compliance.
+        # Live commissioning against a real 6221 (2026-07-22) found a repeat
+        # run of this same DC-mode loop hit -221 "Settings conflict" on its
+        # very first command, even though the prior run's standby() already
+        # zeroed the source — sending :SOUR:CURR:COMP first, with no abort of
+        # its own, offered no protection against whatever state standby()
+        # left armed. This mirrors the same "shared-instrument mode
+        # discipline" defense-in-depth already applied to
+        # stop_delta_mode()/set_current() elsewhere in the K6221 driver: never
+        # assume the instrument is idle, always force it.
+        source.set_current(0.0)
         source.set_compliance(self._compliance_V)
         meter.set_range(self._voltmeter_range_V)
         source.set_current(self._current)
