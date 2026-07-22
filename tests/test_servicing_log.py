@@ -1,14 +1,18 @@
 # ---
 # description: |
 #   Behavior tests for the Servicing Log framework (cryosoft/session/servicing_log.py,
-#   Phase 1 of docs/plans/cryogenics-logbook.md): LogKindSpec validation,
-#   ServicingLogStore's entry-revision model (add/revise/delete round-trips,
-#   tombstone hiding, write validation, tolerant loads, non-editable-kind
-#   refusal), HeliumRecordStore (decimation via the recorder, rotation),
-#   consumption_rate_pct_per_h (fit + fill-interval exclusion + sign
-#   convention), and CryogenicsRecorder end-to-end against synthetic
-#   states_updated/run_started/run_finished payloads (no real Orchestrator).
-# last_updated: 2026-07-19
+#   Phase 1 of docs/plans/cryogenics-logbook.md, extended by Phase 1 of
+#   docs/plans/unified-servicing-log-and-run-recording.md): LogKindSpec
+#   validation, ServicingLogStore's entry-revision model (add/revise/delete
+#   round-trips, tombstone hiding, write validation, tolerant loads,
+#   non-editable-kind refusal), HeliumRecordStore (decimation via the
+#   recorder, rotation), consumption_rate_pct_per_h (fit + fill-interval
+#   exclusion + sign convention), CryogenicsRecorder end-to-end against
+#   synthetic states_updated/run_started/run_finished payloads (no real
+#   Orchestrator), the new flat "servicing" log kind's schema and add/revise
+#   for both origins, and migrate_legacy_servicing_log over synthetic legacy
+#   cryogenics.jsonl/operations.jsonl files.
+# last_updated: 2026-07-23
 # ---
 
 import json
@@ -25,6 +29,7 @@ from cryosoft.session.servicing_log import (
     LogKindSpec,
     ServicingLogStore,
     consumption_rate_pct_per_h,
+    migrate_legacy_servicing_log,
 )
 
 CONFIG_NAME = "sim_cryostat"
@@ -74,6 +79,42 @@ def test_declared_operations_kind_is_not_editable():
         "verified",
         "reason",
     }
+
+
+def test_declared_servicing_kind_shape():
+    spec = DECLARED_LOG_KINDS["servicing"]
+    assert spec.editable is True
+    assert list(spec.fields) == [
+        "entry_kind",
+        "person",
+        "start_utc",
+        "end_utc",
+        "helium_start_pct",
+        "helium_end_pct",
+        "ln2_start_pct",
+        "ln2_end_pct",
+        "notes",
+        "recording",
+        "origin",
+    ]
+    assert spec.fields["entry_kind"].type is str
+    assert spec.fields["entry_kind"].default == "manual"
+    assert spec.fields["entry_kind"].choices is None  # open-ended, not an enum
+    for pct_field in (
+        "helium_start_pct",
+        "helium_end_pct",
+        "ln2_start_pct",
+        "ln2_end_pct",
+    ):
+        assert spec.fields[pct_field].type is float
+        assert spec.fields[pct_field].default == 0.0
+    assert spec.fields["recording"].type is str
+    assert spec.fields["recording"].default == ""
+    assert spec.fields["origin"].type is str
+    assert spec.fields["origin"].default == "manual"
+    assert spec.fields["origin"].choices == {"Machine": "machine", "Manual": "manual"}
+    # No status field: the unification drops the old operations-kind status.
+    assert "status" not in spec.fields
 
 
 def test_log_kind_spec_rejects_bad_key():
@@ -207,6 +248,70 @@ def test_entries_newest_first_by_created_time(servicing_store):
     entries = servicing_store.entries("cryogenics")
     assert [e.values["notes"] for e in entries] == ["second", "first-edited"]
     assert entries[0].entry_id == second.entry_id
+
+
+# ── The "servicing" kind: add/revise/delete for BOTH origins ────────────────
+
+
+def _servicing_values(**overrides):
+    values = {
+        "entry_kind": "helium_fill",
+        "person": "jdoe",
+        "start_utc": "2026-07-23T10:00:00+00:00",
+        "end_utc": "2026-07-23T11:00:00+00:00",
+        "helium_start_pct": 40.0,
+        "helium_end_pct": 90.0,
+        "ln2_start_pct": 60.0,
+        "ln2_end_pct": 60.0,
+        "notes": "",
+        "recording": "",
+        "origin": "manual",
+    }
+    values.update(overrides)
+    return values
+
+
+@pytest.mark.parametrize("origin", ["manual", "machine"])
+def test_servicing_add_entry_round_trip_both_origins(servicing_store, origin):
+    entry = servicing_store.add_entry("servicing", _servicing_values(origin=origin))
+    assert entry.values["origin"] == origin
+    fetched = servicing_store.entries("servicing")
+    assert len(fetched) == 1
+    assert fetched[0] == entry
+
+
+@pytest.mark.parametrize("origin", ["manual", "machine"])
+def test_servicing_revise_entry_both_origins(servicing_store, origin):
+    original = servicing_store.add_entry(
+        "servicing", _servicing_values(origin=origin, notes="typo")
+    )
+    revised = servicing_store.revise_entry(
+        "servicing", original.entry_id, {"notes": "corrected"}, revised_by="tech1"
+    )
+    assert revised.values["origin"] == origin
+    assert revised.values["notes"] == "corrected"
+    assert revised.revision == 2
+
+
+@pytest.mark.parametrize("origin", ["manual", "machine"])
+def test_servicing_delete_entry_both_origins(servicing_store, origin):
+    entry = servicing_store.add_entry("servicing", _servicing_values(origin=origin))
+    tombstone = servicing_store.delete_entry("servicing", entry.entry_id, revised_by="tech1")
+    assert tombstone.deleted is True
+    assert servicing_store.entries("servicing") == []
+
+
+def test_servicing_rejects_unknown_origin_choice(servicing_store):
+    with pytest.raises(ValueError):
+        servicing_store.add_entry("servicing", _servicing_values(origin="alien"))
+
+
+def test_servicing_accepts_future_entry_kind_without_choices_restriction(servicing_store):
+    # entry_kind is deliberately open-ended (a future operation's config_key).
+    entry = servicing_store.add_entry(
+        "servicing", _servicing_values(entry_kind="vti_warmup")
+    )
+    assert entry.values["entry_kind"] == "vti_warmup"
 
 
 def test_revise_unknown_entry_raises(servicing_store):
@@ -658,3 +763,297 @@ def test_recorder_ignores_malformed_manifests(recorder, servicing_store):
     recorder.on_run_finished(
         {"procedure": "Helium Fill", "kind": "operation", "status": "done", "params": {}}
     )
+
+
+# ── migrate_legacy_servicing_log ─────────────────────────────────────────────
+
+
+def _write_jsonl(path, lines):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        for line in lines:
+            f.write(json.dumps(line) + "\n")
+
+
+def _legacy_cryo_line(
+    entry_id="cryo1",
+    person="jdoe",
+    start_utc="2026-07-20T10:00:00+00:00",
+    end_utc="2026-07-20T11:00:00+00:00",
+    helium_start_pct=40.0,
+    helium_end_pct=90.0,
+    ln2_filled=False,
+    notes="",
+    level_curve="",
+    source="operation",
+    run_id="fill1",
+    created_utc="2026-07-20T11:00:00+00:00",
+):
+    values = {
+        "person": person,
+        "start_utc": start_utc,
+        "end_utc": end_utc,
+        "helium_start_pct": helium_start_pct,
+        "helium_end_pct": helium_end_pct,
+        "ln2_filled": ln2_filled,
+        "notes": notes,
+    }
+    if level_curve:
+        values["level_curve"] = level_curve
+    return {
+        "entry_id": entry_id,
+        "kind": "cryogenics",
+        "values": values,
+        "source": source,
+        "run_id": run_id,
+        "created_utc": created_utc,
+        "revised_utc": "",
+        "revised_by": "",
+        "revision": 1,
+        "deleted": False,
+    }
+
+
+def _legacy_op_line(
+    entry_id="op1",
+    operation="Helium Fill",
+    params="{}",
+    started_utc="2026-07-20T10:00:00+00:00",
+    finished_utc="2026-07-20T11:00:00+00:00",
+    status="done",
+    reason="",
+    run_id="fill1",
+    created_utc="2026-07-20T11:00:00+00:00",
+):
+    return {
+        "entry_id": entry_id,
+        "kind": "operations",
+        "values": {
+            "operation": operation,
+            "params": params,
+            "started_utc": started_utc,
+            "finished_utc": finished_utc,
+            "status": status,
+            "verified": status == "done",
+            "reason": reason,
+        },
+        "source": "machine",
+        "run_id": run_id,
+        "created_utc": created_utc,
+        "revised_utc": "",
+        "revised_by": "",
+        "revision": 1,
+        "deleted": False,
+    }
+
+
+def test_migrate_no_legacy_files_is_noop(tmp_path):
+    root = tmp_path / "servicing"
+    assert migrate_legacy_servicing_log(root, CONFIG_NAME) is False
+    assert not (root / CONFIG_NAME / "servicing.jsonl").exists()
+
+
+def test_migrate_merges_matched_fill_into_one_entry(tmp_path):
+    root = tmp_path / "servicing"
+    config_dir = root / CONFIG_NAME
+    _write_jsonl(config_dir / "cryogenics.jsonl", [_legacy_cryo_line()])
+    _write_jsonl(config_dir / "operations.jsonl", [_legacy_op_line()])
+
+    assert migrate_legacy_servicing_log(root, CONFIG_NAME) is True
+
+    store = ServicingLogStore(root, CONFIG_NAME)
+    entries = store.entries("servicing")
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry.values["entry_kind"] == "helium_fill"
+    assert entry.values["person"] == "jdoe"
+    assert entry.values["start_utc"] == "2026-07-20T10:00:00+00:00"
+    assert entry.values["end_utc"] == "2026-07-20T11:00:00+00:00"
+    assert entry.values["helium_start_pct"] == 40.0
+    assert entry.values["helium_end_pct"] == 90.0
+    assert entry.values["ln2_start_pct"] == 0.0
+    assert entry.values["ln2_end_pct"] == 0.0
+    assert entry.values["notes"] == ""
+    assert entry.values["recording"] == ""
+    assert entry.values["origin"] == "machine"
+    assert entry.created_utc == "2026-07-20T11:00:00+00:00"
+
+
+def test_migrate_ln2_filled_becomes_note_with_zero_levels(tmp_path):
+    root = tmp_path / "servicing"
+    config_dir = root / CONFIG_NAME
+    _write_jsonl(config_dir / "cryogenics.jsonl", [_legacy_cryo_line(ln2_filled=True)])
+
+    migrate_legacy_servicing_log(root, CONFIG_NAME)
+
+    entry = ServicingLogStore(root, CONFIG_NAME).entries("servicing")[0]
+    assert entry.values["ln2_start_pct"] == 0.0
+    assert entry.values["ln2_end_pct"] == 0.0
+    assert "LN2 topped up" in entry.values["notes"]
+
+
+def test_migrate_non_done_status_and_params_appended_to_notes(tmp_path):
+    root = tmp_path / "servicing"
+    config_dir = root / CONFIG_NAME
+    _write_jsonl(config_dir / "cryogenics.jsonl", [_legacy_cryo_line()])
+    _write_jsonl(
+        config_dir / "operations.jsonl",
+        [
+            _legacy_op_line(
+                status="failed",
+                reason="level meter stale",
+                params='{"person": "jdoe"}',
+            )
+        ],
+    )
+
+    migrate_legacy_servicing_log(root, CONFIG_NAME)
+
+    entry = ServicingLogStore(root, CONFIG_NAME).entries("servicing")[0]
+    assert "legacy status=failed" in entry.values["notes"]
+    assert "level meter stale" in entry.values["notes"]
+    assert "jdoe" in entry.values["notes"]  # params JSON folded in
+
+
+def test_migrate_sample_change_becomes_its_own_entry(tmp_path):
+    root = tmp_path / "servicing"
+    config_dir = root / CONFIG_NAME
+    _write_jsonl(
+        config_dir / "operations.jsonl",
+        [
+            _legacy_op_line(
+                entry_id="op2",
+                operation="Sample Change",
+                started_utc="2026-07-21T09:00:00+00:00",
+                finished_utc="2026-07-21T09:30:00+00:00",
+                run_id="sc1",
+                created_utc="2026-07-21T09:30:00+00:00",
+            )
+        ],
+    )
+
+    migrate_legacy_servicing_log(root, CONFIG_NAME)
+
+    entries = ServicingLogStore(root, CONFIG_NAME).entries("servicing")
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry.values["entry_kind"] == "sample_change"
+    assert entry.values["start_utc"] == "2026-07-21T09:00:00+00:00"
+    assert entry.values["end_utc"] == "2026-07-21T09:30:00+00:00"
+    assert entry.values["origin"] == "machine"
+    assert entry.run_id == "sc1"
+
+
+def test_migrate_extracts_person_from_legacy_params(tmp_path):
+    # The legacy operations stream had no person column — it lived inside
+    # the params JSON. The migration must surface it into the entry's
+    # person field, not leave it buried in notes.
+    root = tmp_path / "servicing"
+    config_dir = root / CONFIG_NAME
+    _write_jsonl(
+        config_dir / "operations.jsonl",
+        [
+            _legacy_op_line(
+                operation="Sample Change",
+                params='{"person": "asmith", "vti_vi": "vti"}',
+            )
+        ],
+    )
+
+    migrate_legacy_servicing_log(root, CONFIG_NAME)
+
+    entry = ServicingLogStore(root, CONFIG_NAME).entries("servicing")[0]
+    assert entry.values["person"] == "asmith"
+
+
+def test_migrate_leaves_no_partial_file_and_no_tmp(tmp_path):
+    # Atomic-commit contract: after a successful migration there is exactly
+    # servicing.jsonl (no .tmp), and the legacy files are .bak-renamed.
+    root = tmp_path / "servicing"
+    config_dir = root / CONFIG_NAME
+    _write_jsonl(config_dir / "operations.jsonl", [_legacy_op_line()])
+
+    assert migrate_legacy_servicing_log(root, CONFIG_NAME) is True
+
+    assert (config_dir / "servicing.jsonl").is_file()
+    assert not (config_dir / "servicing.jsonl.tmp").exists()
+    assert not (config_dir / "operations.jsonl").exists()
+    assert (config_dir / "operations.jsonl.bak").is_file()
+
+
+def test_migrate_writes_curve_sidecar_and_sets_recording(tmp_path):
+    root = tmp_path / "servicing"
+    config_dir = root / CONFIG_NAME
+    curve = json.dumps({"unix_time": [1.0, 2.0], "helium_pct": [40.0, 90.0]})
+    _write_jsonl(
+        config_dir / "cryogenics.jsonl",
+        [_legacy_cryo_line(level_curve=curve, run_id="fill1")],
+    )
+    _write_jsonl(config_dir / "operations.jsonl", [_legacy_op_line(run_id="fill1")])
+
+    migrate_legacy_servicing_log(root, CONFIG_NAME, level_vi_name="level_meter")
+
+    entry = ServicingLogStore(root, CONFIG_NAME).entries("servicing")[0]
+    assert entry.values["recording"] == "fill1.json"
+    sidecar_path = config_dir / "recordings" / "fill1.json"
+    assert sidecar_path.is_file()
+    payload = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    assert payload == {
+        "unix_time": [1.0, 2.0],
+        "channels": {"level_meter.helium_pct": [40.0, 90.0]},
+    }
+
+
+def test_migrate_renames_legacy_files_to_bak(tmp_path):
+    root = tmp_path / "servicing"
+    config_dir = root / CONFIG_NAME
+    _write_jsonl(config_dir / "cryogenics.jsonl", [_legacy_cryo_line()])
+    _write_jsonl(config_dir / "operations.jsonl", [_legacy_op_line()])
+
+    migrate_legacy_servicing_log(root, CONFIG_NAME)
+
+    assert not (config_dir / "cryogenics.jsonl").exists()
+    assert not (config_dir / "operations.jsonl").exists()
+    assert (config_dir / "cryogenics.jsonl.bak").is_file()
+    assert (config_dir / "operations.jsonl.bak").is_file()
+
+
+def test_migrate_is_idempotent(tmp_path):
+    root = tmp_path / "servicing"
+    config_dir = root / CONFIG_NAME
+    _write_jsonl(config_dir / "cryogenics.jsonl", [_legacy_cryo_line()])
+    _write_jsonl(config_dir / "operations.jsonl", [_legacy_op_line()])
+
+    assert migrate_legacy_servicing_log(root, CONFIG_NAME) is True
+    entries_after_first = ServicingLogStore(root, CONFIG_NAME).entries("servicing")
+
+    # Second call: servicing.jsonl already exists -> no-op, nothing duplicated.
+    assert migrate_legacy_servicing_log(root, CONFIG_NAME) is False
+    entries_after_second = ServicingLogStore(root, CONFIG_NAME).entries("servicing")
+    assert len(entries_after_second) == len(entries_after_first) == 1
+
+
+def test_migrate_tolerates_corrupt_legacy_line(tmp_path, caplog):
+    root = tmp_path / "servicing"
+    config_dir = root / CONFIG_NAME
+    config_dir.mkdir(parents=True)
+    with (config_dir / "cryogenics.jsonl").open("a", encoding="utf-8") as f:
+        f.write(json.dumps(_legacy_cryo_line()) + "\n")
+        f.write("{not valid json\n")
+
+    with caplog.at_level(logging.WARNING):
+        assert migrate_legacy_servicing_log(root, CONFIG_NAME) is True
+
+    entries = ServicingLogStore(root, CONFIG_NAME).entries("servicing")
+    assert len(entries) == 1
+    assert any("corrupt" in record.message for record in caplog.records)
+
+
+def test_store_migrate_legacy_hook_delegates(tmp_path):
+    root = tmp_path / "servicing"
+    config_dir = root / CONFIG_NAME
+    _write_jsonl(config_dir / "cryogenics.jsonl", [_legacy_cryo_line()])
+
+    store = ServicingLogStore(root, CONFIG_NAME)
+    assert store.migrate_legacy() is True
+    assert len(store.entries("servicing")) == 1

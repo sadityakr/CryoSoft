@@ -13,12 +13,34 @@ eLab publishing track (`session/eln/`, planned) and the Agent Gateway
 
 Also hosts the **Servicing Log** framework (`servicing_log.py`): per-setup,
 typed, human-editable logs of servicing events (**log kind**, e.g. the
-**cryogenics log**), the machine-recorded **helium record**, and the
-`CryogenicsRecorder` automatic writer — independent of experiments, what
-technical staff consult and maintain. See
-`docs/plans/cryogenics-logbook.md` §3/§6 and the **Servicing log** / **Log
-kind** / **Cryogenics log** / **Entry revision** / **Helium record** entries
-in `GLOSSARY.md`.
+legacy **cryogenics log**, now unifying into the flat **servicing** kind —
+see below), the machine-recorded **helium record**, the `CryogenicsRecorder`
+automatic writer, and (Phase 1 of the unification) a pure legacy-migration
+routine — independent of experiments, what technical staff consult and
+maintain. See `docs/plans/cryogenics-logbook.md` §3/§6,
+`docs/plans/unified-servicing-log-and-run-recording.md` §2 (the unification),
+and the **Servicing log** / **Log kind** / **Cryogenics log** / **Entry
+revision** / **Helium record** / **Recording** entries in `GLOSSARY.md`.
+
+**Unification in progress** (`docs/plans/unified-servicing-log-and-run-
+recording.md`): the legacy `cryogenics` (editable, one entry per fill) and
+`operations` (machine-only audit trail) kinds are being superseded by ONE
+flat `servicing` kind — every entry, regardless of what happened
+(`entry_kind`: `"helium_fill"` / `"sample_change"` / a future operation's
+key / `"manual"`), shares exactly the same field table (`person`,
+`start_utc`/`end_utc`, `helium_start_pct`/`helium_end_pct`,
+`ln2_start_pct`/`ln2_end_pct`, `notes`, `recording`, `origin`) — no
+kind-specific columns, no `status` field. Phase 1 (this phase) adds the
+declaration, store support (`add_entry`/`revise_entry`/`delete_entry` work
+for both `origin="manual"` and `origin="machine"` entries — origin is a data
+field, not a per-kind editability flag), and
+`migrate_legacy_servicing_log()` (a pure function, plus
+`ServicingLogStore.migrate_legacy()`) that merges existing
+`cryogenics.jsonl`/`operations.jsonl` into `servicing.jsonl`, converts an
+embedded `level_curve` into a `recordings/<id>.json` sidecar, and renames
+the originals to `.bak`. **Nothing calls the migration automatically yet**
+and the legacy kinds/recorder are untouched — later phases rewire the
+recorder to write only `servicing` and wire the migration into startup.
 
 Not to be confused with `gui/form_autosave.py` (historically "the session
 model"): that is form persistence; this layer is experiment management.
@@ -172,4 +194,4 @@ file-format change, not a routine edit.
 | `models.py` | Tolerant-parse records: users, runs, experiments (incl. `queue` and `schema_version`), ELN links, servicing-log entries; envelope (de)serialisation. | `SCHEMA_VERSION`, `User`, `RunRecord`, `ExperimentRecord`, `ElnLink`, `ServiceLogEntry`, `envelope_to_dict`, `envelope_from_dict` | `tests/test_session_layer.py` / `tests/test_servicing_log.py` + conformance |
 | `store.py` | Disk persistence: per-experiment folders (`experiment.json`, `gui_state.json`, `data/`) + active pointer; user roster; bundle-relative data-path (de)resolution. | `ExperimentStore` (`list_experiments`, `load`, `save`, `get_active`, `set_active`, `make_experiment_id`, `data_dir`, `gui_state_path`, `relativize_data_file`, `resolve_data_file`), `UserRoster` (`list_users`, `get`, `add`) | `tests/test_session_layer.py` |
 | `manager.py` | The L6 façade: experiment lifecycle (incl. switching between open experiments and the run queue), automatic run recording from manifests, envelope installation, HDF5 context, save-health surfacing. | `SessionManager` (`start_experiment`, `close_experiment`, `set_findings`, `set_attended`, `set_queue`, `switch_experiment`, `current_data_dir`, `current_gui_state_path`, `experiment_context`, `current_experiment`; signals `experiment_changed`, `run_recorded`, `store_health_changed`) | `tests/test_session_layer.py` |
-| `servicing_log.py` | The Servicing Log framework: declared log kinds, revisioned per-kind storage, the hourly helium record, consumption fit, and the automatic recorder. | `LogKindSpec`, `DECLARED_LOG_KINDS`, `ServicingLogStore` (`add_entry`, `revise_entry`, `delete_entry`, `append_machine_entry`, `entries`, `revisions`), `HeliumRecordStore` (`append`, `samples`), `consumption_rate_pct_per_h`, `CryogenicsRecorder` (`on_states_updated`, `on_run_started`, `on_run_finished`; signal `cryo_warning`) | `tests/test_servicing_log.py` + conformance |
+| `servicing_log.py` | The Servicing Log framework: declared log kinds (incl. the unifying flat `servicing` kind), revisioned per-kind storage, the hourly helium record, consumption fit, the automatic recorder, and legacy-log migration. | `LogKindSpec`, `DECLARED_LOG_KINDS`, `ServicingLogStore` (`add_entry`, `revise_entry`, `delete_entry`, `append_machine_entry`, `entries`, `revisions`, `migrate_legacy`), `HeliumRecordStore` (`append`, `samples`), `consumption_rate_pct_per_h`, `CryogenicsRecorder` (`on_states_updated`, `on_run_started`, `on_run_finished`; signal `cryo_warning`), `migrate_legacy_servicing_log` | `tests/test_servicing_log.py` + conformance |
