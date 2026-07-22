@@ -22,8 +22,10 @@
 #   alongside a constant current array. set_source_current() reprograms only
 #   the source current between readings (the reading loop's setter command).
 # output: |
-#   {"voltage_V": list[float], "current_A": list[float]} of length
-#   readings_per_point.
+#   Mean/error/array triple per quantity: {"voltage_V": float, "voltage_V_error":
+#   float, "voltage_V_array": list[float], "current_A": float,
+#   "current_A_error": float, "current_A_array": list[float]}, arrays of
+#   length readings_per_point.
 # last_updated: 2026-07-17
 # ---
 
@@ -51,7 +53,9 @@ class DCSeparateMeasurementVI(DCMeasurementBase):
         vi.initiate_measurement(current_A=1e-6, compliance_A=1e-3, voltmeter_range_V=0.1,
                     readings_per_point=50)
         data = vi.take_reading()
-        # data = {"voltage_V": list[float](50,), "current_A": list[float](50,)}
+        # data = {"voltage_V": float, "voltage_V_error": float,
+        #         "voltage_V_array": list[float](50,), "current_A": float,
+        #         "current_A_error": float, "current_A_array": list[float](50,)}
 
     To swap to a single-instrument SMU, replace this VI with
     ``DCSingleInstrumentVI`` in the YAML config. The procedure is unchanged.
@@ -123,11 +127,13 @@ class DCSeparateMeasurementVI(DCMeasurementBase):
         source.set_current(self._current_A)
         meter.set_range(self._voltmeter_range_V)
 
-    def take_reading(self) -> dict[str, list[float]]:
+    def take_reading(self) -> dict[str, list[float] | float]:
         """Acquire ``readings_per_point`` DC voltage samples at the fixed current.
 
         Returns:
-            ``{"voltage_V": list[float], "current_A": list[float]}`` of length
+            The mean/error/array triple for both quantities (``voltage_V``,
+            ``voltage_V_error``, ``voltage_V_array``, ``current_A``,
+            ``current_A_error``, ``current_A_array``), arrays of length
             ``readings_per_point`` (fixed at ``initiate_measurement()``).
 
         Raises:
@@ -144,7 +150,17 @@ class DCSeparateMeasurementVI(DCMeasurementBase):
         for _ in range(self._readings_per_point):
             voltages.append(float(meter.get_voltage()))
             currents.append(current)
-        return {"voltage_V": voltages, "current_A": currents}
+
+        v_mean, v_error = self.mean_and_sem(voltages)
+        c_mean, c_error = self.mean_and_sem(currents)
+        return {
+            "voltage_V_array": voltages,
+            "voltage_V": v_mean,
+            "voltage_V_error": v_error,
+            "current_A_array": currents,
+            "current_A": c_mean,
+            "current_A_error": c_error,
+        }
 
     @control
     def set_source_current(self, current_A: float) -> None:

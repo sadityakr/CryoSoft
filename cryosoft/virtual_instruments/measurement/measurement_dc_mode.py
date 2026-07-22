@@ -24,8 +24,10 @@
 #   human-facing bench-test trigger, never called by a Procedure.
 #   standby() zeros the current source and resets the armed state.
 # output: |
-#   {"voltage_V": list[float](n_readings,), "current_A": list[float](n_readings,),
-#    "n_valid": int}
+#   Mean/error/array triple per quantity: {"voltage_V": float, "voltage_V_error":
+#   float, "voltage_V_array": list[float](n_readings,), "current_A": float,
+#   "current_A_error": float, "current_A_array": list[float](n_readings,),
+#   "n_valid": int}
 # last_updated: 2026-07-22
 # ---
 
@@ -63,7 +65,10 @@ class DCModeMeasurementVI(MeasurementInstrumentBase):
 
         vi.initiate_measurement(current=1e-6, n_readings=100)
         data = vi.take_reading()
-        # data = {"voltage_V": list(100,), "current_A": list(100,), "n_valid": int}
+        # data = {"voltage_V": float, "voltage_V_error": float,
+        #         "voltage_V_array": list(100,), "current_A": float,
+        #         "current_A_error": float, "current_A_array": list(100,),
+        #         "n_valid": int}
 
     Bench-testing from the GUI front panel uses ``read_now()`` instead:
     after ``initiate_measurement()`` arms the instruments, clicking
@@ -79,8 +84,13 @@ class DCModeMeasurementVI(MeasurementInstrumentBase):
     # Reading-loop declaration: the DC current. Can be changed in-place cheaply.
     reading_setters: ClassVar[dict[str, str]] = {"current": "set_dc_current"}
 
-    measurement_data_keys: ClassVar[list[str]] = ["voltage_V", "current_A"]
-    measurement_scalar_columns: ClassVar[dict[str, str]] = {"n_valid": "int"}
+    _ARRAY_KEYS, _SCALAR_COLUMNS = MeasurementInstrumentBase.quantity_columns(
+        "voltage_V", "current_A"
+    )
+    measurement_data_keys: ClassVar[list[str]] = _ARRAY_KEYS
+    measurement_scalar_columns: ClassVar[dict[str, str]] = {
+        **_SCALAR_COLUMNS, "n_valid": "int"
+    }
     measurement_parameters: ClassVar[dict[str, ParamSpec]] = {
         "current": ParamSpec(
             type=float,
@@ -151,7 +161,7 @@ class DCModeMeasurementVI(MeasurementInstrumentBase):
     # ------------------------------------------------------------------
 
     def data_arrays(self, params: Mapping[str, Any]) -> dict[str, int]:
-        """Return ``{"voltage_V": n, "current_A": n}`` with n = n_readings.
+        """Return ``{"voltage_V_array": n, "current_A_array": n}`` with n = n_readings.
 
         Args:
             params: Parameter mapping containing ``n_readings``.
@@ -168,7 +178,7 @@ class DCModeMeasurementVI(MeasurementInstrumentBase):
             ) from exc
         if n < 1:
             raise ValueError(f"DC VI: n_readings must be >= 1, got {n!r}")
-        return {"voltage_V": n, "current_A": n}
+        return {key: n for key in self.measurement_data_keys}
 
     # ------------------------------------------------------------------
     # @control — arm the measurement
@@ -257,15 +267,19 @@ class DCModeMeasurementVI(MeasurementInstrumentBase):
         """Most recent valid voltage from the last read_now() call, or None."""
         if self._last_reading is None or self._last_reading["n_valid"] == 0:
             return None
-        return self._last_reading["voltage_V"][self._last_reading["n_valid"] - 1]
+        return self._last_reading["voltage_V_array"][self._last_reading["n_valid"] - 1]
 
     @monitored
     def last_mean_voltage_V(self) -> float | None:
-        """Mean of the valid voltages from the last read_now() call, or None."""
+        """Mean voltage from the last read_now() call, or None.
+
+        Reads the mean ``take_reading()`` already computed (via
+        ``mean_and_sem``) rather than recomputing it, so there is one source
+        of truth for the mean/error/array triple.
+        """
         if self._last_reading is None or self._last_reading["n_valid"] == 0:
             return None
-        valid = self._last_reading["voltage_V"][: self._last_reading["n_valid"]]
-        return sum(valid) / len(valid)
+        return self._last_reading["voltage_V"]
 
     @monitored
     def last_n_valid(self) -> int | None:
@@ -299,7 +313,7 @@ class DCModeMeasurementVI(MeasurementInstrumentBase):
     # take_reading — NOT @monitored, NOT @control (Procedure-only)
     # ------------------------------------------------------------------
 
-    def take_reading(self) -> dict[str, list[float]]:
+    def take_reading(self) -> dict[str, list[float] | float]:
         """Collect one DC-mode datapoint from the armed instruments.
 
         Takes ``n_readings`` voltage samples. If ``compliance_abort`` is
@@ -325,7 +339,9 @@ class DCModeMeasurementVI(MeasurementInstrumentBase):
         actively corrupting the read path it was meant to protect.
 
         Returns:
-            ``{"voltage_V": list, "current_A": list, "n_valid": int}``.
+            The mean/error/array triple for both quantities (``voltage_V``,
+            ``voltage_V_error``, ``voltage_V_array``, ``current_A``,
+            ``current_A_error``, ``current_A_array``) plus ``n_valid``.
 
         Raises:
             RuntimeError: If ``initiate_measurement()`` has not been called first.
@@ -364,9 +380,16 @@ class DCModeMeasurementVI(MeasurementInstrumentBase):
             voltages.extend([nan] * pad)
             currents.extend([nan] * pad)
 
+        v_mean, v_error = self.mean_and_sem(voltages[:n_valid])
+        c_mean, c_error = self.mean_and_sem(currents[:n_valid])
+
         return {
-            "voltage_V": voltages,
-            "current_A": currents,
+            "voltage_V_array": voltages,
+            "voltage_V": v_mean,
+            "voltage_V_error": v_error,
+            "current_A_array": currents,
+            "current_A": c_mean,
+            "current_A_error": c_error,
             "n_valid": n_valid,
         }
 

@@ -4,9 +4,10 @@
 #   dataclasses (Target, Command, PhasePlan, StepPlan, ParamSpec, ParamGroup,
 #   DataSchema). Covers construction happy paths and defaults, frozen-ness,
 #   every eager validation rule (each asserting the error names the offending
-#   field), the DataSchema.multiplexed / validate behaviours, and defensive
-#   copying of dict fields.
-# last_updated: 2026-07-13
+#   field), DataSchema's loop_shape / validate behaviours (measurement columns
+#   carry a real (n_loop1, n_loop2[, length]) axis), and defensive copying of
+#   dict fields.
+# last_updated: 2026-07-22
 # ---
 
 import dataclasses
@@ -349,187 +350,223 @@ def test_paramgroup_params_defensive_copy():
 
 
 def test_dataschema_happy():
-    s = DataSchema(sweep_columns={"field_T": "float"}, arrays={"voltage_V": 10})
+    s = DataSchema(
+        sweep_columns={"field_T": "float"},
+        measurement_scalars={"voltage_V": "float"},
+        measurement_arrays={"voltage_V_array": 10},
+    )
     assert s.sweep_columns == {"field_T": "float"}
-    assert s.arrays == {"voltage_V": 10}
+    assert s.measurement_scalars == {"voltage_V": "float"}
+    assert s.measurement_arrays == {"voltage_V_array": 10}
+    assert s.loop_shape == (1, 1)  # default: no reading loop
+
+
+def test_dataschema_loop_shape_explicit():
+    s = DataSchema(
+        sweep_columns={}, measurement_scalars={}, measurement_arrays={},
+        loop_shape=(2, 3),
+    )
+    assert s.loop_shape == (2, 3)
+
+
+def test_dataschema_loop_shape_must_be_two_ints():
+    with pytest.raises(TypeError, match="loop_shape"):
+        DataSchema(
+            sweep_columns={}, measurement_scalars={}, measurement_arrays={},
+            loop_shape=(2,),
+        )
+
+
+def test_dataschema_loop_shape_entries_must_be_positive():
+    with pytest.raises(ValueError, match="loop_shape"):
+        DataSchema(
+            sweep_columns={}, measurement_scalars={}, measurement_arrays={},
+            loop_shape=(0, 1),
+        )
 
 
 def test_dataschema_bad_dtype():
     with pytest.raises(ValueError, match="sweep_columns"):
-        DataSchema(sweep_columns={"field_T": "complex"}, arrays={})
+        DataSchema(
+            sweep_columns={"field_T": "complex"},
+            measurement_scalars={},
+            measurement_arrays={},
+        )
+
+
+def test_dataschema_measurement_scalar_bad_dtype():
+    with pytest.raises(ValueError, match="measurement_scalars"):
+        DataSchema(
+            sweep_columns={},
+            measurement_scalars={"voltage_V": "complex"},
+            measurement_arrays={},
+        )
 
 
 def test_dataschema_array_length_must_be_positive():
-    with pytest.raises(ValueError, match="arrays"):
-        DataSchema(sweep_columns={}, arrays={"v": 0})
+    with pytest.raises(ValueError, match="measurement_arrays"):
+        DataSchema(sweep_columns={}, measurement_scalars={}, measurement_arrays={"v": 0})
 
 
 def test_dataschema_array_length_bool_rejected():
-    with pytest.raises(TypeError, match="arrays"):
-        DataSchema(sweep_columns={}, arrays={"v": True})
+    with pytest.raises(TypeError, match="measurement_arrays"):
+        DataSchema(sweep_columns={}, measurement_scalars={}, measurement_arrays={"v": True})
 
 
 def test_dataschema_empty_column_name():
     with pytest.raises(ValueError, match="sweep_columns"):
-        DataSchema(sweep_columns={"": "float"}, arrays={})
+        DataSchema(sweep_columns={"": "float"}, measurement_scalars={}, measurement_arrays={})
 
 
 def test_dataschema_frozen():
-    s = DataSchema(sweep_columns={}, arrays={})
+    s = DataSchema(sweep_columns={}, measurement_scalars={}, measurement_arrays={})
     with pytest.raises(dataclasses.FrozenInstanceError):
-        s.arrays = {}  # type: ignore[misc]
+        s.measurement_arrays = {}  # type: ignore[misc]
 
 
 def test_dataschema_defensive_copy():
     arrays = {"v": 10}
-    s = DataSchema(sweep_columns={}, arrays=arrays)
+    scalars = {"m": "float"}
+    s = DataSchema(sweep_columns={}, measurement_scalars=scalars, measurement_arrays=arrays)
     arrays["w"] = 5
-    assert "w" not in s.arrays
-
-
-# ── DataSchema.multiplexed ────────────────────────────────────────────────────
-
-
-def test_multiplexed_expands_and_orders_deterministically():
-    s = DataSchema(sweep_columns={"field_T": "float"}, arrays={"voltage_V": 10})
-    out = s.multiplexed(["Mux-Ch1", "Mux-Ch2"])
-    assert list(out.arrays.keys()) == ["voltage_V__Mux-Ch1", "voltage_V__Mux-Ch2"]
-    assert out.arrays["voltage_V__Mux-Ch1"] == 10
-    assert out.arrays["voltage_V__Mux-Ch2"] == 10
-    # sweep_columns unchanged
-    assert out.sweep_columns == {"field_T": "float"}
-
-
-def test_multiplexed_arrays_outer_routes_inner():
-    s = DataSchema(sweep_columns={}, arrays={"a": 2, "b": 3})
-    out = s.multiplexed(["r1", "r2"])
-    assert list(out.arrays.keys()) == ["a__r1", "a__r2", "b__r1", "b__r2"]
-
-
-def test_multiplexed_empty_routes():
-    s = DataSchema(sweep_columns={}, arrays={"a": 1})
-    with pytest.raises(ValueError, match="at least one route"):
-        s.multiplexed([])
-
-
-def test_multiplexed_route_with_separator():
-    s = DataSchema(sweep_columns={}, arrays={"a": 1})
-    with pytest.raises(ValueError, match="a__b"):
-        s.multiplexed(["a__b"])
-
-
-def test_multiplexed_route_with_slash():
-    s = DataSchema(sweep_columns={}, arrays={"a": 1})
-    with pytest.raises(ValueError, match="a/b"):
-        s.multiplexed(["a/b"])
-
-
-def test_multiplexed_duplicate_route():
-    s = DataSchema(sweep_columns={}, arrays={"a": 1})
-    with pytest.raises(ValueError, match="duplicated"):
-        s.multiplexed(["r1", "r1"])
-
-
-def test_multiplexed_scalar_columns_expanded_per_route():
-    """Named scalar columns are expanded per route; the original is removed."""
-    s = DataSchema(
-        sweep_columns={"field_T": "float", "n_valid": "int"},
-        arrays={"voltage_V": 10},
-    )
-    out = s.multiplexed(["Mux-Ch1", "Mux-Ch2"], scalar_columns=["n_valid"])
-    # Arrays expanded as before.
-    assert list(out.arrays.keys()) == ["voltage_V__Mux-Ch1", "voltage_V__Mux-Ch2"]
-    # n_valid expanded per route, dtype preserved, original removed; the
-    # unnamed field_T column passes through unchanged and keeps its position.
-    assert out.sweep_columns == {
-        "field_T": "float",
-        "n_valid__Mux-Ch1": "int",
-        "n_valid__Mux-Ch2": "int",
-    }
-    assert "n_valid" not in out.sweep_columns
-
-
-def test_multiplexed_unknown_scalar_column_rejected():
-    """A scalar_columns name absent from sweep_columns raises ValueError."""
-    s = DataSchema(sweep_columns={"field_T": "float"}, arrays={"a": 1})
-    with pytest.raises(ValueError, match="nope"):
-        s.multiplexed(["r1", "r2"], scalar_columns=["nope"])
-
-
-def test_multiplexed_default_scalar_columns_unchanged():
-    """The default (no scalar_columns) leaves sweep_columns byte-identical."""
-    s = DataSchema(
-        sweep_columns={"field_T": "float", "n_valid": "int"},
-        arrays={"voltage_V": 3},
-    )
-    out = s.multiplexed(["r1", "r2"])
-    assert out.sweep_columns == {"field_T": "float", "n_valid": "int"}
-    assert list(out.arrays.keys()) == ["voltage_V__r1", "voltage_V__r2"]
+    scalars["n"] = "int"
+    assert "w" not in s.measurement_arrays
+    assert "n" not in s.measurement_scalars
 
 
 # ── DataSchema.validate ───────────────────────────────────────────────────────
 
 
 def test_validate_passes():
-    s = DataSchema(sweep_columns={"field_T": "float"}, arrays={"voltage_V": 3})
-    assert s.validate({"field_T": 1.0, "voltage_V": [0.1, 0.2, 0.3]}) is None
+    s = DataSchema(
+        sweep_columns={"field_T": "float"},
+        measurement_scalars={"voltage_V": "float"},
+        measurement_arrays={"voltage_V_array": 3},
+    )
+    datapoint = {
+        "field_T": 1.0,
+        "voltage_V": [[0.2]],  # loop_shape (1, 1)
+        "voltage_V_array": [[[0.1, 0.2, 0.3]]],
+    }
+    assert s.validate(datapoint) is None
 
 
 def test_validate_int_dtype_accepts_int():
-    s = DataSchema(sweep_columns={"n": "int"}, arrays={})
+    s = DataSchema(sweep_columns={"n": "int"}, measurement_scalars={}, measurement_arrays={})
     assert s.validate({"n": 5}) is None
 
 
 def test_validate_missing_key():
-    s = DataSchema(sweep_columns={"field_T": "float"}, arrays={})
+    s = DataSchema(sweep_columns={"field_T": "float"}, measurement_scalars={}, measurement_arrays={})
     with pytest.raises(DataSchemaError, match="missing declared key 'field_T'"):
         s.validate({})
 
 
 def test_validate_extra_key():
-    s = DataSchema(sweep_columns={"field_T": "float"}, arrays={})
+    s = DataSchema(sweep_columns={"field_T": "float"}, measurement_scalars={}, measurement_arrays={})
     with pytest.raises(DataSchemaError, match="extra undeclared key 'junk'"):
         s.validate({"field_T": 1.0, "junk": 5})
 
 
 def test_validate_wrong_array_length():
-    s = DataSchema(sweep_columns={}, arrays={"voltage_V": 3})
-    with pytest.raises(DataSchemaError, match="voltage_V"):
-        s.validate({"voltage_V": [1, 2]})
+    s = DataSchema(sweep_columns={}, measurement_scalars={}, measurement_arrays={"voltage_V_array": 3})
+    with pytest.raises(DataSchemaError, match="voltage_V_array"):
+        s.validate({"voltage_V_array": [[[1, 2]]]})
 
 
 def test_validate_array_no_length():
-    s = DataSchema(sweep_columns={}, arrays={"voltage_V": 3})
-    with pytest.raises(DataSchemaError, match="no length"):
-        s.validate({"voltage_V": 42})
+    s = DataSchema(sweep_columns={}, measurement_scalars={}, measurement_arrays={"voltage_V_array": 3})
+    with pytest.raises(DataSchemaError, match="does not match shape"):
+        s.validate({"voltage_V_array": 42})
 
 
 def test_validate_wrong_scalar_type():
-    s = DataSchema(sweep_columns={"field_T": "float"}, arrays={})
+    s = DataSchema(sweep_columns={"field_T": "float"}, measurement_scalars={}, measurement_arrays={})
     with pytest.raises(DataSchemaError, match="field_T"):
         s.validate({"field_T": "high"})
 
 
 def test_validate_bool_scalar_rejected():
-    s = DataSchema(sweep_columns={"field_T": "float"}, arrays={})
+    s = DataSchema(sweep_columns={"field_T": "float"}, measurement_scalars={}, measurement_arrays={})
     with pytest.raises(DataSchemaError, match="field_T"):
         s.validate({"field_T": True})
 
 
 def test_validate_int_dtype_rejects_float():
-    s = DataSchema(sweep_columns={"n": "int"}, arrays={})
+    s = DataSchema(sweep_columns={"n": "int"}, measurement_scalars={}, measurement_arrays={})
     with pytest.raises(DataSchemaError, match="not an int"):
         s.validate({"n": 5.0})
 
 
 def test_validate_reports_multiple_problems_together():
-    s = DataSchema(sweep_columns={"field_T": "float"}, arrays={"voltage_V": 3})
+    s = DataSchema(
+        sweep_columns={"field_T": "float"},
+        measurement_scalars={},
+        measurement_arrays={"voltage_V_array": 3},
+    )
     with pytest.raises(DataSchemaError) as excinfo:
-        s.validate({"field_T": "bad", "voltage_V": [1, 2], "junk": 1})
+        s.validate({"field_T": "bad", "voltage_V_array": [[[1, 2]]], "junk": 1})
     msg = str(excinfo.value)
     assert "field_T" in msg
-    assert "voltage_V" in msg
+    assert "voltage_V_array" in msg
     assert "junk" in msg
+
+
+# ── DataSchema.validate — loop axis (measurement_scalars/measurement_arrays) ──
+
+
+def test_validate_measurement_scalar_matches_loop_shape():
+    s = DataSchema(
+        sweep_columns={}, measurement_scalars={"voltage_V": "float"},
+        measurement_arrays={}, loop_shape=(2, 2),
+    )
+    grid = [[1.0, 2.0], [3.0, 4.0]]
+    assert s.validate({"voltage_V": grid}) is None
+
+
+def test_validate_measurement_scalar_wrong_loop_shape():
+    s = DataSchema(
+        sweep_columns={}, measurement_scalars={"voltage_V": "float"},
+        measurement_arrays={}, loop_shape=(2, 2),
+    )
+    with pytest.raises(DataSchemaError, match="loop shape"):
+        s.validate({"voltage_V": [[1.0, 2.0]]})  # missing the second loop1 row
+
+
+def test_validate_measurement_scalar_leaf_type_checked():
+    s = DataSchema(
+        sweep_columns={}, measurement_scalars={"voltage_V": "float"},
+        measurement_arrays={}, loop_shape=(1, 2),
+    )
+    with pytest.raises(DataSchemaError, match="non-real-number"):
+        s.validate({"voltage_V": [[1.0, "bad"]]})
+
+
+def test_validate_measurement_scalar_int_dtype_leaf_rejects_float():
+    s = DataSchema(
+        sweep_columns={}, measurement_scalars={"n_valid": "int"},
+        measurement_arrays={}, loop_shape=(1, 2),
+    )
+    with pytest.raises(DataSchemaError, match="non-int value"):
+        s.validate({"n_valid": [[5, 5.0]]})
+
+
+def test_validate_measurement_array_matches_loop_shape_and_length():
+    s = DataSchema(
+        sweep_columns={}, measurement_scalars={},
+        measurement_arrays={"voltage_V_array": 3}, loop_shape=(2, 1),
+    )
+    grid = [[[1.0, 2.0, 3.0]], [[4.0, 5.0, 6.0]]]
+    assert s.validate({"voltage_V_array": grid}) is None
+
+
+def test_validate_measurement_array_wrong_loop_shape():
+    s = DataSchema(
+        sweep_columns={}, measurement_scalars={},
+        measurement_arrays={"voltage_V_array": 3}, loop_shape=(2, 1),
+    )
+    with pytest.raises(DataSchemaError, match="does not match shape"):
+        s.validate({"voltage_V_array": [[[1.0, 2.0, 3.0]]]})  # missing loop1 index 1
 
 
 # ── EnvelopeBound / SessionEnvelope ──────────────────────────────────────────

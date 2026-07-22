@@ -109,6 +109,57 @@ def test_communication_error_wrapping(monkeypatch):
     with pytest.raises(CryoSoftCommunicationError):
         vi.fail()
 
+
+# 3b. MeasurementInstrumentBase mean/error/array convention helpers
+def test_mean_and_sem_multiple_samples():
+    from cryosoft.virtual_instruments.base import MeasurementInstrumentBase
+
+    mean, sem = MeasurementInstrumentBase.mean_and_sem([1.0, 2.0, 3.0])
+    assert mean == pytest.approx(2.0)
+    # stdev([1,2,3], ddof=1) == 1.0; sem == 1.0 / sqrt(3)
+    assert sem == pytest.approx(1.0 / 3**0.5)
+
+
+def test_mean_and_sem_single_sample_has_zero_error():
+    from cryosoft.virtual_instruments.base import MeasurementInstrumentBase
+
+    mean, sem = MeasurementInstrumentBase.mean_and_sem([5.0])
+    assert mean == pytest.approx(5.0)
+    assert sem == 0.0
+
+
+def test_mean_and_sem_no_samples_is_nan():
+    from cryosoft.virtual_instruments.base import MeasurementInstrumentBase
+    import math
+
+    mean, sem = MeasurementInstrumentBase.mean_and_sem([])
+    assert math.isnan(mean)
+    assert math.isnan(sem)
+
+
+def test_quantity_columns_derives_array_mean_error_keys():
+    from cryosoft.virtual_instruments.base import MeasurementInstrumentBase
+
+    array_keys, scalar_columns = MeasurementInstrumentBase.quantity_columns(
+        "voltage_V", "current_A"
+    )
+    assert array_keys == ["voltage_V_array", "current_A_array"]
+    assert scalar_columns == {
+        "voltage_V": "float",
+        "voltage_V_error": "float",
+        "current_A": "float",
+        "current_A_error": "float",
+    }
+
+
+def test_quantity_columns_rejects_colliding_base_name():
+    from cryosoft.core.exceptions import CryoSoftConfigError
+    from cryosoft.virtual_instruments.base import MeasurementInstrumentBase
+
+    with pytest.raises(CryoSoftConfigError, match="_array' or '_error'"):
+        MeasurementInstrumentBase.quantity_columns("voltage_V_error")
+
+
 # 4. Magnet VI tests
 def test_magnet_vi_ramp_cycle():
     from cryosoft.virtual_instruments.magnet.superconducting_magnet import SuperconductingMagnetVI
@@ -241,9 +292,13 @@ def test_delta_mode_vi():
     data = vi.take_reading()
     assert "voltage_V" in data
     assert "current_A" in data
-    assert len(data["voltage_V"]) == 10
-    assert len(data["current_A"]) == 10
+    assert len(data["voltage_V_array"]) == 10
+    assert len(data["current_A_array"]) == 10
     assert data["n_valid"] == 10
+    assert data["voltage_V"] == pytest.approx(
+        sum(data["voltage_V_array"]) / 10
+    )
+    assert data["voltage_V_error"] >= 0.0
 
 
 def test_delta_mode_vi_forwards_all_config_params():
@@ -337,7 +392,8 @@ def test_delta_mode_set_current_rearms_and_reports_new_current():
     assert source._delta_high_current == pytest.approx(5e-6)
 
     data = vi.take_reading()
-    assert all(c == pytest.approx(5e-6) for c in data["current_A"])
+    assert all(c == pytest.approx(5e-6) for c in data["current_A_array"])
+    assert data["current_A"] == pytest.approx(5e-6)
     assert data["n_valid"] == 4
 
 
@@ -397,13 +453,16 @@ def test_delta_mode_short_return_is_nan_padded():
     vi.initiate_measurement(current=1e-6, n_readings=10, delay_s=0.001)
     data = vi.take_reading()
 
-    assert len(data["voltage_V"]) == 10
-    assert len(data["current_A"]) == 10
+    assert len(data["voltage_V_array"]) == 10
+    assert len(data["current_A_array"]) == 10
     assert data["n_valid"] == 3
     # First 3 are real; the padded tail is NaN in both arrays.
-    assert all(not math.isnan(v) for v in data["voltage_V"][:3])
-    assert all(math.isnan(v) for v in data["voltage_V"][3:])
-    assert all(math.isnan(c) for c in data["current_A"][3:])
+    assert all(not math.isnan(v) for v in data["voltage_V_array"][:3])
+    assert all(math.isnan(v) for v in data["voltage_V_array"][3:])
+    assert all(math.isnan(c) for c in data["current_A_array"][3:])
+    # Mean/error are computed only from the 3 valid samples, not the NaN pad.
+    assert not math.isnan(data["voltage_V"])
+    assert not math.isnan(data["voltage_V_error"])
 
 
 def test_dc_mode_measurement_vi_lifecycle():
@@ -439,16 +498,18 @@ def test_dc_mode_measurement_vi_lifecycle():
 
     # Take reading
     data = vi.take_reading()
-    assert len(data["voltage_V"]) == 10
-    assert len(data["current_A"]) == 10
+    assert len(data["voltage_V_array"]) == 10
+    assert len(data["current_A_array"]) == 10
     assert data["n_valid"] == 10
-    assert all(c == pytest.approx(2e-6) for c in data["current_A"])
+    assert all(c == pytest.approx(2e-6) for c in data["current_A_array"])
+    assert data["current_A"] == pytest.approx(2e-6)
+    assert data["current_A_error"] == pytest.approx(0.0)
 
     # Test reading-loop setter
     vi.set_dc_current(5e-6)
     assert source.get_current() == pytest.approx(5e-6)
     data = vi.take_reading()
-    assert all(c == pytest.approx(5e-6) for c in data["current_A"])
+    assert all(c == pytest.approx(5e-6) for c in data["current_A_array"])
 
     # Test standby
     vi.standby()
@@ -481,8 +542,11 @@ def test_dc_mode_measurement_compliance_abort():
     data = vi.take_reading()
     # It should abort at the first reading since compliance is checked before the read
     assert data["n_valid"] == 0
-    assert all(math.isnan(v) for v in data["voltage_V"])
-    assert all(math.isnan(c) for c in data["current_A"])
+    assert all(math.isnan(v) for v in data["voltage_V_array"])
+    assert all(math.isnan(c) for c in data["current_A_array"])
+    # Zero valid samples -> mean/error is NaN, not computed from the NaN pad.
+    assert math.isnan(data["voltage_V"])
+    assert math.isnan(data["voltage_V_error"])
 
 
 def test_dc_mode_read_now_bench_test():

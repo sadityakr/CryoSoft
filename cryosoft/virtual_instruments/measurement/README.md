@@ -26,14 +26,21 @@ The measurement-method standard (all classes obey it):
 Self-description (class attributes)
 - `measurement_parameters: dict[str, ParamSpec]` — the VI's GUI-facing knobs,
   the single owner of those specs.
-- `measurement_data_keys: list[str]` — the array names `take_reading()` returns.
-- `measurement_scalar_columns: dict[str, str]` — optional extra per-point scalar
-  columns (name → "float"/"int"), e.g. `n_valid` for a VI that can return fewer
-  readings than requested.
+- `measurement_data_keys: list[str]` — the raw-sample array names
+  `take_reading()` returns, each ending `_array` (e.g. `"voltage_V_array"`).
+- `measurement_scalar_columns: dict[str, str]` — per-point scalar columns
+  (name → "float"/"int"). The **mean/error/array convention**: for every
+  quantity behind a `"{quantity}_array"` key, this carries `"{quantity}"`
+  (the mean — what the GUI plots) and `"{quantity}_error"` (the standard
+  error of the mean), both dtype "float"; plus optional VI-specific extras
+  unrelated to any array, e.g. `n_valid`. Build both attributes with
+  `MeasurementInstrumentBase.quantity_columns(*names)` rather than
+  hand-writing the suffixes — see the pattern in `measurement_dc_mode.py`.
 
 Uniform lifecycle (methods)
-- `data_arrays(params) → {array_name: length}` — output shape for the same
-  `params` `initiate_measurement()` will receive, computed before arming the hardware.
+- `data_arrays(params) → {array_name: length}` — output shape (the `_array`
+  keys) for the same `params` `initiate_measurement()` will receive, computed
+  before arming the hardware.
 - `initiate_measurement(**params) → None` — arm/configure the hardware. Accepts
   the `measurement_parameters` keys, all defaulted. `@control(panel=False)`-
   decorated where the VI exposes arming to the GUI (front panel only, never the
@@ -41,12 +48,16 @@ Uniform lifecycle (methods)
   `initiate()` on a measurement VI is a harmless connection check (pings the
   drivers, raises `CryoSoftCommunicationError` when unreachable), so a bulk
   Initiate-All can never start a source current.
-- `take_reading() → dict` — take ONE datapoint. No arguments. Returns exactly
-  `measurement_data_keys` (arrays sized as `data_arrays` declared) plus every
-  `measurement_scalar_columns` key. A VI whose instrument can return fewer points
-  pads the arrays to the declared length with `float("nan")` and reports the true
-  count in its scalar column. This fixed-shape guarantee prevents HDF5 layout
-  mismatches mid-run.
+- `take_reading() → dict` — take ONE datapoint. No arguments. For every
+  quantity, returns the mean/error/array triple: the raw-sample array
+  (`"{quantity}_array"`, NaN-padded to the length `data_arrays` declared),
+  the mean (`"{quantity}"`), and the standard error of the mean
+  (`"{quantity}_error"`) — computed over the VALID samples with
+  `self.mean_and_sem(...)`. Also returns every other
+  `measurement_scalar_columns` key (e.g. `n_valid`). A VI whose instrument can
+  return fewer points pads the array with `float("nan")` and computes the
+  mean/error only from the valid samples. This fixed-shape guarantee prevents
+  HDF5 layout mismatches mid-run.
 - `standby() → None` — safe-off idle state.
 - `ping() → bool` — IDN check on all drivers.
 - `reading_setters: dict[str, str]` — OPTIONAL reading-loop declaration
@@ -54,11 +65,12 @@ Uniform lifecycle (methods)
   method that reprograms just that quantity between readings without
   re-arming (e.g. `{"current_A": "set_source_current"}`). One entry is all a
   VI declares — the generic sweep procedure offers the parameter in its
-  Reading loop slots, dispatches the setter before each value's reading,
-  suffixes columns with per-slot index labels (`{name}__A{i}__B{j}`), and
-  stores the label -> value map in the HDF5 metadata. Setters must accept
-  the parameter under its own name and never change the reading's shape.
-  The same standard lives on `BaseVirtualInstrument` (plus
+  Reading loop slots, dispatches the setter before each value's reading, and
+  every measurement column carries a real `(n_loop1, n_loop2)` array axis in
+  HDF5 (never suffixed names) — axis index → value lives in the run's
+  metadata as `procedure_params["loop1_values"]` / `["loop2_values"]`.
+  Setters must accept the parameter under its own name and never change the
+  reading's shape. The same standard lives on `BaseVirtualInstrument` (plus
   `reading_parameters` / `reading_safe_off`), so non-measurement VIs like
   the switch participate identically. Full contract in the base docstrings.
 
@@ -96,16 +108,20 @@ shared-6221 handoff test for the pattern.
 ## How to add a new measurement VI
 1. Subclass `DCMeasurementBase` (for a DC-resistance method) or
    `MeasurementInstrumentBase` (any other protocol).
-2. Declare `measurement_parameters` (ParamSpecs), `measurement_data_keys`, and —
-   only if the instrument can return fewer readings than requested —
-   `measurement_scalar_columns`.
+2. Declare `measurement_parameters` (ParamSpecs) and derive
+   `measurement_data_keys` / `measurement_scalar_columns` from
+   `MeasurementInstrumentBase.quantity_columns(*names)` for each quantity the
+   VI measures — plus any extra scalar unrelated to an array (e.g. `n_valid`,
+   only if the instrument can return fewer readings than requested).
 3. Implement `data_arrays(params)`, `initiate_measurement(**params)`,
    `take_reading()`, `standby()` (and `ping()`). Keep `@control(panel=False)` on
    `initiate_measurement()` if the GUI should
-   be able to arm it. Pad short returns to the declared length with
-   `float("nan")` and report the true count in a scalar column. Declare a
-   `reading_setters` entry (parameter → setter method) for any parameter the
-   reading loop should be able to vary per point (see the Exit section above).
+   be able to arm it. In `take_reading()`, pad short returns to the declared
+   length with `float("nan")`, then call `self.mean_and_sem(valid_samples)`
+   per quantity to fill in the mean/error and report the true count in a
+   scalar column if applicable. Declare a `reading_setters` entry (parameter →
+   setter method) for any parameter the reading loop should be able to vary
+   per point (see the Exit section above).
 4. If the VI needs a driver role not already in
    `tests/test_conformance.py::_SIM_MEASUREMENT_DRIVER_CLASSES`, add its sim
    driver there so the round-trip conformance test can build it.

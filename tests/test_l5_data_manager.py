@@ -1,9 +1,11 @@
 # ---
 # description: |
 #   Unit tests for Layer 5 (DataManager). Verifies HDF5 file creation,
-#   metadata storage, dataset pre-allocation, save_datapoint(), snapshot
-#   storage, close() with end_time and early-abort trimming.
-# last_updated: 2026-04-06
+#   metadata storage, dataset pre-allocation (sweep_columns 1-D,
+#   measurement_scalars/measurement_arrays carrying a real (n_loop1, n_loop2)
+#   reading-loop axis), save_datapoint(), snapshot storage, close() with
+#   end_time and early-abort trimming.
+# last_updated: 2026-07-22
 # ---
 
 import json
@@ -16,6 +18,9 @@ from cryosoft.core.data_manager import DataManager
 
 
 # ── Shared fixtures ───────────────────────────────────────────────────────────
+# loop_shape defaults to (1, 1) — no reading loop — so every measurement value
+# below is wrapped one extra level: [[value]] for a scalar grid, [[[...]]] for
+# an array grid.
 
 DATA_CONFIG = {
     "sweep_columns": {"field_T": "float"},
@@ -63,8 +68,8 @@ def saved_dm(dm):
             sweep_index=i,
             measured_data={
                 "field_T": float(i) * 0.5,
-                "voltage_V": [float(j) * 1e-6 for j in range(10)],
-                "current_A": [1e-6] * 10,
+                "voltage_V": [[[float(j) * 1e-6 for j in range(10)]]],
+                "current_A": [[[1e-6] * 10]],
             },
             station_snapshot={"magnet_z": {"field": float(i) * 0.5}},
         )
@@ -197,12 +202,40 @@ def test_end_time_written_on_close(dm):
 # ── Pre-allocation ────────────────────────────────────────────────────────────
 
 def test_dataset_shapes(dm):
-    """Datasets are pre-allocated with correct shapes."""
+    """Datasets are pre-allocated with correct shapes (loop_shape defaults (1, 1))."""
     with h5py.File(dm.filepath, "r") as f:
         assert f["data"]["field_T"].shape == (5,)
-        assert f["data"]["voltage_V"].shape == (5, 10)
-        assert f["data"]["current_A"].shape == (5, 10)
+        assert f["data"]["voltage_V"].shape == (5, 1, 1, 10)
+        assert f["data"]["current_A"].shape == (5, 1, 1, 10)
         assert f["data"]["timestamp"].shape == (5,)
+
+
+def test_dataset_shapes_with_loop_axis(tmp_path):
+    """A non-trivial loop_shape sizes measurement datasets on that axis too."""
+    config = {
+        "sweep_columns": {"field_T": "float"},
+        "measurement_scalars": {"voltage_V": "float"},
+        "measurement_arrays": {"voltage_V_array": 10},
+        "loop_shape": [2, 3],
+    }
+    manager = DataManager(
+        data_directory=str(tmp_path),
+        procedure_name="Loop_Sweep",
+        procedure_params={},
+        sample_info=SAMPLE_INFO,
+        instrument_state={},
+        system_targets={},
+        measurement_commands={},
+        data_config=config,
+        n_sweep_points=4,
+    )
+    try:
+        with h5py.File(manager.filepath, "r") as f:
+            assert f["data"]["field_T"].shape == (4,)  # sweep-only: no loop axis
+            assert f["data"]["voltage_V"].shape == (4, 2, 3)
+            assert f["data"]["voltage_V_array"].shape == (4, 2, 3, 10)
+    finally:
+        manager.close()
 
 
 def test_initial_fill_is_nan(dm):
@@ -221,15 +254,99 @@ def test_save_single_datapoint(dm):
         sweep_index=2,
         measured_data={
             "field_T": 0.5,
-            "voltage_V": voltages,
-            "current_A": [1e-6] * 10,
+            "voltage_V": [[voltages]],
+            "current_A": [[[1e-6] * 10]],
         },
         station_snapshot={"magnet_z": {"field": 0.5}},
     )
     with h5py.File(dm.filepath, "r") as f:
         assert f["data"]["field_T"][2] == pytest.approx(0.5)
-        assert list(f["data"]["voltage_V"][2]) == pytest.approx(voltages)
+        assert list(f["data"]["voltage_V"][2, 0, 0]) == pytest.approx(voltages)
         assert f["data"]["timestamp"][2] != ""
+
+
+def test_save_datapoint_with_loop_shape(tmp_path):
+    """save_datapoint() writes a full (n_loop1, n_loop2[, length]) grid per call."""
+    config = {
+        "sweep_columns": {"field_T": "float"},
+        "measurement_scalars": {"voltage_V": "float"},
+        "measurement_arrays": {"voltage_V_array": 2},
+        "loop_shape": [2, 2],
+    }
+    manager = DataManager(
+        data_directory=str(tmp_path),
+        procedure_name="Loop_Sweep",
+        procedure_params={},
+        sample_info=SAMPLE_INFO,
+        instrument_state={},
+        system_targets={},
+        measurement_commands={},
+        data_config=config,
+        n_sweep_points=1,
+    )
+    try:
+        manager.save_datapoint(
+            sweep_index=0,
+            measured_data={
+                "field_T": 1.0,
+                "voltage_V": [[1.0, 2.0], [3.0, 4.0]],
+                "voltage_V_array": [
+                    [[1.0, 1.5], [2.0, 2.5]],
+                    [[3.0, 3.5], [4.0, 4.5]],
+                ],
+            },
+            station_snapshot={},
+        )
+        with h5py.File(manager.filepath, "r") as f:
+            assert list(f["data"]["voltage_V"][0].flatten()) == pytest.approx(
+                [1.0, 2.0, 3.0, 4.0]
+            )
+            assert f["data"]["voltage_V_array"][0, 1, 1, 0] == pytest.approx(4.0)
+            assert f["data"]["voltage_V_array"][0, 0, 1, 1] == pytest.approx(2.5)
+    finally:
+        manager.close()
+
+
+def test_save_datapoint_measurement_array_wrong_loop_axis_raises(dm):
+    """A measurement array whose LOOP axes (not just sample count) are wrong raises."""
+    with pytest.raises(ValueError, match="measurement array"):
+        dm.save_datapoint(
+            sweep_index=0,
+            # 2 loop1 entries where loop_shape declares only 1 — not just an
+            # innermost sample-count mismatch, so this is not pad/truncated.
+            measured_data={"voltage_V": [[[1.0] * 10], [[1.0] * 10]]},
+            station_snapshot={},
+        )
+
+
+def test_save_datapoint_measurement_scalar_wrong_loop_shape_raises(tmp_path):
+    """A measurement scalar whose grid shape mismatches loop_shape raises loudly."""
+    config = {
+        "sweep_columns": {},
+        "measurement_scalars": {"voltage_V": "float"},
+        "measurement_arrays": {},
+        "loop_shape": [1, 1],
+    }
+    manager = DataManager(
+        data_directory=str(tmp_path),
+        procedure_name="Loop_Sweep",
+        procedure_params={},
+        sample_info=SAMPLE_INFO,
+        instrument_state={},
+        system_targets={},
+        measurement_commands={},
+        data_config=config,
+        n_sweep_points=1,
+    )
+    try:
+        with pytest.raises(ValueError, match="loop shape"):
+            manager.save_datapoint(
+                sweep_index=0,
+                measured_data={"voltage_V": [[1.0, 2.0]]},  # (1, 2) != (1, 1)
+                station_snapshot={},
+            )
+    finally:
+        manager.close()
 
 
 def test_save_multiple_datapoints(saved_dm):
@@ -304,7 +421,7 @@ def test_close_trims_on_abort(saved_dm):
     saved_dm.close()
     with h5py.File(saved_dm.filepath, "r") as f:
         assert f["data"]["field_T"].shape == (3,)
-        assert f["data"]["voltage_V"].shape == (3, 10)
+        assert f["data"]["voltage_V"].shape == (3, 1, 1, 10)
         assert f["data"]["timestamp"].shape == (3,)
 
 
@@ -329,17 +446,18 @@ def test_file_readable_after_close(saved_dm):
 def test_save_datapoint_pads_short_measurement_arrays(dm):
     """A short array (e.g. the delta engine aborted an acquisition early)
     must be NaN-padded to the allocated width, not crash with a
-    shape-mismatch ValueError that would kill the whole run."""
+    shape-mismatch ValueError that would kill the whole run. Only the
+    innermost (per-point sample) axis is padded — the loop axes stay (1, 1)."""
     dm.save_datapoint(
         sweep_index=0,
         measured_data={
             "field_T": 0.1,
-            "voltage_V": [1e-6, 2e-6, 3e-6],  # only 3 of the 10 allocated
-            "current_A": [1e-6] * 10,
+            "voltage_V": [[[1e-6, 2e-6, 3e-6]]],  # only 3 of the 10 allocated
+            "current_A": [[[1e-6] * 10]],
         },
         station_snapshot={},
     )
-    stored = dm._file["data"]["voltage_V"][0, :]
+    stored = dm._file["data"]["voltage_V"][0, 0, 0]
     assert stored.shape == (10,)
     assert np.allclose(stored[:3], [1e-6, 2e-6, 3e-6])
     assert np.all(np.isnan(stored[3:]))
@@ -349,10 +467,10 @@ def test_save_datapoint_truncates_long_measurement_arrays(dm):
     """An over-long array is truncated to the allocated width, not fatal."""
     dm.save_datapoint(
         sweep_index=0,
-        measured_data={"voltage_V": list(range(15))},
+        measured_data={"voltage_V": [[list(range(15))]]},
         station_snapshot={},
     )
-    stored = dm._file["data"]["voltage_V"][0, :]
+    stored = dm._file["data"]["voltage_V"][0, 0, 0]
     assert stored.shape == (10,)
     assert np.allclose(stored, np.arange(10, dtype=float))
 

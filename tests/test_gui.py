@@ -59,7 +59,6 @@ from cryosoft.gui.theme import (
     build_stylesheet,
 )
 from cryosoft.gui.trend_plot_panel import TrendPlotPanel
-from cryosoft.gui.param_form import LoopValuesWidget
 from cryosoft.virtual_instruments.base import BaseVirtualInstrument
 
 
@@ -972,7 +971,7 @@ def test_live_plot_loop_selectors_follow_reading_loop(procedure_win, station):
     Hidden while nothing is loopable (lock-in VI, scanner off); visible but
     disabled once something is loopable with the slots off; enabled with one
     item per value — display text carrying the value, item data carrying the
-    index label — once a slot has two or more values.
+    0-based axis index — once a slot has two or more values.
     """
     from cryosoft.procedures.field_sweep import FieldSweep
 
@@ -1004,10 +1003,8 @@ def test_live_plot_loop_selectors_follow_reading_loop(procedure_win, station):
     _set_slot_parameter(
         procedure_win, "loop2_parameter", "dc_measurement.current_A"
     )
-    values_widget = procedure_win.findChild(LoopValuesWidget, "")
-    # LoopValuesWidget doesn't have an objectName match by text — locate by type within the form
-    # and populate its table directly.
-    from cryosoft.gui import param_form
+    # LoopValuesWidget doesn't have an objectName match by text — locate it
+    # via the form's param-input registry instead and populate it directly.
     loop2_values_widget = procedure_win._params_panel._param_inputs.get("loop2_values")
     assert loop2_values_widget is not None, "loop2_values widget not found"
     loop2_values_widget.set_raw("1e-6, -1e-6")
@@ -1020,16 +1017,18 @@ def test_live_plot_loop_selectors_follow_reading_loop(procedure_win, station):
     assert [sel1.itemText(i) for i in range(sel1.count())] == [
         "A1 = Mux-Ch1", "A2 = Mux-Ch2",
     ]
-    assert [sel1.itemData(i) for i in range(sel1.count())] == ["A1", "A2"]
+    assert [sel1.itemData(i) for i in range(sel1.count())] == [0, 1]
     assert sel2.isEnabled()
     assert [sel2.itemText(i) for i in range(sel2.count())] == [
         "B1 = 1e-06", "B2 = -1e-06",
     ]
-    # Axis keys stay plain — the Loop selectors pick the reading.
+    # Axis keys stay plain — the Loop selectors pick the reading. Raw-sample
+    # arrays are saved but never offered as a plot axis.
     x_sel = procedure_win.findChild(QComboBox, "x1_axis_selector")
     keys = [x_sel.itemText(i) for i in range(x_sel.count())]
     assert "voltage_V" in keys
     assert not any("__A" in k or "__B" in k for k in keys)
+    assert not any(k.endswith("_array") for k in keys)
 
 
 def test_param_form_renders_all_widget_kinds_and_round_trips(qtbot):

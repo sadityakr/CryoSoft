@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import math
 import pkgutil
 import typing
 from pathlib import Path
@@ -996,6 +997,39 @@ def test_measurement_vi_self_description(vi_cls: type) -> None:
 @pytest.mark.parametrize(
     "vi_cls", _all_measurement_vi_classes(), ids=lambda c: c.__name__
 )
+def test_measurement_vi_mean_error_array_convention(vi_cls: type) -> None:
+    """Every array-valued quantity gets a companion mean + SEM scalar column.
+
+    The mean/error/array convention (see ``MeasurementInstrumentBase`` and
+    ``quantity_columns()``): every ``measurement_data_keys`` entry names a
+    raw-sample array and MUST end in ``"_array"``; its base quantity name
+    (the key with that suffix stripped) MUST have both a bare-name mean and
+    a ``"_error"`` (SEM) scalar column in ``measurement_scalar_columns``,
+    both dtype ``"float"``. Binding for every future measurement VI, not
+    just the ones that adopted the convention explicitly.
+    """
+    for array_key in vi_cls.measurement_data_keys:
+        assert array_key.endswith("_array"), (
+            f"{vi_cls.__name__}.measurement_data_keys entry {array_key!r} "
+            f"must end in '_array' per the mean/error/array convention"
+        )
+        base_name = array_key[: -len("_array")]
+        assert vi_cls.measurement_scalar_columns.get(base_name) == "float", (
+            f"{vi_cls.__name__}.measurement_scalar_columns must declare "
+            f"{base_name!r} (the mean, dtype 'float') for array quantity "
+            f"{array_key!r}"
+        )
+        error_name = f"{base_name}_error"
+        assert vi_cls.measurement_scalar_columns.get(error_name) == "float", (
+            f"{vi_cls.__name__}.measurement_scalar_columns must declare "
+            f"{error_name!r} (the SEM, dtype 'float') for array quantity "
+            f"{array_key!r}"
+        )
+
+
+@pytest.mark.parametrize(
+    "vi_cls", _all_measurement_vi_classes(), ids=lambda c: c.__name__
+)
 def test_measurement_vi_lifecycle_methods(vi_cls: type) -> None:
     """Every measurement VI implements the lifecycle; take_reading takes no args."""
     for method_name in ("data_arrays", "initiate_measurement", "take_reading", "standby"):
@@ -1055,6 +1089,14 @@ def test_measurement_vi_round_trip(vi_cls: type) -> None:
         assert isinstance(value, (int, float)) and not isinstance(value, bool), (
             f"{vi_cls.__name__}.take_reading()['{name}'] must be a real-number "
             f"scalar, got {value!r}"
+        )
+
+    for array_key in vi_cls.measurement_data_keys:
+        base_name = array_key[: -len("_array")]
+        error = data[f"{base_name}_error"]
+        assert error >= 0.0 or math.isnan(error), (
+            f"{vi_cls.__name__}.take_reading()['{base_name}_error'] must be "
+            f">= 0 (or NaN, when zero samples are valid), got {error!r}"
         )
 
 

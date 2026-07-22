@@ -65,21 +65,22 @@ def test_initiate_sets_voltmeter_range(vi_with_drivers) -> None:
 def test_take_reading_returns_correct_n_points(vi: DCSeparateMeasurementVI) -> None:
     vi.initiate_measurement(current_A=1e-6, compliance_A=1e-3, voltmeter_range_V=0.1, readings_per_point=20)
     data = vi.take_reading()
-    assert len(data["voltage_V"]) == 20
-    assert len(data["current_A"]) == 20
+    assert len(data["voltage_V_array"]) == 20
+    assert len(data["current_A_array"]) == 20
 
 
 def test_take_reading_current_array_is_constant(vi: DCSeparateMeasurementVI) -> None:
     current = 3e-6
     vi.initiate_measurement(current_A=current, compliance_A=1e-3, voltmeter_range_V=0.1, readings_per_point=15)
     data = vi.take_reading()
-    assert all(c == pytest.approx(current) for c in data["current_A"])
+    assert all(c == pytest.approx(current) for c in data["current_A_array"])
+    assert data["current_A"] == pytest.approx(current)
 
 
 def test_take_reading_voltage_values_are_floats(vi: DCSeparateMeasurementVI) -> None:
     vi.initiate_measurement(current_A=1e-6, compliance_A=1e-3, voltmeter_range_V=0.1, readings_per_point=5)
     data = vi.take_reading()
-    assert all(isinstance(v, float) for v in data["voltage_V"])
+    assert all(isinstance(v, float) for v in data["voltage_V_array"])
 
 
 # ------------------------------------------------------------------

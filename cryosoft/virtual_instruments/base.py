@@ -45,7 +45,9 @@ from __future__ import annotations
 import functools
 import inspect
 import logging
-from collections.abc import Mapping
+import math
+import statistics
+from collections.abc import Mapping, Sequence
 from typing import Any, ClassVar
 
 from cryosoft.core.exceptions import (
@@ -425,22 +427,31 @@ class MeasurementInstrumentBase(BaseVirtualInstrument):
       GUI-facing knobs, one ``ParamSpec`` per parameter. This is the single
       owner of those specs (procedures will stop duplicating them in a later
       wave). Must be non-empty on a concrete VI.
-    * ``measurement_data_keys: ClassVar[list[str]]`` — the array names
-      ``take_reading()`` returns (e.g. ``["voltage_V", "current_A"]``). Must be
-      non-empty on a concrete VI.
-    * ``measurement_scalar_columns: ClassVar[dict[str, str]]`` — optional extra
-      *per-point scalar* columns the VI contributes, mapping name → dtype
-      ("float" or "int"). Use this for a VI whose instrument can legitimately
-      return fewer readings than requested: it pads the arrays to the declared
-      length with ``float("nan")`` and reports the true count via a scalar such
-      as ``n_valid``. Empty (the default) means the VI adds no scalars.
+    * ``measurement_data_keys: ClassVar[list[str]]`` — the RAW-SAMPLE array
+      names ``take_reading()`` returns, each named ``"{quantity}_array"``
+      (e.g. ``["voltage_V_array", "current_A_array"]``). Must be non-empty on
+      a concrete VI. Build this — and the companion
+      ``measurement_scalar_columns`` entries below — with
+      ``quantity_columns()`` rather than hand-writing the suffixes.
+    * ``measurement_scalar_columns: ClassVar[dict[str, str]]`` — per-point
+      *scalar* columns, mapping name → dtype ("float" or "int"). The
+      mean/error/array convention: for every array-valued quantity
+      ``"{quantity}_array"`` in ``measurement_data_keys``, this MUST also
+      carry ``"{quantity}"`` (the mean — the value the GUI plots) and
+      ``"{quantity}_error"`` (the standard error of the mean), both dtype
+      "float" — exactly what ``quantity_columns()`` derives. It may also
+      carry VI-specific extras unrelated to any single array, e.g. ``n_valid``
+      (dtype "int") reporting how many of the padded samples were real.
+      ``tests/test_conformance.py`` enforces the mean/error pairing
+      automatically for every ``_array`` key.
 
     Uniform lifecycle (methods)
     ---------------------------
-    * ``data_arrays(params) -> dict[str, int]`` — declared array name → its
-      per-point length, computed from the SAME ``params`` mapping
-      ``initiate_measurement()`` will receive. Lets a procedure size its HDF5
-      layout before arming the hardware. Base raises ``NotImplementedError``.
+    * ``data_arrays(params) -> dict[str, int]`` — declared array name (the
+      ``"{quantity}_array"`` keys) → its per-point length, computed from the
+      SAME ``params`` mapping ``initiate_measurement()`` will receive. Lets a
+      procedure size its HDF5 layout before arming the hardware. Base raises
+      ``NotImplementedError``.
     * ``initiate_measurement(**params) -> None`` — arm / configure the
       hardware. Accepts the ``measurement_parameters`` keys as keyword
       arguments, each with a default. Concrete VIs keep the ``@control``
@@ -453,15 +464,19 @@ class MeasurementInstrumentBase(BaseVirtualInstrument):
       overridden here as a CONNECTION CHECK: pings the drivers and raises
       ``CryoSoftCommunicationError`` when unreachable. Never arms, never
       sources.
-    * ``take_reading() -> dict[str, list[float]]`` — take ONE datapoint. Takes
-      NO arguments: everything it needs was fixed at ``initiate_measurement()``.
-      It MUST return exactly ``measurement_data_keys`` (plus every
-      ``measurement_scalar_columns`` key) and each array MUST have exactly the
-      length ``data_arrays(params)`` declared for the same ``params`` — always.
-      A VI whose instrument may return fewer points pads with ``float("nan")``
-      to the declared length and reports the true count in its scalar column.
-      This fixed-shape guarantee is the contract that prevents HDF5 layout
-      mismatches mid-run.
+    * ``take_reading() -> dict[str, list[float] | float]`` — take ONE
+      datapoint. Takes NO arguments: everything it needs was fixed at
+      ``initiate_measurement()``. For every quantity it declares, it MUST
+      return all three of the mean/error/array triple: the raw sample array
+      (``"{quantity}_array"``, NaN-padded to the length ``data_arrays(params)``
+      declared for the same ``params`` — always), the mean (``"{quantity}"``),
+      and the standard error of the mean (``"{quantity}_error"``), computed
+      over the VALID samples with ``self.mean_and_sem(...)``. It must also
+      return every other ``measurement_scalar_columns`` key (e.g. ``n_valid``).
+      A VI whose instrument may return fewer points than requested still pads
+      the array to the declared length with ``float("nan")`` and computes the
+      mean/error only from the valid samples. This fixed-shape guarantee is
+      the contract that prevents HDF5 layout mismatches mid-run.
     * ``standby() -> None`` — put the instrument in a safe-off idle state.
 
     The reading loop (optional): ``reading_setters``
@@ -474,13 +489,14 @@ class MeasurementInstrumentBase(BaseVirtualInstrument):
     mapping a ``measurement_parameters`` name to the cheap setter method that
     reprograms just that quantity. Declaring an entry is all a VI does: the
     generic sweep procedure automatically renders a "Reading loop" form group
-    where the user picks ONE such parameter and enters a comma-separated list
-    of values, and then, at every sweep point, dispatches the setter (as a
-    ``Command`` via the Station) before each value's ``take_reading()``. The
-    readings' columns are suffixed with index labels ``__L1``, ``__L2``, …
-    (composing with switch routes as ``{name}__L{i}__{route}``); the
-    label-to-value map is stored in the run's HDF5 metadata
-    (``procedure_params["loop_labels"]``).
+    where the user picks up to TWO such parameters (loop1/loop2) and enters
+    each one's value list, and then, at every sweep point, dispatches the
+    setter (as a ``Command`` via the Station) before each value's
+    ``take_reading()``. Every measurement column gets a real ``(n_loop1,
+    n_loop2)`` array axis in HDF5 — index *i* of an axis is that loop slot's
+    *i*-th dispatched value, recorded in the run's HDF5 metadata as
+    ``procedure_params["loop1_values"]`` / ``["loop2_values"]`` — rather than
+    being encoded into the column name.
 
     Contract (machine-enforced by ``tests/test_conformance.py``):
 
@@ -530,6 +546,72 @@ class MeasurementInstrumentBase(BaseVirtualInstrument):
         return {
             name: self.measurement_parameters[name] for name in self.reading_setters
         }
+
+    @classmethod
+    def quantity_columns(cls, *names: str) -> tuple[list[str], dict[str, str]]:
+        """Derive the array/mean/error HDF5 key triple for each quantity name.
+
+        The mean/error/array convention (see the class docstring) requires
+        every array-valued quantity a VI reports — e.g. ``"voltage_V"`` — to
+        surface as three columns: the raw samples under ``"{name}_array"``,
+        the mean under the bare ``"{name}"`` (what the GUI plots), and the
+        standard error of the mean under ``"{name}_error"``. This is the one
+        place that naming convention is spelled out; every concrete
+        measurement VI derives its ``measurement_data_keys`` /
+        ``measurement_scalar_columns`` from it instead of hand-writing the
+        suffixes.
+
+        Args:
+            *names: Base quantity names, e.g. ``"voltage_V", "current_A"``.
+
+        Returns:
+            ``(array_keys, scalar_columns)`` — ``array_keys`` is
+            ``["{name}_array", ...]`` (for ``measurement_data_keys``);
+            ``scalar_columns`` is ``{"{name}": "float", "{name}_error":
+            "float", ...}`` (for ``measurement_scalar_columns``).
+
+        Raises:
+            CryoSoftConfigError: If a base name already ends in ``"_array"``
+                or ``"_error"`` — ambiguous with the derived suffixes.
+        """
+        array_keys: list[str] = []
+        scalar_columns: dict[str, str] = {}
+        for name in names:
+            if name.endswith("_array") or name.endswith("_error"):
+                raise CryoSoftConfigError(
+                    f"quantity_columns: {name!r} already ends in '_array' or "
+                    f"'_error' — base quantity names must not collide with "
+                    f"the derived mean/error/array suffixes."
+                )
+            array_keys.append(f"{name}_array")
+            scalar_columns[name] = "float"
+            scalar_columns[f"{name}_error"] = "float"
+        return array_keys, scalar_columns
+
+    @staticmethod
+    def mean_and_sem(samples: Sequence[float]) -> tuple[float, float]:
+        """Mean and standard error of the mean over valid (non-NaN) samples.
+
+        The shared statistics helper behind the mean/error/array convention:
+        every measurement VI calls this on a quantity's valid raw samples to
+        compute the ``"{quantity}"`` (mean) and ``"{quantity}_error"`` (SEM)
+        columns it returns from ``take_reading()``.
+
+        Args:
+            samples: Raw per-reading values, already filtered to valid
+                (non-NaN) entries — pass none of the NaN padding.
+
+        Returns:
+            ``(mean, sem)``. A single sample has no spread estimate, so
+            ``sem`` is ``0.0``; zero samples return ``(nan, nan)``.
+        """
+        n = len(samples)
+        if n == 0:
+            return float("nan"), float("nan")
+        mean = statistics.fmean(samples)
+        if n == 1:
+            return mean, 0.0
+        return mean, statistics.stdev(samples) / math.sqrt(n)
 
     def data_arrays(self, params: Mapping[str, Any]) -> dict[str, int]:
         """Return declared array name → per-point length for these *params*.
@@ -626,7 +708,11 @@ class DCMeasurementBase(MeasurementInstrumentBase):
 
     display_label: str = "DC resistance"
 
-    measurement_data_keys: ClassVar[list[str]] = ["voltage_V", "current_A"]
+    _ARRAY_KEYS, _SCALAR_COLUMNS = MeasurementInstrumentBase.quantity_columns(
+        "voltage_V", "current_A"
+    )
+    measurement_data_keys: ClassVar[list[str]] = _ARRAY_KEYS
+    measurement_scalar_columns: ClassVar[dict[str, str]] = _SCALAR_COLUMNS
     measurement_parameters: ClassVar[dict[str, ParamSpec]] = {
         "current_A": ParamSpec(
             type=float, default=1e-6, unit="A", description="DC source current"
@@ -652,7 +738,9 @@ class DCMeasurementBase(MeasurementInstrumentBase):
     }
 
     def data_arrays(self, params: Mapping[str, Any]) -> dict[str, int]:
-        """Return ``{"voltage_V": n, "current_A": n}`` with n = readings_per_point.
+        """Return ``{"voltage_V_array": n, "current_A_array": n}``.
+
+        n = ``readings_per_point``.
 
         Args:
             params: Parameter mapping containing ``readings_per_point``.
@@ -661,7 +749,7 @@ class DCMeasurementBase(MeasurementInstrumentBase):
             Per-point length for each DC data array.
         """
         n = int(params["readings_per_point"])
-        return {"voltage_V": n, "current_A": n}
+        return {key: n for key in self.measurement_data_keys}
 
     def initiate_measurement(
         self,
@@ -681,11 +769,13 @@ class DCMeasurementBase(MeasurementInstrumentBase):
         """
         raise NotImplementedError
 
-    def take_reading(self) -> dict[str, list[float]]:
+    def take_reading(self) -> dict[str, list[float] | float]:
         """Acquire ``readings_per_point`` voltage samples at the fixed current.
 
         Returns:
-            ``{"voltage_V": list[float], "current_A": list[float]}`` with length
-            ``readings_per_point`` (fixed at ``initiate_measurement()``).
+            The mean/error/array triple for both quantities: ``voltage_V``,
+            ``voltage_V_error``, ``voltage_V_array`` (length
+            ``readings_per_point``, fixed at ``initiate_measurement()``), and
+            the same three for ``current_A``.
         """
         raise NotImplementedError

@@ -998,14 +998,15 @@ class TestDCSeparateMeasurementVI:
         data = vi.take_reading()
         assert "voltage_V" in data
         assert "current_A" in data
-        assert len(data["voltage_V"]) == 5
-        assert len(data["current_A"]) == 5
+        assert len(data["voltage_V_array"]) == 5
+        assert len(data["current_A_array"]) == 5
 
     def test_current_constant_across_readings(self, source_driver, meter_driver):
         vi = self._make_vi(source_driver, meter_driver)
         vi.initiate_measurement(current_A=2e-6, readings_per_point=10)
         data = vi.take_reading()
-        assert all(abs(c - 2e-6) < 1e-12 for c in data["current_A"])
+        assert all(abs(c - 2e-6) < 1e-12 for c in data["current_A_array"])
+        assert data["current_A"] == pytest.approx(2e-6)
 
     def test_take_reading_without_initiate_raises(self, source_driver, meter_driver):
         vi = self._make_vi(source_driver, meter_driver)
@@ -1040,8 +1041,8 @@ class TestDCSeparateMeasurementVI:
         vi.initiate_measurement(current_A=1e-6, readings_per_point=4)
         vi.set_source_current(-1e-6)
         data = vi.take_reading()
-        assert all(abs(c + 1e-6) < 1e-12 for c in data["current_A"])
-        assert len(data["voltage_V"]) == 4
+        assert all(abs(c + 1e-6) < 1e-12 for c in data["current_A_array"])
+        assert len(data["voltage_V_array"]) == 4
 
     def test_declares_current_reading_setter(self, source_driver, meter_driver):
         """current_A is loopable via set_source_current (the reading loop)."""
@@ -1072,14 +1073,15 @@ class TestDCSingleInstrumentVI:
         data = vi.take_reading()
         assert "voltage_V" in data
         assert "current_A" in data
-        assert len(data["voltage_V"]) == 5
-        assert len(data["current_A"]) == 5
+        assert len(data["voltage_V_array"]) == 5
+        assert len(data["current_A_array"]) == 5
 
     def test_current_constant_across_readings(self, smu_driver):
         vi = self._make_vi(smu_driver)
         vi.initiate_measurement(current_A=3e-6, readings_per_point=10)
         data = vi.take_reading()
-        assert all(abs(c - 3e-6) < 1e-12 for c in data["current_A"])
+        assert all(abs(c - 3e-6) < 1e-12 for c in data["current_A_array"])
+        assert data["current_A"] == pytest.approx(3e-6)
 
     def test_take_reading_without_initiate_raises(self, smu_driver):
         vi = self._make_vi(smu_driver)
@@ -1115,8 +1117,11 @@ class TestDCSingleInstrumentVI:
         for vi in (vi_sep, vi_smu):
             vi.initiate_measurement(current_A=1e-6, compliance_A=1e-3, voltmeter_range_V=0.1, readings_per_point=3)
             data = vi.take_reading()
-            assert set(data.keys()) == {"voltage_V", "current_A"}
-            assert len(data["voltage_V"]) == 3
+            assert set(data.keys()) == {
+                "voltage_V", "voltage_V_error", "voltage_V_array",
+                "current_A", "current_A_error", "current_A_array",
+            }
+            assert len(data["voltage_V_array"]) == 3
 
 
 # ---------------------------------------------------------------------------
@@ -1160,8 +1165,9 @@ class TestLockInHarmonicMeasurementVI:
         vi.initiate_measurement(n_readings=7)
         data = vi.take_reading()
         for key in ("x_1f_V", "y_1f_V", "x_2f_V", "y_2f_V", "current_A"):
-            assert key in data
-            assert len(data[key]) == 7
+            assert key in data  # mean
+            assert f"{key}_error" in data
+            assert len(data[f"{key}_array"]) == 7
 
     def test_take_reading_switches_harmonic_between_1f_and_2f(self, lockin_driver):
         """A single-demodulator lock-in reports one harmonic at a time."""
@@ -1171,14 +1177,15 @@ class TestLockInHarmonicMeasurementVI:
         data = vi.take_reading()
         # 1f response is linear in amplitude, 2f is quadratic (see SimLockIn) —
         # different values confirm take_reading() actually switched harmonics.
-        assert data["x_1f_V"][0] != pytest.approx(data["x_2f_V"][0])
+        assert data["x_1f_V_array"][0] != pytest.approx(data["x_2f_V_array"][0])
         assert lockin_driver.get_harmonic() == 2  # left on 2f after the last read
 
     def test_current_computed_from_amplitude_and_series_resistance(self, lockin_driver):
         vi = self._make_vi(lockin_driver, series_resistance_ohm=2e6)
         vi.initiate_measurement(oscillator_amplitude_V=1.0, n_readings=3)
         data = vi.take_reading()
-        assert all(c == pytest.approx(0.5e-6) for c in data["current_A"])
+        assert all(c == pytest.approx(0.5e-6) for c in data["current_A_array"])
+        assert data["current_A"] == pytest.approx(0.5e-6)
 
     def test_standby_zeros_oscillator_amplitude(self, lockin_driver):
         vi = self._make_vi(lockin_driver)

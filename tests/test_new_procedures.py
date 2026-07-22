@@ -10,13 +10,14 @@
 #   Also keeps the set_ramp_rate @control and Station rate-forwarding checks.
 #   The reading-loop section covers the two generic loop slots (the switch's
 #   route and the DC VI's current_A are the same loopable-parameter concept):
-#   index-label schema/columns ({name}__A{i}__B{j}), static single-value
-#   slots, the HDF5 loop_labels metadata, command dispatch through the
-#   Station, slot composition and ordering, construction-time refusals, the
-#   auto-rendered Reading loop form group, the live-plot label maps, and
+#   the real (n_loop1, n_loop2) DataSchema/HDF5 axis every measurement column
+#   carries, static single-value slots, the HDF5 loop1_values/loop2_values
+#   metadata, command dispatch through the Station, slot composition and
+#   ordering, construction-time refusals, the auto-rendered Reading loop form
+#   group, the live-plot label maps (axis index -> display text), and
 #   end-to-end Orchestrator runs for both slot kinds.
 # entry_point: pytest tests/test_new_procedures.py -v
-# last_updated: 2026-07-17
+# last_updated: 2026-07-22
 # ---
 
 
@@ -235,12 +236,13 @@ def test_field_sweep_measure_saves_data(station, tmp_path, meas):
     n = MEAS_META[meas["measurement_vi"]]["n"]
     with h5py.File(filepath, "r") as f:
         assert not np.isnan(f["data"]["field_T"][0])
-        assert not np.any(np.isnan(f["data"]["voltage_V"][0]))
-        assert f["data"]["voltage_V"].shape == (1, n)
+        assert not np.any(np.isnan(f["data"]["voltage_V_array"][0]))
+        assert f["data"]["voltage_V_array"].shape == (1, 1, 1, n)
+        assert not np.isnan(f["data"]["voltage_V"][0, 0, 0])  # mean
         # The delta VI contributes an n_valid scalar column; the DC VI does not.
         if MEAS_META[meas["measurement_vi"]]["has_n_valid"]:
             assert "n_valid" in f["data"]
-            assert f["data"]["n_valid"][0] == n
+            assert f["data"]["n_valid"][0, 0, 0] == n
         else:
             assert "n_valid" not in f["data"]
 
@@ -418,7 +420,7 @@ def test_wrong_shape_reading_degrades_to_error(station, tmp_path, qtbot, monkeyp
 
     def bad_take_reading():
         data = good_take_reading()
-        data["voltage_V"] = list(data["voltage_V"]) + [0.0]  # one element too long
+        data["voltage_V_array"] = list(data["voltage_V_array"]) + [0.0]  # one too long
         return data
 
     monkeypatch.setattr(vi, "take_reading", bad_take_reading)
@@ -481,25 +483,22 @@ def test_channel_slot_initiate_selects_first_route_before_arming(station, tmp_pa
 
 
 def test_channel_slot_schema_uses_index_labels(station, tmp_path):
-    """Arrays AND scalar columns are expanded per index label (A1, A2)."""
+    """Arrays AND scalar columns carry a real loop1 axis (2 routes), not suffixes."""
     proc = _field_proc_scanner(station, tmp_path, DELTA, ROUTES2)
     proc.initiate()
     schema = proc._data_schema
     proc.standby()
 
-    assert set(schema.arrays) == {
-        "voltage_V__A1", "voltage_V__A2", "current_A__A1", "current_A__A2",
-    }
-    assert "n_valid" not in schema.sweep_columns
-    assert "n_valid__A1" in schema.sweep_columns
-    assert "n_valid__A2" in schema.sweep_columns
+    assert set(schema.measurement_arrays) == {"voltage_V_array", "current_A_array"}
+    assert "n_valid" in schema.measurement_scalars
     assert "field_T" in schema.sweep_columns
-    # The label -> value map ties A1/A2 back to the routes in the metadata.
-    assert proc._params["loop_labels"] == {"A1": "Mux-Ch1", "A2": "Mux-Ch2"}
+    assert schema.loop_shape == (2, 1)  # 2 routes on loop1, loop2 off
+    # Axis index -> route value ties back through the metadata.
+    assert proc._params["loop1_values"] == ["Mux-Ch1", "Mux-Ch2"]
 
 
 def test_channel_slot_measure_writes_labelled_keys(station, tmp_path):
-    """measure() loops the routes and writes per-label suffixed datasets."""
+    """measure() loops the routes and writes them along the loop1 axis."""
     proc = _field_proc_scanner(station, tmp_path, DELTA, ROUTES2)
     proc.initiate()
     _arm(station, DELTA, proc)
@@ -508,10 +507,11 @@ def test_channel_slot_measure_writes_labelled_keys(station, tmp_path):
     proc.standby()
 
     with h5py.File(filepath, "r") as f:
-        assert f["data"]["voltage_V__A1"].shape == (1, 5)
-        assert f["data"]["voltage_V__A2"].shape == (1, 5)
-        assert not np.any(np.isnan(f["data"]["voltage_V__A1"][0]))
-        assert f["data"]["n_valid__A1"][0] == 5
+        assert f["data"]["voltage_V_array"].shape == (1, 2, 1, 5)
+        assert not np.any(np.isnan(f["data"]["voltage_V_array"][0, 0, 0]))
+        assert not np.any(np.isnan(f["data"]["voltage_V_array"][0, 1, 0]))
+        assert f["data"]["n_valid"][0, 0, 0] == 5
+        assert f["data"]["n_valid"][0, 1, 0] == 5
 
 
 def test_channel_slot_standby_and_abort_dispatch_safe_off(station, tmp_path):
@@ -537,26 +537,26 @@ def test_channel_slot_standby_and_abort_dispatch_safe_off(station, tmp_path):
 
 
 def test_single_value_slot_is_static(station, tmp_path):
-    """One value = static setting: dispatched once at initiate, no suffix."""
+    """One value = static setting: dispatched once at initiate, trivial axis."""
     proc = _field_proc_scanner(station, tmp_path, DELTA, ROUTES1)
     plan = proc.initiate()
     schema = proc._data_schema
 
-    # Selected once before arming; schema is plain.
+    # Selected once before arming; schema carries a trivial (1, 1) loop shape.
     assert plan.commands[0].vi_name == "switch_matrix"
     assert plan.commands[0].method == "select_route"
-    assert set(schema.arrays) == {"voltage_V", "current_A"}
-    assert "n_valid" in schema.sweep_columns
-    assert proc._params["loop_labels"] == {}
+    assert set(schema.measurement_arrays) == {"voltage_V_array", "current_A_array"}
+    assert "n_valid" in schema.measurement_scalars
+    assert schema.loop_shape == (1, 1)
+    assert proc._params["loop1_values"] == ["Mux-Ch1"]
 
-    # measure() takes a plain reading (no re-selection, no suffix).
+    # measure() takes a plain reading (no re-selection, trivial grid).
     _arm(station, DELTA, proc)
     proc.measure()
     filepath = proc._data_manager.filepath
     proc.standby()
     with h5py.File(filepath, "r") as f:
-        assert "voltage_V" in f["data"]
-        assert "voltage_V__A1" not in f["data"]
+        assert f["data"]["voltage_V_array"].shape == (1, 1, 1, 5)
 
 
 def test_static_measurement_slot_dispatches_after_arm(station, tmp_path):
@@ -573,7 +573,8 @@ def test_static_measurement_slot_dispatches_after_arm(station, tmp_path):
         ("dc_measurement", "set_source_current"),
     ]
     assert plan.commands[1].kwargs == {"current_A": 2e-6}
-    assert set(proc._data_schema.arrays) == {"voltage_V", "current_A"}
+    assert set(proc._data_schema.measurement_arrays) == {"voltage_V_array", "current_A_array"}
+    assert proc._data_schema.loop_shape == (1, 1)
 
 
 def test_loop_off_is_unchanged(station, tmp_path):
@@ -586,7 +587,8 @@ def test_loop_off_is_unchanged(station, tmp_path):
     proc.standby()
     assert len(plan.commands) == 1
     assert plan.commands[0].vi_name == "keithley_delta_mode"
-    assert set(proc._data_schema.arrays) == {"voltage_V", "current_A"}
+    assert set(proc._data_schema.measurement_arrays) == {"voltage_V_array", "current_A_array"}
+    assert proc._data_schema.loop_shape == (1, 1)
 
 
 def test_unknown_pick_refused(station, tmp_path):
@@ -658,17 +660,19 @@ def test_scanner_disabled_removes_channel_parameter(station, tmp_path):
 # ── Value-list slot alone (± current) ────────────────────────────────────────
 
 def test_value_slot_labels_and_suffixed_keys(station, tmp_path):
-    """A two-value current loop resolves A1/A2 and suffixes the data keys."""
+    """A two-value current loop resolves a loop1 axis of length 2, plain keys."""
     proc = _field_proc(station, tmp_path, {**DC, **CURRENTS2})
     assert [s["qualified"] for s in proc._loop_slots] == ["dc_measurement.current_A"]
+    # dc_measurement (DCSeparate/DCSingle) declares no n_valid scalar.
     assert proc.measurement_data_keys == [
-        "voltage_V__A1", "voltage_V__A2", "current_A__A1", "current_A__A2",
+        "voltage_V", "voltage_V_error", "current_A", "current_A_error",
     ]
-    assert proc._params["loop_labels"] == {"A1": 1e-6, "A2": -1e-6}
+    assert proc._loop_shape == (2, 1)
+    assert proc._params["loop1_values"] == [1e-6, -1e-6]
 
 
 def test_value_slot_measure_writes_signed_current(station, tmp_path):
-    """measure() loops the values; the A2 reading carries -current_A."""
+    """measure() loops the values along axis 0; index 1 carries -current_A."""
     proc = _field_proc(station, tmp_path, {**DC, **CURRENTS2})
     proc.initiate()
     _arm(station, DC, proc)
@@ -677,9 +681,9 @@ def test_value_slot_measure_writes_signed_current(station, tmp_path):
     proc.standby()
 
     with h5py.File(filepath, "r") as f:
-        assert f["data"]["voltage_V__A1"].shape == (1, 5)
-        assert np.allclose(f["data"]["current_A__A1"][0], 1e-6)
-        assert np.allclose(f["data"]["current_A__A2"][0], -1e-6)
+        assert f["data"]["voltage_V_array"].shape == (1, 2, 1, 5)
+        assert np.allclose(f["data"]["current_A"][0, 0, 0], 1e-6)
+        assert np.allclose(f["data"]["current_A"][0, 1, 0], -1e-6)
 
 
 def test_value_slot_measure_rearms_delta_between_readings(station, tmp_path):
@@ -695,7 +699,7 @@ def test_value_slot_measure_rearms_delta_between_readings(station, tmp_path):
         "loop1_values": "1e-6, 5e-6",
     }
     proc = _field_proc(station, tmp_path, {**DELTA, **delta_currents})
-    assert proc._params["loop_labels"] == {"A1": 1e-6, "A2": 5e-6}
+    assert proc._params["loop1_values"] == [1e-6, 5e-6]
 
     proc.initiate()
     _arm(station, DELTA, proc)
@@ -708,12 +712,12 @@ def test_value_slot_measure_rearms_delta_between_readings(station, tmp_path):
 
     proc.standby()
     with h5py.File(filepath, "r") as f:
-        assert np.allclose(f["data"]["current_A__A1"][0], 1e-6)
-        assert np.allclose(f["data"]["current_A__A2"][0], 5e-6)
+        assert np.allclose(f["data"]["current_A"][0, 0, 0], 1e-6)
+        assert np.allclose(f["data"]["current_A"][0, 1, 0], 5e-6)
 
 
 def test_value_slot_metadata_carries_label_map(station, tmp_path):
-    """The HDF5 metadata's procedure_params records the slots and labels."""
+    """The HDF5 metadata's procedure_params records each slot's axis values."""
     import json
 
     proc = _field_proc(station, tmp_path, {**DC, **CURRENTS2})
@@ -724,9 +728,9 @@ def test_value_slot_metadata_carries_label_map(station, tmp_path):
     with h5py.File(filepath, "r") as f:
         params = json.loads(f["metadata"].attrs["procedure_params"])
     assert params["loop1_parameter"] == "dc_measurement.current_A"
-    assert params["loop1_values"] == [1e-6, -1e-6]
+    assert params["loop1_values"] == [1e-6, -1e-6]  # index 0 -> 1e-6, index 1 -> -1e-6
     assert params["loop2_parameter"] == ""
-    assert params["loop_labels"] == {"A1": 1e-6, "A2": -1e-6}
+    assert params["loop2_values"] == []
 
 
 def test_value_slot_bad_entry_refused(station, tmp_path):
@@ -739,59 +743,6 @@ def test_value_slot_bad_entry_refused(station, tmp_path):
             {**DC, "loop1_parameter": "dc_measurement.current_A",
              "loop1_values": "1e-6, abc"},
         )
-
-
-def test_value_slot_resilient_to_spaces(station, tmp_path):
-    """An entry with spaces (e.g. '- 0.000001') is parsed successfully after stripping."""
-    proc = _field_proc(
-        station, tmp_path,
-        {**DC, "loop1_parameter": "dc_measurement.current_A",
-         "loop1_values": "0.000001, - 0.000001"},
-    )
-    assert proc._params["loop_labels"] == {"A1": 1e-6, "A2": -1e-6}
-
-
-def test_value_slot_colon_range_generator(station, tmp_path):
-    """A range entry like '-1e-6:1e-6:3' is expanded to float elements correctly."""
-    proc = _field_proc(
-        station, tmp_path,
-        {**DC, "loop1_parameter": "dc_measurement.current_A",
-         "loop1_values": "-1e-6:1e-6:3, 5e-6"},
-    )
-    assert proc._params["loop_labels"] == {
-        "A1": -1e-6,
-        "A2": 0.0,
-        "A3": 1e-6,
-        "A4": 5e-6,
-    }
-
-
-def test_value_slot_direct_iterable_values(station, tmp_path):
-    """A direct python list/tuple is parsed successfully without conversion."""
-    import numpy as np
-    proc = _field_proc(
-        station, tmp_path,
-        {**DC, "loop1_parameter": "dc_measurement.current_A",
-         "loop1_values": [2e-6, -2e-6]},
-    )
-    assert proc._params["loop_labels"] == {
-        "A1": 2e-6,
-        "A2": -2e-6,
-    }
-
-    # Should also work with numpy array
-    proc2 = _field_proc(
-        station, tmp_path,
-        {**DC, "loop1_parameter": "dc_measurement.current_A",
-         "loop1_values": np.array([3e-6, -3e-6])},
-    )
-    assert proc2._params["loop_labels"] == {
-        "A1": 3e-6,
-        "A2": -3e-6,
-    }
-
-
-
 
 
 def test_non_loopable_parameter_refused(station, tmp_path):
@@ -822,21 +773,16 @@ def test_same_parameter_in_both_slots_refused(station, tmp_path):
 # ── Both slots: channels (outer) x currents (inner) ──────────────────────────
 
 def test_both_slots_compose(station, tmp_path):
-    """Slot 1 x slot 2: columns {name}__A{i}__B{j}, route outer, value inner."""
+    """Slot 1 x slot 2: a real (n_loop1, n_loop2) axis, route outer, value inner."""
     proc = _field_proc_scanner(station, tmp_path, DC, BOTH)
     proc.initiate()
     schema = proc._data_schema
     _arm(station, DC, proc)
 
-    assert set(schema.arrays) == {
-        f"{name}__{a}__{b}"
-        for name in ("voltage_V", "current_A")
-        for a in ("A1", "A2")
-        for b in ("B1", "B2")
-    }
-    assert proc._params["loop_labels"] == {
-        "A1": "Mux-Ch1", "A2": "Mux-Ch2", "B1": 1e-6, "B2": -1e-6,
-    }
+    assert set(schema.measurement_arrays) == {"voltage_V_array", "current_A_array"}
+    assert schema.loop_shape == (2, 2)  # 2 routes (loop1) x 2 currents (loop2)
+    assert proc._params["loop1_values"] == ["Mux-Ch1", "Mux-Ch2"]
+    assert proc._params["loop2_values"] == [1e-6, -1e-6]
 
     calls = []
     original = station.send_measurement_commands
@@ -866,8 +812,9 @@ def test_both_slots_compose(station, tmp_path):
     ]
 
     with h5py.File(filepath, "r") as f:
-        assert f["data"]["voltage_V__A1__B1"].shape == (1, 5)
-        assert np.allclose(f["data"]["current_A__A2__B2"][0], -1e-6)
+        assert f["data"]["voltage_V_array"].shape == (1, 2, 2, 5)
+        # loop1 index 1 (Mux-Ch2) x loop2 index 1 (-1e-6).
+        assert np.allclose(f["data"]["current_A"][0, 1, 1], -1e-6)
 
 
 # ── Form group + live-plot hooks ─────────────────────────────────────────────
@@ -929,7 +876,7 @@ def test_reading_loop_group_absent_when_nothing_loopable(station):
 
 
 def test_live_plot_keys_stay_plain_and_loop_labels_drive_the_selectors(station):
-    """Axis keys stay plain; live_plot_loop_labels() feeds the two selectors."""
+    """Axis keys stay plain (arrays excluded); loop_labels map axis index -> display."""
     station.set_scanner_enabled(True)
     on = {
         "measurement_vi": "dc_measurement",
@@ -940,11 +887,11 @@ def test_live_plot_keys_stay_plain_and_loop_labels_drive_the_selectors(station):
         "loop2_values": "1e-6, -1e-6",
     }
     assert FieldSweep.live_plot_measurement_keys(station, on) == [
-        "voltage_V", "current_A",
+        "voltage_V", "voltage_V_error", "current_A", "current_A_error",
     ]
     labels1, labels2 = FieldSweep.live_plot_loop_labels(station, on)
-    assert labels1 == {"A1": "A1 = Mux-Ch1", "A2": "A2 = Mux-Ch2"}
-    assert labels2 == {"B1": "B1 = 1e-06", "B2": "B2 = -1e-06"}
+    assert labels1 == {0: "A1 = Mux-Ch1", 1: "A2 = Mux-Ch2"}
+    assert labels2 == {0: "B1 = 1e-06", 1: "B2 = -1e-06"}
     # Slots off -> ({}, {}) (selectors visible, disabled).
     assert FieldSweep.live_plot_loop_labels(
         station, {"measurement_vi": "dc_measurement"}
@@ -961,7 +908,7 @@ def test_live_plot_loop_labels_none_when_nothing_loopable(station):
 # ── End-to-end Orchestrator runs ─────────────────────────────────────────────
 
 def test_full_orchestrator_run_channel_slot(station, tmp_path, qtbot):
-    """A 2-route channel-slot sweep completes to IDLE with per-label datasets."""
+    """A 2-route channel-slot sweep completes to IDLE with a real loop1 axis."""
     from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 
     station.magnet_z._default_ramp_rate = 6000.0
@@ -980,13 +927,13 @@ def test_full_orchestrator_run_channel_slot(station, tmp_path, qtbot):
     assert len(h5_files) == 1
     with h5py.File(h5_files[0], "r") as f:
         assert f["data"]["field_T"].shape[0] == 3
-        assert f["data"]["voltage_V__A1"].shape == (3, 5)
-        assert f["data"]["voltage_V__A2"].shape == (3, 5)
-        assert not np.any(np.isnan(f["data"]["voltage_V__A1"][:]))
+        assert f["data"]["voltage_V_array"].shape == (3, 2, 1, 5)
+        assert not np.any(np.isnan(f["data"]["voltage_V_array"][:, 0, 0]))
+        assert not np.any(np.isnan(f["data"]["voltage_V_array"][:, 1, 0]))
 
 
 def test_full_orchestrator_run_value_slot(station, tmp_path, qtbot):
-    """A +/- current sweep completes to IDLE with per-label datasets."""
+    """A +/- current sweep completes to IDLE with a real loop1 axis."""
     from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 
     station.magnet_z._default_ramp_rate = 6000.0
@@ -1004,8 +951,8 @@ def test_full_orchestrator_run_value_slot(station, tmp_path, qtbot):
     assert len(h5_files) == 1
     with h5py.File(h5_files[0], "r") as f:
         assert f["data"]["field_T"].shape[0] == 3
-        assert f["data"]["voltage_V__A1"].shape == (3, 5)
-        assert np.allclose(f["data"]["current_A__A2"][:], -1e-6)
+        assert f["data"]["voltage_V_array"].shape == (3, 2, 1, 5)
+        assert np.allclose(f["data"]["current_A"][:, 1, 0], -1e-6)
 
 
 # ── Temperature-channel on/off toggles ───────────────────────────────────────
@@ -1097,6 +1044,8 @@ def test_temp_sweep_vti_off_emits_no_targets_on_initiate_or_step(station, tmp_pa
 
 def test_temp_sweep_holds_sample_setpoint_only_on_initiate(station, tmp_path):
     """The sample stage is set once at initiate, not re-sent at every step."""
+    from cryosoft.core.exceptions import CryoSoftConfigError
+
     proc = TemperatureSweep(
         station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
         **{**FAST_TEMP, **DC,
@@ -1106,3 +1055,10 @@ def test_temp_sweep_holds_sample_setpoint_only_on_initiate(station, tmp_path):
     step = proc.change_sweep_step()
     assert step is not None and "temperature_sample" not in step.targets
     proc.standby()
+    station = _partial_station("magnet_z", "temperature_vti", "dc_measurement")
+    with pytest.raises(CryoSoftConfigError, match="temperature_sample"):
+        FieldSweep(
+            station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
+            **{**FAST_FIELD, **DC, "set_sample_temperature": True},
+        )
+

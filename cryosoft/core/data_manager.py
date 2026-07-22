@@ -12,7 +12,9 @@
 #   parameter dicts (procedure_params, sample_info, instrument_state,
 #   system_targets, measurement_commands, data_config, and the optional
 #   session-layer experiment_info), target data directory, and n_sweep_points
-#   (int). data_config defines sweep_columns (1-D) and measurement_arrays (2-D).
+#   (int). data_config defines sweep_columns (1-D, never looped),
+#   measurement_scalars (shape (N, n_loop1, n_loop2)), measurement_arrays
+#   (shape (N, n_loop1, n_loop2, length)), and loop_shape ([n_loop1, n_loop2]).
 # process: |
 #   Creates an HDF5 file at {data_directory}/{stem}_{YYYYMMDD_HHMMSS}.h5,
 #   where stem is file_prefix if given, else procedure_name; writes all
@@ -99,9 +101,14 @@ class DataManager:
             Specifies datasets.  Expected format::
 
                 {
-                    "sweep_columns":      {"field_T": "float", ...},
-                    "measurement_arrays": {"voltage_V": 100, "current_A": 100, ...},
+                    "sweep_columns": {"field_T": "float", ...},        # (N,)
+                    "measurement_scalars": {"voltage_V": "float", ...},  # (N, n_loop1, n_loop2)
+                    "measurement_arrays": {"voltage_V_array": 100, ...}, # (N, n_loop1, n_loop2, 100)
+                    "loop_shape": [n_loop1, n_loop2],                   # each >= 1
                 }
+
+            ``loop_shape`` defaults to ``[1, 1]`` (no reading loop) when
+            absent, so callers that never loop can omit it.
 
         n_sweep_points:
             Total number of sweep points expected (used for pre-allocation).
@@ -123,9 +130,14 @@ class DataManager:
 
         # Derive column / array names from data_config
         self._sweep_columns: dict[str, str] = data_config.get("sweep_columns", {})
+        self._measurement_scalars: dict[str, str] = data_config.get(
+            "measurement_scalars", {}
+        )
         self._measurement_arrays: dict[str, int] = data_config.get(
             "measurement_arrays", {}
         )
+        loop_shape = data_config.get("loop_shape", [1, 1])
+        self._loop_shape: tuple[int, int] = (int(loop_shape[0]), int(loop_shape[1]))
 
         # Build file path
         timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -185,9 +197,10 @@ class DataManager:
     def _allocate_datasets(self) -> None:
         """Pre-allocate all datasets in `/data/` with NaN fill values."""
         N = self._n_sweep_points
+        n_loop1, n_loop2 = self._loop_shape
         data_group = self._file.require_group("data")
 
-        # 1-D sweep columns
+        # 1-D sweep columns — one value per sweep point, never looped.
         for col_name in self._sweep_columns:
             data_group.create_dataset(
                 col_name,
@@ -197,12 +210,22 @@ class DataManager:
                 fillvalue=np.nan,
             )
 
-        # 2-D measurement arrays
+        # 3-D measurement scalars — a (n_loop1, n_loop2) grid per sweep point.
+        for col_name in self._measurement_scalars:
+            data_group.create_dataset(
+                col_name,
+                shape=(N, n_loop1, n_loop2),
+                maxshape=(None, n_loop1, n_loop2),
+                dtype=np.float64,
+                fillvalue=np.nan,
+            )
+
+        # 4-D measurement arrays — a (n_loop1, n_loop2, M) grid per sweep point.
         for arr_name, M in self._measurement_arrays.items():
             data_group.create_dataset(
                 arr_name,
-                shape=(N, M),
-                maxshape=(None, M),
+                shape=(N, n_loop1, n_loop2, M),
+                maxshape=(None, n_loop1, n_loop2, M),
                 dtype=np.float64,
                 fillvalue=np.nan,
             )
@@ -242,10 +265,20 @@ class DataManager:
         sweep_index:
             Zero-based index of this sweep point (0 … n_sweep_points-1).
         measured_data:
-            Dict whose keys match sweep_columns or measurement_arrays names.
-            Values may be scalars, lists, or numpy arrays.
+            Dict whose keys match sweep_columns, measurement_scalars or
+            measurement_arrays names. Sweep-column values are plain scalars;
+            measurement_scalars values are a nested ``(n_loop1, n_loop2)``
+            grid; measurement_arrays values are a nested ``(n_loop1, n_loop2,
+            length)`` grid. Lists, tuples and numpy arrays are all accepted.
         station_snapshot:
             Full instrument-state snapshot to store as a JSON string.
+
+        Raises:
+            ValueError: If a measurement scalar's grid shape doesn't match
+                ``loop_shape``, or a measurement array's grid shape doesn't
+                match ``loop_shape`` on the loop axes (a per-point sample
+                count mismatch on the innermost axis is NOT an error — see
+                below).
         """
         if self._closed:
             raise RuntimeError("save_datapoint() called on a closed DataManager")
@@ -255,28 +288,48 @@ class DataManager:
             )
 
         data_group = self._file["data"]
+        loop_shape = self._loop_shape
 
         for col_name, value in measured_data.items():
             if col_name in self._sweep_columns:
                 data_group[col_name][sweep_index] = float(value)
-            elif col_name in self._measurement_arrays:
+            elif col_name in self._measurement_scalars:
                 arr = np.asarray(value, dtype=np.float64)
-                # Instruments can legitimately return fewer readings than
-                # allocated (e.g. the delta engine aborts an acquisition
-                # early). Pad with NaN / truncate to the allocated width —
-                # a raw shape-mismatch here would crash the whole run.
-                expected = int(self._measurement_arrays[col_name])
-                if arr.shape != (expected,):
-                    logger.warning(
-                        "DataManager: column '%s' at index %d has %d values "
-                        "(expected %d) — padding/truncating with NaN",
-                        col_name, sweep_index, arr.size, expected,
+                if arr.shape != loop_shape:
+                    raise ValueError(
+                        f"DataManager: measurement scalar '{col_name}' at "
+                        f"index {sweep_index} has shape {arr.shape}, "
+                        f"expected loop shape {loop_shape}"
                     )
-                    padded = np.full(expected, np.nan)
-                    n = min(arr.size, expected)
-                    padded[:n] = arr.ravel()[:n]
-                    arr = padded
-                data_group[col_name][sweep_index, :] = arr
+                data_group[col_name][sweep_index, ...] = arr
+            elif col_name in self._measurement_arrays:
+                expected_length = int(self._measurement_arrays[col_name])
+                expected_shape = (*loop_shape, expected_length)
+                arr = np.asarray(value, dtype=np.float64)
+                if arr.shape != expected_shape:
+                    if arr.shape[:-1] == loop_shape:
+                        # Instruments can legitimately return fewer readings
+                        # than allocated (e.g. the delta engine aborts an
+                        # acquisition early). Pad/truncate only the innermost
+                        # (per-point sample) axis with NaN — the loop-axis
+                        # shape itself is never adjusted.
+                        logger.warning(
+                            "DataManager: column '%s' at index %d has inner "
+                            "length %d (expected %d) — padding/truncating "
+                            "with NaN",
+                            col_name, sweep_index, arr.shape[-1], expected_length,
+                        )
+                        padded = np.full(expected_shape, np.nan)
+                        n = min(arr.shape[-1], expected_length)
+                        padded[..., :n] = arr[..., :n]
+                        arr = padded
+                    else:
+                        raise ValueError(
+                            f"DataManager: measurement array '{col_name}' at "
+                            f"index {sweep_index} has shape {arr.shape}, "
+                            f"expected {expected_shape}"
+                        )
+                data_group[col_name][sweep_index, ...] = arr
             else:
                 logger.warning(
                     "DataManager: unknown column '%s' — skipped", col_name

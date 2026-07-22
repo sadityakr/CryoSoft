@@ -25,8 +25,10 @@
 #   and the true count reported in the n_valid scalar column.
 #   standby() calls source.stop_delta_mode() to abort the running engine.
 # output: |
-#   {"voltage_V": list[float](n_readings,), "current_A": list[float](n_readings,),
-#    "n_valid": int} — arrays always exactly n_readings long.
+#   Mean/error/array triple per quantity: {"voltage_V": float, "voltage_V_error":
+#   float, "voltage_V_array": list[float](n_readings,), "current_A": float,
+#   "current_A_error": float, "current_A_array": list[float](n_readings,),
+#   "n_valid": int} — arrays always exactly n_readings long.
 # last_updated: 2026-07-13
 # ---
 
@@ -56,7 +58,10 @@ class DeltaModeMeasurementVI(MeasurementInstrumentBase):
 
         vi.initiate_measurement(current=1e-6, n_readings=100)
         data = vi.take_reading()
-        # data = {"voltage_V": list(100,), "current_A": list(100,), "n_valid": int}
+        # data = {"voltage_V": float, "voltage_V_error": float,
+        #         "voltage_V_array": list(100,), "current_A": float,
+        #         "current_A_error": float, "current_A_array": list(100,),
+        #         "n_valid": int}
 
     Implements the self-describing measurement-method standard documented on
     ``MeasurementInstrumentBase``. The delta engine can legitimately return
@@ -85,8 +90,13 @@ class DeltaModeMeasurementVI(MeasurementInstrumentBase):
     # generic sweep procedure loop a list of currents at every sweep point.
     reading_setters: ClassVar[dict[str, str]] = {"current": "set_delta_current"}
 
-    measurement_data_keys: ClassVar[list[str]] = ["voltage_V", "current_A"]
-    measurement_scalar_columns: ClassVar[dict[str, str]] = {"n_valid": "int"}
+    _ARRAY_KEYS, _SCALAR_COLUMNS = MeasurementInstrumentBase.quantity_columns(
+        "voltage_V", "current_A"
+    )
+    measurement_data_keys: ClassVar[list[str]] = _ARRAY_KEYS
+    measurement_scalar_columns: ClassVar[dict[str, str]] = {
+        **_SCALAR_COLUMNS, "n_valid": "int"
+    }
     measurement_parameters: ClassVar[dict[str, ParamSpec]] = {
         "current": ParamSpec(
             type=float,
@@ -159,7 +169,7 @@ class DeltaModeMeasurementVI(MeasurementInstrumentBase):
     # ------------------------------------------------------------------
 
     def data_arrays(self, params: Mapping[str, Any]) -> dict[str, int]:
-        """Return ``{"voltage_V": n, "current_A": n}`` with n = n_readings.
+        """Return ``{"voltage_V_array": n, "current_A_array": n}`` with n = n_readings.
 
         Args:
             params: Parameter mapping containing ``n_readings``.
@@ -168,7 +178,7 @@ class DeltaModeMeasurementVI(MeasurementInstrumentBase):
             Per-point length for each delta-mode data array.
         """
         n = int(params["n_readings"])
-        return {"voltage_V": n, "current_A": n}
+        return {key: n for key in self.measurement_data_keys}
 
     # ------------------------------------------------------------------
     # @control — arm the measurement
@@ -272,18 +282,20 @@ class DeltaModeMeasurementVI(MeasurementInstrumentBase):
     # take_reading — NOT @monitored, NOT @control (Procedure-only)
     # ------------------------------------------------------------------
 
-    def take_reading(self) -> dict[str, list[float]]:
+    def take_reading(self) -> dict[str, list[float] | float]:
         """Collect one delta-mode datapoint from the armed engine.
 
         Polls ``source.acquire_delta_readings()`` for up to ``n_readings``
         samples. The engine can return fewer, so both arrays are padded with
         ``float("nan")`` to exactly ``n_readings`` and the real count reported
-        as ``n_valid``.
+        as ``n_valid``; the mean/error of each quantity are computed only
+        over the valid (non-padded) samples.
 
         Returns:
-            ``{"voltage_V": list(n_readings,), "current_A": list(n_readings,),
-            "n_valid": int}``. Padded (invalid) positions are ``NaN`` in both
-            arrays.
+            The mean/error/array triple for both quantities (``voltage_V``,
+            ``voltage_V_error``, ``voltage_V_array``, ``current_A``,
+            ``current_A_error``, ``current_A_array``) plus ``n_valid``.
+            Padded (invalid) positions are ``NaN`` in both arrays.
 
         Raises:
             RuntimeError: If ``initiate_measurement()`` has not been called first.
@@ -300,6 +312,9 @@ class DeltaModeMeasurementVI(MeasurementInstrumentBase):
         n_valid = len(voltages)
         currents: list[float] = [self._current] * n_valid
 
+        v_mean, v_error = self.mean_and_sem(voltages)
+        c_mean, c_error = self.mean_and_sem(currents)
+
         pad = n - n_valid
         if pad > 0:
             nan = float("nan")
@@ -307,8 +322,12 @@ class DeltaModeMeasurementVI(MeasurementInstrumentBase):
             currents.extend([nan] * pad)
 
         return {
-            "voltage_V": voltages,
-            "current_A": currents,
+            "voltage_V_array": voltages,
+            "voltage_V": v_mean,
+            "voltage_V_error": v_error,
+            "current_A_array": currents,
+            "current_A": c_mean,
+            "current_A_error": c_error,
             "n_valid": n_valid,
         }
 

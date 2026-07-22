@@ -26,8 +26,9 @@
 #   The excitation current is computed from the oscillator amplitude and the
 #   series resistance (Ohm's law, series R >> sample R).
 # output: |
-#   {"x_1f_V": list[float], "y_1f_V": list[float], "x_2f_V": list[float],
-#    "y_2f_V": list[float], "current_A": list[float]}, all length n_readings.
+#   Mean/error/array triple per quantity, for each of x_1f_V, y_1f_V, x_2f_V,
+#   y_2f_V, current_A: "{q}" (mean, float), "{q}_error" (SEM, float),
+#   "{q}_array" (list[float], length n_readings).
 # last_updated: 2026-07-18
 # ---
 
@@ -62,8 +63,9 @@ class LockInHarmonicMeasurementVI(MeasurementInstrumentBase):
 
         vi.initiate_measurement(oscillator_amplitude_V=1.0, oscillator_frequency_Hz=977.0)
         data = vi.take_reading()
-        # data = {"x_1f_V": [...], "y_1f_V": [...], "x_2f_V": [...],
-        #         "y_2f_V": [...], "current_A": [...]}, all length n_readings
+        # data = {"x_1f_V": float, "x_1f_V_error": float, "x_1f_V_array": [...],
+        #         "y_1f_V": ..., "x_2f_V": ..., "y_2f_V": ..., "current_A": ...}
+        #         (mean/error/array triple per quantity, arrays length n_readings)
 
     Harmonic behaviour
     ------------------
@@ -95,9 +97,11 @@ class LockInHarmonicMeasurementVI(MeasurementInstrumentBase):
     display_label: str = "lock-in harmonic"
     selector_label: ClassVar[str] = "Lock-in 1f/2f (internal source)"
 
-    measurement_data_keys: ClassVar[list[str]] = [
+    _ARRAY_KEYS, _SCALAR_COLUMNS = MeasurementInstrumentBase.quantity_columns(
         "x_1f_V", "y_1f_V", "x_2f_V", "y_2f_V", "current_A",
-    ]
+    )
+    measurement_data_keys: ClassVar[list[str]] = _ARRAY_KEYS
+    measurement_scalar_columns: ClassVar[dict[str, str]] = _SCALAR_COLUMNS
     measurement_parameters: ClassVar[dict[str, ParamSpec]] = {
         "oscillator_amplitude_V": ParamSpec(
             type=float,
@@ -190,13 +194,13 @@ class LockInHarmonicMeasurementVI(MeasurementInstrumentBase):
     # take_reading — NOT @monitored, NOT @control (Procedure-only)
     # ------------------------------------------------------------------
 
-    def take_reading(self) -> dict[str, list[float]]:
+    def take_reading(self) -> dict[str, list[float] | float]:
         """Collect one 1f/2f datapoint by switching harmonic between reads.
 
         Returns:
-            ``{"x_1f_V": list(n_readings,), "y_1f_V": list(n_readings,),
-            "x_2f_V": list(n_readings,), "y_2f_V": list(n_readings,),
-            "current_A": list(n_readings,)}``.
+            The mean/error/array triple for each of ``x_1f_V``, ``y_1f_V``,
+            ``x_2f_V``, ``y_2f_V``, ``current_A`` — arrays length
+            ``n_readings``.
 
         Raises:
             RuntimeError: If ``initiate_measurement()`` has not been called first.
@@ -224,13 +228,20 @@ class LockInHarmonicMeasurementVI(MeasurementInstrumentBase):
 
             currents.append(current)
 
-        return {
+        arrays = {
             "x_1f_V": x_1f,
             "y_1f_V": y_1f,
             "x_2f_V": x_2f,
             "y_2f_V": y_2f,
             "current_A": currents,
         }
+        result: dict[str, list[float] | float] = {}
+        for name, samples in arrays.items():
+            mean, error = self.mean_and_sem(samples)
+            result[f"{name}_array"] = samples
+            result[name] = mean
+            result[f"{name}_error"] = error
+        return result
 
     # ------------------------------------------------------------------
     # Lifecycle
