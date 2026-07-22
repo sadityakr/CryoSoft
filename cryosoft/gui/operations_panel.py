@@ -895,11 +895,19 @@ class OperationsPanel(QWidget):
         self._fill_markers.setData(marker_x, marker_y)
 
     def _fill_intervals(self) -> tuple[tuple[float, float], ...]:
-        """Return ``(start_unix, end_unix)`` for every cryogenics-log fill entry."""
+        """Return ``(start_unix, end_unix)`` for every fill entry in the servicing log.
+
+        Reads the unified ``"servicing"`` kind (docs/plans/unified-servicing-
+        log-and-run-recording.md §2 — the recorder no longer writes the
+        legacy ``"cryogenics"`` kind), filtering to ``entry_kind ==
+        "helium_fill"``.
+        """
         if self._servicing_store is None:
             return ()
         intervals: list[tuple[float, float]] = []
-        for entry in self._servicing_store.entries("cryogenics"):
+        for entry in self._servicing_store.entries("servicing"):
+            if entry.values.get("entry_kind") != "helium_fill":
+                continue
             try:
                 start = datetime.fromisoformat(str(entry.values.get("start_utc"))).timestamp()
                 end = datetime.fromisoformat(str(entry.values.get("end_utc"))).timestamp()
@@ -909,12 +917,18 @@ class OperationsPanel(QWidget):
         return tuple(intervals)
 
     def _fill_marker_points(self) -> tuple[list[float], list[float]]:
-        """Return marker (x, y) points at each fill's start time/level."""
+        """Return marker (x, y) points at each fill's start time/level.
+
+        See ``_fill_intervals()`` for the unified ``"servicing"`` kind /
+        ``entry_kind`` filtering this mirrors.
+        """
         if self._servicing_store is None:
             return [], []
         xs: list[float] = []
         ys: list[float] = []
-        for entry in self._servicing_store.entries("cryogenics"):
+        for entry in self._servicing_store.entries("servicing"):
+            if entry.values.get("entry_kind") != "helium_fill":
+                continue
             try:
                 start = datetime.fromisoformat(str(entry.values.get("start_utc"))).timestamp()
                 level = float(entry.values.get("helium_start_pct", 0.0))

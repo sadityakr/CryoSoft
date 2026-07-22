@@ -147,10 +147,19 @@ servicing/<config_name>/
 
 1. **Schema + store**: the flat `servicing` LogKindSpec, store support
    (add/revise for both origins), migration routine (incl. legacy embedded
-   curves → sidecars) + tests over synthetic legacy files.
+   curves → sidecars) + tests over synthetic legacy files. DONE.
 2. **Recorder rewiring**: `CryogenicsRecorder` writes single merged entries
    with He/LN2 start+end levels for every run kind, and recording sidecars;
-   fill's curve moves to a sidecar.
+   fill's curve moves to a sidecar. DONE (2026-07-23): `CryogenicsRecorder`
+   now writes ONLY `"servicing"` (one entry per finished operation run of
+   any kind), `HeliumFillOperation.run_summary()` returns the generic
+   `{"recording": {...}, "start_pct": ..., "end_pct": ...}` shape, and
+   `cryosoft.main` calls `ServicingLogStore.migrate_legacy()` once at
+   startup; the shipped sim configs' `servicing_logs:` lists now declare
+   `servicing` instead of `cryogenics`. The legacy `cryogenics`/`operations`
+   kinds stay declared (readable, `cryogenics` still manually editable) for
+   any not-yet-migrated setup's history, but the recorder never writes them
+   again.
 3. **Sample-change hold phase**: step() hold, sample() recording, mid-run
    ready banner, config keys, tests (run spans Finish click; recording
    lands; timestamps cover the true servicing window).

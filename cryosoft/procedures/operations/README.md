@@ -122,7 +122,16 @@ operation) — the capability a plain procedure's plan does not have.
   prefer `run_summary() -> dict` instead: no file at all, no
   `data_filepath` property needed — the Orchestrator merges the returned
   dict into the run manifest's `summary` key on `run_finished` (duck-typed,
-  default `{}`, guarded so a broken override can never block the run).
+  default `{}`, guarded so a broken override can never block the run). A
+  bounded time series should be handed off under the generic `"recording"`
+  key (docs/plans/unified-servicing-log-and-run-recording.md §3):
+  `{"recording": {"unix_time": [...], "channels": {"<vi>.<value>": [...],
+  ...}}, ...}` — `cryosoft.session.servicing_log.CryogenicsRecorder` writes
+  it as this run's `recordings/<run_id>.json` sidecar and stamps that
+  filename into the run's single `servicing` log entry, whatever operation
+  produced it. `HeliumFillOperation.run_summary()` is the reference
+  implementation: `{"recording": {"unix_time": [...], "channels":
+  {"<level_vi>.helium_pct": [...]}}, "start_pct": float, "end_pct": float}`.
 
 ## How to add a new module
 
@@ -168,8 +177,13 @@ the postcondition or hardcode a GUI checkbox, an operation **declares** it:
   entry point a caller uses to set it.
 - The GUI (Phase 5, `docs/plans/cryogenics-logbook.md` §10) renders one
   checkbox per declared `operator_confirmations` entry and forwards a click
-  through `Orchestrator.confirm_operation(key)`; the entry is recorded in
-  the **operations stream** as human-confirmed rather than machine-verified.
+  through `Orchestrator.confirm_operation(key)`. An unconfirmed key still
+  fails its postcondition gate at the one-shot evaluation, so it surfaces in
+  the run's single `servicing` log entry via `postconditions_unmet`
+  (`CryogenicsRecorder` folds it into `notes`, e.g. `"unmet:
+  needle_valve_confirmed"`); a confirmed key leaves the gate passing and no
+  trace in `notes` (the legacy `operations` stream's per-run `verified`
+  column is gone with that kind).
 
 A future machine-verifiable capability (e.g. an ITC503 `close_needle_valve()`
 VI method) replaces the confirmation with a real `Gate` and drops the
@@ -181,5 +195,5 @@ already supports both, which is why this is declared, not hardcoded.
 | File | Responsibility | Key public API | Tests |
 |------|----------------|-----------------|-------|
 | `__init__.py` | Package marker | (none) | none |
-| `helium_fill.py` | Ramps every magnet (`Station.magnet_vi_names()`) to zero field, switches the level meter to FAST refresh, samples the helium level once per `sample_period_s` into a bounded in-memory curve (no HDF5 file — plan operation-concurrency-and-error-scoping.md §4), and finishes once the level holds at/above `fill_target_pct` for `fill_complete_window_s` (or `max_fill_duration_s` elapses); restores SLOW refresh on standby/abort and verifies it via `postcondition_gates()`. Tolerates `helium_low` (its whole purpose). `readiness_conditions()` exposes one aggregate `zero_field` row; `next_due()` predicts time-to-`helium_warning_pct` from the panel-supplied consumption rate (plan §12). `run_summary()` hands the level curve plus start/end level to the run manifest. `claimed_vi_names()` returns the configured level meter AND every magnet (it holds zero field as an invariant for the whole fill) — the VTI and everything else stays manually controllable during a fill. | `HeliumFillOperation` | `tests/test_helium_fill.py`, `tests/test_operation_readiness.py`, `tests/test_operations.py` |
+| `helium_fill.py` | Ramps every magnet (`Station.magnet_vi_names()`) to zero field, switches the level meter to FAST refresh, samples the helium level once per `sample_period_s` into a bounded in-memory curve (no HDF5 file — plan operation-concurrency-and-error-scoping.md §4), and finishes once the level holds at/above `fill_target_pct` for `fill_complete_window_s` (or `max_fill_duration_s` elapses); restores SLOW refresh on standby/abort and verifies it via `postcondition_gates()`. Tolerates `helium_low` (its whole purpose). `readiness_conditions()` exposes one aggregate `zero_field` row; `next_due()` predicts time-to-`helium_warning_pct` from the panel-supplied consumption rate (plan §12). `run_summary()` hands the level curve, in the generic `"recording"` shape (docs/plans/unified-servicing-log-and-run-recording.md §3), plus start/end level to the run manifest. `claimed_vi_names()` returns the configured level meter AND every magnet (it holds zero field as an invariant for the whole fill) — the VTI and everything else stays manually controllable during a fill. | `HeliumFillOperation` | `tests/test_helium_fill.py`, `tests/test_operation_readiness.py`, `tests/test_operations.py` |
 | `sample_change.py` | "Verify the cryostat is safe to open": ramps every magnet (`Station.magnet_vi_names()`) to zero field and the configured VTI VI to `target_temperature_K` (default 300 K), opens the first switch VI (if any), and sends `standby` to every measurement VI (`Station.measurement_vi_names()`). No sampling loop (`step()` returns `None` immediately) and no data file. `postcondition_gates()` verifies `zero_field`, `heater_off` (only for magnets whose cached state exposes `switch_heater_state`), `vti_at_target`, and — for the only supported `needle_valve: manual` mode — an **operator confirmation** (`needle_valve_confirmed`). `tolerated_safety_flags` is empty. `readiness_conditions()` mirrors the same four checks as live checklist rows; `config_key = "sample_change"` (plan §12). `claimed_vi_names()` returns exactly the magnets, VTI, switch (if any), and measurement VIs it commands in `initiate()`. | `SampleChangeOperation` | `tests/test_sample_change.py`, `tests/test_operation_readiness.py` |

@@ -10,10 +10,11 @@
 #   finishes promptly with "needle_valve_confirmed" named in
 #   postconditions_unmet, never blocking — measurement-VI standby + switch-VI
 #   open_all dispatch, an end-to-end run through a real CryogenicsRecorder
-#   (writing only the "operations" stream, never "cryogenics" — that is the
-#   fill's entry, not this operation's), refusal while a procedure is
-#   running, construction-time validation, and the operator-confirmation
-#   declaration standard itself (confirm()/confirmed()).
+#   (writing exactly one unified "servicing" entry, entry_kind=
+#   "sample_change", never the legacy "cryogenics"/"operations" kinds — see
+#   docs/plans/unified-servicing-log-and-run-recording.md §2), refusal while
+#   a procedure is running, construction-time validation, and the
+#   operator-confirmation declaration standard itself (confirm()/confirmed()).
 #
 #   The sim ITC503 (cryosoft/drivers/sim_oxford_itc503.py) starts at 300 K
 #   already (its "room temperature" default) with a 60 s thermal time
@@ -283,8 +284,8 @@ def test_measurement_vis_get_standby_and_switch_gets_open_all(orchestrator, stat
 # ── End-to-end with a real CryogenicsRecorder ─────────────────────────────
 
 
-def test_cryogenics_recorder_records_only_the_operations_stream(orchestrator, station, tmp_path, qtbot):
-    """A finished sample change produces one operations entry, never a cryogenics one."""
+def test_cryogenics_recorder_records_one_servicing_entry(orchestrator, station, tmp_path, qtbot):
+    """A finished sample change produces exactly ONE "servicing" entry, never a legacy-kind one."""
     _fast_magnets(station)
     _fast_vti(station)
     helium_store = HeliumRecordStore(tmp_path / "servicing", "sim_cryostat")
@@ -308,13 +309,18 @@ def test_cryogenics_recorder_records_only_the_operations_stream(orchestrator, st
     _tick_until(orchestrator, lambda: bool(finished), max_ticks=2000, sleep_s=0.01)
     assert finished[0]["status"] == "done"
 
-    ops_entries = servicing_store.entries("operations")
-    assert len(ops_entries) == 1
-    assert ops_entries[0].source == "machine"  # append_machine_entry (one-shot, unrevisable)
-    assert ops_entries[0].values["operation"] == "Sample Change"
-    assert ops_entries[0].values["status"] == "done"
+    entries = servicing_store.entries("servicing")
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry.source == "operation"
+    assert entry.values["entry_kind"] == "sample_change"
+    assert entry.values["person"] == "Dr. Change"
+    # needle_valve was confirmed -> its postcondition gate passes -> no
+    # "unmet: ..." trace in notes (see GLOSSARY.md's Operator confirmation).
+    assert "needle_valve_confirmed" not in entry.values["notes"]
 
-    # Not the fill operation -> no cryogenics-log entry.
+    # Neither legacy kind is written by the recorder anymore (Phase 2).
+    assert servicing_store.entries("operations") == []
     assert servicing_store.entries("cryogenics") == []
 
 

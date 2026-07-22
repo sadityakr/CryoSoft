@@ -117,7 +117,7 @@ cryogenics:
   helium_volume_l: 40.0          # optional; enables L/h display
 
 servicing_logs:                  # which declared log kinds this setup keeps
-  - cryogenics
+  - servicing
 
 # Cryostat-servicing operations (docs/plans/cryogenics-logbook.md §9). Each
 # named sub-block configures one OperationBase subclass; a setup that omits

@@ -51,10 +51,14 @@
 # output: |
 #   PhasePlan/StepPlan/Command/Gate objects consumed by the Orchestrator.
 #   run_summary() -> dict consumed by the Orchestrator (merged into the run
-#   manifest's "summary" key) and, from there, CryogenicsRecorder. No data
-#   file: data_filepath is not defined (getattr default is None/"" on the
-#   manifest), matching OperationBase's "data file is optional" contract.
-# last_updated: 2026-07-21
+#   manifest's "summary" key) and, from there, CryogenicsRecorder, which
+#   writes the "recording" key as this run's recordings/<run_id>.json
+#   sidecar (docs/plans/unified-servicing-log-and-run-recording.md §3) and
+#   folds start_pct/end_pct into the single "servicing" entry it writes for
+#   every finished run. No data file: data_filepath is not defined (getattr
+#   default is None/"" on the manifest), matching OperationBase's "data file
+#   is optional" contract.
+# last_updated: 2026-07-23
 # ---
 
 """HeliumFillOperation — force all magnets to zero field and fill helium."""
@@ -250,21 +254,27 @@ class HeliumFillOperation(OperationBase):
 
         Called once by the Orchestrator on ``run_finished`` (see
         ``OperationBase.run_summary()``); ``CryogenicsRecorder`` reads this
-        back off ``manifest["summary"]`` and stores the curve alongside the
-        cryogenics-log entry it already writes for a finished fill.
+        back off ``manifest["summary"]`` and writes the curve as this run's
+        ``recordings/<run_id>.json`` sidecar (docs/plans/unified-servicing-
+        log-and-run-recording.md §3) alongside the single ``servicing`` entry
+        it writes for every finished run.
 
         Returns:
-            ``{"level_curve": {"unix_time": [...], "helium_pct": [...]},
-            "start_pct": float, "end_pct": float}`` — every value JSON-safe
-            (plain floats and lists). ``start_pct``/``end_pct`` are ``0.0``
-            if the fill ended before its first sample (mirrors the ``or
-            0.0`` fallback ``CryogenicsRecorder`` already uses for a level
-            it never observed).
+            ``{"recording": {"unix_time": [...], "channels":
+            {"<level_vi>.helium_pct": [...]}}, "start_pct": float,
+            "end_pct": float}`` — the generic recording shape every operation
+            hands off (not fill-specific), every value JSON-safe (plain
+            floats and lists). ``start_pct``/``end_pct`` are ``0.0`` if the
+            fill ended before its first sample (mirrors the ``or 0.0``
+            fallback ``CryogenicsRecorder`` already uses for a level it never
+            observed).
         """
         return {
-            "level_curve": {
+            "recording": {
                 "unix_time": list(self._curve_unix_time),
-                "helium_pct": list(self._curve_helium_pct),
+                "channels": {
+                    f"{self._level_vi_name}.helium_pct": list(self._curve_helium_pct)
+                },
             },
             "start_pct": float(self._start_level_pct or 0.0),
             "end_pct": float(self._last_level_pct or 0.0),
@@ -290,7 +300,7 @@ class HeliumFillOperation(OperationBase):
         """Return the fill's parameters, for the run manifest.
 
         The servicing-log recorder reads ``params["person"]`` when composing
-        the cryogenics-log entry on finish.
+        the ``servicing`` log entry on finish.
 
         Returns:
             ``person`` plus every resolved §9 config value.

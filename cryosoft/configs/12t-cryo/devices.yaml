@@ -168,7 +168,7 @@ cryogenics:
   # the figure is confirmed to enable consumption in litres/hour.
 
 servicing_logs:                  # which declared log kinds this setup keeps
-  - cryogenics
+  - servicing
 
 # Cryostat-servicing operations (docs/plans/cryogenics-logbook.md §9). Each
 # named sub-block configures one OperationBase subclass; a setup that omits
