@@ -18,10 +18,13 @@ on that side).
 ## Exit (what goes out)
 `@monitored` readings: `temperature() → float (K)`, `setpoint() → float (K)`,
 `heater_output() → float (%)`. `VTITemperatureControllerVI` adds
-`needle_valve() → float (%)`.
+`needle_valve() → float (%)`. `Lakeshore335SampleTemperatureControllerVI` adds
+`curve() → int` (the assigned calibration curve number).
 `@control` actions: `set_temperature(K)`, `set_ramp_rate(K/min)` — both
 bounded by the config limits via `control_limits`; `set_needle_valve(%)` on
-the VTI is bounded to the physical 0–100 %.
+the VTI is bounded to the physical 0–100 %; `set_curve(int)` on the Lakeshore
+335 variant is a `panel=False` front-panel-only drop-down (choices = the
+instrument's 0–59 curve numbering).
 `RampableVI` interface: `start_ramp()`, `advance_ramp()`, `ramp_status()`,
 `stop_ramp()` (pins the setpoint to the current temperature — used by the
 Orchestrator on abort/pause/error).
@@ -47,4 +50,12 @@ All classes here extend `SampleTemperatureControllerVI` (itself inheriting from
   needle valve `@monitored needle_valve` and `@control set_needle_valve` (same
   ITC503 auxiliary output). tests: `tests/test_l1_new_vis.py`
   (`TestVTITemperatureControllerVI`).
+- `lakeshore_335_sample_temperature_controller.py` —
+  `Lakeshore335SampleTemperatureControllerVI`: extends
+  `SampleTemperatureControllerVI` with `@monitored curve` and `@control
+  set_curve` over the Lakeshore 335's `INCRV` command (sensor input A).
+  Driver-specific (only the Lakeshore 335 driver/sim implement
+  `get_sensor_curve`/`set_sensor_curve`), so this stays a subclass rather
+  than the shared base. tests: `tests/test_l1_new_vis.py`
+  (`TestLakeshore335SampleTemperatureControllerVI`).
 - `__init__.py` — package marker. tests: none.

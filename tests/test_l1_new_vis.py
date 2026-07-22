@@ -72,6 +72,12 @@ def lockin_driver():
     return SimLockIn("SIM")
 
 
+@pytest.fixture
+def lakeshore_driver():
+    from cryosoft.drivers.sim_lakeshore_335 import SimLakeshore335
+    return SimLakeshore335("SIM")
+
+
 # ---------------------------------------------------------------------------
 # SuperconductingMagnetVI
 # ---------------------------------------------------------------------------
@@ -719,6 +725,72 @@ class TestVTITemperatureControllerVI:
     def test_vi_type_is_temperature(self, itc_driver):
         vi = self._make_vi(itc_driver)
         assert vi.vi_type == "temperature"
+
+
+# ---------------------------------------------------------------------------
+# Lakeshore335SampleTemperatureControllerVI
+# ---------------------------------------------------------------------------
+
+class TestLakeshore335SampleTemperatureControllerVI:
+    """Tests for Lakeshore335SampleTemperatureControllerVI (with calibration curve)."""
+
+    def _make_vi(self, driver):
+        from cryosoft.virtual_instruments.temperature.lakeshore_335_sample_temperature_controller import (
+            Lakeshore335SampleTemperatureControllerVI,
+        )
+        vi = Lakeshore335SampleTemperatureControllerVI(
+            {"main": driver},
+            default_ramp_rate=600.0,
+            tolerance=0.5,
+        )
+        vi.vi_name = "temperature_sample"
+        return vi
+
+    def test_inherits_temperature_methods(self, lakeshore_driver):
+        vi = self._make_vi(lakeshore_driver)
+        assert isinstance(vi.temperature(), float)
+        assert isinstance(vi.setpoint(), float)
+        assert isinstance(vi.heater_output(), float)
+
+    def test_ramp_inherited(self, lakeshore_driver):
+        vi = self._make_vi(lakeshore_driver)
+        vi.start_ramp(100.0)
+        assert vi.ramp_status() == "RAMPING"
+
+    def test_curve_reads_sensor_input_a(self, lakeshore_driver):
+        vi = self._make_vi(lakeshore_driver)
+        assert vi.curve() == lakeshore_driver.get_sensor_curve("A")
+
+    def test_set_curve_control(self, lakeshore_driver):
+        vi = self._make_vi(lakeshore_driver)
+        vi.set_curve(21)
+        assert vi.curve() == 21
+        assert lakeshore_driver.get_sensor_curve("A") == 21
+        # Sensor input B is untouched by the sample VI.
+        assert lakeshore_driver.get_sensor_curve("B") == 2
+
+    def test_set_curve_rejects_out_of_range(self, lakeshore_driver):
+        vi = self._make_vi(lakeshore_driver)
+        with pytest.raises(ValueError):
+            vi.set_curve(60)
+
+    def test_get_state_includes_curve(self, lakeshore_driver):
+        vi = self._make_vi(lakeshore_driver)
+        state = vi.get_state()
+        assert state["curve"] == lakeshore_driver.get_sensor_curve("A")
+
+    def test_control_param_specs_curve_choices(self, lakeshore_driver):
+        vi = self._make_vi(lakeshore_driver)
+        specs = vi.control_param_specs("set_curve")
+        spec = specs["curve"]
+        assert spec.choices["None (0)"] == 0
+        assert spec.choices["Standard 1"] == 1
+        assert spec.choices["User 59"] == 59
+        assert spec.default == vi.curve()
+
+    def test_control_param_specs_other_methods_unaffected(self, lakeshore_driver):
+        vi = self._make_vi(lakeshore_driver)
+        assert vi.control_param_specs("set_temperature") == {}
 
 
 # ---------------------------------------------------------------------------

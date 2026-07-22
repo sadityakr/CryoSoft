@@ -69,7 +69,7 @@ virtual_instruments:
       max_ramp_rate_K_per_min: 20.0
 
   temperature_sample:
-    class: cryosoft.virtual_instruments.temperature.sample_temperature_controller.SampleTemperatureControllerVI
+    class: cryosoft.virtual_instruments.temperature.lakeshore_335_sample_temperature_controller.Lakeshore335SampleTemperatureControllerVI
     drivers: {main: lakeshore_sample}
     vi_type: system
     init_params:

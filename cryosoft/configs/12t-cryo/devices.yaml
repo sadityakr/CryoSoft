@@ -108,7 +108,7 @@ virtual_instruments:
       buffer_size: 5
 
   temperature_sample:
-    class: cryosoft.virtual_instruments.temperature.sample_temperature_controller.SampleTemperatureControllerVI
+    class: cryosoft.virtual_instruments.temperature.lakeshore_335_sample_temperature_controller.Lakeshore335SampleTemperatureControllerVI
     drivers: {main: lakeshore_sample}
     vi_type: system
     init_params:
