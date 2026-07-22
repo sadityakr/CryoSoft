@@ -2059,6 +2059,35 @@ def test_closing_window_persists_to_isolated_ini_not_real_scope(
     assert isolated_settings.exists()
 
 
+def test_closing_window_aborts_active_run(monitor_win, orchestrator):
+    """Closing the app mid-run must safe the hardware, not just quit silently.
+
+    Regression for a real-hardware finding (2026-07-22): a Keithley 6221 left
+    armed/output-on because the window was closed while a run was still
+    active, with nothing to send the abort/standby commands. closeEvent()
+    must now call abort_procedure() whenever state is not already IDLE.
+    """
+    orchestrator._state = OrchestratorState.SWEEPING
+    monitor_win.close()
+    assert orchestrator.state == OrchestratorState.IDLE.value
+
+
+def test_closing_window_idle_does_not_call_abort(monitor_win, orchestrator, monkeypatch):
+    """Closing from an already-IDLE state must not call abort_procedure() at all.
+
+    abort_procedure() is documented safe to call with nothing running, but a
+    normal close (nothing active) should not emit a spurious "Aborted by
+    user" status / run_finished("aborted") signal.
+    """
+    calls = []
+    monkeypatch.setattr(
+        orchestrator, "abort_procedure", lambda: calls.append(True)
+    )
+    assert orchestrator.state == OrchestratorState.IDLE.value
+    monitor_win.close()
+    assert calls == []
+
+
 # ── Phase 2: notification banner (replaces modal dialog storms) ────────────────
 
 def test_banner_hidden_by_default(qtbot):

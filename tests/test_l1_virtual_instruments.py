@@ -678,6 +678,44 @@ def test_dc_separate_initiate_recovers_from_stale_delta_arm():
     assert source.get_current() == pytest.approx(5e-6)
 
 
+def test_dc_mode_initiate_recovers_from_stale_delta_arm():
+    """DCModeMeasurementVI's initiate() must not depend on a prior standby().
+
+    Mirrors test_dc_separate_initiate_recovers_from_stale_delta_arm above,
+    but for the VI actually wired to real hardware in devices.yaml
+    (keithley_dc_mode: source=keithley_6220, meter=keithley_2182a on its own
+    GPIB address). Arms delta mode on the shared 6221 WITHOUT calling
+    standby() first — the Orchestrator normally would, and closeEvent() now
+    also forces an abort on window close, but this proves DC mode's
+    initiate_measurement() is safe even if BOTH of those were skipped (e.g.
+    the app was killed rather than closed cleanly). See the live-hardware
+    finding this session (2026-07-22): -221 "Settings conflict" on a real
+    6221 traced to exactly this — a run left un-aborted, then a fresh
+    initiate_measurement() assuming a clean starting state.
+    """
+    from cryosoft.virtual_instruments.measurement.measurement_dc_mode import DCModeMeasurementVI
+    from cryosoft.virtual_instruments.measurement.measurement_delta_mode import (
+        DeltaModeMeasurementVI,
+    )
+
+    source = SimKeithley6221("SIM")
+    meter = SimKeithley2182A("SIM")
+    source._paired_meter = meter
+
+    delta_vi = DeltaModeMeasurementVI({"source": source, "meter": source})
+    delta_vi.initiate_measurement(current=1e-6, n_readings=5)
+    assert source._mode == "DELTA"
+
+    dc_vi = DCModeMeasurementVI({"source": source, "meter": meter})
+    dc_vi.initiate_measurement(current=5e-6, n_readings=3, compliance_V=1.0)
+
+    assert source._mode == "DC"
+    assert source.get_current() == pytest.approx(5e-6)
+
+    data = dc_vi.take_reading()
+    assert data["n_valid"] == 3
+
+
 def test_delta_mode_initiate_recovers_from_prior_dc_current():
     """Delta-mode VI's initiate() must not depend on the instrument idling at 0 A.
 

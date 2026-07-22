@@ -1290,9 +1290,19 @@ class MonitorWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 (Qt override)
-        """Detach the log handler and persist geometry/splitter/trend state before closing.
+        """Abort any active run, detach the log handler, persist window state.
 
-        Detaching prevents the handler from writing to the destroyed
+        Closing the window used to leave live hardware exactly as it was —
+        no abort, no standby — if a run was still active (SWEEPING, PAUSED,
+        even mid-STANDBY before its safe-off commands finished dispatching):
+        found live 2026-07-22 while chasing a Keithley 6221 that stayed
+        armed/output-on across an app restart. ``abort_procedure()`` is
+        documented safe to call with nothing running (a no-op past the state
+        check) and already no-ops during EMERGENCY (that flow owns its own
+        cleanup), so it is safe to call unconditionally here whenever state
+        is not already IDLE.
+
+        Detaching the log handler prevents it from writing to the destroyed
         ``QTextEdit`` after the window is gone (RuntimeError on a dead widget).
         Splitter proportions and trend selections are saved automatically
         here (no separate "Save layout" action, unlike the old dock-state
@@ -1302,6 +1312,13 @@ class MonitorWindow(QMainWindow):
         Args:
             event: The Qt close event.
         """
+        if self._orchestrator.state != OrchestratorState.IDLE.value:
+            logger.warning(
+                "MonitorWindow closing while orchestrator state=%s — aborting "
+                "the active run to leave hardware safed.",
+                self._orchestrator.state,
+            )
+            self._orchestrator.abort_procedure()
         self._save_session()
         self._log_panel.detach()
         settings = app_settings.get_settings()
