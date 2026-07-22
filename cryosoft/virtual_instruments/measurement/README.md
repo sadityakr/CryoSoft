@@ -112,6 +112,19 @@ shared-6221 handoff test for the pattern.
 5. Register in `devices.yaml`; add behaviour tests to `tests/test_l1_new_vis.py`.
 
 ## Files
+- `measurement_dc_mode.py` — `DCModeMeasurementVI`: Keithley 6221 source + 2182A
+  nanovoltmeter, plain DC mode (current set once, voltage polled repeatedly —
+  contrast with `dc_separate_measurement.py`'s reference `reading_setters`
+  entry and `measurement_delta_mode.py`'s polarity-reversing delta engine).
+  Declares `reading_setters` `{"current": "set_dc_current"}`; the setter
+  reprograms the source in place with no re-arm cost. Also exposes
+  `read_now()`, a `@control(panel=False)` bench-test hook (front panel only,
+  never the compact card) distinct from `take_reading()`: it calls
+  `take_reading()` and caches the result in the `last_voltage_V` /
+  `last_mean_voltage_V` / `last_n_valid` `@monitored` fields so an operator
+  can confirm a configured current yields sane readings before running a
+  procedure. tests: `tests/test_l1_virtual_instruments.py`
+  (`test_dc_mode_measurement_vi_lifecycle`, `test_dc_mode_read_now_bench_test`).
 - `dc_separate_measurement.py` — `DCSeparateMeasurementVI`: Keithley 6221 source +
   2182A nanovoltmeter, simple DC mode. Declares the reference `reading_setters`
   entry `{"current_A": "set_source_current"}`, so the reading loop can measure
