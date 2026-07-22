@@ -4,19 +4,24 @@
 #   6221 current source with a Keithley 2182A nanovoltmeter for DC
 #   resistance measurements. initiate_measurement() arms the current source,
 #   voltmeter range, and compliance. take_reading() collects the readings.
+#   read_now() is a bench-test-only control that triggers a manual read and
+#   caches it in the last_voltage_V / last_mean_voltage_V / last_n_valid
+#   monitored fields so the front panel can show what the Keithley returned.
 # entry_point: Not run directly; instantiated by Station factory.
 # dependencies:
 #   - cryosoft.virtual_instruments.base (MeasurementInstrumentBase)
-#   - cryosoft.core.decorators (control)
+#   - cryosoft.core.decorators (control, monitored)
 #   - cryosoft.core.plan (ParamSpec)
 # input: |
 #   drivers = {"source": <K6221 driver>, "meter": <K2182A driver>}
-#   initiate_measurement() must be called before take_reading().
+#   initiate_measurement() must be called before take_reading() or read_now().
 # process: |
 #   initiate_measurement() sets compliance and range and starts sourcing current.
 #   take_reading() collects n_readings voltage samples. If compliance_abort is
 #   enabled, it monitors source.is_in_compliance() before each reading and
-#   stops early if triggered, padding remaining spots with NaN.
+#   stops early if triggered, padding remaining spots with NaN. read_now()
+#   simply calls take_reading() and stores the result for display; it is the
+#   human-facing bench-test trigger, never called by a Procedure.
 #   standby() zeros the current source and resets the armed state.
 # output: |
 #   {"voltage_V": list[float](n_readings,), "current_A": list[float](n_readings,),
@@ -33,7 +38,7 @@ import time
 from collections.abc import Mapping
 from typing import Any, ClassVar
 
-from cryosoft.core.decorators import control
+from cryosoft.core.decorators import control, monitored
 from cryosoft.core.plan import ParamSpec
 from cryosoft.virtual_instruments.base import MeasurementInstrumentBase
 
@@ -59,6 +64,13 @@ class DCModeMeasurementVI(MeasurementInstrumentBase):
         vi.initiate_measurement(current=1e-6, n_readings=100)
         data = vi.take_reading()
         # data = {"voltage_V": list(100,), "current_A": list(100,), "n_valid": int}
+
+    Bench-testing from the GUI front panel uses ``read_now()`` instead:
+    after ``initiate_measurement()`` arms the instruments, clicking
+    "Read Now" collects the same ``n_readings`` samples and surfaces them
+    through the ``last_voltage_V`` / ``last_mean_voltage_V`` / ``last_n_valid``
+    monitored fields so an operator can confirm a configured current yields
+    sane readings before running a procedure.
     """
 
     display_label: str = "DC mode resistance"
@@ -128,6 +140,12 @@ class DCModeMeasurementVI(MeasurementInstrumentBase):
         self._compliance_V: float = 1.0
         self._compliance_abort: bool = True
 
+        # Cached result of the last manual read_now() bench-test call, so the
+        # last_*/n_valid monitored fields below can report it. None until the
+        # first read_now() (take_reading() itself never touches this cache —
+        # it stays Procedure-only, see the "take_reading" section).
+        self._last_reading: dict[str, Any] | None = None
+
     # ------------------------------------------------------------------
     # Self-description
     # ------------------------------------------------------------------
@@ -141,7 +159,15 @@ class DCModeMeasurementVI(MeasurementInstrumentBase):
         Returns:
             Per-point length for each data array.
         """
-        n = int(params["n_readings"])
+        try:
+            n = int(params["n_readings"])
+        except (ValueError, TypeError) as exc:
+            raise ValueError(
+                f"DC VI: n_readings={params.get('n_readings')!r} cannot be "
+                f"converted to int — check the form field is not blank. ({exc})"
+            ) from exc
+        if n < 1:
+            raise ValueError(f"DC VI: n_readings must be >= 1, got {n!r}")
         return {"voltage_V": n, "current_A": n}
 
     # ------------------------------------------------------------------
@@ -168,9 +194,24 @@ class DCModeMeasurementVI(MeasurementInstrumentBase):
             delay_s: Inter-reading delay in seconds.
             compliance_abort: Abort the run if the source hits compliance.
         """
+        logger.debug(
+            "initiate_measurement called: current=%r, n_readings=%r, "
+            "voltmeter_range_V=%r, compliance_V=%r, delay_s=%r, compliance_abort=%r",
+            current, n_readings, voltmeter_range_V, compliance_V, delay_s, compliance_abort,
+        )
+        try:
+            n_readings_int = int(n_readings)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(
+                f"DC VI: n_readings={n_readings!r} cannot be converted to int "
+                f"— check the form field is not blank. ({exc})"
+            ) from exc
+        if n_readings_int < 1:
+            raise ValueError(f"DC VI: n_readings must be >= 1, got {n_readings_int!r}")
+
         self._armed = True
         self._current = float(current)
-        self._n_readings = int(n_readings)
+        self._n_readings = n_readings_int
         self._delay_s = float(delay_s)
         self._voltmeter_range_V = float(voltmeter_range_V)
         self._compliance_V = float(compliance_V)
@@ -208,14 +249,80 @@ class DCModeMeasurementVI(MeasurementInstrumentBase):
         self._source.set_current(self._current)  # type: ignore[attr-defined]
 
     # ------------------------------------------------------------------
+    # @monitored — last manual read_now() result, for front-panel bench testing
+    # ------------------------------------------------------------------
+
+    @monitored
+    def last_voltage_V(self) -> float | None:
+        """Most recent valid voltage from the last read_now() call, or None."""
+        if self._last_reading is None or self._last_reading["n_valid"] == 0:
+            return None
+        return self._last_reading["voltage_V"][self._last_reading["n_valid"] - 1]
+
+    @monitored
+    def last_mean_voltage_V(self) -> float | None:
+        """Mean of the valid voltages from the last read_now() call, or None."""
+        if self._last_reading is None or self._last_reading["n_valid"] == 0:
+            return None
+        valid = self._last_reading["voltage_V"][: self._last_reading["n_valid"]]
+        return sum(valid) / len(valid)
+
+    @monitored
+    def last_n_valid(self) -> int | None:
+        """Valid-reading count from the last read_now() call, or None."""
+        if self._last_reading is None:
+            return None
+        return self._last_reading["n_valid"]
+
+    # ------------------------------------------------------------------
+    # @control — manual bench-test read
+    # ------------------------------------------------------------------
+
+    @control(panel=False)
+    def read_now(self) -> None:
+        """Take one manual reading from the front panel and cache it for display.
+
+        Bench-test hook: calls ``take_reading()`` and stores the result so the
+        ``last_voltage_V`` / ``last_mean_voltage_V`` / ``last_n_valid``
+        monitored fields report it on the next tick. Distinct from
+        ``take_reading()`` itself, which stays Procedure-only per the
+        measurement-method standard — this is the human-facing equivalent for
+        checking that a configured current actually produces sane readings
+        before running a procedure.
+
+        Raises:
+            RuntimeError: If ``initiate_measurement()`` has not been called first.
+        """
+        self._last_reading = self.take_reading()
+
+    # ------------------------------------------------------------------
     # take_reading — NOT @monitored, NOT @control (Procedure-only)
     # ------------------------------------------------------------------
 
     def take_reading(self) -> dict[str, list[float]]:
         """Collect one DC-mode datapoint from the armed instruments.
 
-        Takes ``n_readings`` voltage samples. If ``compliance_abort`` is enabled
-        and the source hits compliance, stops early and pads with NaN.
+        Takes ``n_readings`` voltage samples. If ``compliance_abort`` is
+        enabled, checks compliance ONCE before the sampling loop (not before
+        every individual reading) and skips the whole datapoint (all NaN) if
+        already tripped.
+
+        Live commissioning against a real 6221 (2026-07-22) found that
+        alternating ``is_in_compliance()``'s ``:STATus:QUEStionable:
+        CONDition?`` query with ``meter.get_voltage()``'s serial-relay
+        ``SEND``/``ENTer?`` pair on every single reading corrupted the 622x's
+        GPIB output-queue state, producing ``-410 "Query INTERRUPTED"`` on
+        nearly every iteration (confirmed against the 622x manual's Query
+        Error / QYE definition — reading an empty output queue — and
+        reproduced identically at 0.05s, 0.1s, and 1.0s inter-reading
+        delays, ruling out a timing race). Delta mode has never hit this: its
+        reading loop polls only one query type (``:CALC1:DATA:FRES?``) and
+        relies on the instrument's own hardware compliance-abort flag
+        (``:SOUR:DELT:CAB``) instead of a per-sample software poll. Checking
+        once here matches that pattern. Trade-off: a compliance trip mid-loop
+        is no longer caught until the *next* ``take_reading()`` call rather
+        than immediately — accepted because the per-reading interleaving was
+        actively corrupting the read path it was meant to protect.
 
         Returns:
             ``{"voltage_V": list, "current_A": list, "n_valid": int}``.
@@ -234,25 +341,23 @@ class DCModeMeasurementVI(MeasurementInstrumentBase):
         source = self._source  # type: ignore[attr-defined]
         meter = self._meter    # type: ignore[attr-defined]
 
-        for i in range(n):
-            if self._compliance_abort:
-                if source.is_in_compliance():
-                    logger.warning("Keithley 6221 is in compliance — aborting DC measurement early.")
+        if self._compliance_abort and source.is_in_compliance():
+            logger.warning("Keithley 6221 is in compliance — skipping DC measurement.")
+        else:
+            for i in range(n):
+                try:
+                    v = float(meter.get_voltage())
+                    voltages.append(v)
+                    currents.append(self._current)
+                    n_valid += 1
+                except Exception as exc:
+                    logger.error("DC read error at index %d: %s", i, exc)
                     break
 
-            try:
-                v = float(meter.get_voltage())
-                voltages.append(v)
-                currents.append(self._current)
-                n_valid += 1
-            except Exception as exc:
-                logger.error("DC read error at index %d: %s", i, exc)
-                break
+                if i < n - 1 and self._delay_s > 0:
+                    time.sleep(self._delay_s)
 
-            if i < n - 1 and self._delay_s > 0:
-                time.sleep(self._delay_s)
-
-        # Pad with NaN if we stopped early
+        # Pad with NaN if we stopped early (or skipped entirely)
         pad = n - n_valid
         if pad > 0:
             nan = float("nan")

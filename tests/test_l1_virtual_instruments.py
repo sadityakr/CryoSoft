@@ -485,6 +485,57 @@ def test_dc_mode_measurement_compliance_abort():
     assert all(math.isnan(c) for c in data["current_A"])
 
 
+def test_dc_mode_read_now_bench_test():
+    """read_now() is the front-panel bench-test hook for manual readings.
+
+    Unlike take_reading() (Procedure-only), read_now() is a @control the GUI
+    can click, and caches its result into the last_voltage_V /
+    last_mean_voltage_V / last_n_valid @monitored fields so an operator can
+    see what the Keithley returned without running a full procedure.
+    """
+    from cryosoft.virtual_instruments.measurement.measurement_dc_mode import DCModeMeasurementVI
+
+    source = SimKeithley6221("SIM")
+    meter = SimKeithley2182A("SIM")
+    source._paired_meter = meter
+    vi = DCModeMeasurementVI({"source": source, "meter": meter})
+
+    # Before any read_now(), the monitored fields report None ("—" in the GUI).
+    assert vi.last_voltage_V() is None
+    assert vi.last_mean_voltage_V() is None
+    assert vi.last_n_valid() is None
+
+    # read_now() before initiate_measurement() must raise, same as take_reading().
+    with pytest.raises(RuntimeError):
+        vi.read_now()
+
+    vi.initiate_measurement(
+        current=2e-6,
+        n_readings=10,
+        voltmeter_range_V=0.1,
+        compliance_V=2.0,
+        delay_s=0.001,
+        compliance_abort=True,
+    )
+
+    vi.read_now()
+    assert vi.last_n_valid() == 10
+    assert isinstance(vi.last_voltage_V(), float)
+    assert isinstance(vi.last_mean_voltage_V(), float)
+    # Sim meter noise is tiny (1e-8 std) relative to the ~mV-scale reading, so
+    # the last sample and the 10-sample mean should sit close together.
+    assert vi.last_voltage_V() == pytest.approx(vi.last_mean_voltage_V(), abs=1e-6)
+
+    # read_now() is a @control (GUI-discoverable) and takes no parameters.
+    assert getattr(vi.read_now, "_is_control", False) is True
+    assert getattr(vi.read_now, "_control_params", {}) == {}
+
+    # The last_* fields are @monitored (polled + displayed every tick).
+    assert getattr(vi.last_voltage_V, "_is_monitored", False) is True
+    assert getattr(vi.last_mean_voltage_V, "_is_monitored", False) is True
+    assert getattr(vi.last_n_valid, "_is_monitored", False) is True
+
+
 # 16. Shared-instrument mode discipline (see GLOSSARY.md and
 #     virtual_instruments/measurement/README.md): DCSeparateMeasurementVI and
 #     DeltaModeMeasurementVI can be wired to the same physical Keithley 6221

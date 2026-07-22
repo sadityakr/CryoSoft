@@ -111,18 +111,23 @@ class Keithley6221:
     def set_current(self, current: float) -> None:
         """Set the DC source current; enables output for non-zero values.
 
-        Unconditionally reasserts fixed-current mode first, mirroring how
-        ``_program_delta_mode()`` always leads with ``:SOUR:SWE:ABOR``. This
-        makes the call self-recovering regardless of whether the instrument
-        was previously left in delta mode by another measurement VI sharing
-        this same physical 6221 (see the "shared-instrument mode discipline"
-        standard in ``virtual_instruments/measurement/README.md``) — callers
-        never need to know or care what mode the instrument was last in.
+        Unconditionally aborts any running sweep/delta/pulse-delta engine
+        first (``:SOUR:SWE:ABOR`` — the same documented recovery command
+        ``_program_delta_mode()`` leads with and ``stop_delta_mode()`` uses).
+        This makes the call self-recovering regardless of whether the
+        instrument was previously left in delta mode by another measurement
+        VI sharing this same physical 6221 (see the "shared-instrument mode
+        discipline" standard in ``virtual_instruments/measurement/README.md``)
+        — callers never need to know or care what mode the instrument was
+        last in. (Previously sent ``:SOUR:CURR:MODE FIX``, which is not a
+        documented 622x command — see Table 14-6, Source command summary, in
+        the 622x SCPI reference; ``:SOUR:SWE:ABOR`` is the actual documented
+        abort mechanism and is already proven elsewhere in this file.)
 
         Args:
             current: Desired current in Amperes.
         """
-        self._write(":SOUR:CURR:MODE FIX")
+        self._write(":SOUR:SWE:ABOR")
         self._write(f":SOUR:CURR {current:.9e}")
         self._write("OUTP " + ("ON" if current != 0.0 else "OFF"))
 
@@ -254,16 +259,21 @@ class Keithley6221:
     def stop_delta_mode(self) -> None:
         """Abort the running delta measurement and return to a plain idle state.
 
-        Reasserts fixed-current mode (not just aborting the sweep) so the
-        instrument is left in the same documented idle baseline regardless of
-        which measurement method runs next — see the "shared-instrument mode
-        discipline" standard in ``virtual_instruments/measurement/README.md``.
-        This is defense-in-depth: ``set_current()`` is already self-recovering
-        on its own, but a human inspecting the instrument between runs (or a
-        future driver method that doesn't go through ``set_current()``)
-        should still find it in a known state.
+        Aborts the sweep/delta engine (``:SOUR:SWE:ABOR``, the documented
+        622x abort command) so the instrument is left in the same idle
+        baseline regardless of which measurement method runs next — see the
+        "shared-instrument mode discipline" standard in
+        ``virtual_instruments/measurement/README.md``. This is
+        defense-in-depth: ``set_current()`` is already self-recovering on its
+        own, but a human inspecting the instrument between runs (or a future
+        driver method that doesn't go through ``set_current()``) should still
+        find it in a known state. (Previously also sent ``:SOUR:CURR:MODE
+        FIX`` here, which live commissioning against a real 6221 confirmed is
+        not a valid command — it raised ``-113 "Undefined header"`` on every
+        call. ``:SOUR:SWE:ABOR`` alone is the documented, verified recovery
+        command; see the same fix in ``set_current()`` above.)
         """
-        for cmd in (":SOUR:SWE:ABOR", ":SOUR:CURR:MODE FIX", "OUTP OFF"):
+        for cmd in (":SOUR:SWE:ABOR", "OUTP OFF"):
             try:
                 self._write(cmd)
             except CryoSoftCommunicationError:
@@ -352,6 +362,14 @@ class Keithley6221:
         self._write(f":SOUR:DELT:LOW  {low_current:.9e}")
         self._write(f":SOUR:CURR:COMP {compliance:.4e}")
         self._write(":UNIT V")                                  # reading units (pymeasure delta_unit); NOT :SOUR:DELT:UNIT — that header doesn't exist and errors -113
+        # Pin the :CALC1:DATA:FRESh? reply to a single element (voltage only).
+        # Table 14-3's documented *RST/PRESet default already happens to be
+        # "READ,TST" (reading + timestamp), which is why _poll_readings()'s
+        # vals[0] has always landed on the right field — but that was never
+        # actually set here, only assumed. Pinning it explicitly means a
+        # changed instrument default/prior session state can no longer
+        # silently shift which field vals[0] picks up.
+        self._write(":FORM:ELEM READ")
 
         if delay == 0.0:
             self._write(":SOUR:DELT:DELay INF")
@@ -442,11 +460,32 @@ class Keithley6221:
                     time.sleep(period)
         finally:
             self._instr.timeout = orig
+
         return readings
 
     def is_in_compliance(self) -> bool:
-        """Return True if the current source is currently in compliance."""
-        cond = int(self._query(":STATus:QUEStionable:CONDition?"))
+        """Return True if the current source is currently in compliance.
+
+        Queries the Questionable Condition register (bit 1 = voltage compliance).
+        If the instrument returns an empty or unparseable response (which can
+        happen while it is actively sourcing current), logs a warning and returns
+        ``False`` so a transient read glitch does not abort a measurement.
+        """
+        raw = self._query(":STATus:QUEStionable:CONDition?").strip()
+        if not raw:
+            log.warning(
+                "Keithley 6221: empty response to :STATus:QUEStionable:CONDition? "
+                "— assuming not in compliance (transient read glitch)."
+            )
+            return False
+        try:
+            cond = int(raw)
+        except ValueError:
+            log.warning(
+                "Keithley 6221: unparseable compliance status %r — assuming not in compliance.",
+                raw,
+            )
+            return False
         return bool(cond & 2)
 
     def _ensure_serial_relay_configured(self) -> None:
@@ -460,8 +499,29 @@ class Keithley6221:
 
         Sends the MEAS? query to the 2182A over RS-232, waits for the response,
         and retrieves it.
+
+        Deliberately does NOT call ``_ensure_serial_relay_configured()`` here.
+        Live commissioning against a real 6221 (2026-07-22) found that
+        reconfiguring BAUD/TERM/PACE before every single reading (this method
+        is called once per ``take_reading()`` sample, i.e. up to ``n_readings``
+        times per datapoint) intermittently corrupted the 622x's own GPIB
+        output-queue state, producing ``-410 "Query INTERRUPTED"`` /
+        ``-420 "Query INTERMINATED"`` on the *next* unrelated GPIB query (e.g.
+        the following ``is_in_compliance()`` call) — confirmed against the
+        622x manual's Section 11 (Query Error / QYE, error codes -410/-420/
+        -430: "an attempt was made to read data from an empty output queue")
+        and Section 10's message-exchange Rule 2 ("the complete response
+        message must be received... before another program message can be
+        sent"). A 150ms post-read settle delay was tried first and did NOT
+        fix it (reproduced at 0.05s, 0.1s, and even 1.0s inter-reading
+        delays — ruling out a timing race). The actual fix: configure the
+        relay ONCE, matching the delta-mode engine's proven pattern
+        (``_program_delta_mode()`` configures once, then ``_poll_readings()``
+        polls repeatedly with zero reconfiguration and has never shown this
+        error). Callers must have already armed the relay via ``set_range()``
+        (``initiate_measurement()`` always does this before any
+        ``get_voltage()`` call).
         """
-        self._ensure_serial_relay_configured()
         self._write(':SYST:COMM:SER:SEND "MEAS?"')
         # Wait 800 ms for serial transmission and voltmeter integration time
         time.sleep(0.8)
