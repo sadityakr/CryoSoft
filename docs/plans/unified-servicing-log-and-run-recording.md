@@ -162,7 +162,21 @@ servicing/<config_name>/
    again.
 3. **Sample-change hold phase**: step() hold, sample() recording, mid-run
    ready banner, config keys, tests (run spans Finish click; recording
-   lands; timestamps cover the true servicing window).
+   lands; timestamps cover the true servicing window). DONE (2026-07-23):
+   `OperationBase` grew a shared decimating multi-channel recorder helper
+   (`_record_sample()`/`_recording_dict()`/`_MAX_RECORDING_POINTS`,
+   generalising the fill's old `_MAX_CURVE_POINTS`/curve fields —
+   `HeliumFillOperation` now uses it, behavior-identical); a new
+   `hold_for_operator: bool` class attribute on `OperationBase`
+   (`SampleChangeOperation` sets it `True`). `SampleChangeOperation.step()`
+   now always returns a `StepPlan` (never `None` on its own), so the run
+   holds until `finish_operation()`; `sample()` records the VTI temperature
+   plus every magnet's field once per the new `sample_period_s` config key
+   (default 10 s, `operations.sample_change:` block) into the shared
+   recorder; `run_summary()` hands it off as `{"recording": {...}}`.
+   `OperationCard._sync_ready_banner()` shows the banner mid-run, once every
+   readiness condition holds, for `hold_for_operator` operations (the fill's
+   post-run-only banner is unchanged).
 4. **Viewer + export**: unified table, filter chips, recording plot, the
    two CSV exports.
 

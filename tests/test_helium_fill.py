@@ -173,13 +173,15 @@ def test_helium_fill_accumulates_multiple_curve_points(orchestrator, station, tm
 
 
 def test_level_curve_decimates_once_bound_exceeded(station, monkeypatch):
-    """Once the curve exceeds _MAX_CURVE_POINTS, it halves and the stride doubles.
+    """Once the curve exceeds _MAX_RECORDING_POINTS, it halves and the stride doubles.
 
     A focused unit test against sample() directly (no Orchestrator tick
     loop needed) — forces the bound low so the decimation path triggers
-    deterministically within a handful of calls.
+    deterministically within a handful of calls. The cap and stride now live
+    on the shared OperationBase recorder helper (Phase 3), not a
+    fill-specific field.
     """
-    monkeypatch.setattr(HeliumFillOperation, "_MAX_CURVE_POINTS", 4)
+    monkeypatch.setattr(HeliumFillOperation, "_MAX_RECORDING_POINTS", 4)
     op = _make_op(station, fill_zero_field_window_s=0.0)
     op.initiate()
 
@@ -190,8 +192,8 @@ def test_level_curve_decimates_once_bound_exceeded(station, monkeypatch):
     curve = recording["channels"]["level_meter.helium_pct"]
     assert len(recording["unix_time"]) <= 4
     assert len(recording["unix_time"]) == len(curve)
-    assert op._curve_stride > 1  # decimation ran at least once
-    assert op._curve_raw_count == 10  # every raw sample() call is still counted
+    assert op._recording_stride > 1  # decimation ran at least once
+    assert op._recording_raw_count == 10  # every raw sample() call is still counted
 
 
 def test_level_curve_stays_under_default_bound(station):
@@ -204,7 +206,7 @@ def test_level_curve_stays_under_default_bound(station):
 
     recording = op.run_summary()["recording"]
     assert len(recording["unix_time"]) == 50
-    assert op._curve_stride == 1
+    assert op._recording_stride == 1
 
 
 # ── run_summary() shape ────────────────────────────────────────────────────

@@ -200,3 +200,4 @@ operations:
     zero_field_eps_T: 0.005
     zero_field_window_s: 10.0
     needle_valve: manual           # "manual" -> operator confirmation; a VI-capability ref is future work
+    sample_period_s: 10.0          # hold-phase recording cadence (VTI temperature + magnet fields)

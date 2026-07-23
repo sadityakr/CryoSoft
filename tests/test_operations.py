@@ -829,3 +829,63 @@ def test_queued_action_drained_during_operation_gets_verdict(
 
     orchestrator.finish_operation()
     qtbot.waitUntil(lambda: orchestrator._procedure is None, timeout=5000)
+
+
+# ── OperationBase's shared recorder helper (Phase 3, docs/plans/unified-
+# servicing-log-and-run-recording.md §3): _record_sample()/_recording_dict(),
+# generalised from HeliumFillOperation's original single-channel curve. Unit
+# tests only — no Orchestrator needed, these are plain method calls. ────────
+
+
+def test_recording_dict_empty_before_any_sample(station):
+    """_recording_dict() is a valid, empty shape before _record_sample() is ever called."""
+    op = SimpleOperation(station)
+    assert op._recording_dict() == {"unix_time": [], "channels": {}}
+
+
+def test_record_sample_multi_channel_stays_consistent(station):
+    """Every channel gets one value per _record_sample() call, same length, same time axis."""
+    op = SimpleOperation(station)
+    op._record_sample(1.0, {"magnet_z.get_field": 0.0, "temperature_vti.temperature": 300.0})
+    op._record_sample(2.0, {"magnet_z.get_field": 0.1, "temperature_vti.temperature": 299.0})
+
+    recording = op._recording_dict()
+    assert recording["unix_time"] == [1.0, 2.0]
+    assert recording["channels"]["magnet_z.get_field"] == [0.0, 0.1]
+    assert recording["channels"]["temperature_vti.temperature"] == [300.0, 299.0]
+    for series in recording["channels"].values():
+        assert len(series) == len(recording["unix_time"])
+
+
+def test_record_sample_rejects_channel_set_change(station):
+    """A later call naming a different channel set than the first raises ValueError."""
+    op = SimpleOperation(station)
+    op._record_sample(1.0, {"a": 1.0, "b": 2.0})
+    with pytest.raises(ValueError):
+        op._record_sample(2.0, {"a": 1.0})  # missing "b"
+
+
+def test_record_sample_decimates_once_bound_exceeded(station, monkeypatch):
+    """Once the recording exceeds _MAX_RECORDING_POINTS, every channel halves together."""
+    monkeypatch.setattr(SimpleOperation, "_MAX_RECORDING_POINTS", 4)
+    op = SimpleOperation(station)
+
+    for i in range(10):
+        op._record_sample(float(i), {"a": float(i), "b": float(-i)})
+
+    recording = op._recording_dict()
+    assert len(recording["unix_time"]) <= 4
+    assert len(recording["channels"]["a"]) == len(recording["unix_time"])
+    assert len(recording["channels"]["b"]) == len(recording["unix_time"])
+    assert op._recording_stride > 1
+    assert op._recording_raw_count == 10  # every raw call is still counted
+
+
+def test_recording_reset_clears_state(station):
+    """_reset_recording() (called by initiate()-style setup) clears every field."""
+    op = SimpleOperation(station)
+    op._record_sample(1.0, {"a": 1.0})
+    op._reset_recording()
+    assert op._recording_dict() == {"unix_time": [], "channels": {}}
+    assert op._recording_stride == 1
+    assert op._recording_raw_count == 0

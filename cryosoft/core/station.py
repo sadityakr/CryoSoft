@@ -1514,6 +1514,11 @@ _OPERATIONS_DEFAULTS: dict[str, dict[str, float | str]] = {
         "zero_field_window_s": 10.0,
         "needle_valve": "manual",
         "postcondition_timeout_s": 7200.0,
+        # How often the hold phase (docs/plans/unified-servicing-log-and-
+        # run-recording.md §1) records station state into the shared
+        # recording, in seconds. Matches HeliumFillOperation's own
+        # sample_period_s default.
+        "sample_period_s": 10.0,
     },
 }
 

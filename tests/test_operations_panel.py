@@ -513,6 +513,81 @@ def test_ready_banner_clears_when_new_run_starts(station, operations_config, qtb
     assert card._ready_banner.isHidden()
 
 
+# ── Mid-run ready banner for a hold-phase operation (Phase 3, docs/plans/
+# unified-servicing-log-and-run-recording.md §1): SampleChangeOperation
+# declares hold_for_operator = True, so the banner may show WHILE the run
+# is still active, not only after it finishes done. ─────────────────────────
+
+
+def test_ready_banner_shows_mid_run_for_hold_phase_operation_once_conditions_hold(
+    station, operations_config, qtbot
+):
+    """A hold-phase operation's ready banner shows mid-run, before Finish is clicked."""
+    mock_orch = MagicMock(spec=Orchestrator)
+    panel = OperationsPanel(
+        station,
+        mock_orch,
+        None,
+        operations_config,
+        None,
+        None,
+        get_data_dir=lambda: "/tmp",
+    )
+    qtbot.addWidget(panel)
+    card = panel._cards[0]
+    assert card._display_instance.name == SampleChangeOperation.name
+    assert card._display_instance.hold_for_operator is True
+
+    running = card._factory("tester")
+    card._pending_instance = running
+    card._on_run_started({"procedure": SampleChangeOperation.name})
+    assert card._ready_banner.isHidden()  # no state snapshot evaluated for THIS run yet
+
+    running.confirm("needle_valve")
+    all_green_state = {
+        "magnet_z": {"get_field": 0.0},
+        "magnet_y": {"get_field": 0.0},
+        "temperature_vti": {"temperature": 300.0},
+    }
+    ctx = {"state": all_green_state, "now_unix": 0.0, "consumption_rate_pct_per_h": None}
+
+    # Still running (no run_finished at all) -> banner shows anyway.
+    card.on_states_updated(all_green_state, ctx)
+    assert not card._ready_banner.isHidden()
+    assert card._ready_banner.text() == f"✓ {SampleChangeOperation.ready_message}"
+
+
+def test_ready_banner_hidden_mid_run_while_conditions_unmet(
+    station, operations_config, qtbot
+):
+    """A hold-phase operation's ready banner stays hidden mid-run while a condition fails."""
+    mock_orch = MagicMock(spec=Orchestrator)
+    panel = OperationsPanel(
+        station,
+        mock_orch,
+        None,
+        operations_config,
+        None,
+        None,
+        get_data_dir=lambda: "/tmp",
+    )
+    qtbot.addWidget(panel)
+    card = panel._cards[0]
+
+    running = card._factory("tester")
+    card._pending_instance = running
+    card._on_run_started({"procedure": SampleChangeOperation.name})
+    # needle_valve never confirmed -> needle_valve_confirmed condition fails.
+    not_green_state = {
+        "magnet_z": {"get_field": 0.0},
+        "magnet_y": {"get_field": 0.0},
+        "temperature_vti": {"temperature": 300.0},
+    }
+    ctx = {"state": not_green_state, "now_unix": 0.0, "consumption_rate_pct_per_h": None}
+    card.on_states_updated(not_green_state, ctx)
+    assert card._ready_banner.isHidden()
+
+
 # ── Immediate finish + status line + unmet-postcondition warning (design
 # doc operation-concurrency-and-error-scoping.md §2) ─────────────────────
 

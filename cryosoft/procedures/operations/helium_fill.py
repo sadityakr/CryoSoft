@@ -55,9 +55,12 @@
 #   writes the "recording" key as this run's recordings/<run_id>.json
 #   sidecar (docs/plans/unified-servicing-log-and-run-recording.md §3) and
 #   folds start_pct/end_pct into the single "servicing" entry it writes for
-#   every finished run. No data file: data_filepath is not defined (getattr
-#   default is None/"" on the manifest), matching OperationBase's "data file
-#   is optional" contract.
+#   every finished run. The curve itself is now OperationBase's shared
+#   _record_sample()/_recording_dict() recorder helper (Phase 3), not a
+#   fill-specific field — the fill's contribution is just the one channel
+#   name and the cap (via OperationBase._MAX_RECORDING_POINTS). No data
+#   file: data_filepath is not defined (getattr default is None/"" on the
+#   manifest), matching OperationBase's "data file is optional" contract.
 # last_updated: 2026-07-23
 # ---
 
@@ -147,15 +150,6 @@ class HeliumFillOperation(OperationBase):
     ready_message = "Ready — helium transfer can begin"
     tolerated_safety_flags = frozenset({"helium_low"})
 
-    #: Upper bound on the in-memory level curve (docs/plans/operation-
-    #: concurrency-and-error-scoping.md §4). Once ``sample()`` would exceed
-    #: this many points, the curve is decimated: every other point is
-    #: dropped (``series[::2]``) and the effective sample stride doubles, so
-    #: memory stays bounded for arbitrarily long/slow fills while the curve
-    #: still spans the whole run. A class attribute (not a config key) so a
-    #: test can lower it to force the decimation path deterministically.
-    _MAX_CURVE_POINTS: int = 4000
-
     def __init__(
         self,
         station: Station,
@@ -231,18 +225,10 @@ class HeliumFillOperation(OperationBase):
         # >= fill_target_pct and non-rising; None while either condition is
         # unmet. Reset to None on any rise (see sample()).
         self._stable_since: float | None = None
-
-        # Bounded in-memory level curve (plan §4): parallel lists, appended
-        # to by sample(), decimated (see _MAX_CURVE_POINTS) rather than
-        # written to an HDF5 file. _curve_stride is the "keep every Nth raw
-        # sample" factor, doubled each time decimation runs;
-        # _curve_raw_count counts raw sample() calls since the last stride
-        # change so the stride is actually honoured going forward (not just
-        # at the moment of decimation).
-        self._curve_unix_time: list[float] = []
-        self._curve_helium_pct: list[float] = []
-        self._curve_stride: int = 1
-        self._curve_raw_count: int = 0
+        # The level curve itself lives in OperationBase's shared recorder
+        # (_record_sample()/_recording_dict(), plan unified-servicing-log-
+        # and-run-recording.md §3) — reset by initiate() via
+        # _reset_recording(), appended to by sample().
 
     # ------------------------------------------------------------------
     # Session hand-off (docs/plans/operation-concurrency-and-error-
@@ -263,19 +249,19 @@ class HeliumFillOperation(OperationBase):
             ``{"recording": {"unix_time": [...], "channels":
             {"<level_vi>.helium_pct": [...]}}, "start_pct": float,
             "end_pct": float}`` — the generic recording shape every operation
-            hands off (not fill-specific), every value JSON-safe (plain
-            floats and lists). ``start_pct``/``end_pct`` are ``0.0`` if the
-            fill ended before its first sample (mirrors the ``or 0.0``
-            fallback ``CryogenicsRecorder`` already uses for a level it never
-            observed).
+            hands off (not fill-specific; ``OperationBase._recording_dict()``
+            below), every value JSON-safe (plain floats and lists). The
+            ``"<level_vi>.helium_pct"`` channel key is always present, even
+            if ``sample()`` was never called (an empty list then). ``start_pct``/
+            ``end_pct`` are ``0.0`` if the fill ended before its first sample
+            (mirrors the ``or 0.0`` fallback ``CryogenicsRecorder`` already
+            uses for a level it never observed).
         """
+        recording = self._recording_dict()
+        if not recording["channels"]:
+            recording["channels"] = {f"{self._level_vi_name}.helium_pct": []}
         return {
-            "recording": {
-                "unix_time": list(self._curve_unix_time),
-                "channels": {
-                    f"{self._level_vi_name}.helium_pct": list(self._curve_helium_pct)
-                },
-            },
+            "recording": recording,
             "start_pct": float(self._start_level_pct or 0.0),
             "end_pct": float(self._last_level_pct or 0.0),
         }
@@ -432,10 +418,7 @@ class HeliumFillOperation(OperationBase):
         self._start_level_pct = None
         self._last_level_pct = None
         self._stable_since = None
-        self._curve_unix_time = []
-        self._curve_helium_pct = []
-        self._curve_stride = 1
-        self._curve_raw_count = 0
+        self._reset_recording()
 
         logger.info(
             "HeliumFillOperation.initiate(): %d magnet(s) to zero field, "
@@ -515,33 +498,7 @@ class HeliumFillOperation(OperationBase):
             self._stable_since = None
         self._last_level_pct = helium_pct
 
-        self._append_curve_point(now, helium_pct)
-
-    def _append_curve_point(self, unix_time: float, helium_pct: float) -> None:
-        """Append one point to the bounded in-memory level curve, decimating if full.
-
-        Decimation strategy (docs/plans/operation-concurrency-and-error-
-        scoping.md §4): only every ``_curve_stride``-th raw sample is kept
-        (starting at 1, i.e. every sample). Once the kept series would grow
-        past ``_MAX_CURVE_POINTS``, it is halved by keeping every other
-        point (``series[::2]``) and ``_curve_stride`` doubles — halving
-        both the current series and the future intake rate keeps the curve
-        bounded for arbitrarily long fills while still spanning the whole
-        run (never just the tail).
-
-        Args:
-            unix_time: The sample's wall-clock time.
-            helium_pct: The sample's helium level, in percent.
-        """
-        self._curve_raw_count += 1
-        if self._curve_raw_count % self._curve_stride != 0:
-            return
-        self._curve_unix_time.append(unix_time)
-        self._curve_helium_pct.append(helium_pct)
-        if len(self._curve_unix_time) > self._MAX_CURVE_POINTS:
-            self._curve_unix_time = self._curve_unix_time[::2]
-            self._curve_helium_pct = self._curve_helium_pct[::2]
-            self._curve_stride *= 2
+        self._record_sample(now, {f"{self._level_vi_name}.helium_pct": helium_pct})
 
     def step(self) -> StepPlan | None:
         """Keep sampling until the fill completes or times out.
