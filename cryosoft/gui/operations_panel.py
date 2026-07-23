@@ -39,11 +39,13 @@
 #   The active cryogenics: config (Station.read_cryogenics_config) and
 #   operations: config (Station.read_operations_config), a HeliumRecordStore
 #   and ServicingLogStore (both optional — None when cryogenics is absent),
-#   per-tick state snapshots via on_states_updated(), and the Orchestrator's
+#   per-tick state snapshots via on_states_updated(), one operation_status
+#   milestone line per on_operation_status() call, and the Orchestrator's
 #   run_started/run_finished signals (connected directly by each
 #   OperationCard, following the same precedent as InstrumentPanel's own
-#   action_succeeded connection — only states_updated routes through the
-#   window, see monitor_window.py's teardown-race note).
+#   action_succeeded connection — states_updated and operation_status route
+#   through the window instead, see monitor_window.py's teardown-race note:
+#   both fire every tick, unlike the run-boundary-only run_started/finished).
 # process: |
 #   on_states_updated() updates the He/N2 readouts and (throttled, exactly
 #   as Phase 5) recomputes the consumption rate and redraws the level plot,
@@ -51,16 +53,23 @@
 #   "now_unix", "consumption_rate_pct_per_h"}) per tick and forwards
 #   (state, context) to every OperationCard, which re-evaluates its
 #   readiness checklist, next-due label, and ready banner from it — no
-#   per-operation code here. A card's button opens a generic OperatorDialog,
-#   constructs a FRESH operation instance via the panel-supplied factory
-#   closure, and calls orchestrator.run_operation(); while that operation is
-#   the active run the button becomes "Finish <name>" and calls
-#   orchestrator.finish_operation(); a declared operator_confirmations
-#   checkbox calls orchestrator.confirm_operation(key) and disables itself.
+#   per-operation code here. on_operation_status() forwards one milestone
+#   line to every card; only the running one (if any) displays it (design
+#   doc operation-concurrency-and-error-scoping.md §2's hard status
+#   separation — this text never reaches the Procedure window). A card's
+#   button opens a generic OperatorDialog, constructs a FRESH operation
+#   instance via the panel-supplied factory closure, and calls
+#   orchestrator.run_operation(); while that operation is the active run the
+#   button becomes "Finish <name>" and calls orchestrator.finish_operation()
+#   (immediately going to a disabled "Finishing <name>…" state, plan §2,
+#   until run_finished arrives — which also surfaces any
+#   postconditions_unmet as a warning badge on the card); a declared
+#   operator_confirmations checkbox calls orchestrator.confirm_operation(key)
+#   and disables itself.
 # output: |
 #   A QWidget hosted (scrolled) in MonitorWindow's bottom-right quadrant.
 #   Side effect: submits an operation to the Orchestrator.
-# last_updated: 2026-07-20
+# last_updated: 2026-07-21
 # ---
 
 """OperationsPanel — cryogenics status (optional) + generic operation cards."""
@@ -238,6 +247,13 @@ class OperationCard(QGroupBox):
         self.setObjectName(f"operation_card_{self._slug}")
 
         self._running = False
+        #: Set the instant Finish is clicked (before run_finished arrives —
+        #: design doc §2's "immediate finish" card contract): the button goes
+        #: to a disabled "Finishing…" state right away rather than waiting
+        #: for the terminal signal, since dispatching standby()/evaluating
+        #: postconditions/ending the run all happen on the very next tick
+        #: but are not instantaneous from the GUI's perspective.
+        self._finishing = False
         self._last_run_done = False
         self._last_all_holding = True
         #: The instance built by the factory for a run this card started,
@@ -261,6 +277,17 @@ class OperationCard(QGroupBox):
         self._next_due_label.setWordWrap(True)
         self._next_due_label.hide()
         outer.addWidget(self._next_due_label)
+
+        # Live status line (design doc operation-concurrency-and-error-
+        # scoping.md §2's hard status separation): shows this operation's own
+        # operation_status milestones while it is the active run — never the
+        # Procedure window. Elided (single line) rather than word-wrapped —
+        # a status line grows unboundedly less than a checklist detail.
+        self._status_label = QLabel("")
+        self._status_label.setObjectName(f"{self._slug}_status_label")
+        self._status_label.setProperty("class", "value_readout")
+        self._status_label.hide()
+        outer.addWidget(self._status_label)
 
         for condition in self._conditions:
             # Label and detail stack on separate lines (rather than one wide
@@ -324,6 +351,20 @@ class OperationCard(QGroupBox):
         self._ready_banner.style().polish(self._ready_banner)
         outer.addWidget(self._ready_banner)
 
+        # Unmet-postcondition warning (design doc operation-concurrency-and-
+        # error-scoping.md §2): finish is immediate and never blocks on a
+        # postcondition, so an unmet one is surfaced here instead — the
+        # same validated "verdict_badge" QSS class, severity="warning".
+        self._postcondition_warning = QLabel("")
+        self._postcondition_warning.setObjectName(f"{self._slug}_postcondition_warning")
+        self._postcondition_warning.setProperty("class", "verdict_badge")
+        self._postcondition_warning.setProperty("severity", "warning")
+        self._postcondition_warning.setWordWrap(True)
+        self._postcondition_warning.hide()
+        self._postcondition_warning.style().unpolish(self._postcondition_warning)
+        self._postcondition_warning.style().polish(self._postcondition_warning)
+        outer.addWidget(self._postcondition_warning)
+
         button_row = QHBoxLayout()
         self._action_btn = QPushButton()
         self._action_btn.setObjectName(f"{self._slug}_action_btn")
@@ -381,6 +422,27 @@ class OperationCard(QGroupBox):
 
         self._sync_ready_banner()
 
+    def on_operation_status(self, text: str) -> None:
+        """Show one operation_status milestone line, only while this card is running.
+
+        Forwarded from ``MonitorWindow`` (never connected directly — see the
+        gui-edit skill's destruction-order rule: ``operation_status`` fires
+        every tick, so it must route through the window like
+        ``states_updated`` does). A non-running card ignores every call —
+        only one operation runs at a time, so at most one card's label is
+        ever non-empty.
+
+        Args:
+            text: The milestone line (``Orchestrator.operation_status``).
+        """
+        if not self._running:
+            return
+        metrics = self._status_label.fontMetrics()
+        elided = metrics.elidedText(text, Qt.TextElideMode.ElideRight, 400)
+        self._status_label.setText(elided)
+        self._status_label.setToolTip(text)
+        self._status_label.show()
+
     # ------------------------------------------------------------------
     # Start / finish / confirm
     # ------------------------------------------------------------------
@@ -388,6 +450,12 @@ class OperationCard(QGroupBox):
     def _on_action_clicked(self) -> None:
         if self._running:
             self._orchestrator.finish_operation()
+            # Immediate visual feedback (design doc §2): the card goes to a
+            # disabled "Finishing…" state right away rather than waiting for
+            # run_finished — finish is fast (the next tick or two) but not
+            # instantaneous from here.
+            self._finishing = True
+            self._sync_button()
             return
         dialog = OperatorDialog(
             self._display_instance.name,
@@ -406,7 +474,16 @@ class OperationCard(QGroupBox):
         if str(manifest.get("procedure", "")) != self._display_instance.name:
             return
         self._running = True
+        self._finishing = False
         self._last_run_done = False
+        # Cleared for a fresh run (mirrors _last_run_done): a hold-phase
+        # operation's mid-run banner (_sync_ready_banner()) must wait for a
+        # genuine on_states_updated() re-evaluation against THIS run's
+        # conditions, not a stale True carried over from the previous run.
+        self._last_all_holding = False
+        self._status_label.setText("")
+        self._status_label.hide()
+        self._postcondition_warning.hide()
         if self._pending_instance is not None:
             # Re-bind the checklist to the instance the orchestrator is
             # actually running (and mutating — confirm_operation() lands
@@ -425,7 +502,18 @@ class OperationCard(QGroupBox):
         if str(manifest.get("procedure", "")) != self._display_instance.name:
             return
         self._running = False
+        self._finishing = False
         self._last_run_done = str(manifest.get("status", "")) == "done"
+        self._status_label.setText("")
+        self._status_label.hide()
+        unmet = manifest.get("postconditions_unmet") or []
+        if unmet:
+            self._postcondition_warning.setText(
+                f"⚠ Finished with unmet postcondition(s): {', '.join(unmet)}"
+            )
+            self._postcondition_warning.show()
+        else:
+            self._postcondition_warning.hide()
         self._sync_button()
         self._sync_confirmations_row()
         self._sync_ready_banner()
@@ -445,7 +533,20 @@ class OperationCard(QGroupBox):
             checkbox.blockSignals(False)
 
     def _sync_button(self) -> None:
-        if self._running:
+        if self._finishing:
+            # Immediate visual feedback (design doc §2): disabled the instant
+            # Finish is clicked, until run_finished flips it back — the run
+            # itself ends within a tick or two, but the button must not
+            # invite a second click (or look idle) in the meantime.
+            self._action_btn.setEnabled(False)
+            self._action_btn.setText(f"Finishing {self._display_instance.name}…")
+            self._action_btn.setProperty("class", BTN_CLASS_DANGER)
+            self._action_btn.setIcon(qta.icon("fa5s.hourglass-half", color=TEXT_PRIMARY))
+            self._action_btn.setToolTip(
+                f"Finishing {self._display_instance.name} — parking hardware"
+            )
+        elif self._running:
+            self._action_btn.setEnabled(True)
             self._action_btn.setText(f"Finish {self._display_instance.name}")
             self._action_btn.setProperty("class", BTN_CLASS_DANGER)
             self._action_btn.setIcon(qta.icon("fa5s.stop", color=TEXT_PRIMARY))
@@ -453,6 +554,7 @@ class OperationCard(QGroupBox):
                 f"Request a graceful stop of the running {self._display_instance.name}"
             )
         else:
+            self._action_btn.setEnabled(True)
             self._action_btn.setText(f"{self._display_instance.name}…")
             self._action_btn.setProperty("class", BTN_CLASS_PRIMARY)
             self._action_btn.setIcon(qta.icon("fa5s.play", color=TEXT_ON_ACCENT))
@@ -466,13 +568,29 @@ class OperationCard(QGroupBox):
         self._confirmations_row.setVisible(self._running and bool(self._confirmations))
 
     def _sync_ready_banner(self) -> None:
-        """Show the ready banner iff done + all-green + not running (plan §12)."""
-        show = (
-            bool(self._display_instance.ready_message)
-            and self._last_run_done
-            and self._last_all_holding
-            and not self._running
-        )
+        """Show the ready banner once every readiness condition holds (plan §12).
+
+        For a plain operation (``hold_for_operator = False``, the default —
+        e.g. the helium fill), unchanged: only once the run finished
+        ``done`` AND every condition holds AND nothing is running now
+        (docs/plans/unified-servicing-log-and-run-recording.md §1's "the
+        fill's whole life is post-run"). For a hold-phase operation (e.g.
+        the sample change), the banner may ALSO show mid-run, the instant
+        every condition holds — "ready" means "you may act now", which is
+        true well before Finish is clicked.
+        """
+        if self._display_instance.hold_for_operator:
+            show = bool(self._display_instance.ready_message) and (
+                (self._running and self._last_all_holding)
+                or (self._last_run_done and self._last_all_holding and not self._running)
+            )
+        else:
+            show = (
+                bool(self._display_instance.ready_message)
+                and self._last_run_done
+                and self._last_all_holding
+                and not self._running
+            )
         if show:
             self._ready_banner.setText(f"✓ {self._display_instance.ready_message}")
         self._ready_banner.setVisible(show)
@@ -747,6 +865,21 @@ class OperationsPanel(QWidget):
         for card in self._cards:
             card.on_states_updated(state, context)
 
+    def on_operation_status(self, text: str) -> None:
+        """Forward one operation_status milestone line to every card.
+
+        Forwarded from ``MonitorWindow`` (never connected directly — see the
+        gui-edit skill's destruction-order rule: ``operation_status`` fires
+        every tick while an operation runs). Only one operation runs at a
+        time, so each ``OperationCard`` ignores the call unless it is the
+        running one (see ``OperationCard.on_operation_status``).
+
+        Args:
+            text: The milestone line (``Orchestrator.operation_status``).
+        """
+        for card in self._cards:
+            card.on_operation_status(text)
+
     def _update_cryo_readouts(self, state: dict[str, Any]) -> None:
         vi_state = state.get(self._level_vi_name)
         if not isinstance(vi_state, dict):
@@ -783,11 +916,19 @@ class OperationsPanel(QWidget):
         self._fill_markers.setData(marker_x, marker_y)
 
     def _fill_intervals(self) -> tuple[tuple[float, float], ...]:
-        """Return ``(start_unix, end_unix)`` for every cryogenics-log fill entry."""
+        """Return ``(start_unix, end_unix)`` for every fill entry in the servicing log.
+
+        Reads the unified ``"servicing"`` kind (docs/plans/unified-servicing-
+        log-and-run-recording.md §2 — the recorder no longer writes the
+        legacy ``"cryogenics"`` kind), filtering to ``entry_kind ==
+        "helium_fill"``.
+        """
         if self._servicing_store is None:
             return ()
         intervals: list[tuple[float, float]] = []
-        for entry in self._servicing_store.entries("cryogenics"):
+        for entry in self._servicing_store.entries("servicing"):
+            if entry.values.get("entry_kind") != "helium_fill":
+                continue
             try:
                 start = datetime.fromisoformat(str(entry.values.get("start_utc"))).timestamp()
                 end = datetime.fromisoformat(str(entry.values.get("end_utc"))).timestamp()
@@ -797,12 +938,18 @@ class OperationsPanel(QWidget):
         return tuple(intervals)
 
     def _fill_marker_points(self) -> tuple[list[float], list[float]]:
-        """Return marker (x, y) points at each fill's start time/level."""
+        """Return marker (x, y) points at each fill's start time/level.
+
+        See ``_fill_intervals()`` for the unified ``"servicing"`` kind /
+        ``entry_kind`` filtering this mirrors.
+        """
         if self._servicing_store is None:
             return [], []
         xs: list[float] = []
         ys: list[float] = []
-        for entry in self._servicing_store.entries("cryogenics"):
+        for entry in self._servicing_store.entries("servicing"):
+            if entry.values.get("entry_kind") != "helium_fill":
+                continue
             try:
                 start = datetime.fromisoformat(str(entry.values.get("start_utc"))).timestamp()
                 level = float(entry.values.get("helium_start_pct", 0.0))

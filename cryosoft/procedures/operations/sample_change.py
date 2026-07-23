@@ -2,18 +2,26 @@
 # description: |
 #   SampleChangeOperation: the second concrete OperationBase (L4) subclass —
 #   "verify the cryostat is safe to open" (docs/plans/cryogenics-logbook.md
-#   §8.2). Ramps every magnet to zero field, ramps the VTI to
-#   target_temperature_K (default 300 K, room temperature), opens the first
-#   switch VI (if any), and disarms every measurement VI via standby(). No
-#   dataset — a sample change produces no measurement curve. Completion is
-#   gated on verified postconditions only: zero field held, the switch
-#   heater off on any magnet whose cached state exposes one, the VTI within
-#   tolerance held, and — for a manual needle valve, the only supported mode
-#   today — an explicit operator confirmation.
+#   §8.2), now a true servicing run with a hold phase (docs/plans/unified-
+#   servicing-log-and-run-recording.md §1). Ramps every magnet to zero
+#   field, ramps the VTI to target_temperature_K (default 300 K, room
+#   temperature), opens the first switch VI (if any), and disarms every
+#   measurement VI via standby(). No HDF5 dataset — instead, once every
+#   sample_period_s the run records the VTI temperature and every magnet's
+#   field into OperationBase's shared recorder, so the run's servicing-log
+#   entry carries the actual conditions spanning the whole hold, not just
+#   the moment the ramps finished. The run then stays open (step() never
+#   returns None on its own) until the operator clicks Finish — that is when
+#   the physical sample change happens. Completion is gated on verified
+#   postconditions only: zero field held, the switch heater off on any
+#   magnet whose cached state exposes one, the VTI within tolerance held,
+#   and — for a manual needle valve, the only supported mode today — an
+#   explicit operator confirmation.
 # entry_point: Not run directly. Constructed by the GUI's sample-change dialog
 #   (Phase 5) or a test, submitted via Orchestrator.run_operation()/
 #   queue_operation(); the needle-valve confirmation flows through
-#   Orchestrator.confirm_operation("needle_valve").
+#   Orchestrator.confirm_operation("needle_valve"); the hold phase ends via
+#   Orchestrator.finish_operation() (the card's Finish click).
 # dependencies:
 #   - cryosoft.core.exceptions (CryoSoftConfigError)
 #   - cryosoft.core.gates (Gate)
@@ -23,35 +31,47 @@
 #     direct virtual_instruments import (contract C6)
 # input: |
 #   Constructor: station (positional), person (keyword, default ""), and
-#   **config carrying the docs/plans/cryogenics-logbook.md §9
-#   operations.sample_change: keys (vti_vi, target_temperature_K,
-#   temperature_tolerance_K, temperature_window_s, zero_field_eps_T,
-#   zero_field_window_s, needle_valve, postcondition_timeout_s), each with a
-#   class-matching default so this constructs from a sim station alone.
-#   magnet_vi_names()/measurement_vi_names()/switch_vi_names() resolve the
-#   VI lists; vti_vi (default "temperature_vti") must be a registered VI.
+#   **config carrying the docs/plans/unified-servicing-log-and-run-
+#   recording.md §1 operations.sample_change: keys (vti_vi,
+#   target_temperature_K, temperature_tolerance_K, temperature_window_s,
+#   zero_field_eps_T, zero_field_window_s, needle_valve, sample_period_s —
+#   new in Phase 3), each with a class-matching default so this constructs
+#   from a sim station alone. magnet_vi_names()/measurement_vi_names()/
+#   switch_vi_names() resolve the VI lists; vti_vi (default
+#   "temperature_vti") must be a registered VI.
 # process: |
 #   initiate() ramps every magnet to 0 T and the VTI to target_temperature_K,
 #   sends open_all to the first switch VI (if the station has one) and
-#   standby to every measurement VI. No initiation_gates() (the default empty
-#   tuple is exactly right — nothing must hold before parking begins).
-#   step() returns None immediately: the whole duration is carried by the
-#   ramps (RAMPING) and postcondition_gates() (STANDBY), not by an
-#   open-ended sampling loop. standby() is an empty PhasePlan — initiate()
-#   already parked everything. postcondition_gates() reads only cached
-#   state: zero_field (every magnet, held zero_field_window_s), heater_off
-#   (only for magnets whose cached state exposes switch_heater_state — plain
-#   SuperconductingMagnetVI has no such field and is silently skipped; if no
-#   magnet exposes one, no such gate is added at all), vti_at_target (held
-#   temperature_window_s), and — only when needle_valve == "manual" —
+#   standby to every measurement VI, and resets the shared recording. No
+#   initiation_gates() (the default empty tuple is exactly right — nothing
+#   must hold before parking begins). sample() (called once per tick,
+#   throttled to sample_period_s by step()'s wait_s, exactly like
+#   HeliumFillOperation's sampling loop) records the VTI temperature and
+#   every magnet's field. step() always returns a StepPlan (never None on
+#   its own): the run holds indefinitely — carried by the ramps (RAMPING) at
+#   first, then by the sampling loop — until
+#   Orchestrator.finish_operation() sets finish_requested, at which point
+#   the OperationBase adapter (change_sweep_step()) returns None on the very
+#   next tick regardless of what step() would return, ending the hold.
+#   postcondition_gates() is then evaluated once, immediately, as the run
+#   ends (docs/plans/operation-concurrency-and-error-scoping.md §2).
+#   standby() is an empty PhasePlan — initiate() already parked everything.
+#   postcondition_gates() reads only cached state: zero_field (every
+#   magnet), heater_off (only for magnets whose cached state exposes
+#   switch_heater_state — plain SuperconductingMagnetVI has no such field
+#   and is silently skipped; if no magnet exposes one, no such gate is added
+#   at all), vti_at_target, and — only when needle_valve == "manual" —
 #   needle_valve_confirmed, reading the confirm()/confirmed() operator-ack
 #   flag the GUI (Phase 5) renders as a checkbox per declared
-#   operator_confirmations entry.
+#   operator_confirmations entry. An unmet gate never blocks completion; it
+#   is named in the run manifest's postconditions_unmet list.
 # output: |
 #   PhasePlan/StepPlan/Command/Gate objects consumed by the Orchestrator. No
 #   HDF5 side effect — the manifest's data_file stays empty, exactly as for
-#   any run with no DataManager.
-# last_updated: 2026-07-19
+#   any run with no DataManager. run_summary() -> {"recording": {...}} in
+#   OperationBase's generic shape, so CryogenicsRecorder writes it as this
+#   run's recordings/<run_id>.json sidecar exactly like the helium fill's.
+# last_updated: 2026-07-23
 # ---
 
 """SampleChangeOperation — verify the cryostat is safe to open."""
@@ -59,6 +79,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from cryosoft.core.exceptions import CryoSoftConfigError
@@ -80,16 +101,25 @@ _NEEDLE_VALVE_MANUAL = "manual"
 class SampleChangeOperation(OperationBase):
     """Verify the cryostat is safe to open: magnets off, VTI at 300 K, valve closed.
 
-    The second concrete operation (plan §8.2). ``initiate()`` ramps every
-    magnet (``Station.magnet_vi_names()``) to 0 T and the configured VTI VI
-    to ``target_temperature_K``, opens the first switch VI (if the station
-    has one — display-only exclusivity reset, mirrors the helium fill's
-    "if it exists" pattern for optional capabilities), and disarms every
-    measurement VI (``Station.measurement_vi_names()``) via ``standby()``.
-    There is no sampling loop: ``step()`` returns ``None`` immediately, so
-    the whole run duration is carried by the ramps (RAMPING) and
-    ``postcondition_gates()`` (the STANDBY sub-phase) — exactly the shape
-    the Orchestrator already drives for a procedure with no gates.
+    The second concrete operation (plan §8.2), and the reference "hold
+    phase" operation (docs/plans/unified-servicing-log-and-run-recording.md
+    §1). ``initiate()`` ramps every magnet (``Station.magnet_vi_names()``)
+    to 0 T and the configured VTI VI to ``target_temperature_K``, opens the
+    first switch VI (if the station has one — display-only exclusivity
+    reset, mirrors the helium fill's "if it exists" pattern for optional
+    capabilities), and disarms every measurement VI
+    (``Station.measurement_vi_names()``) via ``standby()``. ``step()``
+    never returns ``None`` on its own: once the ramps land, the run holds —
+    ``sample()`` records the VTI temperature and every magnet's field once
+    per ``sample_period_s`` into the shared recorder (``run_summary()``
+    hands it off in the generic ``"recording"`` shape) — until the operator
+    clicks Finish (``Orchestrator.finish_operation()``), at which point the
+    ``OperationBase`` adapter ends the loop and ``postcondition_gates()``
+    (the STANDBY sub-phase) evaluates once, immediately.
+    ``hold_for_operator = True`` tells the Operations panel to show the
+    ready banner mid-run, the instant every readiness condition holds,
+    since for this operation "ready" means "you may open the cryostat now" —
+    true well before Finish.
 
     ``tolerated_safety_flags`` is deliberately left at the ``OperationBase``
     default (empty): a sample change has no business running under an
@@ -127,6 +157,10 @@ class SampleChangeOperation(OperationBase):
     description = "Verify the cryostat is safe to open"
     ready_message = "Ready — sample can be taken out"
     config_key = "sample_change"
+    #: Hold-phase operation (docs/plans/unified-servicing-log-and-run-
+    #: recording.md §1): the ready banner may show mid-run, not only after
+    #: Finish — see ``OperationBase.hold_for_operator``'s docstring.
+    hold_for_operator = True
 
     #: Declared operator confirmations: {key: human-readable checkbox label}.
     #: Only "needle_valve" exists today because "manual" is the only
@@ -147,13 +181,16 @@ class SampleChangeOperation(OperationBase):
                 ``config["vti_vi"]`` (default ``"temperature_vti"``).
             person: Who is performing the sample change (recorded via
                 ``get_params()``, mirroring the helium fill's ``person``).
-            **config: Plan §9 ``operations.sample_change:`` keys —
-                ``vti_vi``, ``target_temperature_K``,
-                ``temperature_tolerance_K``, ``temperature_window_s``,
-                ``zero_field_eps_T``, ``zero_field_window_s``,
-                ``needle_valve``, ``postcondition_timeout_s`` — each with a
-                sane default matching §9 so this constructs from a sim
-                station alone. Unrecognised keys are silently ignored, so
+            **config: docs/plans/unified-servicing-log-and-run-recording.md
+                §1 ``operations.sample_change:`` keys — ``vti_vi``,
+                ``target_temperature_K``, ``temperature_tolerance_K``,
+                ``temperature_window_s``, ``zero_field_eps_T``,
+                ``zero_field_window_s``, ``needle_valve``,
+                ``sample_period_s`` (new in Phase 3 — how often the hold
+                phase records station state; default 10.0 s, matching the
+                helium fill's own default) — each with a sane default so
+                this constructs from a sim station alone. Unrecognised keys
+                are silently ignored, so
                 ``**read_operations_config(config_path)["sample_change"]``
                 can be passed verbatim.
 
@@ -180,12 +217,7 @@ class SampleChangeOperation(OperationBase):
             config.get("zero_field_window_s", 10.0)
         )
         self._needle_valve: str = str(config.get("needle_valve", _NEEDLE_VALVE_MANUAL))
-        # Not a §9 default of OperationBase's own (600 s) — a sample change
-        # legitimately takes a long time (a room-temperature warm-up), so
-        # the instance overrides the class attribute here.
-        self.postcondition_timeout_s: float = float(
-            config.get("postcondition_timeout_s", 7200.0)
-        )
+        self._sample_period_s: float = float(config.get("sample_period_s", 10.0))
 
         if not station.has_vi(self._vti_vi_name):
             raise CryoSoftConfigError(
@@ -251,11 +283,31 @@ class SampleChangeOperation(OperationBase):
     # OperationBase lifecycle
     # ------------------------------------------------------------------
 
+    def claimed_vi_names(self) -> set[str]:
+        """Claim every VI this operation actually commands in ``initiate()``.
+
+        A sample change ramps every magnet and the VTI, opens the switch (if
+        any), and stands by every measurement VI — on a typical station that
+        is everything except the level meter, so this narrowing yields
+        little extra concurrency; it is still exact (a station with an
+        instrument this operation never touches, e.g. a rotator, stays
+        manually controllable during a sample change) and cheaper to keep
+        correct than a hand-picked subset.
+
+        Returns:
+            The magnets, the configured VTI VI, the first switch VI (if the
+            station has one), and every measurement VI.
+        """
+        claimed = set(self._magnets) | {self._vti_vi_name} | set(self._measurement_vis)
+        if self._switch_vi_name is not None:
+            claimed.add(self._switch_vi_name)
+        return claimed
+
     def get_params(self) -> dict[str, Any]:
         """Return the sample change's parameters, for the run manifest.
 
         Returns:
-            ``person`` plus every resolved §9 config value.
+            ``person`` plus every resolved config value.
         """
         return {
             "person": self._person,
@@ -266,7 +318,25 @@ class SampleChangeOperation(OperationBase):
             "zero_field_eps_T": self._zero_field_eps_T,
             "zero_field_window_s": self._zero_field_window_s,
             "needle_valve": self._needle_valve,
+            "sample_period_s": self._sample_period_s,
         }
+
+    def run_summary(self) -> dict[str, Any]:
+        """Return the recorded VTI-temperature/magnet-field series, for the run manifest.
+
+        Called once by the Orchestrator on ``run_finished``; ``CryogenicsRecorder``
+        reads this back off ``manifest["summary"]`` and writes it as this
+        run's ``recordings/<run_id>.json`` sidecar (docs/plans/unified-
+        servicing-log-and-run-recording.md §3), referenced from the run's
+        single ``servicing`` log entry.
+
+        Returns:
+            ``{"recording": {"unix_time": [...], "channels": {"<vi>.<value>":
+            [...], ...}}}`` — ``OperationBase._recording_dict()`` verbatim
+            (empty series if the hold phase never sampled, e.g. the run
+            finished before ``sample()`` was ever called).
+        """
+        return {"recording": self._recording_dict()}
 
     # ------------------------------------------------------------------
     # Operations panel: readiness (plan §12) — no next_due() override, a
@@ -403,11 +473,16 @@ class SampleChangeOperation(OperationBase):
     def initiate(self) -> PhasePlan:
         """Ramp every magnet to zero field and the VTI to target, park everything else.
 
+        Also resets the shared recording (``OperationBase._reset_recording()``)
+        so a fresh run starts with an empty series — ``sample()`` appends to
+        it for the whole hold phase.
+
         Returns:
             A ``PhasePlan`` with every magnet and the VTI targeted, plus
             ``open_all`` on the first switch VI (if any) and ``standby`` on
             every measurement VI.
         """
+        self._reset_recording()
         targets: dict[str, Target] = {magnet: Target(0.0) for magnet in self._magnets}
         targets[self._vti_vi_name] = Target(self._target_temperature_K)
 
@@ -433,17 +508,41 @@ class SampleChangeOperation(OperationBase):
     # parking begins, unlike the helium fill's zero-field-before-sampling
     # gate.
 
-    def step(self) -> StepPlan | None:
-        """Return ``None`` immediately — the run has no sampling loop.
+    def sample(self) -> None:
+        """Record the VTI temperature and every magnet's field (the hold-phase recording).
 
-        The whole duration is carried by initiate()'s ramps (RAMPING) and
-        postcondition_gates() (the STANDBY sub-phase), mirroring how a
-        procedure with no ``step()`` work ends its loop on the first call.
+        Called once per tick (``measure()`` adapter), throttled to
+        ``sample_period_s`` by ``step()``'s ``wait_s`` — mirrors
+        ``HeliumFillOperation.sample()``'s cadence exactly. Reads live VI
+        values through the Station (never ``cached_state`` directly — this
+        is a genuine per-tick reading, like any other ``sample()``), so the
+        recording spans the whole hold, from the ramps landing to Finish.
+        """
+        now = time.time()
+        values: dict[str, float] = {
+            f"{self._vti_vi_name}.temperature": float(
+                self._station.get_vi(self._vti_vi_name).temperature()
+            )
+        }
+        for magnet in self._magnets:
+            values[f"{magnet}.get_field"] = float(self._station.get_vi(magnet).get_field())
+        self._record_sample(now, values)
+
+    def step(self) -> StepPlan | None:
+        """Keep the run open — the hold phase (docs/plans/unified-servicing-log-and-run-recording.md §1).
+
+        Never returns ``None`` on its own: once the ramps land, the run
+        holds — ``sample()`` keeps recording every ``sample_period_s`` —
+        until ``Orchestrator.finish_operation()`` sets ``finish_requested``,
+        at which point the ``OperationBase`` adapter
+        (``change_sweep_step()``) returns ``None`` on the very next tick
+        regardless of what this method returns, ending the hold and
+        proceeding to ``standby()``/``postcondition_gates()``.
 
         Returns:
-            ``None``, always.
+            ``StepPlan(targets={}, wait_s=sample_period_s)``, always.
         """
-        return None
+        return StepPlan(targets={}, wait_s=self._sample_period_s)
 
     def standby(self) -> PhasePlan:
         """Return an empty plan — everything was already parked by ``initiate()``.
@@ -457,7 +556,14 @@ class SampleChangeOperation(OperationBase):
         """Verify zero field, switch heater(s) off, VTI at target, valve confirmed.
 
         All four checks read only cached state (or, for the valve, the
-        operator-confirmation flag) — no extra hardware poll.
+        operator-confirmation flag) — no extra hardware poll. The
+        Orchestrator evaluates each gate exactly once, immediately, as the
+        run ends (docs/plans/operation-concurrency-and-error-scoping.md
+        §2) — an unmet gate is recorded on the run manifest's
+        ``postconditions_unmet`` list, never held or timed out. The
+        ``window_s`` each ``Gate`` still declares below has no effect there
+        (it only matters if this method's gates are ever stepped instead —
+        they are not, by any current caller).
 
         Returns:
             ``zero_field`` (always); ``heater_off`` (only if at least one

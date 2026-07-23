@@ -18,7 +18,15 @@
 #   config()/read_servicing_logs_config()/read_operations_config() mirror
 #   read_instrument_metadata()'s GUI-safe YAML-only pattern for the optional
 #   cryogenics:/servicing_logs:/operations: config blocks
-#   (docs/plans/cryogenics-logbook.md §9).
+#   (docs/plans/cryogenics-logbook.md §9). Runtime fault registry (plan
+#   operation-concurrency-and-error-scoping.md §3): get_state() also
+#   populates a structured FaultRecord per stale/disconnected VI
+#   (vi_faults(), acknowledge_fault(), clear_fault() — auto-cleared on the
+#   next successful poll), and retry_fault() resets the error counter and
+#   forces one fresh poll (never rebuilds drivers — that is
+#   retry_instrument()'s job, for a VI that never connected at all).
+#   safety_flag_sources() mirrors check_safety() but names the VI(s) that
+#   tripped each flag, for EMERGENCY reasons/ErrorEvents.
 # entry_point: Not run directly; used by Orchestrator and GUI.
 # dependencies:
 #   - cryosoft.core.exceptions
@@ -35,7 +43,7 @@
 #   After max_errors consecutive failures, _disconnected=True is added.
 # output: |
 #   Full station state dict {vi_name: {field: value, ...}} every poll cycle.
-# last_updated: 2026-07-19
+# last_updated: 2026-07-21
 # ---
 
 """Station class — runtime registry of all Virtual Instruments.
@@ -50,6 +58,7 @@ from __future__ import annotations
 
 import importlib
 import logging
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -97,6 +106,39 @@ class OfflineInstrument:
     failed_drivers: tuple[str, ...] = field(default=())
 
 
+@dataclass(frozen=True)
+class FaultRecord:
+    """Record of a RUNTIME fault on a VI that DID connect (plan §3).
+
+    The runtime sibling of :class:`OfflineInstrument`: an offline instrument
+    never connected at build time; a ``FaultRecord`` describes a VI that was
+    live and has since gone stale or disconnected (comm-error streak) during
+    normal polling. Populated by ``get_state()`` at the same point it already
+    computes ``_stale``/``_disconnected``, so no extra poll is introduced.
+
+    Attributes:
+        vi_name: The VI's registered name.
+        kind: ``"stale"`` (communication errors, below the disconnect
+            threshold) or ``"disconnected"`` (``max_errors`` consecutive
+            failures).
+        message: Human-readable description of the latest failure.
+        since: Unix time this fault was first recorded. Preserved across a
+            ``"stale"`` -> ``"disconnected"`` escalation of the SAME ongoing
+            incident (the record is updated in place, not replaced).
+        acknowledged: Whether the operator has acknowledged this fault via
+            ``acknowledge_fault()``. Deliberately does NOT survive recovery:
+            once the VI polls successfully again the record is removed
+            entirely (see ``clear_fault()``), acknowledged or not — a
+            recovered VI has nothing left to acknowledge.
+    """
+
+    vi_name: str
+    kind: str
+    message: str
+    since: float
+    acknowledged: bool = False
+
+
 class Station:
     """Runtime registry and coordinator of all Virtual Instruments.
 
@@ -123,6 +165,10 @@ class Station:
         self._driver_specs: dict[str, dict] = {}   # {alias: driver config}
         self._vi_specs: dict[str, dict] = {}       # {vi_name: vi config}
         self._drivers: dict[str, Any] = {}         # {alias: live driver}
+        # Runtime fault registry (plan §3) — a VI that DID connect but has
+        # since gone stale/disconnected during polling. Distinct from
+        # _offline_vis (never connected at build time).
+        self._vi_faults: dict[str, FaultRecord] = {}
 
     # ------------------------------------------------------------------
     # VI registration and access
@@ -514,7 +560,11 @@ class Station:
                 self._error_counts[vi_name] = 0
                 self._last_known_state[vi_name] = state
                 full_state[vi_name] = state
-            except CryoSoftCommunicationError:
+                # A successful poll fully clears any standing fault — see
+                # clear_fault()'s docstring: an acknowledged fault does not
+                # survive recovery either, it simply disappears.
+                self.clear_fault(vi_name)
+            except CryoSoftCommunicationError as exc:
                 self._error_counts[vi_name] += 1
                 stale = dict(self._last_known_state.get(vi_name, {}))
                 stale["_stale"] = True
@@ -525,6 +575,7 @@ class Station:
                         vi_name,
                         self._error_counts[vi_name],
                     )
+                    self._record_fault(vi_name, "disconnected", str(exc))
                 else:
                     logger.warning(
                         "VI '%s' communication error (attempt %d/%d)",
@@ -532,9 +583,102 @@ class Station:
                         self._error_counts[vi_name],
                         self._max_errors,
                     )
+                    self._record_fault(vi_name, "stale", str(exc))
                 full_state[vi_name] = stale
 
         return full_state
+
+    # ------------------------------------------------------------------
+    # Runtime fault registry (plan §3) — the RUNTIME sibling of the
+    # offline-instrument registry above: an offline instrument never
+    # connected at build time, a fault record describes a VI that DID
+    # connect and has since gone stale/disconnected during polling.
+    # ------------------------------------------------------------------
+
+    def _record_fault(self, vi_name: str, kind: str, message: str) -> None:
+        """Record (or update in place) a runtime fault for *vi_name*.
+
+        An existing unresolved fault has its ``kind``/``message`` updated
+        (e.g. ``"stale"`` escalating to ``"disconnected"`` as the same
+        ongoing incident) while ``since`` and ``acknowledged`` are
+        preserved — escalating severity does not erase an operator's
+        earlier acknowledgment of the same incident.
+
+        Args:
+            vi_name: The VI the fault concerns.
+            kind: ``"stale"`` or ``"disconnected"``.
+            message: Human-readable description of the latest failure.
+        """
+        existing = self._vi_faults.get(vi_name)
+        since = existing.since if existing is not None else time.time()
+        acknowledged = existing.acknowledged if existing is not None else False
+        self._vi_faults[vi_name] = FaultRecord(vi_name, kind, message, since, acknowledged)
+
+    def vi_faults(self) -> dict[str, FaultRecord]:
+        """Return the current runtime fault registry, ``{vi_name: FaultRecord}``."""
+        return dict(self._vi_faults)
+
+    def acknowledge_fault(self, vi_name: str) -> bool:
+        """Mark a VI's active fault as acknowledged (calms the operator UI).
+
+        Args:
+            vi_name: Name of the faulted VI.
+
+        Returns:
+            True if a fault record existed and was acknowledged; False if
+            the VI has no active fault.
+        """
+        existing = self._vi_faults.get(vi_name)
+        if existing is None:
+            return False
+        self._vi_faults[vi_name] = replace(existing, acknowledged=True)
+        return True
+
+    def clear_fault(self, vi_name: str) -> None:
+        """Remove *vi_name*'s fault record, if any (called on a successful poll).
+
+        An acknowledged-but-recovered fault simply disappears — there is
+        nothing left to acknowledge once the instrument is responding
+        again, so recovery is not distinguished from "never acknowledged".
+
+        Args:
+            vi_name: Name of the VI to clear.
+        """
+        self._vi_faults.pop(vi_name, None)
+
+    def retry_fault(self, vi_name: str) -> tuple[bool, str]:
+        """Reset *vi_name*'s error counter and force one fresh poll (plan §3).
+
+        The runtime counterpart of ``retry_instrument()``: it does NOT
+        rebuild any driver (the VI is already live) — it only resets the
+        comm-error streak and re-polls once, exactly what a stale/
+        disconnected but otherwise-live instrument needs to recover.
+
+        Args:
+            vi_name: Name of the (registered, live) VI to retry.
+
+        Returns:
+            An explicit ``(ok, message)`` verdict, mirroring
+            ``retry_instrument()``'s style: ``message`` is a human-readable
+            success confirmation or failure reason.
+        """
+        vi = self._virtual_instruments.get(vi_name)
+        if vi is None:
+            return False, f"'{vi_name}' is not a registered VI"
+        self._error_counts[vi_name] = 0
+        try:
+            state = vi.get_state()
+        except CryoSoftCommunicationError as exc:
+            self._error_counts[vi_name] = 1
+            message = str(exc)
+            self._record_fault(vi_name, "stale", message)
+            logger.warning("Retry of '%s' failed: %s", vi_name, message)
+            return False, f"'{vi_name}' still not responding: {message}"
+        self._error_counts[vi_name] = 0
+        self._last_known_state[vi_name] = state
+        self.clear_fault(vi_name)
+        logger.info("Retry of '%s' succeeded — fault cleared", vi_name)
+        return True, f"'{vi_name}' responded — fault cleared"
 
     # ------------------------------------------------------------------
     # Ramp management
@@ -705,6 +849,45 @@ class Station:
             except Exception:
                 logger.exception("evaluate_safety failed on VI '%s'", vi_name)
         return flags
+
+    def safety_flag_sources(self, state: dict[str, dict] | None = None) -> dict[str, list[str]]:
+        """Map each tripped safety flag to the VI name(s) that tripped it.
+
+        A parallel accessor to ``check_safety()`` (same OR-combination logic,
+        same disconnected-level-meter special case) that additionally names
+        the originating instrument(s) — used by the Orchestrator so an
+        EMERGENCY reason and its ``ErrorEvent`` can name the instrument
+        (plan §3), without changing ``check_safety()``'s existing
+        ``{flag: bool}`` signature (other callers are unaffected).
+
+        Args:
+            state: Snapshot from ``get_state()``. ``None`` uses the last
+                known state (no hardware poll).
+
+        Returns:
+            ``{flag_name: [vi_name, ...]}`` — VI names in registration
+            order, each listed at most once per flag. A flag absent from
+            the mapping was never tripped by any VI.
+        """
+        if state is None:
+            state = self._last_known_state
+        sources: dict[str, list[str]] = {}
+        for vi_name, vi in self._virtual_instruments.items():
+            vi_state = state.get(vi_name, {})
+            if vi_state.get("_disconnected") and getattr(vi, "vi_type", "") == "level":
+                sources.setdefault("helium_low", [])
+                if vi_name not in sources["helium_low"]:
+                    sources["helium_low"].append(vi_name)
+            try:
+                for flag, tripped in vi.evaluate_safety(vi_state).items():
+                    if not tripped:
+                        continue
+                    names = sources.setdefault(flag, [])
+                    if vi_name not in names:
+                        names.append(vi_name)
+            except Exception:
+                logger.exception("evaluate_safety failed on VI '%s'", vi_name)
+        return sources
 
     # ------------------------------------------------------------------
     # Measurement command dispatch
@@ -1331,6 +1514,11 @@ _OPERATIONS_DEFAULTS: dict[str, dict[str, float | str]] = {
         "zero_field_window_s": 10.0,
         "needle_valve": "manual",
         "postcondition_timeout_s": 7200.0,
+        # How often the hold phase (docs/plans/unified-servicing-log-and-
+        # run-recording.md §1) records station state into the shared
+        # recording, in seconds. Matches HeliumFillOperation's own
+        # sample_period_s default.
+        "sample_period_s": 10.0,
     },
 }
 

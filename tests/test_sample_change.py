@@ -3,15 +3,26 @@
 #   End-to-end behavior tests for SampleChangeOperation
 #   (cryosoft/procedures/operations/sample_change.py, plan §8.2), driven by a
 #   real Orchestrator (ticked directly, not via the QTimer) against the
-#   sim_cryostat station: full run to zero field + 300 K with every
-#   postcondition held, the needle-valve operator-confirmation gate blocking
-#   completion until Orchestrator.confirm_operation("needle_valve") is
-#   called, postcondition timeout naming the unmet gate, measurement-VI
-#   standby + switch-VI open_all dispatch, an end-to-end run through a real
-#   CryogenicsRecorder (writing only the "operations" stream, never
-#   "cryogenics" — that is the fill's entry, not this operation's), refusal
-#   while a procedure is running, construction-time validation, and the
-#   operator-confirmation declaration standard itself (confirm()/confirmed()).
+#   sim_cryostat station. Phase 3 (docs/plans/unified-servicing-log-and-run-
+#   recording.md §1) made this a "hold phase" operation: the run no longer
+#   finishes on its own once the ramps land — every test that wants the run
+#   to end now calls orchestrator.finish_operation() explicitly, mirroring
+#   what the OperationCard's Finish click does. Covers: the run staying
+#   active (never IDLE) after the ramps settle; sample() recording the VTI
+#   temperature + magnet fields into the shared recorder every tick; Finish
+#   producing a "done" manifest with every postcondition held (empty
+#   postconditions_unmet) and the recording in run_summary(); the needle-
+#   valve operator-confirmation gate — one-shot evaluated as the run ends
+#   (docs/plans/operation-concurrency-and-error-scoping.md §2): unconfirmed
+#   finishes promptly with "needle_valve_confirmed" named in
+#   postconditions_unmet, never blocking — measurement-VI standby + switch-VI
+#   open_all dispatch, an end-to-end run through a real CryogenicsRecorder
+#   (writing exactly one unified "servicing" entry, entry_kind=
+#   "sample_change", never the legacy "cryogenics"/"operations" kinds, with
+#   its recording written as a sidecar — see docs/plans/unified-servicing-
+#   log-and-run-recording.md §2/§3), refusal while a procedure is running,
+#   construction-time validation, and the operator-confirmation declaration
+#   standard itself (confirm()/confirmed()).
 #
 #   The sim ITC503 (cryosoft/drivers/sim_oxford_itc503.py) starts at 300 K
 #   already (its "room temperature" default) with a 60 s thermal time
@@ -22,11 +33,12 @@
 #   `driver._tau`) so the settle completes in test time — the same
 #   monkeypatch-the-sim-internals idiom test_helium_fill.py uses for the
 #   ILM's `_force_helium_level`.
-# last_updated: 2026-07-19
+# last_updated: 2026-07-23
 # ---
 
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
@@ -102,7 +114,7 @@ def _make_op(station, *, person: str = "Alex Tech", **overrides) -> SampleChange
     config = dict(
         zero_field_window_s=0.0,
         temperature_window_s=0.03,
-        postcondition_timeout_s=30.0,
+        sample_period_s=0.0,  # tight tick-to-tick hold loop for test speed
     )
     config.update(overrides)
     return SampleChangeOperation(station, person=person, **config)
@@ -142,7 +154,6 @@ def test_constructs_from_defaults(station):
     op = SampleChangeOperation(station)
     assert op.name == "Sample Change"
     assert op.tolerated_safety_flags == frozenset()
-    assert op.postcondition_timeout_s == 7200.0
 
 
 def test_construction_rejects_missing_vti_vi(station):
@@ -178,8 +189,13 @@ def test_confirm_unknown_key_raises(station):
 # ── Full happy-path run ────────────────────────────────────────────────────
 
 
-def test_sample_change_end_to_end(orchestrator, station, qtbot):
-    """Zero-field + 300 K ramps, all postconditions held, done manifest, no data file."""
+def test_sample_change_holds_until_finish_then_all_postconditions_held(orchestrator, station, qtbot):
+    """Zero-field + 300 K ramps, run holds, Finish -> done manifest, no data file.
+
+    Phase 3 (docs/plans/unified-servicing-log-and-run-recording.md §1): the
+    run no longer ends on its own once the ramps land — it stays active
+    (never IDLE) until finish_operation() is called.
+    """
     _fast_magnets(station)
     _fast_vti(station)
     station.magnet_z._driver._current = 5.0
@@ -201,12 +217,28 @@ def test_sample_change_end_to_end(orchestrator, station, qtbot):
 
     orchestrator.confirm_operation("needle_valve")
 
+    # Let the ramps settle to zero field / 300 K, then run a further batch of
+    # ticks — the run must NOT finish on its own (the hold phase).
+    _tick_until(
+        orchestrator,
+        lambda: abs(station.temperature_vti.temperature() - 300.0) <= 2.0,
+        max_ticks=2000,
+        sleep_s=0.01,
+    )
+    for _ in range(50):
+        orchestrator._tick()
+    assert not finished
+    assert orchestrator._state != OrchestratorState.IDLE
+    assert orchestrator._procedure is op
+
+    orchestrator.finish_operation()
     _tick_until(orchestrator, lambda: bool(finished), max_ticks=2000, sleep_s=0.01)
 
     assert finished[0]["status"] == "done"
     assert finished[0]["kind"] == "operation"
     assert finished[0]["procedure"] == "Sample Change"
     assert not finished[0]["data_file"]  # no DataManager -> manifest data_file stays empty
+    assert finished[0]["postconditions_unmet"] == []  # every gate held, confirmed in time
 
     for name in station.magnet_vi_names():
         assert abs(station.get_vi(name).get_field()) < 0.01, f"{name} did not reach zero field"
@@ -215,60 +247,67 @@ def test_sample_change_end_to_end(orchestrator, station, qtbot):
     assert orchestrator._state == OrchestratorState.IDLE
 
 
-# ── Needle-valve operator-confirmation gate ───────────────────────────────
-
-
-def test_needle_valve_gate_blocks_until_confirmed(orchestrator, station, qtbot):
-    """The run holds at the needle-valve gate until confirm_operation() is called."""
+def test_sample_change_records_vti_and_magnet_fields(orchestrator, station, qtbot):
+    """sample() records the VTI temperature + every magnet's field every hold-phase tick."""
     _fast_magnets(station)
     _fast_vti(station)
 
+    op = _make_op(station, sample_period_s=0.0)
+    finished: list[dict] = []
+    orchestrator.run_finished.connect(finished.append)
+
+    orchestrator.run_operation(op)
+    orchestrator.confirm_operation("needle_valve")
+
+    # A handful of hold-phase ticks (sample() runs once per MEASURING state).
+    for _ in range(50):
+        orchestrator._tick()
+    assert not finished
+
+    orchestrator.finish_operation()
+    _tick_until(orchestrator, lambda: bool(finished), max_ticks=2000, sleep_s=0.01)
+
+    recording = finished[0]["summary"]["recording"]
+    channels = recording["channels"]
+    assert "temperature_vti.temperature" in channels
+    for magnet in station.magnet_vi_names():
+        assert f"{magnet}.get_field" in channels
+    assert len(recording["unix_time"]) >= 1
+    for series in channels.values():
+        assert len(series) == len(recording["unix_time"])
+
+
+# ── Needle-valve operator-confirmation gate: one-shot evaluation (plan
+# operation-concurrency-and-error-scoping.md §2 — never held, never timed
+# out) ─────────────────────────────────────────────────────────────────────
+
+
+def test_needle_valve_not_confirmed_finishes_promptly_with_unmet_postcondition(
+    orchestrator, station, qtbot
+):
+    """An unconfirmed needle valve does not block finish; it is named unmet."""
+    _fast_magnets(station)
+    _fast_vti(station)
+    # Defaults: magnets already at 0 T, VTI already at 300 K (the sim
+    # ITC503's start temperature) -> zero_field and vti_at_target hold
+    # immediately, so needle_valve_confirmed is the only gate that can be
+    # unmet, isolating it in the assertion below.
     op = _make_op(station, temperature_window_s=0.0, zero_field_window_s=0.0)
 
     finished: list[dict] = []
     orchestrator.run_finished.connect(finished.append)
     orchestrator.run_operation(op)
 
-    # Let zero_field / vti_at_target settle (defaults: already at target) —
-    # only needle_valve_confirmed should still be blocking.
+    # The hold phase: the run stays active even with every postcondition
+    # already holding — never confirming needle_valve does not end it.
     for _ in range(30):
         orchestrator._tick()
-        time.sleep(0.005)
-    assert not finished, "the run must not finish before the needle valve is confirmed"
-    assert orchestrator._state == OrchestratorState.STANDBY
+    assert not finished
 
-    orchestrator.confirm_operation("needle_valve")
-    _tick_until(orchestrator, lambda: bool(finished), max_ticks=1000, sleep_s=0.01)
+    orchestrator.finish_operation()
+    _tick_until(orchestrator, lambda: bool(finished), max_ticks=1000, sleep_s=0.005)
     assert finished[0]["status"] == "done"
-
-
-# ── Postcondition timeout ─────────────────────────────────────────────────
-
-
-def test_postcondition_timeout_never_confirmed_degrades_to_error(orchestrator, station, qtbot):
-    """An unconfirmed needle valve past postcondition_timeout_s degrades to ERROR."""
-    _fast_magnets(station)
-    _fast_vti(station)
-    # Defaults: magnets already at 0 T, VTI already at 300 K (the sim
-    # ITC503's start temperature) -> zero_field and vti_at_target hold
-    # immediately, so the ONLY gate that can time out is
-    # needle_valve_confirmed, isolating the failure to it.
-    op = _make_op(station, postcondition_timeout_s=0.05, temperature_window_s=0.0)
-
-    errors: list[str] = []
-    orchestrator.error_occurred.connect(errors.append)
-    orchestrator.run_operation(op)
-
-    _tick_until(
-        orchestrator,
-        lambda: orchestrator._state == OrchestratorState.ERROR,
-        max_ticks=2000,
-        sleep_s=0.005,
-    )
-    assert any("needle_valve_confirmed" in e for e in errors)
-    assert orchestrator._procedure is None
-
-    orchestrator.recover_from_error()
+    assert finished[0]["postconditions_unmet"] == ["needle_valve_confirmed"]
     assert orchestrator._state == OrchestratorState.IDLE
 
 
@@ -312,8 +351,8 @@ def test_measurement_vis_get_standby_and_switch_gets_open_all(orchestrator, stat
 # ── End-to-end with a real CryogenicsRecorder ─────────────────────────────
 
 
-def test_cryogenics_recorder_records_only_the_operations_stream(orchestrator, station, tmp_path, qtbot):
-    """A finished sample change produces one operations entry, never a cryogenics one."""
+def test_cryogenics_recorder_records_one_servicing_entry(orchestrator, station, tmp_path, qtbot):
+    """A finished sample change produces exactly ONE "servicing" entry, never a legacy-kind one."""
     _fast_magnets(station)
     _fast_vti(station)
     helium_store = HeliumRecordStore(tmp_path / "servicing", "sim_cryostat")
@@ -334,16 +373,36 @@ def test_cryogenics_recorder_records_only_the_operations_stream(orchestrator, st
     orchestrator.run_operation(op)
     orchestrator.confirm_operation("needle_valve")
 
+    # The hold phase: several ticks pass with the run still active before
+    # Finish is clicked, so sample() has a chance to record.
+    for _ in range(30):
+        orchestrator._tick()
+    assert not finished
+
+    orchestrator.finish_operation()
     _tick_until(orchestrator, lambda: bool(finished), max_ticks=2000, sleep_s=0.01)
     assert finished[0]["status"] == "done"
 
-    ops_entries = servicing_store.entries("operations")
-    assert len(ops_entries) == 1
-    assert ops_entries[0].source == "machine"  # append_machine_entry (one-shot, unrevisable)
-    assert ops_entries[0].values["operation"] == "Sample Change"
-    assert ops_entries[0].values["status"] == "done"
+    entries = servicing_store.entries("servicing")
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry.source == "operation"
+    assert entry.values["entry_kind"] == "sample_change"
+    assert entry.values["person"] == "Dr. Change"
+    # needle_valve was confirmed -> its postcondition gate passes -> no
+    # "unmet: ..." trace in notes (see GLOSSARY.md's Operator confirmation).
+    assert "needle_valve_confirmed" not in entry.values["notes"]
+    # The recorded VTI/magnet-field series was written as a sidecar,
+    # referenced from this entry (docs/plans/unified-servicing-log-and-run-
+    # recording.md §3).
+    assert entry.values["recording"]
+    sidecar_path = servicing_store.recordings_path(entry.values["recording"])
+    assert sidecar_path.exists()
+    sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    assert "temperature_vti.temperature" in sidecar["channels"]
 
-    # Not the fill operation -> no cryogenics-log entry.
+    # Neither legacy kind is written by the recorder anymore (Phase 2).
+    assert servicing_store.entries("operations") == []
     assert servicing_store.entries("cryogenics") == []
 
 

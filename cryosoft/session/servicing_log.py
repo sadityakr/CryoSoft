@@ -1,17 +1,32 @@
 # ---
 # description: |
 #   The Servicing Log framework (L6, plan Phase 1 of
-#   docs/plans/cryogenics-logbook.md §3/§6): declared log kinds
+#   docs/plans/cryogenics-logbook.md §3/§6, unified per Phases 1-2 of
+#   docs/plans/unified-servicing-log-and-run-recording.md): declared log kinds
 #   (LogKindSpec/DECLARED_LOG_KINDS), append-only per-kind storage with an
 #   entry-revision model (ServicingLogStore), the machine-recorded helium
-#   sample stream (HeliumRecordStore), a pure consumption-rate function, and
-#   the automatic writer driven by Orchestrator signals (CryogenicsRecorder).
-#   One generic engine, N declared kinds: adding a servicing log for another
-#   setup is one LogKindSpec, no new store or GUI code.
+#   sample stream (HeliumRecordStore), a pure consumption-rate function, the
+#   automatic writer driven by Orchestrator signals (CryogenicsRecorder), and
+#   a pure legacy-migration routine (migrate_legacy_servicing_log). One
+#   generic engine, N declared kinds: adding a servicing log for another setup
+#   is one LogKindSpec, no new store or GUI code. The legacy `cryogenics` +
+#   `operations` kinds are superseded by the flat `servicing` kind (one
+#   common field table for every entry, no per-kind fields, no `status`
+#   field — see the plan §2); both legacy kinds stay declared (readable, and
+#   still manually editable for `cryogenics`) so historical entries and any
+#   not-yet-migrated setup keep working, but as of Phase 2
+#   CryogenicsRecorder writes ONLY the `servicing` kind — one flat entry per
+#   finished operation run, with He/LN2 start+end levels stamped for every
+#   run kind and a recording sidecar when the operation hands one off. The
+#   migration from legacy files to `servicing.jsonl` is a pure function plus a
+#   thin store method (`ServicingLogStore.migrate_legacy`), invoked once from
+#   `cryosoft.main` at startup (idempotent no-op once `servicing.jsonl`
+#   exists).
 # entry_point: Not run directly. Stores are constructed in cryosoft.main
-#   (Phase 3+) beside the SessionManager; CryogenicsRecorder is connected to
-#   Orchestrator signals there. In Phase 1 all four classes are exercised
-#   directly by tests against a mocked Orchestrator.
+#   beside the SessionManager, which also calls
+#   ServicingLogStore.migrate_legacy() once; CryogenicsRecorder is connected
+#   to Orchestrator signals there. Exercised directly by tests against a
+#   mocked Orchestrator / synthetic legacy files.
 # dependencies:
 #   - cryosoft.core.plan (ParamSpec)
 #   - cryosoft.session.models (ServiceLogEntry)
@@ -19,7 +34,11 @@
 # input: |
 #   ServicingLogStore/HeliumRecordStore: plain values passed by callers (the
 #   GUI's add/edit dialogs, CryogenicsRecorder). CryogenicsRecorder: the
-#   Orchestrator's states_updated / run_started / run_finished payloads.
+#   Orchestrator's states_updated / run_started / run_finished payloads for
+#   any operation-kind run (run_finished's "summary" key, when present, may
+#   carry a generic recording series). migrate_legacy_servicing_log: the
+#   on-disk cryogenics.jsonl / operations.jsonl files of one config's
+#   servicing-log root.
 # process: |
 #   LogKindSpec validates eagerly at construction (ValueError naming the
 #   offender), mirroring core/plan.py. ServicingLogStore coerces every write
@@ -30,18 +49,42 @@
 #   file exceeds ~2 MB — the machine record may rotate; servicing logs never
 #   do. consumption_rate_pct_per_h() is a pure least-squares fit, no I/O.
 #   CryogenicsRecorder never raises out of a slot (broad try/except + log),
-#   exactly like SessionManager's manifest handlers.
+#   exactly like SessionManager's manifest handlers: on_run_started caches the
+#   last-seen He/LN2 levels for any operation-kind run; on_run_finished
+#   derives entry_kind from the manifest's "procedure" name (the same
+#   lowercase/underscore normalisation the legacy migration uses,
+#   _normalize_entry_kind, so both agree on stable keys), appends abort/
+#   failure reason and postconditions_unmet into "notes", and writes a
+#   recordings/<run_id>.json sidecar (_write_recording_sidecar) whenever the
+#   manifest's "summary" carries a well-formed generic recording — fully
+#   tolerant of a missing/malformed "summary" key.
+#   migrate_legacy_servicing_log reads the two legacy kinds through the
+#   existing tolerant reader, matches a fill's operations line to its
+#   cryogenics entry by an exact (started_utc, finished_utc) == (start_utc,
+#   end_utc) match, writes one merged/derived "servicing" entry per pair/
+#   unmatched entry (preserving the original created_utc so the merged
+#   timeline stays chronological), converts an embedded level_curve JSON
+#   string into a recordings/<id>.json sidecar, and renames the legacy files
+#   to .bak. No-op (returns False) if servicing.jsonl already exists or
+#   neither legacy file is present — safe to call unconditionally.
 # output: |
 #   Append-only JSONL files under <root>/<config_name>/{<kind>.jsonl,
-#   helium_record.jsonl}; the cryo_warning(str) Qt signal for GUI banners.
+#   helium_record.jsonl}; the cryo_warning(str) Qt signal for GUI banners;
+#   CryogenicsRecorder additionally writes
+#   <root>/<config_name>/recordings/<run_id>.json sidecars for a run whose
+#   operation hands one off; migrate_legacy_servicing_log likewise writes
+#   <root>/<config_name>/recordings/<id>.json sidecars and renames the legacy
+#   files to <name>.jsonl.bak.
 # ---
 
 """The Servicing Log framework (L6): declared log kinds, revisioned storage,
-the helium record, and the automatic recorder.
+the helium record, the automatic recorder, and legacy-log migration.
 
-See ``docs/plans/cryogenics-logbook.md`` §3 and §6 for the design this
-implements, and ``GLOSSARY.md`` for the **Servicing log** / **Log kind** /
-**Cryogenics log** / **Entry revision** / **Helium record** definitions.
+See ``docs/plans/cryogenics-logbook.md`` §3 and §6, and
+``docs/plans/unified-servicing-log-and-run-recording.md`` §2 (Phases 1-2) for
+the design this implements, and ``GLOSSARY.md`` for the **Servicing log** /
+**Log kind** / **Cryogenics log** / **Entry revision** / **Helium record** /
+**Recording** definitions.
 """
 
 from __future__ import annotations
@@ -71,6 +114,7 @@ __all__ = [
     "HeliumRecordStore",
     "consumption_rate_pct_per_h",
     "CryogenicsRecorder",
+    "migrate_legacy_servicing_log",
 ]
 
 # Machine record rotation threshold (module-level so tests can shrink it).
@@ -239,6 +283,19 @@ _CRYOGENICS_KIND = LogKindSpec(
         "notes": ParamSpec(
             type=str, default="", description="Free-text notes / corrections"
         ),
+        # Machine-populated only (docs/plans/operation-concurrency-and-error-
+        # scoping.md §4): HeliumFillOperation's bounded in-memory level curve,
+        # JSON-encoded ({"unix_time": [...], "helium_pct": [...]}), handed
+        # off via run_summary() and written by CryogenicsRecorder alongside
+        # this entry. "" for a manual entry (no run behind it) and for any
+        # entry written before this field existed — ServicingLogStore never
+        # rewrites old lines, so those simply lack the key entirely; readers
+        # must use .get("level_curve", "") rather than indexing it.
+        "level_curve": ParamSpec(
+            type=str,
+            default="",
+            description="Level-vs-time curve sampled during the fill (JSON, machine-written)",
+        ),
     },
     editable=True,
 )
@@ -278,11 +335,82 @@ _OPERATIONS_KIND = LogKindSpec(
     editable=False,
 )
 
+# The unified log kind (plan docs/plans/unified-servicing-log-and-run-
+# recording.md §2): ONE flat common table for every servicing event —
+# helium fills, sample changes, future operations, and hand-added entries
+# all share exactly these fields, no kind-specific columns and no `status`
+# field. Supersedes the split between `cryogenics` and `operations`, though
+# both stay declared and functional in this phase (see the module docstring).
+# `entry_kind` names what happened ("helium_fill" | "sample_change" | a
+# future operation's key | "manual") — deliberately a plain str, not a
+# `choices` enum, because future operation keys are open-ended and cannot be
+# enumerated here. `origin` is a closed two-value set and does use `choices`.
+_SERVICING_KIND = LogKindSpec(
+    key="servicing",
+    title="Servicing log",
+    fields={
+        "entry_kind": ParamSpec(
+            type=str,
+            default="manual",
+            description=(
+                'What happened: "helium_fill", "sample_change", another '
+                'operation\'s key, or "manual" for a hand-added entry'
+            ),
+        ),
+        "person": ParamSpec(
+            type=str, default="", description="Who performed it"
+        ),
+        "start_utc": ParamSpec(
+            type=str,
+            default="",
+            widget_hint="datetime",
+            description="Servicing start time (UTC, ISO 8601)",
+        ),
+        "end_utc": ParamSpec(
+            type=str,
+            default="",
+            widget_hint="datetime",
+            description="Servicing end time (UTC, ISO 8601)",
+        ),
+        "helium_start_pct": ParamSpec(
+            type=float, default=0.0, unit="%", description="Helium level at start"
+        ),
+        "helium_end_pct": ParamSpec(
+            type=float, default=0.0, unit="%", description="Helium level at end"
+        ),
+        "ln2_start_pct": ParamSpec(
+            type=float, default=0.0, unit="%", description="LN2 level at start"
+        ),
+        "ln2_end_pct": ParamSpec(
+            type=float, default=0.0, unit="%", description="LN2 level at end"
+        ),
+        "notes": ParamSpec(
+            type=str,
+            default="",
+            description="Free-text notes / corrections; the recorder appends "
+            "machine remarks here (there is no status field)",
+        ),
+        "recording": ParamSpec(
+            type=str,
+            default="",
+            description='Sidecar filename under "recordings/", "" if none',
+        ),
+        "origin": ParamSpec(
+            type=str,
+            default="manual",
+            choices={"Machine": "machine", "Manual": "manual"},
+            description="Who/what wrote this entry",
+        ),
+    },
+    editable=True,
+)
+
 #: Registry of every declared log kind. Adding a kind for a new setup is one
 #: entry here (plus, later, a config reference) — no other code changes.
 DECLARED_LOG_KINDS: dict[str, LogKindSpec] = {
     _CRYOGENICS_KIND.key: _CRYOGENICS_KIND,
     _OPERATIONS_KIND.key: _OPERATIONS_KIND,
+    _SERVICING_KIND.key: _SERVICING_KIND,
 }
 
 
@@ -292,7 +420,9 @@ def _coerce_field(kind: str, name: str, value: Any, spec: ParamSpec) -> Any:
     Mirrors ``ParamSpec._matches_type``'s numeric nuance (an ``int`` is
     accepted where ``float`` is declared; ``bool`` never satisfies a numeric
     or ``str`` type) but additionally *coerces* an accepted ``int`` to
-    ``float`` so stored values match the declared type exactly.
+    ``float`` so stored values match the declared type exactly. A field
+    declaring ``choices`` (e.g. the ``servicing`` kind's ``origin``) further
+    restricts the type-matched value to one of ``spec.choices.values()``.
 
     Args:
         kind: The owning log kind's key, for error messages.
@@ -304,27 +434,38 @@ def _coerce_field(kind: str, name: str, value: Any, spec: ParamSpec) -> Any:
         ``value`` coerced to ``spec.type``.
 
     Raises:
-        ValueError: If ``value`` is not a legal instance of ``spec.type``.
+        ValueError: If ``value`` is not a legal instance of ``spec.type``, or
+            the field declares ``choices`` and ``value`` is none of them.
     """
     if spec.type is bool:
-        if isinstance(value, bool):
-            return value
-        raise ValueError(f"{kind}.{name} must be a bool, got {value!r}")
-    if isinstance(value, bool):
+        coerced: Any = value
+        if not isinstance(value, bool):
+            raise ValueError(f"{kind}.{name} must be a bool, got {value!r}")
+    elif isinstance(value, bool):
         raise ValueError(f"{kind}.{name} must be a {spec.type.__name__}, got bool {value!r}")
-    if spec.type is float:
+    elif spec.type is float:
         if isinstance(value, (int, float)):
-            return float(value)
-        raise ValueError(f"{kind}.{name} must be a real number, got {value!r}")
-    if spec.type is int:
+            coerced = float(value)
+        else:
+            raise ValueError(f"{kind}.{name} must be a real number, got {value!r}")
+    elif spec.type is int:
         if isinstance(value, int):
-            return value
-        raise ValueError(f"{kind}.{name} must be an int, got {value!r}")
-    if spec.type is str:
+            coerced = value
+        else:
+            raise ValueError(f"{kind}.{name} must be an int, got {value!r}")
+    elif spec.type is str:
         if isinstance(value, str):
-            return value
-        raise ValueError(f"{kind}.{name} must be a str, got {value!r}")
-    raise ValueError(f"{kind}.{name} has unsupported field type {spec.type!r}")  # pragma: no cover
+            coerced = value
+        else:
+            raise ValueError(f"{kind}.{name} must be a str, got {value!r}")
+    else:
+        raise ValueError(f"{kind}.{name} has unsupported field type {spec.type!r}")  # pragma: no cover
+
+    if spec.choices is not None and coerced not in spec.choices.values():
+        raise ValueError(
+            f"{kind}.{name} must be one of {sorted(spec.choices.values())}, got {coerced!r}"
+        )
+    return coerced
 
 
 def _coerce_values(spec: LogKindSpec, values: Mapping[str, Any]) -> dict[str, Any]:
@@ -392,6 +533,17 @@ class ServicingLogStore:
     def _path(self, kind: str) -> Path:
         """Return the JSONL path for ``kind`` (does not check it exists)."""
         return self._root / self._config_name / f"{kind}.jsonl"
+
+    def recordings_path(self, filename: str) -> Path:
+        """Return the path for a recording sidecar (does not check it exists).
+
+        Args:
+            filename: The sidecar's basename, e.g. ``"<run_id>.json"``.
+
+        Returns:
+            ``<root>/<config_name>/recordings/<filename>``.
+        """
+        return self._root / self._config_name / "recordings" / filename
 
     def _spec(self, kind: str) -> LogKindSpec:
         """Return the declared spec for ``kind``.
@@ -625,6 +777,25 @@ class ServicingLogStore:
         history.sort(key=lambda entry: entry.revision)
         return history
 
+    def migrate_legacy(self, *, level_vi_name: str = "level_meter") -> bool:
+        """Merge this store's legacy ``cryogenics``/``operations`` logs into ``servicing``.
+
+        Thin hook onto the pure, idempotent ``migrate_legacy_servicing_log()``
+        (see its docstring for the full merge/matching rules). Not called
+        anywhere automatically in this phase.
+
+        Args:
+            level_vi_name: VI name used to build the sidecar channel key for
+                a migrated level curve (``"<level_vi_name>.helium_pct"``).
+
+        Returns:
+            ``True`` if migration ran and wrote ``servicing.jsonl``; ``False``
+            on a no-op (already migrated, or no legacy files present).
+        """
+        return migrate_legacy_servicing_log(
+            self._root, self._config_name, level_vi_name=level_vi_name
+        )
+
 
 # ── HeliumRecordStore: the machine sample stream ────────────────────────────
 
@@ -784,11 +955,347 @@ def consumption_rate_pct_per_h(
     return -slope_per_s * 3600.0
 
 
+# ── Legacy migration: cryogenics + operations → servicing ───────────────────
+
+
+def _normalize_entry_kind(operation_name: str) -> str:
+    """Turn a legacy operations-kind ``operation`` name into an ``entry_kind``.
+
+    Args:
+        operation_name: The legacy ``operations`` entry's ``operation`` field
+            (e.g. ``"Sample Change"``).
+
+    Returns:
+        A lowercase, underscore-joined key (e.g. ``"sample_change"``), or
+        ``"manual"`` if ``operation_name`` is blank.
+    """
+    normalized = operation_name.strip().lower().replace(" ", "_")
+    return normalized or "manual"
+
+
+def _derive_recording_filename(run_id: str, start_utc: str) -> str:
+    """Derive a stable sidecar filename for a migrated recording.
+
+    Args:
+        run_id: The originating run id, if known.
+        start_utc: The entry's start time (ISO 8601), used as a fallback key
+            when ``run_id`` is unavailable.
+
+    Returns:
+        A filesystem-safe ``"<id>.json"`` basename, stable across repeated
+        migrations of the same entry.
+    """
+    if run_id:
+        safe = "".join(c if (c.isalnum() or c in "-_") else "_" for c in run_id)
+        return f"{safe}.json"
+    try:
+        unix_time = datetime.fromisoformat(start_utc).timestamp()
+    except (TypeError, ValueError):
+        return f"legacy_{uuid.uuid4().hex}.json"
+    return f"legacy_{int(unix_time)}.json"
+
+
+def _write_level_curve_sidecar(
+    root: Path,
+    config_name: str,
+    level_curve_json: str,
+    run_id: str,
+    start_utc: str,
+    level_vi_name: str,
+) -> str:
+    """Convert an embedded legacy ``level_curve`` JSON string into a sidecar file.
+
+    Args:
+        root: The servicing store's root directory.
+        config_name: Identity of the active config.
+        level_curve_json: The legacy ``cryogenics`` entry's ``level_curve``
+            field (``{"unix_time": [...], "helium_pct": [...]}`` JSON, or
+            ``""``).
+        run_id: The originating run id, for the derived filename.
+        start_utc: The entry's start time, fallback filename key.
+        level_vi_name: VI name used to build the sidecar's channel key.
+
+    Returns:
+        The sidecar's filename (to store in the new entry's ``recording``
+        field), or ``""`` if there was nothing to convert (blank/malformed
+        input) — this is a best-effort conversion, never a reason to fail
+        the whole migration.
+    """
+    if not level_curve_json:
+        return ""
+    try:
+        curve = json.loads(level_curve_json)
+    except (TypeError, ValueError) as exc:
+        logger.warning("migrate_legacy_servicing_log: malformed level_curve (%s)", exc)
+        return ""
+    if not isinstance(curve, dict):
+        return ""
+    unix_time = curve.get("unix_time")
+    helium_pct = curve.get("helium_pct")
+    if not isinstance(unix_time, list) or not isinstance(helium_pct, list):
+        return ""
+
+    filename = _derive_recording_filename(run_id, start_utc)
+    sidecar_path = root / config_name / "recordings" / filename
+    sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "unix_time": unix_time,
+        "channels": {f"{level_vi_name}.helium_pct": helium_pct},
+    }
+    sidecar_path.write_text(json.dumps(payload), encoding="utf-8")
+    return filename
+
+
+def _migrated_entry_dict(
+    values: dict[str, Any],
+    *,
+    source: str,
+    run_id: str,
+    created_utc: str,
+) -> dict[str, Any]:
+    """Build one merged/derived ``servicing`` entry line, preserving its time.
+
+    Bypasses ``ServicingLogStore.add_entry()`` deliberately: migration must
+    preserve each entry's original ``created_utc`` (a fresh timestamp would
+    scramble the merged timeline's chronological order), which ``add_entry``
+    does not allow a caller to set. Returns the JSONL line dict instead of
+    appending it, so ``migrate_legacy_servicing_log`` can write ALL lines in
+    one atomic replace — a crash mid-migration must never leave a partial
+    ``servicing.jsonl`` (the idempotency check would then treat the half-done
+    migration as complete forever).
+
+    Args:
+        values: The new entry's field values (coerced against the
+            ``servicing`` kind's ``ParamSpec`` fields).
+        source: Provenance to record (carried over from the legacy entry).
+        run_id: Linked run id, if any (carried over from the legacy entry).
+        created_utc: The original entry's creation time, preserved verbatim.
+
+    Returns:
+        The entry serialised via ``ServiceLogEntry.to_dict()``.
+    """
+    spec = DECLARED_LOG_KINDS["servicing"]
+    coerced = _coerce_values(spec, values)
+    entry = ServiceLogEntry(
+        entry_id=uuid.uuid4().hex,
+        kind="servicing",
+        values=coerced,
+        source=source,
+        run_id=run_id,
+        created_utc=created_utc or _utc_now_iso(),
+        revision=1,
+    )
+    return entry.to_dict()
+
+
+def migrate_legacy_servicing_log(
+    root: Path | str,
+    config_name: str,
+    *,
+    level_vi_name: str = "level_meter",
+) -> bool:
+    """Merge legacy ``cryogenics.jsonl`` + ``operations.jsonl`` into ``servicing.jsonl``.
+
+    Pure, idempotent, one-time rewrite (docs/plans/unified-servicing-log-and-
+    run-recording.md, "Legacy migration"). Reads the two legacy log kinds
+    through the existing tolerant ``ServicingLogStore`` reader (a corrupt
+    line is skipped, never raised), matches a fill's ``operations`` entry to
+    its ``cryogenics`` entry by an exact
+    ``(started_utc, finished_utc) == (start_utc, end_utc)`` match, and writes
+    one merged/derived ``"servicing"`` entry per matched pair, per unmatched
+    ``cryogenics`` entry, and per unmatched ``operations`` entry (e.g. a
+    sample change) — each preserving its original ``created_utc`` so the
+    merged timeline stays chronological. ``ln2_filled=True`` becomes a
+    ``"LN2 topped up"`` note (``ln2_*_pct`` stay ``0.0``, levels were never
+    tracked for LN2 in the legacy schema); a non-``"done"`` legacy ``status``
+    plus its ``params`` JSON are folded into ``notes`` (the new schema has no
+    ``status`` field). An embedded ``level_curve`` JSON string becomes a
+    ``recordings/<id>.json`` sidecar. Both legacy files are renamed to
+    ``<name>.jsonl.bak`` (only if migration actually ran).
+
+    Never invoked automatically — a caller (a startup hook, a one-off
+    script) must call this or ``ServicingLogStore.migrate_legacy()``
+    explicitly.
+
+    Args:
+        root: Directory holding one subfolder per config (the servicing
+            store's root).
+        config_name: Identity of the active config.
+        level_vi_name: VI name used to build a migrated level curve's sidecar
+            channel key (``"<level_vi_name>.helium_pct"``).
+
+    Returns:
+        ``True`` if migration ran (even if it wrote zero entries because the
+        legacy files were empty); ``False`` on a no-op — ``servicing.jsonl``
+        already exists, or neither legacy file is present.
+
+    Raises:
+        OSError: If a legacy file cannot be renamed or a sidecar cannot be
+            written.
+    """
+    root = Path(root)
+    config_dir = root / config_name
+    servicing_path = config_dir / "servicing.jsonl"
+    cryo_path = config_dir / "cryogenics.jsonl"
+    ops_path = config_dir / "operations.jsonl"
+
+    if servicing_path.is_file():
+        return False
+    if not cryo_path.is_file() and not ops_path.is_file():
+        return False
+
+    legacy_store = ServicingLogStore(root, config_name)
+    cryo_entries = sorted(
+        legacy_store.entries("cryogenics") if cryo_path.is_file() else [],
+        key=lambda entry: entry.created_utc,
+    )
+    op_entries = sorted(
+        legacy_store.entries("operations") if ops_path.is_file() else [],
+        key=lambda entry: entry.created_utc,
+    )
+
+    matched_op_ids: set[str] = set()
+    migrated_lines: list[dict[str, Any]] = []
+
+    for cryo in cryo_entries:
+        match = next(
+            (
+                op
+                for op in op_entries
+                if op.entry_id not in matched_op_ids
+                and op.values.get("operation") == "Helium Fill"
+                and op.values.get("started_utc") == cryo.values.get("start_utc")
+                and op.values.get("finished_utc") == cryo.values.get("end_utc")
+            ),
+            None,
+        )
+
+        notes_parts: list[str] = []
+        cryo_notes = str(cryo.values.get("notes", ""))
+        if cryo_notes:
+            notes_parts.append(cryo_notes)
+        if cryo.values.get("ln2_filled"):
+            notes_parts.append("LN2 topped up")
+
+        run_id = cryo.run_id
+        origin = "manual" if cryo.source == "manual" else "machine"
+        if match is not None:
+            matched_op_ids.add(match.entry_id)
+            run_id = run_id or match.run_id
+            origin = "machine"
+            status = str(match.values.get("status", ""))
+            if status != "done":
+                notes_parts.append(f"legacy status={status}")
+                reason = str(match.values.get("reason", ""))
+                if reason:
+                    notes_parts.append(f"reason={reason}")
+                params = str(match.values.get("params", "{}"))
+                if params and params != "{}":
+                    notes_parts.append(f"params={params}")
+
+        recording = _write_level_curve_sidecar(
+            root,
+            config_name,
+            str(cryo.values.get("level_curve", "")),
+            run_id,
+            str(cryo.values.get("start_utc", "")),
+            level_vi_name,
+        )
+
+        migrated_lines.append(_migrated_entry_dict(
+            {
+                "entry_kind": "helium_fill",
+                "person": str(cryo.values.get("person", "")),
+                "start_utc": str(cryo.values.get("start_utc", "")),
+                "end_utc": str(cryo.values.get("end_utc", "")),
+                "helium_start_pct": float(cryo.values.get("helium_start_pct", 0.0)),
+                "helium_end_pct": float(cryo.values.get("helium_end_pct", 0.0)),
+                "ln2_start_pct": 0.0,
+                "ln2_end_pct": 0.0,
+                "notes": "; ".join(part for part in notes_parts if part),
+                "recording": recording,
+                "origin": origin,
+            },
+            source=cryo.source,
+            run_id=run_id,
+            created_utc=cryo.created_utc,
+        ))
+
+    for op in op_entries:
+        if op.entry_id in matched_op_ids:
+            continue
+
+        notes_parts = []
+        status = str(op.values.get("status", ""))
+        if status != "done":
+            notes_parts.append(f"legacy status={status}")
+            reason = str(op.values.get("reason", ""))
+            if reason:
+                notes_parts.append(f"reason={reason}")
+        params = str(op.values.get("params", "{}"))
+        if params and params != "{}":
+            notes_parts.append(f"params={params}")
+
+        # The legacy operations stream had no person column; the value lives
+        # inside the params JSON. Backtracking "who did the last sample
+        # change" is the unified log's whole point, so pull it out.
+        person = ""
+        try:
+            parsed_params = json.loads(params)
+            if isinstance(parsed_params, dict):
+                person = str(parsed_params.get("person", ""))
+        except (TypeError, ValueError):
+            pass
+
+        entry_kind = _normalize_entry_kind(str(op.values.get("operation", "")))
+
+        migrated_lines.append(_migrated_entry_dict(
+            {
+                "entry_kind": entry_kind,
+                "person": person,
+                "start_utc": str(op.values.get("started_utc", "")),
+                "end_utc": str(op.values.get("finished_utc", "")),
+                "helium_start_pct": 0.0,
+                "helium_end_pct": 0.0,
+                "ln2_start_pct": 0.0,
+                "ln2_end_pct": 0.0,
+                "notes": "; ".join(part for part in notes_parts if part),
+                "recording": "",
+                "origin": "machine",
+            },
+            source=op.source,
+            run_id=op.run_id,
+            created_utc=op.created_utc,
+        ))
+
+    # Atomic commit: all lines land in one os.replace(), so a crash before
+    # this point leaves no servicing.jsonl at all (the migration simply runs
+    # again next time) instead of a partial file the idempotency check would
+    # mistake for a completed migration.
+    tmp_path = servicing_path.with_name(servicing_path.name + ".tmp")
+    tmp_path.write_text(
+        "".join(
+            json.dumps(line, ensure_ascii=False, sort_keys=True) + "\n"
+            for line in migrated_lines
+        ),
+        encoding="utf-8",
+    )
+    os.replace(tmp_path, servicing_path)
+
+    if cryo_path.is_file():
+        cryo_path.replace(cryo_path.with_name(cryo_path.name + ".bak"))
+    if ops_path.is_file():
+        ops_path.replace(ops_path.with_name(ops_path.name + ".bak"))
+
+    return True
+
+
 # ── CryogenicsRecorder: the automatic writer ────────────────────────────────
 
 
 class CryogenicsRecorder(QObject):
-    """The automatic servicing-log/helium-record writer (plan §6.3).
+    """The automatic servicing-log/helium-record writer (plan §6.3, unified
+    per docs/plans/unified-servicing-log-and-run-recording.md §2 Phase 2).
 
     Driven purely by existing Orchestrator signals — this class never touches
     hardware or the Station, and never raises out of a slot (every public
@@ -800,6 +1307,19 @@ class CryogenicsRecorder(QObject):
     ``pyqtSlot``-decorated) so tests can call them with synthetic dicts
     without any real Orchestrator, and headless (no widgets are created or
     required — only a ``QObject``/``QCoreApplication`` instance).
+
+    Writes exactly ONE ``"servicing"`` log entry per finished operation run
+    (never the legacy ``"cryogenics"``/``"operations"`` kinds): He/LN2 levels
+    are stamped for every operation kind (cached at ``on_run_started``,
+    re-read at finish from the last ``states_updated`` sample), and an
+    ``entry_kind`` is derived from the run manifest's ``"procedure"`` name via
+    the same lowercase/underscore normalisation the legacy migration already
+    uses (``_normalize_entry_kind``) so both paths agree on stable keys like
+    ``"helium_fill"``/``"sample_change"``. A recording sidecar is written
+    whenever the manifest's ``summary`` carries a well-formed generic
+    ``"recording"`` series (``{"unix_time": [...], "channels": {...}}}``,
+    docs/plans/unified-servicing-log-and-run-recording.md §3) — not
+    fill-specific.
 
     Signals:
         cryo_warning (str): Emitted once when the helium level drops below
@@ -820,14 +1340,13 @@ class CryogenicsRecorder(QObject):
         warning_pct: float,
         history_sample_s: float = 3600.0,
         warning_clear_margin_pct: float = 3.0,
-        fill_operation_name: str = "Helium Fill",
     ) -> None:
         """Configure the recorder against its two stores.
 
         Args:
             helium_store: Where hourly helium/nitrogen samples are appended.
-            servicing_store: Where the cryogenics-log and operations-log
-                entries are appended.
+            servicing_store: Where the ``servicing`` log entries are
+                appended.
             level_vi_name: Key into the ``states_updated`` state dict naming
                 the level-meter VI (``state[level_vi_name]`` carries
                 ``helium_level``/``nitrogen_level``).
@@ -837,8 +1356,6 @@ class CryogenicsRecorder(QObject):
                 (default 3600 s — hourly, per plan §6.3).
             warning_clear_margin_pct: Hysteresis margin (%) added to
                 ``warning_pct`` before the warning re-arms.
-            fill_operation_name: The operation ``procedure`` name that, on
-                finish, produces a ``"cryogenics"`` log entry.
         """
         super().__init__()
         self._helium_store = helium_store
@@ -847,7 +1364,6 @@ class CryogenicsRecorder(QObject):
         self._warning_pct = float(warning_pct)
         self._history_sample_s = float(history_sample_s)
         self._warning_clear_margin_pct = float(warning_clear_margin_pct)
-        self._fill_operation_name = fill_operation_name
 
         self._last_helium_pct: float | None = None
         self._last_nitrogen_pct: float | None = None
@@ -855,9 +1371,12 @@ class CryogenicsRecorder(QObject):
         self._last_append_monotonic: float | None = None
         self._warning_active = False
 
-        # Level + time captured at the fill operation's start, consumed on finish.
-        self._fill_start_helium_pct: float | None = None
-        self._fill_start_utc: str = ""
+        # Levels + time captured at any operation run's start, consumed on
+        # finish (plan §2: "Levels are stamped for every kind, not just
+        # fills"). None while no operation run is in progress.
+        self._run_start_helium_pct: float | None = None
+        self._run_start_nitrogen_pct: float | None = None
+        self._run_start_utc: str = ""
 
     def on_states_updated(self, state: dict[str, Any]) -> None:
         """Track the latest levels; decimate into the helium record; warn.
@@ -918,7 +1437,7 @@ class CryogenicsRecorder(QObject):
             self._warning_active = False
 
     def on_run_started(self, manifest: dict[str, Any]) -> None:
-        """Remember the level/time at the start of the fill operation.
+        """Remember the He/LN2 levels and time at the start of ANY operation run.
 
         Args:
             manifest: The Orchestrator's ``run_started`` manifest.
@@ -931,13 +1450,14 @@ class CryogenicsRecorder(QObject):
     def _on_run_started(self, manifest: dict[str, Any]) -> None:
         if not isinstance(manifest, dict):
             return
-        if str(manifest.get("procedure", "")) != self._fill_operation_name:
+        if str(manifest.get("kind", "")) != "operation":
             return
-        self._fill_start_helium_pct = self._last_helium_pct
-        self._fill_start_utc = str(manifest.get("started_utc", "")) or self._last_reading_utc
+        self._run_start_helium_pct = self._last_helium_pct
+        self._run_start_nitrogen_pct = self._last_nitrogen_pct
+        self._run_start_utc = str(manifest.get("started_utc", "")) or self._last_reading_utc
 
     def on_run_finished(self, manifest: dict[str, Any]) -> None:
-        """Append the operations-stream entry, and the cryogenics entry for a fill.
+        """Append the single ``servicing`` entry for a finished operation run.
 
         Args:
             manifest: The Orchestrator's ``run_finished`` manifest.
@@ -950,46 +1470,96 @@ class CryogenicsRecorder(QObject):
     def _on_run_finished(self, manifest: dict[str, Any]) -> None:
         if not isinstance(manifest, dict):
             return
+        if str(manifest.get("kind", "")) != "operation":
+            return
+
         status = str(manifest.get("status", ""))
         procedure = str(manifest.get("procedure", ""))
+        params = manifest.get("params")
+        person = ""
+        if isinstance(params, dict):
+            person = str(params.get("person", ""))
 
-        if str(manifest.get("kind", "")) == "operation":
-            params = manifest.get("params")
-            params_json = json.dumps(
-                params if isinstance(params, dict) else {}, sort_keys=True, default=str
-            )
-            self._servicing_store.append_machine_entry(
-                "operations",
-                {
-                    "operation": procedure,
-                    "params": params_json,
-                    "started_utc": str(manifest.get("started_utc", "")),
-                    "finished_utc": str(manifest.get("finished_utc", "")),
-                    "status": status,
-                    "verified": status == "done",
-                    "reason": str(manifest.get("reason", "")),
-                },
-            )
+        notes_parts: list[str] = []
+        if status != "done":
+            reason = str(manifest.get("reason", ""))
+            notes_parts.append(f"{status}: {reason}" if reason else status)
+        unmet = manifest.get("postconditions_unmet")
+        if isinstance(unmet, list) and unmet:
+            notes_parts.append(f"unmet: {', '.join(str(gate) for gate in unmet)}")
 
-        if procedure == self._fill_operation_name:
-            params = manifest.get("params")
-            person = ""
-            if isinstance(params, dict):
-                person = str(params.get("person", ""))
-            notes = "" if status == "done" else f"unverified: {manifest.get('reason', '')}"
-            self._servicing_store.add_entry(
-                "cryogenics",
-                {
-                    "person": person,
-                    "start_utc": self._fill_start_utc,
-                    "end_utc": str(manifest.get("finished_utc", "")),
-                    "helium_start_pct": self._fill_start_helium_pct or 0.0,
-                    "helium_end_pct": self._last_helium_pct or 0.0,
-                    "ln2_filled": False,
-                    "notes": notes,
-                },
-                source="operation",
-                run_id=str(manifest.get("run_id", "")),
+        run_id = str(manifest.get("run_id", ""))
+        recording = self._write_recording_sidecar(manifest, run_id)
+
+        self._servicing_store.add_entry(
+            "servicing",
+            {
+                "entry_kind": _normalize_entry_kind(procedure),
+                "person": person,
+                "start_utc": self._run_start_utc or str(manifest.get("started_utc", "")),
+                "end_utc": str(manifest.get("finished_utc", "")),
+                "helium_start_pct": self._run_start_helium_pct or 0.0,
+                "helium_end_pct": self._last_helium_pct or 0.0,
+                "ln2_start_pct": self._run_start_nitrogen_pct or 0.0,
+                "ln2_end_pct": self._last_nitrogen_pct or 0.0,
+                "notes": "; ".join(notes_parts),
+                "recording": recording,
+                "origin": "machine",
+            },
+            source="operation",
+            run_id=run_id,
+        )
+        self._run_start_helium_pct = None
+        self._run_start_nitrogen_pct = None
+        self._run_start_utc = ""
+
+    def _write_recording_sidecar(self, manifest: dict[str, Any], run_id: str) -> str:
+        """Write ``recordings/<run_id>.json`` if the manifest carries a recording.
+
+        Reads ``manifest["summary"]["recording"]`` (the Orchestrator's
+        duck-typed ``run_summary()`` hand-off, docs/plans/operation-
+        concurrency-and-error-scoping.md §4) — the generic shape every
+        operation may hand off (docs/plans/unified-servicing-log-and-run-
+        recording.md §3): ``{"unix_time": [...], "channels": {"<vi>.<value>":
+        [...], ...}}``. Tolerant of every malformed shape (missing
+        ``summary``, non-dict recording, non-list series, non-dict
+        channels): this is a best-effort observer, never a reason to lose
+        the rest of the ``servicing`` entry.
+
+        Args:
+            manifest: The Orchestrator's ``run_finished`` manifest.
+            run_id: The run's id, used as the sidecar's filename stem.
+
+        Returns:
+            The sidecar's filename (``"<run_id>.json"``), or ``""`` if there
+            was nothing to write (no/malformed recording, or no ``run_id``).
+        """
+        summary = manifest.get("summary")
+        if not isinstance(summary, dict):
+            return ""
+        recording = summary.get("recording")
+        if not isinstance(recording, dict):
+            return ""
+        unix_time = recording.get("unix_time")
+        channels = recording.get("channels")
+        if not isinstance(unix_time, list) or not isinstance(channels, dict):
+            return ""
+        if not all(isinstance(series, list) for series in channels.values()):
+            return ""
+        if not run_id:
+            return ""
+
+        filename = f"{run_id}.json"
+        sidecar_path = self._servicing_store.recordings_path(filename)
+        try:
+            sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+            sidecar_path.write_text(
+                json.dumps({"unix_time": unix_time, "channels": channels}),
+                encoding="utf-8",
             )
-            self._fill_start_helium_pct = None
-            self._fill_start_utc = ""
+        except (OSError, TypeError, ValueError):
+            logger.warning(
+                "CryogenicsRecorder: could not write recording sidecar %s", sidecar_path
+            )
+            return ""
+        return filename

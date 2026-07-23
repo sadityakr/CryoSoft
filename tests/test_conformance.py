@@ -407,6 +407,39 @@ def test_procedure_constructs_from_defaults(proc_cls: type, tmp_path) -> None:
     )
 
 
+@pytest.mark.parametrize("proc_cls", _all_procedure_classes(), ids=lambda c: c.__name__)
+def test_procedure_claimed_vi_names_contract(proc_cls: type, tmp_path) -> None:
+    """claimed_vi_names() returns None or a set of VI names known to the station.
+
+    Concurrency-scope hook (docs/plans/operation-concurrency-and-error-
+    scoping.md §1): ``None`` (claim everything) is always valid; a non-``None``
+    return must be a ``set[str]`` naming VIs the station actually has, so a
+    typo in a narrowed claim can never silently under-claim.
+    """
+    if getattr(proc_cls, "requires_measurement_vi", False):
+        station = build_station("cryosoft/configs/sim_cryostat")
+    else:
+        station = Station()
+    proc = proc_cls(
+        station=station,
+        sample_info={"sample_name": "conformance", "sample_id": "T0", "comments": ""},
+        data_directory=str(tmp_path),
+    )
+    claimed = proc.claimed_vi_names()
+    if claimed is None:
+        return
+    assert isinstance(claimed, set) and all(isinstance(name, str) for name in claimed), (
+        f"{proc_cls.__name__}.claimed_vi_names() must return None or a set[str], "
+        f"got {claimed!r}"
+    )
+    known = set(station.get_vi_names())
+    unknown = claimed - known
+    assert not unknown, (
+        f"{proc_cls.__name__}.claimed_vi_names() names VI(s) not on the station: "
+        f"{sorted(unknown)}"
+    )
+
+
 # ── Config contract ───────────────────────────────────────────────────────────
 
 
@@ -593,7 +626,6 @@ def test_operations_config_block(config_dir: Path) -> None:
         "temperature_window_s",
         "zero_field_eps_T",
         "zero_field_window_s",
-        "postcondition_timeout_s",
     )
     for key in positive_keys:
         if key not in sample_change:
@@ -909,6 +941,33 @@ def test_operation_readiness_conditions_returns_tuple_of_readiness_condition(op_
             f"{op_cls.__name__}.readiness_conditions() must contain only "
             f"ReadinessCondition instances, got {condition!r}"
         )
+
+
+@pytest.mark.parametrize("op_cls", _all_operation_classes(), ids=lambda c: c.__name__)
+def test_operation_claimed_vi_names_contract(op_cls: type) -> None:
+    """claimed_vi_names() returns None or a set of VI names known to the station.
+
+    Mirrors ``test_procedure_claimed_vi_names_contract``: ``None`` (claim
+    everything) is always valid; a non-``None`` return must be a
+    ``set[str]`` naming real station VIs, so a typo in a narrowed claim
+    (e.g. ``HeliumFillOperation``'s level meter, ``SampleChangeOperation``'s
+    magnets/VTI/switch/measurement VIs) can never silently under-claim.
+    """
+    station = build_station("cryosoft/configs/sim_cryostat")
+    op = op_cls(station)
+    claimed = op.claimed_vi_names()
+    if claimed is None:
+        return
+    assert isinstance(claimed, set) and all(isinstance(name, str) for name in claimed), (
+        f"{op_cls.__name__}.claimed_vi_names() must return None or a set[str], "
+        f"got {claimed!r}"
+    )
+    known = set(station.get_vi_names())
+    unknown = claimed - known
+    assert not unknown, (
+        f"{op_cls.__name__}.claimed_vi_names() names VI(s) not on the station: "
+        f"{sorted(unknown)}"
+    )
 
 
 def test_operation_config_key_unique_across_operations() -> None:

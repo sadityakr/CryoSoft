@@ -123,7 +123,7 @@ cryogenics:
   helium_volume_l: 40.0          # optional; enables L/h display
 
 servicing_logs:                  # which declared log kinds this setup keeps
-  - cryogenics
+  - servicing
 
 # Cryostat-servicing operations (docs/plans/cryogenics-logbook.md §9). Each
 # named sub-block configures one OperationBase subclass; a setup that omits
@@ -138,4 +138,4 @@ operations:
     zero_field_eps_T: 0.005
     zero_field_window_s: 10.0
     needle_valve: manual           # "manual" -> operator confirmation; a VI-capability ref is future work
-    postcondition_timeout_s: 7200.0
+    sample_period_s: 10.0          # hold-phase recording cadence (VTI temperature + magnet fields)
