@@ -476,6 +476,11 @@ class OperationCard(QGroupBox):
         self._running = True
         self._finishing = False
         self._last_run_done = False
+        # Cleared for a fresh run (mirrors _last_run_done): a hold-phase
+        # operation's mid-run banner (_sync_ready_banner()) must wait for a
+        # genuine on_states_updated() re-evaluation against THIS run's
+        # conditions, not a stale True carried over from the previous run.
+        self._last_all_holding = False
         self._status_label.setText("")
         self._status_label.hide()
         self._postcondition_warning.hide()
@@ -563,13 +568,29 @@ class OperationCard(QGroupBox):
         self._confirmations_row.setVisible(self._running and bool(self._confirmations))
 
     def _sync_ready_banner(self) -> None:
-        """Show the ready banner iff done + all-green + not running (plan §12)."""
-        show = (
-            bool(self._display_instance.ready_message)
-            and self._last_run_done
-            and self._last_all_holding
-            and not self._running
-        )
+        """Show the ready banner once every readiness condition holds (plan §12).
+
+        For a plain operation (``hold_for_operator = False``, the default —
+        e.g. the helium fill), unchanged: only once the run finished
+        ``done`` AND every condition holds AND nothing is running now
+        (docs/plans/unified-servicing-log-and-run-recording.md §1's "the
+        fill's whole life is post-run"). For a hold-phase operation (e.g.
+        the sample change), the banner may ALSO show mid-run, the instant
+        every condition holds — "ready" means "you may act now", which is
+        true well before Finish is clicked.
+        """
+        if self._display_instance.hold_for_operator:
+            show = bool(self._display_instance.ready_message) and (
+                (self._running and self._last_all_holding)
+                or (self._last_run_done and self._last_all_holding and not self._running)
+            )
+        else:
+            show = (
+                bool(self._display_instance.ready_message)
+                and self._last_run_done
+                and self._last_all_holding
+                and not self._running
+            )
         if show:
             self._ready_banner.setText(f"✓ {self._display_instance.ready_message}")
         self._ready_banner.setVisible(show)
@@ -895,11 +916,19 @@ class OperationsPanel(QWidget):
         self._fill_markers.setData(marker_x, marker_y)
 
     def _fill_intervals(self) -> tuple[tuple[float, float], ...]:
-        """Return ``(start_unix, end_unix)`` for every cryogenics-log fill entry."""
+        """Return ``(start_unix, end_unix)`` for every fill entry in the servicing log.
+
+        Reads the unified ``"servicing"`` kind (docs/plans/unified-servicing-
+        log-and-run-recording.md §2 — the recorder no longer writes the
+        legacy ``"cryogenics"`` kind), filtering to ``entry_kind ==
+        "helium_fill"``.
+        """
         if self._servicing_store is None:
             return ()
         intervals: list[tuple[float, float]] = []
-        for entry in self._servicing_store.entries("cryogenics"):
+        for entry in self._servicing_store.entries("servicing"):
+            if entry.values.get("entry_kind") != "helium_fill":
+                continue
             try:
                 start = datetime.fromisoformat(str(entry.values.get("start_utc"))).timestamp()
                 end = datetime.fromisoformat(str(entry.values.get("end_utc"))).timestamp()
@@ -909,12 +938,18 @@ class OperationsPanel(QWidget):
         return tuple(intervals)
 
     def _fill_marker_points(self) -> tuple[list[float], list[float]]:
-        """Return marker (x, y) points at each fill's start time/level."""
+        """Return marker (x, y) points at each fill's start time/level.
+
+        See ``_fill_intervals()`` for the unified ``"servicing"`` kind /
+        ``entry_kind`` filtering this mirrors.
+        """
         if self._servicing_store is None:
             return [], []
         xs: list[float] = []
         ys: list[float] = []
-        for entry in self._servicing_store.entries("cryogenics"):
+        for entry in self._servicing_store.entries("servicing"):
+            if entry.values.get("entry_kind") != "helium_fill":
+                continue
             try:
                 start = datetime.fromisoformat(str(entry.values.get("start_utc"))).timestamp()
                 level = float(entry.values.get("helium_start_pct", 0.0))

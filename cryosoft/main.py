@@ -193,6 +193,12 @@ def main() -> None:
         )
         helium_store = HeliumRecordStore(servicing_root, config_identity)
         servicing_store = ServicingLogStore(servicing_root, config_identity)
+        # One-time migration of any pre-unification cryogenics.jsonl/
+        # operations.jsonl into servicing.jsonl (docs/plans/unified-
+        # servicing-log-and-run-recording.md §2). Idempotent no-op once
+        # servicing.jsonl exists or neither legacy file is present, so it is
+        # always safe to call unconditionally on every startup.
+        servicing_store.migrate_legacy(level_vi_name=cryogenics_config["level_vi"])
         servicing_log_kinds = read_servicing_logs_config(used_path)
         cryogenics_recorder = CryogenicsRecorder(
             helium_store,

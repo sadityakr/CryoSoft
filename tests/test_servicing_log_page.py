@@ -1,21 +1,37 @@
 # ---
 # description: |
-#   Behavior tests for cryosoft.gui.servicing_log_page (Phase 5,
-#   docs/plans/cryogenics-logbook.md §10): one table per declared log kind
-#   with columns derived from its LogKindSpec, Add/Edit/Delete round-tripping
-#   through ServicingLogStore's revision model, the "edited" marker, the
-#   read-only operations table, and refresh() behavior.
-# last_updated: 2026-07-19
+#   Behavior tests for cryosoft.gui.servicing_log_page: one table per
+#   declared log kind with columns derived from its LogKindSpec, Add/Edit/
+#   Delete round-tripping through ServicingLogStore's revision model, the
+#   "edited" marker, the read-only operations table, and refresh() behavior
+#   (Phase 5, docs/plans/cryogenics-logbook.md §10); plus the unified
+#   "servicing" kind's dedicated timeline table — chronological sort, data-
+#   derived filter chips, the recording detail dialog, and the two CSV export
+#   helpers (Phase 4, docs/plans/unified-servicing-log-and-run-recording.md
+#   §4).
+# last_updated: 2026-07-23
 # ---
 
 """Behavior tests for ServicingLogPage."""
 
+import json
+
 import pytest
-from PyQt6.QtWidgets import QDialog, QPushButton, QTableWidget
+from PyQt6.QtWidgets import QDialog, QPushButton, QTableWidget, QWidget
 
 from cryosoft.gui import servicing_log_page as slp_module
 from cryosoft.gui.log_panel import LogPanel
-from cryosoft.gui.servicing_log_page import ServicingLogPage
+from cryosoft.gui.servicing_log_page import (
+    ServicingLogPage,
+    distinct_entry_kinds,
+    filter_entries_by_kind,
+    load_recording_sidecar,
+    recording_csv_rows,
+    servicing_table_csv_rows,
+    sorted_servicing_entries,
+    write_recording_csv,
+    write_servicing_table_csv,
+)
 from cryosoft.session.servicing_log import DECLARED_LOG_KINDS, ServicingLogStore
 
 
@@ -247,3 +263,261 @@ def test_refresh_picks_up_entries_written_outside_the_dialog_flow(store, log_pan
 
     page.refresh()
     assert table.rowCount() == 1
+
+
+# ── The unified "servicing" kind: timeline, filter chips, detail, exports ───
+
+
+def _servicing_values(**overrides):
+    values = {
+        "entry_kind": "helium_fill",
+        "person": "jdoe",
+        "start_utc": "2026-07-23T10:00:00+00:00",
+        "end_utc": "2026-07-23T11:00:00+00:00",
+        "helium_start_pct": 40.0,
+        "helium_end_pct": 90.0,
+        "ln2_start_pct": 60.0,
+        "ln2_end_pct": 60.0,
+        "notes": "",
+        "recording": "",
+        "origin": "manual",
+    }
+    values.update(overrides)
+    return values
+
+
+def test_unified_table_sorted_newest_first_by_start_utc(store, log_panel, qtbot):
+    """Mixed entry kinds render in ONE table, sorted by parsed start_utc descending."""
+    store.add_entry(
+        "servicing",
+        _servicing_values(entry_kind="helium_fill", start_utc="2026-07-20T08:00:00+00:00"),
+    )
+    store.add_entry(
+        "servicing",
+        _servicing_values(entry_kind="sample_change", start_utc="2026-07-22T08:00:00+00:00"),
+    )
+    # A manual entry with no start_utc falls back to created_utc for sorting,
+    # but any manual entry created in this test necessarily sorts after both
+    # machine-dated entries above (created "now", after 2026-07-22).
+    store.add_entry("servicing", _servicing_values(entry_kind="manual", start_utc=""))
+
+    page = ServicingLogPage(store, ["servicing"], log_panel, get_current_person=lambda: "")
+    qtbot.addWidget(page)
+    table = page.findChild(QTableWidget, "servicing_table_servicing")
+    assert table is not None
+    assert table.rowCount() == 3
+
+    field_names = list(DECLARED_LOG_KINDS["servicing"].fields)
+    kind_col = field_names.index("entry_kind")
+    # Newest first: the fallback-sorted manual entry (created "now") first,
+    # then sample_change (07-22), then helium_fill (07-20).
+    assert table.item(0, kind_col).text() == "manual"
+    assert table.item(1, kind_col).text() == "sample_change"
+    assert table.item(2, kind_col).text() == "helium_fill"
+
+
+def test_filter_chips_narrow_the_table_live(store, log_panel, qtbot):
+    store.add_entry("servicing", _servicing_values(entry_kind="helium_fill"))
+    store.add_entry("servicing", _servicing_values(entry_kind="sample_change"))
+    store.add_entry("servicing", _servicing_values(entry_kind="sample_change"))
+
+    page = ServicingLogPage(store, ["servicing"], log_panel, get_current_person=lambda: "")
+    qtbot.addWidget(page)
+    table = page.findChild(QTableWidget, "servicing_table_servicing")
+    assert table.rowCount() == 3
+
+    all_chip = page.findChild(QPushButton, "servicing_chip_All")
+    fill_chip = page.findChild(QPushButton, "servicing_chip_helium_fill")
+    sample_chip = page.findChild(QPushButton, "servicing_chip_sample_change")
+    assert all_chip is not None
+    assert fill_chip is not None
+    assert sample_chip is not None
+
+    fill_chip.click()
+    assert table.rowCount() == 1
+
+    sample_chip.click()
+    assert table.rowCount() == 2
+
+    all_chip.click()
+    assert table.rowCount() == 3
+
+
+def test_view_recording_button_enabled_only_for_rows_with_a_recording(store, log_panel, qtbot):
+    store.add_entry("servicing", _servicing_values(recording=""))
+    store.add_entry("servicing", _servicing_values(recording="run_1.json"))
+
+    page = ServicingLogPage(store, ["servicing"], log_panel, get_current_person=lambda: "")
+    qtbot.addWidget(page)
+    table = page.findChild(QTableWidget, "servicing_table_servicing")
+    view_btn = page.findChild(QPushButton, "servicing_view_recording_btn")
+    assert view_btn is not None
+
+    table.selectRow(0)  # newest-first: the one with a recording (created last)
+    assert view_btn.isEnabled()
+
+    table.selectRow(1)
+    assert not view_btn.isEnabled()
+
+
+def test_add_dialog_creates_manual_servicing_entry_with_manual_origin(
+    store, log_panel, qtbot, monkeypatch
+):
+    """The Add dialog's field defaults (unedited) give origin="manual", entry_kind="manual"."""
+    monkeypatch.setattr(
+        slp_module, "ServicingLogEntryDialog", _make_fake_entry_dialog(_servicing_values(notes="x"))
+    )
+    page = ServicingLogPage(store, ["servicing"], log_panel, get_current_person=lambda: "Alice")
+    qtbot.addWidget(page)
+    add_btn = page.findChild(QPushButton, "servicing_add_btn_servicing")
+    assert add_btn is not None
+
+    add_btn.click()
+
+    entries = store.entries("servicing")
+    assert len(entries) == 1
+    assert entries[0].values["origin"] == "manual"
+    assert entries[0].values["notes"] == "x"
+
+    # Spec default check (independent of the dialog): an untouched Add form
+    # defaults BOTH origin and entry_kind to "manual".
+    spec = DECLARED_LOG_KINDS["servicing"]
+    assert spec.fields["origin"].default == "manual"
+    assert spec.fields["entry_kind"].default == "manual"
+
+
+# ── Pure CSV/sort/filter helper functions (no Qt) ───────────────────────────
+
+
+def test_sorted_servicing_entries_orders_by_parsed_start_utc(store):
+    old = store.add_entry(
+        "servicing", _servicing_values(start_utc="2026-01-01T00:00:00+00:00")
+    )
+    new = store.add_entry(
+        "servicing", _servicing_values(start_utc="2026-06-01T00:00:00+00:00")
+    )
+    ordered = sorted_servicing_entries(store.entries("servicing"))
+    assert [e.entry_id for e in ordered] == [new.entry_id, old.entry_id]
+
+
+def test_distinct_entry_kinds_derives_from_data():
+    entries = [
+        _StubEntry({"entry_kind": "helium_fill"}),
+        _StubEntry({"entry_kind": "sample_change"}),
+        _StubEntry({"entry_kind": "helium_fill"}),
+        _StubEntry({"entry_kind": ""}),
+    ]
+    assert distinct_entry_kinds(entries) == ["helium_fill", "sample_change"]
+
+
+def test_filter_entries_by_kind():
+    entries = [
+        _StubEntry({"entry_kind": "helium_fill"}),
+        _StubEntry({"entry_kind": "sample_change"}),
+    ]
+    assert filter_entries_by_kind(entries, None) == entries
+    assert filter_entries_by_kind(entries, "All") == entries
+    filtered = filter_entries_by_kind(entries, "helium_fill")
+    assert len(filtered) == 1
+    assert filtered[0].values["entry_kind"] == "helium_fill"
+
+
+def test_servicing_table_csv_rows_and_write(tmp_path, store):
+    store.add_entry("servicing", _servicing_values(entry_kind="helium_fill", person="Alice"))
+    entries = store.entries("servicing")
+    field_names = list(DECLARED_LOG_KINDS["servicing"].fields)
+
+    header, rows = servicing_table_csv_rows(entries, field_names)
+    assert header == field_names
+    assert len(rows) == 1
+    assert rows[0][field_names.index("person")] == "Alice"
+
+    out = tmp_path / "table.csv"
+    write_servicing_table_csv(out, entries, field_names)
+    text = out.read_text(encoding="utf-8")
+    assert "person" in text.splitlines()[0]
+    assert "Alice" in text
+
+
+def test_recording_csv_rows_and_write(tmp_path):
+    recording = {
+        "unix_time": [0.0, 60.0, 120.0],
+        "channels": {"vti.temperature": [4.2, 4.3, 4.1], "magnet.field": [0.0, 0.1, 0.2]},
+    }
+    header, rows = recording_csv_rows(recording)
+    assert header == ["unix_time", "utc", "magnet.field", "vti.temperature"]
+    assert len(rows) == 3
+    assert rows[0][0] == 0.0
+    assert rows[0][1].startswith("1970-01-01T00:00:00")
+
+    out = tmp_path / "recording.csv"
+    write_recording_csv(out, recording)
+    lines = out.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 4  # header + 3 rows
+
+
+def test_load_recording_sidecar_reads_synthetic_file(tmp_path):
+    root = tmp_path / "servicing"
+    store = ServicingLogStore(root, "sim_cryostat")
+    sidecar = store.recordings_path("run_1.json")
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"unix_time": [0.0, 1.0], "channels": {"vti.temperature": [4.2, 4.3]}}
+    sidecar.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = load_recording_sidecar(store, "run_1.json")
+    assert loaded == payload
+
+
+def test_load_recording_sidecar_tolerates_missing_file(tmp_path):
+    root = tmp_path / "servicing"
+    store = ServicingLogStore(root, "sim_cryostat")
+    assert load_recording_sidecar(store, "does_not_exist.json") is None
+
+
+def test_load_recording_sidecar_tolerates_corrupt_file(tmp_path):
+    root = tmp_path / "servicing"
+    store = ServicingLogStore(root, "sim_cryostat")
+    sidecar = store.recordings_path("bad.json")
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_text("{not json", encoding="utf-8")
+
+    assert load_recording_sidecar(store, "bad.json") is None
+
+
+def test_detail_dialog_plots_synthetic_sidecar(store, log_panel, qtbot):
+    """Selecting a recorded row and clicking View recording loads/plots the sidecar."""
+    from cryosoft.gui.servicing_log_page import ServicingRecordingDialog
+
+    sidecar = store.recordings_path("run_1.json")
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_text(
+        json.dumps({"unix_time": [0.0, 1.0], "channels": {"vti.temperature": [4.2, 4.3]}}),
+        encoding="utf-8",
+    )
+    entry = store.add_entry("servicing", _servicing_values(recording="run_1.json"))
+
+    dialog = ServicingRecordingDialog(entry, store)
+    qtbot.addWidget(dialog)
+    plot = dialog.findChild(QWidget, "servicing_detail_plot")
+    assert plot is not None
+    export_btn = dialog.findChild(QPushButton, "servicing_detail_export_recording_btn")
+    assert export_btn.isEnabled()
+
+
+def test_detail_dialog_tolerates_missing_sidecar(store, log_panel, qtbot):
+    entry = store.add_entry("servicing", _servicing_values(recording="missing.json"))
+
+    from cryosoft.gui.servicing_log_page import ServicingRecordingDialog
+
+    dialog = ServicingRecordingDialog(entry, store)
+    qtbot.addWidget(dialog)
+    export_btn = dialog.findChild(QPushButton, "servicing_detail_export_recording_btn")
+    assert export_btn is not None
+    assert not export_btn.isEnabled()
+
+
+class _StubEntry:
+    """Minimal stand-in for ServiceLogEntry, values-only, for pure-function tests."""
+
+    def __init__(self, values: dict) -> None:
+        self.values = values

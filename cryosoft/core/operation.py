@@ -19,7 +19,15 @@
 #   hook (same plan, §4) lets a subclass hand a small JSON-serialisable
 #   summary (e.g. the helium fill's bounded in-memory level curve) to the
 #   session layer without an HDF5 file — the Orchestrator merges it into the
-#   run manifest's "summary" key on run_finished.
+#   run manifest's "summary" key on run_finished. A shared, decimating,
+#   multi-channel recorder helper (_record_sample()/_recording_dict(), plan
+#   unified-servicing-log-and-run-recording.md §3) is opt-in for exactly this
+#   hand-off — HeliumFillOperation and SampleChangeOperation both use it.
+#   hold_for_operator (plan §1) declares a "hold phase" operation whose
+#   step() stays open-ended (never returns None on its own) until the
+#   operator clicks Finish; the Operations panel reads it to show the ready
+#   banner mid-run, once every readiness condition holds, instead of only
+#   after the run ends.
 # entry_point: Not run directly. Subclassed by concrete operations
 #   (``cryosoft.procedures.operations.*``).
 # dependencies:
@@ -38,15 +46,21 @@
 #   returns None once request_finish() has set the graceful-finish flag,
 #   otherwise it defers to step(). Together these are the adapter that lets
 #   the Orchestrator's existing MEASURING/SWEEPING states drive an operation
-#   with no new states and minimal branching.
+#   with no new states and minimal branching. A "hold phase" operation
+#   (hold_for_operator = True) keeps step() returning a StepPlan
+#   indefinitely once its own setup work is done, so the run stays open
+#   until request_finish() arrives — the SAME mechanism a plain open-ended
+#   step() already used (e.g. the helium fill's sampling loop), just held
+#   past task completion instead of a fixed condition.
 # output: |
 #   PhasePlan / StepPlan / Command / Gate objects consumed by the
 #   Orchestrator, exactly like a BaseProcedure's. readiness_conditions() /
 #   next_due() output ReadinessCondition / NextDue objects consumed only by
 #   the GUI (never by the Orchestrator). run_summary() outputs a plain dict
 #   consumed by the Orchestrator (merged into the run manifest) and, from
-#   there, the session layer (e.g. CryogenicsRecorder).
-# last_updated: 2026-07-21
+#   there, the session layer (e.g. CryogenicsRecorder), which reads a
+#   "recording" key in the _recording_dict() shape as this run's sidecar.
+# last_updated: 2026-07-23
 # ---
 
 """OperationBase — the L4 contract for cryostat-servicing operations."""
@@ -213,6 +227,16 @@ class OperationBase:
         command_scope: Fixed at ``"operation"`` — the capability tier this
             operation's plans may carry (see
             ``Station.send_measurement_commands``). Do not override.
+        hold_for_operator: ``False`` by default. ``True`` declares a "hold
+            phase" operation (plan §1) whose ``step()`` keeps the run open
+            (returns a ``StepPlan``, never ``None``) once its own setup work
+            is done, until the operator clicks Finish
+            (``request_finish()``). The Operations panel's ready banner
+            reads this: for a hold-phase operation it shows mid-run, the
+            instant every readiness condition holds, instead of waiting for
+            the run to finish. ``SampleChangeOperation`` sets this ``True``;
+            ``HeliumFillOperation`` leaves the default (its own completion
+            condition, not the operator, ends the run).
 
     Lifecycle (override in a concrete subclass):
         initiate() -> PhasePlan: Initial targets/commands, mirroring
@@ -280,9 +304,35 @@ class OperationBase:
     run_kind: str = "operation"
     tolerated_safety_flags: frozenset[str] = frozenset()
     command_scope: str = "operation"
+    #: Declares a "hold phase" operation (docs/plans/unified-servicing-log-
+    #: and-run-recording.md §1): ``step()`` keeps returning a ``StepPlan``
+    #: (never ``None``) once its own work is done, so the run stays active
+    #: indefinitely until the operator clicks Finish
+    #: (``Orchestrator.finish_operation()`` -> ``request_finish()``). The
+    #: Operations panel reads this to decide WHEN the ready banner may show:
+    #: ``False`` (default) keeps the existing post-run-only banner
+    #: (``ready_message`` shown once the run finished ``done`` AND every
+    #: readiness condition holds); ``True`` (``SampleChangeOperation``) also
+    #: shows it mid-run, the instant every readiness condition holds — for a
+    #: hold-phase operation "ready" means "you may act now", true well
+    #: before Finish is clicked. Finish itself is unaffected either way.
+    hold_for_operator: bool = False
+
+    #: Upper bound on the shared in-memory recording (``_record_sample()``/
+    #: ``_recording_dict()`` below; docs/plans/unified-servicing-log-and-
+    #: run-recording.md §3). Once the recorded series would exceed this many
+    #: points, it is decimated: every other point is dropped
+    #: (``series[::2]``, across the shared time axis AND every channel
+    #: together, so they stay the same length) and the effective sample
+    #: stride doubles — memory stays bounded for an arbitrarily long run
+    #: while the series still spans the whole run, never just the tail. A
+    #: class attribute (not a config key) so a test can lower it to force
+    #: the decimation path deterministically. Generalises
+    #: ``HeliumFillOperation``'s original ``_MAX_CURVE_POINTS``.
+    _MAX_RECORDING_POINTS: int = 4000
 
     def __init__(self) -> None:
-        """Initialise the graceful-finish flag.
+        """Initialise the graceful-finish flag and the shared recorder.
 
         A concrete subclass that needs constructor arguments (a Station,
         parameters, …) should call ``super().__init__()`` from its own
@@ -293,6 +343,7 @@ class OperationBase:
         #: caller can inspect it, but a subclass should treat it as
         #: read-only — set it via ``request_finish()``, never directly.
         self.finish_requested: bool = False
+        self._reset_recording()
 
     # ------------------------------------------------------------------
     # Override in subclass
@@ -466,6 +517,90 @@ class OperationBase:
             ``None`` by default (no next-due line shown).
         """
         return None
+
+    # ------------------------------------------------------------------
+    # Shared recording helper (opt-in; docs/plans/unified-servicing-log-and-
+    # run-recording.md §3) — a bounded, decimating, multi-channel in-memory
+    # recorder every operation may use from its own ``sample()`` instead of
+    # rolling its own (this generalises ``HeliumFillOperation``'s original
+    # single-channel level curve). Not part of the override contract above:
+    # a subclass calls these directly, it does not override them.
+    # ------------------------------------------------------------------
+
+    def _reset_recording(self) -> None:
+        """Clear the shared in-memory recording.
+
+        Call from ``initiate()`` before the first ``_record_sample()`` of a
+        run (mirrors ``HeliumFillOperation.initiate()`` resetting its old
+        curve fields) — also called once by ``__init__`` so a fresh instance
+        starts with a valid, empty recording even if ``initiate()`` is never
+        reached.
+        """
+        self._recording_unix_time: list[float] = []
+        self._recording_channels: dict[str, list[float]] = {}
+        self._recording_stride: int = 1
+        self._recording_raw_count: int = 0
+
+    def _record_sample(self, unix_time: float, values: dict[str, float]) -> None:
+        """Append one multi-channel sample to the shared bounded recording.
+
+        All channels share one time axis, so decimation (see
+        ``_MAX_RECORDING_POINTS``) drops points across every channel
+        together — the series never desynchronises.
+
+        Args:
+            unix_time: The sample's wall-clock time.
+            values: ``{channel_name: value}`` for every channel this
+                operation records, e.g. ``{"temperature_vti.temperature":
+                295.1, "magnet_z.get_field": 0.0}``. The channel set must be
+                the SAME on every call within one run (first call fixes it).
+
+        Raises:
+            ValueError: If *values*' channel names differ from a previous
+                call's within the same run.
+        """
+        if self._recording_channels and set(values) != set(self._recording_channels):
+            raise ValueError(
+                f"{type(self).__name__}._record_sample: channel set changed "
+                f"from {sorted(self._recording_channels)} to "
+                f"{sorted(values)} — every call within one run must record "
+                f"the same channels."
+            )
+
+        self._recording_raw_count += 1
+        if self._recording_raw_count % self._recording_stride != 0:
+            return
+
+        if not self._recording_channels:
+            self._recording_channels = {name: [] for name in values}
+
+        self._recording_unix_time.append(float(unix_time))
+        for name, value in values.items():
+            self._recording_channels[name].append(float(value))
+
+        if len(self._recording_unix_time) > self._MAX_RECORDING_POINTS:
+            self._recording_unix_time = self._recording_unix_time[::2]
+            for name in self._recording_channels:
+                self._recording_channels[name] = self._recording_channels[name][::2]
+            self._recording_stride *= 2
+
+    def _recording_dict(self) -> dict[str, Any]:
+        """Return the recording so far in the generic sidecar shape.
+
+        Returns:
+            ``{"unix_time": [...], "channels": {name: [...], ...}}`` — a
+            fresh copy of the accumulated recording (``{"unix_time": [],
+            "channels": {}}`` if ``_record_sample()`` was never called).
+            The shape ``CryogenicsRecorder`` reads off a run's
+            ``run_summary()["recording"]`` (docs/plans/unified-servicing-
+            log-and-run-recording.md §3).
+        """
+        return {
+            "unix_time": list(self._recording_unix_time),
+            "channels": {
+                name: list(series) for name, series in self._recording_channels.items()
+            },
+        }
 
     # ------------------------------------------------------------------
     # Orchestrator adapter — final; do not override (see class docstring)

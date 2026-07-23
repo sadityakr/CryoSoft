@@ -4,13 +4,15 @@
 #   (cryosoft/procedures/operations/helium_fill.py, plan §8.1), driven by a
 #   real Orchestrator (ticked directly, not via the QTimer) against the
 #   sim_cryostat station: zero-field ramp + initiation gate, FAST/SLOW
-#   refresh, the bounded in-memory level curve + run_summary() hand-off (no
-#   HDF5 file — docs/plans/operation-concurrency-and-error-scoping.md §4),
-#   the completion condition (monkeypatching the sim ILM's private
-#   _force_helium_level, not a new sim-only public method), max-duration
-#   termination, abort mid-fill, the helium_low-tolerated-but-quench-not
-#   safety matrix, and an end-to-end run through a real CryogenicsRecorder.
-# last_updated: 2026-07-22
+#   refresh, the bounded in-memory level curve + run_summary() hand-off in
+#   the generic "recording" shape (docs/plans/unified-servicing-log-and-run-
+#   recording.md §3; no HDF5 file — docs/plans/operation-concurrency-and-
+#   error-scoping.md §4), the completion condition (monkeypatching the sim
+#   ILM's private _force_helium_level, not a new sim-only public method),
+#   max-duration termination, abort mid-fill, the helium_low-tolerated-but-
+#   quench-not safety matrix, and an end-to-end run through a real
+#   CryogenicsRecorder writing the single unified "servicing" entry.
+# last_updated: 2026-07-23
 # ---
 
 from __future__ import annotations
@@ -137,9 +139,10 @@ def test_helium_fill_end_to_end(orchestrator, station, tmp_path, qtbot):
     assert orchestrator._state == OrchestratorState.IDLE
 
     summary = finished[0]["summary"]
-    curve = summary["level_curve"]
-    assert curve["unix_time"] and curve["helium_pct"]  # at least one point sampled
-    assert len(curve["unix_time"]) == len(curve["helium_pct"])
+    recording = summary["recording"]
+    curve = recording["channels"]["level_meter.helium_pct"]
+    assert recording["unix_time"] and curve  # at least one point sampled
+    assert len(recording["unix_time"]) == len(curve)
     assert summary["start_pct"] == pytest.approx(70.0)
     assert summary["end_pct"] == pytest.approx(70.0)
 
@@ -162,31 +165,35 @@ def test_helium_fill_accumulates_multiple_curve_points(orchestrator, station, tm
 
     _tick_until(orchestrator, lambda: bool(finished), max_ticks=1000, sleep_s=0.01)
 
-    assert len(finished[0]["summary"]["level_curve"]["helium_pct"]) >= 2
+    recording = finished[0]["summary"]["recording"]
+    assert len(recording["channels"]["level_meter.helium_pct"]) >= 2
 
 
 # ── Bounded in-memory level curve (decimation strategy) ───────────────────
 
 
 def test_level_curve_decimates_once_bound_exceeded(station, monkeypatch):
-    """Once the curve exceeds _MAX_CURVE_POINTS, it halves and the stride doubles.
+    """Once the curve exceeds _MAX_RECORDING_POINTS, it halves and the stride doubles.
 
     A focused unit test against sample() directly (no Orchestrator tick
     loop needed) — forces the bound low so the decimation path triggers
-    deterministically within a handful of calls.
+    deterministically within a handful of calls. The cap and stride now live
+    on the shared OperationBase recorder helper (Phase 3), not a
+    fill-specific field.
     """
-    monkeypatch.setattr(HeliumFillOperation, "_MAX_CURVE_POINTS", 4)
+    monkeypatch.setattr(HeliumFillOperation, "_MAX_RECORDING_POINTS", 4)
     op = _make_op(station, fill_zero_field_window_s=0.0)
     op.initiate()
 
     for _ in range(10):
         op.sample()
 
-    curve = op.run_summary()["level_curve"]
-    assert len(curve["unix_time"]) <= 4
-    assert len(curve["unix_time"]) == len(curve["helium_pct"])
-    assert op._curve_stride > 1  # decimation ran at least once
-    assert op._curve_raw_count == 10  # every raw sample() call is still counted
+    recording = op.run_summary()["recording"]
+    curve = recording["channels"]["level_meter.helium_pct"]
+    assert len(recording["unix_time"]) <= 4
+    assert len(recording["unix_time"]) == len(curve)
+    assert op._recording_stride > 1  # decimation ran at least once
+    assert op._recording_raw_count == 10  # every raw sample() call is still counted
 
 
 def test_level_curve_stays_under_default_bound(station):
@@ -197,9 +204,9 @@ def test_level_curve_stays_under_default_bound(station):
     for _ in range(50):
         op.sample()
 
-    curve = op.run_summary()["level_curve"]
-    assert len(curve["unix_time"]) == 50
-    assert op._curve_stride == 1
+    recording = op.run_summary()["recording"]
+    assert len(recording["unix_time"]) == 50
+    assert op._recording_stride == 1
 
 
 # ── run_summary() shape ────────────────────────────────────────────────────
@@ -210,7 +217,7 @@ def test_run_summary_before_any_sample_is_json_safe_and_empty(station):
     op = _make_op(station)
     summary = op.run_summary()
     assert summary == {
-        "level_curve": {"unix_time": [], "helium_pct": []},
+        "recording": {"unix_time": [], "channels": {"level_meter.helium_pct": []}},
         "start_pct": 0.0,
         "end_pct": 0.0,
     }
@@ -392,7 +399,7 @@ def test_quench_still_aborts_the_fill(orchestrator, station, tmp_path):
 
 
 def test_cryogenics_recorder_records_the_finished_fill(orchestrator, station, tmp_path, qtbot):
-    """A finished fill produces one cryogenics-log entry and one operations entry."""
+    """A finished fill produces exactly ONE "servicing" entry, with a recording sidecar."""
     _fast_magnets(station)
     station.level_meter._driver._force_helium_level = 70.0
     helium_store = HeliumRecordStore(tmp_path / "servicing", "sim_cryostat")
@@ -422,21 +429,24 @@ def test_cryogenics_recorder_records_the_finished_fill(orchestrator, station, tm
     _tick_until(orchestrator, lambda: bool(finished), max_ticks=1000, sleep_s=0.01)
     assert finished[0]["status"] == "done"
 
-    cryo_entries = servicing_store.entries("cryogenics")
-    assert len(cryo_entries) == 1
-    entry = cryo_entries[0]
+    entries = servicing_store.entries("servicing")
+    assert len(entries) == 1
+    entry = entries[0]
     assert entry.source == "operation"
     assert entry.run_id == finished[0]["run_id"]
+    assert entry.values["entry_kind"] == "helium_fill"
     assert entry.values["person"] == "Dr. Fill"
 
     # The level curve made the full round trip: HeliumFillOperation.sample()
     # -> run_summary() -> Orchestrator manifest["summary"] ->
-    # CryogenicsRecorder -> the stored cryogenics-log entry.
-    curve = json.loads(entry.values["level_curve"])
-    assert curve["unix_time"] and curve["helium_pct"]
-    assert len(curve["unix_time"]) == len(curve["helium_pct"])
+    # CryogenicsRecorder -> the run's recordings/<run_id>.json sidecar.
+    assert entry.values["recording"] == f"{entry.run_id}.json"
+    sidecar_path = servicing_store.recordings_path(entry.values["recording"])
+    curve = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    channel = curve["channels"]["level_meter.helium_pct"]
+    assert curve["unix_time"] and channel
+    assert len(curve["unix_time"]) == len(channel)
 
-    ops_entries = servicing_store.entries("operations")
-    assert len(ops_entries) == 1
-    assert ops_entries[0].values["operation"] == "Helium Fill"
-    assert ops_entries[0].values["status"] == "done"
+    # No legacy-kind writes at all (unification, Phase 2).
+    assert servicing_store.entries("cryogenics") == []
+    assert servicing_store.entries("operations") == []
