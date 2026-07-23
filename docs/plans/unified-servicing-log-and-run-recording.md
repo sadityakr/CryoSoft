@@ -1,6 +1,8 @@
 # Unified servicing log and per-run parameter recording
 
-Status: APPROVED 2026-07-23 (Aditya) — flat common table, no status field,
+Status: IMPLEMENTED 2026-07-23 (Aditya) — all four phases landed with a green
+harness (`make check`); see "Phasing" below for what each phase delivered.
+Flat common table, no status field,
 symmetric He/LN2 start+end levels, everything editable via revisions. Builds on
 `docs/plans/operation-concurrency-and-error-scoping.md` (claims, immediate
 finish, `run_summary()` hand-off) and `docs/plans/cryogenics-logbook.md`
@@ -178,7 +180,29 @@ servicing/<config_name>/
    readiness condition holds, for `hold_for_operator` operations (the fill's
    post-run-only banner is unchanged).
 4. **Viewer + export**: unified table, filter chips, recording plot, the
-   two CSV exports.
+   two CSV exports. DONE (2026-07-23): `gui/servicing_log_page.py` gained
+   `_ServicingLogTable`, used in place of the generic `_LogKindTable`
+   whenever a setup declares the `"servicing"` kind. One chronological
+   table (`sorted_servicing_entries`: parsed `start_utc`, falling back to
+   `created_utc`, newest first — parsed defensively, not by string order,
+   since a hand-edited entry is not guaranteed one ISO 8601 format), a row
+   of filter chips derived from the data's `entry_kind` values
+   (`distinct_entry_kinds`/`filter_entries_by_kind`, never hardcoded, styled
+   with the existing primary/secondary button-class toggle pattern), a
+   "View recording" button (enabled only when the selected row's
+   `recording` is non-empty) opening `ServicingRecordingDialog` — a summary
+   plus a lazily-loaded `pyqtgraph` plot of every channel in the sidecar
+   (`load_recording_sidecar`, tolerant of a missing/corrupt file — shows a
+   message, never raises), with its own "Export recording as CSV" button —
+   and "Export table as CSV" on the main table (over the currently filtered
+   rows). Both exports go through a `QFileDialog` save prompt calling a
+   pure, Qt-free helper (`write_servicing_table_csv`/`write_recording_csv`,
+   built on `csv.writer` for correct quoting, UTF-8), so the CSV logic is
+   unit-tested without driving a dialog. Add/Edit/Delete/History reuse the
+   existing `ServicingLogEntryDialog`/`RevisionHistoryDialog`/
+   `_DeleteConfirmDialog` machinery unchanged — the servicing kind's
+   `ParamSpec` defaults already give a manual Add form `origin="manual"`,
+   `entry_kind="manual"` with no extra code needed.
 
 Cross-cutting: GLOSSARY updates (Servicing log entry, Recording, Hold
 phase), folder READMEs in the same commits, conformance coverage for
