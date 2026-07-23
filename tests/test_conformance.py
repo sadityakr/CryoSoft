@@ -939,6 +939,7 @@ _SIM_MEASUREMENT_DRIVER_CLASSES = {
     "meter": "cryosoft.drivers.sim_keithley_2182a.SimKeithley2182A",
     "main": "cryosoft.drivers.sim_keithley_2400.SimKeithley2400",
     "lockin": "cryosoft.drivers.sim_lockin.SimLockIn",
+    "tensormeter": "cryosoft.drivers.sim_tensormeter_rtm2.SimTensormeterRTM2",
 }
 
 

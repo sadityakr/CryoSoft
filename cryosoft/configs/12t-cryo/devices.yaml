@@ -70,6 +70,16 @@ real_drivers:
   # no separate driver entry is used for that path. DC mode instead talks to
   # the 2182A directly over its own GPIB address; see keithley_2182a above.
 
+  # Tensormeter RTM2 (resistance-tensor analyzer): TCP, not VISA/GPIB — see
+  # cryosoft/drivers/tensormeter_rtm2.py module docstring. address is a
+  # PLACEHOLDER — run `python -c "from rtm2 import Discover; print(Discover())"`
+  # on a machine sharing the RTM2's LAN segment to find its IP, then update
+  # this before connecting. Port 6340 is the vendor's documented default.
+  tensormeter_rtm2:
+    class: cryosoft.drivers.tensormeter_rtm2.TensormeterRTM2
+    address: "169.254.169.184:6340"   # Found via Discover() 2026-07-23 (link-local — direct Ethernet/USB-adapter link, no DHCP)
+    expect_idn: "Tensormeter RTM2"
+
 virtual_instruments:
   magnet_z:
     class: cryosoft.virtual_instruments.magnet.superconducting_magnet_persistent.SuperconductingMagnetPersistentVI
@@ -170,6 +180,24 @@ virtual_instruments:
       # (open before close) if a run needs to guarantee no two channels are
       # ever connected together, even for an instant.
       hot_switching: true
+
+  # Bench-test wiring only: a 100-200 kOhm test resistor is currently
+  # connected across RTM2 BNC ports 1 and 2 (2026-07-23), so "ch1_ch2" is a
+  # single-state 2-wire route (DRV and SNS share the same two physical
+  # leads) — not a true 4-terminal van-der-Pauw wiring. Revisit once real
+  # multi-contact samples are landed. max_current_A is set for THIS
+  # resistor (10 uA -> <=2 V at 200 kOhm); rescale before wiring a
+  # lower-resistance sample.
+  tensormeter_measurement:
+    class: cryosoft.virtual_instruments.measurement.tensormeter_rtm2_measurement.TensormeterRTM2MeasurementVI
+    drivers: {tensormeter: tensormeter_rtm2}
+    vi_type: measurement
+    init_params:
+      routes:
+        ch1_ch2:
+          - {drv_minus: [2], drv_plus: [1], sns_minus: [2], sns_plus: [1]}
+      max_current_A: 0.00001
+      max_voltage_V: 10.0
 
 # Cryogenics: the helium-fill operation, the consumption display, and the
 # automatic level recorder are all built around level_vi (docs/plans/

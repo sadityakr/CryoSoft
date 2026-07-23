@@ -16,6 +16,7 @@ dependencies = [
     "numpy>=1.24",
     "pyvisa>=1.13",
     "pyserial>=3.5",
+    "rtm2 @ git+https://github.com/hzdrinno/rtm2-python.git@v1.2.3",
 ]
 
 [project.optional-dependencies]

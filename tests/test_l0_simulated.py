@@ -694,3 +694,91 @@ class TestSimLockIn:
         d._simulate_error = True
         with pytest.raises(CryoSoftCommunicationError):
             d.get_x()
+
+
+class TestSimTensormeterRTM2:
+    """Tests for SimTensormeterRTM2 resistance-tensor analyzer."""
+
+    def test_contract_single_string_init(self):
+        from cryosoft.drivers.sim_tensormeter_rtm2 import SimTensormeterRTM2
+
+        d = SimTensormeterRTM2("SIM")
+        assert d is not None
+
+    def test_build_switch_state_bit_layout(self):
+        """Bit 10 high (only) means BNC port 3 on DRV+ — vendor doc §3.11 example."""
+        from cryosoft.drivers.sim_tensormeter_rtm2 import SimTensormeterRTM2
+
+        d = SimTensormeterRTM2("SIM")
+        assert d.build_switch_state([], [3], [], []) == 1024
+
+    def test_build_switch_state_multi_port(self):
+        """Bits 0, 10, 17, 27 high — vendor doc §3.11 second example."""
+        from cryosoft.drivers.sim_tensormeter_rtm2 import SimTensormeterRTM2
+
+        d = SimTensormeterRTM2("SIM")
+        assert d.build_switch_state([1], [3], [2], [4]) == 134_349_825
+
+    def test_build_switch_state_rejects_out_of_range_port(self):
+        from cryosoft.drivers.sim_tensormeter_rtm2 import SimTensormeterRTM2
+
+        d = SimTensormeterRTM2("SIM")
+        with pytest.raises(ValueError):
+            d.build_switch_state([9], [], [], [])
+
+    def test_current_amplitude_get_set(self):
+        from cryosoft.drivers.sim_tensormeter_rtm2 import SimTensormeterRTM2
+
+        d = SimTensormeterRTM2("SIM")
+        assert d.set_current_amplitude(1e-3) == pytest.approx(1e-3)
+
+    def test_analysis_mode_round_trip(self):
+        from cryosoft.drivers.sim_tensormeter_rtm2 import SimTensormeterRTM2
+
+        d = SimTensormeterRTM2("SIM")
+        d.set_analysis_mode(3)  # Van-der-Pauw
+        assert d.get_detected_analysis_mode() == 3
+
+    def test_take_reading_produces_res_a_and_res_b(self):
+        """trigger_demodulation()+read_new_data() reflects the true-resistance test hooks."""
+        from cryosoft.drivers.sim_tensormeter_rtm2 import SimTensormeterRTM2
+
+        d = SimTensormeterRTM2("SIM")
+        d._true_sheet_resistance_ohm = 150_000.0
+        d._true_hall_resistance_ohm = 0.0
+        d._noise_ohm = 0.0  # deterministic
+        d.set_current_amplitude(1e-6)
+        d.clear_data()
+        d.trigger_demodulation()
+        rows = d.read_new_data()
+        assert len(rows) == 1
+        assert rows[0]["res_a_dc_ohm"] == pytest.approx(150_000.0)
+        assert rows[0]["res_b_dc_ohm"] == pytest.approx(0.0)
+
+    def test_read_new_data_only_returns_unread_rows(self):
+        from cryosoft.drivers.sim_tensormeter_rtm2 import SimTensormeterRTM2
+
+        d = SimTensormeterRTM2("SIM")
+        d.clear_data()
+        d.trigger_demodulation()
+        first = d.read_new_data()
+        assert len(first) == 1
+        d.trigger_demodulation()
+        second = d.read_new_data()
+        assert len(second) == 1
+        assert len(d.read_all_data()) == 2
+
+    def test_get_idn_returns_str(self):
+        from cryosoft.drivers.sim_tensormeter_rtm2 import SimTensormeterRTM2
+
+        d = SimTensormeterRTM2("SIM")
+        assert isinstance(d.get_idn(), str)
+
+    def test_simulate_error_raises(self):
+        from cryosoft.core.exceptions import CryoSoftCommunicationError
+        from cryosoft.drivers.sim_tensormeter_rtm2 import SimTensormeterRTM2
+
+        d = SimTensormeterRTM2("SIM")
+        d._simulate_error = True
+        with pytest.raises(CryoSoftCommunicationError):
+            d.get_idn()
