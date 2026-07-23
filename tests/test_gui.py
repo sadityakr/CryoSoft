@@ -841,7 +841,7 @@ def test_generic_field_sweep_renders_measurement_select_and_default_group(proced
     _select_procedure(procedure_win, FieldSweep.name)
 
     combo = _measurement_combo(procedure_win)
-    assert combo.count() == 3  # keithley_delta_mode + dc_measurement + lockin_harmonic
+    assert combo.count() == 4  # keithley_delta_mode + keithley_dc_mode + dc_measurement + lockin_harmonic
     # The default VI's params render (delta-mode).
     assert procedure_win.findChild(QComboBox, "param_voltmeter_range_V_input") is not None
     assert procedure_win.findChild(QLineEdit, "param_n_readings_input") is not None
@@ -1010,7 +1010,7 @@ def test_generic_field_sweep_method_combo_shows_selector_labels(procedure_win, s
     ]
     assert items == expected
     assert items == [
-        "Delta mode (6221 + 2182A)", "DC (6221 + 2182A)", "Lock-in 1f/2f (internal source)",
+        "Delta mode (6221 + 2182A)", "DC mode (6221 + 2182A)", "DC (6221 + 2182A)", "Lock-in 1f/2f (internal source)",
     ]
 
     # Each item carries its vi_name as a tooltip (disambiguation).
@@ -1058,7 +1058,7 @@ def test_live_plot_loop_selectors_follow_reading_loop(procedure_win, station):
     Hidden while nothing is loopable (lock-in VI, scanner off); visible but
     disabled once something is loopable with the slots off; enabled with one
     item per value — display text carrying the value, item data carrying the
-    index label — once a slot has two or more values.
+    0-based axis index — once a slot has two or more values.
     """
     from cryosoft.procedures.field_sweep import FieldSweep
 
@@ -1090,9 +1090,13 @@ def test_live_plot_loop_selectors_follow_reading_loop(procedure_win, station):
     _set_slot_parameter(
         procedure_win, "loop2_parameter", "dc_measurement.current_A"
     )
-    values_edit = procedure_win.findChild(QLineEdit, "param_loop2_values_input")
-    values_edit.setText("1e-6, -1e-6")
-    values_edit.editingFinished.emit()
+    # LoopValuesWidget doesn't have an objectName match by text — locate it
+    # via the form's param-input registry instead and populate it directly.
+    loop2_values_widget = procedure_win._params_panel._param_inputs.get("loop2_values")
+    assert loop2_values_widget is not None, "loop2_values widget not found"
+    loop2_values_widget.set_raw("1e-6, -1e-6")
+    # Trigger structural re-render since the loop values widget is structural
+    procedure_win._params_panel._on_structural_changed()
 
     sel1 = procedure_win.findChild(QComboBox, "plot1_loop1_selector")
     sel2 = procedure_win.findChild(QComboBox, "plot1_loop2_selector")
@@ -1100,16 +1104,18 @@ def test_live_plot_loop_selectors_follow_reading_loop(procedure_win, station):
     assert [sel1.itemText(i) for i in range(sel1.count())] == [
         "A1 = Mux-Ch1", "A2 = Mux-Ch2",
     ]
-    assert [sel1.itemData(i) for i in range(sel1.count())] == ["A1", "A2"]
+    assert [sel1.itemData(i) for i in range(sel1.count())] == [0, 1]
     assert sel2.isEnabled()
     assert [sel2.itemText(i) for i in range(sel2.count())] == [
         "B1 = 1e-06", "B2 = -1e-06",
     ]
-    # Axis keys stay plain — the Loop selectors pick the reading.
+    # Axis keys stay plain — the Loop selectors pick the reading. Raw-sample
+    # arrays are saved but never offered as a plot axis.
     x_sel = procedure_win.findChild(QComboBox, "x1_axis_selector")
     keys = [x_sel.itemText(i) for i in range(x_sel.count())]
     assert "voltage_V" in keys
     assert not any("__A" in k or "__B" in k for k in keys)
+    assert not any(k.endswith("_array") for k in keys)
 
 
 def test_param_form_renders_all_widget_kinds_and_round_trips(qtbot):
@@ -2206,6 +2212,35 @@ def test_closing_window_persists_to_isolated_ini_not_real_scope(
     settings.sync()
     assert settings.value("MonitorWindow/geometry") is not None
     assert isolated_settings.exists()
+
+
+def test_closing_window_aborts_active_run(monitor_win, orchestrator):
+    """Closing the app mid-run must safe the hardware, not just quit silently.
+
+    Regression for a real-hardware finding (2026-07-22): a Keithley 6221 left
+    armed/output-on because the window was closed while a run was still
+    active, with nothing to send the abort/standby commands. closeEvent()
+    must now call abort_procedure() whenever state is not already IDLE.
+    """
+    orchestrator._state = OrchestratorState.SWEEPING
+    monitor_win.close()
+    assert orchestrator.state == OrchestratorState.IDLE.value
+
+
+def test_closing_window_idle_does_not_call_abort(monitor_win, orchestrator, monkeypatch):
+    """Closing from an already-IDLE state must not call abort_procedure() at all.
+
+    abort_procedure() is documented safe to call with nothing running, but a
+    normal close (nothing active) should not emit a spurious "Aborted by
+    user" status / run_finished("aborted") signal.
+    """
+    calls = []
+    monkeypatch.setattr(
+        orchestrator, "abort_procedure", lambda: calls.append(True)
+    )
+    assert orchestrator.state == OrchestratorState.IDLE.value
+    monitor_win.close()
+    assert calls == []
 
 
 # ── Phase 2: notification banner (replaces modal dialog storms) ────────────────

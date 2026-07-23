@@ -31,7 +31,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -512,161 +512,137 @@ class ParamGroup:
         object.__setattr__(self, "params", dict(self.params))
 
 
+def _validate_dtype_columns(field_name: str, columns: Any) -> dict[str, str]:
+    """Validate a ``{name: "float"|"int"}`` mapping and return a defensive copy."""
+    if not isinstance(columns, dict):
+        raise TypeError(f"DataSchema.{field_name} must be a dict, got {columns!r}")
+    for name, dtype in columns.items():
+        if not isinstance(name, str):
+            raise TypeError(f"DataSchema.{field_name} key must be a str, got {name!r}")
+        if not name:
+            raise ValueError(f"DataSchema.{field_name} key must be a non-empty str")
+        if dtype not in _ALLOWED_DTYPES:
+            raise ValueError(
+                f"DataSchema.{field_name}[{name!r}] dtype {dtype!r} must be "
+                f"one of {sorted(_ALLOWED_DTYPES)}"
+            )
+    return dict(columns)
+
+
+def _validate_array_lengths(field_name: str, arrays: Any) -> dict[str, int]:
+    """Validate a ``{name: length}`` mapping and return a defensive copy."""
+    if not isinstance(arrays, dict):
+        raise TypeError(f"DataSchema.{field_name} must be a dict, got {arrays!r}")
+    for name, length in arrays.items():
+        if not isinstance(name, str):
+            raise TypeError(f"DataSchema.{field_name} key must be a str, got {name!r}")
+        if not name:
+            raise ValueError(f"DataSchema.{field_name} key must be a non-empty str")
+        if isinstance(length, bool) or not isinstance(length, int):
+            raise TypeError(
+                f"DataSchema.{field_name}[{name!r}] length must be an int, got {length!r}"
+            )
+        if length <= 0:
+            raise ValueError(
+                f"DataSchema.{field_name}[{name!r}] length must be > 0, got {length!r}"
+            )
+    return dict(arrays)
+
+
+def _nested_shape_leaves(value: Any, shape: tuple[int, ...]) -> list[Any] | None:
+    """Return the flat leaves of *value* if its nesting matches *shape*, else None.
+
+    Walks list/tuple/ndarray-like nesting (anything with ``__len__`` other than
+    a string) one ``shape`` dimension at a time. An empty ``shape`` means
+    *value* itself is the (scalar) leaf.
+    """
+    if not shape:
+        return [value]
+    if isinstance(value, (str, bytes)) or not hasattr(value, "__len__"):
+        return None
+    if len(value) != shape[0]:
+        return None
+    leaves: list[Any] = []
+    for item in value:
+        sub = _nested_shape_leaves(item, shape[1:])
+        if sub is None:
+            return None
+        leaves.extend(sub)
+    return leaves
+
+
 @dataclass(frozen=True)
 class DataSchema:
     """The declared HDF5 layout of one measurement run.
 
     Assembled at ``initiate()`` by composition: the sweep axis contributes its
-    sweep column, the station its system columns, the measurement VI its arrays,
-    and each looping level of the reading loop suffixes the arrays with its
-    index labels (see ``multiplexed``, applied once per level, slot 1 first;
-    suffixes compose as ``{name}__A{i}__B{j}``). This
-    is the single owner of the run's shape contract, the thing that catches
-    "HDF5 expected a different format" mismatches before any data is written.
-    Both dicts are defensively copied.
+    sweep column and the station its system columns — both ``sweep_columns``,
+    one value per sweep point, never looped — and the selected measurement VI
+    contributes its scalar columns (``measurement_scalars``, e.g. a
+    quantity's mean/error, or ``n_valid``) and raw-sample arrays
+    (``measurement_arrays``). Every measurement column carries a real
+    reading-loop axis: shape ``(n_loop1, n_loop2)`` for a scalar, or
+    ``(n_loop1, n_loop2, length)`` for an array — ``loop_shape`` declares the
+    axis lengths (``1`` means that slot is not looping). This is the single
+    owner of the run's shape contract, the thing that catches "HDF5 expected a
+    different format" mismatches before any data is written. All three dicts
+    are defensively copied.
 
     Attributes:
-        sweep_columns: Mapping of scalar column name to dtype string. Allowed
-            dtypes are "float" and "int". Defensively copied.
-        arrays: Mapping of array name to its per-point length (an ``int`` > 0;
-            ``bool`` is rejected). Defensively copied.
+        sweep_columns: Mapping of scalar column name to dtype string ("float"
+            or "int"). One value per sweep point — never looped (e.g.
+            ``unix_time``, system state, the sweep axis readback).
+        measurement_scalars: Mapping of scalar column name to dtype string.
+            One ``(n_loop1, n_loop2)`` grid of values per sweep point.
+        measurement_arrays: Mapping of array name to its per-point length (an
+            ``int`` > 0; ``bool`` is rejected). One ``(n_loop1, n_loop2,
+            length)`` grid of raw samples per sweep point.
+        loop_shape: ``(n_loop1, n_loop2)``, each ``>= 1``. Defaults to
+            ``(1, 1)`` — no reading loop.
     """
 
     sweep_columns: dict[str, str]
-    arrays: dict[str, int]
+    measurement_scalars: dict[str, str]
+    measurement_arrays: dict[str, int]
+    loop_shape: tuple[int, int] = (1, 1)
 
     def __post_init__(self) -> None:
-        """Validate names, dtypes and lengths; copy both dicts.
+        """Validate names, dtypes, lengths and ``loop_shape``; copy the dicts.
 
         Raises:
-            TypeError: If ``sweep_columns``/``arrays`` is not a dict, a name is
-                not a string, or an array length is not an int.
-            ValueError: If a name is empty, a dtype is not in the allowed set, or
-                an array length is not strictly positive.
+            TypeError: If a dict field is not a dict, a name is not a string,
+                an array length is not an int, or ``loop_shape`` is not a
+                ``(int, int)`` tuple.
+            ValueError: If a name is empty, a dtype is not in the allowed set,
+                an array length is not strictly positive, or a ``loop_shape``
+                entry is not ``>= 1``.
         """
-        if not isinstance(self.sweep_columns, dict):
+        sweep_columns = _validate_dtype_columns("sweep_columns", self.sweep_columns)
+        measurement_scalars = _validate_dtype_columns(
+            "measurement_scalars", self.measurement_scalars
+        )
+        measurement_arrays = _validate_array_lengths(
+            "measurement_arrays", self.measurement_arrays
+        )
+
+        loop_shape = self.loop_shape
+        if (
+            not isinstance(loop_shape, tuple)
+            or len(loop_shape) != 2
+            or any(isinstance(n, bool) or not isinstance(n, int) for n in loop_shape)
+        ):
             raise TypeError(
-                f"DataSchema.sweep_columns must be a dict, got {self.sweep_columns!r}"
+                f"DataSchema.loop_shape must be a (int, int) tuple, got {loop_shape!r}"
             )
-        for name, dtype in self.sweep_columns.items():
-            if not isinstance(name, str):
-                raise TypeError(
-                    f"DataSchema.sweep_columns key must be a str, got {name!r}"
-                )
-            if not name:
-                raise ValueError("DataSchema.sweep_columns key must be a non-empty str")
-            if dtype not in _ALLOWED_DTYPES:
-                raise ValueError(
-                    f"DataSchema.sweep_columns[{name!r}] dtype {dtype!r} must be "
-                    f"one of {sorted(_ALLOWED_DTYPES)}"
-                )
+        if any(n < 1 for n in loop_shape):
+            raise ValueError(
+                f"DataSchema.loop_shape entries must be >= 1, got {loop_shape!r}"
+            )
 
-        if not isinstance(self.arrays, dict):
-            raise TypeError(f"DataSchema.arrays must be a dict, got {self.arrays!r}")
-        for name, length in self.arrays.items():
-            if not isinstance(name, str):
-                raise TypeError(f"DataSchema.arrays key must be a str, got {name!r}")
-            if not name:
-                raise ValueError("DataSchema.arrays key must be a non-empty str")
-            if isinstance(length, bool) or not isinstance(length, int):
-                raise TypeError(
-                    f"DataSchema.arrays[{name!r}] length must be an int, got {length!r}"
-                )
-            if length <= 0:
-                raise ValueError(
-                    f"DataSchema.arrays[{name!r}] length must be > 0, got {length!r}"
-                )
-
-        object.__setattr__(self, "sweep_columns", dict(self.sweep_columns))
-        object.__setattr__(self, "arrays", dict(self.arrays))
-
-    def multiplexed(
-        self, routes: Sequence[str], scalar_columns: Sequence[str] = ()
-    ) -> DataSchema:
-        """Return a new schema with every array (and named scalars) per route.
-
-        ``routes`` is any ordered set of suffix labels — each looping level of
-        the reading loop reuses this one expansion with its index labels
-        (applied once per level, slot 1 first, so suffixes compose as
-        ``{name}__A{i}__B{j}``).
-
-        Each array ``name`` becomes ``f"{name}__{route}"`` for each route. The
-        resulting ``arrays`` dict is ordered arrays-outer, routes-inner: all
-        route variants of the first array appear first (in route order), then
-        all variants of the second, and so on.
-
-        By default ``sweep_columns`` is unchanged. The optional
-        ``scalar_columns`` argument names sweep columns that are *also* expanded
-        per route (e.g. a per-route ``n_valid`` becomes ``n_valid__Mux-Ch1``,
-        ``n_valid__Mux-Ch2``, … and the original ``n_valid`` is removed). Each
-        expanded scalar keeps the position it had among ``sweep_columns``; every
-        other sweep column is passed through unchanged. Passing the default
-        empty ``scalar_columns`` leaves ``sweep_columns`` byte-identical to this
-        schema's, so existing single-array multiplexing is unaffected.
-
-        Args:
-            routes: Ordered, non-empty sequence of unique route names. Each must
-                be a non-empty string containing neither "__" (the reserved
-                array/route separator) nor "/" (illegal in an HDF5 dataset name).
-            scalar_columns: Names of existing ``sweep_columns`` to expand once
-                per route as well (same suffix rule as the arrays). Every name
-                must already be a sweep column. Defaults to ``()`` (no scalar
-                expansion — the historical behaviour).
-
-        Returns:
-            A new ``DataSchema`` with the expanded arrays (and expanded scalars).
-
-        Raises:
-            TypeError: If a route is not a string.
-            ValueError: If ``routes`` is empty, a route is empty, contains "__"
-                or "/", the routes are not unique, or a name in
-                ``scalar_columns`` is not one of this schema's sweep columns.
-        """
-        routes = list(routes)
-        if not routes:
-            raise ValueError("DataSchema.multiplexed requires at least one route")
-        seen: set[str] = set()
-        for route in routes:
-            if not isinstance(route, str):
-                raise TypeError(f"DataSchema route must be a str, got {route!r}")
-            if not route:
-                raise ValueError("DataSchema route must be a non-empty str")
-            if "__" in route:
-                raise ValueError(
-                    f"DataSchema route {route!r} must not contain '__' "
-                    "(the array/route separator)"
-                )
-            if "/" in route:
-                raise ValueError(
-                    f"DataSchema route {route!r} must not contain '/' "
-                    "(illegal in an HDF5 dataset name)"
-                )
-            if route in seen:
-                raise ValueError(f"DataSchema route {route!r} is duplicated")
-            seen.add(route)
-
-        scalar_names = list(scalar_columns)
-        for col in scalar_names:
-            if col not in self.sweep_columns:
-                raise ValueError(
-                    f"DataSchema.multiplexed scalar column {col!r} is not one of "
-                    f"the sweep columns {list(self.sweep_columns)}"
-                )
-        scalar_set = set(scalar_names)
-
-        expanded_columns: dict[str, str] = {}
-        for name, dtype in self.sweep_columns.items():
-            if name in scalar_set:
-                for route in routes:
-                    expanded_columns[f"{name}__{route}"] = dtype
-            else:
-                expanded_columns[name] = dtype
-
-        expanded: dict[str, int] = {}
-        for name, length in self.arrays.items():
-            for route in routes:
-                expanded[f"{name}__{route}"] = length
-        return DataSchema(sweep_columns=expanded_columns, arrays=expanded)
+        object.__setattr__(self, "sweep_columns", sweep_columns)
+        object.__setattr__(self, "measurement_scalars", measurement_scalars)
+        object.__setattr__(self, "measurement_arrays", measurement_arrays)
+        object.__setattr__(self, "loop_shape", tuple(loop_shape))
 
     def validate(self, datapoint: Mapping[str, Any]) -> None:
         """Check one datapoint against this schema, reporting every problem.
@@ -678,11 +654,14 @@ class DataSchema:
         Checks performed:
             * every declared key is present (missing keys reported);
             * no undeclared keys are present (extra keys reported);
-            * each declared array value has ``len()`` equal to its declared
-              length (a wrong length, or a value with no ``len()``, is reported);
-            * each declared sweep-column value is a real-number scalar (``bool``
+            * each ``sweep_columns`` value is a real-number scalar (``bool``
               rejected; dtype "int" accepts ``int``, dtype "float" accepts
-              ``int`` or ``float``).
+              ``int`` or ``float``);
+            * each ``measurement_scalars`` value is a nested structure shaped
+              exactly ``loop_shape``, every leaf a real-number scalar (same
+              dtype rule as sweep columns);
+            * each ``measurement_arrays`` value is a nested structure shaped
+              exactly ``loop_shape + (length,)``.
 
         Args:
             datapoint: Mapping of column/array name to value to check.
@@ -693,7 +672,11 @@ class DataSchema:
         Raises:
             DataSchemaError: If any check fails; the message lists all problems.
         """
-        declared = set(self.sweep_columns) | set(self.arrays)
+        declared = (
+            set(self.sweep_columns)
+            | set(self.measurement_scalars)
+            | set(self.measurement_arrays)
+        )
         present = set(datapoint)
         problems: list[str] = []
 
@@ -701,23 +684,6 @@ class DataSchema:
             problems.append(f"missing declared key {key!r}")
         for key in sorted(present - declared):
             problems.append(f"extra undeclared key {key!r}")
-
-        for name, length in self.arrays.items():
-            if name not in datapoint:
-                continue
-            value = datapoint[name]
-            try:
-                actual = len(value)
-            except TypeError:
-                problems.append(
-                    f"array key {name!r} value {value!r} has no length "
-                    f"(expected length {length})"
-                )
-                continue
-            if actual != length:
-                problems.append(
-                    f"array key {name!r} has length {actual}, expected {length}"
-                )
 
         for name, dtype in self.sweep_columns.items():
             if name not in datapoint:
@@ -730,6 +696,38 @@ class DataSchema:
             elif dtype == "int" and not isinstance(value, int):
                 problems.append(
                     f"sweep column {name!r} value {value!r} is not an int (dtype 'int')"
+                )
+
+        for name, dtype in self.measurement_scalars.items():
+            if name not in datapoint:
+                continue
+            leaves = _nested_shape_leaves(datapoint[name], self.loop_shape)
+            if leaves is None:
+                problems.append(
+                    f"measurement scalar {name!r} does not match loop shape "
+                    f"{self.loop_shape}"
+                )
+                continue
+            for value in leaves:
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    problems.append(
+                        f"measurement scalar {name!r} has a non-real-number "
+                        f"value {value!r}"
+                    )
+                elif dtype == "int" and not isinstance(value, int):
+                    problems.append(
+                        f"measurement scalar {name!r} has a non-int value "
+                        f"{value!r} (dtype 'int')"
+                    )
+
+        for name, length in self.measurement_arrays.items():
+            if name not in datapoint:
+                continue
+            shape = (*self.loop_shape, length)
+            leaves = _nested_shape_leaves(datapoint[name], shape)
+            if leaves is None:
+                problems.append(
+                    f"measurement array {name!r} does not match shape {shape}"
                 )
 
         if problems:

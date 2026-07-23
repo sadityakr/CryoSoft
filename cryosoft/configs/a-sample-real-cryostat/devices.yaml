@@ -73,7 +73,7 @@ virtual_instruments:
       max_ramp_rate_K_per_min: 20.0
 
   temperature_sample:
-    class: cryosoft.virtual_instruments.temperature.sample_temperature_controller.SampleTemperatureControllerVI
+    class: cryosoft.virtual_instruments.temperature.lakeshore_335_sample_temperature_controller.Lakeshore335SampleTemperatureControllerVI
     drivers: {main: lakeshore_sample}
     vi_type: system
     init_params:
@@ -94,6 +94,12 @@ virtual_instruments:
 
   keithley_delta_mode:
     class: cryosoft.virtual_instruments.measurement.measurement_delta_mode.DeltaModeMeasurementVI
+    drivers: {source: keithley_6221, meter: keithley_2182a}
+    vi_type: measurement
+    init_params: {}
+
+  keithley_dc_mode:
+    class: cryosoft.virtual_instruments.measurement.measurement_dc_mode.DCModeMeasurementVI
     drivers: {source: keithley_6221, meter: keithley_2182a}
     vi_type: measurement
     init_params: {}

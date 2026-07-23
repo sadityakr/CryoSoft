@@ -12,8 +12,9 @@
 #   assembly, the shared four-method loop, and the reading loop (up to two
 #   generic slots, each a loopable parameter any reading-path VI advertises
 #   via reading_setters — the switch's route and a source's current alike —
-#   with a user-entered value list; columns are suffixed {name}__A{i}__B{j}
-#   and the label->value map is stored in the HDF5 metadata); a concrete axis
+#   with a user-entered value list; every measurement column carries a real
+#   (n_loop1, n_loop2) axis in HDF5 and the axis index->value map is stored
+#   in the HDF5 metadata as loop1_values/loop2_values); a concrete axis
 #   procedure supplies only the ramp targets, the axis read-back, and the
 #   settle times.
 # entry_point: Not run directly. Subclassed by concrete procedures.
@@ -689,19 +690,21 @@ class SweepMeasureProcedure(BaseProcedure):
       ``BaseProcedure._save_datapoint``). ``standby`` / ``abort`` disarm the VI.
     * **The reading loop.** One datapoint may comprise several readings,
       taken by up to TWO generic loop slots nested inside ``measure()`` (slot
-      1 outer, slot 2 inner). A slot is a loopable parameter — anything a
-      reading-path VI advertises via ``reading_setters``: the switch VI's
-      ``route`` and a measurement VI's ``current_A`` are the same concept —
-      plus an ordered value list from the auto-rendered "Reading loop" form
-      group (checkboxes for an enumerated parameter, comma-separated text
-      otherwise). A slot with ONE value is a static setting (dispatched once
-      at ``initiate()``, no suffix); with two or more it loops: value *i* is
-      measured under index label ``A{i}`` / ``B{i}``, columns compose as
-      ``{name}__A{i}__B{j}``, and the label -> value map is stored in the
-      HDF5 metadata (``procedure_params["loop_labels"]``). All per-reading
-      setup is dispatched as ``Command``s through the Station, never by
-      direct VI calls; participating non-measurement VIs get their
-      ``reading_safe_off`` (e.g. the switch's ``open_all``) at
+      1 = loop1 = axis 0, outer; slot 2 = loop2 = axis 1, inner). A slot is a
+      loopable parameter — anything a reading-path VI advertises via
+      ``reading_setters``: the switch VI's ``route`` and a measurement VI's
+      ``current_A`` are the same concept — plus an ordered value list from
+      the auto-rendered "Reading loop" form group (checkboxes for an
+      enumerated parameter, comma-separated text otherwise). A slot with ONE
+      value is a static setting (dispatched once at ``initiate()``); with two
+      or more it loops, dispatching value *i* before reading index *i* of its
+      axis. Every measurement column gets a real ``(n_loop1, n_loop2)`` array
+      axis in HDF5 (see ``DataSchema``/``_loop_shape``) — column names are
+      never suffixed; axis index -> physical value is recorded in the HDF5
+      metadata as ``procedure_params["loop1_values"]`` / ``["loop2_values"]``.
+      All per-reading setup is dispatched as ``Command``s through the
+      Station, never by direct VI calls; participating non-measurement VIs
+      get their ``reading_safe_off`` (e.g. the switch's ``open_all``) at
       standby/abort.
 
     A concrete axis procedure (``FieldSweep``, ``TemperatureSweep``) subclasses
@@ -880,6 +883,9 @@ class SweepMeasureProcedure(BaseProcedure):
                     "setter": setter,
                     "values": values,
                     "labels": labels,
+                    # Which loop_shape axis this slot occupies: 0 = loop1
+                    # (outer), 1 = loop2 (inner) — see measure()/_loop_shape.
+                    "axis": 0 if slot == "loop1" else 1,
                 }
             )
             self._params[f"{slot}_values"] = list(values)
@@ -888,20 +894,17 @@ class SweepMeasureProcedure(BaseProcedure):
         self._loop_levels: list[dict[str, Any]] = [
             s for s in self._loop_slots if s["labels"]
         ]
-        # Label -> value map for the HDF5 metadata (procedure_params).
-        self._params["loop_labels"] = {
-            label: value
-            for level in self._loop_levels
-            for label, value in zip(level["labels"], level["values"])
-        }
 
-        # Live-plot / data keys: each looping level suffixes the measurement
-        # columns with its index labels, slot 1 (outer) first:
-        # {key}__A{i}__B{j}. No looping level keeps the plain columns.
-        keys = list(vi.measurement_data_keys) + list(vi.measurement_scalar_columns)
-        for level in self._loop_levels:
-            keys = [f"{key}__{label}" for key in keys for label in level["labels"]]
-        self.measurement_data_keys = keys
+        # Live-plot / data keys: the plain measurement column names (the
+        # VI's mean/error/array triple names), minus the raw sample arrays —
+        # those are saved but never offered as a plot axis. The reading loop
+        # no longer suffixes column names: every measurement column carries a
+        # real (n_loop1, n_loop2) axis instead (see DataSchema).
+        self.measurement_data_keys = [
+            key
+            for key in list(vi.measurement_data_keys) + list(vi.measurement_scalar_columns)
+            if not key.endswith("_array")
+        ]
 
     # ------------------------------------------------------------------
     # Reading-loop plumbing (shared by __init__, the form, and the plots)
@@ -1125,6 +1128,7 @@ class SweepMeasureProcedure(BaseProcedure):
                         type=str,
                         default=str(selections.get(f"{slot}_values") or ""),
                         structural=True,
+                        widget_hint="array",
                         description=(
                             "Comma-separated values; one value sets it once, "
                             "two or more loop it at every sweep point"
@@ -1162,12 +1166,14 @@ class SweepMeasureProcedure(BaseProcedure):
     def live_plot_measurement_keys(
         cls, station: Station, selections: Mapping[str, Any] | None = None
     ) -> list[str]:
-        """Return the selected measurement VI's array + scalar column names.
+        """Return the selected measurement VI's plottable scalar column names.
 
         Keys stay the PLAIN column names even when a reading loop is defined:
-        the per-plot Loop and Route selectors (see ``live_plot_loop_labels``)
-        pick which reading of the datapoint is drawn, and the panel composes
-        the ``{key}__L{i}__{route}`` suffixes at draw time.
+        the per-plot Loop selectors (see ``live_plot_loop_labels``) pick
+        which ``(loop1, loop2)`` grid index is drawn, and the panel indexes
+        into that axis at draw time. Raw-sample-array columns (``*_array``)
+        are excluded — they are saved but never a plot axis; only the
+        mean/error/other scalar columns are offered.
         """
         names = station.measurement_vi_names()
         if not names:
@@ -1177,22 +1183,29 @@ class SweepMeasureProcedure(BaseProcedure):
         if selected not in names:
             selected = names[0]
         vi = station.get_vi(selected)
-        return list(vi.measurement_data_keys) + list(vi.measurement_scalar_columns)
+        return [
+            key
+            for key in list(vi.measurement_data_keys) + list(vi.measurement_scalar_columns)
+            if not key.endswith("_array")
+        ]
 
     @classmethod
     def live_plot_loop_labels(
         cls, station: Station, selections: Mapping[str, Any] | None = None
-    ) -> tuple[dict[str, str] | None, dict[str, str] | None]:
+    ) -> tuple[dict[int, str] | None, dict[int, str] | None]:
         """Return the two Loop-selector label maps for the current selections.
 
-        One entry per loop slot, in slot order. ``(None, None)`` when the
-        station's reading path offers nothing loopable (selectors hidden).
-        Per slot: ``{}`` when the slot is off, static (one value), or its
-        values are empty/invalid (selector visible, disabled; construction
-        refuses a bad list loudly); otherwise an ordered ``{label: display}``
-        map like ``{"A1": "A1 = Mux-Ch1", ...}`` / ``{"B1": "B1 = 1e-06",
-        ...}``. All loop params are ``structural=True`` precisely so their
-        values reach ``selections`` and their changes re-derive the selectors.
+        One entry per loop slot, in slot order (loop1 = axis 0, loop2 = axis
+        1). ``(None, None)`` when the station's reading path offers nothing
+        loopable (selectors hidden). Per slot: ``{}`` when the slot is off,
+        static (one value), or its values are empty/invalid (selector
+        visible, disabled; construction refuses a bad list loudly); otherwise
+        an ordered ``{axis_index: display}`` map like ``{0: "A1 =
+        Mux-Ch1", 1: "A2 = Mux-Ch2"}`` — the key is the 0-based index into
+        that axis's ``(n_loop1, n_loop2)`` grid dimension (see
+        ``DataSchema``/``_loop_shape``), the value a human-readable label.
+        All loop params are ``structural=True`` precisely so their values
+        reach ``selections`` and their changes re-derive the selectors.
         """
         names = station.measurement_vi_names()
         if not names:
@@ -1205,7 +1218,7 @@ class SweepMeasureProcedure(BaseProcedure):
         if not registry:
             return (None, None)
 
-        maps: list[dict[str, str]] = []
+        maps: list[dict[int, str]] = []
         for slot, prefix in (("loop1", "A"), ("loop2", "B")):
             qualified = selections.get(f"{slot}_parameter") or ""
             entry = registry.get(qualified)
@@ -1233,13 +1246,13 @@ class SweepMeasureProcedure(BaseProcedure):
                 continue
             maps.append(
                 {
-                    f"{prefix}{i}": (
-                        f"{prefix}{i} = {value:g}"
+                    index: (
+                        f"{prefix}{index + 1} = {value:g}"
                         if isinstance(value, (int, float))
                         and not isinstance(value, bool)
-                        else f"{prefix}{i} = {value}"
+                        else f"{prefix}{index + 1} = {value}"
                     )
-                    for i, value in enumerate(values, start=1)
+                    for index, value in enumerate(values)
                 }
             )
         return (maps[0], maps[1])
@@ -1276,13 +1289,29 @@ class SweepMeasureProcedure(BaseProcedure):
     # Shared four-method loop
     # ------------------------------------------------------------------
 
+    @property
+    def _loop_shape(self) -> tuple[int, int]:
+        """Return ``(n_loop1, n_loop2)`` — each ``>= 1``.
+
+        ``1`` means that slot is off or static (a single value, dispatched
+        once at ``initiate()``); any larger count is the number of values the
+        reading loop dispatches on that axis. Derived from
+        ``self._params["loop1_values"]`` / ``["loop2_values"]``, which
+        ``__init__`` always populates (empty when the slot is off).
+        """
+        n1 = len(self._params.get("loop1_values") or []) or 1
+        n2 = len(self._params.get("loop2_values") or []) or 1
+        return (n1, n2)
+
     def _build_data_schema(self, vi: Any) -> DataSchema:
         """Assemble this run's ``DataSchema`` from the axis, station, and VI.
 
-        Sweep columns: ``unix_time`` + every system column
-        (``station.last_state_flat()``, populated by the ``get_state()`` poll in
-        ``initiate()``) + the axis data-key + the VI's scalar columns. Arrays:
-        the VI's ``data_arrays`` for the selected measurement params.
+        Sweep columns (never looped): ``unix_time`` + every system column
+        (``station.last_state_flat()``, populated by the ``get_state()`` poll
+        in ``initiate()``) + the axis data-key. Measurement scalars/arrays:
+        the VI's ``measurement_scalar_columns`` / ``data_arrays`` for the
+        selected measurement params, each carrying the real ``_loop_shape``
+        axis (see ``DataSchema``) instead of suffixed column names.
 
         Args:
             vi: The selected measurement VI instance.
@@ -1294,25 +1323,12 @@ class SweepMeasureProcedure(BaseProcedure):
         for key in self._station.last_state_flat():
             sweep_columns[key] = "float"
         sweep_columns[type(self).sweep_axis.data_key] = "float"
-        for name, dtype in vi.measurement_scalar_columns.items():
-            sweep_columns[name] = dtype
-        arrays = dict(vi.data_arrays(self._measurement_params))
-        base = DataSchema(sweep_columns=sweep_columns, arrays=arrays)
-
-        # The reading loop expands the schema once per looping level, slot 1
-        # (outer) first, so suffixes compose as "<name>__A<i>__B<j>". Each
-        # level expands every measurement array and the VI's per-point scalar
-        # columns (e.g. n_valid). A slot that is off or static leaves the
-        # schema untouched, exactly as before that level existed.
-        scalar_names = tuple(vi.measurement_scalar_columns.keys())
-        for level in self._loop_levels:
-            base = base.multiplexed(level["labels"], scalar_columns=scalar_names)
-            scalar_names = tuple(
-                f"{name}__{label}"
-                for name in scalar_names
-                for label in level["labels"]
-            )
-        return base
+        return DataSchema(
+            sweep_columns=sweep_columns,
+            measurement_scalars=dict(vi.measurement_scalar_columns),
+            measurement_arrays=dict(vi.data_arrays(self._measurement_params)),
+            loop_shape=self._loop_shape,
+        )
 
     def initiate(self) -> PhasePlan:
         """Ramp to the first sweep point, arm the selected VI, open the file.
@@ -1354,7 +1370,9 @@ class SweepMeasureProcedure(BaseProcedure):
         self._data_schema = self._build_data_schema(vi)
         data_config = {
             "sweep_columns": dict(self._data_schema.sweep_columns),
-            "measurement_arrays": dict(self._data_schema.arrays),
+            "measurement_scalars": dict(self._data_schema.measurement_scalars),
+            "measurement_arrays": dict(self._data_schema.measurement_arrays),
+            "loop_shape": list(self._data_schema.loop_shape),
         }
 
         self._data_manager = DataManager(
@@ -1400,14 +1418,17 @@ class SweepMeasureProcedure(BaseProcedure):
     def measure(self) -> None:
         """Run the reading loop, tag on the axis read-back, and save.
 
-        The reading loop takes every reading of one datapoint by nesting the
-        looping slots: slot 1 (outer) x slot 2 (inner). Before each reading it
-        dispatches the level's setter (as a ``Command`` through the Station —
-        the same channel ``initiate()`` and the Orchestrator use, never a
-        direct call on another VI) and suffixes the returned columns with the
-        level's index labels, composing as ``{name}__A{i}__B{j}``. A slot
-        that is off or static contributes no level, so with no looping slots
-        this is a single plain ``take_reading()``.
+        The reading loop takes one grid of readings per datapoint: axis 1
+        (outer, loop1) x axis 2 (inner, loop2), each of length declared by
+        ``_loop_shape``. Before each axis-1 step it dispatches that slot's
+        setter (as a ``Command`` through the Station — the same channel
+        ``initiate()`` and the Orchestrator use, never a direct call on
+        another VI); before each axis-2 reading it dispatches axis 2's setter.
+        A slot that is off or static contributes no dispatch (its single
+        value was already set at ``initiate()``) but still occupies its
+        trivial length-1 axis. Every measurement column comes back as a real
+        ``(n_loop1, n_loop2)`` (or ``(n_loop1, n_loop2, length)`` for an
+        array) grid — column names are never suffixed.
 
         Raises:
             RuntimeError: If called before ``initiate()``.
@@ -1417,34 +1438,30 @@ class SweepMeasureProcedure(BaseProcedure):
         if self._data_manager is None:
             raise RuntimeError("measure() called before initiate()")
         vi = self._station.get_vi(self._measurement_vi)
-        measured_data: dict = {}
+        n_loop1, n_loop2 = self._loop_shape
+        keys = list(vi.measurement_data_keys) + list(vi.measurement_scalar_columns)
+        grids: dict[str, list[list[Any]]] = {
+            key: [[None] * n_loop2 for _ in range(n_loop1)] for key in keys
+        }
 
         def _dispatch(level: dict[str, Any], value: Any) -> None:
             self._station.send_measurement_commands(
                 (Command(level["vi_name"], level["setter"], {level["param"]: value}),)
             )
 
-        def _read(suffix: str) -> None:
-            for key, value in vi.take_reading().items():
-                measured_data[f"{key}{suffix}"] = value
+        axis1 = next((lv for lv in self._loop_levels if lv["axis"] == 0), None)
+        axis2 = next((lv for lv in self._loop_levels if lv["axis"] == 1), None)
 
-        levels = self._loop_levels
-        if not levels:
-            _read("")
-        else:
-            outer = levels[0]
-            inner = levels[1] if len(levels) > 1 else None
-            for outer_label, outer_value in zip(outer["labels"], outer["values"]):
-                _dispatch(outer, outer_value)
-                if inner is None:
-                    _read(f"__{outer_label}")
-                else:
-                    for inner_label, inner_value in zip(
-                        inner["labels"], inner["values"]
-                    ):
-                        _dispatch(inner, inner_value)
-                        _read(f"__{outer_label}__{inner_label}")
+        for i1 in range(n_loop1):
+            if axis1 is not None:
+                _dispatch(axis1, axis1["values"][i1])
+            for i2 in range(n_loop2):
+                if axis2 is not None:
+                    _dispatch(axis2, axis2["values"][i2])
+                for key, value in vi.take_reading().items():
+                    grids[key][i1][i2] = value
 
+        measured_data: dict[str, Any] = dict(grids)
         measured_data[type(self).sweep_axis.data_key] = self._axis_readback()
         self._save_datapoint(measured_data)
 

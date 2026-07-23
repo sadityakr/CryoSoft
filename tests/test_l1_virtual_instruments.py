@@ -1,4 +1,4 @@
-﻿# ---
+# ---
 # description: |
 #   Complete test suite for Layer 1 Virtual Instruments.
 # entry_point: pytest tests/test_l1_virtual_instruments.py -v
@@ -108,6 +108,57 @@ def test_communication_error_wrapping(monkeypatch):
     vi = MockCommVI({"main": None})
     with pytest.raises(CryoSoftCommunicationError):
         vi.fail()
+
+
+# 3b. MeasurementInstrumentBase mean/error/array convention helpers
+def test_mean_and_sem_multiple_samples():
+    from cryosoft.virtual_instruments.base import MeasurementInstrumentBase
+
+    mean, sem = MeasurementInstrumentBase.mean_and_sem([1.0, 2.0, 3.0])
+    assert mean == pytest.approx(2.0)
+    # stdev([1,2,3], ddof=1) == 1.0; sem == 1.0 / sqrt(3)
+    assert sem == pytest.approx(1.0 / 3**0.5)
+
+
+def test_mean_and_sem_single_sample_has_zero_error():
+    from cryosoft.virtual_instruments.base import MeasurementInstrumentBase
+
+    mean, sem = MeasurementInstrumentBase.mean_and_sem([5.0])
+    assert mean == pytest.approx(5.0)
+    assert sem == 0.0
+
+
+def test_mean_and_sem_no_samples_is_nan():
+    from cryosoft.virtual_instruments.base import MeasurementInstrumentBase
+    import math
+
+    mean, sem = MeasurementInstrumentBase.mean_and_sem([])
+    assert math.isnan(mean)
+    assert math.isnan(sem)
+
+
+def test_quantity_columns_derives_array_mean_error_keys():
+    from cryosoft.virtual_instruments.base import MeasurementInstrumentBase
+
+    array_keys, scalar_columns = MeasurementInstrumentBase.quantity_columns(
+        "voltage_V", "current_A"
+    )
+    assert array_keys == ["voltage_V_array", "current_A_array"]
+    assert scalar_columns == {
+        "voltage_V": "float",
+        "voltage_V_error": "float",
+        "current_A": "float",
+        "current_A_error": "float",
+    }
+
+
+def test_quantity_columns_rejects_colliding_base_name():
+    from cryosoft.core.exceptions import CryoSoftConfigError
+    from cryosoft.virtual_instruments.base import MeasurementInstrumentBase
+
+    with pytest.raises(CryoSoftConfigError, match="_array' or '_error'"):
+        MeasurementInstrumentBase.quantity_columns("voltage_V_error")
+
 
 # 4. Magnet VI tests
 def test_magnet_vi_ramp_cycle():
@@ -241,9 +292,13 @@ def test_delta_mode_vi():
     data = vi.take_reading()
     assert "voltage_V" in data
     assert "current_A" in data
-    assert len(data["voltage_V"]) == 10
-    assert len(data["current_A"]) == 10
+    assert len(data["voltage_V_array"]) == 10
+    assert len(data["current_A_array"]) == 10
     assert data["n_valid"] == 10
+    assert data["voltage_V"] == pytest.approx(
+        sum(data["voltage_V_array"]) / 10
+    )
+    assert data["voltage_V_error"] >= 0.0
 
 
 def test_delta_mode_vi_forwards_all_config_params():
@@ -337,7 +392,8 @@ def test_delta_mode_set_current_rearms_and_reports_new_current():
     assert source._delta_high_current == pytest.approx(5e-6)
 
     data = vi.take_reading()
-    assert all(c == pytest.approx(5e-6) for c in data["current_A"])
+    assert all(c == pytest.approx(5e-6) for c in data["current_A_array"])
+    assert data["current_A"] == pytest.approx(5e-6)
     assert data["n_valid"] == 4
 
 
@@ -397,13 +453,193 @@ def test_delta_mode_short_return_is_nan_padded():
     vi.initiate_measurement(current=1e-6, n_readings=10, delay_s=0.001)
     data = vi.take_reading()
 
-    assert len(data["voltage_V"]) == 10
-    assert len(data["current_A"]) == 10
+    assert len(data["voltage_V_array"]) == 10
+    assert len(data["current_A_array"]) == 10
     assert data["n_valid"] == 3
     # First 3 are real; the padded tail is NaN in both arrays.
-    assert all(not math.isnan(v) for v in data["voltage_V"][:3])
-    assert all(math.isnan(v) for v in data["voltage_V"][3:])
-    assert all(math.isnan(c) for c in data["current_A"][3:])
+    assert all(not math.isnan(v) for v in data["voltage_V_array"][:3])
+    assert all(math.isnan(v) for v in data["voltage_V_array"][3:])
+    assert all(math.isnan(c) for c in data["current_A_array"][3:])
+    # Mean/error are computed only from the 3 valid samples, not the NaN pad.
+    assert not math.isnan(data["voltage_V"])
+    assert not math.isnan(data["voltage_V_error"])
+
+
+def test_dc_mode_measurement_vi_lifecycle():
+    from cryosoft.virtual_instruments.measurement.measurement_dc_mode import DCModeMeasurementVI
+
+    source = SimKeithley6221("SIM")
+    meter = SimKeithley2182A("SIM")
+    source._paired_meter = meter
+    vi = DCModeMeasurementVI({"source": source, "meter": meter})
+
+    assert vi.ping() is True
+
+    # Before initiate, take_reading/set_dc_current should raise RuntimeError
+    with pytest.raises(RuntimeError):
+        vi.take_reading()
+
+    with pytest.raises(RuntimeError):
+        vi.set_dc_current(1e-6)
+
+    # Initiate
+    vi.initiate_measurement(
+        current=2e-6,
+        n_readings=10,
+        voltmeter_range_V=0.1,
+        compliance_V=2.0,
+        delay_s=0.001,
+        compliance_abort=True
+    )
+    assert source._mode == "DC"
+    assert source.get_current() == pytest.approx(2e-6)
+    assert source.get_compliance() == pytest.approx(2.0)
+    assert meter.get_range() == pytest.approx(0.1)
+
+    # Take reading
+    data = vi.take_reading()
+    assert len(data["voltage_V_array"]) == 10
+    assert len(data["current_A_array"]) == 10
+    assert data["n_valid"] == 10
+    assert all(c == pytest.approx(2e-6) for c in data["current_A_array"])
+    assert data["current_A"] == pytest.approx(2e-6)
+    assert data["current_A_error"] == pytest.approx(0.0)
+
+    # Test reading-loop setter
+    vi.set_dc_current(5e-6)
+    assert source.get_current() == pytest.approx(5e-6)
+    data = vi.take_reading()
+    assert all(c == pytest.approx(5e-6) for c in data["current_A_array"])
+
+    # Test standby
+    vi.standby()
+    assert source.get_current() == pytest.approx(0.0)
+    with pytest.raises(RuntimeError):
+        vi.take_reading()
+
+
+def test_dc_mode_initiate_resets_source_before_compliance():
+    """initiate_measurement() must force a known-idle source before arming.
+
+    Live commissioning against a real 6221 (2026-07-22) hit -221 "Settings
+    conflict" on the very first command of a second run of the same DC-mode
+    loop, even though the prior run's standby() had already zeroed the
+    source — initiate_measurement() set compliance first, with nothing of
+    its own to abort a state standby() might have left armed. Pins the fix:
+    a reset-to-zero call (which drives the real driver's :SOUR:SWE:ABORt)
+    must land before compliance is (re)programmed on every initiate_measurement()
+    call, not just relying on the previous run's standby() to have done it.
+    """
+    from cryosoft.virtual_instruments.measurement.measurement_dc_mode import DCModeMeasurementVI
+
+    class RecordingSource(SimKeithley6221):
+        def __init__(self, resource_string: str) -> None:
+            super().__init__(resource_string)
+            self.calls: list[str] = []
+
+        def set_current(self, current: float) -> None:
+            self.calls.append(f"set_current({current!r})")
+            super().set_current(current)
+
+        def set_compliance(self, compliance_v: float) -> None:
+            self.calls.append(f"set_compliance({compliance_v!r})")
+            super().set_compliance(compliance_v)
+
+    source = RecordingSource("SIM")
+    meter = SimKeithley2182A("SIM")
+    source._paired_meter = meter
+    vi = DCModeMeasurementVI({"source": source, "meter": meter})
+
+    vi.initiate_measurement(current=2e-6, n_readings=1, compliance_V=2.0)
+
+    # A reset-to-zero must precede compliance being (re)armed, then the real
+    # target current is set last.
+    reset_idx = source.calls.index("set_current(0.0)")
+    compliance_idx = source.calls.index("set_compliance(2.0)")
+    target_idx = source.calls.index("set_current(2e-06)")
+    assert reset_idx < compliance_idx < target_idx
+
+
+def test_dc_mode_measurement_compliance_abort():
+    import math
+    from cryosoft.virtual_instruments.measurement.measurement_dc_mode import DCModeMeasurementVI
+
+    source = SimKeithley6221("SIM")
+    meter = SimKeithley2182A("SIM")
+    source._paired_meter = meter
+    vi = DCModeMeasurementVI({"source": source, "meter": meter})
+
+    # Trigger compliance abort. Since paired meter simulates 1500 Ohm load,
+    # sourcing 1 mA (1e-3 A) yields 1.5 V. With compliance at 1.0 V, it will
+    # trigger compliance abort.
+    vi.initiate_measurement(
+        current=1e-3,
+        n_readings=5,
+        voltmeter_range_V=1.0,
+        compliance_V=1.0,
+        delay_s=0.001,
+        compliance_abort=True
+    )
+
+    data = vi.take_reading()
+    # It should abort at the first reading since compliance is checked before the read
+    assert data["n_valid"] == 0
+    assert all(math.isnan(v) for v in data["voltage_V_array"])
+    assert all(math.isnan(c) for c in data["current_A_array"])
+    # Zero valid samples -> mean/error is NaN, not computed from the NaN pad.
+    assert math.isnan(data["voltage_V"])
+    assert math.isnan(data["voltage_V_error"])
+
+
+def test_dc_mode_read_now_bench_test():
+    """read_now() is the front-panel bench-test hook for manual readings.
+
+    Unlike take_reading() (Procedure-only), read_now() is a @control the GUI
+    can click, and caches its result into the last_voltage_V /
+    last_mean_voltage_V / last_n_valid @monitored fields so an operator can
+    see what the Keithley returned without running a full procedure.
+    """
+    from cryosoft.virtual_instruments.measurement.measurement_dc_mode import DCModeMeasurementVI
+
+    source = SimKeithley6221("SIM")
+    meter = SimKeithley2182A("SIM")
+    source._paired_meter = meter
+    vi = DCModeMeasurementVI({"source": source, "meter": meter})
+
+    # Before any read_now(), the monitored fields report None ("—" in the GUI).
+    assert vi.last_voltage_V() is None
+    assert vi.last_mean_voltage_V() is None
+    assert vi.last_n_valid() is None
+
+    # read_now() before initiate_measurement() must raise, same as take_reading().
+    with pytest.raises(RuntimeError):
+        vi.read_now()
+
+    vi.initiate_measurement(
+        current=2e-6,
+        n_readings=10,
+        voltmeter_range_V=0.1,
+        compliance_V=2.0,
+        delay_s=0.001,
+        compliance_abort=True,
+    )
+
+    vi.read_now()
+    assert vi.last_n_valid() == 10
+    assert isinstance(vi.last_voltage_V(), float)
+    assert isinstance(vi.last_mean_voltage_V(), float)
+    # Sim meter noise is tiny (1e-8 std) relative to the ~mV-scale reading, so
+    # the last sample and the 10-sample mean should sit close together.
+    assert vi.last_voltage_V() == pytest.approx(vi.last_mean_voltage_V(), abs=1e-6)
+
+    # read_now() is a @control (GUI-discoverable) and takes no parameters.
+    assert getattr(vi.read_now, "_is_control", False) is True
+    assert getattr(vi.read_now, "_control_params", {}) == {}
+
+    # The last_* fields are @monitored (polled + displayed every tick).
+    assert getattr(vi.last_voltage_V, "_is_monitored", False) is True
+    assert getattr(vi.last_mean_voltage_V, "_is_monitored", False) is True
+    assert getattr(vi.last_n_valid, "_is_monitored", False) is True
 
 
 # 16. Shared-instrument mode discipline (see GLOSSARY.md and
@@ -440,6 +676,44 @@ def test_dc_separate_initiate_recovers_from_stale_delta_arm():
 
     assert source._mode == "DC"
     assert source.get_current() == pytest.approx(5e-6)
+
+
+def test_dc_mode_initiate_recovers_from_stale_delta_arm():
+    """DCModeMeasurementVI's initiate() must not depend on a prior standby().
+
+    Mirrors test_dc_separate_initiate_recovers_from_stale_delta_arm above,
+    but for the VI actually wired to real hardware in devices.yaml
+    (keithley_dc_mode: source=keithley_6220, meter=keithley_2182a on its own
+    GPIB address). Arms delta mode on the shared 6221 WITHOUT calling
+    standby() first — the Orchestrator normally would, and closeEvent() now
+    also forces an abort on window close, but this proves DC mode's
+    initiate_measurement() is safe even if BOTH of those were skipped (e.g.
+    the app was killed rather than closed cleanly). See the live-hardware
+    finding this session (2026-07-22): -221 "Settings conflict" on a real
+    6221 traced to exactly this — a run left un-aborted, then a fresh
+    initiate_measurement() assuming a clean starting state.
+    """
+    from cryosoft.virtual_instruments.measurement.measurement_dc_mode import DCModeMeasurementVI
+    from cryosoft.virtual_instruments.measurement.measurement_delta_mode import (
+        DeltaModeMeasurementVI,
+    )
+
+    source = SimKeithley6221("SIM")
+    meter = SimKeithley2182A("SIM")
+    source._paired_meter = meter
+
+    delta_vi = DeltaModeMeasurementVI({"source": source, "meter": source})
+    delta_vi.initiate_measurement(current=1e-6, n_readings=5)
+    assert source._mode == "DELTA"
+
+    dc_vi = DCModeMeasurementVI({"source": source, "meter": meter})
+    dc_vi.initiate_measurement(current=5e-6, n_readings=3, compliance_V=1.0)
+
+    assert source._mode == "DC"
+    assert source.get_current() == pytest.approx(5e-6)
+
+    data = dc_vi.take_reading()
+    assert data["n_valid"] == 3
 
 
 def test_delta_mode_initiate_recovers_from_prior_dc_current():

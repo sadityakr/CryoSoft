@@ -41,7 +41,16 @@ real_drivers:
     class: cryosoft.drivers.keithley_6221.Keithley6221
     address: "GPIB0::19::INSTR"
     expect_idn: "KEITHLEY INSTRUMENTS INC.,MODEL 6220"
-  
+
+  # DC mode's voltmeter, now on its own GPIB address (confirmed live
+  # 2026-07-22) rather than the RS-232 relay through keithley_6220. Delta
+  # mode is unaffected: it still reaches the 2182A over the 6220's internal
+  # serial relay via configure_and_start_delta()/acquire_delta_readings().
+  keithley_2182a:
+    class: cryosoft.drivers.keithley_2182a.Keithley2182A
+    address: "GPIB0::28::INSTR"
+    expect_idn: "KEITHLEY INSTRUMENTS INC.,MODEL 2182A"
+
   # DDC command set verified against the 705 manual (705-901-01F) and this
   # instrument at the bench on 2026-07-20: channels are plain numbers 1..20
   # (U8X reports F001,L020), closed with Cnnn / opened with Nnnn.
@@ -56,9 +65,10 @@ real_drivers:
     address: "GPIB0::17::INSTR"
     expect_idn: "705"
   
-  # NOTE: Keithley 2182A is connected via RS232 serial to the K6220.
-  # Delta mode uses the internal serial relay in K6220.configure_and_start_delta().
-  # No separate driver entry needed — K6220 driver handles both instruments.
+  # NOTE: Delta mode still reaches the 2182A via RS-232 serial relay through
+  # the K6220 (K6220.configure_and_start_delta()/acquire_delta_readings()) —
+  # no separate driver entry is used for that path. DC mode instead talks to
+  # the 2182A directly over its own GPIB address; see keithley_2182a above.
 
 virtual_instruments:
   magnet_z:
@@ -98,7 +108,7 @@ virtual_instruments:
       buffer_size: 5
 
   temperature_sample:
-    class: cryosoft.virtual_instruments.temperature.sample_temperature_controller.SampleTemperatureControllerVI
+    class: cryosoft.virtual_instruments.temperature.lakeshore_335_sample_temperature_controller.Lakeshore335SampleTemperatureControllerVI
     drivers: {main: lakeshore_sample}
     vi_type: system
     init_params:
@@ -111,6 +121,12 @@ virtual_instruments:
   keithley_delta_mode:
     class: cryosoft.virtual_instruments.measurement.measurement_delta_mode.DeltaModeMeasurementVI
     drivers: {source: keithley_6220, meter: keithley_6220}  # serial relay to K2182A
+    vi_type: measurement
+    init_params: {}
+
+  keithley_dc_mode:
+    class: cryosoft.virtual_instruments.measurement.measurement_dc_mode.DCModeMeasurementVI
+    drivers: {source: keithley_6220, meter: keithley_2182a}  # 2182A on its own GPIB address
     vi_type: measurement
     init_params: {}
 
@@ -147,6 +163,13 @@ virtual_instruments:
         ch20: ["20"]
       settle_time_s: 1.0
       pole_mode: 4
+      # Hot-switching (default True, also runtime-toggleable via
+      # set_hot_switching): close the new channel before opening the old one
+      # so the K6220 current source never briefly sees an open circuit
+      # between routes and rails to compliance. Set False for cold-switching
+      # (open before close) if a run needs to guarantee no two channels are
+      # ever connected together, even for an instant.
+      hot_switching: true
 
 # Cryogenics: the helium-fill operation, the consumption display, and the
 # automatic level recorder are all built around level_vi (docs/plans/

@@ -413,10 +413,12 @@ def test_measure_saves_datapoint(procedure, tmp_path):
     procedure.standby()
 
     with h5py.File(filepath, "r") as f:
-        # Only 1 point was saved → standby() trims datasets to shape (1, 5)
+        # Only 1 point was saved → standby() trims datasets to shape
+        # (1, n_loop1, n_loop2, ...) = (1, 1, 1, ...) here (no reading loop).
         assert not np.isnan(f["data"]["field_T"][0])
-        assert not np.any(np.isnan(f["data"]["voltage_V"][0]))
-        assert f["data"]["voltage_V"].shape == (1, 5)
+        assert not np.any(np.isnan(f["data"]["voltage_V_array"][0]))
+        assert f["data"]["voltage_V_array"].shape == (1, 1, 1, 5)
+        assert not np.isnan(f["data"]["voltage_V"][0, 0, 0])  # mean
 
 
 def test_measure_stores_snapshot(procedure, tmp_path):

@@ -43,6 +43,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -50,11 +51,20 @@ from PyQt6.QtWidgets import (
     QGroupBox,
     QLineEdit,
     QWidget,
+    QTableWidget,
+    QTableWidgetItem,
+    QPushButton,
+    QVBoxLayout,
+    QHBoxLayout,
+    QHeaderView,
 )
+import qtawesome as qta
 
 from cryosoft.core.plan import ParamGroup, ParamSpec
+from cryosoft.gui.theme import TEXT_PRIMARY
 
 __all__ = [
+    "LoopValuesWidget",
     "build_param_widget",
     "build_param_tooltip",
     "build_form_layout",
@@ -63,6 +73,94 @@ __all__ = [
     "get_widget_raw",
     "set_widget_raw",
 ]
+
+
+class LoopValuesWidget(QWidget):
+    """A structured array/list editor widget for parameter loop values.
+
+    Renders a single-column table of values with Add/Remove buttons.
+    """
+
+    def __init__(self, default_val: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._build_ui()
+        self.set_raw(default_val)
+
+    def _build_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        # Single column table: "Value"
+        self._table = QTableWidget(0, 1)
+        self._table.setObjectName("loop_values_table")
+        self._table.setHorizontalHeaderLabels(["Value"])
+        self._table.verticalHeader().setVisible(False)
+        self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._table.setMaximumHeight(120)  # keep it compact
+        self._table.cellClicked.connect(self._on_cell_clicked)
+        layout.addWidget(self._table)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(4)
+        
+        self._add_btn = QPushButton()
+        self._add_btn.setObjectName("loop_values_add_btn")
+        self._add_btn.setIcon(qta.icon("fa5s.plus", color=TEXT_PRIMARY))
+        self._add_btn.setToolTip("Add loop value")
+        self._add_btn.setMaximumWidth(32)
+        self._add_btn.clicked.connect(self._add_row)
+        
+        self._remove_btn = QPushButton()
+        self._remove_btn.setObjectName("loop_values_remove_btn")
+        self._remove_btn.setIcon(qta.icon("fa5s.minus", color=TEXT_PRIMARY))
+        self._remove_btn.setToolTip("Remove selected loop value")
+        self._remove_btn.setMaximumWidth(32)
+        self._remove_btn.clicked.connect(self._remove_row)
+
+        btn_row.addWidget(self._add_btn)
+        btn_row.addWidget(self._remove_btn)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+
+    def _on_cell_clicked(self, row: int, column: int) -> None:
+        item = self._table.item(row, column)
+        if item is not None and item.flags() & Qt.ItemFlag.ItemIsEditable:
+            self._table.editItem(item)
+
+    def _add_row(self) -> None:
+        row = self._table.rowCount()
+        self._table.insertRow(row)
+        self._table.setItem(row, 0, QTableWidgetItem(""))
+
+    def _remove_row(self) -> None:
+        row = self._table.currentRow()
+        if row >= 0:
+            self._table.removeRow(row)
+        elif self._table.rowCount() > 0:
+            self._table.removeRow(self._table.rowCount() - 1)
+
+    def get_raw(self) -> str:
+        vals = []
+        for r in range(self._table.rowCount()):
+            item = self._table.item(r, 0)
+            if item is not None:
+                text = item.text().strip()
+                if text:
+                    vals.append(text)
+        return ", ".join(vals)
+
+    def set_raw(self, raw: str) -> None:
+        self._table.setRowCount(0)
+        if not raw:
+            return
+        # Split by comma to get individual values/ranges
+        parts = [p.strip() for p in raw.split(",") if p.strip()]
+        for part in parts:
+            row = self._table.rowCount()
+            self._table.insertRow(row)
+            self._table.setItem(row, 0, QTableWidgetItem(part))
+
 
 
 def build_param_widget(param_name: str, spec: ParamSpec) -> QWidget:
@@ -101,6 +199,14 @@ def build_param_widget(param_name: str, spec: ParamSpec) -> QWidget:
         field = QLineEdit(str(spec.default))
         field.setPlaceholderText("YYYY-MM-DDTHH:MM:SS+00:00 (UTC)")
         return field
+    if spec.widget_hint == "array":
+        default_str = ""
+        if spec.default:
+            if isinstance(spec.default, (list, tuple)):
+                default_str = ", ".join(str(x) for x in spec.default)
+            else:
+                default_str = str(spec.default)
+        return LoopValuesWidget(default_str)
     return QLineEdit(str(spec.default))
 
 
@@ -255,6 +361,8 @@ def collect_value(widget: QWidget, spec: ParamSpec) -> Any:
         return spec.choices[widget.currentText()]
     if spec.type is bool:
         return widget.isChecked()
+    if isinstance(widget, LoopValuesWidget):
+        return spec.type(widget.get_raw())
     raw = widget.text().strip()
     return spec.type(raw)
 
@@ -276,6 +384,8 @@ def get_widget_raw(widget: QWidget) -> str:
         return widget.currentText()
     if isinstance(widget, QCheckBox):
         return str(widget.isChecked())
+    if isinstance(widget, LoopValuesWidget):
+        return widget.get_raw()
     return widget.text() if isinstance(widget, QLineEdit) else ""
 
 
@@ -295,5 +405,7 @@ def set_widget_raw(widget: QWidget, raw: str) -> None:
             widget.setCurrentText(raw)
     elif isinstance(widget, QCheckBox):
         widget.setChecked(raw == "True")
+    elif isinstance(widget, LoopValuesWidget):
+        widget.set_raw(raw)
     elif isinstance(widget, QLineEdit):
         widget.setText(raw)

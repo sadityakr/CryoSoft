@@ -10,21 +10,23 @@
 # dependencies:
 #   - PyQt6 >= 6.5
 #   - pyqtgraph >= 0.13
-#   - numpy
 # input: |
 #   Constructor objectName strings (preserved so findChild-by-name still works),
 #   a list of available axis keys via set_available_keys(), per-slot
 #   reading-loop label maps via set_available_loop_labels() (optional; hidden
-#   by default), and a datapoint history (list of enriched dicts) via
-#   redraw().
+#   by default; keys are 0-based axis indices), and a datapoint history (list
+#   of enriched dicts) via redraw().
 # process: |
 #   set_available_keys() repopulates X/Y selectors, preserving still-valid
 #   selections. set_available_loop_labels() shows/hides/enables each Loop
-#   selector from its slot's label map (hidden if None, disabled if <2
-#   entries, enabled if >=2). redraw() extracts scalar X/Y series
-#   (suffix-composed as __A<i>__B<j> from the selected loop readings, with
-#   progressive fallback for unsuffixed columns) from the datapoint history
-#   and feeds them to the curve.
+#   selector from its slot's {axis_index: display} label map (hidden if None,
+#   disabled if <2 entries, enabled if >=2; itemData is the axis index).
+#   redraw() reads X/Y series by indexing directly into each measurement
+#   column's (n_loop1, n_loop2) grid at the selected indices (0 when a slot
+#   is inactive); sweep-only columns (unix_time, system state, sweep axis)
+#   are plain scalars with no grid to index. Every plottable value is already
+#   a scalar by construction — computing it is the measurement method's job
+#   (see MeasurementInstrumentBase), never the plot panel's.
 #   Changing any selector redraws against the last datapoint list the panel
 #   was handed.
 # output: |
@@ -38,7 +40,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtWidgets import (
     QComboBox,
@@ -52,22 +53,24 @@ from PyQt6.QtWidgets import (
 logger = logging.getLogger(__name__)
 
 
-def _extract_scalar(raw: Any) -> float:
-    """Convert a datapoint value to a plottable float.
+def _to_float(raw: Any) -> float:
+    """Convert a datapoint value to a plottable float, or NaN when absent.
 
-    A measurement value may be a scalar or an array (e.g. a buffer of samples);
-    arrays are reduced to their mean so a single point can be plotted.
+    Every plottable column is already a scalar: computing it — the mean of
+    a quantity's raw samples — is the measurement method's responsibility
+    (``MeasurementInstrumentBase.mean_and_sem``), never the plot panel's.
+    ``*_array`` columns are excluded from the plottable key list, so this
+    function does no array reduction; a non-scalar reaching it is a bug
+    upstream, not something to paper over here.
 
     Args:
-        raw: The raw value pulled from a datapoint dict (may be ``None``,
-            a scalar, or an array-like).
+        raw: The raw value pulled from a datapoint dict (may be ``None``
+            or a scalar).
 
     Returns:
         The value as a float, or NaN when the value is ``None``.
     """
-    if raw is None:
-        return float("nan")
-    return float(np.mean(raw)) if hasattr(raw, "__len__") else float(raw)
+    return float("nan") if raw is None else float(raw)
 
 
 class LivePlotPanel(QGroupBox):
@@ -81,8 +84,9 @@ class LivePlotPanel(QGroupBox):
     the parent re-supplying the data. The two reading-loop selectors (one per
     loop slot) are hidden by default; call ``set_available_loop_labels`` to
     show them for looped measurements. Axis keys stay the PLAIN column names —
-    the selected loop readings are composed onto them at draw time
-    (``{key}__A{i}__B{j}``, with fallback for unsuffixed columns).
+    each measurement column is a real ``(n_loop1, n_loop2)`` grid in every
+    datapoint, and the selected loop indices (0 when a slot is inactive) are
+    used to index directly into it at draw time.
 
     Args:
         title: Group-box title (e.g. ``"Plot 1"``).
@@ -210,7 +214,7 @@ class LivePlotPanel(QGroupBox):
             self._y_selector.setCurrentText(default_y)
 
     def set_available_loop_labels(
-        self, label_maps: tuple[dict[str, str] | None, dict[str, str] | None]
+        self, label_maps: tuple[dict[int, str] | None, dict[int, str] | None]
     ) -> None:
         """Show/hide/enable the two Loop selectors, one per reading-loop slot.
 
@@ -218,11 +222,11 @@ class LivePlotPanel(QGroupBox):
         selector is hidden. ``{}`` means a loop is possible but that slot is
         off/static/invalid — visible but disabled. With two or more entries
         the selector is enabled: each item shows the display text (e.g.
-        ``"A1 = Mux-Ch1"``) and carries the bare suffix label (``"A1"``) as
-        its item data, which ``_redraw`` uses to pick the column.
+        ``"A1 = Mux-Ch1"``) and carries the 0-based axis index as its item
+        data, which ``_redraw`` uses to index into that slot's grid axis.
 
         Args:
-            label_maps: One ordered ``{suffix_label: display_text}`` map (or
+            label_maps: One ordered ``{axis_index: display_text}`` map (or
                 ``{}`` / ``None``) per loop slot, in slot order.
         """
         for label_widget, selector, labels in zip(
@@ -244,10 +248,10 @@ class LivePlotPanel(QGroupBox):
                 prev = selector.currentData()
                 selector.blockSignals(True)
                 selector.clear()
-                for label, display in labels.items():
-                    selector.addItem(display, label)
-                index = selector.findData(prev)
-                selector.setCurrentIndex(index if index >= 0 else 0)
+                for index, display in labels.items():
+                    selector.addItem(display, index)
+                found = selector.findData(prev)
+                selector.setCurrentIndex(found if found >= 0 else 0)
                 selector.blockSignals(False)
         self._redraw()
 
@@ -274,51 +278,47 @@ class LivePlotPanel(QGroupBox):
         x_key = self._x_selector.currentText()
         y_key = self._y_selector.currentText()
 
-        # Selected suffix label per loop slot ("" when that slot is inactive).
-        picked: list[str] = []
+        # Selected axis index per loop slot (0 — the trivial index into a
+        # length-1 axis — when that slot is inactive/not picked). Also
+        # collect the display text of any active pick, for the axis label.
+        indices: list[int] = []
+        qualifiers: list[str] = []
         for selector in self._loop_selectors:
             if (
                 selector.isVisible()
                 and selector.isEnabled()
-                and selector.currentData()
+                and selector.currentData() is not None
             ):
-                picked.append(str(selector.currentData()))
+                indices.append(int(selector.currentData()))
+                qualifiers.append(selector.currentText())
             else:
-                picked.append("")
-        slot1, slot2 = picked
-
-        # Candidate suffixes, most-specific first, matching the reading-loop
-        # column composition {name}__A{i}__B{j}. The trailing plain key is the
-        # fallback for sweep columns, system state, etc., which the reading
-        # loop never suffixes.
-        suffixes: list[str] = []
-        if slot1 and slot2:
-            suffixes.append(f"__{slot1}__{slot2}")
-        if slot1:
-            suffixes.append(f"__{slot1}")
-        if slot2:
-            suffixes.append(f"__{slot2}")
-        suffixes.append("")
+                indices.append(0)
+        i1, i2 = indices
 
         def _lookup(dp: dict, key: str):
-            for suffix in suffixes:
-                value = dp.get(f"{key}{suffix}")
-                if value is not None:
-                    return value
-            return None
+            # Every measurement column is a real (n_loop1, n_loop2) grid;
+            # sweep-only columns (unix_time, system state, sweep axis) are
+            # plain scalars with no grid to index.
+            raw = dp.get(key)
+            if raw is None or not hasattr(raw, "__len__"):
+                return raw
+            try:
+                return raw[i1][i2]
+            except (IndexError, TypeError):
+                return None
 
         xs = []
         ys = []
         for dp in self._datapoints:
-            xs.append(_extract_scalar(_lookup(dp, x_key)))
-            ys.append(_extract_scalar(_lookup(dp, y_key)))
+            xs.append(_to_float(_lookup(dp, x_key)))
+            ys.append(_to_float(_lookup(dp, y_key)))
 
         self._curve.setData(xs, ys)
         x_label = x_key.replace("_", " ")
         y_label = y_key.replace("_", " ")
-        qualifiers = ", ".join(q for q in picked if q)
-        if qualifiers:
-            x_label += f" ({qualifiers})"
-            y_label += f" ({qualifiers})"
+        qualifier_text = ", ".join(qualifiers)
+        if qualifier_text:
+            x_label += f" ({qualifier_text})"
+            y_label += f" ({qualifier_text})"
         self._plot_widget.setLabel("bottom", x_label)
         self._plot_widget.setLabel("left", y_label)

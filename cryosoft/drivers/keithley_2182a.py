@@ -68,6 +68,16 @@ class Keithley2182A:
         self._instr.write_termination = "\n"
         self._instr.read_termination = "\n"
 
+        # Live commissioning (2026-07-22, GPIB0::28) found the instrument
+        # ships with continuous initiation on (:INIT:CONT? -> 1, :TRIG:COUN?
+        # -> ~9.9e37 — free-running). READ?'s implicit :INIT is then always
+        # rejected as "-213 Init ignored" (harmless — :FETCh? still returns a
+        # fresh conversion since one is always in flight) but it fills the
+        # error queue on every get_voltage() call. Pinning single-shot mode
+        # here makes each READ? do exactly what it looks like it does: one
+        # trigger, one fresh reading, idle in between, zero spurious errors.
+        self._write(":INIT:CONT OFF")
+
     # ------------------------------------------------------------------
     # Public API  (matches SimKeithley2182A)
     # ------------------------------------------------------------------

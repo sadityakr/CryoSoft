@@ -93,8 +93,8 @@ attribute: the switch VI's `route` (setter `select_route`, safe-off
 `open_all`) and the DC measurement VI's `current_A` (setter
 `set_source_current`) are the *same concept*, so a setup with no scanner
 simply has one fewer loopable parameter and no special case anywhere. Slot 1
-(index labels `A1, A2, …`) is the outer level, slot 2 (`B1, B2, …`) the inner
-one.
+(loop1) is axis 0 (outer) of every measurement column's real loop axis, slot 2
+(loop2) axis 1 (inner).
 
 The **Reading loop** form group renders automatically whenever anything is
 loopable: one `{slot}_parameter` drop-down per slot plus that parameter's
@@ -102,15 +102,17 @@ values input — per-choice `{slot}_pick_{value}` checkboxes when the ParamSpec
 is enumerated (tick the channels), a `{slot}_values` comma-separated text
 field otherwise (e.g. `1e-6, -1e-6`), each value validated against the
 parameter's own spec at construction. A slot with ONE value is a static
-setting (dispatched once at `initiate()`, no suffix); with two or more it
-loops: the setter is dispatched as a `Command` through the Station before
-every reading and columns compose as `{name}__A{i}__B{j}`. The label -> value
-map is stored in the HDF5 metadata (`procedure_params["loop_labels"]`);
-participating non-measurement VIs get their `reading_safe_off` at
-standby/abort. The live plots mirror the slots with per-plot Loop 1 / Loop 2
-selectors (fed by `live_plot_loop_labels()`, items like "A1 = Mux-Ch1"); axis
-keys stay the plain column names and the panel composes the suffix at draw
-time.
+setting (dispatched once at `initiate()`, trivial length-1 axis); with two or
+more it loops: the setter is dispatched as a `Command` through the Station
+before every reading at that axis index. Every measurement column (mean,
+error, raw-sample array, `n_valid`, …) carries the real `(n_loop1, n_loop2)`
+axis in HDF5 — column names are never suffixed. Axis index -> physical value
+is stored in the HDF5 metadata (`procedure_params["loop1_values"]` /
+`["loop2_values"]`); participating non-measurement VIs get their
+`reading_safe_off` at standby/abort. The live plots mirror the slots with
+per-plot Loop 1 / Loop 2 selectors (fed by `live_plot_loop_labels()`, items
+like "A1 = Mux-Ch1" with the axis index as item data); axis keys stay the
+plain column names and the panel indexes directly into the grid at draw time.
 
 ## Operations
 

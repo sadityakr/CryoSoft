@@ -114,6 +114,16 @@ virtual_instruments:
       role: Delta-mode resistance measurement (source + nanovoltmeter pair)
       manufacturer: Keithley
       model: 6221 + 2182A
+
+  keithley_dc_mode:
+    class: cryosoft.virtual_instruments.measurement.measurement_dc_mode.DCModeMeasurementVI
+    drivers: {source: keithley_6221, meter: keithley_2182a}
+    vi_type: measurement
+    init_params: {}
+    metadata:
+      role: DC mode resistance measurement (source + nanovoltmeter pair)
+      manufacturer: Keithley
+      model: 6221 + 2182A
   dc_measurement:
     class: cryosoft.virtual_instruments.measurement.dc_separate_measurement.DCSeparateMeasurementVI
     drivers: {source: keithley_6221, meter: keithley_2182a}
