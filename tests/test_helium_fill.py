@@ -147,6 +147,29 @@ def test_helium_fill_end_to_end(orchestrator, station, tmp_path, qtbot):
     assert summary["end_pct"] == pytest.approx(70.0)
 
 
+def test_helium_fill_finishes_with_no_unmet_postconditions(orchestrator, station, tmp_path):
+    """A normal finish reports NO unmet postconditions (regression).
+
+    The SLOW-refresh restore is dispatched within the finishing tick itself,
+    AFTER that tick's monitoring poll, so the one-shot refresh gate used to
+    read the stale FAST value out of cached_state and report a spuriously
+    unmet postcondition on every single fill. The Orchestrator now refreshes
+    the state snapshot between dispatching standby() and evaluating gates.
+    """
+    _fast_magnets(station)
+    station.level_meter._driver._force_helium_level = 70.0
+    op = _make_op(station, tmp_path)
+
+    finished: list[dict] = []
+    orchestrator.run_finished.connect(finished.append)
+    orchestrator.run_operation(op)
+
+    _tick_until(orchestrator, lambda: bool(finished), max_ticks=1000, sleep_s=0.005)
+
+    assert finished[0]["status"] == "done"
+    assert finished[0]["postconditions_unmet"] == []
+
+
 def test_helium_fill_accumulates_multiple_curve_points(orchestrator, station, tmp_path):
     """A fill that takes a few sample cycles to settle accumulates more than one point."""
     _fast_magnets(station)

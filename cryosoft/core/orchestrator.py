@@ -1801,6 +1801,18 @@ class Orchestrator(QObject):
                 self._emit_status("Parking hardware")
                 self._emit_setup_actions(plan.targets, plan.commands, verb="Ramping")
 
+        # Refresh the state snapshot before the one-shot evaluation: the
+        # standby commands went out within THIS tick, after the last
+        # monitoring poll, so a gate reading cached_state would otherwise
+        # verify against pre-standby values and report spuriously unmet
+        # (e.g. the fill's restore-SLOW-refresh gate). Ramps standby() just
+        # started are still honestly mid-flight — only command effects
+        # become visible, which is exactly what the gates verify.
+        try:
+            self._station.get_state()
+        except Exception:
+            logger.exception("State refresh before postcondition evaluation failed")
+
         unmet = self._evaluate_postconditions_once(procedure)
         if unmet:
             message = f"Postcondition(s) not met at finish: {', '.join(unmet)}"
