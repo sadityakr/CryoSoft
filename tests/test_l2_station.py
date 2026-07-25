@@ -426,7 +426,7 @@ def test_check_safety_flags_magnet_quench(sim_station: Station):
 
 
 # ---------------------------------------------------------------------------
-# Runtime fault registry (docs/plans/operation-concurrency-and-error-scoping.md §3)
+# Runtime fault registry
 # ---------------------------------------------------------------------------
 
 def test_fault_recorded_on_stale_then_disconnected(sim_station: Station):
@@ -502,7 +502,7 @@ def test_level_meter_disconnect_records_fault_independent_of_debounce(sim_statio
     """A disconnected level meter records a fault whether or not helium_low has
     won the debounce majority vote yet.
 
-    Guards the interplay called out in plan §3: the runtime fault registry
+    Guards the interplay between the two: the runtime fault registry
     (vi_faults(), always reflecting the *current* comm state) is independent
     of check_safety()'s debounced safety verdict (which may lag a few ticks
     behind — see test_check_safety_sustained_disconnect_still_trips).

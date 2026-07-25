@@ -16,7 +16,7 @@
 #   forces the field to that session's own data/ folder (remembering
 #   whatever it held before, to restore on close), and a plain status note
 #   (no stylesheet) appears whenever the field points outside the open
-#   session's folder — see docs/plans/unified-session-record.md §5.
+#   session's folder.
 # entry_point: Not run directly. Hosted as MonitorWindow's bottom-left quadrant.
 # dependencies:
 #   - PyQt6 >= 6.5
@@ -100,7 +100,7 @@ class SessionInfoPanel(QWidget):
     ) -> None:
         super().__init__(parent)
         self._session_manager = session_manager
-        # Data Dir transition tracking (rule 3, plan §5): _last_experiment_id
+        # Data Dir transition tracking (rule 3): _last_experiment_id
         # detects an actual open/switch transition (vs. a same-experiment
         # experiment_changed re-emit from e.g. an attendance/findings edit);
         # _pre_session_data_dir remembers the field's manual value from just

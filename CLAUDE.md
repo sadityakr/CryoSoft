@@ -69,6 +69,18 @@ it automatically. Existing standards include:
   Purpose, Architecture layer, Entry, Exit, Interface contract, How to add a
   new module, and Files sections. Update it in the same commit as the code
   change it describes.
+- **Code-reference standard**: comments and docstrings in `cryosoft/` cite
+  *standards*, never plan documents. Name the concept ("the hard status
+  separation", "the claim standard") and, if a pointer is needed, point at
+  `GLOSSARY.md`, the folder `README.md`, or the owning base class. Never
+  write `plan §4.2` or `docs/plans/<name>.md §3` in code. Plans in
+  `docs/plans/` are dated proposals that get implemented, superseded, and
+  archived; a code comment citing one is a pointer that rots silently and
+  says nothing to a reader who does not fetch the document. The code plus
+  its READMEs must present the complete picture on their own. Vendor
+  documentation is the deliberate exception: an instrument manual's section
+  number (`vendor doc §3.11`) is a stable external reference and belongs in
+  the driver that implements it.
 
 ## Build bottom-up, test at every layer
 

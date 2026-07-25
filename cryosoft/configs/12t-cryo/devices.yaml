@@ -221,7 +221,7 @@ cryogenics:
 servicing_logs:                  # which declared log kinds this setup keeps
   - servicing
 
-# Cryostat-servicing operations (docs/plans/cryogenics-logbook.md §9). Each
+# Cryostat-servicing operations (docs/plans/archive/cryogenics-logbook.md §9). Each
 # named sub-block configures one OperationBase subclass; a setup that omits
 # an operation's block still gets that operation's class-level defaults.
 operations:

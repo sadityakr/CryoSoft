@@ -1,11 +1,17 @@
 # Unified servicing log and per-run parameter recording
 
+> **ARCHIVED 2026-07-25 — IMPLEMENTED 2026-07-23.** This is the **normative
+> reference for the flat `servicing` log kind, the Recording sidecar shape,
+> and `run_summary()` hand-off**, cited 27 times from shipped code and
+> tests. Do not plan new work from it; see
+> [`../agentic-instrumentation-framework.md`](../agentic-instrumentation-framework.md).
+
 Status: IMPLEMENTED 2026-07-23 (Aditya) — all four phases landed with a green
 harness (`make check`); see "Phasing" below for what each phase delivered.
 Flat common table, no status field,
 symmetric He/LN2 start+end levels, everything editable via revisions. Builds on
-`docs/plans/operation-concurrency-and-error-scoping.md` (claims, immediate
-finish, `run_summary()` hand-off) and `docs/plans/cryogenics-logbook.md`
+`docs/plans/archive/operation-concurrency-and-error-scoping.md` (claims, immediate
+finish, `run_summary()` hand-off) and `docs/plans/archive/cryogenics-logbook.md`
 (the servicing-log framework). Supersedes, once implemented, the split
 between the `cryogenics` log kind and the machine-only `operations` stream.
 

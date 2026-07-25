@@ -453,10 +453,10 @@ class BaseProcedure:
     def claimed_vi_names(self) -> set[str] | None:
         """Return the VI names this procedure exclusively owns while running.
 
-        Concurrency-scope hook (docs/plans/operation-concurrency-and-error-
-        scoping.md §1): the Orchestrator captures this once, at run start,
-        into ``_active_claims`` and consults it to decide whether a manual
-        front-panel action submitted while this procedure is running may be
+        Concurrency-scope hook: the Orchestrator captures this once, at run
+        start, into ``_active_claims`` and consults it to decide whether a
+        manual front-panel action submitted while this procedure is running
+        may be
         admitted. A VI named in the returned set is refused (the refusal
         names this procedure as the owner); every VI NOT in the set stays
         under manual control exactly as in IDLE.

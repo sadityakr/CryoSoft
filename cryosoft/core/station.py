@@ -17,10 +17,9 @@
 #   for registry-system VIs whose class vi_type == "magnet". read_cryogenics_
 #   config()/read_servicing_logs_config()/read_operations_config() mirror
 #   read_instrument_metadata()'s GUI-safe YAML-only pattern for the optional
-#   cryogenics:/servicing_logs:/operations: config blocks
-#   (docs/plans/cryogenics-logbook.md §9). Runtime fault registry (plan
-#   operation-concurrency-and-error-scoping.md §3): get_state() also
-#   populates a structured FaultRecord per stale/disconnected VI
+#   cryogenics:/servicing_logs:/operations: config blocks. Runtime fault
+#   registry: get_state() also populates a structured FaultRecord per
+#   stale/disconnected VI
 #   (vi_faults(), acknowledge_fault(), clear_fault() — auto-cleared on the
 #   next successful poll), and retry_fault() resets the error counter and
 #   forces one fresh poll (never rebuilds drivers — that is
@@ -108,7 +107,7 @@ class OfflineInstrument:
 
 @dataclass(frozen=True)
 class FaultRecord:
-    """Record of a RUNTIME fault on a VI that DID connect (plan §3).
+    """Record of a RUNTIME fault on a VI that DID connect.
 
     The runtime sibling of :class:`OfflineInstrument`: an offline instrument
     never connected at build time; a ``FaultRecord`` describes a VI that was
@@ -165,7 +164,7 @@ class Station:
         self._driver_specs: dict[str, dict] = {}   # {alias: driver config}
         self._vi_specs: dict[str, dict] = {}       # {vi_name: vi config}
         self._drivers: dict[str, Any] = {}         # {alias: live driver}
-        # Runtime fault registry (plan §3) — a VI that DID connect but has
+        # Runtime fault registry — a VI that DID connect but has
         # since gone stale/disconnected during polling. Distinct from
         # _offline_vis (never connected at build time).
         self._vi_faults: dict[str, FaultRecord] = {}
@@ -254,7 +253,7 @@ class Station:
         see GLOSSARY.md's "vi_type (class)" / "vi_type (config/registry)"
         entries). The order is config order, so a caller that defaults to
         "every magnet" (e.g. the helium-fill operation forcing all magnets to
-        zero field, plan §8.1) gets a stable, config-controlled list —
+        zero field) gets a stable, config-controlled list —
         mirrors ``switch_vi_names()``.
 
         Returns:
@@ -589,7 +588,7 @@ class Station:
         return full_state
 
     # ------------------------------------------------------------------
-    # Runtime fault registry (plan §3) — the RUNTIME sibling of the
+    # Runtime fault registry — the RUNTIME sibling of the
     # offline-instrument registry above: an offline instrument never
     # connected at build time, a fault record describes a VI that DID
     # connect and has since gone stale/disconnected during polling.
@@ -647,7 +646,7 @@ class Station:
         self._vi_faults.pop(vi_name, None)
 
     def retry_fault(self, vi_name: str) -> tuple[bool, str]:
-        """Reset *vi_name*'s error counter and force one fresh poll (plan §3).
+        """Reset *vi_name*'s error counter and force one fresh poll.
 
         The runtime counterpart of ``retry_instrument()``: it does NOT
         rebuild any driver (the VI is already live) — it only resets the
@@ -854,8 +853,8 @@ class Station:
         A parallel accessor to ``check_safety()`` (same OR-combination logic)
         that additionally names the originating instrument(s) — used by the
         Orchestrator so an EMERGENCY reason and its ``ErrorEvent`` can name
-        the instrument (plan §3), without changing ``check_safety()``'s
-        existing ``{flag: bool}`` signature (other callers are unaffected).
+        the instrument, without changing ``check_safety()``'s existing
+        ``{flag: bool}`` signature (other callers are unaffected).
 
         Args:
             state: Snapshot from ``get_state()``. ``None`` uses the last
@@ -1321,9 +1320,9 @@ def read_instrument_metadata(config_path: str) -> dict[str, dict[str, str]]:
     return result
 
 
-# Defaults applied by read_cryogenics_config() for every key the config omits
-# (docs/plans/cryogenics-logbook.md §9). ``helium_volume_l`` deliberately has
-# no default: its absence means "no L/h display", not "0 L".
+# Defaults applied by read_cryogenics_config() for every key the config
+# omits. ``helium_volume_l`` deliberately has no default: its absence means
+# "no L/h display", not "0 L".
 _CRYOGENICS_DEFAULTS: dict[str, float | str] = {
     "level_vi": "level_meter",
     "helium_warning_pct": 35.0,
@@ -1440,7 +1439,7 @@ def read_panels_config(config_path: str) -> dict[str, list[str]]:
 def read_cryogenics_config(config_path: str) -> dict[str, Any]:
     """Read the optional ``cryogenics:`` block, GUI-safe, with defaults applied.
 
-    A setup property like everything else in ``devices.yaml`` (plan §9): the
+    A setup property like everything else in ``devices.yaml``: the
     fill target, zero-field tolerance, timing, and the level VI the
     cryogenics feature (the helium-fill operation, the consumption display,
     the automatic recorder) is built around. Parses YAML only — never
@@ -1471,7 +1470,7 @@ def read_servicing_logs_config(config_path: str) -> list[str]:
     """Read the optional ``servicing_logs:`` list, GUI-safe.
 
     Names which declared servicing-log kinds (``cryosoft.session.
-    servicing_log.DECLARED_LOG_KINDS``) this setup keeps (plan §9). Parses
+    servicing_log.DECLARED_LOG_KINDS``) this setup keeps. Parses
     YAML only, mirroring ``read_cryogenics_config`` — never imports the
     session layer or instantiates anything.
 
@@ -1492,8 +1491,8 @@ def read_servicing_logs_config(config_path: str) -> list[str]:
     return [str(kind) for kind in block]
 
 
-# Per-operation-kind defaults for read_operations_config()'s merge (plan §9).
-# Only "sample_change" exists today (plan §11 phase 4); a future operation
+# Per-operation-kind defaults for read_operations_config()'s merge.
+# Only "sample_change" exists today; a future operation
 # kind adds its own entry here. An operation name declared in devices.yaml
 # but absent from this dict is passed through unmerged — forward-compatible
 # with an operation this function does not yet know defaults for.
@@ -1507,8 +1506,7 @@ _OPERATIONS_DEFAULTS: dict[str, dict[str, float | str]] = {
         "zero_field_window_s": 10.0,
         "needle_valve": "manual",
         "postcondition_timeout_s": 7200.0,
-        # How often the hold phase (docs/plans/unified-servicing-log-and-
-        # run-recording.md §1) records station state into the shared
+        # How often the hold phase records station state into the shared
         # recording, in seconds. Matches HeliumFillOperation's own
         # sample_period_s default.
         "sample_period_s": 10.0,
@@ -1520,8 +1518,8 @@ def read_operations_config(config_path: str) -> dict[str, dict[str, Any]]:
     """Read the optional ``operations:`` block, GUI-safe, with defaults applied.
 
     Unlike ``cryogenics:`` (one flat mapping), ``operations:`` is a mapping
-    of *named* operation configs (``sample_change:``, and future kinds) —
-    see plan §9. Parses YAML only, mirroring ``read_cryogenics_config`` —
+    of *named* operation configs (``sample_change:``, and future kinds).
+    Parses YAML only, mirroring ``read_cryogenics_config`` —
     never imports the operations layer or instantiates anything, so it is
     safe to call from the GUI thread on a config that may describe
     unreachable hardware.

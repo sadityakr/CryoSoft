@@ -411,8 +411,8 @@ def test_procedure_constructs_from_defaults(proc_cls: type, tmp_path) -> None:
 def test_procedure_claimed_vi_names_contract(proc_cls: type, tmp_path) -> None:
     """claimed_vi_names() returns None or a set of VI names known to the station.
 
-    Concurrency-scope hook (docs/plans/operation-concurrency-and-error-
-    scoping.md §1): ``None`` (claim everything) is always valid; a non-``None``
+    Concurrency-scope hook: ``None`` (claim everything) is always valid; a
+    non-``None``
     return must be a ``set[str]`` naming VIs the station actually has, so a
     typo in a narrowed claim can never silently under-claim.
     """
@@ -516,7 +516,7 @@ def test_panels_config_names_real_vis_and_controls(config_dir: Path) -> None:
 
 
 # ── Cryogenics config block ───────────────────────────────────────────────────
-# See docs/plans/cryogenics-logbook.md §9: an optional cryogenics: block plus
+# An optional cryogenics: block plus
 # a servicing_logs: list. A config that declares neither carries zero
 # footprint (the feature stays off); a config that declares cryogenics: must
 # reference a real vi_type: level VI with sane, ordered bounds.
@@ -583,12 +583,12 @@ def test_cryogenics_config_block(config_dir: Path) -> None:
 
 
 # ── Operations config block ───────────────────────────────────────────────────
-# See docs/plans/cryogenics-logbook.md §9: an optional operations: block, one
+# An optional operations: block, one
 # named sub-block per OperationBase subclass (only sample_change ships so
 # far). A config that declares none carries zero footprint; a declared
 # operations.sample_change: must reference a real vi_type: system VI with
 # sane, ordered timing/tolerance values, and needle_valve must be "manual"
-# (a VI-capability reference is future work, plan §8.2).
+# (a VI-capability reference is future work).
 
 
 @pytest.mark.parametrize("config_dir", _config_dirs(), ids=lambda p: p.name)
@@ -639,7 +639,7 @@ def test_operations_config_block(config_dir: Path) -> None:
     assert needle_valve == "manual", (
         f"{config_dir.name}: operations.sample_change.needle_valve="
         f"{needle_valve!r} is not supported; only 'manual' is implemented "
-        f"today (a VI-capability reference is future work, plan §8.2)"
+        f"today (a VI-capability reference is future work)"
     )
 
 
@@ -817,7 +817,7 @@ def test_control_scope_is_a_valid_value(vi_cls: type) -> None:
 
 def test_known_operation_scope_controls() -> None:
     """The persistent-magnet heater/persistent-mode and level-meter refresh
-    controls are operation-scope (plan §5) — the switch-heater/persistent-mode
+    controls are operation-scope — the switch-heater/persistent-mode
     entry-exit methods on the persistent magnet VI, and
     CryogenLevelMeterVI.set_refresh_rate.
     """
@@ -843,7 +843,7 @@ def test_known_operation_scope_controls() -> None:
 def test_reading_setters_are_measurement_scope() -> None:
     """Every reading_setters target method is measurement-scope.
 
-    The reading loop is a procedure-only mechanism (plan §5: "reading-loop
+    The reading loop is a procedure-only mechanism ("reading-loop
     setters and the measurement lifecycle are measurement-scope by
     definition, so no existing procedure changes behavior").
     """
@@ -885,7 +885,7 @@ def test_measurement_lifecycle_is_measurement_scope(vi_cls: type) -> None:
 
 
 # ── Operation contract (L4, cryosoft.core.operation.OperationBase) ───────────
-# See OperationBase's docstring, plan §4.1, and §12 (readiness/next-due). The
+# See OperationBase's docstring, including readiness/next-due. The
 # discovery scaffold above tolerates an empty parametrize set too, which
 # pytest handles by simply collecting zero test cases.
 
@@ -923,7 +923,7 @@ def test_operation_constructs_from_defaults(op_cls: type) -> None:
 
 @pytest.mark.parametrize("op_cls", _all_operation_classes(), ids=lambda c: c.__name__)
 def test_operation_readiness_conditions_returns_tuple_of_readiness_condition(op_cls: type) -> None:
-    """readiness_conditions() must return a tuple of ReadinessCondition (plan §12).
+    """readiness_conditions() must return a tuple of ReadinessCondition.
 
     The Operations panel (``gui/operations_panel.py``) builds one checklist
     row per element with zero per-operation code — a wrong return type would
@@ -974,7 +974,7 @@ def test_operation_config_key_unique_across_operations() -> None:
     """A non-empty config_key must be unique across every discovered operation.
 
     The Operations panel maps ``operations: {config_key: block}`` config
-    entries to a class by ``config_key`` (plan §12) — a collision would make
+    entries to a class by ``config_key`` — a collision would make
     that mapping ambiguous.
     """
     keys = [op_cls.config_key for op_cls in _all_operation_classes() if op_cls.config_key]
@@ -1218,8 +1218,8 @@ def test_session_model_from_dict_tolerates_junk(model_cls: type, junk) -> None:
 # ── Servicing-log kind standard (L6) ──────────────────────────────────────────
 # Every declared LogKindSpec (cryosoft.session.servicing_log.DECLARED_LOG_KINDS)
 # must have a valid key, a title, and a non-empty ordered field schema of
-# ParamSpecs — see LogKindSpec's docstring and docs/plans/cryogenics-logbook.md
-# §6.1. A new log kind is covered the moment it's added to the registry, no
+# ParamSpecs — see LogKindSpec's docstring. A new log kind is covered the
+# moment it's added to the registry, no
 # test needs to be written for it. ParamSpec.__post_init__ already enforces at
 # construction that every field's default matches its declared type, so a
 # LogKindSpec that imports at all already has a usable default per field.

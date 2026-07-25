@@ -17,7 +17,7 @@ Instruments; `Orchestrator` (L3) is the single tick loop and the sole writer to
 hardware, driving both procedures and operations; `BaseProcedure` /
 `SweepMeasureProcedure` (L4) are measurement recipes; `OperationBase` (L4) is
 the parallel contract for multi-step cryostat-servicing actions (helium fill,
-sample change — see `docs/plans/cryogenics-logbook.md` §4), detected by the
+sample change — see `docs/plans/archive/cryogenics-logbook.md` §4), detected by the
 Orchestrator via duck-typing (`command_scope == "operation"`) rather than
 import, so contract C5 stays clean; `DataManager` (L5) writes HDF5. `plan.py`
 is the typed currency shared by all of them.

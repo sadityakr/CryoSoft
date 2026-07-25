@@ -1,8 +1,7 @@
 # ---
 # description: |
-#   Behavior tests for the operation substrate (Phase 2, plan §4/§5/§7), and
-#   the immediate-finish/one-shot-postcondition contract (docs/plans/
-#   operation-concurrency-and-error-scoping.md §2): OperationBase driven by
+#   Behavior tests for the operation substrate, and the
+#   immediate-finish/one-shot-postcondition contract: OperationBase driven by
 #   the real Orchestrator against a real simulated Station. Covers the
 #   helium_low-tolerated vs quench safety matrix, the EMERGENCY carve-out and
 #   its end-state, run_operation refusal while a procedure is active,
@@ -65,7 +64,7 @@ class SimpleOperation(OperationBase):
         self.postcondition_gates_calls = 0
         self.run_summary_calls = 0
         # Minimal operator-confirmation surface, mirroring
-        # SampleChangeOperation's confirm()/confirmed() (plan §8.2) closely
+        # SampleChangeOperation's confirm()/confirmed() closely
         # enough to exercise Orchestrator.confirm_operation()'s duck-typed
         # dispatch generically, without depending on the concrete operation.
         self._confirmations: set[str] = set()
@@ -411,8 +410,7 @@ def test_finish_operation_blocked_when_no_operation_running(orchestrator, statio
     assert "no operation" in blocked[0].lower()
 
 
-# ── run_summary() hand-off (docs/plans/operation-concurrency-and-error-
-# scoping.md §4) ──────────────────────────────────────────────────────────
+# ── run_summary() hand-off ───────────────────────────────────────────────
 
 
 def test_run_summary_merged_into_manifest_on_done(orchestrator, station, qtbot):
@@ -510,7 +508,7 @@ def test_run_summary_merged_into_manifest_on_abort(orchestrator, station, qtbot)
     assert finished[0]["summary"] == {"partial": True}
 
 
-# ── confirm_operation() (plan §8.2) ───────────────────────────────────────
+# ── confirm_operation() ───────────────────────────────────────
 # Mirrors finish_operation()'s tests exactly: confirm_operation() is the
 # same duck-typed-active-operation / action_blocked pattern, generalised
 # from request_finish() to confirm(key). SampleChangeOperation's own
@@ -631,8 +629,7 @@ def test_operation_scope_command_in_procedure_plan_is_rejected_before_dispatch(
     orchestrator.recover_from_error()
 
 
-# ── Claims + admission gate (plan operation-concurrency-and-error-scoping.md
-# §1) ─────────────────────────────────────────────────────────────────────
+# ── Claims + admission gate ──────────────────────────────────────────────
 # HeliumFillOperation.claimed_vi_names() returns its configured level meter
 # plus every magnet (the fill drives them to zero field and holds that as an
 # invariant — see the class docstring), so a running fill must admit a
@@ -831,8 +828,8 @@ def test_queued_action_drained_during_operation_gets_verdict(
     qtbot.waitUntil(lambda: orchestrator._procedure is None, timeout=5000)
 
 
-# ── OperationBase's shared recorder helper (Phase 3, docs/plans/unified-
-# servicing-log-and-run-recording.md §3): _record_sample()/_recording_dict(),
+# ── OperationBase's shared recorder helper:
+# _record_sample()/_recording_dict(),
 # generalised from HeliumFillOperation's original single-channel curve. Unit
 # tests only — no Orchestrator needed, these are plain method calls. ────────
 

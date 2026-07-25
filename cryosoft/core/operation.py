@@ -1,21 +1,21 @@
 # ---
 # description: |
 #   OperationBase: the L4 contract for multi-step cryostat-servicing actions
-#   (helium fill, sample change — see docs/plans/cryogenics-logbook.md §4).
-#   Distinct from BaseProcedure: operation-scope command access, tolerated
-#   safety flags, one-shot verified postconditions, an optional (not
+#   (helium fill, sample change). Distinct from BaseProcedure:
+#   operation-scope command access, tolerated safety flags, one-shot
+#   verified postconditions, an optional (not
 #   required) data file, and higher submission priority. Drives the same
 #   Orchestrator state machine as a procedure via a thin adapter
 #   (measure()/change_sweep_step()) so the Orchestrator needs almost no
 #   branching to support both request types — it detects an operation purely
 #   by duck-typing (``command_scope == "operation"``) and never imports this
 #   module (keeps import-linter contract C5 clean). Also declares the
-#   readiness/next-due contract (plan §12) the GUI's Operations panel renders
+#   readiness/next-due contract the GUI's Operations panel renders
 #   generically: ReadinessCondition/NextDue dataclasses plus the
 #   readiness_conditions()/next_due() hooks and the ready_message/config_key
-#   class attributes. Finish is immediate (docs/plans/operation-concurrency-
-#   and-error-scoping.md §2): postcondition_gates() is evaluated exactly once
-#   as the run ends, never held or timed out. A duck-typed run_summary()
+#   class attributes. Finish is immediate: postcondition_gates() is
+#   evaluated exactly once as the run ends, never held or timed out. A
+#   duck-typed run_summary()
 #   hook (same plan, §4) lets a subclass hand a small JSON-serialisable
 #   summary (e.g. the helium fill's bounded in-memory level curve) to the
 #   session layer without an HDF5 file — the Orchestrator merges it into the
@@ -23,7 +23,7 @@
 #   multi-channel recorder helper (_record_sample()/_recording_dict(), plan
 #   unified-servicing-log-and-run-recording.md §3) is opt-in for exactly this
 #   hand-off — HeliumFillOperation and SampleChangeOperation both use it.
-#   hold_for_operator (plan §1) declares a "hold phase" operation whose
+#   hold_for_operator declares a "hold phase" operation whose
 #   step() stays open-ended (never returns None on its own) until the
 #   operator clicks Finish; the Operations panel reads it to show the ready
 #   banner mid-run, once every readiness condition holds, instead of only
@@ -79,7 +79,7 @@ __all__ = ["NextDue", "OperationBase", "ReadinessCondition"]
 
 @dataclass(frozen=True)
 class ReadinessCondition:
-    """One live readiness check, rendered by the GUI as a checklist row (plan §12).
+    """One live readiness check, rendered by the GUI as a checklist row.
 
     An operation declares its readiness conditions via
     ``OperationBase.readiness_conditions()``; the GUI's Operations panel
@@ -111,7 +111,7 @@ class ReadinessCondition:
 
 @dataclass(frozen=True)
 class NextDue:
-    """When an operation is predicted to next be needed (plan §12).
+    """When an operation is predicted to next be needed.
 
     Returned by ``OperationBase.next_due()``; the GUI shows ``text`` in the
     operation card's header when not ``None``.
@@ -132,7 +132,7 @@ class OperationBase:
     """Abstract base class for multi-step cryostat-servicing operations.
 
     An operation is a *different contract submitted to the same single
-    writer* as a procedure (see plan §2): both speak the ``PhasePlan`` /
+    writer* as a procedure (see): both speak the ``PhasePlan`` /
     ``StepPlan`` / ``Target`` / ``Command`` / ``Gate`` currency and are driven
     by the same Orchestrator tick loop, state machine, watchdog, and safety
     checks. What differs is submission priority and the EMERGENCY carve-out
@@ -164,9 +164,9 @@ class OperationBase:
     Do not override ``measure()`` or ``change_sweep_step()`` in a subclass —
     they are marked ``@typing.final`` for exactly this reason. This is what
     lets ``Orchestrator.run_operation()`` reuse the existing setup/dispatch
-    path with essentially no new state-machine branching (plan §2, §4.2).
+    path with essentially no new state-machine branching (§4.2).
 
-    Readiness / next-due contract (Operations panel, plan §12)
+    Readiness / next-due contract (Operations panel)
     -------------------------------------------------------------
     Two overridable hooks and two class attributes let the GUI's Operations
     panel render a live readiness checklist, a next-due prediction, and a
@@ -219,7 +219,7 @@ class OperationBase:
             ``getattr(procedure, "run_kind", "run")`` lookup — no Orchestrator
             change needed for this to flow through. Fixed at ``"operation"``.
         tolerated_safety_flags: Safety flags that do not abort *this*
-            operation (plan §7) — e.g. the helium fill tolerates
+            operation — e.g. the helium fill tolerates
             ``"helium_low"`` because its whole purpose is fixing that
             condition. A flag NOT in this set still escalates to EMERGENCY
             exactly as for any procedure. Empty by default (tolerates
@@ -228,7 +228,7 @@ class OperationBase:
             operation's plans may carry (see
             ``Station.send_measurement_commands``). Do not override.
         hold_for_operator: ``False`` by default. ``True`` declares a "hold
-            phase" operation (plan §1) whose ``step()`` keeps the run open
+            phase" operation whose ``step()`` keeps the run open
             (returns a ``StepPlan``, never ``None``) once its own setup work
             is done, until the operator clicks Finish
             (``request_finish()``). The Operations panel's ready banner
@@ -264,8 +264,7 @@ class OperationBase:
             Default: none.
         postcondition_gates() -> tuple[Gate, ...]: Evaluated by the
             Orchestrator exactly ONCE, immediately after ``standby()`` is
-            dispatched, as the run ends (docs/plans/operation-concurrency-
-            and-error-scoping.md §2 — "immediate finish"). Each gate's
+            dispatched, as the run ends ("immediate finish"). Each gate's
             ``check()`` is read a single time (via ``Gate.check_once()``);
             there is no holding and no timeout. Unmet gates never block the
             run from finishing — they are recorded on the run manifest's
@@ -277,16 +276,15 @@ class OperationBase:
             mirroring ``BaseProcedure.get_params()``. Default ``{}``.
         run_summary() -> dict: A small, JSON-serialisable hand-off to the
             session layer, merged into the run manifest's ``summary`` key
-            when the run ends (docs/plans/operation-concurrency-and-error-
-            scoping.md §4 — e.g. the helium fill's bounded in-memory level
-            curve). Default ``{}`` (nothing to hand off). Read duck-typed by
+            when the run ends (e.g. the helium fill's bounded in-memory
+            level curve). Default ``{}`` (nothing to hand off). Read
+            duck-typed by
             the Orchestrator via ``getattr`` — it never imports
             ``OperationBase`` (contract C5) — and guarded by a broad
             try/except there, so a broken override can never prevent the run
             from finishing.
 
-    Graceful finish (plan §4.3; immediate finish, operation-concurrency-and-
-    error-scoping.md §2):
+    Graceful finish (immediate finish):
         ``Orchestrator.finish_operation()`` calls ``request_finish()`` on the
         active operation. The very next ``change_sweep_step()`` (the adapter
         above) then returns ``None`` regardless of what ``step()`` would have
@@ -304,10 +302,9 @@ class OperationBase:
     run_kind: str = "operation"
     tolerated_safety_flags: frozenset[str] = frozenset()
     command_scope: str = "operation"
-    #: Declares a "hold phase" operation (docs/plans/unified-servicing-log-
-    #: and-run-recording.md §1): ``step()`` keeps returning a ``StepPlan``
-    #: (never ``None``) once its own work is done, so the run stays active
-    #: indefinitely until the operator clicks Finish
+    #: Declares a "hold phase" operation: ``step()`` keeps returning a
+    #: ``StepPlan`` (never ``None``) once its own work is done, so the run
+    #: stays active indefinitely until the operator clicks Finish
     #: (``Orchestrator.finish_operation()`` -> ``request_finish()``). The
     #: Operations panel reads this to decide WHEN the ready banner may show:
     #: ``False`` (default) keeps the existing post-run-only banner
@@ -319,9 +316,8 @@ class OperationBase:
     hold_for_operator: bool = False
 
     #: Upper bound on the shared in-memory recording (``_record_sample()``/
-    #: ``_recording_dict()`` below; docs/plans/unified-servicing-log-and-
-    #: run-recording.md §3). Once the recorded series would exceed this many
-    #: points, it is decimated: every other point is dropped
+    #: ``_recording_dict()`` below). Once the recorded series would exceed
+    #: this many points, it is decimated: every other point is dropped
     #: (``series[::2]``, across the shared time axis AND every channel
     #: together, so they stay the same length) and the effective sample
     #: stride doubles — memory stays bounded for an arbitrarily long run
@@ -338,7 +334,7 @@ class OperationBase:
         parameters, …) should call ``super().__init__()`` from its own
         ``__init__``.
         """
-        #: Set by ``request_finish()`` (plan §4.3); read only by the
+        #: Set by ``request_finish()``; read only by the
         #: ``change_sweep_step()`` adapter below. Public so a test or a
         #: caller can inspect it, but a subclass should treat it as
         #: read-only — set it via ``request_finish()``, never directly.
@@ -416,9 +412,9 @@ class OperationBase:
 
         The Orchestrator reads each gate's ``check()`` exactly once (via
         ``Gate.check_once()``) right after dispatching ``standby()``'s plan —
-        no holding, no timeout (docs/plans/operation-concurrency-and-error-
-        scoping.md §2). An unmet gate never blocks the run; it is named in
-        the run manifest's ``postconditions_unmet`` list and logged at
+        no holding, no timeout. An unmet gate never blocks the run; it is
+        named in the run manifest's ``postconditions_unmet`` list and
+        logged at
         WARNING.
 
         Returns:
@@ -446,10 +442,10 @@ class OperationBase:
     def run_summary(self) -> dict[str, Any]:
         """Return a small, JSON-serialisable hand-off for the session layer.
 
-        Called once by the Orchestrator when it emits ``run_finished``
-        (docs/plans/operation-concurrency-and-error-scoping.md §4), duck-typed
-        via ``getattr`` — the Orchestrator never imports ``OperationBase``
-        (contract C5) — and merged into the run manifest's ``summary`` key.
+        Called once by the Orchestrator when it emits ``run_finished``,
+        duck-typed via ``getattr`` — the Orchestrator never imports
+        ``OperationBase`` (contract C5) — and merged into the run manifest's
+        ``summary`` key.
         The call is guarded there by a broad try/except, so a subclass
         override that raises can never prevent the run from finishing; it
         just yields an empty ``summary``. Keep the return value small and
@@ -465,10 +461,10 @@ class OperationBase:
     def claimed_vi_names(self) -> set[str] | None:
         """Return the VI names this operation exclusively owns while running.
 
-        Concurrency-scope hook (docs/plans/operation-concurrency-and-error-
-        scoping.md §1): the Orchestrator captures this once, at run start,
-        into ``_active_claims`` and consults it to decide whether a manual
-        front-panel action submitted while this operation is running may be
+        Concurrency-scope hook: the Orchestrator captures this once, at run
+        start, into ``_active_claims`` and consults it to decide whether a
+        manual front-panel action submitted while this operation is running
+        may be
         admitted. A VI named in the returned set is refused (the refusal
         names this operation as the owner); every VI NOT in the set stays
         under manual control exactly as in IDLE — e.g. the helium fill
@@ -488,7 +484,7 @@ class OperationBase:
         return None
 
     def readiness_conditions(self) -> tuple[ReadinessCondition, ...]:
-        """Return this operation's live readiness checklist (plan §12).
+        """Return this operation's live readiness checklist.
 
         Called once by the GUI, on a display instance constructed at panel
         init; the returned ``ReadinessCondition``s' ``check``/``detail``
@@ -502,7 +498,7 @@ class OperationBase:
         return ()
 
     def next_due(self, context: dict[str, Any]) -> NextDue | None:
-        """Predict when this operation will next be needed (plan §12).
+        """Predict when this operation will next be needed.
 
         Args:
             context: GUI-assembled, extensible dict. Keys defined today:
@@ -519,9 +515,9 @@ class OperationBase:
         return None
 
     # ------------------------------------------------------------------
-    # Shared recording helper (opt-in; docs/plans/unified-servicing-log-and-
-    # run-recording.md §3) — a bounded, decimating, multi-channel in-memory
-    # recorder every operation may use from its own ``sample()`` instead of
+    # Shared recording helper (opt-in) — a bounded, decimating,
+    # multi-channel in-memory recorder every operation may use from its own
+    # ``sample()`` instead of
     # rolling its own (this generalises ``HeliumFillOperation``'s original
     # single-channel level curve). Not part of the override contract above:
     # a subclass calls these directly, it does not override them.
@@ -592,8 +588,7 @@ class OperationBase:
             fresh copy of the accumulated recording (``{"unix_time": [],
             "channels": {}}`` if ``_record_sample()`` was never called).
             The shape ``CryogenicsRecorder`` reads off a run's
-            ``run_summary()["recording"]`` (docs/plans/unified-servicing-
-            log-and-run-recording.md §3).
+            ``run_summary()["recording"]``.
         """
         return {
             "unix_time": list(self._recording_unix_time),
@@ -626,7 +621,7 @@ class OperationBase:
         return self.step()
 
     def request_finish(self) -> None:
-        """Set the graceful-finish flag (plan §4.3, ``finish_requested``).
+        """Set the graceful-finish flag (``finish_requested``).
 
         The next ``change_sweep_step()`` call returns ``None`` regardless of
         what ``step()`` would otherwise return, ending an open-ended

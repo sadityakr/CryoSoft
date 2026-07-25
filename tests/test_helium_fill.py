@@ -1,13 +1,12 @@
 # ---
 # description: |
 #   End-to-end behavior tests for HeliumFillOperation
-#   (cryosoft/procedures/operations/helium_fill.py, plan §8.1), driven by a
+#   (cryosoft/procedures/operations/helium_fill.py), driven by a
 #   real Orchestrator (ticked directly, not via the QTimer) against the
 #   sim_cryostat station: zero-field ramp + initiation gate, FAST/SLOW
 #   refresh, the bounded in-memory level curve + run_summary() hand-off in
-#   the generic "recording" shape (docs/plans/unified-servicing-log-and-run-
-#   recording.md §3; no HDF5 file — docs/plans/operation-concurrency-and-
-#   error-scoping.md §4), the completion condition (monkeypatching the sim
+#   the generic "recording" shape (no HDF5 file), the completion condition
+#   (monkeypatching the sim
 #   ILM's private _force_helium_level, not a new sim-only public method),
 #   max-duration termination, abort mid-fill, the helium_low-tolerated-but-
 #   quench-not safety matrix, and an end-to-end run through a real
@@ -120,7 +119,7 @@ def test_helium_fill_end_to_end(orchestrator, station, tmp_path, qtbot):
     # set_refresh_rate(FAST) is dispatched synchronously by initiate(), before
     # the first tick even runs.
     assert station.level_meter.get_refresh_rate() == _REFRESH_FAST
-    # No data file at any point in the run (plan §4) — the manifest's
+    # No data file at any point in the run — the manifest's
     # data_file is always empty for this operation.
     assert started[0]["data_file"] == ""
 
@@ -368,7 +367,7 @@ def test_abort_mid_fill_restores_slow_and_closes_file(orchestrator, station, tmp
 
 
 def test_helium_low_does_not_abort_the_fill(orchestrator, station, tmp_path, qtbot):
-    """helium_low, the fill's whole reason to exist, must not abort it (plan §7)."""
+    """helium_low, the fill's whole reason to exist, must not abort it."""
     _fast_magnets(station)
     op = _make_op(
         station,

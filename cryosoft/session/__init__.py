@@ -18,10 +18,8 @@
 
 """cryosoft.session — the L6 Session Management layer.
 
-See ``cryosoft/session/README.md`` for the layer standard,
-``docs/plans/session-management-layer.md`` / ``agent-native-architecture.md``
-for the experiment-management design, and
-``docs/plans/cryogenics-logbook.md`` for the Servicing Log framework.
+See ``cryosoft/session/README.md`` for the layer standard, and ``GLOSSARY.md``
+for the Servicing Log vocabulary.
 """
 
 from cryosoft.session.manager import SessionManager

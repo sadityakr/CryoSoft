@@ -1,7 +1,7 @@
 # ---
 # description: |
 #   Behavior tests for the readiness/next-due contract added to OperationBase
-#   in Phase 6 (docs/plans/cryogenics-logbook.md §12): the ReadinessCondition/
+#   in Phase 6: the ReadinessCondition/
 #   NextDue dataclasses, OperationBase's defaults, HeliumFillOperation's
 #   zero_field checklist row + next_due() prediction math, and
 #   SampleChangeOperation's four checklist rows (including heater_off

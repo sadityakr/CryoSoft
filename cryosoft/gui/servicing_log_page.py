@@ -7,10 +7,9 @@
 #   Add entry / Edit / Delete / History buttons acting on the selected row;
 #   dialogs are rendered from the kind's ParamSpecs via param_form.py, the
 #   same machinery the procedure parameter form uses. One generic engine, N
-#   declared kinds (docs/plans/cryogenics-logbook.md §6.1): a future log kind
+#   declared kinds: a future log kind
 #   gets a table here automatically, with zero new GUI code. The unified
-#   "servicing" kind (docs/plans/unified-servicing-log-and-run-recording.md
-#   §4, Phase 4) gets a dedicated `_ServicingLogTable` instead of the generic
+#   "servicing" kind gets a dedicated `_ServicingLogTable` instead of the generic
 #   per-kind table: one chronological timeline (sorted by parsed start_utc,
 #   falling back to created_utc, newest first), filter chips derived from the
 #   data's entry_kind values, a row-detail dialog with a lazily-loaded
@@ -326,7 +325,7 @@ class ServicingLogEntryDialog(QDialog):
     """Add/Edit dialog rendered from a log kind's ``ParamSpec`` fields.
 
     Reuses ``param_form.build_form_layout`` — the same ParamSpec -> Qt-widget
-    machinery the procedure parameter form uses (plan §10 / gui/README.md
+    machinery the procedure parameter form uses (the gui/README.md
     standard: "if a small extension is needed... it goes in param_form.py and
     nowhere else"). In edit mode an extra "Edited by" field is prepended,
     separate from the kind's own fields, to attribute the revision.
@@ -774,9 +773,9 @@ class _LogKindTable(QWidget):
 class _ServicingLogTable(QWidget):
     """The unified "servicing" kind's table: timeline, filter chips, detail, CSV exports.
 
-    Renders the flat ``servicing`` log kind (docs/plans/unified-servicing-
-    log-and-run-recording.md §4) as ONE chronological table — helium fills,
-    sample changes, other operation runs, and manual entries all in one
+    Renders the flat ``servicing`` log kind as ONE chronological table —
+    helium fills, sample changes, other operation runs, and manual entries
+    all in one
     timeline, sorted newest-first by ``sorted_servicing_entries`` (parsed
     ``start_utc``, falling back to ``created_utc``). A row of filter chips
     (derived from the data's ``entry_kind`` values, never hardcoded) narrows
@@ -1071,7 +1070,7 @@ class ServicingLogPage(QWidget):
     editable ``LogKindSpec``; an undeclared or non-editable name is skipped
     with a WARNING log), plus the read-only "operations" audit trail
     whenever ``servicing_store`` is not ``None`` — the operations stream has
-    no config toggle of its own (plan §9: "always on when any operation
+    no config toggle of its own ("always on when any operation
     exists"). ``log_panel`` is composed here, not created — MonitorWindow
     still owns its attach()/detach() lifecycle.
 
@@ -1130,8 +1129,7 @@ class ServicingLogPage(QWidget):
             kind_specs.append(DECLARED_LOG_KINDS["operations"])
 
         for spec in kind_specs:
-            # The unified "servicing" kind (docs/plans/unified-servicing-log-
-            # and-run-recording.md §4) gets the dedicated timeline/filter/
+            # The unified "servicing" kind gets the dedicated timeline/filter/
             # detail/export table instead of the generic per-kind one.
             table_cls = _ServicingLogTable if spec.key == "servicing" else _LogKindTable
             table = table_cls(spec, servicing_store, get_current_person, parent=tables_container)

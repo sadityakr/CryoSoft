@@ -7,9 +7,9 @@
 #   duck-typing via command_scope == "operation", never imported here, to
 #   keep import-linter contract C5 clean) is a second request type driven by
 #   the SAME state machine: run_operation()/queue_operation() give it
-#   queue-jumping priority and a narrow EMERGENCY carve-out
-#   (docs/plans/cryogenics-logbook.md §4.2), and its plans may carry
-#   operation-scope @control commands a procedure's may not (§5).
+#   queue-jumping priority and a narrow EMERGENCY carve-out, and its plans
+#   may carry operation-scope @control commands a procedure's may not (the
+#   capability-scope standard — see core/README.md).
 # entry_point: Not run directly. Instantiated dynamically.
 # dependencies:
 #   - PyQt6.QtCore (QObject, QTimer, pyqtSignal)
@@ -28,7 +28,7 @@
 #   On _tick() (inside an exception boundary that degrades to ERROR instead
 #   of crashing the app): while monitoring is active, gets state from
 #   station (which also populates/clears its runtime FaultRecord registry —
-#   docs/plans/operation-concurrency-and-error-scoping.md §3), emits a
+#   the runtime fault-tiering standard, see core/README.md), emits a
 #   warning-severity error_event for each newly faulted VI the active run
 #   does not claim (no state change), evaluates safety flags on that same
 #   snapshot — subtracting the active operation's tolerated_safety_flags
@@ -43,7 +43,7 @@
 #   active fault outright, before its other admission rules, including in
 #   IDLE. Then (monitoring or not) processes IDLE gui actions and runs the
 #   state machine. STANDBY forks on the active run's kind (duck-typed via
-#   command_scope, docs/plans/operation-concurrency-and-error-scoping.md §2):
+#   command_scope):
 #   a PROCEDURE keeps the original two-phase wait (for any ramp already in
 #   flight when SWEEPING ended, then — after dispatching procedure.standby()'s
 #   own targets — for whatever ramp standby() itself started) before declaring
@@ -63,12 +63,11 @@
 #   Emits signals: states_updated, state_changed, run_started/run_finished
 #   (run manifests: id, procedure, kind, params, data file path, timestamps,
 #   terminal status, postconditions_unmet, summary (duck-typed
-#   procedure.run_summary(), {} by default — plan operation-concurrency-and-
-#   error-scoping.md §4) — consumed by the session layer; kind is
-#   "operation" for an operation via its run_kind class attribute),
+#   procedure.run_summary(), {} by default) — consumed by the session layer;
+#   kind is "operation" for an operation via its run_kind class attribute),
 #   error_occurred, action_blocked, action_succeeded, action_failed (vi,
 #   method, reason — the uniform per-action verdict). Run-scoped UI signals
-#   are routed by run kind (hard status separation, plan §2): status_message,
+#   are routed by run kind (hard status separation): status_message,
 #   procedure_progress, procedure_finished, and measurement_ready fire ONLY
 #   for a procedure run (the Procedure window's status log/progress
 #   bar/plots); operation_status/operation_progress fire instead for an
@@ -173,17 +172,16 @@ class Orchestrator(QObject):
             names an operation's one-shot ``postcondition_gates()``
             evaluation found unmet at finish — always ``[]`` for a procedure,
             or for an operation with none declared/all held), and ``summary``
-            (docs/plans/operation-concurrency-and-error-scoping.md §4: the
-            dict ``procedure.run_summary()`` returned — duck-typed, ``{}``
+            (the dict ``procedure.run_summary()`` returned — duck-typed, ``{}``
             for a procedure or an operation that does not override it, and
             ``{}`` rather than propagating if the override raised) added.
         error_occurred (str): Emitted when ERROR or EMERGENCY state entered,
-            or a run fails (plan operation-concurrency-and-error-scoping.md
-            §3). Not run-scoped — fires regardless of run kind. Kept as a
+            or a run fails. Not run-scoped — fires regardless of run kind.
+            Kept as a
             thin compat wrapper: every emission here has a matching, richer
             ``error_event`` emitted alongside it.
         error_event (ErrorEvent): Structured counterpart of
-            ``error_occurred``/a VI-scoped fault (plan §3, ``core.events.
+            ``error_occurred``/a VI-scoped fault (``core.events.
             ErrorEvent``): ``vi_name`` (the originating instrument, or
             ``None``/comma-joined for a machine-wide or multi-VI event),
             ``kind`` (``"fault"`` — VI-scoped, quarantines only that VI;
@@ -229,7 +227,7 @@ class Orchestrator(QObject):
     run_started = pyqtSignal(dict)  # run manifest at successful setup
     run_finished = pyqtSignal(dict)  # same manifest + finished_utc/status/reason
     error_occurred = pyqtSignal(str)
-    error_event = pyqtSignal(object)  # ErrorEvent — structured error/fault payload (plan §3)
+    error_event = pyqtSignal(object)  # ErrorEvent — structured error/fault payload
     action_blocked = pyqtSignal(str)
     action_succeeded = pyqtSignal(str, str)
     action_failed = pyqtSignal(str, str, str)
@@ -248,7 +246,7 @@ class Orchestrator(QObject):
         self._procedure_queue: list[Any] = []
         # Operations (L4, duck-typed via command_scope == "operation") queue
         # separately and always drain first — see run_operation()/
-        # queue_operation()/run_queue() and plan §4.2's "queue-jumping, not
+        # queue_operation()/run_queue() and the "queue-jumping, not
         # preemption".
         self._operation_queue: list[Any] = []
         self._gui_action_queue: list[dict[str, Any]] = []
@@ -266,7 +264,7 @@ class Orchestrator(QObject):
         self._pending_gates: list = []
         self._first_measurement = True
 
-        # Set by run_operation() when the EMERGENCY carve-out (plan §4.2) was
+        # Set by run_operation() when the EMERGENCY carve-out was
         # used to start the active operation; read by _operation_end_state()
         # so a finishing operation returns to EMERGENCY rather than IDLE when
         # appropriate. Meaningless (and unread) for a plain procedure.
@@ -306,8 +304,7 @@ class Orchestrator(QObject):
         self._active_run_manifest: dict[str, Any] | None = None
         self._run_counter = 0
 
-        # run_summary() hand-off (docs/plans/operation-concurrency-and-
-        # error-scoping.md §4): collected from self._procedure by
+        # run_summary() hand-off: collected from self._procedure by
         # _emit_run_finished() for the "done" path, where self._procedure is
         # still set. The abort/fail/emergency paths clear self._procedure in
         # _abort_active_procedure() BEFORE calling _emit_run_finished(), so
@@ -315,16 +312,15 @@ class Orchestrator(QObject):
         # prefers self._procedure when present, else falls back to this.
         self._pending_run_summary: dict[str, Any] = {}
 
-        # Claims + admission gate (docs/plans/operation-concurrency-and-
-        # error-scoping.md §1): the active run's claimed_vi_names(), captured
-        # once at _start_run() and cleared on EVERY teardown path (finish,
-        # abort, fail, emergency — see _abort_active_procedure()/
+        # Claims + admission gate: the active run's claimed_vi_names(),
+        # captured once at _start_run() and cleared on EVERY teardown path
+        # (finish, abort, fail, emergency — see _abort_active_procedure()/
         # _finish_run()). None while no run is active, or while the active
         # run claims everything (the default for every procedure and for an
         # operation that does not override claimed_vi_names()).
         self._active_claims: set[str] | None = None
 
-        # Runtime fault registry tracking (plan §3): the set of VI names
+        # Runtime fault registry tracking: the set of VI names
         # with an active Station fault as of the last tick, used to detect
         # NEW faults (emit one warning error_event, not one per tick) and
         # recoveries. Station is the source of truth; this is only a
@@ -496,7 +492,7 @@ class Orchestrator(QObject):
         self._start_run(procedure, kind="procedure")
 
     def run_operation(self, operation: Any) -> None:
-        """Start an operation immediately if permitted; else refuse it (plan §4.2).
+        """Start an operation immediately if permitted; else refuse it.
 
         Allowed from IDLE, from a manual ramp (cancelled first, exactly like
         ``run_procedure()``), and — the narrow EMERGENCY carve-out — from
@@ -578,7 +574,7 @@ class Orchestrator(QObject):
                 and the error message on setup failure.
         """
         self._procedure = procedure
-        # Claims + admission gate (plan §1): captured here, duck-typed (never
+        # Claims + admission gate: captured here, duck-typed (never
         # importing BaseProcedure/OperationBase — contract C5) so a test
         # double without claimed_vi_names() behaves exactly like the
         # claim-everything default.
@@ -652,15 +648,15 @@ class Orchestrator(QObject):
         """Queue an operation to run once the Orchestrator returns to IDLE.
 
         Operations queue separately from procedures and always drain first
-        (see ``run_queue()``) — the queueing half of plan §4.2's
-        "queue-jumping, not preemption".
+        (see ``run_queue()``) — the queueing half of "queue-jumping, not
+        preemption".
         """
         self._operation_queue.append(operation)
 
     def run_queue(self) -> None:
         """Run the next queued operation, else the next queued procedure, if IDLE.
 
-        Operations always drain before procedures (plan §4.2).
+        Operations always drain before procedures.
         """
         if self._state != OrchestratorState.IDLE:
             return
@@ -726,7 +722,7 @@ class Orchestrator(QObject):
         self.run_queue()
 
     def finish_operation(self) -> None:
-        """Request a graceful stop of the active operation (plan §4.3).
+        """Request a graceful stop of the active operation.
 
         Calls ``request_finish()`` on the active operation so its next
         ``change_sweep_step()`` (the ``OperationBase`` adapter) returns
@@ -747,7 +743,7 @@ class Orchestrator(QObject):
         self._emit_status("Finish requested — completing operation")
 
     def confirm_operation(self, key: str) -> None:
-        """Record an operator confirmation on the active operation (plan §8.2).
+        """Record an operator confirmation on the active operation.
 
         Mirrors ``finish_operation()``: calls ``confirm(key)`` on the active
         operation (duck-typed — a plain procedure or an operation without a
@@ -862,7 +858,7 @@ class Orchestrator(QObject):
     def _active_run_label(self) -> str:
         """Return a human-readable ``"<kind> '<name>'"`` label for the active run.
 
-        Used only to compose admission-refusal messages (plan §1) — never
+        Used only to compose admission-refusal messages — never
         called with no active run.
 
         Returns:
@@ -880,7 +876,7 @@ class Orchestrator(QObject):
     def _manual_action_admissible(self, vi_name: str) -> tuple[bool, str]:
         """Decide whether a manual action on *vi_name* may be admitted right now.
 
-        The single admission predicate (plan §1's "Claims + admission gate"),
+        The single admission predicate (the "Claims + admission gate"),
         shared verbatim by ``submit_vi_action()`` (what may be *queued*) and
         the ``_tick_body()`` GUI-action drain gate (what may be *drained*) —
         they must agree, or a queued action could sit forever without a
@@ -888,7 +884,7 @@ class Orchestrator(QObject):
 
         Admission rules, in order:
 
-        0. A VI with an active runtime fault (plan §3) is ALWAYS refused,
+        0. A VI with an active runtime fault is ALWAYS refused,
            regardless of state — including IDLE — until it recovers or
            ``retry_fault()`` succeeds. Checked first, and here (not as a
            parallel check) so every caller (``submit_vi_action()``, the
@@ -952,7 +948,7 @@ class Orchestrator(QObject):
     def submit_vi_action(self, vi_name: str, method_name: str, **kwargs: Any) -> None:
         """Submit a GUI action to a specific VI.
 
-        Admission is decided by ``_manual_action_admissible()`` (plan §1):
+        Admission is decided by ``_manual_action_admissible()``:
         IDLE / a manual ramp / an EMERGENCY manual override always admit;
         ERROR / EMERGENCY (without override) always refuse; otherwise a run
         is active and the action is admitted iff *vi_name* is not one of the
@@ -1085,7 +1081,7 @@ class Orchestrator(QObject):
             logger.info("acknowledge_fault('%s') ignored: no active fault", vi_name)
 
     def retry_fault(self, vi_name: str) -> None:
-        """Retry a VI's active runtime fault: reset counters, poll once (plan §3).
+        """Retry a VI's active runtime fault: reset counters, poll once.
 
         The runtime counterpart of ``retry_reconnect()``: it never rebuilds
         a driver (the VI is already live) — only ``Station.retry_fault()``'s
@@ -1163,8 +1159,7 @@ class Orchestrator(QObject):
     def _collect_run_summary(self, procedure: Any) -> dict[str, Any]:
         """Return ``procedure.run_summary()``'s result, or ``{}`` on any problem.
 
-        Duck-typed (docs/plans/operation-concurrency-and-error-scoping.md
-        §4): looked up via ``getattr`` so this module never imports
+        Duck-typed: looked up via ``getattr`` so this module never imports
         ``OperationBase`` (contract C5) — a plain ``BaseProcedure`` or a test
         double without ``run_summary()`` simply yields ``{}``. Guarded by a
         broad try/except plus a return-type check, so a broken or
@@ -1209,7 +1204,7 @@ class Orchestrator(QObject):
             status: Terminal status — ``done``, ``aborted``, or ``failed``.
             reason: Error text for ``failed``; empty otherwise.
             postconditions_unmet: Gate names an operation's one-shot
-                postcondition evaluation found unmet at finish (plan §2), or
+                postcondition evaluation found unmet at finish, or
                 ``None`` — recorded as ``[]``, which is always the case for
                 a procedure/abort/failure path.
         """
@@ -1221,7 +1216,7 @@ class Orchestrator(QObject):
         manifest["status"] = status
         manifest["reason"] = reason
         manifest["postconditions_unmet"] = list(postconditions_unmet or ())
-        # run_summary() hand-off (plan §4): self._procedure is still set on
+        # run_summary() hand-off: self._procedure is still set on
         # the "done" path (_finish_run() clears it AFTER this call); the
         # abort/fail/emergency paths already cleared it via
         # _abort_active_procedure(), which cached the summary into
@@ -1282,8 +1277,7 @@ class Orchestrator(QObject):
                 wait_elapsed_s=wait_elapsed,
                 progress=progress,
                 # Postcondition gates are no longer a multi-tick wait phase
-                # (plan operation-concurrency-and-error-scoping.md §2 —
-                # evaluated once, immediately, as the run ends), so only the
+                # (evaluated once, immediately, as the run ends), so only the
                 # initiation/reading gates can ever be "active" across ticks.
                 active_gates=[g.name for g in self._pending_gates],
             )
@@ -1464,7 +1458,7 @@ class Orchestrator(QObject):
             # from this tick's snapshot, emitted, and appended to logs/status.jsonl.
             self._update_operational_status(state)
 
-            # Runtime fault registry (plan §3): Station.get_state() (just
+            # Runtime fault registry: Station.get_state() (just
             # called above) already populated/cleared FaultRecords for
             # anything stale/disconnected this tick. Detect NEW faults (one
             # warning event each, not one per tick) for VIs the active run
@@ -1496,7 +1490,7 @@ class Orchestrator(QObject):
                 self._emit_fault_event(vi_name, record.kind, record.message)
 
             # Safety check — reuses this tick's snapshot (no second hardware poll).
-            # An active operation's tolerated_safety_flags (plan §7) are
+            # An active operation's tolerated_safety_flags are
             # subtracted before deciding on EMERGENCY: a tolerated flag (e.g.
             # helium_low during a helium-fill operation) must not abort the
             # very operation that exists to fix it. A non-tolerated flag
@@ -1530,7 +1524,7 @@ class Orchestrator(QObject):
                     self._enter_emergency("; ".join(envelope_violations))
                     return
 
-            # Stale ACTIVE (claimed/system) VI during a run (plan §3): the
+            # Stale ACTIVE (claimed/system) VI during a run: the
             # run fails and its VI's fault stands in the Station registry,
             # but — unlike the old behavior — the machine returns to IDLE
             # rather than global ERROR, so every other instrument stays
@@ -1546,7 +1540,7 @@ class Orchestrator(QObject):
 
         # 3. GUI Actions — each queued action gets the SAME verdict
         # submit_vi_action() would give it right now, via the shared
-        # _manual_action_admissible() predicate (plan §1): the run may have
+        # _manual_action_admissible() predicate: the run may have
         # started/finished/changed claims since it was queued, and a claim
         # refusal during an active run only refuses the CLAIMED VIs, not the
         # whole queue — so admission is decided per action, not once for the
@@ -1628,7 +1622,7 @@ class Orchestrator(QObject):
                         self.operation_progress.emit(progress)
                     else:
                         self.procedure_progress.emit(progress)
-                # measurement_ready is PROCEDURE-EXCLUSIVE (plan §2's hard
+                # measurement_ready is PROCEDURE-EXCLUSIVE (the hard
                 # status separation) — an operation's sample() has no
                 # equivalent GUI consumer today (the fill curve is an
                 # internal detail until phase 4 moves it to the cryogenics
@@ -1703,10 +1697,10 @@ class Orchestrator(QObject):
         Safe to call with no procedure active (stops manual ramps then).
         Each cleanup step is individually guarded so one failure (e.g. a dead
         instrument) cannot prevent the others. Also clears ``_active_claims``
-        (plan §1) — the shared teardown path for user abort, ``_fail_to_error``,
+        — the shared teardown path for user abort, ``_fail_to_error``,
         and ``_enter_emergency``, so a claim can never outlive its run.
 
-        Caches ``procedure.run_summary()`` (plan §4) into
+        Caches ``procedure.run_summary()`` into
         ``self._pending_run_summary`` BEFORE clearing ``self._procedure``
         below: the subsequent ``_emit_run_finished()`` call on every one of
         these teardown paths (abort/fail/emergency) runs with
@@ -1743,7 +1737,7 @@ class Orchestrator(QObject):
         self._last_system_targets = {}
 
     def _operation_end_state(self, procedure: Any) -> OrchestratorState:
-        """Return the state a finishing run should return to (plan §4.2/§7).
+        """Return the state a finishing run should return to.
 
         A plain procedure always returns to IDLE. An operation returns to
         EMERGENCY instead when it was started via the EMERGENCY carve-out, or
@@ -1770,7 +1764,7 @@ class Orchestrator(QObject):
         return OrchestratorState.IDLE
 
     def _standby_operation_immediate(self) -> None:
-        """Immediate-finish STANDBY handling for an operation (plan §2).
+        """Immediate-finish STANDBY handling for an operation.
 
         Runs exactly once, on the tick after SWEEPING enters STANDBY (the
         ``elif`` state-machine dispatch in ``_tick_body()`` guarantees this —
@@ -1822,7 +1816,7 @@ class Orchestrator(QObject):
         self._finish_run(postconditions_unmet=unmet)
 
     def _evaluate_postconditions_once(self, procedure: Any) -> list[str]:
-        """Evaluate ``procedure.postcondition_gates()`` exactly once (plan §2).
+        """Evaluate ``procedure.postcondition_gates()`` exactly once.
 
         Each gate's one-shot ``action`` (if any) runs once and its ``check``
         (if any) is read a single time via ``Gate.check_once()`` — no
@@ -1879,7 +1873,7 @@ class Orchestrator(QObject):
         label = "Operation" if is_operation else "Procedure"
         self._emit_status(f"{label} finished")
         self._emit_run_finished("done", postconditions_unmet=postconditions_unmet)
-        # procedure_finished is PROCEDURE-EXCLUSIVE (plan §2's hard status
+        # procedure_finished is PROCEDURE-EXCLUSIVE (the hard status
         # separation) — the Procedure window's queue-advance/progress-reset
         # handler must never fire for an operation's completion.
         if not is_operation:
@@ -1905,7 +1899,7 @@ class Orchestrator(QObject):
     def _fail_to_error(self, message: str) -> None:
         """Contain a failure: clean up the run and degrade to ERROR.
 
-        Reserved for unknown-blast-radius failures (plan §3): an unhandled
+        Reserved for unknown-blast-radius failures: an unhandled
         exception at the tick boundary, or a run whose ``initiate()``/setup
         itself raised (the run never got far enough to know which VI, if
         any, is to blame). A stale CLAIMED VI mid-run has a KNOWN, narrow
@@ -1921,7 +1915,7 @@ class Orchestrator(QObject):
         self._change_state(OrchestratorState.ERROR)
 
     def _fail_run_for_fault(self, vi_name: str) -> None:
-        """Fail the active run because its claimed VI faulted (plan §3).
+        """Fail the active run because its claimed VI faulted.
 
         Unlike ``_fail_to_error()``, this does NOT degrade to global ERROR:
         the blast radius is known (one VI, already recorded in the Station's
@@ -1957,8 +1951,8 @@ class Orchestrator(QObject):
         Args:
             reason: Human-readable description of the tripped condition(s)
                 (e.g. flag names or an envelope-violation message).
-            vi_names: The VI(s) that originated the condition (plan §3,
-                from ``Station.safety_flag_sources()``), so the reason and
+            vi_names: The VI(s) that originated the condition (from
+                ``Station.safety_flag_sources()``), so the reason and
                 its ``ErrorEvent`` name the instrument. Empty when no
                 per-VI attribution is available (e.g. a session-envelope
                 violation, which is checked against a live reading rather
@@ -1998,7 +1992,7 @@ class Orchestrator(QObject):
         """Report an error: log it, emit the compat + structured signals.
 
         Every call here emits BOTH ``error_occurred`` (compat, unchanged
-        shape) and the richer ``error_event`` (plan §3) — see the class
+        shape) and the richer ``error_event`` — see the class
         docstring's ``error_event`` entry for why a plain per-VI fault
         (``kind="fault"``, severity ``"warning"``) does NOT go through this
         method (see ``_emit_fault_event()`` instead).
@@ -2028,7 +2022,7 @@ class Orchestrator(QObject):
         # Also surface in the concise status log as a persistent history line.
         # logger.error above already wrote it to file, so emit the signal
         # directly (bypassing _emit_status's logger) to avoid double file
-        # logging — but keep _emit_status's run-kind ROUTING (plan §2's hard
+        # logging — but keep _emit_status's run-kind ROUTING (the hard
         # status separation): an operation's failure line belongs on its
         # card, never in the Procedure window's status log.
         try:

@@ -5,8 +5,8 @@
 #   that InstrumentPanel widgets are auto-generated for all registered VIs,
 #   that Orchestrator signals (state_changed, procedure_progress,
 #   measurement_ready) update the GUI correctly, and that ProcedureWindow is
-#   operation-blind (docs/plans/operation-concurrency-and-error-scoping.md
-#   §2's hard status separation): its status log stays empty and its
+#   operation-blind (the hard status separation): its status log stays
+#   empty and its
 #   Pause/Resume/Abort no-op while an operation, rather than a procedure, is
 #   the active run.
 # last_updated: 2026-07-21
@@ -286,8 +286,8 @@ def test_instrument_panel_fault_row_disables_controls_and_wires_ack_retry(
     station, orchestrator, qtbot
 ):
     """A real runtime fault shows the fault row, disables controls, and wires
-    Acknowledge/Retry through Orchestrator (docs/plans/operation-concurrency-
-    and-error-scoping.md §3) — the RUNTIME sibling of the offline fault card.
+    Acknowledge/Retry through Orchestrator — the RUNTIME sibling of the
+    offline fault card.
     """
     vi_name = "magnet_z"
     vi = station._virtual_instruments[vi_name]
@@ -342,7 +342,7 @@ def test_monitor_window_banner_shows_and_clears_vi_fault_warning(
     station, orchestrator, monitor_win, qtbot
 ):
     """MonitorWindow's banner shows a per-VI fault warning (error_event) and
-    calms once every runtime fault clears (plan §3)."""
+    calms once every runtime fault clears."""
     vi_name = "magnet_z"
     vi = station._virtual_instruments[vi_name]
 
@@ -1726,8 +1726,7 @@ def test_procedure_control_buttons_exist(procedure_win, qtbot):
 def test_ack_button_visible_in_emergency(monitor_win, orchestrator):
     """Emergency acknowledge button appears when EMERGENCY state is emitted.
 
-    Single home is the Monitor window (docs/plans/operation-concurrency-
-    and-error-scoping.md §3) — see
+    Single home is the Monitor window — see
     test_ack_button_absent_from_procedure_window for the ProcedureWindow side.
     """
     orchestrator.state_changed.emit(OrchestratorState.EMERGENCY.value)
@@ -1743,7 +1742,7 @@ def test_ack_button_visible_when_window_opened_after_emergency_already_active(
 ):
     """Opening MonitorWindow *after* EMERGENCY already fired must still show ACK.
 
-    Regression test (moved from ProcedureWindow, plan §3): a window can be
+    Regression test (moved from ProcedureWindow): a window can be
     (re)created well after an emergency has already put the Orchestrator
     into EMERGENCY. state_changed only reports future transitions, so
     without an explicit sync at construction time the button stayed hidden
@@ -1761,7 +1760,7 @@ def test_ack_button_visible_when_window_opened_after_emergency_already_active(
 def test_ack_button_absent_from_procedure_window(procedure_win):
     """ProcedureWindow no longer carries the Emergency-Acknowledge button.
 
-    Single home is the Monitor window now (plan §3).
+    Single home is the Monitor window now.
     """
     from PyQt6.QtWidgets import QPushButton
     assert procedure_win.findChild(QPushButton, "ack_emergency_btn") is None
@@ -2102,8 +2101,7 @@ def test_status_log_appends_status_messages(procedure_win, orchestrator):
     assert "Measuring point 3/11" in status_log.toPlainText()
 
 
-# ── ProcedureWindow is operation-blind (docs/plans/operation-concurrency-
-# and-error-scoping.md §2's hard status separation) ──────────────────────
+# ── ProcedureWindow is operation-blind (hard status separation) ──────────
 
 
 class _StubOperation:

@@ -1,5 +1,17 @@
 # Plan: agent-native CryoSoft — human monitoring via UI
 
+> **ARCHIVED 2026-07-25 — SUPERSEDED BY
+> [`../agentic-instrumentation-framework.md`](../agentic-instrumentation-framework.md).**
+> Retained as design rationale: §1 (the interview decision table), §3.2
+> (roles and action classes), §3.3 (the session envelope), §3.4 (the action
+> feed), and §5 (probe runs) are carried forward largely intact. Two things
+> here are now known to be out of date: its **F0 is already implemented**
+> (envelope enforcement and run-manifest `kind` both shipped, see
+> `core/plan.py:739-940` and `core/orchestrator.py:1156`), and its **§8
+> roadmap ordering is replaced** — the framework doc argues
+> self-description before transport, and promotes the "A5 optional" CLI
+> client to a first-class deliverable ahead of MCP.
+
 **Status:** proposal — no code yet. Companion to
 `session-management-layer.md`; the roadmap in §8 here supersedes that
 plan's §7 sequencing.
