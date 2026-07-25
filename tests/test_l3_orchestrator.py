@@ -415,8 +415,7 @@ def test_action_failed_emitted_with_reason(orchestrator, qtbot):
 def test_stale_claimed_vi_during_procedure_fails_run_to_idle(orchestrator, station, qtbot):
     """A stale ACTIVE (claimed) VI fails the run, but returns to IDLE, not ERROR.
 
-    Rev. per docs/plans/operation-concurrency-and-error-scoping.md §3: a
-    claimed VI's fault has a KNOWN, narrow blast radius (that one
+    A claimed VI's fault has a KNOWN, narrow blast radius (that one
     instrument), so it must not park the whole machine in global ERROR —
     only the run fails, and every other instrument (and this one, once it
     recovers or is retried) stays usable. This replaces the old
@@ -503,7 +502,7 @@ def test_stale_unclaimed_vi_while_monitoring_is_warning_only(orchestrator, stati
 def test_unhandled_tick_exception_still_enters_error(orchestrator, qtbot, monkeypatch):
     """An unhandled tick-boundary exception (unknown blast radius) still -> ERROR.
 
-    The one case global ERROR survives (plan §3): recover_from_error() is
+    The one case global ERROR survives: recover_from_error() is
     unchanged.
     """
     def boom():

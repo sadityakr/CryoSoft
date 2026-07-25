@@ -21,10 +21,9 @@
 #   (loads a newly opened/switched session's own gui_state.json over the
 #   in-memory SessionState, skipping a brand-new experiment that has none
 #   yet) and store_health_changed (a save failure/recovery banner + status
-#   note) — see docs/plans/unified-session-record.md §7. Also the single
-#   home of the ACKNOWLEDGE EMERGENCY button (moved off ProcedureWindow,
-#   docs/plans/operation-concurrency-and-error-scoping.md §3) and of the
-#   per-VI runtime-fault banner, driven by Orchestrator.error_event.
+#   note). Also the single home of the ACKNOWLEDGE EMERGENCY button (moved
+#   off ProcedureWindow) and of the per-VI runtime-fault banner, driven by
+#   Orchestrator.error_event.
 # entry_point: Not run directly. Instantiated in main.py.
 # dependencies:
 #   - PyQt6 >= 6.5
@@ -226,7 +225,7 @@ class MonitorWindow(QMainWindow):
         # scanner_enabled is a single Station-wide bit.
         self._scanner_enable_checks: list[QCheckBox] = []
 
-        # Cryogenics management (docs/plans/cryogenics-logbook.md §9/§10),
+        # Cryogenics management,
         # all optional — every existing construction site (and every prior
         # test) keeps working with these left at their None defaults, which
         # simply builds the Logs page with no tables/no Operations panel.
@@ -243,7 +242,7 @@ class MonitorWindow(QMainWindow):
             and self._servicing_store is not None
             and self._station.has_vi(str(self._cryogenics_config.get("level_vi", "")))
         )
-        # The Operations panel (plan §12) is available when cryogenics is
+        # The Operations panel is available when cryogenics is
         # enabled OR an operations: config block is declared — a setup with
         # only sample_change still gets the panel, minus the cryo section.
         self._operations_panel_enabled = self._cryogenics_enabled or bool(
@@ -491,7 +490,7 @@ class MonitorWindow(QMainWindow):
         self._banner = NotificationBanner()
         root.addWidget(self._banner)
 
-        # ── Emergency acknowledge (single home — plan §3; moved off
+        # ── Emergency acknowledge (single home; moved off
         # ProcedureWindow) ──────────────────────────────────────────────
         ack_row = QHBoxLayout()
         ack_row.addStretch()
@@ -502,9 +501,9 @@ class MonitorWindow(QMainWindow):
         ack_row.addWidget(self._ack_btn)
         root.addLayout(ack_row)
 
-        # Tracks the last per-VI fault warning message shown on the banner
-        # (plan §3), so states_updated can dismiss it once every fault
-        # clears without stomping on an unrelated banner message.
+        # Tracks the last per-VI fault warning message shown on the banner,
+        # so states_updated can dismiss it once every fault clears without
+        # stomping on an unrelated banner message.
         self._last_fault_message: str | None = None
 
         # ── Fixed 2x2 quadrant grid (Page 1 — Monitor) ───────────────
@@ -1222,7 +1221,7 @@ class MonitorWindow(QMainWindow):
             self._operations_panel.on_states_updated(state)
 
         # Calm a shown fault-warning banner once every runtime fault has
-        # cleared (plan §3) — but only if THIS banner is the one showing
+        # cleared — but only if THIS banner is the one showing
         # (never steal a dismiss from an unrelated message, e.g. the
         # save-health error).
         if self._last_fault_message is not None and not self._orchestrator.vi_faults():
@@ -1230,7 +1229,7 @@ class MonitorWindow(QMainWindow):
             self._last_fault_message = None
 
     def _on_error_event(self, event: ErrorEvent) -> None:
-        """Show a per-VI fault warning on the banner (plan §3).
+        """Show a per-VI fault warning on the banner.
 
         Only ``kind="fault"``/``severity="warning"`` events are handled
         here — everything more severe (``run_failure``, ``safety``,

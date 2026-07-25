@@ -1,10 +1,9 @@
 # ---
 # description: |
 #   End-to-end behavior tests for SampleChangeOperation
-#   (cryosoft/procedures/operations/sample_change.py, plan §8.2), driven by a
+#   (cryosoft/procedures/operations/sample_change.py), driven by a
 #   real Orchestrator (ticked directly, not via the QTimer) against the
-#   sim_cryostat station. Phase 3 (docs/plans/unified-servicing-log-and-run-
-#   recording.md §1) made this a "hold phase" operation: the run no longer
+#   sim_cryostat station. This is a "hold phase" operation: the run no longer
 #   finishes on its own once the ramps land — every test that wants the run
 #   to end now calls orchestrator.finish_operation() explicitly, mirroring
 #   what the OperationCard's Finish click does. Covers: the run staying
@@ -12,15 +11,13 @@
 #   temperature + magnet fields into the shared recorder every tick; Finish
 #   producing a "done" manifest with every postcondition held (empty
 #   postconditions_unmet) and the recording in run_summary(); the needle-
-#   valve operator-confirmation gate — one-shot evaluated as the run ends
-#   (docs/plans/operation-concurrency-and-error-scoping.md §2): unconfirmed
-#   finishes promptly with "needle_valve_confirmed" named in
+#   valve operator-confirmation gate — one-shot evaluated as the run ends:
+#   unconfirmed finishes promptly with "needle_valve_confirmed" named in
 #   postconditions_unmet, never blocking — measurement-VI standby + switch-VI
 #   open_all dispatch, an end-to-end run through a real CryogenicsRecorder
 #   (writing exactly one unified "servicing" entry, entry_kind=
 #   "sample_change", never the legacy "cryogenics"/"operations" kinds, with
-#   its recording written as a sidecar — see docs/plans/unified-servicing-
-#   log-and-run-recording.md §2/§3), refusal while a procedure is running,
+#   its recording written as a sidecar), refusal while a procedure is running,
 #   construction-time validation, and the operator-confirmation declaration
 #   standard itself (confirm()/confirmed()).
 #
@@ -163,7 +160,7 @@ def test_construction_rejects_missing_vti_vi(station):
 
 
 def test_construction_rejects_non_manual_needle_valve(station):
-    """Only needle_valve == 'manual' is implemented today (plan §8.2)."""
+    """Only needle_valve == 'manual' is implemented today."""
     with pytest.raises(CryoSoftConfigError):
         SampleChangeOperation(station, needle_valve="auto")
 
@@ -192,7 +189,7 @@ def test_confirm_unknown_key_raises(station):
 def test_sample_change_holds_until_finish_then_all_postconditions_held(orchestrator, station, qtbot):
     """Zero-field + 300 K ramps, run holds, Finish -> done manifest, no data file.
 
-    Phase 3 (docs/plans/unified-servicing-log-and-run-recording.md §1): the
+    Phase 3: the
     run no longer ends on its own once the ramps land — it stays active
     (never IDLE) until finish_operation() is called.
     """
@@ -393,8 +390,7 @@ def test_cryogenics_recorder_records_one_servicing_entry(orchestrator, station, 
     # "unmet: ..." trace in notes (see GLOSSARY.md's Operator confirmation).
     assert "needle_valve_confirmed" not in entry.values["notes"]
     # The recorded VTI/magnet-field series was written as a sidecar,
-    # referenced from this entry (docs/plans/unified-servicing-log-and-run-
-    # recording.md §3).
+    # referenced from this entry.
     assert entry.values["recording"]
     sidecar_path = servicing_store.recordings_path(entry.values["recording"])
     assert sidecar_path.exists()

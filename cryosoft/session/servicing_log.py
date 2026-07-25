@@ -1,8 +1,6 @@
 # ---
 # description: |
-#   The Servicing Log framework (L6, plan Phase 1 of
-#   docs/plans/cryogenics-logbook.md §3/§6, unified per Phases 1-2 of
-#   docs/plans/unified-servicing-log-and-run-recording.md): declared log kinds
+#   The Servicing Log framework (L6): declared log kinds
 #   (LogKindSpec/DECLARED_LOG_KINDS), append-only per-kind storage with an
 #   entry-revision model (ServicingLogStore), the machine-recorded helium
 #   sample stream (HeliumRecordStore), a pure consumption-rate function, the
@@ -12,7 +10,7 @@
 #   is one LogKindSpec, no new store or GUI code. The legacy `cryogenics` +
 #   `operations` kinds are superseded by the flat `servicing` kind (one
 #   common field table for every entry, no per-kind fields, no `status`
-#   field — see the plan §2); both legacy kinds stay declared (readable, and
+#   field — see the); both legacy kinds stay declared (readable, and
 #   still manually editable for `cryogenics`) so historical entries and any
 #   not-yet-migrated setup keep working, but as of Phase 2
 #   CryogenicsRecorder writes ONLY the `servicing` kind — one flat entry per
@@ -80,9 +78,7 @@
 """The Servicing Log framework (L6): declared log kinds, revisioned storage,
 the helium record, the automatic recorder, and legacy-log migration.
 
-See ``docs/plans/cryogenics-logbook.md`` §3 and §6, and
-``docs/plans/unified-servicing-log-and-run-recording.md`` §2 (Phases 1-2) for
-the design this implements, and ``GLOSSARY.md`` for the **Servicing log** /
+See ``GLOSSARY.md`` for the **Servicing log** /
 **Log kind** / **Cryogenics log** / **Entry revision** / **Helium record** /
 **Recording** definitions.
 """
@@ -250,7 +246,7 @@ class LogKindSpec:
 
 
 # The first (and, so far, only) editable log kind: one entry per cryogen
-# fill (plan §6.1). Written automatically by the fill operation (Phase 3),
+# fill. Written automatically by the fill operation (Phase 3),
 # addable/editable by hand (fills done manually, LN2 top-ups, corrections).
 _CRYOGENICS_KIND = LogKindSpec(
     key="cryogenics",
@@ -283,9 +279,9 @@ _CRYOGENICS_KIND = LogKindSpec(
         "notes": ParamSpec(
             type=str, default="", description="Free-text notes / corrections"
         ),
-        # Machine-populated only (docs/plans/operation-concurrency-and-error-
-        # scoping.md §4): HeliumFillOperation's bounded in-memory level curve,
-        # JSON-encoded ({"unix_time": [...], "helium_pct": [...]}), handed
+        # Machine-populated only: HeliumFillOperation's bounded in-memory
+        # level curve, JSON-encoded ({"unix_time": [...], "helium_pct":
+        # [...]}), handed
         # off via run_summary() and written by CryogenicsRecorder alongside
         # this entry. "" for a manual entry (no run behind it) and for any
         # entry written before this field existed — ServicingLogStore never
@@ -335,8 +331,7 @@ _OPERATIONS_KIND = LogKindSpec(
     editable=False,
 )
 
-# The unified log kind (plan docs/plans/unified-servicing-log-and-run-
-# recording.md §2): ONE flat common table for every servicing event —
+# The unified log kind: ONE flat common table for every servicing event —
 # helium fills, sample changes, future operations, and hand-added entries
 # all share exactly these fields, no kind-specific columns and no `status`
 # field. Supersedes the split between `cryogenics` and `operations`, though
@@ -1096,8 +1091,7 @@ def migrate_legacy_servicing_log(
 ) -> bool:
     """Merge legacy ``cryogenics.jsonl`` + ``operations.jsonl`` into ``servicing.jsonl``.
 
-    Pure, idempotent, one-time rewrite (docs/plans/unified-servicing-log-and-
-    run-recording.md, "Legacy migration"). Reads the two legacy log kinds
+    Pure, idempotent, one-time rewrite. Reads the two legacy log kinds
     through the existing tolerant ``ServicingLogStore`` reader (a corrupt
     line is skipped, never raised), matches a fill's ``operations`` entry to
     its ``cryogenics`` entry by an exact
@@ -1294,8 +1288,7 @@ def migrate_legacy_servicing_log(
 
 
 class CryogenicsRecorder(QObject):
-    """The automatic servicing-log/helium-record writer (plan §6.3, unified
-    per docs/plans/unified-servicing-log-and-run-recording.md §2 Phase 2).
+    """The automatic servicing-log/helium-record writer.
 
     Driven purely by existing Orchestrator signals — this class never touches
     hardware or the Station, and never raises out of a slot (every public
@@ -1317,9 +1310,8 @@ class CryogenicsRecorder(QObject):
     uses (``_normalize_entry_kind``) so both paths agree on stable keys like
     ``"helium_fill"``/``"sample_change"``. A recording sidecar is written
     whenever the manifest's ``summary`` carries a well-formed generic
-    ``"recording"`` series (``{"unix_time": [...], "channels": {...}}}``,
-    docs/plans/unified-servicing-log-and-run-recording.md §3) — not
-    fill-specific.
+    ``"recording"`` series (``{"unix_time": [...], "channels": {...}}}``) —
+    not fill-specific.
 
     Signals:
         cryo_warning (str): Emitted once when the helium level drops below
@@ -1353,7 +1345,7 @@ class CryogenicsRecorder(QObject):
             warning_pct: Advisory helium threshold (%); crossing it below
                 emits ``cryo_warning``.
             history_sample_s: Minimum seconds between helium-record appends
-                (default 3600 s — hourly, per plan §6.3).
+                (default 3600 s — hourly, per).
             warning_clear_margin_pct: Hysteresis margin (%) added to
                 ``warning_pct`` before the warning re-arms.
         """
@@ -1372,7 +1364,7 @@ class CryogenicsRecorder(QObject):
         self._warning_active = False
 
         # Levels + time captured at any operation run's start, consumed on
-        # finish (plan §2: "Levels are stamped for every kind, not just
+        # finish ("Levels are stamped for every kind, not just
         # fills"). None while no operation run is in progress.
         self._run_start_helium_pct: float | None = None
         self._run_start_nitrogen_pct: float | None = None
@@ -1517,12 +1509,10 @@ class CryogenicsRecorder(QObject):
         """Write ``recordings/<run_id>.json`` if the manifest carries a recording.
 
         Reads ``manifest["summary"]["recording"]`` (the Orchestrator's
-        duck-typed ``run_summary()`` hand-off, docs/plans/operation-
-        concurrency-and-error-scoping.md §4) — the generic shape every
-        operation may hand off (docs/plans/unified-servicing-log-and-run-
-        recording.md §3): ``{"unix_time": [...], "channels": {"<vi>.<value>":
-        [...], ...}}``. Tolerant of every malformed shape (missing
-        ``summary``, non-dict recording, non-list series, non-dict
+        duck-typed ``run_summary()`` hand-off) — the generic shape every
+        operation may hand off: ``{"unix_time": [...], "channels":
+        {"<vi>.<value>": [...], ...}}``. Tolerant of every malformed shape
+        (missing ``summary``, non-dict recording, non-list series, non-dict
         channels): this is a best-effort observer, never a reason to lose
         the rest of the ``servicing`` entry.
 

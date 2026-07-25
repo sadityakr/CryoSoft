@@ -10,9 +10,8 @@
 #   A runtime fault (stale/disconnected — the SAME status the QSS border
 #   already reflects) additionally shows a fault row (message + Acknowledge +
 #   Retry) and disables the @control rows — the RUNTIME sibling of
-#   OfflineInstrumentPanel's build-time fault card (docs/plans/operation-
-#   concurrency-and-error-scoping.md §3): reuses its "controls disabled,
-#   state the fault, offer one recovery action" idiom rather than
+#   OfflineInstrumentPanel's build-time fault card: reuses its "controls
+#   disabled, state the fault, offer one recovery action" idiom rather than
 #   duplicating it.
 # entry_point: Not run directly. Instantiated by MonitorWindow.
 # dependencies:
@@ -193,7 +192,7 @@ class InstrumentPanel(QGroupBox):
         header_row.addWidget(self._lifecycle)
         outer.addLayout(header_row)
 
-        # ── Fault row (runtime fault registry, plan §3) ────────────────
+        # ── Fault row (runtime fault registry) ────────────────
         # Hidden until _on_states_updated() detects an active fault via
         # Orchestrator.vi_faults() — the RUNTIME sibling of
         # OfflineInstrumentPanel's build-time fault card.
@@ -452,7 +451,7 @@ class InstrumentPanel(QGroupBox):
         """Show/hide the fault row and enable/disable controls from the fault registry.
 
         Reads ``Orchestrator.vi_faults()`` (backed by the Station's runtime
-        fault registry, plan §3) every tick, but only actually toggles
+        fault registry) every tick, but only actually toggles
         widget state on a fault/recovery TRANSITION — matching the existing
         status-border repolish discipline (never restyle unless something
         changed).
@@ -472,7 +471,7 @@ class InstrumentPanel(QGroupBox):
             self._ack_fault_btn.setEnabled(not fault.acknowledged)
 
     # ------------------------------------------------------------------
-    # Fault row actions (runtime fault registry, plan §3)
+    # Fault row actions (runtime fault registry)
     # ------------------------------------------------------------------
 
     def _on_acknowledge_fault_clicked(self) -> None:

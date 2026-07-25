@@ -373,7 +373,7 @@ def test_check_safety_flags_magnet_quench(sim_station: Station):
 
 
 # ---------------------------------------------------------------------------
-# Runtime fault registry (docs/plans/operation-concurrency-and-error-scoping.md §3)
+# Runtime fault registry
 # ---------------------------------------------------------------------------
 
 def test_fault_recorded_on_stale_then_disconnected(sim_station: Station):
@@ -448,7 +448,7 @@ def test_retry_fault_both_outcomes(sim_station: Station):
 def test_level_meter_disconnect_still_force_trips_helium_low_with_fault(sim_station: Station):
     """A disconnected level meter still force-trips helium_low AND records a fault.
 
-    Guards the interplay called out in plan §3: the runtime fault registry
+    Guards the interplay: the runtime fault registry
     must not have displaced check_safety()'s existing disconnected-level-
     meter safety guard.
     """

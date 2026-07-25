@@ -24,7 +24,7 @@
 #   Orchestrator — sessions_root() is a dedicated, app-settings-backed
 #   location, decoupled from the Data Directory form field), then — only when
 #   the active config declares a cryogenics: block AND the station has the
-#   level VI it names (docs/plans/cryogenics-logbook.md §9) — builds a
+#   level VI it names — builds a
 #   HeliumRecordStore/ServicingLogStore rooted at sessions_root()/"servicing"
 #   (a sibling of the experiment folders, never inside one), constructs a
 #   CryogenicsRecorder, and connects it to the Orchestrator's
@@ -155,8 +155,7 @@ def main() -> None:
     # Session layer (L6). Experiment records live under the dedicated,
     # app-settings-backed sessions_root() — a deliberate machine-level
     # setting, never derived from the Data Directory form field (which is
-    # itself now *derived from* the open session — see
-    # docs/plans/unified-session-record.md §4/§8). The user roster stays
+    # itself now *derived from* the open session). The user roster stays
     # setup-local, next to the app-settings files.
     session_manager = SessionManager(
         store=ExperimentStore(app_settings.sessions_root()),
@@ -167,7 +166,7 @@ def main() -> None:
         config_path=used_path,
     )
 
-    # Cryogenics management (Phase 3/5, docs/plans/cryogenics-logbook.md §9/§10):
+    # Cryogenics management:
     # config-gated like every optional feature — a setup without a
     # cryogenics: block (or without the level VI it names) carries zero
     # footprint and this whole block is a no-op. Stores are rooted at
@@ -178,7 +177,7 @@ def main() -> None:
     # same store instances feed both the automatic recorder and the Monitor
     # window's Cryogenics panel / Logs page, so both always see the same data.
     cryogenics_config = read_cryogenics_config(used_path)
-    # Operations panel (plan §12): declared operations.<key>: config blocks,
+    # Operations panel: declared operations.<key>: config blocks,
     # GUI-safe to read unconditionally (empty {} when the setup declares
     # none) — the panel decides which discovered class each key maps to.
     operations_config = read_operations_config(used_path)
@@ -194,8 +193,7 @@ def main() -> None:
         helium_store = HeliumRecordStore(servicing_root, config_identity)
         servicing_store = ServicingLogStore(servicing_root, config_identity)
         # One-time migration of any pre-unification cryogenics.jsonl/
-        # operations.jsonl into servicing.jsonl (docs/plans/unified-
-        # servicing-log-and-run-recording.md §2). Idempotent no-op once
+        # operations.jsonl into servicing.jsonl. Idempotent no-op once
         # servicing.jsonl exists or neither legacy file is present, so it is
         # always safe to call unconditionally on every startup.
         servicing_store.migrate_legacy(level_vi_name=cryogenics_config["level_vi"])

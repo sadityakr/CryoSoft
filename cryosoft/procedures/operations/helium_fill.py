@@ -8,10 +8,8 @@
 #   elapses). Restores SLOW refresh on standby/abort so an aborted fill
 #   never leaves the meter in FAST, and verifies that restoration (plus that
 #   the level actually rose) via postcondition_gates(). Tolerates the
-#   helium_low safety flag — see docs/plans/cryogenics-logbook.md §8.1. No
-#   HDF5 file: the level curve is handed to the session layer via
-#   run_summary() instead (docs/plans/operation-concurrency-and-error-
-#   scoping.md §4).
+#   helium_low safety flag. No HDF5 file: the level curve is handed to the
+#   session layer via run_summary() instead.
 # entry_point: Not run directly. Constructed by the GUI's fill dialog (Phase
 #   5) or a test, submitted via Orchestrator.run_operation()/queue_operation().
 # dependencies:
@@ -23,8 +21,8 @@
 #     direct virtual_instruments import (contract C6)
 # input: |
 #   Constructor: station (positional), person (keyword, default ""), and
-#   **config carrying the docs/plans/cryogenics-logbook.md §9 cryogenics:
-#   keys (level_vi, fill_target_pct, fill_zero_field_eps_T,
+#   **config carrying the cryogenics: keys (level_vi, fill_target_pct,
+#   fill_zero_field_eps_T,
 #   fill_zero_field_window_s, fill_complete_window_s, max_fill_duration_s,
 #   sample_period_s), each with a class-matching default — main.py can pass
 #   **read_cryogenics_config(config_path) verbatim (its extra keys, e.g.
@@ -53,8 +51,8 @@
 #   run_summary() -> dict consumed by the Orchestrator (merged into the run
 #   manifest's "summary" key) and, from there, CryogenicsRecorder, which
 #   writes the "recording" key as this run's recordings/<run_id>.json
-#   sidecar (docs/plans/unified-servicing-log-and-run-recording.md §3) and
-#   folds start_pct/end_pct into the single "servicing" entry it writes for
+#   sidecar and folds start_pct/end_pct into the single "servicing" entry it
+#   writes for
 #   every finished run. The curve itself is now OperationBase's shared
 #   _record_sample()/_recording_dict() recorder helper (Phase 3), not a
 #   fill-specific field — the fill's contribution is just the one channel
@@ -117,7 +115,7 @@ def _humanize_duration_hours(hours: float) -> str:
 class HeliumFillOperation(OperationBase):
     """Force every magnet to zero field, then fill the helium reservoir.
 
-    The first concrete operation (plan §8.1): a servicing action, not a
+    The first concrete operation: a servicing action, not a
     measurement. ``initiate()`` ramps every magnet
     (``Station.magnet_vi_names()``) to 0 T and switches the configured level
     meter to FAST refresh; ``initiation_gates()`` holds the run until zero
@@ -131,15 +129,15 @@ class HeliumFillOperation(OperationBase):
     ``tolerated_safety_flags = frozenset({"helium_low"})``: the fill's whole
     purpose is fixing low helium, so that flag must not abort it — a
     non-tolerated flag (e.g. ``quench``) still aborts the fill exactly like
-    any other run (plan §7).
+    any other run.
 
-    Readiness / next-due (Operations panel, plan §12): ``readiness_conditions()``
+    Readiness / next-due (Operations panel): ``readiness_conditions()``
     exposes one aggregate ``zero_field`` checklist row (empty if the station
     has no magnets); ``next_due()`` predicts when the level will cross the
     configured warning threshold from the measured consumption rate passed
     in via ``context``.
 
-    No HDF5 file (docs/plans/operation-concurrency-and-error-scoping.md §4):
+    No HDF5 file:
     ``sample()`` appends to a bounded in-memory level curve instead of
     writing a dataset, and ``run_summary()`` hands that curve to the session
     layer (``CryogenicsRecorder``) when the run ends.
@@ -169,9 +167,9 @@ class HeliumFillOperation(OperationBase):
                 ``fill_target_pct``, ``fill_zero_field_eps_T``,
                 ``fill_zero_field_window_s``, ``fill_complete_window_s``,
                 ``max_fill_duration_s``, ``sample_period_s``,
-                ``helium_warning_pct`` (read by ``next_due()``, plan §12 —
-                the same key the recorder's advisory warning uses) — each
-                with a sane default matching §9 so this constructs from a
+                ``helium_warning_pct`` (read by ``next_due()`` — the same
+                key the recorder's advisory warning uses) — each with a
+                sane default so this constructs from a
                 sim station alone. Unrecognised keys (including the retired
                 ``data_directory``, kept accepted-but-ignored for any caller
                 still passing it) are silently ignored, so
@@ -201,7 +199,7 @@ class HeliumFillOperation(OperationBase):
             config.get("max_fill_duration_s", 3600.0)
         )
         self._sample_period_s: float = float(config.get("sample_period_s", 10.0))
-        # next_due()'s prediction threshold (plan §12) — the same
+        # next_due()'s prediction threshold — the same
         # helium_warning_pct key the recorder's advisory cryo_warning signal
         # already reads (see cryosoft.session.servicing_log.CryogenicsRecorder
         # and Station._CRYOGENICS_DEFAULTS), so **cryogenics_config passed
@@ -231,8 +229,7 @@ class HeliumFillOperation(OperationBase):
         # _reset_recording(), appended to by sample().
 
     # ------------------------------------------------------------------
-    # Session hand-off (docs/plans/operation-concurrency-and-error-
-    # scoping.md §4)
+    # Session hand-off
     # ------------------------------------------------------------------
 
     def run_summary(self) -> dict[str, Any]:
@@ -241,8 +238,8 @@ class HeliumFillOperation(OperationBase):
         Called once by the Orchestrator on ``run_finished`` (see
         ``OperationBase.run_summary()``); ``CryogenicsRecorder`` reads this
         back off ``manifest["summary"]`` and writes the curve as this run's
-        ``recordings/<run_id>.json`` sidecar (docs/plans/unified-servicing-
-        log-and-run-recording.md §3) alongside the single ``servicing`` entry
+        ``recordings/<run_id>.json`` sidecar alongside the single
+        ``servicing`` entry
         it writes for every finished run.
 
         Returns:
@@ -303,7 +300,7 @@ class HeliumFillOperation(OperationBase):
         }
 
     # ------------------------------------------------------------------
-    # Operations panel: readiness / next-due (plan §12)
+    # Operations panel: readiness / next-due
     # ------------------------------------------------------------------
 
     def readiness_conditions(self) -> tuple[ReadinessCondition, ...]:
@@ -558,8 +555,7 @@ class HeliumFillOperation(OperationBase):
         """Verify SLOW refresh is restored and the level did not fall below start.
 
         The Orchestrator evaluates each gate exactly once, immediately, as
-        the run ends (docs/plans/operation-concurrency-and-error-scoping.md
-        §2); an unmet gate is recorded on the run manifest's
+        the run ends; an unmet gate is recorded on the run manifest's
         ``postconditions_unmet`` list rather than blocking completion.
 
         Returns:

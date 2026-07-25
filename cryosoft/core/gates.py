@@ -19,8 +19,8 @@
 #   given). check_once() is the one-shot alternative: it runs the action
 #   once (if not already run) and returns a single check() reading,
 #   ignoring window_s entirely — used by the Orchestrator's operation-finish
-#   one-shot postcondition evaluation (docs/plans/operation-concurrency-and-
-#   error-scoping.md §2), never combined with step() on the same instance.
+#   one-shot postcondition evaluation, never combined with step() on the
+#   same instance.
 # output: |
 #   step() -> bool, True exactly once the gate is satisfied and forever
 #   after. check_once() -> bool, a single point-in-time read.
@@ -125,9 +125,8 @@ class Gate:
         Runs ``action`` once (if not already run) exactly like ``step()``,
         then reads ``check()`` a single time and returns it verbatim — no
         stability window, no holding, no timeout. Used by the Orchestrator's
-        operation-finish one-shot postcondition evaluation (design doc
-        ``docs/plans/operation-concurrency-and-error-scoping.md`` §2), where
-        holding for ``window_s`` would defeat "finish is immediate". Call
+        operation-finish one-shot postcondition evaluation, where holding
+        for ``window_s`` would defeat "finish is immediate". Call
         this instead of (never together with) ``step()`` on a given ``Gate``
         instance.
 

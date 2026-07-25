@@ -11,16 +11,16 @@
 #   the same nested-QSplitter pattern as MonitorWindow. Sample info is read from
 #   MonitorWindow via callables. This module owns the quadrant assembly, the
 #   Orchestrator signal wiring, the run/queue/abort flows, the live plots, and
-#   session/geometry persistence. Operation-blind by design (docs/plans/
-#   operation-concurrency-and-error-scoping.md §2's hard status separation):
+#   session/geometry persistence. Operation-blind by design (the hard
+#   status separation):
 #   status_message/procedure_progress/procedure_finished/measurement_ready
 #   fire only for a procedure run at the Orchestrator level, and Pause/
 #   Resume/Abort additionally gate on Orchestrator.active_run_kind() so this
 #   window never acts on a running operation — operation status and control
 #   live exclusively on the Operations panel's OperationCard. The
-#   ACKNOWLEDGE EMERGENCY button has moved to MonitorWindow (docs/plans/
-#   operation-concurrency-and-error-scoping.md §3, single home) — this
-#   window no longer connects state_changed at all, having no other use
+#   ACKNOWLEDGE EMERGENCY button has moved to MonitorWindow (single
+#   home) — this window no longer connects state_changed at all, having no
+#   other use
 #   for it.
 # entry_point: Not run directly. Opened via MonitorWindow Procedures menu.
 # dependencies:
@@ -320,8 +320,7 @@ class ProcedureWindow(QMainWindow):
         """Build the Pause / Resume / Abort buttons.
 
         The Emergency-Acknowledge button has a single home now — the
-        Monitor window's banner (docs/plans/operation-concurrency-and-
-        error-scoping.md §3) — so it no longer lives here.
+        Monitor window's banner — so it no longer lives here.
 
         Returns:
             A QHBoxLayout containing the control buttons.

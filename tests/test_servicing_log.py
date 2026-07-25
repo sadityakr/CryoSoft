@@ -1,8 +1,7 @@
 # ---
 # description: |
-#   Behavior tests for the Servicing Log framework (cryosoft/session/servicing_log.py,
-#   Phase 1 of docs/plans/cryogenics-logbook.md, unified per Phases 1-2 of
-#   docs/plans/unified-servicing-log-and-run-recording.md): LogKindSpec
+#   Behavior tests for the Servicing Log framework
+#   (cryosoft/session/servicing_log.py): LogKindSpec
 #   validation, ServicingLogStore's entry-revision model (add/revise/delete
 #   round-trips, tombstone hiding, write validation, tolerant loads,
 #   non-editable-kind refusal), HeliumRecordStore (decimation via the
@@ -642,7 +641,7 @@ def test_recorder_writes_single_servicing_entry_for_fill(recorder, servicing_sto
 
 
 def test_recorder_writes_single_servicing_entry_for_non_fill_operation(recorder, servicing_store):
-    """Levels are stamped for EVERY run kind, not just fills (plan §2)."""
+    """Levels are stamped for EVERY run kind, not just fills."""
     recorder.on_states_updated(_state(70.0, nitrogen_pct=65.0))
 
     recorder.on_run_started(
@@ -810,7 +809,7 @@ def test_recorder_notes_include_abort_reason_and_unmet_postconditions(recorder, 
     assert "failed" in entry.values["notes"]
     assert "level meter stale" in entry.values["notes"]
     assert "unmet: refresh_slow, level_held_or_rose" in entry.values["notes"]
-    # There is no status field in the unified schema (plan §2).
+    # There is no status field in the unified schema.
     assert "status" not in entry.values
 
 

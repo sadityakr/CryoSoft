@@ -4,8 +4,8 @@
 #   These are marker decorators: they tag methods with metadata attributes
 #   so that BaseVirtualInstrument.__init_subclass__ can discover them,
 #   and the GUI can auto-generate panels. @control also carries a capability
-#   scope ("measurement" or "operation", see docs/plans/cryogenics-logbook.md
-#   §5) enforced at dispatch by Station.send_measurement_commands().
+#   scope ("measurement" or "operation") enforced at dispatch by
+#   Station.send_measurement_commands().
 # last_updated: 2026-07-20
 # ---
 
@@ -49,7 +49,7 @@ import inspect
 import typing
 from typing import Any, Callable
 
-# The only valid @control capability scopes (plan §5). Anything else raises
+# The only valid @control capability scopes. Anything else raises
 # ValueError at decoration time — a typo in scope="opration" fails loudly at
 # import time, not silently at dispatch.
 VALID_CONTROL_SCOPES: frozenset[str] = frozenset({"measurement", "operation"})

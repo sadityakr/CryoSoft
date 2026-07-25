@@ -1,8 +1,8 @@
 # ---
 # description: |
 #   OperationsPanel: MonitorWindow page 1's bottom-right selector entry
-#   (renamed from "Cryogenics" to "Operations", plan §12 — absorbs, does not
-#   replace, the Phase 5 cryogenics status section). Built when cryogenics
+#   (renamed from "Cryogenics" to "Operations" — absorbs, does not
+#   replace, the cryogenics status section). Built when cryogenics
 #   is enabled OR the operations: config is non-empty. Structure: when
 #   cryogenics is configured, a QSplitter divides the panel into a left pane
 #   (cryogenics status: He/N2 levels, consumption readout + window combo,
@@ -61,7 +61,7 @@
 #   instance via the panel-supplied factory closure, and calls
 #   orchestrator.run_operation(); while that operation is the active run the
 #   button becomes "Finish <name>" and calls orchestrator.finish_operation()
-#   (immediately going to a disabled "Finishing <name>…" state, plan §2,
+#   (immediately going to a disabled "Finishing <name>…" state
 #   until run_finished arrives — which also surfaces any
 #   postconditions_unmet as a warning badge on the card); a declared
 #   operator_confirmations checkbox calls orchestrator.confirm_operation(key)
@@ -126,7 +126,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["OperationCard", "OperationsPanel", "OperatorDialog"]
 
-# Consumption / plot time-window options (plan §10: 1 h / 6 h / 24 h).
+# Consumption / plot time-window options (1 h / 6 h / 24 h).
 _CONSUMPTION_WINDOWS: list[tuple[str, float]] = [
     ("1 h", 3600.0),
     ("6 h", 21600.0),
@@ -208,7 +208,7 @@ class OperationCard(QGroupBox):
     """One operation's live readiness checklist, next-due line, and start/finish control.
 
     Built generically from an operation *instance* — this class contains no
-    per-operation logic (plan §12's hybrid-declaration standard: the
+    per-operation logic (the hybrid-declaration standard: the
     operation class declares WHAT to check and predict; this card only
     renders it).
 
@@ -525,7 +525,7 @@ class OperationCard(QGroupBox):
         checkbox.setEnabled(False)  # confirmations are one-way
 
     def _reset_confirmations(self) -> None:
-        """Clear every confirmation checkbox for a fresh run (plan §12)."""
+        """Clear every confirmation checkbox for a fresh run."""
         for checkbox in self._confirm_checkboxes.values():
             checkbox.blockSignals(True)
             checkbox.setChecked(False)
@@ -568,13 +568,12 @@ class OperationCard(QGroupBox):
         self._confirmations_row.setVisible(self._running and bool(self._confirmations))
 
     def _sync_ready_banner(self) -> None:
-        """Show the ready banner once every readiness condition holds (plan §12).
+        """Show the ready banner once every readiness condition holds.
 
         For a plain operation (``hold_for_operator = False``, the default —
         e.g. the helium fill), unchanged: only once the run finished
         ``done`` AND every condition holds AND nothing is running now
-        (docs/plans/unified-servicing-log-and-run-recording.md §1's "the
-        fill's whole life is post-run"). For a hold-phase operation (e.g.
+        ("the fill's whole life is post-run"). For a hold-phase operation (e.g.
         the sample change), the banner may ALSO show mid-run, the instant
         every condition holds — "ready" means "you may act now", which is
         true well before Finish is clicked.
@@ -758,7 +757,7 @@ class OperationsPanel(QWidget):
         level_pen = pg.mkPen(PLOT_SERIES[0], width=2)
         # connect='finite' breaks the line at any inserted NaN point (see
         # _build_gapped_series) — the gap is never bridged by a straight
-        # line, matching "gaps rendered as gaps, no interpolation" (plan §10).
+        # line, matching "gaps rendered as gaps, no interpolation".
         self._curve = self._plot_widget.plot([], [], pen=level_pen, connect="finite")
         self._fill_markers = pg.ScatterPlotItem(
             symbol="t1", size=12, brush=pg.mkBrush(PLOT_SERIES[1]), pen=None
@@ -767,7 +766,7 @@ class OperationsPanel(QWidget):
         outer.addWidget(self._plot_widget)
 
     def _build_operation_cards(self, outer: QVBoxLayout) -> None:
-        """Build one OperationCard per available operation (plan §12)."""
+        """Build one OperationCard per available operation."""
         if self._cryogenics_config and self._station.has_vi(self._level_vi_name):
             try:
                 fill_display = HeliumFillOperation(self._station, **self._cryogenics_config)
@@ -918,9 +917,8 @@ class OperationsPanel(QWidget):
     def _fill_intervals(self) -> tuple[tuple[float, float], ...]:
         """Return ``(start_unix, end_unix)`` for every fill entry in the servicing log.
 
-        Reads the unified ``"servicing"`` kind (docs/plans/unified-servicing-
-        log-and-run-recording.md §2 — the recorder no longer writes the
-        legacy ``"cryogenics"`` kind), filtering to ``entry_kind ==
+        Reads the unified ``"servicing"`` kind (the recorder no longer
+        writes the legacy ``"cryogenics"`` kind), filtering to ``entry_kind ==
         "helium_fill"``.
         """
         if self._servicing_store is None:

@@ -95,7 +95,7 @@ def discover_operations() -> list[type[OperationBase]]:
     """Import all modules in cryosoft.procedures.operations and return concrete operations.
 
     Same pkgutil-walk-and-import pattern as ``discover_procedures()``, over
-    the operations subpackage instead. The Operations panel (plan §12) uses
+    the operations subpackage instead. The Operations panel uses
     this to build one card per discovered class whose ``config_key`` matches
     a key in the ``operations:`` config block — no per-operation GUI code.
 

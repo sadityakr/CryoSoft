@@ -1,7 +1,6 @@
 # ---
 # description: |
-#   Behavior tests for cryosoft.gui.operations_panel (Phase 6,
-#   docs/plans/cryogenics-logbook.md §12): panel presence gated on
+#   Behavior tests for cryosoft.gui.operations_panel: panel presence gated on
 #   cryogenics/operations config, live cryogenics-status readouts from a
 #   synthetic states_updated snapshot, on-screen geometry when selected in
 #   MonitorWindow's bottom-right quadrant, generic OperationCard
@@ -10,9 +9,9 @@
 #   run_started/run_finished, the operator-confirmation checkbox calling
 #   confirm_operation(), the ready banner appearing only once a run is done
 #   and every condition holds, a cryogenics-less/operations-only panel
-#   building only the sample-change card, and the immediate-finish contract
-#   (docs/plans/operation-concurrency-and-error-scoping.md §2): Finish click
-#   -> instant disabled "Finishing…" state, the live operation_status label
+#   building only the sample-change card, and the immediate-finish contract:
+#   Finish click -> instant disabled "Finishing…" state, the live
+#   operation_status label
 #   (only for the currently-running card), and the unmet-postcondition
 #   warning badge on run_finished.
 # last_updated: 2026-07-21
@@ -513,8 +512,7 @@ def test_ready_banner_clears_when_new_run_starts(station, operations_config, qtb
     assert card._ready_banner.isHidden()
 
 
-# ── Mid-run ready banner for a hold-phase operation (Phase 3, docs/plans/
-# unified-servicing-log-and-run-recording.md §1): SampleChangeOperation
+# ── Mid-run ready banner for a hold-phase operation: SampleChangeOperation
 # declares hold_for_operator = True, so the banner may show WHILE the run
 # is still active, not only after it finishes done. ─────────────────────────
 
