@@ -951,8 +951,7 @@ class Orchestrator(QObject):
     def _check_vi_preconditions(self, vi_name: str) -> tuple[bool, str]:
         """Check VI-specific preconditions for manual operation.
 
-        Currently checks: if the VI is a magnet and helium_low is active,
-        refuse (magnets cannot operate without helium).
+        Checks: if the VI has an active safety concern, refuse operation.
 
         Args:
             vi_name: The VI to check.
@@ -961,18 +960,14 @@ class Orchestrator(QObject):
             ``(True, "")`` when preconditions are met; ``(False, reason)`` when
             violated.
         """
-        vi = self._station._virtual_instruments.get(vi_name)
-        if vi is None:
-            return True, ""
-
-        # Check if this VI is a magnet and depends on helium_low
-        if "helium_low" in vi.safety_concerns():
-            safety = self._station.check_safety()
-            if safety.get("helium_low"):
-                return False, (
-                    f"Cannot control {vi_name}: helium level is critically low. "
-                    f"Fill helium before operating magnets."
-                )
+        # Check if this VI is in safety_hold (a safety concern is active for it)
+        vi_safety = self._station.vi_safety_status()
+        if vi_name in vi_safety:
+            flag = vi_safety[vi_name]
+            return False, (
+                f"Cannot control {vi_name}: safety condition active ({flag}). "
+                f"Resolve the condition before operating."
+            )
 
         return True, ""
 
@@ -1554,20 +1549,46 @@ class Orchestrator(QObject):
                     getattr(self._procedure, "tolerated_safety_flags", frozenset())
                 )
                 tripped_flags = tripped_flags - tolerated
-            # helium_low does not trigger EMERGENCY, only blocks magnet operations
-            emergency_flags = tripped_flags - {"helium_low"}
-            active_flags = sorted(emergency_flags)
-            if active_flags and self._state != OrchestratorState.EMERGENCY:
+            # Update per-VI safety status: flags tripped for specific VIs.
+            # This is the per-VI equivalent of a fault: when any of a procedure's
+            # claimed/system VIs have a tripped safety concern, the procedure fails.
+            # Non-critical flags (helium_low) work via per-VI status only.
+            # Critical flags (quench) also enter EMERGENCY.
+            self._station.update_vi_safety_status(state)
+            vi_safety = self._station.vi_safety_status()
+
+            # Critical safety flags (quench) trigger EMERGENCY
+            critical_flags = {"quench"}
+            safety = self._station.check_safety(state)
+            tripped_critical = {f for f in critical_flags if safety.get(f)}
+            if tripped_critical and self._state != OrchestratorState.EMERGENCY:
                 sources = self._station.safety_flag_sources(state)
                 vi_names = tuple(sorted({
-                    vi_name for flag in active_flags for vi_name in sources.get(flag, [])
+                    vi_name for flag in tripped_critical for vi_name in sources.get(flag, [])
                 }))
                 self._enter_emergency(
-                    ", ".join(active_flags),
+                    ", ".join(sorted(tripped_critical)),
                     vi_names,
-                    tripped_flags=active_flags,
+                    tripped_flags=list(tripped_critical),
                 )
-                return  # emergency entry already cleaned up; nothing else this tick
+                return  # emergency entry already cleaned up
+
+            # Standby VIs whose safety concern just tripped (one-shot on first entry)
+            if vi_safety and self._state != OrchestratorState.EMERGENCY:
+                for vi_name in sorted(vi_safety.keys()):
+                    try:
+                        self._station._virtual_instruments[vi_name].standby()
+                    except Exception:
+                        logger.exception("standby failed on VI '%s'", vi_name)
+
+            # Fail any running procedure that uses an affected VI
+            if run_active:
+                for vi_name in watched_vis:
+                    if vi_name in vi_safety:
+                        # This VI's safety concern tripped; procedure must fail
+                        reason = f"Safety condition: {vi_safety[vi_name]}"
+                        self._fail_run_for_fault(vi_name, reason=reason)
+                        return
 
             # Session-envelope check — same snapshot, same consequence as a tripped
             # safety flag: the envelope protects the mounted sample, so a live
@@ -1968,25 +1989,29 @@ class Orchestrator(QObject):
         self._emit_run_finished("failed", reason=message)
         self._change_state(OrchestratorState.ERROR)
 
-    def _fail_run_for_fault(self, vi_name: str) -> None:
-        """Fail the active run because its claimed VI faulted.
+    def _fail_run_for_fault(self, vi_name: str, reason: str | None = None) -> None:
+        """Fail the active run because its claimed VI faulted or a safety condition triggered.
 
         Unlike ``_fail_to_error()``, this does NOT degrade to global ERROR:
         the blast radius is known (one VI, already recorded in the Station's
-        fault registry by ``get_state()``), so only the run ends — every
-        other instrument, including this one once it recovers or is
-        retried, stays usable. Deliberately does NOT call ``run_queue()``
-        afterward: a run failing for an instrument fault must not silently
-        auto-continue to the next queued run, the same conservative
+        fault registry by ``get_state()``, or a specific safety event), so only
+        the run ends — every other instrument, including this one once it
+        recovers or is retried, stays usable. Deliberately does NOT call
+        ``run_queue()`` afterward: a run failing for an instrument fault must
+        not silently auto-continue to the next queued run, the same conservative
         behavior the old global-ERROR path had.
 
         Args:
-            vi_name: The claimed VI that went stale during the run.
+            vi_name: The claimed VI that faulted or whose safety concern tripped.
+            reason: Human-readable reason for the failure. If None, assumes VI went stale.
         """
-        message = (
-            f"Run failed: active VI '{vi_name}' became stale. The instrument "
-            "is quarantined; every other instrument stays usable."
-        )
+        if reason is None:
+            message = (
+                f"Run failed: active VI '{vi_name}' became stale. The instrument "
+                "is quarantined; every other instrument stays usable."
+            )
+        else:
+            message = f"Run failed: {reason}"
         self._error(message, vi_name=vi_name, kind="run_failure", severity="error")
         try:
             self._abort_active_procedure()

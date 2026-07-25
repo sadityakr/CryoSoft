@@ -581,8 +581,11 @@ def test_helium_low_blocks_magnets_without_emergency(orchestrator, station, qtbo
     # Force helium low
     station.level_meter._driver._force_helium_level = 5.0
 
-    # Wait a moment for flag to be debounced
-    qtbot.wait(100)
+    # Wait for safety status to be updated by orchestrator tick
+    def helium_in_safety_status():
+        return "magnet_z" in station.vi_safety_status()
+
+    qtbot.waitUntil(helium_in_safety_status, timeout=2000)
 
     # Confirm: no EMERGENCY triggered, state stays IDLE
     assert orchestrator._state == OrchestratorState.IDLE
