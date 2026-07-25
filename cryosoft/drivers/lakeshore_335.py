@@ -13,9 +13,13 @@
 # process: |
 #   All commands are standard Lakeshore SCPI. get_temperature() queries KRDG? A.
 #   get/set_setpoint() use SETP? 1 / SETP 1,<val>. get_heater_output() uses HTR? 1.
+#   get/set_heater_range() use RANGE? 1 / RANGE 1,<n> — the power-up default is
+#   Off, which is why a fresh instrument or one whose range was reset delivers
+#   no heater power regardless of heater mode or setpoint until commanded on.
 # output: |
-#   Returns float temperature (K), setpoint (K), and heater output (%) via public API.
-# last_updated: 2026-04-19
+#   Returns float temperature (K), setpoint (K), heater output (%), and
+#   heater range via public API.
+# last_updated: 2026-07-25
 # ---
 
 """Real Lakeshore 335 temperature controller driver (pure PyVISA)."""
@@ -192,6 +196,47 @@ class Lakeshore335:
         self._write(f"OUTMODE 1,{target_mode},{input_ch},{powerup}")
         import time
         time.sleep(0.2)  # Allow control loop to reinitialize and settle
+
+    def get_heater_range(self) -> str:
+        """Return the heater range for output 1 ('OFF', 'LOW', 'MEDIUM', or 'HIGH').
+
+        The heater range is what actually switches the output on: even in
+        Closed Loop PID (auto) mode with a valid setpoint, the heater
+        delivers no power while its range is 'OFF' (the instrument's
+        power-up default). Distinct from ``get_heater_mode()``, which only
+        selects auto vs. manual control of the setpoint/output value.
+        """
+        raw = self._query("RANGE? 1")
+        try:
+            n = int(raw)
+        except ValueError as exc:
+            raise CryoSoftCommunicationError(
+                f"Lakeshore 335: cannot parse RANGE from {raw!r}: {exc}",
+                vi_name="Lakeshore335",
+            ) from exc
+        mapping = {0: "OFF", 1: "LOW", 2: "MEDIUM", 3: "HIGH"}
+        if n not in mapping:
+            raise CryoSoftCommunicationError(
+                f"Lakeshore 335: unexpected RANGE value {n}",
+                vi_name="Lakeshore335",
+            )
+        return mapping[n]
+
+    def set_heater_range(self, range_setting: str) -> None:
+        """Set the heater range for output 1, switching heater power on or off.
+
+        Args:
+            range_setting: One of 'OFF', 'LOW', 'MEDIUM', 'HIGH'.
+
+        Raises:
+            ValueError: If ``range_setting`` is not one of the four values.
+        """
+        mapping = {"OFF": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3}
+        if range_setting not in mapping:
+            raise ValueError(
+                f"Heater range must be one of {sorted(mapping)}, got {range_setting!r}"
+            )
+        self._write(f"RANGE 1,{mapping[range_setting]}")
 
     def get_proportional_band(self) -> float:
         """Return the proportional band (P value) for output 1."""

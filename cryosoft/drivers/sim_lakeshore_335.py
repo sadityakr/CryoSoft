@@ -8,10 +8,14 @@
 # input: |
 #   Instantiated with a VISA resource string (ignored).
 # process: |
-#   Models temperature readings and manual/auto PID heating states.
+#   Models temperature readings and manual/auto PID heating states. The
+#   heater range (OFF/LOW/MEDIUM/HIGH) defaults to OFF, matching the real
+#   instrument's power-up default, and gates heater output to 0% whenever
+#   it is OFF regardless of heater mode or setpoint.
 # output: |
-#   Returns float temperature, setpoint, heater output, and PID values.
-# last_updated: 2026-07-16
+#   Returns float temperature, setpoint, heater output, heater range, and
+#   PID values.
+# last_updated: 2026-07-25
 # ---
 
 """Simulated Lakeshore 335 temperature controller driver."""
@@ -44,6 +48,7 @@ class SimLakeshore335:
         self._setpoint: float = 0.0
         self._heater_output: float = 0.0
         self._heater_mode: str = "AUTO"
+        self._heater_range: str = "OFF"  # matches the real instrument's power-up default
         self._proportional_band: float = 90.0
         self._integral_action_time: float = 50.0
         self._derivative_action_time: float = 0.0
@@ -78,9 +83,17 @@ class SimLakeshore335:
         self._setpoint = setpoint
 
     def get_heater_output(self) -> float:
-        """Return the simulated heater output percentage."""
+        """Return the simulated heater output percentage.
+
+        Always 0% while the heater range is 'OFF' (the instrument's power-up
+        default) — matching the real 335, where the commanded/computed
+        output is preserved internally but no power reaches the heater until
+        a non-'OFF' range is set.
+        """
         self._check_error()
         self._update_simulation()
+        if self._heater_range == "OFF":
+            return 0.0
         return self._heater_output
 
     def set_heater_output(self, output: float) -> None:
@@ -107,6 +120,25 @@ class SimLakeshore335:
         if mode not in ("MANUAL", "AUTO"):
             raise ValueError(f"Heater mode must be 'MANUAL' or 'AUTO', got {mode}")
         self._heater_mode = mode
+
+    def get_heater_range(self) -> str:
+        """Return the simulated heater range ('OFF', 'LOW', 'MEDIUM', 'HIGH')."""
+        self._check_error()
+        return self._heater_range
+
+    def set_heater_range(self, range_setting: str) -> None:
+        """Set the simulated heater range, switching heater power on or off.
+
+        Args:
+            range_setting: One of 'OFF', 'LOW', 'MEDIUM', 'HIGH'.
+        """
+        self._check_error()
+        if range_setting not in ("OFF", "LOW", "MEDIUM", "HIGH"):
+            raise ValueError(
+                f"Heater range must be one of 'OFF', 'LOW', 'MEDIUM', 'HIGH', "
+                f"got {range_setting!r}"
+            )
+        self._heater_range = range_setting
 
     def get_proportional_band(self) -> float:
         """Return the proportional band."""
@@ -189,16 +221,25 @@ class SimLakeshore335:
         if dt <= 0:
             return
 
-        # If AUTO mode, settle towards setpoint.
-        # If MANUAL mode, settle towards temperature proportional to heater output.
+        # _heater_output always tracks the commanded (MANUAL) or computed
+        # (AUTO) value, independent of heater range — matching the real 335,
+        # where MOUT/the PID's internal output survive a range change. What
+        # the range gates is whether that value actually reaches the heater
+        # (see get_heater_output() and the target computation below).
         if self._heater_mode == "AUTO":
-            target = self._setpoint
             # In AUTO, heater output is simulated as proportional to difference
             error = self._setpoint - self._temperature
-            if error > 0:
-                self._heater_output = min(99.9, error * 10.0)
-            else:
-                self._heater_output = 0.0
+            self._heater_output = min(99.9, error * 10.0) if error > 0 else 0.0
+        # MANUAL: self._heater_output already holds the value set_heater_output() commanded.
+
+        if self._heater_range == "OFF":
+            # Heater range 'OFF' (the instrument's power-up default) switches
+            # power delivery off entirely, no matter the heater mode or
+            # setpoint — matching the real 335's RANGE behaviour (see driver
+            # docstring). This is the condition the reported bug hit.
+            target = self._temperature
+        elif self._heater_mode == "AUTO":
+            target = self._setpoint
         else:
             # MANUAL: max power (99.9%) reaches 300 K, 0% sits at 4.2 K (base temp)
             target = 4.2 + (self._heater_output / 99.9) * 295.8

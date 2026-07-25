@@ -6,7 +6,7 @@
 #   VTITemperatureControllerVI, CryogenLevelMeterVI, DCSeparateMeasurementVI,
 #   DCSingleInstrumentVI, and DCMeasurementBase.
 # entry_point: pytest tests/test_l1_new_vis.py -v
-# last_updated: 2026-07-12
+# last_updated: 2026-07-25
 # ---
 
 """Tests for behavior-based VIs (Stage 2 of VI refactor)."""
@@ -668,6 +668,31 @@ class TestSampleTemperatureControllerVI:
         vi = self._make_vi(itc_driver)
         assert not hasattr(vi, "needle_valve")
 
+    # -- heater mode (shared base: Lakeshore 335 and Oxford ITC503 both
+    #    implement get/set_heater_mode with the same 'AUTO'/'MANUAL' values) --
+
+    def test_heater_mode_default_is_auto(self, itc_driver):
+        vi = self._make_vi(itc_driver)
+        assert vi.heater_mode() == "AUTO"
+
+    def test_set_heater_mode_control(self, itc_driver):
+        vi = self._make_vi(itc_driver)
+        vi.set_heater_mode("MANUAL")
+        assert vi.heater_mode() == "MANUAL"
+        assert itc_driver.get_heater_mode() == "MANUAL"
+        vi.set_heater_mode("AUTO")
+        assert vi.heater_mode() == "AUTO"
+
+    def test_set_heater_mode_rejects_invalid(self, itc_driver):
+        vi = self._make_vi(itc_driver)
+        with pytest.raises(ValueError):
+            vi.set_heater_mode("INVALID")
+
+    def test_get_state_includes_heater_mode(self, itc_driver):
+        vi = self._make_vi(itc_driver)
+        state = vi.get_state()
+        assert state["heater_mode"] == "AUTO"
+
 
 # ---------------------------------------------------------------------------
 # VTITemperatureControllerVI
@@ -725,6 +750,13 @@ class TestVTITemperatureControllerVI:
     def test_vi_type_is_temperature(self, itc_driver):
         vi = self._make_vi(itc_driver)
         assert vi.vi_type == "temperature"
+
+    def test_heater_mode_inherited(self, itc_driver):
+        """VTI (Oxford ITC503) also gets heater_mode from the shared base."""
+        vi = self._make_vi(itc_driver)
+        assert vi.heater_mode() == "AUTO"
+        vi.set_heater_mode("MANUAL")
+        assert vi.heater_mode() == "MANUAL"
 
 
 # ---------------------------------------------------------------------------
@@ -791,6 +823,51 @@ class TestLakeshore335SampleTemperatureControllerVI:
     def test_control_param_specs_other_methods_unaffected(self, lakeshore_driver):
         vi = self._make_vi(lakeshore_driver)
         assert vi.control_param_specs("set_temperature") == {}
+
+    # -- heater range (Lakeshore-specific: powers up 'OFF', which is the
+    #    reported bug — no heater power regardless of heater_mode or
+    #    setpoint until the range is explicitly turned on) --------------------
+
+    def test_heater_range_default_is_off(self, lakeshore_driver):
+        vi = self._make_vi(lakeshore_driver)
+        assert vi.heater_range() == "OFF"
+
+    def test_set_heater_range_control(self, lakeshore_driver):
+        vi = self._make_vi(lakeshore_driver)
+        vi.set_heater_range("HIGH")
+        assert vi.heater_range() == "HIGH"
+        assert lakeshore_driver.get_heater_range() == "HIGH"
+
+    def test_set_heater_range_rejects_invalid(self, lakeshore_driver):
+        vi = self._make_vi(lakeshore_driver)
+        with pytest.raises(ValueError):
+            vi.set_heater_range("INVALID")
+
+    def test_heater_stays_off_until_range_is_set(self, lakeshore_driver):
+        """Regression: heater_output() must read 0 at the VI layer while
+        heater_range is 'OFF', even with heater_mode AUTO and a setpoint far
+        from the current temperature — reproduces the reported bug and its
+        fix at the level the front panel actually reads."""
+        vi = self._make_vi(lakeshore_driver)
+        vi.set_heater_mode("AUTO")
+        vi.set_temperature(300.0)
+        assert vi.heater_output() == pytest.approx(0.0)
+
+        vi.set_heater_range("HIGH")
+        lakeshore_driver._temperature = 4.2
+        assert vi.heater_output() > 0.0
+
+    def test_control_param_specs_heater_range_choices(self, lakeshore_driver):
+        vi = self._make_vi(lakeshore_driver)
+        specs = vi.control_param_specs("set_heater_range")
+        spec = specs["range_setting"]
+        assert spec.choices == {"Off": "OFF", "Low": "LOW", "Medium": "MEDIUM", "High": "HIGH"}
+        assert spec.default == vi.heater_range()
+
+    def test_get_state_includes_heater_range(self, lakeshore_driver):
+        vi = self._make_vi(lakeshore_driver)
+        state = vi.get_state()
+        assert state["heater_range"] == "OFF"
 
 
 # ---------------------------------------------------------------------------
