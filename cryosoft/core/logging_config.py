@@ -2,7 +2,9 @@
 # description: |
 #   Logging configuration for CryoSoft. Resolves the log directory
 #   (log_directory()) and sets up a rotating file handler that writes to
-#   <log_dir>/cryosoft.log, plus a console handler for development.
+#   <log_dir>/cryosoft.log, a console handler for development, plus four
+#   time-rotated JSONL streams: cryosoft.status (operational status) and the
+#   three tiered trend-history streams (raw / 3-min / hourly).
 # last_updated: 2026-07-25
 # ---
 
@@ -60,8 +62,61 @@ def log_directory() -> Path:
     return Path(__file__).parent.parent / "logs"
 
 
+def _add_jsonl_handler(
+    name: str, path: Path, *, when: str, backup_count: int
+) -> None:
+    """Configure one propagate=False JSONL logger with a timed-rotating handler.
+
+    Shared by ``cryosoft.status`` and the three ``cryosoft.trend_*`` loggers
+    (see the module-level table in the docstring of ``setup_logging``) so the
+    four near-identical blocks collapse into one place. Each stream is one
+    JSON object per line, kept off the human console/file handlers
+    (``propagate=False``) and idempotency-guarded so repeated
+    ``setup_logging()`` calls never duplicate handlers.
+
+    Args:
+        name: Logger name, e.g. ``"cryosoft.status"``.
+        path: Full path to the JSONL file this logger writes.
+        when: ``TimedRotatingFileHandler`` rotation unit (``"midnight"`` for
+            daily, ``"W0"`` for weekly on Monday).
+        backup_count: Number of rotated backups to retain.
+    """
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    if not logger.handlers:
+        handler = logging.handlers.TimedRotatingFileHandler(
+            path, when=when, backupCount=backup_count, encoding="utf-8", utc=True
+        )
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        logger.addHandler(handler)
+
+
 def setup_logging(log_dir: str | Path | None = None, level: int = logging.DEBUG) -> None:
-    """Configure CryoSoft logging with rotating file + console output.
+    """Configure CryoSoft logging with rotating file + console + JSONL streams.
+
+    Four parallel JSONL streams, each one JSON object per line, each its own
+    ``propagate=False`` logger so JSON never reaches the console/GUI log
+    handlers:
+
+    ============ ==================== ============ ===============
+    Logger        File                 Rotation     backupCount
+    ============ ==================== ============ ===============
+    cryosoft.status         status.jsonl              daily (UTC)   7
+    cryosoft.trend_raw      trend_history_raw.jsonl    daily (UTC)   2
+    cryosoft.trend_3min     trend_history_3min.jsonl   daily (UTC)   8
+    cryosoft.trend_hourly   trend_history_hourly.jsonl weekly (UTC) 53
+    ============ ==================== ============ ===============
+
+    ``cryosoft.status`` moved here from a size-based ``RotatingFileHandler``
+    (10 MB x 3) to a daily ``TimedRotatingFileHandler``: its old time
+    coverage was an accident of VI count and tick rate, whereas "the last N
+    days of operational status" needs to be a guarantee independent of how
+    busy a given day's ticking was. Its record schema and its readers
+    (``status_reader.py``) are unchanged, only the handler is; readers that
+    already glob rotated files keep working unmodified. ``utc=True`` on every
+    handler avoids a DST-related duplicated/missing rotation boundary against
+    the ``time.time()`` epochs the records carry.
 
     Args:
         log_dir: Directory for log files. Defaults to ``log_directory()``.
@@ -74,20 +129,27 @@ def setup_logging(log_dir: str | Path | None = None, level: int = logging.DEBUG)
 
     log_file = log_dir / "cryosoft.log"
 
-    # Structured operational-status stream: one JSON object per line, consumed
-    # by the troubleshoot layer. Kept OFF the human handlers (propagate=False)
-    # so JSON never clutters the console or GUI log. Its own idempotency guard,
-    # so it survives the root-handler early-return on repeated setup_logging().
-    status_logger = logging.getLogger("cryosoft.status")
-    status_logger.setLevel(logging.INFO)
-    status_logger.propagate = False
-    if not status_logger.handlers:
-        status_handler = logging.handlers.RotatingFileHandler(
-            log_dir / "status.jsonl", maxBytes=10 * 1024 * 1024,
-            backupCount=3, encoding="utf-8",
-        )
-        status_handler.setFormatter(logging.Formatter("%(message)s"))
-        status_logger.addHandler(status_handler)
+    _add_jsonl_handler(
+        "cryosoft.status", log_dir / "status.jsonl", when="midnight", backup_count=7
+    )
+    _add_jsonl_handler(
+        "cryosoft.trend_raw",
+        log_dir / "trend_history_raw.jsonl",
+        when="midnight",
+        backup_count=2,
+    )
+    _add_jsonl_handler(
+        "cryosoft.trend_3min",
+        log_dir / "trend_history_3min.jsonl",
+        when="midnight",
+        backup_count=8,
+    )
+    _add_jsonl_handler(
+        "cryosoft.trend_hourly",
+        log_dir / "trend_history_hourly.jsonl",
+        when="W0",
+        backup_count=53,
+    )
 
     # Root logger
     root = logging.getLogger("cryosoft")
