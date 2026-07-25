@@ -572,65 +572,68 @@ def test_unhandled_tick_exception_still_enters_error(orchestrator, qtbot, monkey
     assert orchestrator._state == OrchestratorState.IDLE
 
 
-def test_helium_low_blocks_magnets_without_emergency(orchestrator, station, qtbot):
-    """Helium_low blocks magnet operations but does not trigger EMERGENCY.
+def test_emergency_on_helium_low(orchestrator, station, qtbot):
+    """Sustained helium_low -> EMERGENCY; acknowledge only after it clears.
 
-    Temperature control and other unconcerned VIs can operate freely while
-    helium is low. Magnets are blocked at the precondition gate.
+    The helium flag is debounced (majority vote over the level meter's
+    reading buffer), so EMERGENCY requires a few consecutive low polls.
+    acknowledge_emergency() is refused while the condition persists and
+    succeeds once the level recovers.
     """
     # Force helium low
     station.level_meter._driver._force_helium_level = 5.0
 
-    # Wait for safety status to be updated by orchestrator tick
-    def helium_in_safety_status():
-        return "magnet_z" in station.vi_safety_status()
+    def check_state():
+        return orchestrator._state == OrchestratorState.EMERGENCY
 
-    qtbot.waitUntil(helium_in_safety_status, timeout=2000)
+    qtbot.waitUntil(check_state, timeout=2000)
+    assert orchestrator._state == OrchestratorState.EMERGENCY
 
-    # Confirm: no EMERGENCY triggered, state stays IDLE
-    assert orchestrator._state == OrchestratorState.IDLE
-    assert station.check_safety().get("helium_low") is True
+    # Acknowledging while helium is still low must be refused.
+    orchestrator.acknowledge_emergency()
+    assert orchestrator._state == OrchestratorState.EMERGENCY
 
-    # Temperature can run (unconcerned with helium_low)
-    with qtbot.waitSignal(orchestrator.action_succeeded, timeout=500):
-        orchestrator.submit_vi_action("temperature_vti", "initiate")
-
-    # But magnet operations are blocked by the precondition check
-    with qtbot.waitSignal(orchestrator.action_blocked, timeout=500):
-        orchestrator.submit_vi_action("magnet_z", "set_field", target_T=1.0)
-
-    # Helium recovers; magnet operations are now unblocked
+    # Helium recovers; after enough clean polls the debounce buffer clears.
     station.level_meter._driver._force_helium_level = None
 
     def safety_cleared():
-        return not station.check_safety().get("helium_low")
+        return not any(station.check_safety().values())
 
     qtbot.waitUntil(safety_cleared, timeout=2000)
-    with qtbot.waitSignal(orchestrator.action_succeeded, timeout=500):
-        orchestrator.submit_vi_action("magnet_z", "set_field", target_T=1.0)
+    orchestrator.acknowledge_emergency()
+    assert orchestrator._state == OrchestratorState.IDLE
 
 
-def test_quench_emergency_allows_unconcerned_vi_operations(orchestrator, station, qtbot):
-    """During quench EMERGENCY, unconcerned VIs can operate while concerned ones are blocked.
+def test_emergency_acknowledge_unlocks_manual_front_panel(orchestrator, station, qtbot):
+    """Acknowledging an unresolved EMERGENCY unlocks submit_vi_action, not procedures.
 
-    Quench triggers EMERGENCY and affects all rampable VIs (magnets, temperature).
-    But temperature_sample (a non-rampable monitor-only VI) has no safety concerns,
-    so it can run even during quench EMERGENCY.
+    Before acknowledging, a front-panel action is refused exactly like during
+    a procedure. Acknowledging once (condition still active) stays in
+    EMERGENCY but unlocks manual VI control — the operator's way to
+    intervene (e.g. cycling a switch heater by hand) without the condition
+    having cleared on its own. run_procedure() must still refuse to run
+    immediately: it only queues, same as any busy state.
     """
-    # Trigger EMERGENCY via quench
-    station.magnet_z._driver._simulate_quench = True
+    station.level_meter._driver._force_helium_level = 5.0
     qtbot.waitUntil(
         lambda: orchestrator._state == OrchestratorState.EMERGENCY, timeout=2000
     )
+
+    # Locked: front-panel action refused before acknowledging.
+    with qtbot.waitSignal(orchestrator.action_blocked, timeout=500):
+        orchestrator.submit_vi_action("magnet_z", "initiate")
     assert orchestrator._state == OrchestratorState.EMERGENCY
 
-    # Magnet action is blocked (concerned with quench).
-    with qtbot.waitSignal(orchestrator.action_blocked, timeout=500):
-        orchestrator.submit_vi_action("magnet_z", "set_field", target_T=1.0)
+    # Condition is still active, so acknowledging cannot reach IDLE...
+    orchestrator.acknowledge_emergency()
+    assert orchestrator._state == OrchestratorState.EMERGENCY
+    assert orchestrator._emergency_manual_override is True
 
-    # Temperature control is also blocked by EMERGENCY (concerned with quench).
-    with qtbot.waitSignal(orchestrator.action_blocked, timeout=500):
-        orchestrator.submit_vi_action("temperature_vti", "initiate")
+    # ...but the front panel is now unlocked.
+    with qtbot.waitSignal(orchestrator.action_succeeded, timeout=500) as blocker:
+        orchestrator.submit_vi_action("magnet_z", "initiate")
+    assert blocker.args == ["magnet_z", "initiate"]
+    assert orchestrator._state == OrchestratorState.EMERGENCY
 
     # A procedure is still refused from running immediately — it queues.
     procedure = MockProcedure(station)
@@ -639,36 +642,30 @@ def test_quench_emergency_allows_unconcerned_vi_operations(orchestrator, station
     assert orchestrator._procedure is None
     assert procedure in orchestrator._procedure_queue
 
-    # Acknowledging returns to IDLE.
+    # Helium recovers; acknowledging again returns to IDLE and relocks.
+    station.level_meter._driver._force_helium_level = None
+    qtbot.waitUntil(lambda: not any(station.check_safety().values()), timeout=2000)
     orchestrator.acknowledge_emergency()
     assert orchestrator._state == OrchestratorState.IDLE
-
-    # Clear quench; operations now allowed.
-    station.magnet_z._driver._simulate_quench = False
-    qtbot.wait(100)
-    with qtbot.waitSignal(orchestrator.action_succeeded, timeout=500):
-        orchestrator.submit_vi_action("magnet_z", "set_field", target_T=1.0)
+    assert orchestrator._emergency_manual_override is False
 
 
 def test_emergency_shutdown_runs_once_not_every_tick(orchestrator, station, qtbot):
-    """Concerned VI standby() runs once on EMERGENCY entry, not every tick.
+    """standby_all() must run once on EMERGENCY entry, not every tick.
 
-    For quench, all rampable VIs are concerned, so their standby() is called once.
     Repeating it each tick would restart a persistent magnet's full
     switch-heater warmup/cooldown cycle every few seconds.
     """
     calls = {"n": 0}
-    # Patch the magnet's standby to count calls
-    original_standby = station.magnet_z.standby
+    original = station.standby_all
 
     def counting():
         calls["n"] += 1
-        original_standby()
+        original()
 
-    station.magnet_z.standby = counting
+    station.standby_all = counting
     try:
-        # Trigger quench EMERGENCY
-        station.magnet_z._driver._simulate_quench = True
+        station.level_meter._driver._force_helium_level = 5.0
         qtbot.waitUntil(
             lambda: orchestrator._state == OrchestratorState.EMERGENCY,
             timeout=2000,
@@ -676,8 +673,7 @@ def test_emergency_shutdown_runs_once_not_every_tick(orchestrator, station, qtbo
         # Let several more ticks pass in EMERGENCY.
         qtbot.wait(100)
     finally:
-        station.magnet_z.standby = original_standby
-    # Magnet's standby should be called exactly once on EMERGENCY entry
+        station.standby_all = original
     assert calls["n"] == 1
 
 
@@ -1108,21 +1104,13 @@ def test_envelope_state_violation_enters_emergency(orchestrator, station, qtbot)
     assert orchestrator._state == OrchestratorState.EMERGENCY
     assert any("session envelope" in e and "temperature_sample" in e for e in errors)
 
-    # Acknowledgement returns to IDLE unconditionally, but EMERGENCY re-enters
-    # on the next tick if the violation still persists.
+    # Acknowledgement is refused while the violation persists...
     orchestrator.acknowledge_emergency()
-    assert orchestrator._state == OrchestratorState.IDLE
-
-    # The next tick re-enters EMERGENCY because the envelope is still violated.
-    orchestrator._tick()
     assert orchestrator._state == OrchestratorState.EMERGENCY
 
-    # Once the envelope is cleared (the "sample removed" case), acknowledging
-    # keeps the state in IDLE.
+    # ...and succeeds once the envelope is cleared (the "sample removed" case).
     orchestrator.set_session_envelope(None)
     orchestrator.acknowledge_emergency()
-    assert orchestrator._state == OrchestratorState.IDLE
-    orchestrator._tick()
     assert orchestrator._state == OrchestratorState.IDLE
 
 

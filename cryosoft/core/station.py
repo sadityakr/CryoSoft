@@ -168,10 +168,6 @@ class Station:
         # since gone stale/disconnected during polling. Distinct from
         # _offline_vis (never connected at build time).
         self._vi_faults: dict[str, FaultRecord] = {}
-        # Per-VI safety status: {vi_name: flag_name} when a VI's safety concern trips.
-        # Cleared automatically when the flag recovers. Used to fail running procedures
-        # that depend on affected VIs.
-        self._vi_safety_status: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # VI registration and access
@@ -884,68 +880,6 @@ class Station:
             except Exception:
                 logger.exception("evaluate_safety failed on VI '%s'", vi_name)
         return sources
-
-    def get_concerned_vis(self, flag: str) -> list[str]:
-        """Return VI names whose operation depends on a safety flag.
-
-        When a safety flag trips, the Orchestrator calls this to find which
-        VIs care about that flag — only those VIs are told to standby, while
-        other VIs remain unaffected.
-
-        Args:
-            flag: The safety flag name (e.g. "helium_low", "quench").
-
-        Returns:
-            List of VI names (in registration order) whose safety_concerns()
-            includes *flag*. Empty list if no VI depends on that flag.
-        """
-        concerned = []
-        for vi_name, vi in self._virtual_instruments.items():
-            concerns = vi.safety_concerns()
-            if flag in concerns:
-                concerned.append(vi_name)
-        return concerned
-
-    def vi_safety_status(self) -> dict[str, str]:
-        """Return the per-VI safety status: {vi_name: flag_name} for tripped flags.
-
-        A VI in safety_status has a tripped concern; running procedures that
-        claim/use that VI should be aborted.
-
-        Returns:
-            Dict mapping VI name to the safety flag name that tripped (or empty).
-        """
-        return dict(self._vi_safety_status)
-
-    def update_vi_safety_status(self, state: dict[str, dict] | None = None) -> None:
-        """Update per-VI safety status from current safety flags.
-
-        Clears statuses for flags that have recovered, sets statuses for new flags.
-        For each tripped flag, set status on VIs that are CONCERNED with it
-        (not on the VI that reports it).
-        Called each tick before procedure/action gates.
-
-        Args:
-            state: State snapshot from get_state(). None uses cached state.
-        """
-        if state is None:
-            state = self._last_known_state
-
-        safety = self.check_safety(state)
-        tripped_flags = {f for f, t in safety.items() if t}
-
-        # Update per-VI status: set for tripped, clear for recovered
-        for vi_name in list(self._vi_safety_status.keys()):
-            current_flag = self._vi_safety_status[vi_name]
-            if current_flag not in tripped_flags:
-                # Flag recovered, clear this VI's status
-                del self._vi_safety_status[vi_name]
-
-        # Set status on VIs CONCERNED with tripped flags (not on VI that reports them)
-        for flag in tripped_flags:
-            concerned_vis = self.get_concerned_vis(flag)
-            for vi_name in concerned_vis:
-                self._vi_safety_status[vi_name] = flag
 
     # ------------------------------------------------------------------
     # Measurement command dispatch
