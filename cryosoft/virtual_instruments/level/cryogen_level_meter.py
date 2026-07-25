@@ -59,7 +59,13 @@ class CryogenLevelMeterVI(LevelMeterBase):
     -------------
     ``helium_level()`` appends each reading to a fixed-size deque.
     ``helium_low()`` computes the statistical mode of the buffer to suppress
-    transient single-point dips.
+    transient single-point dips. A tick where the driver could not be read
+    at all (``evaluate_safety()``'s ``state["_disconnected"]``) feeds a
+    synthetic "low" reading into the SAME buffer rather than force-tripping
+    the flag outright — a momentary comms glitch (one bad ISOBUS round-trip)
+    is smoothed away exactly like a momentary low-value glitch, while a
+    genuinely dead meter still trips once disconnection persists long enough
+    to win the majority vote.
     """
 
     def __init__(self, drivers: dict[str, object], **init_params: Any) -> None:
@@ -73,6 +79,14 @@ class CryogenLevelMeterVI(LevelMeterBase):
         self._helium_buffer: deque[bool] = deque(
             [False] * self._buffer_size, maxlen=self._buffer_size
         )
+        # Identity of the last disconnected state dict already folded into
+        # the buffer by evaluate_safety() — Station.get_state() builds one
+        # fresh dict per tick, so comparing identity (not equality) dedupes
+        # the case where evaluate_safety() is called more than once against
+        # the same tick's snapshot (e.g. the per-tick safety check and an
+        # operation's end-of-run check) without under-weighting a genuinely
+        # new disconnected tick.
+        self._last_disconnect_state_seen: dict | None = None
 
     # ------------------------------------------------------------------
     # @monitored methods
@@ -130,12 +144,22 @@ class CryogenLevelMeterVI(LevelMeterBase):
     def evaluate_safety(self, state: dict) -> dict[str, bool]:
         """Report the debounced helium verdict to Station.check_safety().
 
-        The buffer was already filled by this tick's ``helium_level()`` poll,
-        so no hardware is touched here. The majority vote suppresses
-        single-reading glitches that would otherwise trigger a full
-        EMERGENCY shutdown of a running measurement.
+        On a normal tick the buffer was already filled by this tick's
+        ``helium_level()`` poll, so no hardware is touched here. On a tick
+        where the driver could not be read at all, ``state["_disconnected"]``
+        is set (Station.get_state()'s comm-error streak) and
+        ``helium_level()`` was never called to append anything — a synthetic
+        "low" reading is folded into the buffer here instead, so a dead or
+        merely-glitching meter is judged by the same majority vote as a
+        genuine low reading rather than force-tripping on one bad
+        round-trip. ``state`` is the exact dict object Station cached for
+        this tick, reused as an identity key so a second same-tick call
+        (e.g. an operation's end-of-run safety recheck) does not double-count
+        the one physical event.
         """
-        _ = state
+        if state.get("_disconnected") and state is not self._last_disconnect_state_seen:
+            self._helium_buffer.append(True)
+            self._last_disconnect_state_seen = state
         return {"helium_low": self.helium_low()}
 
     # ------------------------------------------------------------------

@@ -191,6 +191,27 @@ Overrides the default in `setup-supervisor/references/safe-testing.md`
 - ITC 503 uses **ISOBUS** protocol (command `V` for identity, not `*IDN?`)
 - ILM 210 also uses **ISOBUS** protocol (command `V` for identity, `@1`
   instrument-number prefix on every command)
+- 2026-07-25: A helium fill on 2026-07-24 finished normally at 100% but the
+  system went to EMERGENCY instead of IDLE. Root cause was software, not
+  this instrument: `Station.check_safety()` used to force-trip `helium_low`
+  the instant the level meter reported `_disconnected` (a 3-consecutive-
+  comm-error streak), bypassing the debounce buffer that filters exactly
+  this kind of transient glitch for genuine low readings.
+  `HeliumFillOperation.standby()` (fired the moment the fill completes)
+  sends `set_refresh_rate(SLOW)`, itself 3 back-to-back ISOBUS round-trips
+  on this ILM 210's RS-232 link — a plausible window for a brief comms
+  hiccup right at fill completion. Fixed in `CryogenLevelMeterVI.
+  evaluate_safety()` (now folds a disconnected tick into the same
+  majority-vote buffer instead of forcing the flag) and `Station.
+  check_safety()`/`safety_flag_sources()` (disconnected-level special case
+  removed, fully delegated to the VI). Also added a 0.15 s settling gap
+  between `set_refresh_rate()`'s three back-to-back ISOBUS commands in
+  `oxford_ilm210.py` (`_INTER_COMMAND_SETTLE_S`), to reduce how often that
+  burst causes a comms error in the first place. See `LOGBOOK.md`
+  (2026-07-25 entry) for the diagnosis and tests. A genuinely dead level
+  meter still trips `helium_low` — it just takes a real sustained outage,
+  not one bad round-trip, matching how a real low reading is already
+  debounced.
 - HP 34420A is a precision nanovoltmeter; very sensitive to AC noise
 - Magnet was in **persistent mode, leads open** during initial commissioning;
   as of 2026-07-20 leads are closed onto the coil (see Physical Wiring above)

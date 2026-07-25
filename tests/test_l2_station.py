@@ -323,14 +323,67 @@ def test_check_safety(sim_station: Station):
     safety = sim_station.check_safety()
     assert safety["helium_low"] is True
 
-    # Simulate disconnected level meter -> assumes unsafe
-    level_driver._simulate_error = True
-    for _ in range(3):
-        sim_station.get_state()  # Trigger _disconnected
 
-    safety = sim_station.check_safety()
-    # It should still be True because of disconnection assumption
-    assert safety["helium_low"] is True
+def test_check_safety_debounces_transient_disconnect(sim_station: Station):
+    """A single disconnected tick must not force-trip helium_low.
+
+    Regression test: check_safety() used to unconditionally force helium_low
+    True the instant the level meter went _disconnected, bypassing the
+    debounce buffer entirely — a momentary ISOBUS round-trip failure (right
+    as a fill's standby() switches refresh mode, say) could false-trip
+    EMERGENCY on a helium-fill operation even with the reservoir full. A
+    disconnected tick must instead feed the SAME majority-vote buffer real
+    low readings use.
+    """
+    sim_station.get_state()
+    assert sim_station.check_safety()["helium_low"] is False
+
+    level_driver = sim_station.level_meter._driver
+    level_driver._simulate_error = True
+
+    # Two ticks below Station's own max_vi_errors=3 streak: _stale, not yet
+    # _disconnected, so no buffer entry should be added at all.
+    state = sim_station.get_state()
+    assert state["level_meter"].get("_disconnected") is not True
+    assert sim_station.check_safety(state)["helium_low"] is False
+
+    state = sim_station.get_state()
+    assert state["level_meter"].get("_disconnected") is not True
+    assert sim_station.check_safety(state)["helium_low"] is False
+
+    # 3rd consecutive error -> _disconnected, but that is only the buffer's
+    # 1st "low" entry (out of 5) — still not a majority.
+    state = sim_station.get_state()
+    assert state["level_meter"]["_disconnected"] is True
+    assert sim_station.check_safety(state)["helium_low"] is False
+
+    # Recovers before disconnection ever won the majority vote.
+    level_driver._simulate_error = False
+    state = sim_station.get_state()
+    assert sim_station.check_safety(state)["helium_low"] is False
+
+
+def test_check_safety_sustained_disconnect_still_trips(sim_station: Station):
+    """A genuinely dead level meter still trips helium_low, just debounced.
+
+    Preserves the "can't monitor the level -> assume unsafe" guarantee: it
+    just takes a real, sustained outage (several consecutive ticks, matching
+    how a genuine low-level reading is debounced too) rather than the single
+    _disconnected tick the old force-override reacted to.
+    """
+    sim_station.get_state()
+    assert sim_station.check_safety()["helium_low"] is False
+
+    level_driver = sim_station.level_meter._driver
+    level_driver._simulate_error = True
+
+    tripped = False
+    for _ in range(10):
+        state = sim_station.get_state()
+        if sim_station.check_safety(state)["helium_low"]:
+            tripped = True
+            break
+    assert tripped, "a sustained disconnection must still trip helium_low"
 
 
 def test_check_safety_uses_snapshot_without_polling(sim_station: Station):
@@ -445,12 +498,14 @@ def test_retry_fault_both_outcomes(sim_station: Station):
     assert ok is False
 
 
-def test_level_meter_disconnect_still_force_trips_helium_low_with_fault(sim_station: Station):
-    """A disconnected level meter still force-trips helium_low AND records a fault.
+def test_level_meter_disconnect_records_fault_independent_of_debounce(sim_station: Station):
+    """A disconnected level meter records a fault whether or not helium_low has
+    won the debounce majority vote yet.
 
     Guards the interplay called out in plan §3: the runtime fault registry
-    must not have displaced check_safety()'s existing disconnected-level-
-    meter safety guard.
+    (vi_faults(), always reflecting the *current* comm state) is independent
+    of check_safety()'s debounced safety verdict (which may lag a few ticks
+    behind — see test_check_safety_sustained_disconnect_still_trips).
     """
     level_driver = sim_station.level_meter._driver
     level_driver._simulate_error = True
@@ -459,7 +514,18 @@ def test_level_meter_disconnect_still_force_trips_helium_low_with_fault(sim_stat
     state = sim_station.get_state()
 
     assert sim_station.vi_faults()["level_meter"].kind == "disconnected"
+    # Only the buffer's 1st "low" entry so far — not yet a majority.
     safety = sim_station.check_safety(state)
+    assert safety["helium_low"] is False
+
+    # Sustained disconnection (one check_safety() call per tick, matching
+    # production's per-tick safety check) eventually wins the majority vote
+    # too, and safety_flag_sources() attributes it to level_meter via the
+    # normal per-VI evaluate_safety() loop (no separate disconnected
+    # special-case).
+    for _ in range(3):
+        state = sim_station.get_state()
+        safety = sim_station.check_safety(state)
     assert safety["helium_low"] is True
     sources = sim_station.safety_flag_sources(state)
     assert "level_meter" in sources.get("helium_low", [])

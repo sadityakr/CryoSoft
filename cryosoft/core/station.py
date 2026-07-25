@@ -822,12 +822,12 @@ class Station:
         """Aggregate every VI's safety verdict from a state snapshot.
 
         Each VI judges its own state fragment via ``evaluate_safety()`` (the
-        level meter reports its debounced ``helium_low``, magnet VIs report
+        level meter reports its debounced ``helium_low`` — including a
+        disconnected reading, which it folds into the same debounce buffer
+        as a low reading rather than tripping outright, so one bad
+        round-trip cannot force a false EMERGENCY; magnet VIs report
         ``quench``). No hardware is polled here — pass the snapshot the
         monitor tick already collected, or omit it to use the cached one.
-
-        A disconnected level meter also trips ``helium_low``: if the helium
-        level cannot be monitored, it must be assumed unsafe.
 
         Args:
             state: Snapshot from ``get_state()``. ``None`` uses the last
@@ -841,8 +841,6 @@ class Station:
         flags: dict[str, bool] = {}
         for vi_name, vi in self._virtual_instruments.items():
             vi_state = state.get(vi_name, {})
-            if vi_state.get("_disconnected") and getattr(vi, "vi_type", "") == "level":
-                flags["helium_low"] = True
             try:
                 for flag, tripped in vi.evaluate_safety(vi_state).items():
                     flags[flag] = flags.get(flag, False) or bool(tripped)
@@ -853,12 +851,11 @@ class Station:
     def safety_flag_sources(self, state: dict[str, dict] | None = None) -> dict[str, list[str]]:
         """Map each tripped safety flag to the VI name(s) that tripped it.
 
-        A parallel accessor to ``check_safety()`` (same OR-combination logic,
-        same disconnected-level-meter special case) that additionally names
-        the originating instrument(s) — used by the Orchestrator so an
-        EMERGENCY reason and its ``ErrorEvent`` can name the instrument
-        (plan §3), without changing ``check_safety()``'s existing
-        ``{flag: bool}`` signature (other callers are unaffected).
+        A parallel accessor to ``check_safety()`` (same OR-combination logic)
+        that additionally names the originating instrument(s) — used by the
+        Orchestrator so an EMERGENCY reason and its ``ErrorEvent`` can name
+        the instrument (plan §3), without changing ``check_safety()``'s
+        existing ``{flag: bool}`` signature (other callers are unaffected).
 
         Args:
             state: Snapshot from ``get_state()``. ``None`` uses the last
@@ -874,10 +871,6 @@ class Station:
         sources: dict[str, list[str]] = {}
         for vi_name, vi in self._virtual_instruments.items():
             vi_state = state.get(vi_name, {})
-            if vi_state.get("_disconnected") and getattr(vi, "vi_type", "") == "level":
-                sources.setdefault("helium_low", [])
-                if vi_name not in sources["helium_low"]:
-                    sources["helium_low"].append(vi_name)
             try:
                 for flag, tripped in vi.evaluate_safety(vi_state).items():
                     if not tripped:

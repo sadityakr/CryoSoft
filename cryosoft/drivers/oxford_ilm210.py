@@ -34,6 +34,17 @@ log = logging.getLogger(__name__)
 
 _ISOBUS_NUMBER = 1      # standard instrument number for ILM series
 
+# set_refresh_rate() issues three ISOBUS round-trips back to back (remote
+# lock, mode command, remote unlock). Each _execute() already settles 70 ms
+# after its own write; this adds a further gap BETWEEN those three commands
+# — real ISOBUS hardware needs a moment to finish processing one command
+# before the next arrives, and three in immediate succession was a
+# plausible source of transient comm errors (see LOGBOOK.md 2026-07-25).
+# Not a vendor-specified value (no timing spec in this setup's manual
+# notes) — a conservative default, safe to tune if the real link still
+# glitches under it.
+_INTER_COMMAND_SETTLE_S = 0.15
+
 
 class OxfordILM210:
     """Real Oxford ILM 210 cryogen level meter.
@@ -144,6 +155,9 @@ class OxfordILM210:
     def set_refresh_rate(self, mode: int) -> None:
         """Set the channel-1 probe refresh rate.
 
+        Issues three ISOBUS commands (remote lock, mode, remote unlock) with
+        a settling gap between each — see ``_INTER_COMMAND_SETTLE_S``.
+
         Args:
             mode: 0 = STANDBY (slow), 1 = SLOW, 2 = FAST (continuous).
 
@@ -154,10 +168,12 @@ class OxfordILM210:
             raise ValueError(f"Refresh rate mode must be 0, 1, or 2, got {mode}")
 
         self._set_remote(1)   # remote locked for control commands
+        time.sleep(_INTER_COMMAND_SETTLE_S)
         if mode == 2:
             self._execute("T1")   # continuous / fast
         else:
             self._execute("S1")   # slow pulsed
+        time.sleep(_INTER_COMMAND_SETTLE_S)
         self._set_remote(3)   # back to remote unlocked
 
     def get_idn(self) -> str:

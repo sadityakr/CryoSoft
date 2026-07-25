@@ -831,6 +831,51 @@ class TestCryogenLevelMeterVI:
             vi.helium_level()
         assert vi.helium_low() is True
 
+    def test_evaluate_safety_single_disconnected_tick_does_not_trip(self, ilm_driver):
+        """A single _disconnected snapshot must feed the buffer, not force-trip.
+
+        Regression coverage for the helium-fill false-EMERGENCY bug: a
+        momentary comms glitch reported as one disconnected tick must be
+        smoothed by the same majority vote as a single low-value glitch.
+        """
+        vi = self._make_vi(ilm_driver)
+        for _ in range(5):
+            vi.helium_level()  # healthy readings fill the buffer with False
+        assert vi.helium_low() is False
+
+        verdict = vi.evaluate_safety({"_disconnected": True})
+        assert verdict["helium_low"] is False
+
+    def test_evaluate_safety_same_state_object_not_double_counted(self, ilm_driver):
+        """Calling evaluate_safety() twice with the SAME state dict (e.g. the
+        per-tick safety check and an operation's end-of-run recheck reusing
+        one tick's snapshot) must fold in only one buffer entry, not two.
+        """
+        vi = self._make_vi(ilm_driver)
+        for _ in range(5):
+            vi.helium_level()
+
+        disconnected_state = {"_disconnected": True}
+        vi.evaluate_safety(disconnected_state)
+        vi.evaluate_safety(disconnected_state)
+        vi.evaluate_safety(disconnected_state)
+        # Still just 1 "low" entry out of 5 — nowhere near majority.
+        assert vi.helium_low() is False
+
+    def test_evaluate_safety_sustained_disconnect_still_trips(self, ilm_driver):
+        """Repeated disconnected snapshots (distinct objects, one per tick)
+        must still win the majority vote eventually — the "can't monitor ->
+        assume unsafe" guarantee is preserved, just debounced.
+        """
+        vi = self._make_vi(ilm_driver)
+        for _ in range(5):
+            vi.helium_level()
+        assert vi.helium_low() is False
+
+        for _ in range(5):
+            verdict = vi.evaluate_safety({"_disconnected": True})
+        assert verdict["helium_low"] is True
+
     def test_set_refresh_rate_standby(self, ilm_driver):
         vi = self._make_vi(ilm_driver)
         vi.set_refresh_rate(0)
