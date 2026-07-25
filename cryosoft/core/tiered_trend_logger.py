@@ -169,13 +169,20 @@ class TieredTrendLogger:
       holds the underlying points for anything still within its retention,
       so no data is silently lost, only its aggregate form for that one
       window.
-    - **Re-aggregating ``std`` across multiple flushed buckets is only
-      approximate** (there is no exact way to combine population standard
-      deviations of unequal-count sub-populations from summary statistics
-      alone), whereas ``mean``/``min``/`max`/``count`` recombine exactly.
+    - **Re-aggregating ``mean``/``min``/``max``/``std``/``count`` across
+      multiple flushed buckets is exact**, including ``std``: each bucket's
+      ``std`` is a population standard deviation computed from exact sums
+      (``sumsq``/``count``/``mean``), so its second moment about zero
+      (``count * (std**2 + mean**2)``) is exactly recoverable and summable
+      across buckets, and the law of total variance reconstructs the exact
+      combined variance from the combined second moment and combined mean.
       This is why every flushed bucket carries an explicit per-key
-      ``count``: a caller that needs to re-aggregate several buckets can at
-      least weight ``mean`` correctly, even though ``std`` stays approximate.
+      ``count`` alongside ``std``: without both, a caller re-aggregating
+      several buckets could only fall back to an approximate
+      pooled-within-bucket estimate that understates the true combined
+      spread whenever bucket means differ (see ``trend_history.py``'s
+      ``KeySummary``/``_summarize_aggregate``, which perform this exact
+      recombination).
     """
 
     def __init__(

@@ -199,8 +199,13 @@ Two changes beyond the original plan:
   than bucket-level because a key can appear mid-bucket when a VI comes
   online. `std` is written too (derived from `sumsq` at flush): for "was it
   stable", std is far more informative than min/max, which are
-  outlier-dominated. Documented caveat: re-aggregating `std` across buckets
-  is approximate, while `mean`/`min`/`max`/`count` are exact.
+  outlier-dominated. Re-aggregating `std` across buckets is exact, not
+  approximate: each bucket's `std` is a population standard deviation
+  computed from exact sums, so its second moment about zero is exactly
+  recoverable from `(mean, std, count)`, and the law of total variance
+  reconstructs the exact combined variance from the summed second moments
+  and counts. `mean`/`min`/`max`/`count` recombine exactly for the same
+  reason (`mean` via count-weighting).
 - **Raw-tier write cadence is decoupled from the tick.** A `min_raw_interval_s`
   constructor argument (default `1.0`) skips a raw write that arrives sooner
   than that since the last one; the accumulators still see every sample. The
@@ -250,7 +255,10 @@ def find_crossings(log_dir, key, threshold, window_s, direction="below", now=Non
 - `summarize` returns per key `{min, max, mean, std, count, first_t, last_t,
   tier, persisted}` and is the agent-facing entry point: evidence, not a
   28,800-row dump. Same shape and rationale as the framework plan's Phase 2
-  `data_reader.summary_stats()`.
+  `data_reader.summary_stats()`. On an aggregate tier every field, including
+  `std`, is an exact recombination of the underlying buckets (law of total
+  variance from each bucket's `mean`/`std`/`count`, §2), not an approximate
+  pooled estimate.
 - `find_crossings` returns timestamps where the series crossed a threshold,
   the one query beyond aggregation that operational reasoning actually needs
   ("when did helium last go below 30 %").
