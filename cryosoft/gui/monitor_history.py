@@ -10,11 +10,17 @@
 #   - Python standard library only (collections, time, logging).
 # input: |
 #   record() takes a nested state dict shaped like Station.get_state()'s
-#   output, plus an optional timestamp (defaults to time.time()).
+#   output, plus an optional timestamp (defaults to time.time()). record_flat()
+#   takes an already-flattened {flat_key: value} dict (e.g. from
+#   Station.last_state_flat() or disk-persisted trend history), plus the same
+#   optional timestamp.
 # process: |
 #   record() flattens the state to {vi_name}_{field_name} numeric scalar
 #   keys, skipping bool values and any field name starting with "_", then
 #   appends (timestamp, value) to a per-key ring buffer (deque with maxlen).
+#   record_flat() applies the same numeric/bool/underscore filtering directly
+#   to the already-flat dict and appends through the same shared helper, so
+#   both entry points share identical append/eviction behaviour.
 # output: |
 #   series(key, window_s, now) returns parallel (times, values) lists for a
 #   flat key, optionally windowed to the last window_s seconds.
@@ -47,6 +53,24 @@ class MonitorHistory:
     ``Station.last_state_flat()`` does, and stores each key's history in its
     own ring buffer so memory use stays bounded regardless of how long the
     Monitor window has been open.
+
+    Two entry points feed the same buffers, and they are deliberately
+    asymmetric:
+
+    - ``record()`` is the live path, fed from ``Orchestrator.states_updated``
+      roughly every tick. It takes the nested station-state shape and
+      flattens it itself, and it includes measurement VIs.
+    - ``record_flat()`` is the replay path, used at startup to rehydrate the
+      buffer from disk-persisted trend history (``TrendsQuadrant`` reading
+      the tiered trend store). It takes an already-flat dict and does not
+      re-derive it, and it does **not** include measurement VIs, because the
+      canonical flattener behind the disk tiers,
+      ``Station.last_state_flat()`` (``cryosoft/core/station.py:535-536``),
+      excludes them by design. A trend panel on a measurement-VI key
+      therefore works live but goes empty after a restart or on a
+      disk-backed window; this is the accepted asymmetry documented in
+      ``docs/plans/trend-history-persistence.md`` §7, not a bug in either
+      entry point.
 
     Attributes:
         retention_s: How many seconds of history each key retains.
@@ -98,13 +122,55 @@ class MonitorHistory:
             for field_name, value in fields.items():
                 if field_name.startswith("_"):
                     continue
-                # bool is a subclass of int, so it must be excluded explicitly.
-                if isinstance(value, bool) or not isinstance(value, (int, float)):
-                    continue
                 key = f"{vi_name}_{field_name}"
-                if key not in self._history:
-                    self._history[key] = deque(maxlen=self._maxlen)
-                self._history[key].append((timestamp, float(value)))
+                self._append_if_numeric(key, value, timestamp)
+
+    def record_flat(self, flat: dict[str, float], timestamp: float | None = None) -> None:
+        """Append an already-flattened reading dict to each key's history.
+
+        For replaying disk-persisted trend history (e.g. at ``TrendsQuadrant``
+        startup) through the same ring buffers ``record()`` feeds live. Applies
+        the identical value-filtering discipline as ``record()`` (numeric
+        scalars only, ``bool`` excluded, keys starting with ``"_"`` skipped),
+        but does not re-derive the flat keys: ``flat`` is expected to already
+        be in ``{vi_name}_{field_name}`` form, as produced by
+        ``Station.last_state_flat()``. That source excludes measurement VIs,
+        so this path never records them; see the class docstring for the
+        accepted asymmetry with ``record()``.
+
+        Args:
+            flat: Already-flattened reading dict, ``{flat_key: value}``.
+            timestamp: Unix timestamp to record the points under. Defaults to
+                ``time.time()`` when ``None``, identically to ``record()``.
+        """
+        if timestamp is None:
+            timestamp = time.time()
+
+        for key, value in flat.items():
+            if key.startswith("_"):
+                continue
+            self._append_if_numeric(key, value, timestamp)
+
+    def _append_if_numeric(self, key: str, value: object, timestamp: float) -> None:
+        """Append ``(timestamp, value)`` to ``key``'s ring buffer if numeric.
+
+        Shared by ``record()`` and ``record_flat()`` so both entry points
+        apply identical filtering and eviction behaviour. Skips ``bool``
+        values explicitly, since ``bool`` is a subclass of ``int`` and would
+        otherwise pass the numeric check. Creates the ring buffer on first
+        sight of ``key``.
+
+        Args:
+            key: Flat key (``{vi_name}_{field_name}``).
+            value: Candidate value; only ``int``/``float`` (excluding
+                ``bool``) is recorded.
+            timestamp: Unix timestamp to record the point under.
+        """
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return
+        if key not in self._history:
+            self._history[key] = deque(maxlen=self._maxlen)
+        self._history[key].append((timestamp, float(value)))
 
     def keys(self) -> list[str]:
         """Return all flat keys seen so far.
