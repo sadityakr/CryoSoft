@@ -2,18 +2,23 @@
 
 ## Purpose
 
-Design documents and roadmaps. One document per body of work, kept after
-the work lands because shipped code cites these documents by path in its
-docstrings: they are the "why" that a module docstring is too small to
-hold. **A plan is never deleted once code references it.**
+Design documents and roadmaps, one per body of work. They record the
+reasoning behind a decision at the time it was taken: the alternatives
+weighed, the evidence, the trade-off accepted. That is context a module
+docstring is too small to hold and a diff cannot recover.
+
+**Shipped code must never cite a document in this folder.** See the
+code-reference standard in `CLAUDE.md`. Code and its folder READMEs have to
+present the complete picture on their own, to a reader with only the
+repository checked out. These documents are written for whoever is *planning*
+work, not for whoever is reading a docstring.
 
 Three tiers:
 
 - **Active** (this folder): what is being built now, or next. Plan new work
   from these.
-- **`archive/`**: implemented or superseded. Still normative as *design
-  references* where code cites them, never as roadmaps. Do not plan new
-  work from an archived document.
+- **`archive/`**: implemented or superseded. Read for rationale, never as a
+  roadmap. Do not plan new work from an archived document.
 - **`deferred/`**: designed, agreed, deliberately not scheduled. Revisit
   when its trigger condition arrives.
 
@@ -25,26 +30,33 @@ Three tiers:
    designed it. Its rationale is usually the answer to "why is it built
    this way".
 3. **When a plan is fully implemented**, add an `ARCHIVED — IMPLEMENTED`
-   banner naming the date, move it to `archive/`, and update every
-   `docs/plans/<name>.md` reference in code in the same commit. Verify with:
+   banner naming the date, move it to `archive/`, and update the index
+   tables below in the same commit. Nothing in `cryosoft/` should need
+   touching: no code cites these paths. Verify that stays true, and that
+   what *does* cite a plan (this index, other plans) is not left dangling:
 
    ```sh
-   grep -rho "docs/plans/[a-z0-9/-]*\.md" cryosoft tests docs GLOSSARY.md README.md \
+   # 1. No plan reference in shipped code or tests. Must print nothing.
+   grep -rnE "docs/plans|plan §" cryosoft tests --include=*.py
+   # 2. No dangling path in the docs that legitimately do cite plans.
+   grep -rho "docs/plans/[a-z0-9/-]*\.md" docs GLOSSARY.md README.md \
      | sort -u | while read p; do [ -f "$p" ] || echo "DANGLING $p"; done
    ```
 
-4. **Never move or delete a referenced plan without rewriting its
-   references.** This has gone wrong once already: commit `70c910a`
-   ("Added docs", 2026-07-22) deleted four plan documents in the same
-   commit that added one, leaving 41 dangling docstring references for
-   three days. All four were restored from `70c910a^` on 2026-07-25.
+4. **Why the code-reference standard exists.** Commit `70c910a` ("Added
+   docs", 2026-07-22) deleted four plan documents in the same commit that
+   added one, leaving 41 dangling docstring references for three days. All
+   four were restored from `70c910a^` on 2026-07-25 and the references were
+   removed from code entirely, which is the durable fix: a citation that
+   cannot exist cannot dangle. Check 1 above is what keeps it that way, and
+   belongs in `tests/test_conformance.py` so it is enforced rather than
+   remembered.
 
 ## Active
 
 | Document | Status | What it covers |
 |---|---|---|
 | [`agentic-instrumentation-framework.md`](agentic-instrumentation-framework.md) | **Proposal, current roadmap** | The unified vision. Defines the nine modules an agentic instrumentation system needs (capability manifest, state observation, result access, action verdicts, authority, safe state, cheap evaluation, audit, client surface), scores CryoSoft against them from a full code survey, and sequences seven phases. Supersedes both agent-facing roadmaps in `archive/`. |
-| [`trend-history-persistence.md`](trend-history-persistence.md) | In progress | Tiered trend-history persistence (raw / 3-min / hourly). Untracked working document; owned by a parallel session. |
 
 ## Deferred
 
@@ -54,14 +66,15 @@ Three tiers:
 
 ## Archive
 
-Implemented. Normative as design references, cited from shipped code.
+Implemented. Read for the rationale behind a subsystem, never as a roadmap.
 
-| Document | Landed | Reference count | What it is the reference for |
-|---|---|---|---|
-| [`archive/cryogenics-logbook.md`](archive/cryogenics-logbook.md) | 2026-07 | 38 | Operations as an L4 class, the Servicing Log framework, cryogenics management, the readiness/next-due contract. The most heavily cited plan in the repository. |
-| [`archive/operation-concurrency-and-error-scoping.md`](archive/operation-concurrency-and-error-scoping.md) | 2026-07-22 | 27 | Claims and the single admission predicate, runtime fault tiering, immediate operation finish, hard procedure/operation status separation. |
-| [`archive/unified-servicing-log-and-run-recording.md`](archive/unified-servicing-log-and-run-recording.md) | 2026-07-23 | 27 | The flat `servicing` log kind, Recording sidecars, the `run_summary()` hand-off, the sample-change hold phase. |
-| [`archive/unified-session-record.md`](archive/unified-session-record.md) | 2026-07 | 6 | The session record format: `schema_version`, bundle-relative data paths, save-failure surfacing, derived Data Directory. |
+| Document | Landed | What it designed |
+|---|---|---|
+| [`archive/cryogenics-logbook.md`](archive/cryogenics-logbook.md) | 2026-07 | Operations as an L4 class, the Servicing Log framework, cryogenics management, the readiness/next-due contract. The broadest of these by far. |
+| [`archive/operation-concurrency-and-error-scoping.md`](archive/operation-concurrency-and-error-scoping.md) | 2026-07-22 | Claims and the single admission predicate, runtime fault tiering, immediate operation finish, hard procedure/operation status separation. |
+| [`archive/unified-servicing-log-and-run-recording.md`](archive/unified-servicing-log-and-run-recording.md) | 2026-07-23 | The flat `servicing` log kind, Recording sidecars, the `run_summary()` hand-off, the sample-change hold phase. |
+| [`archive/unified-session-record.md`](archive/unified-session-record.md) | 2026-07 | The session record format: `schema_version`, bundle-relative data paths, save-failure surfacing, derived Data Directory. |
+| [`archive/trend-history-persistence.md`](archive/trend-history-persistence.md) | 2026-07-25 | The tiered trend-history store: three fixed-resolution disk tiers downsampled live, the reader's aggregate-first query surface and exact cross-bucket recombination, the `log_directory()` resolver, and the two live/disk asymmetries. |
 
 Superseded or partly built. Read for rationale, not for sequencing.
 
@@ -79,9 +92,14 @@ Superseded or partly built. Read for rationale, not for sequencing.
   archived document keeps its original status line underneath the archive
   banner rather than rewriting history, per the LOGBOOK convention that
   past entries are never rewritten.
-- **Cite by path.** Code references a plan as
-  `docs/plans/archive/<name>.md §<section>`, so the section survives edits
-  to surrounding prose.
-- **Sections are stable.** Code cites section numbers. Renumbering a
-  section of a referenced plan is a breaking change to every docstring that
-  cites it.
+- **One plan may cite another**, by path and section
+  (`docs/plans/archive/<name>.md §3`). These documents are a connected set
+  and citing across them is how a superseding plan credits what it replaces.
+  Keep such paths current when a document moves; check 2 above finds the
+  strays.
+- **Shipped code cites none of them.** A plan reference in `cryosoft/` or
+  `tests/` is a defect, not a style preference: the citation outlives the
+  document and tells a reader nothing without it. Name the concept inline
+  and point at `GLOSSARY.md`, the folder `README.md`, or the owning class.
+  Vendor manual sections are the one durable exception, and belong in the
+  driver implementing them.

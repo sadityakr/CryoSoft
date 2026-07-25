@@ -1,5 +1,12 @@
 # Tiered trend-history persistence (raw / 3-min / hourly)
 
+> **ARCHIVED — IMPLEMENTED 2026-07-25.** All seven phases landed on
+> `claude/trend-logging` and merged into `develop` (`9e52f1d`). Harness on the
+> merged tree: ruff at the one pre-existing skill-template error, 12/12 import
+> contracts, 1567 passed / 5 failed / 5 skipped, the failures all pre-existing
+> (four from the absent `rtm2` vendor package, one documented load flake).
+> Read for rationale, not as a roadmap. The original status line follows.
+
 Status: Phases 0-6 implemented, Phase 7 (housekeeping) in progress.
 Planning discussion complete (one independent Opus review, then redesigned
 to a live cascading three-tier scheme after further discussion). **Revised

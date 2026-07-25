@@ -3,12 +3,10 @@
 #   Behavior tests for cryosoft.gui.servicing_log_page: one table per
 #   declared log kind with columns derived from its LogKindSpec, Add/Edit/
 #   Delete round-tripping through ServicingLogStore's revision model, the
-#   "edited" marker, the read-only operations table, and refresh() behavior
-#   (Phase 5, docs/plans/archive/cryogenics-logbook.md §10); plus the unified
-#   "servicing" kind's dedicated timeline table — chronological sort, data-
-#   derived filter chips, the recording detail dialog, and the two CSV export
-#   helpers (Phase 4, docs/plans/archive/unified-servicing-log-and-run-recording.md
-#   §4).
+#   "edited" marker, the read-only operations table, and refresh() behavior;
+#   plus the unified "servicing" kind's dedicated timeline table —
+#   chronological sort, data-derived filter chips, the recording detail
+#   dialog, and the two CSV export helpers.
 # last_updated: 2026-07-23
 # ---
 
