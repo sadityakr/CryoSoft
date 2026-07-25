@@ -11,16 +11,20 @@
 #   - PyQt6 >= 6.5
 #   - pyqtgraph >= 0.13
 #   - qtawesome
+#   - cryosoft.core.trend_history / cryosoft.core.logging_config
+#     (disk-backed reads for windows beyond MonitorHistory's retention)
 # input: |
 #   A MonitorHistory instance (shared, read-only from this widget's
-#   perspective), a panel_id string, and a series_index used to pick a pen
-#   colour from theme.PLOT_SERIES. The host calls refresh() on each
-#   Orchestrator tick.
+#   perspective), a panel_id string, a series_index used to pick a pen
+#   colour from theme.PLOT_SERIES, and a log_dir for the tiered
+#   trend-history store. The host calls refresh() on each Orchestrator tick.
 # process: |
 #   refresh() repopulates the Y-variable combo from history.keys() (preserving
-#   the current selection), then fetches history.series(key, window_s=...) for
-#   the selected key and time window and redraws the curve. Changing either
-#   combo triggers an immediate redraw against the last known history.
+#   the current selection), then redraws: windows up to 24 h fetch
+#   history.series(key, window_s=...) from RAM as before; longer windows
+#   ("7 d", "1 y") call trend_history.read_window(log_dir, ...), which picks
+#   the tier itself. Changing either combo triggers an immediate redraw
+#   against the last known history/store.
 # output: |
 #   A QGroupBox meant to be embedded in the Monitor window's Trends section,
 #   updating whenever refresh() is called. Emits remove_requested(panel_id)
@@ -39,6 +43,7 @@ widget never talks to the Orchestrator directly.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 import pyqtgraph as pg
 import qtawesome as qta
@@ -52,6 +57,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from cryosoft.core import trend_history
+from cryosoft.core.logging_config import log_directory
 from cryosoft.gui.monitor_history import MonitorHistory
 from cryosoft.gui.theme import PLOT_SERIES, TEXT_PRIMARY
 
@@ -59,13 +66,25 @@ logger = logging.getLogger(__name__)
 
 # (label, window in seconds) — module constant so the Monitor window and
 # tests can both reference the same option list without duplicating it.
+# Windows beyond "24 h" exceed MonitorHistory's in-RAM retention and are
+# served from the disk-backed tiered trend-history store instead (see
+# _redraw()'s RAM/disk split, keyed off this same list via _is_disk_window()).
 TIME_WINDOWS: list[tuple[str, float]] = [
     ("15 min", 900.0),
     ("1 h", 3600.0),
     ("6 h", 21600.0),
     ("24 h", 86400.0),
+    ("7 d", 604800.0),
+    ("1 y", 31536000.0),
 ]
 _DEFAULT_WINDOW_LABEL = "1 h"
+
+# Windows at or below this many seconds are always served from the in-RAM
+# MonitorHistory ring buffer (its own default retention); anything longer is
+# read from disk via trend_history.read_window(), which picks the tier
+# itself (trend_history.pick_tier() — tier choice does not belong in the
+# GUI, see GLOSSARY.md "Trend tier").
+_RAM_WINDOW_CEILING_S = 86400.0
 
 
 class TrendPlotPanel(QGroupBox):
@@ -96,6 +115,11 @@ class TrendPlotPanel(QGroupBox):
             panel's curve colour, the same convention ``LivePlotPanel`` uses
             for its two plots.
         parent: Optional Qt parent widget.
+        log_dir: Directory containing the tiered trend-history JSONL store,
+            used only for windows longer than the in-RAM ``MonitorHistory``
+            can serve (``"7 d"``, ``"1 y"``). ``None`` (the default) resolves
+            it via ``cryosoft.core.logging_config.log_directory()``; tests
+            pass an explicit ``tmp_path`` instead.
     """
 
     remove_requested = pyqtSignal(str)
@@ -106,12 +130,14 @@ class TrendPlotPanel(QGroupBox):
         panel_id: str,
         series_index: int = 0,
         parent: QWidget | None = None,
+        log_dir: Path | None = None,
     ) -> None:
         super().__init__(f"Trend — {panel_id}", parent)
 
         self._history = history
         self._panel_id = panel_id
         self._known_keys: list[str] = []
+        self._log_dir = log_dir if log_dir is not None else log_directory()
 
         self.setMinimumSize(260, 180)
 
@@ -251,9 +277,48 @@ class TrendPlotPanel(QGroupBox):
         if not key or key not in self._known_keys:
             self._curve.setData([], [])
             return
-        times, values = self._history.series(key, window_s=self.selected_window_s())
+        window_s = self.selected_window_s()
+        if window_s <= _RAM_WINDOW_CEILING_S:
+            times, values = self._history.series(key, window_s=window_s)
+        else:
+            times, values = self._read_disk_series(key, window_s)
         self._curve.setData(times, values)
         self._update_y_label()
+
+    def _read_disk_series(self, key: str, window_s: float) -> tuple[list[float], list[float]]:
+        """Read a disk-backed series for a window beyond MonitorHistory's retention.
+
+        Delegates tier selection entirely to ``trend_history.read_window()``
+        (that decision belongs in the store, not the GUI). Synchronous by
+        design: the disk reads involved (~3,840 lines for a week, ~8,760 for
+        a year) are small enough to read on the tick/redraw path without a
+        thread, which this codebase's single-threaded cooperative scheduling
+        forbids anyway.
+
+        Args:
+            key: The flat key to plot.
+            window_s: The requested window length in seconds.
+
+        Returns:
+            ``(times, values)`` parallel lists, empty on any read failure or
+            if the key has no persisted data in the window — including a
+            measurement-VI key, which ``Station.last_state_flat()`` excludes
+            from every tier, so it plots live but is always empty here (see
+            GLOSSARY.md "Trend history").
+        """
+        try:
+            series = trend_history.read_window(self._log_dir, [key], window_s)[key]
+        except Exception:
+            logger.exception(
+                "trend_plot_panel[%s]: disk read failed for key=%r window_s=%s",
+                self._panel_id, key, window_s,
+            )
+            return [], []
+        if not series:
+            return [], []
+        times = [t for t, _ in series]
+        values = [v for _, v in series]
+        return times, values
 
     def _update_y_label(self) -> None:
         """Set the Y-axis label to the currently selected key string."""

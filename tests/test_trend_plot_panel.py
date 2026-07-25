@@ -4,7 +4,11 @@
 #   real MonitorHistory filled with synthetic timestamped data (no mocks
 #   needed, since MonitorHistory is Qt-free stdlib-only). Verifies
 #   construction, refresh() population/redraw, time-window filtering,
-#   selection round-trips, and the remove-button signal.
+#   selection round-trips, and the remove-button signal. Also covers the
+#   "7 d"/"1 y" long windows, which read from disk-backed JSONL tier
+#   fixtures written directly to tmp_path (never through the real writer),
+#   the RAM/disk split at the 24h boundary, disk-read failure/empty
+#   tolerance, and the measurement-VI live-vs-disk asymmetry.
 # entry_point: pytest tests/test_trend_plot_panel.py
 # dependencies:
 #   - pytest, pytest-qt (qtbot fixture)
@@ -22,13 +26,29 @@
 
 """Tests for TrendPlotPanel — reusable time-series trend plot panel."""
 
+import json
 import time
+from pathlib import Path
 
 import pytest
 from PyQt6.QtWidgets import QComboBox, QPushButton
 
 from cryosoft.gui.monitor_history import MonitorHistory
 from cryosoft.gui.trend_plot_panel import TIME_WINDOWS, TrendPlotPanel
+
+
+def _write_jsonl(path: Path, records: list[dict]) -> None:
+    """Write one JSONL record per line to ``path`` (matches trend_history's on-disk format)."""
+    path.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
+
+
+def _bucket_record(t: float, key_stats: dict[str, dict]) -> dict:
+    """One aggregate-tier (3min/hourly) JSONL record."""
+    return {"t": t, "n": sum(s["count"] for s in key_stats.values()), "v": key_stats}
+
+
+def _stats(min_v: float, max_v: float, mean: float, std: float, count: int) -> dict:
+    return {"min": min_v, "max": max_v, "mean": mean, "std": std, "count": count}
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -203,3 +223,150 @@ def test_remove_button_emits_remove_requested_with_panel_id(qtbot, history):
         remove_button.click()
 
     assert blocker.args == ["p5"]
+
+
+# ── Long windows (7 d / 1 y) read from disk ──────────────────────────────────
+
+def test_time_windows_includes_7d_and_1y_after_24h():
+    """TIME_WINDOWS gains ("7 d", 604800.0) and ("1 y", 31536000.0) after "24 h"."""
+    labels = [label for label, _ in TIME_WINDOWS]
+    assert labels.index("24 h") == labels.index("7 d") - 1
+    assert labels.index("7 d") == labels.index("1 y") - 1
+    assert dict(TIME_WINDOWS)["7 d"] == 604800.0
+    assert dict(TIME_WINDOWS)["1 y"] == 31536000.0
+
+
+def test_window_selector_offers_7d_and_1y(qtbot, history):
+    """The window selector combo lists the two new long-window options."""
+    panel = TrendPlotPanel(history, panel_id="p6")
+    qtbot.addWidget(panel)
+
+    window_selector = panel.findChild(QComboBox, "trend_window_selector_p6")
+    items = [window_selector.itemText(i) for i in range(window_selector.count())]
+    assert "7 d" in items
+    assert "1 y" in items
+
+
+def test_selecting_7d_reads_3min_tier_from_disk(qtbot, history, tmp_path):
+    """Selecting "7 d" plots data read from the 3-min tier on disk, not RAM."""
+    now = time.time()
+    key = "temperature_sample_temperature_K"
+    _write_jsonl(
+        tmp_path / "trend_history_3min.jsonl",
+        [
+            _bucket_record(now - 3600, {key: _stats(4.0, 4.2, 4.1, 0.05, 60)}),
+            _bucket_record(now - 1800, {key: _stats(4.1, 4.3, 4.2, 0.05, 60)}),
+        ],
+    )
+
+    # RAM history has the key too, but with different data — proves the
+    # long window is NOT served from RAM.
+    history.record({"temperature_sample": {"temperature_K": 99.0}}, timestamp=now)
+
+    panel = TrendPlotPanel(history, panel_id="p7", log_dir=tmp_path)
+    qtbot.addWidget(panel)
+    panel.refresh()
+    panel.set_selected_key(key)
+    window_selector = panel.findChild(QComboBox, "trend_window_selector_p7")
+    window_selector.setCurrentText("7 d")
+
+    x_data, y_data = panel._curve.getData()
+    assert len(x_data) == 2
+    assert list(y_data) == [4.1, 4.2]
+
+
+def test_selecting_1y_reads_hourly_tier_from_disk(qtbot, history, tmp_path):
+    """Selecting "1 y" plots data read from the hourly tier on disk."""
+    now = time.time()
+    key = "temperature_sample_temperature_K"
+    _write_jsonl(
+        tmp_path / "trend_history_hourly.jsonl",
+        [
+            _bucket_record(now - 86400 * 30, {key: _stats(3.9, 4.4, 4.15, 0.1, 3600)}),
+        ],
+    )
+
+    # RAM history must know the key too, so the Y combo offers it — the
+    # live path is what makes a key selectable, regardless of window.
+    history.record({"temperature_sample": {"temperature_K": 4.2}}, timestamp=now)
+
+    panel = TrendPlotPanel(history, panel_id="p8", log_dir=tmp_path)
+    qtbot.addWidget(panel)
+    panel.refresh()
+    panel.set_selected_key(key)
+    window_selector = panel.findChild(QComboBox, "trend_window_selector_p8")
+    window_selector.setCurrentText("1 y")
+
+    x_data, y_data = panel._curve.getData()
+    assert len(x_data) == 1
+    assert list(y_data) == [4.15]
+
+
+def test_selecting_1h_still_reads_ram_and_ignores_missing_files(qtbot, history, tmp_path):
+    """"1 h" reads MonitorHistory in RAM regardless of whether any disk file exists."""
+    now = time.time()
+    key = "magnet_z_field_T"
+    history.record({"magnet_z": {"field_T": 1.5}}, timestamp=now)
+
+    # log_dir points at an empty, otherwise-unused directory: no trend
+    # history files exist here at all.
+    panel = TrendPlotPanel(history, panel_id="p9", log_dir=tmp_path)
+    qtbot.addWidget(panel)
+    panel.refresh()
+    panel.set_selected_key(key)
+    window_selector = panel.findChild(QComboBox, "trend_window_selector_p9")
+    window_selector.setCurrentText("1 h")
+
+    x_data, y_data = panel._curve.getData()
+    assert len(x_data) == 1
+    assert list(y_data) == [1.5]
+
+
+def test_disk_read_failure_or_empty_renders_empty_plot(qtbot, history, tmp_path):
+    """A missing/empty disk store on a long window renders an empty curve, never raises."""
+    key = "temperature_sample_temperature_K"
+    history.record({"temperature_sample": {"temperature_K": 4.2}}, timestamp=time.time())
+
+    empty_dir = tmp_path / "does_not_exist"
+    panel = TrendPlotPanel(history, panel_id="p10", log_dir=empty_dir)
+    qtbot.addWidget(panel)
+    panel.refresh()
+    panel.set_selected_key(key)
+    window_selector = panel.findChild(QComboBox, "trend_window_selector_p10")
+    window_selector.setCurrentText("1 y")
+
+    x_data, y_data = panel._curve.getData()
+    assert x_data is None or len(x_data) == 0
+    assert y_data is None or len(y_data) == 0
+
+
+def test_measurement_vi_key_plottable_live_but_empty_on_disk_window(qtbot, history, tmp_path):
+    """Measurement-VI asymmetry: live in RAM, empty on a disk-backed window."""
+    now = time.time()
+    key = "lockin1_x_voltage_V"  # measurement-VI-shaped key: never persisted to disk tiers
+    history.record({"lockin1": {"x_voltage_V": 0.003}}, timestamp=now)
+
+    # Disk store exists (other keys persisted) but never carries this key,
+    # exactly as Station.last_state_flat() excludes measurement VIs.
+    _write_jsonl(
+        tmp_path / "trend_history_hourly.jsonl",
+        [_bucket_record(now - 3600, {"magnet_z_field_T": _stats(1.0, 1.0, 1.0, 0.0, 60)})],
+    )
+
+    panel = TrendPlotPanel(history, panel_id="p11", log_dir=tmp_path)
+    qtbot.addWidget(panel)
+    panel.refresh()
+
+    # Live: plottable and appears in the combo with RAM data at a RAM window.
+    panel.set_selected_key(key)
+    window_selector = panel.findChild(QComboBox, "trend_window_selector_p11")
+    window_selector.setCurrentText("1 h")
+    x_data, y_data = panel._curve.getData()
+    assert len(x_data) == 1
+    assert list(y_data) == [0.003]
+
+    # Same key, long (disk-backed) window: empty, not an error.
+    window_selector.setCurrentText("1 y")
+    x_data, y_data = panel._curve.getData()
+    assert x_data is None or len(x_data) == 0
+    assert y_data is None or len(y_data) == 0

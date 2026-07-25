@@ -11,14 +11,19 @@
 # dependencies:
 #   - PyQt6 >= 6.5
 #   - cryosoft.core.station (Station, for VI-name-aware default-key picking)
+#   - cryosoft.core.trend_history / cryosoft.core.logging_config
+#     (startup rehydration of MonitorHistory from the disk-backed raw tier)
 #   - cryosoft.gui.monitor_history (MonitorHistory)
 #   - cryosoft.gui.trend_plot_panel (TrendPlotPanel)
 # input: |
 #   Per-tick state snapshots via on_states_updated(); QSettings blobs via
-#   restore_settings().
+#   restore_settings(); at construction, the raw trend-history tier on disk
+#   (log_dir, defaulting to logging_config.log_directory()).
 # process: |
-#   Panels are registered in an insertion-ordered dict; the grid is rebuilt
-#   from scratch on every add/remove (cheap at N<=4). Restored/default key
+#   At construction, replays the raw tier (bounded to MonitorHistory's
+#   retention) into MonitorHistory via record_flat(), non-fatally. Panels
+#   are registered in an insertion-ordered dict; the grid is rebuilt from
+#   scratch on every add/remove (cheap at N<=4). Restored/default key
 #   selections are held pending until MonitorHistory has data for them.
 # output: |
 #   Live trend plots; save_settings() persists the panel list.
@@ -31,6 +36,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+from pathlib import Path
 
 import qtawesome as qta
 from PyQt6.QtWidgets import (
@@ -43,6 +49,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from cryosoft.core import trend_history
+from cryosoft.core.logging_config import log_directory
 from cryosoft.core.station import Station
 from cryosoft.gui import app_settings  # import the module (not the function) so tests can monkeypatch the factory
 from cryosoft.gui.monitor_history import MonitorHistory
@@ -76,15 +84,28 @@ class TrendsQuadrant(QWidget):
         station: The active Station instance (VI names inform the
             default-trend-key picking).
         parent: Optional Qt parent widget.
+        log_dir: Directory containing the tiered trend-history JSONL store,
+            as resolved by ``cryosoft.core.logging_config.log_directory()``.
+            ``None`` (the default) resolves it via that function; tests pass
+            an explicit ``tmp_path`` instead. Used both for startup
+            rehydration (this class) and passed down to each
+            ``TrendPlotPanel`` for disk-backed long-window reads.
     """
 
-    def __init__(self, station: Station, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        station: Station,
+        parent: QWidget | None = None,
+        log_dir: Path | None = None,
+    ) -> None:
         super().__init__(parent)
         self._station = station
+        self._log_dir = log_dir if log_dir is not None else log_directory()
         self.setObjectName("trends_quadrant")
 
         # Shared ring-buffer history feeding all Trend plot panels.
         self._history = MonitorHistory()
+        self._rehydrate_history()
 
         self._trend_panels: dict[str, TrendPlotPanel] = {}
         self._trend_series_counter = 0
@@ -130,6 +151,41 @@ class TrendsQuadrant(QWidget):
         """The shared MonitorHistory ring buffer feeding all trend panels."""
         return self._history
 
+    def _rehydrate_history(self) -> None:
+        """Replay the raw trend-history tier into ``self._history`` at startup.
+
+        Reads the raw tier for a window equal to ``MonitorHistory``'s own
+        retention and feeds each record's value mapping through
+        ``record_flat()``, oldest-first, so the ring buffer is pre-populated
+        as if the app had been running the whole time. Never fatal: a
+        missing or corrupt log directory must degrade to an empty history,
+        not a failed GUI startup.
+        """
+        try:
+            records = trend_history.read_tier(
+                self._log_dir, "raw", window_s=self._history.retention_s
+            )
+            for timestamp, mapping in records:
+                self._history.record_flat(mapping, timestamp)
+        except Exception:
+            logger.exception(
+                "trends_quadrant: rehydration from %s failed; starting with empty history",
+                self._log_dir,
+            )
+            return
+
+        if records:
+            logger.info(
+                "trends_quadrant: rehydrated %d raw-tier record(s) from %s",
+                len(records),
+                self._log_dir,
+            )
+        else:
+            logger.info(
+                "trends_quadrant: no raw-tier history found at %s; starting empty",
+                self._log_dir,
+            )
+
     # ------------------------------------------------------------------
     # Panel management
     # ------------------------------------------------------------------
@@ -164,7 +220,11 @@ class TrendsQuadrant(QWidget):
         """
         panel_id = f"trend_{self._next_trend_panel_index()}"
         panel = TrendPlotPanel(
-            self._history, panel_id, series_index=self._trend_series_counter, parent=self
+            self._history,
+            panel_id,
+            series_index=self._trend_series_counter,
+            parent=self,
+            log_dir=self._log_dir,
         )
         self._trend_series_counter += 1
         panel.remove_requested.connect(self._on_trend_remove_requested)
