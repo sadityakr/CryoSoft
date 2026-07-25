@@ -795,43 +795,17 @@ class Orchestrator(QObject):
             self._change_state(OrchestratorState.IDLE)
 
     def acknowledge_emergency(self) -> None:
-        """Acknowledge an EMERGENCY: unlock manual control, or return to IDLE.
+        """Acknowledge an EMERGENCY and return to IDLE.
 
-        If the safety condition is still active, acknowledging cannot return
-        to IDLE (the next tick would bounce straight back), but it does
-        unlock ``submit_vi_action`` for manual front-panel recovery — e.g.
-        cycling a switch heater by hand — while remaining in EMERGENCY.
-        Starting a procedure or operation stays refused throughout: those
-        gates check the state itself, which is unchanged here.
-
-        Once the condition has cleared, acknowledging again (the same
-        button) returns to IDLE and relocks the override for the next
-        emergency.
+        Returns to IDLE unconditionally, allowing normal operation to resume.
+        The Orchestrator will prevent starting procedures while safety
+        conditions are active (those checks happen at procedure-start time).
+        Manual monitor-window operations are allowed on unconcerned VIs
+        (those whose safety_concerns() do not include any active flag).
         """
-        if self._state != OrchestratorState.EMERGENCY:
-            return
-        safety = self._station.check_safety()
-        active = sorted(flag for flag, tripped in safety.items() if tripped)
-        # A still-violated session envelope blocks the return to IDLE for the
-        # same reason a safety flag does — the next tick would bounce straight
-        # back.
-        if self._session_envelope is not None:
-            active.extend(self._session_envelope.check_state(self._station.cached_state))
-        if active:
-            if not self._emergency_manual_override:
-                self._emergency_manual_override = True
-                self._emit_status(
-                    "Emergency acknowledged — front-panel manual control "
-                    f"unlocked. Condition still active: {', '.join(active)}"
-                )
-            else:
-                self._error(
-                    "Cannot return to IDLE: condition still active "
-                    f"({', '.join(active)})"
-                )
-            return
-        self._emergency_manual_override = False
-        self._change_state(OrchestratorState.IDLE)
+        if self._state == OrchestratorState.EMERGENCY:
+            self._emergency_manual_override = False
+            self._change_state(OrchestratorState.IDLE)
 
     def active_run_kind(self) -> str | None:
         """Return the active run's kind, or ``None`` if no run is active.
@@ -898,12 +872,17 @@ class Orchestrator(QObject):
            ``retry_fault()`` succeeds. Checked first, and here (not as a
            parallel check) so every caller (``submit_vi_action()``, the
            drain gate) inherits it for free.
-        1. IDLE, or a manual ramp (RAMPING with no active run), or EMERGENCY
-           once ``acknowledge_emergency()`` unlocked manual override: always
-           admitted (unchanged from before claims existed).
-        2. ERROR, or EMERGENCY without the override: always refused, naming
-           the state.
-        3. Otherwise a run is active. Admitted iff the active run's
+        0b. Preconditions: if this VI is a magnet and helium_low is active,
+            refuse (magnets cannot operate without helium).
+        1. IDLE, or a manual ramp (RAMPING with no active run): always
+           admitted.
+        2. EMERGENCY: admitted iff the VI is unconcerned with any active
+           safety flags (i.e., its safety_concerns() and the tripped flags
+           have no overlap). VIs concerned with tripped flags are refused.
+           This allows temperature control to run while magnets are
+           emergency-stopped due to helium_low.
+        3. ERROR or EMERGENCY (after 2): always refused.
+        4. Otherwise a run is active. Admitted iff the active run's
            ``claimed_vi_names()`` is not "claim everything" (``None``) AND
            *vi_name* is not in it. A claimed VI, or a run that claims
            everything (every procedure today), is refused naming the owning
@@ -923,6 +902,12 @@ class Orchestrator(QObject):
                 f"Cannot control {vi_name}: instrument fault ({fault.kind}) — "
                 f"{fault.message}. Retry the instrument or wait for it to recover."
             )
+
+        # Check VI-specific preconditions
+        precond_ok, precond_reason = self._check_vi_preconditions(vi_name)
+        if not precond_ok:
+            return False, precond_reason
+
         if self._state == OrchestratorState.IDLE:
             return True, ""
         manual_ramping = (
@@ -930,11 +915,20 @@ class Orchestrator(QObject):
         )
         if manual_ramping:
             return True, ""
-        emergency_override = (
-            self._state == OrchestratorState.EMERGENCY and self._emergency_manual_override
-        )
-        if emergency_override:
-            return True, ""
+
+        # In EMERGENCY, allow operations on unconcerned VIs
+        if self._state == OrchestratorState.EMERGENCY:
+            active_flags = {f for f, t in self._station.check_safety().items() if t}
+            vi = self._station._virtual_instruments.get(vi_name)
+            if vi is not None:
+                vi_concerns = vi.safety_concerns()
+                if not (vi_concerns & active_flags):
+                    # This VI is not concerned with any active flag
+                    return True, ""
+            return False, (
+                f"Cannot control {vi_name}: concerned with active safety flag(s)"
+            )
+
         if self._state in (OrchestratorState.ERROR, OrchestratorState.EMERGENCY):
             return False, (
                 f"Cannot control {vi_name}: procedure is running in state {self._state.name}"
@@ -952,6 +946,34 @@ class Orchestrator(QObject):
             return False, (
                 f"Cannot control {vi_name}: claimed by running {self._active_run_label()}"
             )
+        return True, ""
+
+    def _check_vi_preconditions(self, vi_name: str) -> tuple[bool, str]:
+        """Check VI-specific preconditions for manual operation.
+
+        Currently checks: if the VI is a magnet and helium_low is active,
+        refuse (magnets cannot operate without helium).
+
+        Args:
+            vi_name: The VI to check.
+
+        Returns:
+            ``(True, "")`` when preconditions are met; ``(False, reason)`` when
+            violated.
+        """
+        vi = self._station._virtual_instruments.get(vi_name)
+        if vi is None:
+            return True, ""
+
+        # Check if this VI is a magnet and depends on helium_low
+        if "helium_low" in vi.safety_concerns():
+            safety = self._station.check_safety()
+            if safety.get("helium_low"):
+                return False, (
+                    f"Cannot control {vi_name}: helium level is critically low. "
+                    f"Fill helium before operating magnets."
+                )
+
         return True, ""
 
     def submit_vi_action(self, vi_name: str, method_name: str, **kwargs: Any) -> None:
@@ -1534,7 +1556,11 @@ class Orchestrator(QObject):
                 vi_names = tuple(sorted({
                     vi_name for flag in active_flags for vi_name in sources.get(flag, [])
                 }))
-                self._enter_emergency(", ".join(active_flags), vi_names)
+                self._enter_emergency(
+                    ", ".join(active_flags),
+                    vi_names,
+                    tripped_flags=active_flags,
+                )
                 return  # emergency entry already cleaned up; nothing else this tick
 
             # Session-envelope check — same snapshot, same consequence as a tripped
@@ -1963,12 +1989,21 @@ class Orchestrator(QObject):
         self._emit_run_finished("failed", reason=message)
         self._change_state(OrchestratorState.IDLE)
 
-    def _enter_emergency(self, reason: str, vi_names: tuple[str, ...] = ()) -> None:
+    def _enter_emergency(
+        self,
+        reason: str,
+        vi_names: tuple[str, ...] = (),
+        tripped_flags: list[str] | None = None,
+    ) -> None:
         """One-shot emergency entry: clean up the run, then safe shutdown.
 
         The shutdown runs exactly once here (not every tick): repeating
         standby_all() each tick would, for a persistent magnet, restart the
         full switch-heater warmup/cooldown cycle every few seconds.
+
+        Only VIs whose safety_concerns() includes a tripped flag are told to
+        standby — other VIs remain unaffected, allowing manual operations on
+        unconcerned instruments via the monitor window after acknowledge.
 
         Args:
             reason: Human-readable description of the tripped condition(s)
@@ -1979,6 +2014,11 @@ class Orchestrator(QObject):
                 per-VI attribution is available (e.g. a session-envelope
                 violation, which is checked against a live reading rather
                 than a VI-tagged safety flag).
+            tripped_flags: The names of flags that triggered EMERGENCY
+                (e.g. ["helium_low", "quench"]). If provided, only VIs
+                concerned with these flags are told to standby. If None,
+                all VIs are told to standby (conservative fallback, used
+                for session-envelope violations).
         """
         message = f"EMERGENCY: safety condition triggered ({reason})"
         if vi_names:
@@ -1997,7 +2037,20 @@ class Orchestrator(QObject):
         self._emit_run_finished("failed", reason=f"EMERGENCY: {reason}")
         self._change_state(OrchestratorState.EMERGENCY)
         try:
-            self._station.standby_all()
+            if tripped_flags:
+                # Only standby VIs concerned with the tripped flags
+                concerned_vis = set()
+                for flag in tripped_flags:
+                    for vi_name in self._station.get_concerned_vis(flag):
+                        concerned_vis.add(vi_name)
+                for vi_name in concerned_vis:
+                    try:
+                        self._station._virtual_instruments[vi_name].standby()
+                    except Exception:
+                        logger.exception("standby failed on VI '%s'", vi_name)
+            else:
+                # No flags provided (e.g., envelope violation): standby all (conservative)
+                self._station.standby_all()
             self._error("Emergency shutdown executed.")
         except Exception:
             logger.exception("standby_all during emergency entry failed")

@@ -881,6 +881,27 @@ class Station:
                 logger.exception("evaluate_safety failed on VI '%s'", vi_name)
         return sources
 
+    def get_concerned_vis(self, flag: str) -> list[str]:
+        """Return VI names whose operation depends on a safety flag.
+
+        When a safety flag trips, the Orchestrator calls this to find which
+        VIs care about that flag — only those VIs are told to standby, while
+        other VIs remain unaffected.
+
+        Args:
+            flag: The safety flag name (e.g. "helium_low", "quench").
+
+        Returns:
+            List of VI names (in registration order) whose safety_concerns()
+            includes *flag*. Empty list if no VI depends on that flag.
+        """
+        concerned = []
+        for vi_name, vi in self._virtual_instruments.items():
+            concerns = vi.safety_concerns()
+            if flag in concerns:
+                concerned.append(vi_name)
+        return concerned
+
     # ------------------------------------------------------------------
     # Measurement command dispatch
     # ------------------------------------------------------------------

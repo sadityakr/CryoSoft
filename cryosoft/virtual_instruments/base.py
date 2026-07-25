@@ -347,6 +347,26 @@ class BaseVirtualInstrument:
 
         return get_control_specs(getattr(self, method_name))
 
+    def safety_concerns(self) -> set[str]:
+        """Return the safety flags this VI's operation depends on.
+
+        Subclasses override to declare which conditions must hold for this VI's
+        ramps/operations to be safe. The names returned here (e.g. "quench",
+        "helium_low") are matched against the flag names returned by
+        ``evaluate_safety()`` across all VIs. When a flag is tripped (returned
+        True by any VI's evaluate_safety()), only the VIs whose safety_concerns()
+        includes that flag are told to standby.
+
+        This is NOT a query about the current state — it is a static declaration
+        of invariants. A magnet always depends on helium, independent of the
+        current helium level.
+
+        Returns:
+            Set of safety flag names this VI depends on, e.g. ``{"quench", "helium_low"}``.
+            Empty set (the default) means this VI is unaffected by safety flags.
+        """
+        return set()
+
     def evaluate_safety(self, state: dict) -> dict[str, bool]:
         """Judge this VI's own polled state for safety conditions.
 
@@ -382,6 +402,10 @@ class MagnetBase(BaseVirtualInstrument):
     setpoint_unit: str = "T"
     display_label: str = "magnet"
 
+    def safety_concerns(self) -> set[str]:
+        """Magnets require helium and are affected by quench."""
+        return {"quench", "helium_low"}
+
 
 class TemperatureControllerBase(BaseVirtualInstrument):
     """Base class for all temperature-controller VIs."""
@@ -389,6 +413,10 @@ class TemperatureControllerBase(BaseVirtualInstrument):
     setpoint_label: str = "temperature"
     setpoint_unit: str = "K"
     display_label: str = "temperature"
+
+    def safety_concerns(self) -> set[str]:
+        """Temperature control is affected only by quench events."""
+        return {"quench"}
 
 
 class LevelMeterBase(BaseVirtualInstrument):
@@ -402,6 +430,10 @@ class RotatorBase(BaseVirtualInstrument):
     setpoint_label: str = "sample angle"
     setpoint_unit: str = "deg"
     display_label: str = "rotator"
+
+    def safety_concerns(self) -> set[str]:
+        """Rotators are affected only by quench events."""
+        return {"quench"}
 
 
 class MeasurementInstrumentBase(BaseVirtualInstrument):
