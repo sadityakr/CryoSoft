@@ -32,10 +32,13 @@ a diagnosis is *derived*, not guessed.
 1. **Capture the symptom.** Restate what the human reported as: what was
    expected, what happened instead, when it started, what changed recently
    (check `LOGBOOK.md` and recent commits).
-2. **Gather passive evidence first** (no instrument I/O): tail
-   `cryosoft/logs/cryosoft.log` around the failure time; check
-   `cryosoft/logs/troubleshoot.jsonl` for recent diagnostics; look for
-   `_stale` / `_disconnected` flags mentioned in the log.
+2. **Gather passive evidence first** (no instrument I/O): find the log
+   directory — `cryosoft.core.logging_config.log_directory()` resolves it
+   (default `%LOCALAPPDATA%\CryoSoft\logs` on Windows, overridable via the
+   `CRYOSOFT_LOG_DIR` env var; check that env var first if set) — then tail
+   `cryosoft.log` in that directory around the failure time; check
+   `troubleshoot.jsonl` there for recent diagnostics; look for `_stale` /
+   `_disconnected` flags mentioned in the log.
 3. **Run the preflight:** `python -m cryosoft.troubleshoot check --json`.
    Branch on the FaultCodes using `references/triage-tree.md`.
 4. **Narrow with read-only commands** (`scan`, `probe`, `idn`, `read`,
@@ -52,9 +55,10 @@ a diagnosis is *derived*, not guessed.
      be 12"), then re-run the relevant probe to verify the fix.
    - **Cannot conclude:** write an incident report
      (`references/incident-report-template.md`) to
-     `cryosoft/logs/incidents/YYYY-MM-DD-<slug>.md` and tell the human what
-     a stronger model or a human expert should look at. A good report is a
-     success; a guess or a workaround is a failure.
+     `incidents/YYYY-MM-DD-<slug>.md` under the resolved log directory (see
+     step 2) and tell the human what a stronger model or a human expert
+     should look at. A good report is a success; a guess or a workaround is
+     a failure.
 6. **Write back.** Every episode ends with: a LOGBOOK.md entry (symptom,
    diagnosis, evidence, resolution); a new dated entry under "Known quirks"
    in the config's `setup.md` if the cause was a property of this setup; and,
