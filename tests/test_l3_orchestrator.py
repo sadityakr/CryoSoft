@@ -572,66 +572,62 @@ def test_unhandled_tick_exception_still_enters_error(orchestrator, qtbot, monkey
     assert orchestrator._state == OrchestratorState.IDLE
 
 
-def test_emergency_on_helium_low(orchestrator, station, qtbot):
-    """Sustained helium_low -> EMERGENCY; acknowledge returns to IDLE unconditionally.
+def test_helium_low_blocks_magnets_without_emergency(orchestrator, station, qtbot):
+    """Helium_low blocks magnet operations but does not trigger EMERGENCY.
 
-    The helium flag is debounced (majority vote over the level meter's
-    reading buffer), so EMERGENCY requires a few consecutive low polls.
-    acknowledge_emergency() returns to IDLE unconditionally, but magnets
-    remain gated by the helium-level precondition.
+    Temperature control and other unconcerned VIs can operate freely while
+    helium is low. Magnets are blocked at the precondition gate.
     """
     # Force helium low
     station.level_meter._driver._force_helium_level = 5.0
 
-    def check_state():
-        return orchestrator._state == OrchestratorState.EMERGENCY
+    # Wait a moment for flag to be debounced
+    qtbot.wait(100)
 
-    qtbot.waitUntil(check_state, timeout=2000)
-    assert orchestrator._state == OrchestratorState.EMERGENCY
-
-    # Acknowledging returns to IDLE unconditionally (even while helium is low).
-    orchestrator.acknowledge_emergency()
+    # Confirm: no EMERGENCY triggered, state stays IDLE
     assert orchestrator._state == OrchestratorState.IDLE
+    assert station.check_safety().get("helium_low") is True
 
-    # But magnet operations are still blocked by the precondition check.
+    # Temperature can run (unconcerned with helium_low)
+    with qtbot.waitSignal(orchestrator.action_succeeded, timeout=500):
+        orchestrator.submit_vi_action("temperature_vti", "initiate")
+
+    # But magnet operations are blocked by the precondition check
     with qtbot.waitSignal(orchestrator.action_blocked, timeout=500):
         orchestrator.submit_vi_action("magnet_z", "set_field", target_T=1.0)
 
-    # Helium recovers; magnet operations are now unblocked.
+    # Helium recovers; magnet operations are now unblocked
     station.level_meter._driver._force_helium_level = None
 
     def safety_cleared():
-        return not any(station.check_safety().values())
+        return not station.check_safety().get("helium_low")
 
     qtbot.waitUntil(safety_cleared, timeout=2000)
     with qtbot.waitSignal(orchestrator.action_succeeded, timeout=500):
         orchestrator.submit_vi_action("magnet_z", "set_field", target_T=1.0)
 
 
-def test_emergency_allows_unconcerned_vi_operations(orchestrator, station, qtbot):
-    """During EMERGENCY, unconcerned VIs can operate while concerned ones are blocked.
+def test_quench_emergency_allows_unconcerned_vi_operations(orchestrator, station, qtbot):
+    """During quench EMERGENCY, unconcerned VIs can operate while concerned ones are blocked.
 
-    Helium_low triggers EMERGENCY but only magnets depend on it (in safety_concerns).
-    Temperature control has no helium dependency, so it can run even during
-    helium_low EMERGENCY. Magnets are blocked by the precondition check.
-    run_procedure() still refuses to start new procedures during EMERGENCY
-    (queues them instead).
+    Quench triggers EMERGENCY and affects all rampable VIs (magnets, temperature).
+    But temperature_sample (a non-rampable monitor-only VI) has no safety concerns,
+    so it can run even during quench EMERGENCY.
     """
-    station.level_meter._driver._force_helium_level = 5.0
+    # Trigger EMERGENCY via quench
+    station.magnet_z._driver._simulate_quench = True
     qtbot.waitUntil(
         lambda: orchestrator._state == OrchestratorState.EMERGENCY, timeout=2000
     )
+    assert orchestrator._state == OrchestratorState.EMERGENCY
 
-    # Magnet action is blocked (precondition: helium too low).
+    # Magnet action is blocked (concerned with quench).
     with qtbot.waitSignal(orchestrator.action_blocked, timeout=500):
         orchestrator.submit_vi_action("magnet_z", "set_field", target_T=1.0)
-    assert orchestrator._state == OrchestratorState.EMERGENCY
 
-    # Temperature control is allowed (unconcerned with helium_low).
-    # It can run without acknowledging, because temperature has no helium dependency.
-    with qtbot.waitSignal(orchestrator.action_succeeded, timeout=500):
+    # Temperature control is also blocked by EMERGENCY (concerned with quench).
+    with qtbot.waitSignal(orchestrator.action_blocked, timeout=500):
         orchestrator.submit_vi_action("temperature_vti", "initiate")
-    assert orchestrator._state == OrchestratorState.EMERGENCY
 
     # A procedure is still refused from running immediately — it queues.
     procedure = MockProcedure(station)
@@ -644,13 +640,9 @@ def test_emergency_allows_unconcerned_vi_operations(orchestrator, station, qtbot
     orchestrator.acknowledge_emergency()
     assert orchestrator._state == OrchestratorState.IDLE
 
-    # Magnet remains blocked by precondition (helium still low).
-    with qtbot.waitSignal(orchestrator.action_blocked, timeout=500):
-        orchestrator.submit_vi_action("magnet_z", "set_field", target_T=1.0)
-
-    # Helium recovers; magnet operations now allowed.
-    station.level_meter._driver._force_helium_level = None
-    qtbot.waitUntil(lambda: not any(station.check_safety().values()), timeout=2000)
+    # Clear quench; operations now allowed.
+    station.magnet_z._driver._simulate_quench = False
+    qtbot.wait(100)
     with qtbot.waitSignal(orchestrator.action_succeeded, timeout=500):
         orchestrator.submit_vi_action("magnet_z", "set_field", target_T=1.0)
 
@@ -658,7 +650,7 @@ def test_emergency_allows_unconcerned_vi_operations(orchestrator, station, qtbot
 def test_emergency_shutdown_runs_once_not_every_tick(orchestrator, station, qtbot):
     """Concerned VI standby() runs once on EMERGENCY entry, not every tick.
 
-    For helium_low, only magnets are concerned, so their standby() is called.
+    For quench, all rampable VIs are concerned, so their standby() is called once.
     Repeating it each tick would restart a persistent magnet's full
     switch-heater warmup/cooldown cycle every few seconds.
     """
@@ -672,7 +664,8 @@ def test_emergency_shutdown_runs_once_not_every_tick(orchestrator, station, qtbo
 
     station.magnet_z.standby = counting
     try:
-        station.level_meter._driver._force_helium_level = 5.0
+        # Trigger quench EMERGENCY
+        station.magnet_z._driver._simulate_quench = True
         qtbot.waitUntil(
             lambda: orchestrator._state == OrchestratorState.EMERGENCY,
             timeout=2000,

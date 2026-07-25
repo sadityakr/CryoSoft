@@ -1541,6 +1541,10 @@ class Orchestrator(QObject):
             # (e.g. quench) still enters EMERGENCY exactly as for any
             # procedure. Only the ACTIVE procedure's tolerance applies here —
             # a plain procedure (or IDLE) tolerates nothing, unchanged.
+            #
+            # helium_low is not an EMERGENCY condition — it only blocks magnet
+            # operations at the precondition gate. So it's filtered out before
+            # EMERGENCY entry, but still monitored for magnet blocking.
             safety = self._station.check_safety(state)
             tripped_flags = {flag for flag, tripped in safety.items() if tripped}
             if self._procedure is not None and (
@@ -1550,7 +1554,9 @@ class Orchestrator(QObject):
                     getattr(self._procedure, "tolerated_safety_flags", frozenset())
                 )
                 tripped_flags = tripped_flags - tolerated
-            active_flags = sorted(tripped_flags)
+            # helium_low does not trigger EMERGENCY, only blocks magnet operations
+            emergency_flags = tripped_flags - {"helium_low"}
+            active_flags = sorted(emergency_flags)
             if active_flags and self._state != OrchestratorState.EMERGENCY:
                 sources = self._station.safety_flag_sources(state)
                 vi_names = tuple(sorted({
