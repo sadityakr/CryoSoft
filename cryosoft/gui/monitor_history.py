@@ -68,9 +68,23 @@ class MonitorHistory:
       ``Station.last_state_flat()`` (``cryosoft/core/station.py:535-536``),
       excludes them by design. A trend panel on a measurement-VI key
       therefore works live but goes empty after a restart or on a
-      disk-backed window; this is the accepted asymmetry documented in
-      ``docs/plans/trend-history-persistence.md`` §7, not a bug in either
-      entry point.
+      disk-backed window; this is an accepted asymmetry, not a bug in
+      either entry point.
+
+    There is a second, opposite-running asymmetry between the same two
+    paths, currently accepted but NOT deliberately designed the way the
+    one above is: ``Station.last_state_flat()`` has no ``bool`` guard — it
+    keeps anything passing ``isinstance(value, (int, float))``, and
+    ``bool`` is an ``int`` subclass, so a boolean ``@monitored`` field
+    (e.g. ``SwitchMatrixVI.hot_switching_enabled``) is coerced to
+    ``1.0``/``0.0`` and reaches the disk tiers. ``record()`` here
+    explicitly skips ``bool`` values, so the same field never enters the
+    live in-RAM history. Net effect: that key *gains* a trend-plot entry
+    after a restart or on a disk-backed window, the opposite direction of
+    the measurement-VI asymmetry above (which *loses* one). Neither
+    ``last_state_flat()`` nor ``record()`` should be changed to fix this
+    without an explicit decision, since ``last_state_flat()`` also feeds
+    HDF5 sweep columns and changing its filtering would alter data files.
 
     Attributes:
         retention_s: How many seconds of history each key retains.

@@ -297,8 +297,10 @@ class Orchestrator(QObject):
         self._watchdog_state = WatchdogState()
         self._watchdog_config = WatchdogConfig()
 
-        # Tiered trend-history writer (docs/plans/trend-history-persistence.md
-        # §2). No arguments: its defaults resolve the cryosoft.trend_* loggers
+        # Tiered trend-history writer: the disk-backed store of per-tick
+        # station readings, downsampled live into the raw/3min/hourly tiers
+        # (see TieredTrendLogger's docstring and GLOSSARY.md "Trend tier").
+        # No arguments: its defaults resolve the cryosoft.trend_* loggers
         # already configured by setup_logging(), so the Orchestrator never
         # needs to know where trend logs live.
         self._tiered_trend_logger = TieredTrendLogger()
@@ -1468,14 +1470,15 @@ class Orchestrator(QObject):
             logger.debug("Monitor: %s", " | ".join(parts))
 
             # Operational-status record (runtime troubleshooting signal): assembled
-            # from this tick's snapshot, emitted, and appended to logs/status.jsonl.
+            # from this tick's snapshot, emitted, and appended to the resolved
+            # log directory's status.jsonl (see logging_config.log_directory()).
             self._update_operational_status(state)
 
-            # Tiered trend-history sample (docs/plans/trend-history-persistence.md
-            # §2): non-fatal, mirrors the operational-status guard above — a
-            # logging failure here must never fail the tick. record() is
-            # itself internally exception-safe; this guard is belt-and-braces
-            # around constructing its arguments (e.g. last_state_flat()).
+            # Tiered trend-history sample: non-fatal, mirrors the
+            # operational-status guard above — a logging failure here must
+            # never fail the tick. record() is itself internally
+            # exception-safe; this guard is belt-and-braces around
+            # constructing its arguments (e.g. last_state_flat()).
             try:
                 self._tiered_trend_logger.record(
                     self._station.last_state_flat(), time.time(), self._state.name

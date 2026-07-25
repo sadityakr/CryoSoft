@@ -3,9 +3,9 @@
 #   TieredTrendLogger: live incremental downsampling of Station state into
 #   three JSONL log tiers (raw, 3-min, hourly) via the loggers set up in
 #   logging_config.py. Qt-free, orchestrator-agnostic write side of the
-#   tiered trend-history store (docs/plans/trend-history-persistence.md §2).
-# entry_point: Not run directly. Phase 3 wires record() into
-#   Orchestrator's tick, next to _update_operational_status().
+#   tiered trend-history store — see GLOSSARY.md "Trend history"/"Trend tier".
+# entry_point: Not run directly. Orchestrator.tick() calls record() once per
+#   tick, next to _update_operational_status().
 # dependencies:
 #   - Python standard library only (logging, math, time).
 # input: |
@@ -27,9 +27,9 @@
 
 Qt-free by design: this module imports nothing from PyQt6, the Orchestrator,
 Virtual Instruments, or drivers, so it cannot violate any layer-boundary
-import-linter contract. It is the write side only; Phase 2 adds the reader
-module (``trend_history.py``) and Phase 3 wires ``record()`` into the
-Orchestrator's tick.
+import-linter contract. It is the write side only; ``trend_history.py`` is
+the read side, querying the JSONL tiers this class writes, and
+``Orchestrator.tick()`` calls ``record()`` once per tick.
 """
 
 from __future__ import annotations
@@ -147,8 +147,8 @@ class _BucketAccumulator:
 class TieredTrendLogger:
     """Live incremental writer for the raw / 3-min / hourly trend-history tiers.
 
-    ``record()`` is meant to be called once per Orchestrator tick (Phase 3)
-    with the already-flattened, measurement-VI-excluded reading dict from
+    ``record()`` is called once per Orchestrator tick, with the
+    already-flattened, measurement-VI-excluded reading dict from
     ``Station.last_state_flat()``. Each call:
 
     1. Writes one raw-tier JSONL line, throttled by ``min_raw_interval_s``
@@ -162,7 +162,7 @@ class TieredTrendLogger:
        in the next bucket, i.e. buckets are closed and flushed lazily, on
        the following sample, not on a wall-clock timer.
 
-    Accepted gaps (see ``docs/plans/trend-history-persistence.md`` §2):
+    Accepted gaps:
 
     - **Crash/restart mid-bucket** loses that one in-progress 3-min or
       1-hour bucket: it is never flushed, not corrupted. The raw tier still

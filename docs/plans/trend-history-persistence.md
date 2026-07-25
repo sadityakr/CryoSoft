@@ -1,12 +1,13 @@
 # Tiered trend-history persistence (raw / 3-min / hourly)
 
-Status: IN PROGRESS — planning discussion complete (one independent Opus
-review, then redesigned to a live cascading three-tier scheme after further
-discussion). **Revised 2026-07-25** after a full-codebase agentic survey
+Status: Phases 0-6 implemented, Phase 7 (housekeeping) in progress.
+Planning discussion complete (one independent Opus review, then redesigned
+to a live cascading three-tier scheme after further discussion). **Revised
+2026-07-25** after a full-codebase agentic survey
 (`docs/plans/agentic-instrumentation-framework.md`): added Phase 0
 (log-location and gitignore defects), reshaped the reader API for a second
 non-human consumer, and folded in UTC/cadence correctness fixes.
-Implementing phase by phase, `make check` green at each phase before moving
+Implemented phase by phase, `make check` green at each phase before moving
 to the next.
 
 ## Problem statement
@@ -296,8 +297,9 @@ The raw trend tier is therefore the *more complete* historical state record
 of the two, which both justifies the separate file and is the reason the
 better query API belongs on this one.
 
-### 7. Known, accepted asymmetry
+### 7. Known, accepted asymmetries (two, running in opposite directions)
 
+**Asymmetry 1 — measurement VIs (documented, deliberate).**
 `MonitorHistory.record()` (live path) includes measurement VIs; all three
 disk tiers do not, because `last_state_flat()` excludes them
 (`core/station.py:535-536`). A trend panel on a measurement-VI key works
@@ -305,24 +307,50 @@ live but goes empty after a restart or on a >24h window. Deliberate and
 tested. The reader's `persisted` flag (§3) is what keeps this from becoming
 a silent wrong answer for a non-human caller.
 
+**Asymmetry 2 — boolean fields (accepted during Phase 7 housekeeping, NOT
+deliberately designed).** `last_state_flat()` has no `bool` guard: it keeps
+anything passing `isinstance(value, (int, float))`, and `bool` is an `int`
+subclass, so a boolean `@monitored` field (e.g.
+`SwitchMatrixVI.hot_switching_enabled`) is coerced to `1.0`/`0.0` and IS
+persisted to the raw tier (and folds into the aggregate tiers too).
+`MonitorHistory.record()` explicitly excludes `bool` values, so the same
+field never enters the live in-RAM history. User-visible consequence: the
+opposite direction of Asymmetry 1 — a trend panel *gains* a key after a
+restart or on a disk-backed window that was unavailable while running
+live, rather than losing one. Neither `last_state_flat()` nor
+`MonitorHistory.record()` should be changed to close this gap without an
+explicit decision: `last_state_flat()` also feeds HDF5 sweep columns, so
+changing its filtering would alter data files, and `MonitorHistory.record()`'s
+bool exclusion may be relied on elsewhere. Pinned by
+`test_l2_station.py::test_last_state_flat_coerces_bool_to_float_unlike_monitor_history`
+and documented on `MonitorHistory`'s class docstring and the
+`core/README.md` row for `tiered_trend_logger.py`.
+
 ---
 
 ## Phasing
 
-0. **0a** `.gitignore` pattern + untrack the two committed `status.jsonl`
-   backups. **0b** `log_directory()` resolver in `core/logging_config.py`,
-   troubleshoot delegation, skill/doc path updates, tests.
-1. `core/logging_config.py`: three trend loggers, `status.jsonl` to
-   time-based rotation, `utc=True` throughout. Plus
+0. **DONE.** **0a** `.gitignore` pattern + untrack the two committed
+   `status.jsonl` backups. **0b** `log_directory()` resolver in
+   `core/logging_config.py`, troubleshoot delegation, skill/doc path
+   updates, tests.
+1. **DONE.** `core/logging_config.py`: three trend loggers, `status.jsonl`
+   to time-based rotation, `utc=True` throughout. Plus
    `core/tiered_trend_logger.py` and its tests. No orchestrator wiring yet.
-2. `core/trend_history.py`: `read_tier`, `pick_tier`, `persisted_keys`,
-   `read_window`, `summarize`, `find_crossings`, plus tests.
-3. Wire `TieredTrendLogger` into `orchestrator.py`'s tick, plus a
+2. **DONE.** `core/trend_history.py`: `read_tier`, `pick_tier`,
+   `persisted_keys`, `read_window`, `summarize`, `find_crossings`, plus
+   tests.
+3. **DONE.** Wire `TieredTrendLogger` into `orchestrator.py`'s tick, plus a
    record-shape-pinning test.
-4. `MonitorHistory.record_flat()` plus test.
-5. `TrendsQuadrant` startup rehydration plus test.
-6. `trend_plot_panel.py` `TIME_WINDOWS` and disk-backed `refresh()`, plus test.
-7. README/GLOSSARY housekeeping; final `make check`.
+4. **DONE.** `MonitorHistory.record_flat()` plus test.
+5. **DONE.** `TrendsQuadrant` startup rehydration plus test.
+6. **DONE.** `trend_plot_panel.py` `TIME_WINDOWS` and disk-backed
+   `refresh()`, plus test.
+7. **IN PROGRESS.** README/GLOSSARY housekeeping; removal of plan-document
+   citations from code/test comments and docstrings (project now forbids
+   them — see the code-reference standard); documenting the second,
+   undocumented bool-persistence asymmetry (§7); a skill-path accuracy
+   fix; final `make check`.
 
 Phases 0a and 4 touch no shared files and may run in parallel with each
 other; everything else is sequential on the phase before it.

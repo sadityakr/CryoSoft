@@ -5,8 +5,8 @@
 #   TieredTrendLogger (tiered_trend_logger.py) and exposes both a low-level
 #   raw-row primitive and an aggregate/query surface aimed at a second,
 #   non-human consumer (an LLM agent asking "was the sample temperature
-#   stable overnight" rather than wanting 28,800 raw rows).
-#   docs/plans/trend-history-persistence.md §3.
+#   stable overnight" rather than wanting 28,800 raw rows). See
+#   GLOSSARY.md "Trend history"/"Trend tier" for the store's shape.
 # entry_point: Not run directly. Called by the GUI trend panel
 #   (read_window) and by future agent-facing tooling (summarize,
 #   find_crossings).
@@ -81,8 +81,9 @@ class TierSpec:
             writer's ``TimedRotatingFileHandler`` rotation unit and
             ``backupCount`` (see ``TIERS`` below for the derivation of each
             tier's value). Informational only — actual retention is
-            enforced by file count, not this figure (plan §"Retention is
-            enforced entirely by ... backupCount").
+            enforced by file count (the handler's rotation unit times
+            ``backupCount``, see the derivation above ``TIERS``), not by
+            this figure.
     """
 
     name: str
@@ -135,10 +136,12 @@ class KeySummary:
         tier: The tier this summary was computed from (``pick_tier``'s
             choice for the requested window).
         persisted: ``False`` if this key never appears in this tier's
-            files at all (e.g. a measurement-VI key, which
-            ``Station.last_state_flat()`` excludes — plan §7). ``True`` and
-            an empty/zeroed summary means the key is persisted but simply
-            had no samples in the requested window.
+            files at all (e.g. a measurement-VI key: ``Station.
+            last_state_flat()`` excludes every measurement VI, so a trend
+            panel on a measurement-VI key works live but is empty on any
+            disk-backed window — see GLOSSARY.md "Trend history"). ``True``
+            and an empty/zeroed summary means the key is persisted but
+            simply had no samples in the requested window.
     """
 
     min: float | None
@@ -155,8 +158,8 @@ class KeySummary:
 def pick_tier(window_s: float) -> str:
     """Map a requested time window to the tier that should serve it.
 
-    Single home for this decision (plan §3), so the GUI plot panel, a CLI,
-    and any future agent-facing tool all inherit the same choice instead of
+    Single home for this decision, so the GUI plot panel, a CLI, and any
+    future agent-facing tool all inherit the same choice instead of
     reimplementing it.
 
     Args:
@@ -290,8 +293,9 @@ def persisted_keys(log_dir: Path, tier: str) -> set[str]:
     """Return the set of keys that appear in a tier's files at all.
 
     Used to distinguish "no data in the requested window" from "this key is
-    never written to disk" (plan §7 — measurement-VI keys are never
-    persisted). Bounded to the most recent ``_PERSISTED_KEYS_MAX_LINES``
+    never written to disk" — measurement-VI keys are excluded by
+    ``Station.last_state_flat()`` and so never reach any tier. Bounded to
+    the most recent ``_PERSISTED_KEYS_MAX_LINES``
     records across the tier's files (newest files first, by mtime), rather
     than a full scan of the retention window: a key that has ever been
     persisted recently is what matters for this distinction, and scanning
@@ -491,9 +495,10 @@ def summarize(
 
     Returns:
         ``{key: KeySummary}``. A key never persisted to this tier (e.g. a
-        measurement-VI key, plan §7) gets ``persisted=False`` and
-        zeroed/``None`` stats, distinguishing "never persisted" from "no
-        data in this window" (``persisted=True`` with ``count=0``).
+        measurement-VI key, excluded by ``Station.last_state_flat()``) gets
+        ``persisted=False`` and zeroed/``None`` stats, distinguishing "never
+        persisted" from "no data in this window" (``persisted=True`` with
+        ``count=0``).
     """
     log_dir = Path(log_dir)
     tier = pick_tier(window_s)
@@ -523,7 +528,7 @@ def find_crossings(
     """Return timestamps where consecutive samples of ``key`` cross ``threshold``.
 
     The one query beyond aggregation an agent needs for operational
-    reasoning ("when did helium last drop below 30%") — plan §3.
+    reasoning ("when did helium last drop below 30%").
 
     Args:
         log_dir: Directory containing the trend-history JSONL files.

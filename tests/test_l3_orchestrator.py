@@ -187,9 +187,9 @@ def test_operational_status_reports_live_ramp_target(orchestrator, station, qtbo
 
 
 def test_tick_emits_raw_trend_record(orchestrator, station, qtbot):
-    """A tick writes exactly the documented raw-tier JSON shape to
-    cryosoft.trend_raw (docs/plans/trend-history-persistence.md §2), pinning
-    the "t"/"s"/"v" nesting and the measurement-VI exclusion at the
+    """A tick writes exactly the documented raw-tier JSON shape (see
+    TieredTrendLogger's docstring) to cryosoft.trend_raw, pinning the
+    "t"/"s"/"v" nesting and the measurement-VI exclusion at the
     orchestrator boundary.
 
     cryosoft.trend_raw has propagate=False (logging_config.py), so the

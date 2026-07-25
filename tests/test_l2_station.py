@@ -234,6 +234,28 @@ def test_get_state_error_handling(sim_station: Station):
     assert sim_station._error_counts["magnet_z"] == 3
 
 
+def test_last_state_flat_coerces_bool_to_float_unlike_monitor_history(sim_station: Station):
+    """Pin the bool-persistence asymmetry documented on MonitorHistory's docstring.
+
+    ``last_state_flat()`` has no ``bool`` guard: since ``bool`` is a subclass
+    of ``int``, ``switch_matrix``'s boolean ``hot_switching_enabled`` field
+    passes ``isinstance(value, (int, float))`` and is coerced to a float,
+    so it IS written to the trend-history tiers. This is the opposite
+    direction from ``gui.monitor_history.MonitorHistory.record()``, which
+    explicitly excludes bools from the live in-RAM history (see that test
+    module's matching pin, and MonitorHistory's class docstring for the
+    full asymmetry writeup). Neither method should change to "fix" this —
+    ``last_state_flat()`` also feeds HDF5 sweep columns.
+    """
+    sim_station.get_state()  # populate _last_known_state
+    flat = sim_station.last_state_flat()
+
+    key = "switch_matrix_hot_switching_enabled"
+    assert key in flat
+    assert flat[key] == 1.0
+    assert isinstance(flat[key], float)
+
+
 def test_process_system_targets_forwards_persistent_key(sim_station: Station):
     """An optional 'persistent' key in a target dict is forwarded to start_ramp().
 
