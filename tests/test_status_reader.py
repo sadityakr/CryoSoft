@@ -3,9 +3,11 @@
 #   Tests for the runtime status reader (cryosoft.troubleshoot.status_reader)
 #   and the `troubleshoot status` CLI subcommand: record parsing, digest/trend
 #   folding, plain-English rendering with per-code triage help, and CLI exit
-#   codes (0 only when a log exists and the verdict is OK).
+#   codes (0 only when a log exists and the verdict is OK). Also covers the
+#   System-Condition standard's ``conditions`` field: present, absent (old-log
+#   backward compatibility), and its "Active conditions" rendering.
 # entry_point: pytest tests/test_status_reader.py -v
-# last_updated: 2026-07-13
+# last_updated: 2026-07-26
 # ---
 
 """Tests for the runtime status reader and `troubleshoot status`."""
@@ -34,6 +36,17 @@ def _vi(name, value, target, gap, code, ramp_status="RAMPING"):
         "vi_name": name, "value": value, "target": target, "gap": gap,
         "rate": 1.0, "eta_s": gap * 60.0, "ramp_status": ramp_status,
         "phase": None, "code": code,
+    }
+
+
+def _condition(
+    key="safety:helium_low", severity="hold", message="helium low",
+    affected="magnet_z", acknowledged=False,
+):
+    return {
+        "key": key, "origin": "safety", "severity": severity, "kind": "helium_low",
+        "message": message, "affected": [affected] if affected != "all" else "all",
+        "since": 1.0, "acknowledged": acknowledged,
     }
 
 
@@ -96,3 +109,54 @@ def test_cli_status_stalled_exits_one(tmp_path):
 
 def test_cli_status_missing_log_exits_one(tmp_path):
     assert main(["status", "--log", str(tmp_path / "none.jsonl")]) == 1
+
+
+def test_summarize_carries_conditions_through():
+    rec = _rec("RAMPING", "OK", [])
+    rec["conditions"] = [_condition()]
+    d = status_reader.summarize([rec])
+    assert d["conditions"] == [_condition()]
+
+
+def test_summarize_defaults_conditions_to_empty_for_old_log():
+    rec = _rec("IDLE", "OK", [])  # no "conditions" key at all
+    assert "conditions" not in rec
+    d = status_reader.summarize([rec])
+    assert d["conditions"] == []
+
+
+def test_render_text_shows_active_conditions_section():
+    rec = _rec("RAMPING", "OK", [_vi("m", 1.0, 2.0, 1.0, "OK")])
+    rec["conditions"] = [_condition(severity="hold", message="helium low", affected="magnet_z")]
+    text = status_reader.render_text(status_reader.summarize([rec]))
+    assert "Active conditions:" in text
+    assert "HOLD: helium low (affects: magnet_z)" in text
+
+
+def test_render_text_marks_station_wide_and_acknowledged_conditions():
+    rec = _rec("EMERGENCY", "OK", [])
+    rec["conditions"] = [
+        _condition(
+            key="envelope:field too high", severity="critical",
+            message="field too high", affected="all", acknowledged=True,
+        )
+    ]
+    text = status_reader.render_text(status_reader.summarize([rec]))
+    assert "CRITICAL: field too high (affects: all instruments) [acknowledged]" in text
+
+
+def test_render_text_omits_active_conditions_section_when_none():
+    rec = _rec("IDLE", "OK", [])  # old-log style, no conditions field
+    text = status_reader.render_text(status_reader.summarize([rec]))
+    assert "Active conditions:" not in text
+
+
+def test_cli_status_json_includes_conditions(tmp_path, capsys):
+    p = tmp_path / "status.jsonl"
+    rec = _rec("IDLE", "OK", [])
+    rec["conditions"] = [_condition()]
+    _write_log(p, [rec])
+    rc = main(["status", "--log", str(p), "--json"])
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["conditions"] == [_condition()]

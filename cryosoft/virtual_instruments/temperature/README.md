@@ -28,11 +28,15 @@ instrument's 0–59 curve numbering).
 `RampableVI` interface: `start_ramp()`, `advance_ramp()`, `ramp_status()`,
 `stop_ramp()` (pins the setpoint to the current temperature — used by the
 Orchestrator on abort/pause/error).
-`TemperatureControllerBase.safety_concerns()` declares every temperature
-controller dependent only on `{"quench"}` (never `helium_low`): a magnet
-quench places a safety hold refusing manual control and failing any run
-that claims one, but a low-helium condition never does — see
-GLOSSARY.md's **Safety hold**.
+`TemperatureControllerBase` does not override `safety_concerns()` — it
+keeps the empty-set default, so a temperature controller is never subject
+to a safety hold: not for `helium_low` (only magnets, via `MagnetBase`,
+depend on it — see GLOSSARY.md's **Safety concern**) and not for `quench`
+either, since `quench` is critical severity and therefore station-wide by
+construction (GLOSSARY.md's **Critical safety flag**) — a quench stops
+every instrument, including the temperature controller, via EMERGENCY
+rather than a per-VI hold; naming it in `safety_concerns()` would be
+meaningless. See GLOSSARY.md's **Safety hold**.
 
 ## Interface contract
 All classes here extend `SampleTemperatureControllerVI` (itself inheriting from

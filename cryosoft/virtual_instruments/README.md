@@ -27,16 +27,27 @@ a `drivers` dict of role → driver instance (e.g. `{"main": ...}`,
   capability scope (see below) and optional GUI metadata: `params={name:
   ParamSpec}` (widget shape, unit, bounds, choices) and `panel=` (default
   monitor-card placement — see "GUI presentation" below).
-- `evaluate_safety()` interlock verdicts reported to `Station.check_safety()`.
-  Two companion declarations classify those flags (GLOSSARY.md's **Safety
-  concern** / **Critical safety flag** / **Safety hold**): `safety_concerns()`
-  says which flags — by name, anyone's — this VI depends on to operate
-  safely (overridden by `MagnetBase`/`TemperatureControllerBase`/
-  `RotatorBase`; a plain VI declares none); `critical_safety_flags()` says
-  which of the flags THIS VI itself reports are critical enough to force a
-  station-wide EMERGENCY rather than a per-VI hold (only `MagnetBase`'s
-  `"quench"` today). Both are static, declarative sets — never a live
-  reading — aggregated by the Station once per tick with no extra poll.
+- `evaluate_safety()` interlock verdicts reported to `Station.check_safety()`
+  every tick — a per-VI, per-tick JUDGMENT of that VI's own polled state,
+  never a declaration. The two declarative halves that classify what a
+  judgment MEANS live one level up, on the class, and are the System-
+  Condition standard's producer/consumer pair (GLOSSARY.md's **System
+  condition** / **Safety-flag manifest** / **Safety concern**): the
+  PRODUCER side is the `safety_flags` class attribute, mapping every flag
+  this VI's `evaluate_safety()` can report to its severity — `"advisory"`
+  (reserved), `"hold"` (scoped to concerned VIs, e.g. `LevelMeterBase`'s
+  `"helium_low"`), or `"critical"` (station-wide EMERGENCY by construction,
+  e.g. `MagnetBase`'s `"quench"` — no VI may name a critical flag as a
+  concern, since a per-VI hold would be meaningless once EMERGENCY has
+  already stopped everything) — merged across the MRO by
+  `merged_safety_flags()`, exactly like `control_limits`. The CONSUMER side
+  is `safety_concerns()`: which HOLD-severity flags — by name, anyone's —
+  this VI depends on to operate safely (only `MagnetBase` overrides the
+  empty-set default, declaring `{"helium_low"}`; quench-concerned VIs
+  declare nothing, `quench` being critical). Both are static, declarative —
+  never a live reading — read by `Station.update_conditions()` once per
+  tick, with no extra poll, to build that tick's safety-origin `Condition`s
+  (GLOSSARY.md's **Safety hold** / **Critical safety flag**).
 - For rampable VIs, the `start_ramp` / `advance_ramp` / `ramp_status` /
   `stop_ramp` generator API the Orchestrator drives each tick.
 
@@ -115,8 +126,10 @@ Shared contracts at the root; concrete classes live in the subfolders.
   `TemperatureControllerBase`, `LevelMeterBase`, `RotatorBase`,
   `MeasurementInstrumentBase`, `DCMeasurementBase`. Provides `__init_subclass__` auto-wrapping of
   `@monitored`/`@control` (structured logging + declarative limit enforcement),
-  `get_state()`, `evaluate_safety()`/`safety_concerns()`/`critical_safety_flags()`
-  (the safety-hold standard — GLOSSARY.md's **Safety hold**), and the full
+  `get_state()`, `evaluate_safety()`/`safety_flags`/`merged_safety_flags()`/
+  `safety_concerns()` (the System-Condition standard's producer/consumer
+  declarations — GLOSSARY.md's **Safety-flag manifest** / **Safety concern**
+  / **Safety hold** / **Critical safety flag**), and the full
   measurement-method standard in
   `MeasurementInstrumentBase`'s docstring. (`@monitored`/`@control` decorators
   themselves are defined in `cryosoft.core.decorators`.) tests:

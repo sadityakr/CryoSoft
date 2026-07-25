@@ -18,7 +18,10 @@
 # output: |
 #   A digest dict and/or a human-readable string. No hardware, no imports from
 #   cryosoft.core — it depends only on the log's JSON schema, so the troubleshoot
-#   package stays decoupled from the live app (contract C10).
+#   package stays decoupled from the live app (contract C10). The digest's
+#   ``conditions`` list (the latest record's System-Condition standard
+#   registry, or ``[]`` for older logs written before that field existed) is
+#   carried through additively — see cryosoft.core.conditions.Condition.
 # ---
 
 """Read and explain the runtime operational-status log.
@@ -97,7 +100,12 @@ def _trend_word(gaps: list[float]) -> str:
 
 
 def summarize(records: list[dict]) -> dict:
-    """Fold a window of records into a digest (latest record is authoritative)."""
+    """Fold a window of records into a digest (latest record is authoritative).
+
+    ``conditions`` is read from the latest record and defaults to ``[]`` when
+    absent — status.jsonl written before the System-Condition standard was
+    carried into it stays readable, never an error (the log is the contract).
+    """
     if not records:
         return {"available": False}
     latest = records[-1]
@@ -117,6 +125,7 @@ def summarize(records: list[dict]) -> dict:
         "vis": latest.get("vis", []),
         "trends": {name: _trend_word(g) for name, g in gaps.items()},
         "window": len(records),
+        "conditions": latest.get("conditions", []),
     }
 
 
@@ -141,6 +150,17 @@ def render_text(digest: dict) -> str:
     if digest["alerts"]:
         lines.append("Alerts:")
         lines.extend(f"  ! {a}" for a in digest["alerts"])
+
+    if digest.get("conditions"):
+        lines.append("Active conditions:")
+        for c in digest["conditions"]:
+            affected = c.get("affected")
+            affected_str = "all instruments" if affected == "all" else ", ".join(affected)
+            ack_str = " [acknowledged]" if c.get("acknowledged") else ""
+            lines.append(
+                f"  {c['severity'].upper()}: {c['message']} "
+                f"(affects: {affected_str}){ack_str}"
+            )
 
     lines.append("Instruments:")
     for vi in digest["vis"]:

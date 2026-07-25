@@ -5,12 +5,13 @@
 #   structured logging AND declarative limit enforcement (the control-validation
 #   standard: control_limits class attr + self._limits populated from config
 #   init_params; out-of-range @control calls raise CryoSoftSafetyError before
-#   any hardware command). Also get_state() auto-build, the safety-hold
-#   standard (safety_concerns() declares which flags a VI depends on,
-#   critical_safety_flags() declares which flags THIS VI reports via
-#   evaluate_safety() force a station-wide EMERGENCY rather than a per-VI
-#   hold — see Station.update_safety_holds()/critical_safety_flags()),
-#   and typed sub-bases for each VI category (MagnetBase,
+#   any hardware command). Also get_state() auto-build, the System-Condition
+#   standard's safety-flag manifest (safety_flags class attr is the producer
+#   manifest — every flag a VI's evaluate_safety() can report mapped to its
+#   severity, merged over the MRO by merged_safety_flags(); safety_concerns()
+#   is the consumer side, naming the hold-severity flags a VI depends on —
+#   scope follows from severity alone, see core/conditions.py and
+#   Station.update_conditions()), and typed sub-bases for each VI category (MagnetBase,
 #   TemperatureControllerBase, LevelMeterBase, RotatorBase,
 #   MeasurementInstrumentBase, DCMeasurementBase). MeasurementInstrumentBase also defines the
 #   self-describing measurement-method standard (measurement_parameters /
@@ -100,6 +101,49 @@ class BaseVirtualInstrument:
     Subclasses that ADD limits must merge, not replace::
 
         control_limits = {**ParentVI.control_limits, "set_x": {"x": "x_lim"}}
+
+    Safety-flag manifest standard
+    ------------------------------
+    Every flag a VI's ``evaluate_safety()`` can report MUST be declared in
+    the class attribute ``safety_flags``, mapping the flag name to its
+    severity::
+
+        safety_flags: ClassVar[dict[str, str]] = {"quench": "critical"}
+
+    Severity is one of three values (the System-Condition standard's
+    severity ladder; scope follows from severity):
+
+    * ``"advisory"`` — no enforcement (reserved for future use).
+    * ``"hold"`` — scoped: on onset, every VI whose ``safety_concerns()``
+      names the flag is stood by and refused manual control (see
+      ``Station.update_conditions()``), without affecting the rest of
+      the station.
+    * ``"critical"`` — station-wide by definition: the flag forces
+      EMERGENCY the instant it trips, regardless of what any VI's
+      ``safety_concerns()`` declares. Consequently no VI may list a
+      critical flag in ``safety_concerns()`` — a per-VI hold would be
+      meaningless once EMERGENCY has already stopped everything.
+
+    ``safety_flags`` is the single declaration point for a flag's
+    severity — a flag's meaning never varies by which VI happens to
+    report it. Declare it on the base class that owns the flag's physical
+    semantics (e.g. ``MagnetBase`` for ``"quench"``, ``LevelMeterBase``
+    for ``"helium_low"``), not on each concrete VI, so every VI of that
+    category inherits the correct classification automatically.
+
+    Subclass manifests are MERGED over the MRO, exactly like
+    ``control_limits`` — a subclass may ADD new flags but must NOT
+    contradict a severity a base already declared for the same flag
+    (checked by ``tests/test_conformance.py``, not at import time)::
+
+        safety_flags = {**ParentVI.safety_flags, "new_flag": "hold"}
+
+    Use ``merged_safety_flags()`` to read the fully-merged manifest — the
+    single read side of this declaration. Severity alone determines scope
+    (the System-Condition standard, ``core/conditions.py``): critical is
+    station-wide by construction, so no derived "critical subset" accessor
+    is needed by any caller — ``Station.active_critical_conditions()``
+    reads the live registry directly.
     """
 
     vi_type: str = "unknown"
@@ -109,6 +153,12 @@ class BaseVirtualInstrument:
     # Declarative control limits: {method_name: {param_name: limit_name}}.
     # See "Control-validation standard" in the class docstring.
     control_limits: dict[str, dict[str, str]] = {}
+
+    # Declarative safety-flag manifest: {flag_name: severity}, severity one
+    # of "advisory" | "hold" | "critical". See "Safety-flag manifest
+    # standard" in the class docstring. Merged across the MRO by
+    # merged_safety_flags() — a subclass declares only the flags it adds.
+    safety_flags: ClassVar[dict[str, str]] = {}
 
     # ── Reading-loop participation (see GLOSSARY "Reading loop") ──────────
     # A VI in the reading path may declare parameters the generic sweep
@@ -351,11 +401,36 @@ class BaseVirtualInstrument:
 
         return get_control_specs(getattr(self, method_name))
 
+    @classmethod
+    def merged_safety_flags(cls) -> dict[str, str]:
+        """Return this class's ``safety_flags`` manifest merged over the MRO.
+
+        The read side of the safety-flag manifest standard (see the class
+        docstring's "Safety-flag manifest standard"): walks ``cls.__mro__``
+        from the most-base class to the most-derived, collecting each
+        class's OWN ``safety_flags`` dict (read via ``vars()`` so a class
+        that declares nothing contributes nothing, and inheritance is never
+        double-counted) into one merged mapping. A more-derived class's
+        entry for the same flag simply overwrites its base's — the *lack*
+        of contradiction is a declarative invariant checked by
+        ``tests/test_conformance.py``, not enforced here, exactly like
+        ``control_limits`` is declared without an import-time check.
+
+        Returns:
+            ``{flag_name: severity}`` unioned across every class in the
+            MRO, severity one of ``"advisory"`` | ``"hold"`` | ``"critical"``.
+        """
+        merged: dict[str, str] = {}
+        for klass in reversed(cls.__mro__):
+            merged.update(vars(klass).get("safety_flags") or {})
+        return merged
+
     def safety_concerns(self) -> set[str]:
         """Return the safety flags this VI's operation depends on.
 
-        The consumer half of the safety-hold standard (GLOSSARY.md's
-        **Safety hold**; see ``Station.update_safety_holds()``): a VI
+        The consumer half of the System-Condition standard's safety-hold
+        mechanism (GLOSSARY.md's **Safety hold**; see ``Station.
+        update_conditions()``): a VI
         declares which flags — named exactly like ``evaluate_safety()``'s
         keys, e.g. ``"quench"``, ``"helium_low"`` — must NOT be tripped for
         this VI to operate safely. When any of them trips (on ANY VI's
@@ -363,6 +438,14 @@ class BaseVirtualInstrument:
         records a hold against this VI, and the Orchestrator refuses manual
         control of it and fails any run that claims it, without touching a
         VI whose ``safety_concerns()`` does not overlap.
+
+        Concerns are for HOLD-severity flags only (see the "Safety-flag
+        manifest standard"): a VI names the flags whose onset should stand
+        IT down, and every flag it can meaningfully name has severity
+        ``"hold"`` in the producing VI's merged ``safety_flags`` manifest.
+        Naming a ``"critical"`` flag here would be meaningless — a tripped
+        critical flag already forces station-wide EMERGENCY, stopping this
+        VI (and every other) regardless of any per-VI concern declaration.
 
         This is a static declaration of an invariant, not a query of current
         state — a magnet always depends on helium, independent of today's
@@ -375,35 +458,6 @@ class BaseVirtualInstrument:
         """
         return set()
 
-    def critical_safety_flags(self) -> set[str]:
-        """Return the flags THIS VI reports via ``evaluate_safety()`` that are critical.
-
-        The producer half of the safety-hold standard: a flag is "critical"
-        when its mere occurrence — anywhere in the station, regardless of
-        what is currently running or what any operation declares in its
-        ``tolerated_safety_flags`` — is dangerous enough to warrant an
-        unconditional, station-wide EMERGENCY (full hardware hold, the
-        active run aborted, an operator acknowledgment required to
-        continue). ``Station.critical_safety_flags()`` unions this across
-        every registered VI once per tick to decide EMERGENCY entry; every
-        flag NOT listed here by its reporting VI is "hold-only" — it stops
-        only the VIs whose ``safety_concerns()`` include it (see
-        ``Station.update_safety_holds()``), never the whole station, and an
-        operation may declare it tolerable via ``tolerated_safety_flags``.
-
-        Declaring criticality here — on the VI that actually raises the flag
-        via ``evaluate_safety()`` — keeps the classification a property of
-        the physical condition, not a hardcoded literal in the Orchestrator:
-        adding a new critical condition means overriding this method on the
-        VI that detects it, nothing else.
-
-        Returns:
-            Set of flag names, drawn from this VI's own
-            ``evaluate_safety()`` keys, that are critical. Empty (the
-            default) means every flag this VI reports is hold-only.
-        """
-        return set()
-
     def evaluate_safety(self, state: dict) -> dict[str, bool]:
         """Judge this VI's own polled state for safety conditions.
 
@@ -411,10 +465,11 @@ class BaseVirtualInstrument:
         fragment of the snapshot belonging to this VI. Must NOT poll
         hardware — decide from *state* (and internal buffers filled during
         the poll). A flag returned True here is dispatched by the
-        safety-hold standard: it holds every VI whose ``safety_concerns()``
-        names it (see ``Station.update_safety_holds()``), and additionally
-        escalates the whole station to EMERGENCY iff this VI's
-        ``critical_safety_flags()`` also names it.
+        System-Condition standard (``core/conditions.py``): ``Station.
+        update_conditions()`` builds the flag's own ``Condition`` from its
+        declared severity in ``safety_flags`` — critical station-wide by
+        construction, or hold-severity and scoped to every VI whose
+        ``safety_concerns()`` names it.
 
         Args:
             state: This VI's slice of the get_state() snapshot,
@@ -442,18 +497,20 @@ class MagnetBase(BaseVirtualInstrument):
     setpoint_unit: str = "T"
     display_label: str = "magnet"
 
+    # A quench (reported by a concrete magnet's evaluate_safety()) is
+    # critical severity — see the "Safety-flag manifest standard". Declared
+    # here, on the category all quench-capable VIs share, so a new magnet VI
+    # inherits the correct classification the moment it reports "quench".
+    # Critical severity is station-wide scope by construction (the
+    # System-Condition standard, core/conditions.py): a quench stops every
+    # instrument via EMERGENCY, so no VI — including this one — declares
+    # "quench" in safety_concerns(); a per-VI hold would be meaningless
+    # once EMERGENCY has already stopped everything.
+    safety_flags: ClassVar[dict[str, str]] = {"quench": "critical"}
+
     def safety_concerns(self) -> set[str]:
-        """A magnet cannot ramp without helium, and must hold on a quench."""
-        return {"quench", "helium_low"}
-
-    def critical_safety_flags(self) -> set[str]:
-        """A quench (reported by a concrete magnet's ``evaluate_safety()``) is critical.
-
-        Declared here, on the category all quench-capable VIs share, so a
-        new magnet VI inherits the correct classification the moment it
-        reports ``"quench"`` — it need not redeclare it.
-        """
-        return {"quench"}
+        """A magnet cannot ramp without helium."""
+        return {"helium_low"}
 
 
 class TemperatureControllerBase(BaseVirtualInstrument):
@@ -463,14 +520,16 @@ class TemperatureControllerBase(BaseVirtualInstrument):
     setpoint_unit: str = "K"
     display_label: str = "temperature"
 
-    def safety_concerns(self) -> set[str]:
-        """Temperature control is unaffected by helium level — only a quench holds it."""
-        return {"quench"}
-
 
 class LevelMeterBase(BaseVirtualInstrument):
     """Base class for all cryogen-level-meter VIs."""
     vi_type: str = "level"
+
+    # helium_low is hold severity — see the "Safety-flag manifest standard".
+    # A level meter itself has no safety_concerns() (it keeps reading
+    # regardless of the level it reports); MagnetBase is the consumer that
+    # names this flag.
+    safety_flags: ClassVar[dict[str, str]] = {"helium_low": "hold"}
 
 
 class RotatorBase(BaseVirtualInstrument):
@@ -479,10 +538,6 @@ class RotatorBase(BaseVirtualInstrument):
     setpoint_label: str = "sample angle"
     setpoint_unit: str = "deg"
     display_label: str = "rotator"
-
-    def safety_concerns(self) -> set[str]:
-        """A rotator is unaffected by helium level — only a quench holds it."""
-        return {"quench"}
 
 
 class MeasurementInstrumentBase(BaseVirtualInstrument):

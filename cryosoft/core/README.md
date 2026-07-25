@@ -64,9 +64,11 @@ is the typed currency shared by all of them.
   run. `active_run_kind()` is the public accessor GUI code uses to tell them
   apart without duck-typing.
 - `Orchestrator.vi_faults()` / `acknowledge_fault()` / `retry_fault()` are the
-  GUI-facing surface of the Station's runtime fault registry (plan §3) — the
-  RUNTIME sibling of `offline_vi_names()` / `retry_reconnect()` for a VI that
-  DID connect but has since gone stale/disconnected.
+  GUI-facing surface of the comm-origin slice of the Station's unified
+  condition registry (the System-Condition standard; GLOSSARY.md's
+  **Instrument fault**) — the RUNTIME sibling of `offline_vi_names()` /
+  `retry_reconnect()` for a VI that DID connect but has since gone
+  stale/disconnected.
 - `DataManager` writes one HDF5 file to disk per procedure run.
 - `plan.py` hands immutable value objects to every layer; a malformed plan
   raises at construction, at the guilty module, not deep in the tick loop.
@@ -88,49 +90,47 @@ is the typed currency shared by all of them.
   `CryoSoftSafetyError` before anything is dispatched. The Orchestrator passes
   `allowed_scope="operation"` only when the active procedure is an operation
   (`command_scope == "operation"`).
-- The **claim** standard (plan operation-concurrency-and-error-scoping.md §1;
-  GLOSSARY.md's **Claim**): every procedure/operation declares
-  `claimed_vi_names() -> set[str] | None` (default `None` = claim every
-  system VI); the Orchestrator captures it at run start and refuses a
+- The **claim** standard (GLOSSARY.md's **Claim**): every procedure/operation
+  declares `claimed_vi_names() -> set[str] | None` (default `None` = claim
+  every system VI); the Orchestrator captures it at run start and refuses a
   manual VI action only for a VI actually claimed by the active run,
   through the single `_manual_action_admissible()` predicate shared by
   `submit_vi_action()` and the tick's GUI-action drain gate.
-- The **runtime fault tiering** standard (plan operation-concurrency-and-
-  error-scoping.md §3; GLOSSARY.md's **Instrument fault**): a VI-scoped
-  comm/stale/disconnected fault (`Station.FaultRecord`, populated by
-  `get_state()`) quarantines only that VI (`_manual_action_admissible()`
-  refuses it outright, before any other rule, in every state including
-  IDLE); a stale VI CLAIMED by the active run additionally fails the run
-  (`_fail_run_for_fault()` — `run_finished` "failed", the machine returns to
-  IDLE, the queue does NOT auto-continue); a tripped CRITICAL safety flag
-  (see the safety-hold standard below) enters global EMERGENCY; an
-  unhandled tick-boundary exception is the only case that still degrades to
-  global ERROR (unknown blast radius). `core/events.py`'s `ErrorEvent`
-  carries the structured payload (`vi_name`, `kind`, `severity`, `message`,
-  `timestamp`) on the `error_event` signal.
-- The **safety-hold** standard (GLOSSARY.md's **Safety hold** / **Safety
-  concern** / **Critical safety flag**): every VI declares which safety
-  flags — named exactly like `evaluate_safety()`'s keys — it depends on via
-  `safety_concerns()` (`BaseVirtualInstrument`, overridden by `MagnetBase`
-  and friends), and, on the VI that actually reports a flag, which of its
-  own flags are CRITICAL enough to force station-wide EMERGENCY via
-  `critical_safety_flags()` (only `MagnetBase`'s `"quench"` today — every
-  other reported flag, e.g. `"helium_low"`, is hold-only). Each tick the
-  Orchestrator calls `check_safety()` exactly once, resolves the active
-  run's `tolerated_safety_flags` (an operation only), and passes both into
-  `Station.update_safety_holds()`, which records a `SafetyHoldRecord` on
-  every VI concerned with a still-tripped, non-tolerated flag
-  (`vi_safety_holds()`, `acknowledge_safety_hold()`). A held VI is refused
-  manual control by `_manual_action_admissible()` exactly like a fault
-  (regardless of state, unless the EMERGENCY manual override is unlocked)
-  and fails any run that claims/targets it; on hold ONSET its `standby()`
-  is dispatched exactly once, never a blanket `standby_all()` — an
-  unconcerned VI (e.g. temperature control while only the magnets are held
-  for low helium) keeps operating untouched, in or out of EMERGENCY alike.
-  Composing an operation's tolerance into the SAME hold computation (rather
-  than only the EMERGENCY decision) is what lets `HeliumFillOperation`
-  claim and ramp every magnet to zero while tolerating the very
-  `"helium_low"` condition it exists to fix.
+- The **System-Condition standard** (GLOSSARY.md's **System condition** /
+  **Severity ladder**; full text in `core/conditions.py`'s module
+  docstring): every "something is wrong" signal in CryoSoft — a VI's
+  `evaluate_safety()` flag, the Station's comm-fault detection, a
+  `SessionEnvelope.check_state()` violation — is a `Condition` from one of
+  exactly three producers (`"comm"`, `"safety"`, `"envelope"`), and scope
+  follows from severity alone, never from which producer reported it:
+  `"advisory"` (no enforcement, reserved), `"hold"` (scoped to
+  `affected_vis` — those VIs are stood by once on onset, refused manual
+  control, and fail any run watching one of them), `"critical"`
+  (station-wide by construction — EMERGENCY, `standby_all()`, every manual
+  control refused until acknowledged). Every condition, of every origin,
+  lives in ONE registry (`Station._conditions`, read via `conditions()` /
+  `active_critical_conditions()`, acknowledged via `acknowledge_condition()`
+  — see GLOSSARY.md's **Instrument fault** / **Safety hold** / **Critical
+  safety flag**). The tick pipeline (`Orchestrator._tick_body()`) runs the
+  whole standard once per tick: one `check_safety()` call feeds
+  `Station.update_conditions()` (which alone applies **Tolerated safety
+  flags** — the single application point for a hold-severity flag's
+  tolerance), the result is merged with this tick's `envelope_conditions()`,
+  an onset diff over the merged condition-key set fires per-instrument
+  fault events and one-shot `standby()` dispatches, one `decide()` call
+  turns the merged list into a `Verdict`, and the Orchestrator executes it
+  (`emergency` → `_enter_emergency()`, always a blanket `standby_all()`;
+  `run_failure` → `_fail_run_for_fault()`). EMERGENCY refuses every manual
+  action station-wide — there is no "unconcerned VI" once critical severity
+  has stopped the whole station — until `acknowledge_emergency()` unlocks
+  the front-panel override. `core/conditions.py` holds the pure policy (the
+  `Condition`/`Verdict` value objects and the deterministic `decide()`
+  function) with no dependency on the Station or Orchestrator (import-linter
+  contract C13), so the policy is unit-testable without a running system.
+  `Station.vi_faults()` (GLOSSARY.md's **Instrument fault**) is the
+  permanent GUI adapter synthesizing a `FaultRecord` per comm-origin
+  condition — the one place the pre-standard fault-registry shape is
+  preserved for callers that want it instead of the typed `Condition`.
 
 ## How to add a new module
 
@@ -151,11 +151,12 @@ skip it).
 |------|----------------|----------------|-------|
 | `__init__.py` | Package marker | (none) | none |
 | `plan.py` | Typed vocabulary of frozen dataclasses shared across every layer | `Target`, `Command`, `PhasePlan`, `StepPlan`, `ParamSpec`, `ParamGroup`, `DataSchema` (`sweep_columns` + `measurement_scalars` + `measurement_arrays` + `loop_shape` — the reading loop's real `(n_loop1, n_loop2)` axis, `.validate()` raising `DataSchemaError`) | `test_plan.py` |
+| `conditions.py` | The System-Condition standard's pure policy core (origin × severity, scope follows severity): the `Condition`/`Verdict` value objects and the deterministic `decide()` verdict function. Stdlib-only — no other `cryosoft` import, machine-enforced by import-linter contract C13 | `Condition`, `Verdict`, `decide()`, `envelope_conditions()`, `SEVERITIES`, `ORIGINS` | `test_conditions.py` |
 | `exceptions.py` | The exception hierarchy every layer catches by subtype | `CryoSoftError`, `CryoSoftCommunicationError`, `CryoSoftSafetyError`, `CryoSoftConfigError`, `DataSchemaError` | `test_foundation.py` |
 | `events.py` | The structured `ErrorEvent` payload (plan operation-concurrency-and-error-scoping.md §3) — a tiny, dependency-free module so both `orchestrator.py` (emitter) and `gui/` (consumer) can import it | `ErrorEvent` (frozen dataclass: `vi_name`, `kind`, `severity`, `message`, `timestamp`) | `test_l2_station.py`, `test_l3_orchestrator.py`, `test_gui.py` |
 | `decorators.py` | Marker decorators that tag VI methods for discovery and GUI generation; `@control` also carries the capability-scope standard | `monitored`, `control` (bare or `control(scope=...)`), `get_monitored_methods()`, `get_control_methods()`, `get_control_scope()`, `VALID_CONTROL_SCOPES` | `test_foundation.py`, `test_conformance.py` |
-| `station.py` | L2 registry: builds VIs from config, polls state with stale-value caching, dispatches ramps and measurement commands, aggregates safety, enforces the capability-scope standard at command dispatch. `get_state()` also populates/clears a structured runtime fault registry (plan §3, `FaultRecord`) in the same pass as its existing stale/disconnected detection; `update_safety_holds()` similarly maintains the safety-hold registry (`SafetyHoldRecord`, GLOSSARY.md's **Safety hold**) from a `check_safety()` snapshot the Orchestrator passes in, composing the active run's tolerated flags | `Station` (`get_vi`, `get_vi_names`, `measurement_vi_names`, `switch_vi_names`, `magnet_vi_names`, `measurement_selector_label`, `get_state`, `process_system_targets`, `send_measurement_commands(commands, allowed_scope=...)`, `check_ramps`, `stop_ramps`, `get_ramp_status`, `check_safety`, `safety_flag_sources`, `get_concerned_vis`, `critical_safety_flags`, `update_safety_holds`, `vi_safety_holds`, `acknowledge_safety_hold`, `vi_faults`, `acknowledge_fault`, `clear_fault`, `retry_fault`); `FaultRecord`; `SafetyHoldRecord`; `build_station()`, `build_station_with_fallback()`, `validate_config_dir()`, `read_instrument_metadata()`, `read_cryogenics_config()`, `read_servicing_logs_config()` | `test_l2_station.py`, `test_config_validation.py`, `test_operations.py`, `test_helium_fill.py`, `test_l3_orchestrator.py` |
-| `orchestrator.py` | L3 single-threaded cooperative state machine; the sole hardware writer; runs the monitor + status cycle each tick inside an exception boundary that degrades to ERROR; each tick also feeds `Station.last_state_flat()` to a `TieredTrendLogger` (non-fatal) for the raw/3-min/hourly trend-history tiers. Monitoring is OFF at construction (nothing polled until `start_monitoring()`); `run_procedure()`/`run_operation()` auto-start it, stopping is refused outside IDLE/ERROR, `shutdown()` stops the tick timer. `INITIATION_GATE`/`READING_GATE` states hold the state machine on a procedure's/operation's declared `Gate`s between "targets dispatched" and "take a measurement"; an operation's `postcondition_gates()` are evaluated exactly once, immediately, as the run ends (`Gate.check_once()`, plan operation-concurrency-and-error-scoping.md §2 — the state snapshot is refreshed first so standby-command effects are visible; unmet gates land in the manifest's `postconditions_unmet`, never blocking). Operations (detected via `command_scope == "operation"`, never imported — keeps contract C5 clean) get queue-jumping priority over procedures and a narrow EMERGENCY-entry carve-out gated by `tolerated_safety_flags`. Claims + admission gate (plan operation-concurrency-and-error-scoping.md §1): `_active_claims` is captured from the active run's `claimed_vi_names()` at `_start_run()` and cleared on every teardown path (`_abort_active_procedure()`, `_finish_run()`); `_manual_action_admissible(vi_name)` is the single admission predicate shared by `submit_vi_action()` (what may be queued) and the `_tick_body()` drain gate (what may be drained, evaluated per action) — it refuses a VI with an active runtime fault first (plan §3), then one with an active safety hold (GLOSSARY.md's **Safety hold**), before the state/claim rules. Each tick calls `check_safety()` exactly once and, via `Station.update_safety_holds()`, resolves EITHER a held VI's one-shot `standby()` dispatch, OR (only for a CRITICAL flag — `Station.critical_safety_flags()`, never hardcoded here) EMERGENCY entry (`_enter_emergency()`, which itself no longer blanket-`standby_all()`s — the hold dispatch already stood down every concerned VI, except for a session-envelope violation, which has no per-VI attribution). A held claimed/watched VI fails the run via `_fail_run_for_fault(vi_name, reason=...)` exactly like a stale VI does; `_fail_to_error()` is reserved for unknown-blast-radius failures (tick-boundary exceptions, run-setup failures) | `Orchestrator` (`start_monitoring`, `stop_monitoring`, `is_monitoring`, `shutdown`, `run_procedure`, `queue_procedure`, `run_operation`, `queue_operation`, `finish_operation`, `confirm_operation`, `run_queue`, `pause_procedure`, `resume_procedure`, `abort_procedure`, `recover_from_error`, `acknowledge_emergency`, `submit_vi_action`, `submit_global_action`, `get_operational_status`, `vi_faults`, `acknowledge_fault`, `retry_fault`); `OrchestratorState` enum; `monitoring_changed` signal | `test_l3_orchestrator.py`, `test_operations.py` |
+| `station.py` | L2 registry: builds VIs from config, polls state with stale-value caching, dispatches ramps and measurement commands, aggregates safety, enforces the capability-scope standard at command dispatch. Owns the ONE unified condition registry (the System-Condition standard, see `conditions.py` and GLOSSARY.md's **System condition**): `get_state()` records a comm-origin hold `Condition` per stale/disconnected VI in the same pass as its existing detection; `update_conditions(safety, tolerated_flags=...)` refreshes every safety-origin `Condition` from a `check_safety()` snapshot the Orchestrator passes in, reading each flag's severity off its producer's `safety_flags` manifest and — for hold-severity flags only — applying `tolerated_flags` and scoping to `get_concerned_vis(flag)`; a critical/advisory flag's condition is built unconditionally, station-wide. `conditions()` / `active_critical_conditions()` / `acknowledge_condition(key)` are the origin-agnostic read/acknowledge surface; `vi_faults()`/`acknowledge_fault()`/`clear_fault()`/`retry_fault()` are the permanent GUI adapter synthesizing a `FaultRecord` per comm-origin condition, preserving the pre-standard field shape for callers that want it instead of the typed `Condition` | `Station` (`get_vi`, `get_vi_names`, `measurement_vi_names`, `switch_vi_names`, `magnet_vi_names`, `measurement_selector_label`, `get_state`, `process_system_targets`, `send_measurement_commands(commands, allowed_scope=...)`, `check_ramps`, `stop_ramps`, `get_ramp_status`, `check_safety`, `safety_flag_sources`, `get_concerned_vis`, `conditions`, `active_critical_conditions`, `acknowledge_condition`, `update_conditions`, `vi_faults`, `acknowledge_fault`, `clear_fault`, `retry_fault`); `FaultRecord`; `build_station()`, `build_station_with_fallback()`, `validate_config_dir()`, `read_instrument_metadata()`, `read_cryogenics_config()`, `read_servicing_logs_config()` | `test_l2_station.py`, `test_config_validation.py`, `test_operations.py`, `test_helium_fill.py`, `test_l3_orchestrator.py` |
+| `orchestrator.py` | L3 single-threaded cooperative state machine; the sole hardware writer; runs the monitor + status cycle each tick inside an exception boundary that degrades to ERROR; each tick also feeds `Station.last_state_flat()` to a `TieredTrendLogger` (non-fatal) for the raw/3-min/hourly trend-history tiers. Monitoring is OFF at construction (nothing polled until `start_monitoring()`); `run_procedure()`/`run_operation()` auto-start it, stopping is refused outside IDLE/ERROR, `shutdown()` stops the tick timer. `INITIATION_GATE`/`READING_GATE` states hold the state machine on a procedure's/operation's declared `Gate`s between "targets dispatched" and "take a measurement"; an operation's `postcondition_gates()` are evaluated exactly once, immediately, as the run ends (`Gate.check_once()` — the state snapshot is refreshed first so standby-command effects are visible; unmet gates land in the manifest's `postconditions_unmet`, never blocking). Operations (detected via `command_scope == "operation"`, never imported — keeps contract C5 clean) get queue-jumping priority over procedures and a narrow EMERGENCY-entry carve-out gated by `tolerated_safety_flags`. Claims + admission gate: `_active_claims` is captured from the active run's `claimed_vi_names()` at `_start_run()` and cleared on every teardown path (`_abort_active_procedure()`, `_finish_run()`); `_manual_action_admissible(vi_name)` is the single admission predicate shared by `submit_vi_action()` (what may be queued) and the `_tick_body()` drain gate (what may be drained, evaluated per action) — it refuses a VI with an active comm-origin condition first (GLOSSARY.md's **Instrument fault**), then one with an active safety-origin hold (GLOSSARY.md's **Safety hold**), before the state/claim rules, and refuses EVERY VI once in EMERGENCY unless the manual override is unlocked. The unified tick pipeline (`_tick_body()`, the System-Condition standard): `check_safety()` exactly once, `Station.update_conditions()`, merge in this tick's `envelope_conditions()`, one onset diff over the merged condition-key set (fires fault events for new comm conditions on unwatched VIs, dispatches one-shot `standby()` to every VI a new hold condition affects), one `core.conditions.decide()` call over the merged list, then execute its `Verdict` — `emergency` → `_enter_emergency()` (always a blanket `standby_all()`; critical severity is station-wide by construction, so there is no concerned subset to narrow to), `run_failure` → `_fail_run_for_fault(vi_name, reason=...)` exactly for whichever origin `decide()` found. `_fail_to_error()` is reserved for unknown-blast-radius failures (tick-boundary exceptions, run-setup failures) | `Orchestrator` (`start_monitoring`, `stop_monitoring`, `is_monitoring`, `shutdown`, `run_procedure`, `queue_procedure`, `run_operation`, `queue_operation`, `finish_operation`, `confirm_operation`, `run_queue`, `pause_procedure`, `resume_procedure`, `abort_procedure`, `recover_from_error`, `acknowledge_emergency`, `submit_vi_action`, `submit_global_action`, `get_operational_status`, `vi_faults`, `acknowledge_fault`, `retry_fault`); `OrchestratorState` enum; `monitoring_changed` signal | `test_l3_orchestrator.py`, `test_operations.py` |
 | `gates.py` | Generic tick-driven wait primitive: a one-shot action optionally followed by a windowed stability check, declared by a procedure via `initiation_gates()`/`reading_gates()` or by an operation via `initiation_gates()`/`postcondition_gates()`. `step()` is polled each tick while in `INITIATION_GATE`/`READING_GATE`. `postcondition_gates()` is evaluated differently — once, via `check_once()`, as an operation's run ends (plan operation-concurrency-and-error-scoping.md §2 — no holding, no timeout). | `Gate` (`step() -> bool`, `check_once() -> bool`) | `test_core_gates.py` |
 | `procedure.py` | L4 base classes: the Orchestrator-driven lifecycle and the generic sweep engine | `BaseProcedure` (`initiate` -> `PhasePlan`, `change_sweep_step` -> `StepPlan \| None`, `measure`, `standby` -> `PhasePlan`, `abort` -> `tuple[Command, ...]`, `get_param_groups()` classmethod, `initiation_gates()`/`reading_gates()` -> `tuple[Gate, ...]`, `claimed_vi_names()` -> `set[str] \| None`); `SweepMeasureProcedure` (GUI-selected measurement VI, the reading loop — up to two generic slots of `reading_setters` parameters, switch route and source current alike, per datapoint; each a real `loop_shape` axis 0/1 on every measurement column + HDF5 `loop1_values`/`loop2_values` metadata, `DataSchema` assembly; concrete axes supply six hooks) | `test_l4_procedure.py`, `test_new_procedures.py` |
 | `operation.py` | L4 base class for cryostat-servicing operations (plan §4): the same `PhasePlan`/`StepPlan`/`Gate` currency as a procedure, plus `tolerated_safety_flags`, `command_scope = "operation"`, `postcondition_gates()`, `claimed_vi_names()` (the concurrency-scope hook, plan operation-concurrency-and-error-scoping.md §1), and `run_summary()` (the same plan, §4 — a duck-typed, JSON-safe data hand-off to the session layer via the run manifest's `summary` key, for an operation with no HDF5 file). `measure()`/`change_sweep_step()` are final adapters over `sample()`/`step()` so the Orchestrator drives an operation with the same state machine as a procedure. Also declares the GUI-facing readiness/next-due contract (plan §12): `readiness_conditions()`/`next_due()` hooks and `ready_message`/`config_key` class attributes, read only by the Operations panel, never the Orchestrator | `OperationBase` (`initiate`, `step`, `sample`, `standby`, `abort`, `initiation_gates`, `postcondition_gates`, `claimed_vi_names`, `get_progress`, `get_params`, `run_summary`, `request_finish`, `readiness_conditions`, `next_due`), `ReadinessCondition`, `NextDue` | `test_operations.py`, `test_operation_readiness.py` |

@@ -50,6 +50,7 @@ import pytest
 import cryosoft.drivers
 import cryosoft.procedures
 import cryosoft.virtual_instruments
+from cryosoft.core.conditions import SEVERITIES
 from cryosoft.core.decorators import (
     VALID_CONTROL_SCOPES,
     get_control_panel,
@@ -301,6 +302,122 @@ def test_vi_contract(vi_cls: type) -> None:
         f"{[p.name for p in extra_required]} — give them defaults and read them "
         f"from **init_params instead"
     )
+
+
+# ── Safety-flag manifest standard ─────────────────────────────────────────────
+# See BaseVirtualInstrument's "Safety-flag manifest standard" docstring: every
+# flag a VI's evaluate_safety() can report is declared, once, in the class
+# attribute `safety_flags` (flag name -> severity), merged over the MRO by
+# `merged_safety_flags()` exactly like `control_limits`. `safety_concerns()`
+# is the consumer side and may only name hold-severity flags. These tests make
+# the standard binding for every present and future VI.
+
+# Valid severities for a safety_flags manifest entry — the System-Condition
+# standard's severity ladder (scope follows from severity: "hold" is scoped
+# to concerned VIs, "critical" is station-wide by definition, "advisory" is
+# reserved with no enforcement yet), canonically declared in
+# cryosoft.core.conditions.
+SAFETY_FLAG_SEVERITIES = SEVERITIES
+
+
+def _all_manifest_severities() -> dict[str, str]:
+    """{flag: severity} unioned across every discovered VI class's merged manifest.
+
+    The global producer-side picture: a consumer VI's ``safety_concerns()``
+    may name a flag reported by ANY VI, not just its own, so validating a
+    concern requires looking here rather than at one class's own manifest.
+    """
+    severities: dict[str, str] = {}
+    for cls in _all_vi_classes():
+        severities.update(cls.merged_safety_flags())
+    return severities
+
+
+@pytest.mark.parametrize("vi_cls", _all_vi_classes(), ids=lambda c: c.__name__)
+def test_safety_flags_manifest_is_valid(vi_cls: type) -> None:
+    """Every safety_flags entry has a valid severity; no MRO contradictions.
+
+    Every key in the merged-MRO manifest is a non-empty str and every value
+    is one of SAFETY_FLAG_SEVERITIES. Separately, walking the MRO directly
+    (rather than through the already-merged dict) catches a subclass that
+    redeclares an inherited flag with a DIFFERENT severity than a base
+    already gave it — the one thing merged_safety_flags() silently allows
+    (last-declared-wins) because the "no contradiction" invariant is a
+    conformance concern, not a runtime one (see the class docstring).
+    """
+    merged = vi_cls.merged_safety_flags()
+    for flag, severity in merged.items():
+        assert isinstance(flag, str) and flag, (
+            f"{vi_cls.__name__}.safety_flags key {flag!r} must be a "
+            f"non-empty str"
+        )
+        assert severity in SAFETY_FLAG_SEVERITIES, (
+            f"{vi_cls.__name__}.safety_flags[{flag!r}] = {severity!r} is not "
+            f"one of {SAFETY_FLAG_SEVERITIES}"
+        )
+
+    declared: dict[str, str] = {}
+    for klass in reversed(vi_cls.__mro__):
+        own = vars(klass).get("safety_flags") or {}
+        for flag, severity in own.items():
+            assert flag not in declared or declared[flag] == severity, (
+                f"{vi_cls.__name__}: {klass.__name__}.safety_flags "
+                f"redeclares {flag!r} as {severity!r}, contradicting the "
+                f"inherited severity {declared.get(flag)!r}"
+            )
+            declared[flag] = severity
+
+
+@pytest.mark.parametrize("vi_cls", _all_vi_classes(), ids=lambda c: c.__name__)
+def test_safety_concerns_are_consumer_side_and_hold_only(vi_cls: type) -> None:
+    """Every safety_concerns() flag is hold-severity and actually producible.
+
+    The consumer-side half of the safety-flag manifest standard: a VI's
+    safety_concerns() may only name flags that (a) appear in SOME
+    discovered VI's merged safety_flags manifest, and (b) have severity
+    "hold" there. Naming a critical flag here would be meaningless — a
+    tripped critical flag already forces station-wide EMERGENCY (the
+    System-Condition standard, ``core/conditions.py``: critical scope is
+    station-wide by construction), which stops this VI (and every other)
+    regardless of any per-VI concern declaration. MagnetBase is the one
+    concrete example today: it names "helium_low" (hold) but not "quench"
+    (critical), even though it is the VI that reports "quench".
+
+    A bare (``__init__``-less) instance is enough: every existing
+    ``safety_concerns()`` override is a pure function of the class, never
+    of instance state populated by ``__init__`` (see
+    ``tests/test_l0_keithley_6221_error_queue.py`` for the same
+    ``object.__new__`` idiom used to probe a class without constructing it).
+    """
+    severities = _all_manifest_severities()
+    concerns = object.__new__(vi_cls).safety_concerns()
+    for flag in concerns:
+        assert flag in severities, (
+            f"{vi_cls.__name__}.safety_concerns() names {flag!r}, which no "
+            f"discovered VI's safety_flags manifest produces"
+        )
+        assert severities[flag] == "hold", (
+            f"{vi_cls.__name__}.safety_concerns() names {flag!r}, whose "
+            f"manifest severity is {severities[flag]!r}, not 'hold'"
+        )
+
+
+def test_no_dead_hold_flags() -> None:
+    """Every hold-severity flag some VI can produce has at least one consumer.
+
+    A hold-severity flag with no VI declaring it in safety_concerns() would
+    trip a per-VI hold that holds nothing — the producer side of the
+    safety-flag manifest standard would be dead weight. Checked once,
+    globally, rather than per-VI, since "has a consumer" is a property of
+    the whole station's declarations, not of any one class.
+    """
+    severities = _all_manifest_severities()
+    hold_flags = {flag for flag, severity in severities.items() if severity == "hold"}
+    consumed: set[str] = set()
+    for cls in _all_vi_classes():
+        consumed |= object.__new__(cls).safety_concerns()
+    dead = hold_flags - consumed
+    assert not dead, f"hold-severity flag(s) with no consumer: {sorted(dead)}"
 
 
 # ── Procedure contract ────────────────────────────────────────────────────────
@@ -745,6 +862,35 @@ def test_declared_finite_limits_reject_out_of_range(config_dir: Path) -> None:
         f"{config_dir.name}: no finite limits were exercised — expected at "
         f"least one limited @control method"
     )
+
+
+@pytest.mark.parametrize("config_dir", _sim_config_dirs(), ids=lambda p: p.name)
+def test_evaluate_safety_flags_are_declared_in_manifest(config_dir: Path) -> None:
+    """Every flag a VI's evaluate_safety() reports is in its safety_flags manifest.
+
+    Builds the sim station, takes one state snapshot, and calls each VI's
+    ``evaluate_safety()`` with its own slice exactly as
+    ``Station.check_safety()`` does (station.py's ``check_safety()``:
+    ``vi.evaluate_safety(state.get(vi_name, {}))``), asserting the returned
+    flag keys are a subset of that VI's merged ``safety_flags`` manifest —
+    the sim round-trip proof that the declarative manifest actually matches
+    what the VI can report, not just what it is documented to report.
+    """
+    station = build_station(str(config_dir))
+    state = station.get_state()
+    checked = 0
+    for vi_name in station.get_vi_names():
+        vi = station.get_vi(vi_name)
+        flags = vi.evaluate_safety(state.get(vi_name, {}))
+        manifest = type(vi).merged_safety_flags()
+        undeclared = set(flags) - set(manifest)
+        assert not undeclared, (
+            f"{config_dir.name}: VI '{vi_name}' evaluate_safety() reported "
+            f"undeclared flag(s) {sorted(undeclared)} — not in its "
+            f"safety_flags manifest {sorted(manifest)}"
+        )
+        checked += 1
+    assert checked > 0, f"{config_dir.name}: no VIs to check"
 
 
 # ── Control-declaration standard (GUI metadata) ──────────────────────────────

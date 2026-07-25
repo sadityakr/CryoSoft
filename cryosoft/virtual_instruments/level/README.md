@@ -20,12 +20,13 @@ Driver dict `{"main": <level meter real driver>}` and `init_params`:
 `evaluate_safety()` reports the debounced `{"helium_low": ...}` verdict to
 `Station.check_safety()` every tick (a sustained low level, or a disconnected
 level meter, folds into the same buffer). `helium_low` is hold-only, not
-critical (`LevelMeterBase` does not override `critical_safety_flags()`): it
-never escalates the station to EMERGENCY itself — it places a safety hold
-on every VI whose `safety_concerns()` names it (magnets, via `MagnetBase`;
-see GLOSSARY.md's **Safety hold**), while the level meter itself keeps
-reading throughout, unaffected (its own `safety_concerns()` is empty — it
-reports the condition, it does not depend on it).
+critical (`LevelMeterBase.safety_flags` declares it `"hold"`, see
+GLOSSARY.md's **Safety-flag manifest**): it never escalates the station to
+EMERGENCY itself — it places a safety hold on every VI whose
+`safety_concerns()` names it (magnets, via `MagnetBase`; see GLOSSARY.md's
+**Safety hold**), while the level meter itself keeps reading throughout,
+unaffected (its own `safety_concerns()` is empty — it reports the
+condition, it does not depend on it).
 
 ## Interface contract
 All classes here inherit `LevelMeterBase` from `virtual_instruments/base.py`.

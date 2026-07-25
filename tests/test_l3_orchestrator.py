@@ -194,6 +194,38 @@ def test_operational_status_reports_live_ramp_target(orchestrator, station, qtbo
     assert magnet["gap"] is not None
 
 
+def test_operational_status_conditions_empty_when_healthy(orchestrator, qtbot):
+    """A healthy tick's record carries an empty conditions list, not a missing key."""
+    orchestrator._tick()
+    status = orchestrator.get_operational_status()
+    assert status["conditions"] == []
+
+
+def test_operational_status_carries_active_safety_condition(orchestrator, station, qtbot):
+    """The System-Condition standard's registry reaches the status record.
+
+    Mirrors test_helium_low_holds_magnets_without_emergency's setup: a
+    sustained low helium reading trips a hold-severity safety condition
+    scoped to magnet_z (see virtual_instruments/base.py's safety_concerns()).
+    Once the Orchestrator's tick has recorded it, the same condition must
+    show up in the operational-status record built by
+    _update_operational_status.
+    """
+    station.level_meter._driver._force_helium_level = 5.0
+
+    def magnet_held():
+        return "magnet_z" in orchestrator._held_vis()
+
+    qtbot.waitUntil(magnet_held, timeout=2000)
+    orchestrator._tick()
+    status = orchestrator.get_operational_status()
+    hold_conditions = [c for c in status["conditions"] if c["severity"] == "hold"]
+    assert hold_conditions, "expected a hold condition for the helium_low flag"
+    condition = hold_conditions[0]
+    assert condition["kind"] == "helium_low"
+    assert "magnet_z" in condition["affected"]
+
+
 def test_tick_emits_raw_trend_record(orchestrator, station, qtbot):
     """A tick writes exactly the documented raw-tier JSON shape (see
     TieredTrendLogger's docstring) to cryosoft.trend_raw, pinning the
@@ -586,7 +618,7 @@ def test_helium_low_holds_magnets_without_emergency(orchestrator, station, qtbot
     station.level_meter._driver._force_helium_level = 5.0
 
     def magnet_held():
-        return "magnet_z" in orchestrator._station.vi_safety_holds()
+        return "magnet_z" in orchestrator._held_vis()
 
     qtbot.waitUntil(magnet_held, timeout=2000)
     assert orchestrator._state == OrchestratorState.IDLE
@@ -604,7 +636,7 @@ def test_helium_low_holds_magnets_without_emergency(orchestrator, station, qtbot
     station.level_meter._driver._force_helium_level = None
 
     def hold_cleared():
-        return "magnet_z" not in orchestrator._station.vi_safety_holds()
+        return "magnet_z" not in orchestrator._held_vis()
 
     qtbot.waitUntil(hold_cleared, timeout=2000)
     with qtbot.waitSignal(orchestrator.action_succeeded, timeout=500):
@@ -612,24 +644,30 @@ def test_helium_low_holds_magnets_without_emergency(orchestrator, station, qtbot
 
 
 def test_emergency_acknowledge_unlocks_manual_front_panel(orchestrator, station, qtbot):
-    """Acknowledging an unresolved EMERGENCY unlocks the held VI, not procedures.
+    """Acknowledging an unresolved EMERGENCY unlocks manual control station-wide.
 
-    Before acknowledging, a front-panel action on a VI concerned with the
-    tripped critical flag (quench) is refused exactly like during a
-    procedure. Acknowledging once (condition still active) stays in
-    EMERGENCY but unlocks manual VI control — the operator's way to
-    intervene (e.g. cycling a switch heater by hand) without the condition
-    having cleared on its own. run_procedure() must still refuse to run
-    immediately: it only queues, same as any busy state.
+    Before acknowledging, a front-panel action on ANY VI — not just one
+    concerned with the tripped critical flag — is refused: critical
+    severity is station-wide scope by construction (the System-Condition
+    standard), so EMERGENCY refuses every VI, held or not (the inversion of
+    the pre-System-Condition behavior, where an unconcerned VI stayed
+    operable). Acknowledging once (condition still active) stays in
+    EMERGENCY but unlocks manual control of EVERY VI — the operator's way
+    to intervene (e.g. cycling a switch heater by hand) without the
+    condition having cleared on its own. run_procedure() must still refuse
+    to run immediately: it only queues, same as any busy state.
     """
     station.magnet_z._driver._simulate_quench = True
     qtbot.waitUntil(
         lambda: orchestrator._state == OrchestratorState.EMERGENCY, timeout=2000
     )
 
-    # Locked: front-panel action refused before acknowledging.
+    # Locked: front-panel action refused before acknowledging, on both the
+    # quenched magnet AND a VI with no safety_concerns() at all.
     with qtbot.waitSignal(orchestrator.action_blocked, timeout=500):
         orchestrator.submit_vi_action("magnet_z", "initiate")
+    with qtbot.waitSignal(orchestrator.action_blocked, timeout=500):
+        orchestrator.submit_vi_action("dc_measurement", "initiate")
     assert orchestrator._state == OrchestratorState.EMERGENCY
 
     # Condition is still active, so acknowledging cannot reach IDLE...
@@ -637,11 +675,14 @@ def test_emergency_acknowledge_unlocks_manual_front_panel(orchestrator, station,
     assert orchestrator._state == OrchestratorState.EMERGENCY
     assert orchestrator._emergency_manual_override is True
 
-    # ...but the front panel is now unlocked.
+    # ...but the front panel is now unlocked, for every VI.
     with qtbot.waitSignal(orchestrator.action_succeeded, timeout=500) as blocker:
         orchestrator.submit_vi_action("magnet_z", "initiate")
     assert blocker.args == ["magnet_z", "initiate"]
     assert orchestrator._state == OrchestratorState.EMERGENCY
+    with qtbot.waitSignal(orchestrator.action_succeeded, timeout=500) as blocker:
+        orchestrator.submit_vi_action("dc_measurement", "initiate")
+    assert blocker.args == ["dc_measurement", "initiate"]
 
     # A procedure is still refused from running immediately — it queues.
     procedure = MockProcedure(station)
@@ -661,12 +702,14 @@ def test_emergency_acknowledge_unlocks_manual_front_panel(orchestrator, station,
 
 
 def test_emergency_shutdown_runs_once_not_every_tick(orchestrator, station, qtbot):
-    """A concerned VI's standby() must run once on hold onset, not every tick.
+    """EMERGENCY entry's blanket standby_all() must run once, not every tick.
 
-    Repeating it each tick would restart a persistent magnet's full
-    switch-heater warmup/cooldown cycle every few seconds — the same
-    concern that applies to the (now hold-scoped, not blanket) shutdown
-    EMERGENCY entry performs.
+    _enter_emergency() always calls Station.standby_all() exactly once on
+    entry (critical severity is station-wide scope by construction, so
+    there is no "concerned VI" subset to narrow the shutdown to — see the
+    System-Condition standard). Repeating it every tick would restart a
+    persistent magnet's full switch-heater warmup/cooldown cycle every few
+    seconds.
     """
     calls = {"n": 0}
     original = station.magnet_z.standby
@@ -699,18 +742,20 @@ def test_quench_triggers_emergency(orchestrator, station, qtbot):
     assert orchestrator._state == OrchestratorState.EMERGENCY
 
 
-def test_quench_emergency_allows_unconcerned_vi_operations(orchestrator, station, qtbot):
-    """During quench EMERGENCY, a VI with no safety_concerns() stays fully usable.
+def test_quench_emergency_blocks_all_manual_control(orchestrator, station, qtbot):
+    """During quench EMERGENCY, EVERY VI's manual control is refused.
 
-    magnet_z and temperature_vti are both concerned with quench (see
-    MagnetBase/TemperatureControllerBase.safety_concerns()) and are held;
-    dc_measurement is a plain measurement VI (MeasurementInstrumentBase,
-    which does not override safety_concerns() — the BaseVirtualInstrument
-    default, empty set) and is unaffected by the station-wide EMERGENCY.
-    Note temperature_sample looks similarly "unconcerned" by name but is
-    actually a second TemperatureControllerBase instance (SampleTemperature
-    ControllerVI) and IS concerned with quench — it is deliberately not
-    used here.
+    Quench concerns no instrument (MagnetBase.safety_concerns() names only
+    "helium_low" — see virtual_instruments/base.py); it is a critical
+    safety flag, and critical severity IS station-wide scope (the
+    System-Condition standard): the whole station needs to be shut down
+    regardless of which VI reported the quench or which VI's
+    safety_concerns() name it. This is the inversion of the old
+    "unconcerned VI stays usable" behavior — dc_measurement (a plain
+    measurement VI with no safety_concerns() at all) and temperature_vti
+    (unaffected by quench under either the old or new safety_concerns())
+    are refused exactly like magnet_z, until acknowledge_emergency()
+    unlocks the manual override.
     """
     station.magnet_z._driver._simulate_quench = True
     qtbot.waitUntil(
@@ -721,6 +766,13 @@ def test_quench_emergency_allows_unconcerned_vi_operations(orchestrator, station
         orchestrator.submit_vi_action("magnet_z", "initiate")
     with qtbot.waitSignal(orchestrator.action_blocked, timeout=500):
         orchestrator.submit_vi_action("temperature_vti", "initiate")
+    with qtbot.waitSignal(orchestrator.action_blocked, timeout=500):
+        orchestrator.submit_vi_action("dc_measurement", "initiate")
+
+    orchestrator.acknowledge_emergency()
+    assert orchestrator._state == OrchestratorState.EMERGENCY
+    assert orchestrator._emergency_manual_override is True
+
     with qtbot.waitSignal(orchestrator.action_succeeded, timeout=500):
         orchestrator.submit_vi_action("dc_measurement", "initiate")
 

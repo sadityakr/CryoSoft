@@ -25,8 +25,14 @@ out-of-range value raises `CryoSoftSafetyError` before any hardware command.
 `RampableVI` interface: `start_ramp()`, `advance_ramp()`, `ramp_status()`,
 `stop_ramp()` (kills the generator AND commands a hardware hold — used by
 the Orchestrator on abort/pause/error).
-`RotatorBase.safety_concerns()` declares every rotator dependent only on
-`{"quench"}` (never `helium_low`) — see GLOSSARY.md's **Safety hold**.
+`RotatorBase` does not override `safety_concerns()` — it keeps the
+empty-set default, so a rotator is never subject to a safety hold: not for
+`helium_low` (only magnets, via `MagnetBase`, depend on it — see
+GLOSSARY.md's **Safety concern**) and not for `quench` either, since
+`quench` is critical severity and therefore station-wide by construction
+(GLOSSARY.md's **Critical safety flag**) — a quench stops every
+instrument, including the rotator, via EMERGENCY rather than a per-VI
+hold. See GLOSSARY.md's **Safety hold**.
 
 ## Interface contract
 All classes here extend `RotatorVI` (itself inheriting from `RotatorBase`

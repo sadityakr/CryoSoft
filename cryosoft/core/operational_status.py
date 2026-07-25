@@ -6,17 +6,23 @@
 #   and Station.get_ramp_status(). No hardware, no Qt, no I/O — the Orchestrator
 #   owns emission and logging; this module owns the data shape and the codes.
 #   The heuristic stall verdict is applied on top by cryosoft.core.watchdog.
+#   The record also carries the tick's System-Condition standard registry
+#   (cryosoft.core.conditions.Condition) as a JSON-ready list, additively —
+#   old logs without the field remain valid.
 # entry_point: Not run directly; called by the Orchestrator each tick.
 # dependencies:
 #   - dataclasses, enum (stdlib only)
+#   - cryosoft.core.conditions (the Condition value object)
 # input: |
 #   build_operational_status() takes the orchestrator state name, elapsed time
-#   in that state, the station state snapshot, the ramp-status aggregate, and
-#   the previous tick's per-VI gaps (for the closing-rate fact).
+#   in that state, the station state snapshot, the ramp-status aggregate, the
+#   previous tick's per-VI gaps (for the closing-rate fact), and this tick's
+#   Condition sequence.
 # process: |
 #   For each system VI it computes gap-to-target, gap closing since last tick,
 #   and an ETA, and assigns an unambiguous RunFaultCode (stale / disconnected /
 #   quench / ok). Heuristic stall detection is done by the watchdog, not here.
+#   Conditions are carried through as-is, sorted by key, into a JSON-safe list.
 # output: |
 #   A JSON-ready dict record (the schema the troubleshoot layer reads from
 #   logs/status.jsonl) plus the new per-VI gap map for the next tick.
@@ -35,8 +41,11 @@ isolation.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from enum import Enum
+
+from cryosoft.core.conditions import Condition
 
 
 class RunFaultCode(str, Enum):
@@ -116,6 +125,31 @@ class VIHealth:
         return data
 
 
+def _condition_as_dict(condition: Condition) -> dict:
+    """Render one `Condition` as the JSON-safe shape carried in the record.
+
+    Args:
+        condition: The condition to render.
+
+    Returns:
+        A plain dict with ``key``, ``origin``, ``severity``, ``kind``,
+        ``message``, ``affected`` (``"all"`` for a station-wide condition,
+        else a sorted list of VI names), ``since``, and ``acknowledged``.
+    """
+    return {
+        "key": condition.key,
+        "origin": condition.origin,
+        "severity": condition.severity,
+        "kind": condition.kind,
+        "message": condition.message,
+        "affected": (
+            "all" if condition.affected_vis is None else sorted(condition.affected_vis)
+        ),
+        "since": condition.since,
+        "acknowledged": condition.acknowledged,
+    }
+
+
 def build_operational_status(
     *,
     orch_state: str,
@@ -127,6 +161,7 @@ def build_operational_status(
     wait_elapsed_s: float | None = None,
     progress: float | None = None,
     active_gates: list[str] | None = None,
+    conditions: Sequence[Condition] = (),
 ) -> tuple[dict, dict[str, float]]:
     """Assemble one operational-status record and the next-tick gap map.
 
@@ -147,6 +182,13 @@ def build_operational_status(
         progress: Procedure progress 0..1, if a procedure is running.
         active_gates: Names of the currently pending initiation/reading
             gates, if any (see ``cryosoft.core.gates.Gate``).
+        conditions: This tick's System-Condition standard registry (see
+            `cryosoft.core.conditions.Condition`) — the union of the
+            Station's comm/safety conditions and, when a session envelope is
+            active, its envelope conditions. Defaults to empty, so callers
+            that do not pass it (and old status.jsonl records written before
+            this field existed) simply carry no conditions — additive and
+            backward-compatible.
 
     Returns:
         ``(record, new_gaps)`` — the JSON-ready record dict and the gap map to
@@ -215,5 +257,6 @@ def build_operational_status(
         "alerts": [],
         "vis": vis,
         "active_gates": list(active_gates) if active_gates else [],
+        "conditions": [_condition_as_dict(c) for c in sorted(conditions, key=lambda c: c.key)],
     }
     return record, new_gaps

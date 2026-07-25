@@ -24,14 +24,17 @@ raises `CryoSoftSafetyError` before any hardware command.
 `stop_ramp()` (kills the generator AND commands a hardware hold — used by the
 Orchestrator on abort/pause/error).
 `evaluate_safety()` reports `{"quench": ...}` from the polled status to
-`Station.check_safety()`; `MagnetBase.critical_safety_flags()` declares
-`"quench"` critical, so it escalates the whole station to EMERGENCY (see
-GLOSSARY.md's **Critical safety flag**) rather than only holding concerned
-VIs. `MagnetBase.safety_concerns()` also declares every magnet dependent on
-`{"quench", "helium_low"}` — a low-helium condition (reported by the level
-meter, not this VI) places a safety hold on every magnet, refusing manual
-control and failing any run that claims one, without touching an
-unconcerned instrument (see GLOSSARY.md's **Safety hold**).
+`Station.check_safety()`; `MagnetBase.safety_flags` declares `"quench"`
+critical (GLOSSARY.md's **Safety-flag manifest**), so a tripped quench
+escalates the whole station to EMERGENCY (see GLOSSARY.md's **Critical
+safety flag**) rather than holding any concerned VI — no VI, including this
+one, names `quench` in `safety_concerns()`, since a per-VI hold would be
+meaningless once EMERGENCY has already stopped everything. `MagnetBase.
+safety_concerns()` declares every magnet dependent only on `{"helium_low"}`
+— a low-helium condition (reported by the level meter, not this VI) places
+a safety hold on every magnet, refusing manual control and failing any run
+that claims one, without touching an unconcerned instrument (see
+GLOSSARY.md's **Safety hold**).
 
 ## Interface contract
 All classes here extend `SuperconductingMagnetVI` (itself inheriting from

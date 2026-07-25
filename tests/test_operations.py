@@ -210,7 +210,7 @@ def test_tolerated_flag_does_not_abort_operation(orchestrator, station, qtbot):
     qtbot.wait(100)  # let several ticks pass with the flag active
     assert orchestrator._state != OrchestratorState.EMERGENCY
     assert orchestrator._procedure is op
-    assert "magnet_z" not in orchestrator._station.vi_safety_holds()
+    assert "magnet_z" not in orchestrator._held_vis()
 
     orchestrator.finish_operation()
     qtbot.waitUntil(lambda: orchestrator._procedure is None, timeout=2000)
@@ -262,10 +262,10 @@ def test_run_operation_allowed_from_emergency_iff_flags_tolerated(
     """run_operation from EMERGENCY succeeds iff active flags <= tolerated.
 
     Quench (not helium_low) is used to reach EMERGENCY here: helium_low is
-    hold-only under the safety-hold standard and can no longer trigger
+    hold-only under the System-Condition standard and can no longer trigger
     EMERGENCY at all (see test_helium_low_holds_magnets_without_emergency
-    in test_l3_orchestrator.py) — quench remains the one flag any VI
-    declares via critical_safety_flags().
+    in test_l3_orchestrator.py) — quench remains the one flag declared
+    critical severity in a VI's safety_flags manifest.
     """
     station.magnet_z._driver._simulate_quench = True
     qtbot.waitUntil(
@@ -809,8 +809,7 @@ def test_stale_claimed_nonsystem_vi_fails_operation_run(
     # standard), so the machine correctly places a hold on every magnet
     # rather than entering EMERGENCY, and rests in IDLE.
     qtbot.waitUntil(
-        lambda: set(station.magnet_vi_names())
-        <= set(orchestrator._station.vi_safety_holds()),
+        lambda: set(station.magnet_vi_names()) <= set(orchestrator._held_vis()),
         timeout=2000,
     )
     assert orchestrator._state == OrchestratorState.IDLE

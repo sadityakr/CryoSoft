@@ -17,17 +17,25 @@
 #   for registry-system VIs whose class vi_type == "magnet". read_cryogenics_
 #   config()/read_servicing_logs_config()/read_operations_config() mirror
 #   read_instrument_metadata()'s GUI-safe YAML-only pattern for the optional
-#   cryogenics:/servicing_logs:/operations: config blocks. Runtime fault
-#   registry: get_state() also populates a structured FaultRecord per
-#   stale/disconnected VI
-#   (vi_faults(), acknowledge_fault(), clear_fault() — auto-cleared on the
-#   next successful poll), and retry_fault() resets the error counter and
-#   forces one fresh poll (never rebuilds drivers — that is
+#   cryogenics:/servicing_logs:/operations: config blocks. Unified condition
+#   registry (the System-Condition standard, see core/conditions.py and
+#   GLOSSARY.md): get_state() records a comm-origin Condition per
+#   stale/disconnected VI in the same pass as its existing detection, and
+#   update_conditions() builds safety-origin Conditions from a
+#   check_safety() snapshot — one Condition per tripped flag, scope
+#   following from its declared severity alone (critical/advisory are
+#   station-wide; hold is scoped to safety_concerns()). vi_faults()/
+#   acknowledge_fault()/clear_fault()/retry_fault() are the permanent GUI
+#   adapters over the comm-origin slice of that one registry; clear_fault()
+#   auto-clears on the next successful poll, and retry_fault() resets the
+#   error counter and forces one fresh poll (never rebuilds drivers — that is
 #   retry_instrument()'s job, for a VI that never connected at all).
 #   safety_flag_sources() mirrors check_safety() but names the VI(s) that
-#   tripped each flag, for EMERGENCY reasons/ErrorEvents.
+#   tripped each flag, for EMERGENCY reasons/ErrorEvents and for
+#   update_conditions()'s Condition.source_vis.
 # entry_point: Not run directly; used by Orchestrator and GUI.
 # dependencies:
+#   - cryosoft.core.conditions (Condition — the System-Condition standard)
 #   - cryosoft.core.exceptions
 #   - cryosoft.core.plan (Command, Target — the typed dispatch currency)
 #   - cryosoft.virtual_instruments.base (BaseVirtualInstrument)
@@ -42,7 +50,7 @@
 #   After max_errors consecutive failures, _disconnected=True is added.
 # output: |
 #   Full station state dict {vi_name: {field: value, ...}} every poll cycle.
-# last_updated: 2026-07-21
+# last_updated: 2026-07-25
 # ---
 
 """Station class — runtime registry of all Virtual Instruments.
@@ -58,11 +66,12 @@ from __future__ import annotations
 import importlib
 import logging
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from cryosoft.core.conditions import Condition
 from cryosoft.core.exceptions import (
     CryoSoftCommunicationError,
     CryoSoftConfigError,
@@ -138,44 +147,6 @@ class FaultRecord:
     acknowledged: bool = False
 
 
-@dataclass(frozen=True)
-class SafetyHoldRecord:
-    """Record of a safety hold on a VI CONCERNED with a currently-tripped flag.
-
-    The safety-scoped sibling of :class:`FaultRecord`: a fault describes a
-    comms failure discovered by polling; a ``SafetyHoldRecord`` describes a
-    VI whose ``safety_concerns()`` (see ``virtual_instruments.base.
-    BaseVirtualInstrument``) names a flag some VI's ``evaluate_safety()``
-    currently reports as tripped. Populated by ``update_safety_holds()``,
-    called once per monitor tick from the same snapshot ``check_safety()``
-    already judged — no extra poll. Held VIs are refused manual control
-    (``Orchestrator._manual_action_admissible()``) and fail any run that
-    claims them, exactly like a fault, but recover automatically the moment
-    the flag clears — there is no hardware to retry, only a physical
-    condition to wait out.
-
-    Attributes:
-        vi_name: The concerned VI's registered name (NOT the VI that
-            reported the flag — see ``safety_flag_sources()`` for that).
-        flags: The safety flag name(s) causing this hold, e.g.
-            ``frozenset({"helium_low"})`` — more than one when this VI is
-            concerned with several flags tripped at once.
-        since: Unix time this hold was first recorded. Preserved across a
-            change in which flags compose the hold, as long as it stays
-            continuously active — the same ongoing incident, exactly like
-            ``FaultRecord``'s ``"stale"`` -> ``"disconnected"`` escalation.
-        acknowledged: Whether the operator has acknowledged this hold
-            (calms the operator UI), mirroring ``FaultRecord.acknowledged``.
-            Does NOT survive recovery — a cleared hold has nothing left to
-            acknowledge.
-    """
-
-    vi_name: str
-    flags: frozenset[str]
-    since: float
-    acknowledged: bool = False
-
-
 class Station:
     """Runtime registry and coordinator of all Virtual Instruments.
 
@@ -202,16 +173,20 @@ class Station:
         self._driver_specs: dict[str, dict] = {}   # {alias: driver config}
         self._vi_specs: dict[str, dict] = {}       # {vi_name: vi config}
         self._drivers: dict[str, Any] = {}         # {alias: live driver}
-        # Runtime fault registry — a VI that DID connect but has
-        # since gone stale/disconnected during polling. Distinct from
-        # _offline_vis (never connected at build time).
-        self._vi_faults: dict[str, FaultRecord] = {}
-        # Safety-hold registry — a VI CONCERNED with a currently-tripped
-        # safety flag (see safety_concerns()/update_safety_holds()).
-        # Distinct from _vi_faults: a hold is a physical safety condition,
-        # not a communication failure, and clears itself once the
-        # condition recovers rather than needing a retry.
-        self._vi_safety_holds: dict[str, SafetyHoldRecord] = {}
+        # Unified condition registry — the System-Condition standard (see
+        # cryosoft/core/conditions.py and GLOSSARY.md): every comm- and
+        # safety-origin Condition currently active on this Station, keyed
+        # by Condition.key ("comm:<vi_name>" for a VI that DID connect but
+        # has since gone stale/disconnected during polling; "safety:<flag>"
+        # for a tripped safety flag). Distinct from _offline_vis (never
+        # connected at build time). vi_faults() and its siblings below are
+        # adapters that read this one registry, so the GUI observes the
+        # exact same field semantics as before this registry was unified.
+        self._conditions: dict[str, Condition] = {}
+        # Safety flags whose "nobody consumes this hold" WARNING has
+        # already been logged once by update_conditions() — logged only on
+        # first occurrence per flag, not on every tick it stays unconsumed.
+        self._warned_unconsumed_flags: set[str] = set()
 
     # ------------------------------------------------------------------
     # VI registration and access
@@ -618,7 +593,7 @@ class Station:
                         vi_name,
                         self._error_counts[vi_name],
                     )
-                    self._record_fault(vi_name, "disconnected", str(exc))
+                    self._record_comm_condition(vi_name, "disconnected", str(exc))
                 else:
                     logger.warning(
                         "VI '%s' communication error (attempt %d/%d)",
@@ -626,43 +601,161 @@ class Station:
                         self._error_counts[vi_name],
                         self._max_errors,
                     )
-                    self._record_fault(vi_name, "stale", str(exc))
+                    self._record_comm_condition(vi_name, "stale", str(exc))
                 full_state[vi_name] = stale
 
         return full_state
 
     # ------------------------------------------------------------------
-    # Runtime fault registry — the RUNTIME sibling of the
-    # offline-instrument registry above: an offline instrument never
-    # connected at build time, a fault record describes a VI that DID
-    # connect and has since gone stale/disconnected during polling.
+    # Unified condition registry — the System-Condition standard's
+    # producer-side plumbing shared by every origin (see
+    # cryosoft/core/conditions.py and GLOSSARY.md).
     # ------------------------------------------------------------------
 
-    def _record_fault(self, vi_name: str, kind: str, message: str) -> None:
-        """Record (or update in place) a runtime fault for *vi_name*.
+    def _upsert_condition(self, candidate: Condition) -> Condition:
+        """Insert *candidate* into the unified registry, or refresh it in place.
 
-        An existing unresolved fault has its ``kind``/``message`` updated
-        (e.g. ``"stale"`` escalating to ``"disconnected"`` as the same
-        ongoing incident) while ``since`` and ``acknowledged`` are
-        preserved — escalating severity does not erase an operator's
-        earlier acknowledgment of the same incident.
+        The single point where an existing condition's ``since`` and
+        ``acknowledged`` survive a change to its other fields — e.g. a comm
+        condition escalating ``"stale"`` -> ``"disconnected"``, or a safety
+        condition's ``source_vis``/``message`` changing tick to tick — as
+        long as the SAME ``key`` (the same ongoing incident) stays
+        continuously present. A key with no prior entry is stored exactly
+        as given. This is the one place that logic exists; every producer
+        (the comm detector in ``get_state()``, the safety-flag builder in
+        ``update_conditions()``) calls it instead of re-implementing the
+        since/acknowledged-preservation rule.
 
         Args:
-            vi_name: The VI the fault concerns.
+            candidate: The freshly built condition from a producer.
+
+        Returns:
+            The condition actually stored: *candidate*, or *candidate* with
+            ``since``/``acknowledged`` overridden from the prior entry.
+        """
+        existing = self._conditions.get(candidate.key)
+        if existing is not None:
+            candidate = replace(
+                candidate, since=existing.since, acknowledged=existing.acknowledged
+            )
+        self._conditions[candidate.key] = candidate
+        return candidate
+
+    def _record_comm_condition(self, vi_name: str, kind: str, message: str) -> None:
+        """Record (or refresh) *vi_name*'s comm-origin condition.
+
+        The producer side of the System-Condition standard's ``"comm"``
+        origin (GLOSSARY.md's **Instrument fault**): builds a hold-severity
+        `Condition` scoped to just this VI and upserts it via
+        `_upsert_condition()`, which preserves ``since``/``acknowledged``
+        across a ``"stale"`` -> ``"disconnected"`` escalation of the same
+        ongoing incident — the same behavior the pre-unification
+        ``FaultRecord`` registry gave.
+
+        Args:
+            vi_name: The VI the condition concerns.
             kind: ``"stale"`` or ``"disconnected"``.
             message: Human-readable description of the latest failure.
         """
-        existing = self._vi_faults.get(vi_name)
-        since = existing.since if existing is not None else time.time()
-        acknowledged = existing.acknowledged if existing is not None else False
-        self._vi_faults[vi_name] = FaultRecord(vi_name, kind, message, since, acknowledged)
+        self._upsert_condition(
+            Condition(
+                key=f"comm:{vi_name}",
+                origin="comm",
+                severity="hold",
+                kind=kind,
+                source_vis=(vi_name,),
+                affected_vis=frozenset({vi_name}),
+                message=message,
+                since=time.time(),
+            )
+        )
+
+    def conditions(self) -> dict[str, Condition]:
+        """Return a copy of the unified condition registry, ``{key: Condition}``.
+
+        The read side of the System-Condition standard for callers that
+        want the typed `Condition` objects directly rather than through the
+        permanent comm-origin adapter below (`vi_faults()`).
+
+        Returns:
+            Every condition currently active on this Station, from any
+            origin and severity.
+        """
+        return dict(self._conditions)
+
+    def active_critical_conditions(self) -> tuple[Condition, ...]:
+        """Return every critical-severity condition, sorted by key.
+
+        Mirrors `cryosoft.core.conditions.decide()`'s own `emergency`
+        field, but as a direct Station query rather than requiring the
+        caller to first collect every condition and call `decide()` itself.
+
+        Returns:
+            Critical-severity conditions from any origin, sorted by
+            `Condition.key`.
+        """
+        return tuple(
+            sorted(
+                (c for c in self._conditions.values() if c.severity == "critical"),
+                key=lambda c: c.key,
+            )
+        )
+
+    def acknowledge_condition(self, key: str) -> bool:
+        """Mark a condition as acknowledged by its registry key.
+
+        The origin-agnostic acknowledge primitive the permanent
+        `acknowledge_fault()` adapter is built from.
+
+        Args:
+            key: The `Condition.key` to acknowledge, e.g.
+                ``"comm:magnet_z"`` or ``"safety:helium_low"``.
+
+        Returns:
+            True if a condition with that key exists and was acknowledged;
+            False otherwise.
+        """
+        existing = self._conditions.get(key)
+        if existing is None:
+            return False
+        self._conditions[key] = replace(existing, acknowledged=True)
+        return True
+
+    # ------------------------------------------------------------------
+    # Runtime fault registry — a transitional (kept FOREVER) adapter of
+    # the System-Condition standard's "comm" origin over the unified
+    # registry above. The GUI (cryosoft/gui/instrument_panel.py) reads
+    # these through the Orchestrator, so their field semantics must never
+    # change even though the storage underneath is now unified.
+    # ------------------------------------------------------------------
 
     def vi_faults(self) -> dict[str, FaultRecord]:
-        """Return the current runtime fault registry, ``{vi_name: FaultRecord}``."""
-        return dict(self._vi_faults)
+        """Return the current runtime fault registry, ``{vi_name: FaultRecord}``.
+
+        Adapter of the System-Condition standard: synthesizes one
+        `FaultRecord` per comm-origin condition in the unified registry,
+        preserving the exact field semantics (`kind`, `message`, `since`,
+        `acknowledged`) the pre-unification fault registry had.
+        """
+        result: dict[str, FaultRecord] = {}
+        for condition in self._conditions.values():
+            if condition.origin != "comm":
+                continue
+            vi_name = condition.source_vis[0]
+            result[vi_name] = FaultRecord(
+                vi_name,
+                condition.kind,
+                condition.message,
+                condition.since,
+                condition.acknowledged,
+            )
+        return result
 
     def acknowledge_fault(self, vi_name: str) -> bool:
         """Mark a VI's active fault as acknowledged (calms the operator UI).
+
+        Adapter of the System-Condition standard over
+        `acknowledge_condition()`.
 
         Args:
             vi_name: Name of the faulted VI.
@@ -671,23 +764,21 @@ class Station:
             True if a fault record existed and was acknowledged; False if
             the VI has no active fault.
         """
-        existing = self._vi_faults.get(vi_name)
-        if existing is None:
-            return False
-        self._vi_faults[vi_name] = replace(existing, acknowledged=True)
-        return True
+        return self.acknowledge_condition(f"comm:{vi_name}")
 
     def clear_fault(self, vi_name: str) -> None:
         """Remove *vi_name*'s fault record, if any (called on a successful poll).
 
-        An acknowledged-but-recovered fault simply disappears — there is
+        Adapter of the System-Condition standard: pops the comm-origin
+        condition, if present, from the unified registry. An
+        acknowledged-but-recovered fault simply disappears — there is
         nothing left to acknowledge once the instrument is responding
         again, so recovery is not distinguished from "never acknowledged".
 
         Args:
             vi_name: Name of the VI to clear.
         """
-        self._vi_faults.pop(vi_name, None)
+        self._conditions.pop(f"comm:{vi_name}", None)
 
     def retry_fault(self, vi_name: str) -> tuple[bool, str]:
         """Reset *vi_name*'s error counter and force one fresh poll.
@@ -714,7 +805,7 @@ class Station:
         except CryoSoftCommunicationError as exc:
             self._error_counts[vi_name] = 1
             message = str(exc)
-            self._record_fault(vi_name, "stale", message)
+            self._record_comm_condition(vi_name, "stale", message)
             logger.warning("Retry of '%s' failed: %s", vi_name, message)
             return False, f"'{vi_name}' still not responding: {message}"
         self._error_counts[vi_name] = 0
@@ -945,97 +1036,147 @@ class Station:
             if flag in vi.safety_concerns()
         ]
 
-    def critical_safety_flags(self) -> set[str]:
-        """Return the union of every registered VI's declared ``critical_safety_flags()``.
+    def _flag_severity(self, flag: str, producing_vis: tuple[str, ...]) -> str | None:
+        """Return *flag*'s declared severity, read off its producing VI(s).
 
-        A purely declarative aggregation (mirrors ``check_safety()``'s
-        OR-combination, but over static classifications rather than live
-        readings — no hardware poll, no state snapshot needed). This is how
-        the Orchestrator learns which tripped flags force EMERGENCY without
-        hardcoding a flag-name literal of its own: the classification lives
-        entirely on the VI that reports the flag via ``evaluate_safety()``.
+        Severity is a property of the flag itself, never of which VI
+        happens to report it (the Safety-flag manifest standard, see
+        ``BaseVirtualInstrument``'s docstring) — this simply reads the
+        first producing VI's merged manifest that declares it.
+
+        Args:
+            flag: The safety flag name.
+            producing_vis: The VI names ``safety_flag_sources()`` attributes
+                this flag to, in reporting order.
 
         Returns:
-            Set of flag names that force a station-wide EMERGENCY when any
-            VI's ``evaluate_safety()`` reports them tripped.
+            The declared severity (``"advisory"`` | ``"hold"`` |
+            ``"critical"``), or ``None`` if no producing VI's manifest
+            declares it (a conformance violation elsewhere — see
+            ``tests/test_conformance.py``'s
+            ``test_evaluate_safety_flags_are_declared_in_manifest`` — so
+            this should not occur on a conforming station).
         """
-        critical: set[str] = set()
-        for vi in self._virtual_instruments.values():
-            critical |= vi.critical_safety_flags()
-        return critical
+        for vi_name in producing_vis:
+            vi = self._virtual_instruments.get(vi_name)
+            if vi is None:
+                continue
+            manifest = type(vi).merged_safety_flags()
+            if flag in manifest:
+                return manifest[flag]
+        return None
 
-    def update_safety_holds(
-        self, safety: dict[str, bool], *, tolerated_flags: frozenset[str] = frozenset()
+    def update_conditions(
+        self,
+        safety: Mapping[str, bool],
+        *,
+        tolerated_flags: frozenset[str] | set[str] = frozenset(),
     ) -> None:
-        """Refresh the safety-hold registry from this tick's ``check_safety()`` result.
+        """Refresh the safety-origin conditions from this tick's ``check_safety()`` result.
 
-        The write side of the safety-hold standard (GLOSSARY.md's **Safety
-        hold**): every VI whose ``safety_concerns()`` names a flag that is
-        tripped in *safety* and not in *tolerated_flags* gets (or keeps) a
-        hold; every other VI's hold is cleared — including one whose only
-        tripped concern just became tolerated. A VI concerned with more than
-        one simultaneously-tripped flag gets one record naming all of them.
+        The write side of the System-Condition standard's ``"safety"``
+        origin (see ``cryosoft/core/conditions.py`` and GLOSSARY.md's
+        **Safety hold**): scope follows from severity alone, so every
+        tripped flag produces EXACTLY ONE `Condition`, keyed
+        ``f"safety:{flag}"``, built from the flag's OWN declared severity
+        (``_flag_severity()``, read off the producing VI's merged
+        ``safety_flags`` manifest):
+
+        - ``"critical"`` — always constructed, tolerance never applies
+          (GLOSSARY.md's **Critical safety flag** — station-wide by
+          definition, ``affected_vis=None``). Critical IS station-wide
+          scope; no VI's ``safety_concerns()`` is ever consulted for it.
+        - ``"advisory"`` — always constructed (no enforcement reads it, so
+          tolerance is moot); ``affected_vis=None``.
+        - ``"hold"`` — scoped to ``get_concerned_vis(flag)``: concerns
+          exist only for hold-severity flags. If *flag* is tolerated, or
+          no VI's ``safety_concerns()`` names it, no condition is built
+          (a WARNING is logged once per flag in the latter case — there
+          is no one to hold).
+
+        A flag no longer tripped, or a flag that just became tolerated,
+        has its condition removed. `_upsert_condition()` preserves an
+        existing condition's ``since``/``acknowledged`` across ticks the
+        same key stays active — see its docstring.
 
         Args:
             safety: The ``{flag: bool}`` dict ``check_safety()`` already
                 computed this tick, passed in rather than recomputed here —
                 the Orchestrator calls ``check_safety()`` exactly once per
                 tick regardless of how many places consult the result.
-            tolerated_flags: Flags to treat as untripped for hold purposes —
+            tolerated_flags: Hold-severity flags to treat as untripped —
                 the active run's own ``tolerated_safety_flags`` (only an
                 operation declares any; empty when a plain procedure or no
-                run is active). Resolved by the Orchestrator and passed in:
-                the Station never imports the procedure/operation layer
-                (contract C8) and has no notion of "the active run" itself.
-                This is what lets an operation like the helium fill —
-                tolerating ``helium_low`` while it claims and ramps every
-                magnet to zero — run to completion instead of being held on
-                (and having its own run failed for) the very condition it
-                exists to fix.
+                run is active). Resolved by the Orchestrator and passed
+                in: the Station never imports the procedure/operation
+                layer (contract C8) and has no notion of "the active run"
+                itself. This is what lets an operation like the helium
+                fill — tolerating ``helium_low`` while it claims and ramps
+                every magnet to zero — run to completion instead of being
+                held on (and having its own run failed for) the very
+                condition it exists to fix. Never applied to a flag's own
+                critical/advisory condition (see above) — a critical or
+                advisory flag never becomes a hold in the first place.
         """
-        tripped = {flag for flag, is_tripped in safety.items() if is_tripped} - tolerated_flags
+        tolerated = frozenset(tolerated_flags)
+        now = time.time()
+        sources = self.safety_flag_sources()
+        tripped = {flag for flag, is_tripped in safety.items() if is_tripped}
+        non_tolerated = tripped - tolerated
 
-        concerned: dict[str, set[str]] = {}
+        desired: dict[str, Condition] = {}
         for flag in tripped:
-            for vi_name in self.get_concerned_vis(flag):
-                concerned.setdefault(vi_name, set()).add(flag)
+            producing_vis = tuple(sources.get(flag, []))
+            severity = self._flag_severity(flag, producing_vis)
+            if severity is None:
+                continue
+            message = f"Safety flag '{flag}' is tripped"
+            key = f"safety:{flag}"
 
-        for vi_name in list(self._vi_safety_holds):
-            if vi_name not in concerned:
-                del self._vi_safety_holds[vi_name]
+            if severity in ("critical", "advisory"):
+                desired[key] = Condition(
+                    key=key,
+                    origin="safety",
+                    severity=severity,
+                    kind=flag,
+                    source_vis=producing_vis,
+                    affected_vis=None,
+                    message=message,
+                    since=now,
+                )
+                continue
 
-        for vi_name, flags in concerned.items():
-            existing = self._vi_safety_holds.get(vi_name)
-            since = existing.since if existing is not None else time.time()
-            acknowledged = existing.acknowledged if existing is not None else False
-            self._vi_safety_holds[vi_name] = SafetyHoldRecord(
-                vi_name, frozenset(flags), since, acknowledged
+            # severity == "hold": scoped to the flag's concerned VIs, and
+            # subject to tolerance — the only severity either applies to.
+            if flag not in non_tolerated:
+                continue
+            concerned = self.get_concerned_vis(flag)
+            if not concerned:
+                if flag not in self._warned_unconsumed_flags:
+                    logger.warning(
+                        "Safety flag '%s' is tripped but no VI's "
+                        "safety_concerns() names it — no hold condition "
+                        "constructed.",
+                        flag,
+                    )
+                    self._warned_unconsumed_flags.add(flag)
+                continue
+            desired[key] = Condition(
+                key=key,
+                origin="safety",
+                severity="hold",
+                kind=flag,
+                source_vis=producing_vis,
+                affected_vis=frozenset(concerned),
+                message=message,
+                since=now,
             )
 
-    def vi_safety_holds(self) -> dict[str, SafetyHoldRecord]:
-        """Return the current safety-hold registry, ``{vi_name: SafetyHoldRecord}``."""
-        return dict(self._vi_safety_holds)
-
-    def acknowledge_safety_hold(self, vi_name: str) -> bool:
-        """Mark a VI's active safety hold as acknowledged (calms the operator UI).
-
-        Mirrors ``acknowledge_fault()``. Acknowledging does not lift the
-        hold — manual control stays refused (an operator needing to
-        intervene on a held VI itself uses the EMERGENCY manual-override
-        path, not this) — it only marks the condition as seen.
-
-        Args:
-            vi_name: Name of the held VI.
-
-        Returns:
-            True if a hold existed and was acknowledged; False if the VI
-            has no active hold.
-        """
-        existing = self._vi_safety_holds.get(vi_name)
-        if existing is None:
-            return False
-        self._vi_safety_holds[vi_name] = replace(existing, acknowledged=True)
-        return True
+        for key in [k for k, c in self._conditions.items() if c.origin == "safety"]:
+            if key not in desired:
+                del self._conditions[key]
+        for key, condition in desired.items():
+            self._conditions[key] = self._upsert_condition(condition)
 
     # ------------------------------------------------------------------
     # Measurement command dispatch

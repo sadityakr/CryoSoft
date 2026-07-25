@@ -5,11 +5,14 @@
 # last_updated: 2026-07-12
 # ---
 
+import logging
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 from cryosoft.core.plan import Target
 from cryosoft.core.station import Station, build_station
+from cryosoft.virtual_instruments.base import BaseVirtualInstrument
 
 
 class _AddressCapturingDriver:
@@ -552,6 +555,266 @@ def test_level_meter_disconnect_records_fault_independent_of_debounce(sim_statio
     sources = sim_station.safety_flag_sources(state)
     assert "level_meter" in sources.get("helium_low", [])
 
+
+# ---------------------------------------------------------------------------
+# Unified condition registry (the System-Condition standard, see
+# cryosoft/core/conditions.py and GLOSSARY.md) — Station.conditions() and
+# the transitional vi_faults()/vi_safety_holds() adapters over it.
+# ---------------------------------------------------------------------------
+
+
+class _CriticalFlagAVI(BaseVirtualInstrument):
+    """Test double: reports a hardcoded critical-severity flag, no concerns."""
+
+    safety_flags: ClassVar[dict[str, str]] = {"flag_aaa": "critical"}
+
+    def evaluate_safety(self, state: dict) -> dict[str, bool]:
+        return {"flag_aaa": True}
+
+
+class _CriticalFlagZVI(BaseVirtualInstrument):
+    """Test double: reports a second, alphabetically-later critical flag."""
+
+    safety_flags: ClassVar[dict[str, str]] = {"flag_zzz": "critical"}
+
+    def evaluate_safety(self, state: dict) -> dict[str, bool]:
+        return {"flag_zzz": True}
+
+
+class _UnconsumedHoldFlagVI(BaseVirtualInstrument):
+    """Test double: reports a hold-severity flag no VI's safety_concerns() names."""
+
+    safety_flags: ClassVar[dict[str, str]] = {"widget_stuck": "hold"}
+
+    def evaluate_safety(self, state: dict) -> dict[str, bool]:
+        return {"widget_stuck": True}
+
+
+def test_comm_condition_escalates_preserving_since_and_ack(sim_station: Station):
+    """The unified registry's comm-origin condition mirrors the pre-unification
+    FaultRecord lifecycle exactly: record -> escalate stale->disconnected
+    (since/acknowledged preserved) -> recover/clear.
+    """
+    sim_station.get_state()
+    assert "comm:magnet_z" not in sim_station.conditions()
+
+    sim_station.magnet_z._driver._simulate_error = True
+    sim_station.get_state()
+    condition = sim_station.conditions()["comm:magnet_z"]
+    assert condition.origin == "comm"
+    assert condition.severity == "hold"
+    assert condition.kind == "stale"
+    assert condition.source_vis == ("magnet_z",)
+    assert condition.affected_vis == frozenset({"magnet_z"})
+    assert condition.acknowledged is False
+    since_first = condition.since
+
+    assert sim_station.acknowledge_condition("comm:magnet_z") is True
+    assert sim_station.conditions()["comm:magnet_z"].acknowledged is True
+
+    sim_station.get_state()
+    sim_station.get_state()  # 3rd consecutive error -> disconnected
+    condition = sim_station.conditions()["comm:magnet_z"]
+    assert condition.kind == "disconnected"
+    # Escalating the SAME incident preserves 'since' AND 'acknowledged'.
+    assert condition.since == since_first
+    assert condition.acknowledged is True
+
+    sim_station.magnet_z._driver._simulate_error = False
+    sim_station.get_state()
+    assert "comm:magnet_z" not in sim_station.conditions()
+
+
+def test_vi_faults_adapter_agrees_with_conditions_registry(sim_station: Station):
+    """vi_faults() is a thin view of the unified registry's comm conditions."""
+    sim_station.magnet_z._driver._simulate_error = True
+    sim_station.get_state()
+    sim_station.get_state()
+    sim_station.get_state()  # disconnected
+
+    faults = sim_station.vi_faults()
+    comm_conditions = {
+        c.source_vis[0]: c for c in sim_station.conditions().values() if c.origin == "comm"
+    }
+    assert set(faults) == set(comm_conditions) == {"magnet_z"}
+    fault = faults["magnet_z"]
+    condition = comm_conditions["magnet_z"]
+    assert fault.vi_name == "magnet_z"
+    assert fault.kind == condition.kind
+    assert fault.message == condition.message
+    assert fault.since == condition.since
+    assert fault.acknowledged == condition.acknowledged
+
+
+def test_update_conditions_tolerated_hold_flag_constructs_nothing(sim_station: Station):
+    """A tolerated hold-severity flag builds no condition and holds no VI."""
+    level_driver = sim_station.level_meter._driver
+    level_driver._simulate_error = True
+    safety: dict[str, bool] = {}
+    for _ in range(10):
+        state = sim_station.get_state()
+        safety = sim_station.check_safety(state)
+        if safety.get("helium_low"):
+            break
+    assert safety.get("helium_low") is True
+
+    sim_station.update_conditions(safety, tolerated_flags=frozenset({"helium_low"}))
+    assert "safety:helium_low" not in sim_station.conditions()
+    assert not any(
+        c.origin == "safety" and c.severity == "hold"
+        for c in sim_station.conditions().values()
+    )
+
+
+def test_update_conditions_clearing_tolerance_recreates_with_fresh_since(
+    sim_station: Station, monkeypatch: pytest.MonkeyPatch
+):
+    """Un-tolerating a flag rebuilds its condition with a FRESH `since` —
+    the tolerated interval removed the condition entirely, so there is no
+    prior entry for _upsert_condition() to preserve `since` from.
+    """
+    level_driver = sim_station.level_meter._driver
+    level_driver._simulate_error = True
+    safety: dict[str, bool] = {}
+    for _ in range(10):
+        state = sim_station.get_state()
+        safety = sim_station.check_safety(state)
+        if safety.get("helium_low"):
+            break
+    assert safety.get("helium_low") is True
+
+    import cryosoft.core.station as station_module
+
+    clock = iter([100.0, 200.0, 300.0])
+    monkeypatch.setattr(station_module.time, "time", lambda: next(clock))
+
+    sim_station.update_conditions(safety, tolerated_flags=frozenset())
+    assert sim_station.conditions()["safety:helium_low"].since == 100.0
+
+    sim_station.update_conditions(safety, tolerated_flags=frozenset({"helium_low"}))
+    assert "safety:helium_low" not in sim_station.conditions()
+
+    sim_station.update_conditions(safety, tolerated_flags=frozenset())
+    assert sim_station.conditions()["safety:helium_low"].since == 300.0
+
+
+def test_update_conditions_critical_flag_ignores_tolerance(sim_station: Station):
+    """A critical flag builds its station-wide condition even if 'tolerated'.
+
+    Critical is station-wide scope by construction (the System-Condition
+    standard: scope follows from severity alone) — tolerance never applies
+    to it, and no VI's safety_concerns() is ever consulted for a critical
+    flag (a per-VI hold would be meaningless once EMERGENCY has already
+    stopped everything).
+    """
+    sim_station.magnet_z._driver._simulate_quench = True
+    state = sim_station.get_state()
+    safety = sim_station.check_safety(state)
+    assert safety["quench"] is True
+
+    sim_station.update_conditions(safety, tolerated_flags=frozenset({"quench"}))
+    condition = sim_station.conditions()["safety:quench"]
+    assert condition.severity == "critical"
+    assert condition.affected_vis is None
+    assert condition.source_vis == ("magnet_z",)
+
+
+def test_update_conditions_critical_flag_produces_only_its_own_condition(
+    sim_station: Station,
+):
+    """A critical flag produces ONLY its own critical condition — never a
+    concern-based hold, even if some VI's safety_concerns() named it.
+
+    Concern-based holds exist only for hold-severity flags (see the
+    System-Condition standard); a critical flag's station-wide scope
+    already covers every VI, concerned or not, so there is no separate
+    'safety-hold:<flag>' condition coexisting with the critical one.
+    """
+    sim_station.magnet_z._driver._simulate_quench = True
+    state = sim_station.get_state()
+    safety = sim_station.check_safety(state)
+
+    sim_station.update_conditions(safety, tolerated_flags=frozenset())
+    assert sim_station.conditions()["safety:quench"].severity == "critical"
+    assert set(sim_station.conditions()) == {"safety:quench"}
+
+
+def test_update_conditions_hold_flag_scopes_to_concerned_vis(sim_station: Station):
+    """A hold-severity flag holds exactly the VIs whose safety_concerns()
+    name it — every magnet (via MagnetBase), not temperature_vti or
+    level_meter.
+    """
+    level_driver = sim_station.level_meter._driver
+    level_driver._simulate_error = True
+
+    safety: dict[str, bool] = {}
+    for _ in range(10):
+        state = sim_station.get_state()
+        safety = sim_station.check_safety(state)
+        if safety.get("helium_low"):
+            break
+    assert safety.get("helium_low") is True
+
+    sim_station.update_conditions(safety, tolerated_flags=frozenset())
+    condition = sim_station.conditions()["safety:helium_low"]
+    assert condition.severity == "hold"
+    assert condition.affected_vis == frozenset({"magnet_z", "magnet_y"})
+
+
+def test_acknowledge_condition_acknowledges_a_safety_hold(sim_station: Station):
+    """acknowledge_condition() marks a hold-severity safety condition as seen."""
+    level_driver = sim_station.level_meter._driver
+    level_driver._simulate_error = True
+    safety: dict[str, bool] = {}
+    for _ in range(10):
+        state = sim_station.get_state()
+        safety = sim_station.check_safety(state)
+        if safety.get("helium_low"):
+            break
+
+    sim_station.update_conditions(safety, tolerated_flags=frozenset())
+    assert sim_station.acknowledge_condition("safety:helium_low") is True
+    assert sim_station.conditions()["safety:helium_low"].acknowledged is True
+    assert sim_station.acknowledge_condition("safety:no_such_flag") is False
+
+
+def test_active_critical_conditions_sorted_by_key():
+    """active_critical_conditions() returns every critical condition, sorted."""
+    station = Station()
+    station.register_vi("vi_z", _CriticalFlagZVI({}), "system")
+    station.register_vi("vi_a", _CriticalFlagAVI({}), "system")
+
+    safety = station.check_safety()
+    assert safety == {"flag_zzz": True, "flag_aaa": True}
+
+    station.update_conditions(safety, tolerated_flags=frozenset())
+    critical = station.active_critical_conditions()
+    assert [c.key for c in critical] == ["safety:flag_aaa", "safety:flag_zzz"]
+    assert all(c.severity == "critical" and c.affected_vis is None for c in critical)
+
+
+def test_update_conditions_warns_once_for_unconsumed_hold_flag(caplog: pytest.LogCaptureFixture):
+    """A hold-severity flag nobody concerns itself with builds no condition
+    and logs exactly one WARNING, not one per tick it stays unconsumed.
+    """
+    station = Station()
+    station.register_vi("widget", _UnconsumedHoldFlagVI({}), "system")
+    safety = station.check_safety()
+    assert safety == {"widget_stuck": True}
+
+    with caplog.at_level(logging.WARNING, logger="cryosoft.core.station"):
+        station.update_conditions(safety, tolerated_flags=frozenset())
+        station.update_conditions(safety, tolerated_flags=frozenset())
+
+    assert station.conditions() == {}
+    matching = [r for r in caplog.records if "widget_stuck" in r.getMessage()]
+    assert len(matching) == 1
+
+
+def test_acknowledge_condition_unknown_key_returns_false(sim_station: Station):
+    """acknowledge_condition() on a key with no active condition is a no-op."""
+    assert sim_station.acknowledge_condition("safety:no_such_flag") is False
+    assert sim_station.acknowledge_condition("comm:no_such_vi") is False
 
 
 def test_scanner_enabled_defaults_false(sim_station: Station):

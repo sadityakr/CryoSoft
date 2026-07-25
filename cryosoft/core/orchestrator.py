@@ -27,23 +27,27 @@
 # process: |
 #   On _tick() (inside an exception boundary that degrades to ERROR instead
 #   of crashing the app): while monitoring is active, gets state from
-#   station (which also populates/clears its runtime FaultRecord registry —
-#   the runtime fault-tiering standard, see core/README.md), emits a
-#   warning-severity error_event for each newly faulted VI the active run
-#   does not claim (no state change), evaluates safety flags on that same
-#   snapshot — subtracting the active operation's tolerated_safety_flags
-#   first, if one is running — (any remaining tripped flag -> one-shot
-#   EMERGENCY entry, its reason/ErrorEvent naming the originating VI(s) via
-#   Station.safety_flag_sources(): abort procedure, stop ramps, standby_all
-#   once), and checks for stale ACTIVE (claimed) system VIs — a stale
-#   claimed VI fails the run (_fail_run_for_fault(): run_finished "failed",
-#   error_event kind="run_failure") and returns the machine to IDLE (NOT
+#   station (which also records/clears its comm-origin Conditions — the
+#   System-Condition standard, see core/conditions.py and core/README.md),
+#   resolves the active operation's tolerated_safety_flags (empty if none),
+#   and calls Station.update_conditions() to refresh the safety-origin
+#   Conditions from that same snapshot. The tick's full condition list
+#   (comm + safety, plus a session envelope's violations when one is active)
+#   feeds ONE decide() call: an onset diff against the previous tick's
+#   condition keys emits a warning-severity error_event for each newly
+#   faulted, unwatched VI (no state change) and dispatches one standby() per
+#   VI a NEW hold condition affects; decide()'s Verdict then drives
+#   execution — emergency non-empty -> one-shot EMERGENCY entry (reason/
+#   ErrorEvent naming the originating VI(s) via each Condition's
+#   source_vis: abort procedure, stop ramps, standby_all once);
+#   otherwise run_failure not None -> _fail_run_for_fault(): run_finished
+#   "failed", error_event kind="run_failure", machine returns to IDLE (NOT
 #   global ERROR — only that VI is quarantined; the queue does not
 #   auto-continue). _manual_action_admissible() refuses any VI with an
-#   active fault outright, before its other admission rules, including in
-#   IDLE. Then (monitoring or not) processes IDLE gui actions and runs the
-#   state machine. STANDBY forks on the active run's kind (duck-typed via
-#   command_scope):
+#   active comm-origin condition outright, before its other admission
+#   rules, including in IDLE. Then (monitoring or not) processes IDLE gui
+#   actions and runs the state machine. STANDBY forks on the active run's
+#   kind (duck-typed via command_scope):
 #   a PROCEDURE keeps the original two-phase wait (for any ramp already in
 #   flight when SWEEPING ended, then — after dispatching procedure.standby()'s
 #   own targets — for whatever ramp standby() itself started) before declaring
@@ -102,6 +106,7 @@ from typing import Any
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
+from cryosoft.core.conditions import Condition, decide, envelope_conditions
 from cryosoft.core.events import ErrorEvent
 from cryosoft.core.exceptions import CryoSoftSafetyError
 from cryosoft.core.operational_status import build_operational_status
@@ -329,19 +334,18 @@ class Orchestrator(QObject):
         # operation that does not override claimed_vi_names()).
         self._active_claims: set[str] | None = None
 
-        # Runtime fault registry tracking: the set of VI names
-        # with an active Station fault as of the last tick, used to detect
-        # NEW faults (emit one warning error_event, not one per tick) and
-        # recoveries. Station is the source of truth; this is only a
-        # transition-detection cache.
-        self._known_fault_vis: set[str] = set()
-
-        # Safety-hold registry tracking (the safety-hold standard,
-        # GLOSSARY.md): mirrors _known_fault_vis exactly, but for
-        # Station.vi_safety_holds() — detects a NEW hold (dispatch one
-        # standby(), not one per tick) versus one already active. Station
-        # is the source of truth; this is only a transition-detection cache.
-        self._known_safety_holds: set[str] = set()
+        # Condition-registry onset tracking (the System-Condition standard,
+        # core/conditions.py): the set of Station condition keys
+        # (comm:<vi_name>, safety:<flag>) active as of the last tick, used
+        # to detect NEW conditions — a new comm condition on an unwatched
+        # VI emits one warning error_event (not one per tick); a new
+        # hold-severity condition dispatches one standby() to each VI it
+        # affects (not one per tick a hold persists). Replaces the old
+        # separate _known_fault_vis/_known_safety_holds trackers — one key
+        # set now serves both, since a comm condition IS hold-severity
+        # exactly like a safety-hold condition. Station is the source of
+        # truth; this is only a transition-detection cache.
+        self._known_condition_keys: set[str] = set()
 
         self._pre_pause_state = OrchestratorState.IDLE
         self._paused_wait_elapsed = 0.0
@@ -514,7 +518,19 @@ class Orchestrator(QObject):
         ``run_procedure()``), and — the narrow EMERGENCY carve-out — from
         EMERGENCY iff every currently tripped safety flag (from
         ``Station.check_safety()``) is in the operation's
-        ``tolerated_safety_flags``.
+        ``tolerated_safety_flags``. This check alone decides whether the
+        operation is allowed to START; it does not exempt the operation
+        from the tick's own EMERGENCY-entry check afterwards, which reads
+        the unconditional System-Condition registry (``core/
+        conditions.py``: critical severity is never tolerated, station-wide
+        by construction) rather than this method's tolerance comparison. In
+        practice this means the carve-out only lets an operation keep
+        running past the start if the flag it tolerated is hold-severity
+        (e.g. ``helium_low``) or the EMERGENCY cause has actually cleared —
+        tolerating a still-tripped CRITICAL flag (e.g. ``quench``) here gets
+        the operation started, but the very next tick's EMERGENCY check
+        aborts it again, since that check answers "is anything critical
+        active", never "does the active run tolerate it".
 
         Unlike ``run_procedure()``, a busy Orchestrator never auto-queues the
         request: a running procedure (or operation) is NEVER auto-aborted, so
@@ -805,19 +821,21 @@ class Orchestrator(QObject):
         """Acknowledge an EMERGENCY: unlock manual control, or return to IDLE.
 
         If the condition that triggered EMERGENCY (a critical safety flag —
-        ``BaseVirtualInstrument.critical_safety_flags()`` — or a session-
-        envelope violation) is still active, acknowledging cannot return to
-        IDLE (the next tick would bounce straight back), but it does unlock
-        manual control of held VIs (via ``_manual_action_admissible()``'s
-        override bypass) for front-panel recovery — e.g. cycling a switch
-        heater by hand — while remaining in EMERGENCY. Starting a procedure
-        or operation stays refused throughout: those gates check the state
-        itself, which is unchanged here.
+        ``Station.active_critical_conditions()``, the System-Condition
+        standard's own live registry, see ``core/conditions.py`` — or a
+        session-envelope violation) is still active, acknowledging cannot
+        return to IDLE (the next tick would bounce straight back), but it
+        does unlock manual control of held VIs (via
+        ``_manual_action_admissible()``'s override bypass) for front-panel
+        recovery — e.g. cycling a switch heater by hand — while remaining in
+        EMERGENCY. Starting a procedure or operation stays refused
+        throughout: those gates check the state itself, which is unchanged
+        here.
 
         A merely hold-only flag (e.g. ``helium_low``) never blocks this
         return: it was never why EMERGENCY was entered, and it keeps
-        governing its concerned VIs identically in IDLE (the safety-hold
-        standard applies in every state, not only EMERGENCY).
+        governing its concerned VIs identically in IDLE (the System-
+        Condition standard applies in every state, not only EMERGENCY).
 
         Once the condition has cleared, acknowledging again (the same
         button) returns to IDLE and relocks the override for the next
@@ -825,9 +843,7 @@ class Orchestrator(QObject):
         """
         if self._state != OrchestratorState.EMERGENCY:
             return
-        safety = self._station.check_safety()
-        critical = self._station.critical_safety_flags()
-        active = sorted(flag for flag in critical if safety.get(flag))
+        active = [c.kind for c in self._station.active_critical_conditions()]
         # A still-violated session envelope blocks the return to IDLE for the
         # same reason a critical safety flag does — the next tick would
         # bounce straight back.
@@ -898,6 +914,25 @@ class Orchestrator(QObject):
         name = getattr(procedure, "name", "") or type(procedure).__name__
         return f"{kind} {name!r}"
 
+    def _held_vis(self) -> dict[str, Condition]:
+        """Return ``{vi_name: Condition}`` for every VI currently held.
+
+        Reads the Station's unified condition registry (the
+        System-Condition standard, ``core/conditions.py``) through
+        ``decide()`` — the same pure policy the tick pipeline uses to
+        collapse the same information — rather than keeping a second,
+        parallel bookkeeping structure. ``watched_vis``/``run_active`` are
+        irrelevant to ``held_vis`` (only ``run_failure`` depends on them),
+        so dummy values are passed.
+
+        Returns:
+            The alphabetically-first (by ``Condition.key``) hold-severity
+            condition affecting each held VI, comm- or safety-origin alike.
+        """
+        return decide(
+            self._station.conditions().values(), watched_vis=frozenset(), run_active=False
+        ).held_vis
+
     def _manual_action_admissible(self, vi_name: str) -> tuple[bool, str]:
         """Decide whether a manual action on *vi_name* may be admitted right now.
 
@@ -909,26 +944,31 @@ class Orchestrator(QObject):
 
         Admission rules, in order:
 
-        0. A VI with an active runtime fault is ALWAYS refused,
-           regardless of state — including IDLE — until it recovers or
+        0. A VI with an active comm-origin condition (an instrument
+           fault — GLOSSARY.md's **Instrument fault**) is ALWAYS refused,
+           regardless of state — including IDLE, and NEVER bypassed by the
+           EMERGENCY manual override — until it recovers or
            ``retry_fault()`` succeeds. Checked first, and here (not as a
            parallel check) so every caller (``submit_vi_action()``, the
            drain gate) inherits it for free.
-        0b. A VI with an active safety hold (the safety-hold standard: its
-            ``safety_concerns()`` names a currently-tripped, non-tolerated
-            flag — see ``Station.update_safety_holds()``) is refused next,
-            ALSO regardless of state, UNLESS ``acknowledge_emergency()`` has
-            unlocked the manual override — the operator's way to intervene
-            on the held instrument itself (e.g. cycling a switch heater by
-            hand after a quench). A VI with no hold is entirely unaffected
-            by this rule, whatever flags are tripped elsewhere.
+        0b. A VI with an active safety-origin hold condition (the
+            System-Condition standard: its ``safety_concerns()`` names a
+            currently-tripped, non-tolerated flag — see ``Station.
+            update_conditions()``) is refused next, ALSO regardless of
+            state, UNLESS ``acknowledge_emergency()`` has unlocked the
+            manual override — the operator's way to intervene on the held
+            instrument itself (e.g. cycling a switch heater by hand after a
+            quench). A VI with no hold is entirely unaffected by this rule,
+            whatever flags are tripped elsewhere.
         1. IDLE, or a manual ramp (RAMPING with no active run): always
            admitted.
-        2. EMERGENCY: always admitted from here — a VI concerned with the
-           tripped critical flag was already refused by rule 0b above; one
-           that reaches this point is either unconcerned with it (e.g.
-           temperature control during a magnet quench) or was let through
-           by the manual override, and is free to operate.
+        2. EMERGENCY: refused for EVERY VI, held or not, UNLESS the manual
+           override is unlocked — critical severity is station-wide scope
+           by construction (the System-Condition standard): there is no
+           "unconcerned VI" to admit once the whole station is in
+           EMERGENCY. This is the inversion of the pre-System-Condition
+           behavior, where a VI unconcerned with the tripped flag stayed
+           operable.
         3. ERROR: always refused, naming the state.
         4. Otherwise a run is active. Admitted iff the active run's
            ``claimed_vi_names()`` is not "claim everything" (``None``) AND
@@ -944,19 +984,19 @@ class Orchestrator(QObject):
             with a human-readable reason naming why (and, for a claim
             refusal, the owning run).
         """
-        fault = self._station.vi_faults().get(vi_name)
-        if fault is not None:
-            return False, (
-                f"Cannot control {vi_name}: instrument fault ({fault.kind}) — "
-                f"{fault.message}. Retry the instrument or wait for it to recover."
-            )
-        hold = self._station.vi_safety_holds().get(vi_name)
-        if hold is not None and not self._emergency_manual_override:
-            return False, (
-                f"Cannot control {vi_name}: safety hold active "
-                f"({', '.join(sorted(hold.flags))}). Resolve the condition, "
-                "or acknowledge the emergency for manual recovery."
-            )
+        held = self._held_vis().get(vi_name)
+        if held is not None:
+            if held.origin == "comm":
+                return False, (
+                    f"Cannot control {vi_name}: instrument fault ({held.kind}) — "
+                    f"{held.message}. Retry the instrument or wait for it to recover."
+                )
+            if not self._emergency_manual_override:
+                return False, (
+                    f"Cannot control {vi_name}: safety hold active "
+                    f"({held.kind}). Resolve the condition, "
+                    "or acknowledge the emergency for manual recovery."
+                )
         if self._state == OrchestratorState.IDLE:
             return True, ""
         manual_ramping = (
@@ -965,7 +1005,12 @@ class Orchestrator(QObject):
         if manual_ramping:
             return True, ""
         if self._state == OrchestratorState.EMERGENCY:
-            return True, ""
+            if self._emergency_manual_override:
+                return True, ""
+            return False, (
+                f"Cannot control {vi_name}: EMERGENCY — acknowledge the "
+                "emergency to unlock manual front-panel recovery."
+            )
         if self._state == OrchestratorState.ERROR:
             return False, (
                 f"Cannot control {vi_name}: procedure is running in state {self._state.name}"
@@ -1308,6 +1353,18 @@ class Orchestrator(QObject):
                     progress = self._procedure.get_progress()
                 except Exception:
                     progress = None
+            # This tick's System-Condition standard registry (core/conditions.py),
+            # mirroring how the unified condition pipeline below (~1602-1607)
+            # builds its list: the Station's comm/safety conditions plus, when a
+            # session envelope is active and we are not already in EMERGENCY, its
+            # envelope conditions for this same state snapshot. Sorted by key so
+            # the record is stable across ticks with the same conditions.
+            conditions: list[Condition] = list(self._station.conditions().values())
+            if self._session_envelope is not None and self._state != OrchestratorState.EMERGENCY:
+                conditions.extend(
+                    envelope_conditions(self._session_envelope.check_state(state), time.time())
+                )
+            conditions.sort(key=lambda c: c.key)
             record, self._prev_gaps = build_operational_status(
                 orch_state=self._state.value,
                 elapsed_in_state_s=time.time() - self._state_entered_at,
@@ -1321,6 +1378,7 @@ class Orchestrator(QObject):
                 # (evaluated once, immediately, as the run ends), so only the
                 # initiation/reading gates can ever be "active" across ticks.
                 active_gates=[g.name for g in self._pending_gates],
+                conditions=conditions,
             )
             record, self._watchdog_state = apply_watchdog(
                 record, self._watchdog_state, self._watchdog_config
@@ -1512,16 +1570,6 @@ class Orchestrator(QObject):
             except Exception:
                 logger.exception("tiered trend-history record failed (non-fatal)")
 
-            # Runtime fault registry: Station.get_state() (just
-            # called above) already populated/cleared FaultRecords for
-            # anything stale/disconnected this tick. Detect NEW faults (one
-            # warning event each, not one per tick) for VIs the active run
-            # does not claim — a claimed VI's fault is handled by the
-            # run-failure path below instead, with a matching, more severe
-            # event, so it must not ALSO get a warning here.
-            current_faults = self._station.vi_faults()
-            new_fault_names = set(current_faults) - self._known_fault_vis
-            self._known_fault_vis = set(current_faults)
             run_active = self._state not in (
                 OrchestratorState.IDLE,
                 OrchestratorState.PAUSED,
@@ -1537,24 +1585,17 @@ class Orchestrator(QObject):
             # VI going stale was never a run-failure before and stays a
             # warning-only fault.
             watched_vis = set(self._active_system_vis) | (self._active_claims or set())
-            for vi_name in sorted(new_fault_names):
-                if run_active and vi_name in watched_vis:
-                    continue  # handled as a run failure below, this same tick
-                record = current_faults[vi_name]
-                self._emit_fault_event(vi_name, record.kind, record.message)
 
             # Safety check — reuses this tick's snapshot (no second hardware
             # poll), called exactly once regardless of how many decisions
             # below consult it. An active operation's tolerated_safety_flags
-            # are resolved once here and applied uniformly to both EMERGENCY
-            # entry and the safety-hold registry: a tolerated flag (e.g.
-            # helium_low during a helium-fill operation) must not abort the
-            # very operation that exists to fix it, NOR hold the magnets
-            # that same operation claims and ramps to zero. Only the ACTIVE
+            # are resolved once here and applied uniformly by
+            # update_conditions() (a tolerated flag, e.g. helium_low during
+            # a helium-fill operation, must not hold the magnets that same
+            # operation claims and ramps to zero). Only the ACTIVE
             # procedure's tolerance applies here — a plain procedure (or
             # IDLE) tolerates nothing, unchanged.
             safety = self._station.check_safety(state)
-            tripped_flags = {flag for flag, tripped in safety.items() if tripped}
             tolerated: frozenset[str] = frozenset()
             if self._procedure is not None and (
                 getattr(self._procedure, "command_scope", "measurement") == "operation"
@@ -1563,83 +1604,88 @@ class Orchestrator(QObject):
                     getattr(self._procedure, "tolerated_safety_flags", frozenset())
                 )
 
-            # Safety-hold registry (the safety-hold standard, GLOSSARY.md):
-            # every VI whose safety_concerns() names a still-tripped,
-            # non-tolerated flag gets (or keeps) a hold — refreshed BEFORE
-            # the EMERGENCY decision below, so a VI concerned with a flag
-            # that also turns out critical (e.g. a magnet during quench)
-            # already carries its hold by the time _enter_emergency() runs.
-            self._station.update_safety_holds(safety, tolerated_flags=tolerated)
-            holds = self._station.vi_safety_holds()
+            # ONE unified condition pipeline (the System-Condition standard,
+            # core/conditions.py): get_state() above already recorded this
+            # tick's comm conditions; update_conditions() refreshes the
+            # safety-origin ones from this tick's check_safety() result,
+            # honoring tolerated_safety_flags exactly as before. A
+            # session-envelope violation is folded into the same list — same
+            # snapshot, same consequence as a tripped safety flag — gated
+            # exactly like today: not even computed once already EMERGENCY.
+            self._station.update_conditions(safety, tolerated_flags=tolerated)
+            conditions: list[Condition] = list(self._station.conditions().values())
+            if self._session_envelope is not None and self._state != OrchestratorState.EMERGENCY:
+                conditions.extend(
+                    envelope_conditions(self._session_envelope.check_state(state), time.time())
+                )
 
-            # One-shot standby on hold ONSET: only VIs whose hold is NEW
-            # this tick are told to standby, exactly like new-fault
-            # detection above — repeating it every tick while a hold
-            # persists would, for a persistent magnet, restart the full
-            # switch-heater warmup/cooldown cycle every few seconds.
-            new_holds = set(holds) - self._known_safety_holds
-            self._known_safety_holds = set(holds)
-            for vi_name in sorted(new_holds):
-                try:
-                    self._station.get_vi(vi_name).standby()
-                except Exception:
-                    logger.exception("standby failed on held VI '%s'", vi_name)
+            # Onset diff: ONE registry-key set replaces the old separate
+            # fault-VI and safety-hold-VI trackers. A NEW comm-origin key on
+            # an unwatched VI is a per-instrument warning (a watched VI's
+            # fault is handled by the run-failure verdict below instead,
+            # with a matching, more severe event, so it must not ALSO get a
+            # warning here). A NEW hold-severity SAFETY key (the safety-hold
+            # standard: some VI's safety_concerns() names a newly-tripped,
+            # non-tolerated flag) dispatches one standby() to every VI it
+            # holds — not repeated every tick the hold persists, and
+            # naturally re-fired if the key disappears (a tolerance window)
+            # and later reappears, since it is then "new" again. Comm
+            # conditions never get this standby dispatch — a stale VI was
+            # never told to stand by, only warned about or failed.
+            by_key = {c.key: c for c in conditions}
+            current_keys = set(by_key)
+            new_keys = current_keys - self._known_condition_keys
+            self._known_condition_keys = current_keys
+            for key in sorted(new_keys):
+                condition = by_key[key]
+                if condition.origin == "comm":
+                    vi_name = condition.source_vis[0]
+                    if run_active and vi_name in watched_vis:
+                        continue  # handled as a run failure below, this same tick
+                    self._emit_fault_event(vi_name, condition.kind, condition.message)
+                elif condition.origin == "safety" and condition.severity == "hold":
+                    for vi_name in sorted(condition.affected_vis or ()):
+                        try:
+                            self._station.get_vi(vi_name).standby()
+                        except Exception:
+                            logger.exception("standby failed on held VI '%s'", vi_name)
 
-            # EMERGENCY entry: only flags a VI declares CRITICAL via
-            # critical_safety_flags() (e.g. a magnet's quench) escalate to a
-            # station-wide EMERGENCY. Every other tripped flag (e.g.
-            # helium_low) is hold-only — it already stopped its concerned
-            # VIs above and never touches an instrument that isn't
-            # concerned with it.
-            critical = self._station.critical_safety_flags()
-            emergency_flags = sorted((tripped_flags & critical) - tolerated)
-            if emergency_flags and self._state != OrchestratorState.EMERGENCY:
-                sources = self._station.safety_flag_sources(state)
-                vi_names = tuple(sorted({
-                    vi_name for flag in emergency_flags for vi_name in sources.get(flag, [])
-                }))
-                self._enter_emergency(", ".join(emergency_flags), vi_names)
+            # Single verdict over every condition (comm + safety + envelope):
+            # decide() partitions by severity — critical -> emergency,
+            # hold -> held_vis, and (when a run is active) the
+            # alphabetically-first watched VI landing in held_vis ->
+            # run_failure. This collapses what used to be four separate
+            # checks (EMERGENCY entry, envelope violation, held-claimed run
+            # failure, stale-claimed run failure) into one policy call.
+            verdict = decide(conditions, watched_vis=watched_vis, run_active=run_active)
+
+            if verdict.emergency and self._state != OrchestratorState.EMERGENCY:
+                safety_conditions = [c for c in verdict.emergency if c.origin == "safety"]
+                envelope_conds = [c for c in verdict.emergency if c.origin == "envelope"]
+                reason_parts = []
+                vi_names: set[str] = set()
+                if safety_conditions:
+                    reason_parts.append(", ".join(sorted({c.kind for c in safety_conditions})))
+                    vi_names |= {vi for c in safety_conditions for vi in c.source_vis}
+                if envelope_conds:
+                    reason_parts.append("; ".join(c.message for c in envelope_conds))
+                self._enter_emergency("; ".join(reason_parts), tuple(sorted(vi_names)))
                 return  # emergency entry already cleaned up; nothing else this tick
 
-            # Session-envelope check — same snapshot, same consequence as a tripped
-            # safety flag: the envelope protects the mounted sample, so a live
-            # reading outside it is treated exactly like an instrument safety event.
-            if self._session_envelope is not None and self._state != OrchestratorState.EMERGENCY:
-                envelope_violations = self._session_envelope.check_state(state)
-                if envelope_violations:
-                    self._enter_emergency("; ".join(envelope_violations))
-                    return
-
-            # Held ACTIVE (claimed/system) VI during a run: the hold-scoped
-            # sibling of the stale-VI check below. A non-tolerated safety
-            # concern on a VI the run watches fails the run (IDLE, not
-            # global ERROR — every other instrument stays usable) exactly
-            # like a stale VI would, but for a physical safety reason rather
-            # than a communication failure.
-            if run_active:
-                for vi_name in sorted(watched_vis):
-                    hold = holds.get(vi_name)
-                    if hold is not None:
-                        reason = (
-                            f"safety hold on '{vi_name}' "
-                            f"({', '.join(sorted(hold.flags))})"
-                        )
-                        self._fail_run_for_fault(vi_name, reason=reason)
-                        return
-
-            # Stale ACTIVE (claimed/system) VI during a run: the
-            # run fails and its VI's fault stands in the Station registry,
-            # but — unlike the old behavior — the machine returns to IDLE
-            # rather than global ERROR, so every other instrument stays
-            # usable. A stale UNCLAIMED VI never reaches here at all: it was
-            # already handled (as a warning-severity fault, no state change)
-            # by the fault-transition block above.
-            if run_active:
-                for vi_name in sorted(watched_vis):
-                    vi_state = state.get(vi_name, {})
-                    if vi_state.get("_stale"):
-                        self._fail_run_for_fault(vi_name)
-                        return
+            # Run failure: the watched VI's hold — comm-origin (stale) or
+            # safety-origin (a non-tolerated concern) — that decide() found.
+            # Either way the run fails and returns to IDLE, not global
+            # ERROR: the blast radius is this one VI, every other instrument
+            # (including this one once it recovers) stays usable.
+            if verdict.run_failure is not None:
+                vi_name, condition = verdict.run_failure
+                if condition.origin == "safety":
+                    self._fail_run_for_fault(
+                        vi_name, reason=f"safety hold on '{vi_name}' ({condition.kind})"
+                    )
+                else:
+                    self._fail_run_for_fault(vi_name)
+                return
 
         # 3. GUI Actions — each queued action gets the SAME verdict
         # submit_vi_action() would give it right now, via the shared
@@ -1843,20 +1889,24 @@ class Orchestrator(QObject):
         """Return the state a finishing run should return to.
 
         A plain procedure always returns to IDLE. An operation returns to
-        EMERGENCY instead when it was started via the EMERGENCY carve-out, or
-        when any CRITICAL safety flag (``Station.critical_safety_flags()``)
-        — even one this operation tolerated — is still tripped at finish: a
-        tolerated flag was tolerated for THIS operation only, it was never
-        cleared. An operation could not reach this "done" path with a
-        non-tolerated CRITICAL flag active, because the tick safety check
-        would already have escalated it to EMERGENCY and aborted the run.
+        EMERGENCY instead when it was started via the EMERGENCY carve-out
+        (``_operation_started_from_emergency`` — a sticky bit set at start,
+        independent of what is tripped right now), or when ``Station.
+        active_critical_conditions()`` — the System-Condition standard's own
+        live registry, see ``core/conditions.py`` — is non-empty at finish.
+        Critical severity is never tolerated (scope follows from severity
+        alone, unconditionally), so a critical condition still active here
+        would already have been caught by this same tick's own EMERGENCY
+        check in ``_tick_body()`` before ``_finish_run()`` could ever be
+        reached; this is the defensive backstop for that invariant, not a
+        path expected to fire in the ordinary case.
 
         A merely hold-only flag (e.g. ``helium_low``) still tripped at
         finish does NOT send the operation to EMERGENCY: it never causes
-        EMERGENCY in the first place (see the safety-hold standard), and it
-        keeps governing its concerned VIs identically whether the machine
-        lands in IDLE or EMERGENCY — the common case for HeliumFillOperation
-        finishing before the level has fully recovered.
+        EMERGENCY in the first place (see the System-Condition standard),
+        and it keeps governing its concerned VIs identically whether the
+        machine lands in IDLE or EMERGENCY — the common case for
+        HeliumFillOperation finishing before the level has fully recovered.
 
         Args:
             procedure: The procedure/operation that just finished (captured
@@ -1869,9 +1919,7 @@ class Orchestrator(QObject):
             return OrchestratorState.IDLE
         if self._operation_started_from_emergency:
             return OrchestratorState.EMERGENCY
-        safety = self._station.check_safety()
-        critical = self._station.critical_safety_flags()
-        if any(safety.get(flag) for flag in critical):
+        if self._station.active_critical_conditions():
             return OrchestratorState.EMERGENCY
         return OrchestratorState.IDLE
 
@@ -2030,10 +2078,11 @@ class Orchestrator(QObject):
         """Fail the active run because its claimed/watched VI faulted or was held.
 
         Unlike ``_fail_to_error()``, this does NOT degrade to global ERROR:
-        the blast radius is known (one VI, already recorded in the Station's
-        fault registry by ``get_state()`` or its safety-hold registry by
-        ``update_safety_holds()``), so only the run ends — every other
-        instrument, including this one once it recovers, stays usable.
+        the blast radius is known (one VI, already recorded as a
+        comm- or safety-origin ``Condition`` in the Station's unified
+        registry — the System-Condition standard, ``core/conditions.py``),
+        so only the run ends — every other instrument, including this one
+        once it recovers, stays usable.
         Deliberately does NOT call ``run_queue()`` afterward: a run failing
         for an instrument fault or safety hold must not silently
         auto-continue to the next queued run, the same conservative
@@ -2071,10 +2120,10 @@ class Orchestrator(QObject):
         Args:
             reason: Human-readable description of the tripped condition(s)
                 (e.g. flag names or an envelope-violation message).
-            vi_names: The VI(s) that originated the condition (from
-                ``Station.safety_flag_sources()``), so the reason and
-                its ``ErrorEvent`` name the instrument. Empty when no
-                per-VI attribution is available (e.g. a session-envelope
+            vi_names: The VI(s) that originated the condition (from each
+                critical ``Condition.source_vis``), so the reason and its
+                ``ErrorEvent`` name the instrument. Empty when no per-VI
+                attribution is available (e.g. a session-envelope
                 violation, which is checked against a live reading rather
                 than a VI-tagged safety flag).
         """
@@ -2094,25 +2143,17 @@ class Orchestrator(QObject):
             logger.exception("Cleanup while entering EMERGENCY failed")
         self._emit_run_finished("failed", reason=f"EMERGENCY: {reason}")
         self._change_state(OrchestratorState.EMERGENCY)
-        # Concerned-VI shutdown, not a blanket standby_all(): a critical
-        # flag (vi_names non-empty, from safety_flag_sources()) always has
-        # per-VI attribution, and every VI concerned with it — per the
-        # safety-hold standard — was already stood down this same tick by
-        # the tick's hold-onset dispatch, BEFORE this method ever runs (see
-        # _tick_body()). An instrument unconcerned with the tripped flag
-        # (e.g. temperature control during a magnet quench) is deliberately
-        # left running. A session-envelope violation (vi_names empty — the
-        # one EMERGENCY cause with no safety-hold attribution at all, since
-        # it judges a live reading rather than a VI-tagged flag) still
-        # safes every instrument, because there is no "concerned VI" to
-        # narrow it to.
-        if not vi_names:
-            try:
-                self._station.standby_all()
-                self._error("Emergency shutdown executed.")
-            except Exception:
-                logger.exception("standby_all during emergency entry failed")
-                self._error("Emergency shutdown could not complete — check instruments.")
+        # Always a blanket standby_all(): critical severity is station-wide
+        # scope by construction (the System-Condition standard, core/
+        # conditions.py) — there is no "concerned VI" subset to narrow the
+        # shutdown to, whether the cause was a safety flag (vi_names
+        # attributed) or a session-envelope violation (vi_names empty).
+        try:
+            self._station.standby_all()
+            self._error("Emergency shutdown executed.")
+        except Exception:
+            logger.exception("standby_all during emergency entry failed")
+            self._error("Emergency shutdown could not complete — check instruments.")
 
     def _error(
         self,

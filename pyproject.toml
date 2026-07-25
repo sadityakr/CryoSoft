@@ -247,3 +247,19 @@ source_modules = [
     "cryosoft.troubleshoot",
 ]
 forbidden_modules = ["cryosoft.session"]
+
+[[tool.importlinter.contracts]]
+name = "C13: cryosoft.core.conditions is pure policy — stdlib only, nothing else in cryosoft"
+type = "forbidden"
+source_modules = ["cryosoft.core.conditions"]
+forbidden_modules = [
+    "cryosoft.drivers",
+    "cryosoft.virtual_instruments",
+    "cryosoft.procedures",
+    "cryosoft.gui",
+    "cryosoft.main",
+    "cryosoft.core.station",
+    "cryosoft.core.orchestrator",
+    "cryosoft.core.plan",
+    "cryosoft.core.data_manager",
+]

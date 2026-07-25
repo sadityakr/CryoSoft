@@ -3,9 +3,10 @@
 #   Unit tests for the pure operational-status record builder
 #   (cryosoft.core.operational_status.build_operational_status). No Qt, no
 #   hardware — verifies the record schema, gap/closing/eta computation, JSON
-#   serializability, and the unambiguous fault-code verdicts.
+#   serializability, the unambiguous fault-code verdicts, and the carried-through
+#   System-Condition standard registry (the ``conditions`` field).
 # entry_point: pytest tests/test_operational_status.py -v
-# last_updated: 2026-07-12
+# last_updated: 2026-07-26
 # ---
 
 """Tests for the operational-status record builder."""
@@ -16,6 +17,7 @@ import json
 
 import pytest
 
+from cryosoft.core.conditions import Condition
 from cryosoft.core.operational_status import RunFaultCode, build_operational_status
 
 
@@ -106,3 +108,89 @@ def test_record_is_json_serializable():
         ramp_info=ramp_info, prev_gaps={},
     )
     json.dumps(record)  # must not raise (the record is written to status.jsonl)
+
+
+def test_conditions_defaults_to_empty_list():
+    record, _ = build_operational_status(
+        orch_state="IDLE", elapsed_in_state_s=0.0, state={}, ramp_info={}, prev_gaps={},
+    )
+    assert record["conditions"] == []
+
+
+def test_conditions_station_wide_reports_affected_all():
+    condition = Condition(
+        key="envelope:field too high",
+        origin="envelope",
+        severity="critical",
+        kind="envelope",
+        source_vis=(),
+        affected_vis=None,
+        message="field too high",
+        since=100.0,
+    )
+    record, _ = build_operational_status(
+        orch_state="EMERGENCY", elapsed_in_state_s=0.0, state={}, ramp_info={}, prev_gaps={},
+        conditions=[condition],
+    )
+    assert record["conditions"] == [
+        {
+            "key": "envelope:field too high",
+            "origin": "envelope",
+            "severity": "critical",
+            "kind": "envelope",
+            "message": "field too high",
+            "affected": "all",
+            "since": 100.0,
+            "acknowledged": False,
+        }
+    ]
+
+
+def test_conditions_scoped_reports_sorted_affected_vis():
+    condition = Condition(
+        key="safety:helium_low",
+        origin="safety",
+        severity="hold",
+        kind="helium_low",
+        source_vis=("helium_level",),
+        affected_vis=frozenset({"magnet_z", "magnet_x"}),
+        message="helium low",
+        since=50.0,
+        acknowledged=True,
+    )
+    record, _ = build_operational_status(
+        orch_state="RAMPING", elapsed_in_state_s=1.0, state={}, ramp_info={}, prev_gaps={},
+        conditions=[condition],
+    )
+    entry = record["conditions"][0]
+    assert entry["affected"] == ["magnet_x", "magnet_z"]
+    assert entry["acknowledged"] is True
+
+
+def test_conditions_are_sorted_by_key():
+    c_b = Condition(
+        key="safety:b", origin="safety", severity="advisory", kind="b",
+        source_vis=(), affected_vis=None, message="b", since=1.0,
+    )
+    c_a = Condition(
+        key="safety:a", origin="safety", severity="advisory", kind="a",
+        source_vis=(), affected_vis=None, message="a", since=1.0,
+    )
+    record, _ = build_operational_status(
+        orch_state="IDLE", elapsed_in_state_s=0.0, state={}, ramp_info={}, prev_gaps={},
+        conditions=[c_b, c_a],
+    )
+    assert [c["key"] for c in record["conditions"]] == ["safety:a", "safety:b"]
+
+
+def test_conditions_are_json_serializable():
+    condition = Condition(
+        key="comm:magnet_z", origin="comm", severity="hold", kind="stale",
+        source_vis=("magnet_z",), affected_vis=frozenset({"magnet_z"}),
+        message="stale", since=1.0,
+    )
+    record, _ = build_operational_status(
+        orch_state="RAMPING", elapsed_in_state_s=1.0, state={}, ramp_info={}, prev_gaps={},
+        conditions=[condition],
+    )
+    json.dumps(record)  # must not raise
