@@ -9,7 +9,7 @@ procedure (it returns plans, it never touches a VI directly), but is a
 different request type: operation-scope command access, tolerated safety
 flags, verified postconditions, an optional (not required) data file, and
 higher submission priority than a queued measurement procedure. See
-`docs/plans/cryogenics-logbook.md` §2/§4 for the full design and
+`docs/plans/archive/cryogenics-logbook.md` §2/§4 for the full design and
 `OperationBase`'s own docstring for the Orchestrator adapter contract.
 
 ## Architecture layer
@@ -18,7 +18,7 @@ L4 (Operations — same layer as Procedures, a parallel contract). Sits above
 L3 (Orchestrator) and L2 (Station); an operation that wants an HDF5 dataset
 may still use `DataManager` (L5) exactly like a procedure does, but a small
 bounded in-memory series handed to the session layer via `run_summary()`
-(docs/plans/operation-concurrency-and-error-scoping.md §4 — e.g. the helium
+(docs/plans/archive/operation-concurrency-and-error-scoping.md §4 — e.g. the helium
 fill's level curve) is preferred when HDF5's column layout is not needed.
 
 ```
@@ -36,7 +36,7 @@ Every operation here is constructed with:
 - `person` (keyword, default `""`): who is performing the servicing action,
   recorded via `get_params()` so the servicing-log recorder can attribute it.
 - `**config`: the operation's own config keys (e.g. the helium fill's
-  `docs/plans/cryogenics-logbook.md` §9 `cryogenics:` block keys, or the
+  `docs/plans/archive/cryogenics-logbook.md` §9 `cryogenics:` block keys, or the
   sample change's `operations.sample_change:` block keys), each with a
   class-level default so the conformance suite's
   `test_operation_constructs_from_defaults` can build the class from a sim
@@ -124,7 +124,7 @@ operation) — the capability a plain procedure's plan does not have.
   dict into the run manifest's `summary` key on `run_finished` (duck-typed,
   default `{}`, guarded so a broken override can never block the run). A
   bounded time series should be handed off under the generic `"recording"`
-  key (docs/plans/unified-servicing-log-and-run-recording.md §3):
+  key (docs/plans/archive/unified-servicing-log-and-run-recording.md §3):
   `{"recording": {"unix_time": [...], "channels": {"<vi>.<value>": [...],
   ...}}, ...}` — `cryosoft.session.servicing_log.CryogenicsRecorder` writes
   it as this run's `recordings/<run_id>.json` sidecar and stamps that
@@ -133,7 +133,7 @@ operation) — the capability a plain procedure's plan does not have.
   implementation: `{"recording": {"unix_time": [...], "channels":
   {"<level_vi>.helium_pct": [...]}}, "start_pct": float, "end_pct": float}`.
 - A recording is built with `OperationBase`'s shared, opt-in recorder helper
-  (docs/plans/unified-servicing-log-and-run-recording.md §3): call
+  (docs/plans/archive/unified-servicing-log-and-run-recording.md §3): call
   `self._record_sample(unix_time, {channel_name: value, ...})` once per
   sample from `sample()` (every channel must be the SAME set on every call
   within one run — the shared time axis and every channel decimate
@@ -220,7 +220,7 @@ the postcondition or hardcode a GUI checkbox, an operation **declares** it:
 - `Orchestrator.confirm_operation(key)` (mirroring `finish_operation()`,
   same duck-typed-active-operation / `action_blocked` pattern) is the single
   entry point a caller uses to set it.
-- The GUI (Phase 5, `docs/plans/cryogenics-logbook.md` §10) renders one
+- The GUI (Phase 5, `docs/plans/archive/cryogenics-logbook.md` §10) renders one
   checkbox per declared `operator_confirmations` entry and forwards a click
   through `Orchestrator.confirm_operation(key)`. An unconfirmed key still
   fails its postcondition gate at the one-shot evaluation, so it surfaces in
@@ -240,5 +240,5 @@ already supports both, which is why this is declared, not hardcoded.
 | File | Responsibility | Key public API | Tests |
 |------|----------------|-----------------|-------|
 | `__init__.py` | Package marker | (none) | none |
-| `helium_fill.py` | Ramps every magnet (`Station.magnet_vi_names()`) to zero field, switches the level meter to FAST refresh, samples the helium level once per `sample_period_s` into the shared `OperationBase` recorder (no HDF5 file — plan operation-concurrency-and-error-scoping.md §4), and finishes once the level holds at/above `fill_target_pct` for `fill_complete_window_s` (or `max_fill_duration_s` elapses); restores SLOW refresh on standby/abort and verifies it via `postcondition_gates()`. Tolerates `helium_low` (its whole purpose). `readiness_conditions()` exposes one aggregate `zero_field` row; `next_due()` predicts time-to-`helium_warning_pct` from the panel-supplied consumption rate (plan §12). `run_summary()` hands the recorded level curve, in the generic `"recording"` shape (docs/plans/unified-servicing-log-and-run-recording.md §3), plus start/end level to the run manifest. `claimed_vi_names()` returns the configured level meter AND every magnet (it holds zero field as an invariant for the whole fill) — the VTI and everything else stays manually controllable during a fill. Not a **Hold phase** operation (`hold_for_operator` stays the default `False`) — its own completion condition ends the run, not the operator. | `HeliumFillOperation` | `tests/test_helium_fill.py`, `tests/test_operation_readiness.py`, `tests/test_operations.py` |
+| `helium_fill.py` | Ramps every magnet (`Station.magnet_vi_names()`) to zero field, switches the level meter to FAST refresh, samples the helium level once per `sample_period_s` into the shared `OperationBase` recorder (no HDF5 file — plan operation-concurrency-and-error-scoping.md §4), and finishes once the level holds at/above `fill_target_pct` for `fill_complete_window_s` (or `max_fill_duration_s` elapses); restores SLOW refresh on standby/abort and verifies it via `postcondition_gates()`. Tolerates `helium_low` (its whole purpose). `readiness_conditions()` exposes one aggregate `zero_field` row; `next_due()` predicts time-to-`helium_warning_pct` from the panel-supplied consumption rate (plan §12). `run_summary()` hands the recorded level curve, in the generic `"recording"` shape (docs/plans/archive/unified-servicing-log-and-run-recording.md §3), plus start/end level to the run manifest. `claimed_vi_names()` returns the configured level meter AND every magnet (it holds zero field as an invariant for the whole fill) — the VTI and everything else stays manually controllable during a fill. Not a **Hold phase** operation (`hold_for_operator` stays the default `False`) — its own completion condition ends the run, not the operator. | `HeliumFillOperation` | `tests/test_helium_fill.py`, `tests/test_operation_readiness.py`, `tests/test_operations.py` |
 | `sample_change.py` | "Verify the cryostat is safe to open": ramps every magnet (`Station.magnet_vi_names()`) to zero field and the configured VTI VI to `target_temperature_K` (default 300 K), opens the first switch VI (if any), and sends `standby` to every measurement VI (`Station.measurement_vi_names()`). The reference **Hold phase** operation (`hold_for_operator = True`, plan §1): once the ramps land, `step()` never returns `None` on its own — the run holds while `sample()` records the VTI temperature and every magnet's field once per `sample_period_s` (new config key, default 10 s) into the shared recorder — until the operator clicks Finish; `run_summary()` hands the series off as `{"recording": {...}}`. No data file. `postcondition_gates()`, evaluated once as the run ends, verifies `zero_field`, `heater_off` (only for magnets whose cached state exposes `switch_heater_state`), `vti_at_target`, and — for the only supported `needle_valve: manual` mode — an **operator confirmation** (`needle_valve_confirmed`). `tolerated_safety_flags` is empty. `readiness_conditions()` mirrors the same four checks as live checklist rows, shown mid-run by the Operations panel's ready banner because of `hold_for_operator`; `config_key = "sample_change"` (plan §12). `claimed_vi_names()` returns exactly the magnets, VTI, switch (if any), and measurement VIs it commands in `initiate()`. | `SampleChangeOperation` | `tests/test_sample_change.py`, `tests/test_operation_readiness.py` |

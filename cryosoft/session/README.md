@@ -8,8 +8,8 @@ envelope**), and which runs were produced (**RunRecord**, recorded
 automatically from the Orchestrator's run manifests). This is the layer the
 eLab publishing track (`session/eln/`, planned) and the Agent Gateway
 (`session/gateway/`, planned) will build on — see
-`docs/plans/session-management-layer.md` and
-`docs/plans/agent-native-architecture.md`.
+`docs/plans/archive/session-management-layer.md` and
+`docs/plans/archive/agent-native-architecture.md`.
 
 Also hosts the **Servicing Log** framework (`servicing_log.py`): per-setup,
 typed, human-editable logs of servicing events (**log kind**, e.g. the
@@ -17,12 +17,12 @@ legacy **cryogenics log**, now unifying into the flat **servicing** kind —
 see below), the machine-recorded **helium record**, the `CryogenicsRecorder`
 automatic writer, and (Phase 1 of the unification) a pure legacy-migration
 routine — independent of experiments, what technical staff consult and
-maintain. See `docs/plans/cryogenics-logbook.md` §3/§6,
-`docs/plans/unified-servicing-log-and-run-recording.md` §2 (the unification),
+maintain. See `docs/plans/archive/cryogenics-logbook.md` §3/§6,
+`docs/plans/archive/unified-servicing-log-and-run-recording.md` §2 (the unification),
 and the **Servicing log** / **Log kind** / **Cryogenics log** / **Entry
 revision** / **Helium record** / **Recording** entries in `GLOSSARY.md`.
 
-**Unification** (`docs/plans/unified-servicing-log-and-run-recording.md`):
+**Unification** (`docs/plans/archive/unified-servicing-log-and-run-recording.md`):
 the legacy `cryogenics` (editable, one entry per fill) and `operations`
 (machine-only audit trail) kinds are superseded by ONE flat `servicing`
 kind — every entry, regardless of what happened (`entry_kind`:
@@ -164,7 +164,7 @@ file-format change, not a routine edit.
   `delete_entry`; only `append_machine_entry` may write it.
 - **Log kinds are declarations.** Adding a servicing log for a new setup is
   one `LogKindSpec` in `DECLARED_LOG_KINDS`, never new store or GUI code —
-  see `LogKindSpec`'s docstring and `docs/plans/cryogenics-logbook.md` §6.1.
+  see `LogKindSpec`'s docstring and `docs/plans/archive/cryogenics-logbook.md` §6.1.
 - **Operation data hand-off without a file** (docs/plans/operation-
   concurrency-and-error-scoping.md §4): `CryogenicsRecorder.on_run_finished`
   reads the duck-typed `run_summary()` result off the Orchestrator's

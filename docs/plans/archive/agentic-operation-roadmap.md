@@ -1,5 +1,16 @@
 # Roadmap: Agentic Operation & Instrumentation Debugging
 
+> **ARCHIVED 2026-07-25 — SUPERSEDED BY
+> [`../agentic-instrumentation-framework.md`](../agentic-instrumentation-framework.md).**
+> Retained as the field record of the 2026-07-22 Keithley 6221 `-221`
+> diagnosis, which remains the strongest evidence for the safe-state work.
+> Its Phase 1 (error-queue checking, persistent troubleshoot session), Phase
+> 2 (`safe_shutdown()`, shared-instrument conformance test), and Phase 4
+> (standards + handbook) are carried forward as framework **Phase 3**, moved
+> earlier because they gate the agent write path. Its Phase 3a
+> (`InstrumentContext` snapshot/rollback) and 3b (driver proxy diagnostic
+> events) are **explicitly deferred** with reasons in framework §5.
+
 **Author:** Claude Code (diagnostic session 2026-07-22)  
 **Status:** Design document for discussion  
 **Scope:** Improvements needed for safe parallel agent execution and rapid hardware diagnostics  

@@ -1,11 +1,17 @@
 # Operation concurrency and per-instrument error scoping
 
+> **ARCHIVED 2026-07-25 — IMPLEMENTED 2026-07-22.** All four phases landed
+> with a green harness. This is the **normative reference for claims, the
+> admission predicate, runtime fault tiering, and hard status separation**,
+> cited 27 times from shipped code and tests. Do not plan new work from it;
+> see [`../agentic-instrumentation-framework.md`](../agentic-instrumentation-framework.md).
+
 Status: design agreed 2026-07-21 (Aditya + Claude); rev. 2 same day
 (immediate finish, hard ProcedureWindow separation). IMPLEMENTED — all four
 phases landed on branch `claude/ops-concurrency` (2026-07-21/22), each with
 a green harness. Known follow-up: `operations_panel.py` still passes the
 retired `data_directory` kwarg into the fill factory (silently ignored).
-Builds on `docs/plans/cryogenics-logbook.md` (the operations design). This plan
+Builds on `docs/plans/archive/cryogenics-logbook.md` (the operations design). This plan
 does not change the operation/procedure class split; it changes what an active
 run blocks and what an error blocks.
 

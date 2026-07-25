@@ -125,7 +125,7 @@ driven by the same Orchestrator tick loop — but carries operation-scope
 command access, tolerated safety flags, a verified `postcondition_gates()`
 phase, and higher submission priority; it is never returned among the
 measurement procedures discovered from this folder. See
-`docs/plans/cryogenics-logbook.md` §2/§4 for the design and
+`docs/plans/archive/cryogenics-logbook.md` §2/§4 for the design and
 `procedures/operations/README.md` for its own entry/exit/interface contract.
 
 ## How to add a new module
