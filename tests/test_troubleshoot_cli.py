@@ -25,6 +25,11 @@ from tests.test_troubleshoot_engine import (
     make_config,
 )
 
+# Captured before the autouse isolated_transcript fixture below patches
+# cli._transcript_dir per-test, so a test can restore the real resolver
+# delegation and check it against CRYOSOFT_LOG_DIR.
+_REAL_TRANSCRIPT_DIR = cli._transcript_dir
+
 
 @pytest.fixture(autouse=True)
 def isolated_transcript(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -241,3 +246,17 @@ def test_transcript_appends_one_jsonl_line_per_invocation(
     assert first["ok"] is True and first["argv"][0] == "idn"
     assert second["ok"] is False and "error" in second["payload"]
     assert "ts" in first
+
+
+def test_transcript_dir_resolves_through_log_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sim_config, capsys
+) -> None:
+    """`_transcript_dir()` delegates to log_directory(), so CRYOSOFT_LOG_DIR
+    steers both the transcript and the `status` command's default log path."""
+    monkeypatch.setattr(cli, "_transcript_dir", _REAL_TRANSCRIPT_DIR)
+    monkeypatch.setenv("CRYOSOFT_LOG_DIR", str(tmp_path))
+
+    cli.main(["idn", "meter", "--config", sim_config, "--json"])
+
+    assert (tmp_path / "troubleshoot.jsonl").exists()
+    assert cli._transcript_dir() == tmp_path
