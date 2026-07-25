@@ -5,7 +5,11 @@
 #   structured logging AND declarative limit enforcement (the control-validation
 #   standard: control_limits class attr + self._limits populated from config
 #   init_params; out-of-range @control calls raise CryoSoftSafetyError before
-#   any hardware command). Also get_state() auto-build, evaluate_safety() hook,
+#   any hardware command). Also get_state() auto-build, the safety-hold
+#   standard (safety_concerns() declares which flags a VI depends on,
+#   critical_safety_flags() declares which flags THIS VI reports via
+#   evaluate_safety() force a station-wide EMERGENCY rather than a per-VI
+#   hold — see Station.update_safety_holds()/critical_safety_flags()),
 #   and typed sub-bases for each VI category (MagnetBase,
 #   TemperatureControllerBase, LevelMeterBase, RotatorBase,
 #   MeasurementInstrumentBase, DCMeasurementBase). MeasurementInstrumentBase also defines the
@@ -347,14 +351,70 @@ class BaseVirtualInstrument:
 
         return get_control_specs(getattr(self, method_name))
 
+    def safety_concerns(self) -> set[str]:
+        """Return the safety flags this VI's operation depends on.
+
+        The consumer half of the safety-hold standard (GLOSSARY.md's
+        **Safety hold**; see ``Station.update_safety_holds()``): a VI
+        declares which flags — named exactly like ``evaluate_safety()``'s
+        keys, e.g. ``"quench"``, ``"helium_low"`` — must NOT be tripped for
+        this VI to operate safely. When any of them trips (on ANY VI's
+        ``evaluate_safety()``, not necessarily this one's own), the Station
+        records a hold against this VI, and the Orchestrator refuses manual
+        control of it and fails any run that claims it, without touching a
+        VI whose ``safety_concerns()`` does not overlap.
+
+        This is a static declaration of an invariant, not a query of current
+        state — a magnet always depends on helium, independent of today's
+        level. The default (empty set) means this VI is never held by any
+        safety flag.
+
+        Returns:
+            Set of safety flag names this VI depends on, e.g.
+            ``{"quench", "helium_low"}``.
+        """
+        return set()
+
+    def critical_safety_flags(self) -> set[str]:
+        """Return the flags THIS VI reports via ``evaluate_safety()`` that are critical.
+
+        The producer half of the safety-hold standard: a flag is "critical"
+        when its mere occurrence — anywhere in the station, regardless of
+        what is currently running or what any operation declares in its
+        ``tolerated_safety_flags`` — is dangerous enough to warrant an
+        unconditional, station-wide EMERGENCY (full hardware hold, the
+        active run aborted, an operator acknowledgment required to
+        continue). ``Station.critical_safety_flags()`` unions this across
+        every registered VI once per tick to decide EMERGENCY entry; every
+        flag NOT listed here by its reporting VI is "hold-only" — it stops
+        only the VIs whose ``safety_concerns()`` include it (see
+        ``Station.update_safety_holds()``), never the whole station, and an
+        operation may declare it tolerable via ``tolerated_safety_flags``.
+
+        Declaring criticality here — on the VI that actually raises the flag
+        via ``evaluate_safety()`` — keeps the classification a property of
+        the physical condition, not a hardcoded literal in the Orchestrator:
+        adding a new critical condition means overriding this method on the
+        VI that detects it, nothing else.
+
+        Returns:
+            Set of flag names, drawn from this VI's own
+            ``evaluate_safety()`` keys, that are critical. Empty (the
+            default) means every flag this VI reports is hold-only.
+        """
+        return set()
+
     def evaluate_safety(self, state: dict) -> dict[str, bool]:
         """Judge this VI's own polled state for safety conditions.
 
         Called by ``Station.check_safety()`` every monitor tick with the
         fragment of the snapshot belonging to this VI. Must NOT poll
         hardware — decide from *state* (and internal buffers filled during
-        the poll). Any flag returned True escalates the Orchestrator to
-        EMERGENCY, so only report conditions that warrant a full shutdown.
+        the poll). A flag returned True here is dispatched by the
+        safety-hold standard: it holds every VI whose ``safety_concerns()``
+        names it (see ``Station.update_safety_holds()``), and additionally
+        escalates the whole station to EMERGENCY iff this VI's
+        ``critical_safety_flags()`` also names it.
 
         Args:
             state: This VI's slice of the get_state() snapshot,
@@ -382,6 +442,19 @@ class MagnetBase(BaseVirtualInstrument):
     setpoint_unit: str = "T"
     display_label: str = "magnet"
 
+    def safety_concerns(self) -> set[str]:
+        """A magnet cannot ramp without helium, and must hold on a quench."""
+        return {"quench", "helium_low"}
+
+    def critical_safety_flags(self) -> set[str]:
+        """A quench (reported by a concrete magnet's ``evaluate_safety()``) is critical.
+
+        Declared here, on the category all quench-capable VIs share, so a
+        new magnet VI inherits the correct classification the moment it
+        reports ``"quench"`` — it need not redeclare it.
+        """
+        return {"quench"}
+
 
 class TemperatureControllerBase(BaseVirtualInstrument):
     """Base class for all temperature-controller VIs."""
@@ -389,6 +462,10 @@ class TemperatureControllerBase(BaseVirtualInstrument):
     setpoint_label: str = "temperature"
     setpoint_unit: str = "K"
     display_label: str = "temperature"
+
+    def safety_concerns(self) -> set[str]:
+        """Temperature control is unaffected by helium level — only a quench holds it."""
+        return {"quench"}
 
 
 class LevelMeterBase(BaseVirtualInstrument):
@@ -402,6 +479,10 @@ class RotatorBase(BaseVirtualInstrument):
     setpoint_label: str = "sample angle"
     setpoint_unit: str = "deg"
     display_label: str = "rotator"
+
+    def safety_concerns(self) -> set[str]:
+        """A rotator is unaffected by helium level — only a quench holds it."""
+        return {"quench"}
 
 
 class MeasurementInstrumentBase(BaseVirtualInstrument):

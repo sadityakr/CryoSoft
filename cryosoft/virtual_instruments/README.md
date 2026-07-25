@@ -28,6 +28,15 @@ a `drivers` dict of role → driver instance (e.g. `{"main": ...}`,
   ParamSpec}` (widget shape, unit, bounds, choices) and `panel=` (default
   monitor-card placement — see "GUI presentation" below).
 - `evaluate_safety()` interlock verdicts reported to `Station.check_safety()`.
+  Two companion declarations classify those flags (GLOSSARY.md's **Safety
+  concern** / **Critical safety flag** / **Safety hold**): `safety_concerns()`
+  says which flags — by name, anyone's — this VI depends on to operate
+  safely (overridden by `MagnetBase`/`TemperatureControllerBase`/
+  `RotatorBase`; a plain VI declares none); `critical_safety_flags()` says
+  which of the flags THIS VI itself reports are critical enough to force a
+  station-wide EMERGENCY rather than a per-VI hold (only `MagnetBase`'s
+  `"quench"` today). Both are static, declarative sets — never a live
+  reading — aggregated by the Station once per tick with no extra poll.
 - For rampable VIs, the `start_ramp` / `advance_ramp` / `ramp_status` /
   `stop_ramp` generator API the Orchestrator drives each tick.
 
@@ -106,7 +115,9 @@ Shared contracts at the root; concrete classes live in the subfolders.
   `TemperatureControllerBase`, `LevelMeterBase`, `RotatorBase`,
   `MeasurementInstrumentBase`, `DCMeasurementBase`. Provides `__init_subclass__` auto-wrapping of
   `@monitored`/`@control` (structured logging + declarative limit enforcement),
-  `get_state()`, `evaluate_safety()`, and the full measurement-method standard in
+  `get_state()`, `evaluate_safety()`/`safety_concerns()`/`critical_safety_flags()`
+  (the safety-hold standard — GLOSSARY.md's **Safety hold**), and the full
+  measurement-method standard in
   `MeasurementInstrumentBase`'s docstring. (`@monitored`/`@control` decorators
   themselves are defined in `cryosoft.core.decorators`.) tests:
   `tests/test_conformance.py`, `tests/test_l1_virtual_instruments.py`.

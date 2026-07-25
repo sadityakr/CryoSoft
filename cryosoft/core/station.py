@@ -138,6 +138,44 @@ class FaultRecord:
     acknowledged: bool = False
 
 
+@dataclass(frozen=True)
+class SafetyHoldRecord:
+    """Record of a safety hold on a VI CONCERNED with a currently-tripped flag.
+
+    The safety-scoped sibling of :class:`FaultRecord`: a fault describes a
+    comms failure discovered by polling; a ``SafetyHoldRecord`` describes a
+    VI whose ``safety_concerns()`` (see ``virtual_instruments.base.
+    BaseVirtualInstrument``) names a flag some VI's ``evaluate_safety()``
+    currently reports as tripped. Populated by ``update_safety_holds()``,
+    called once per monitor tick from the same snapshot ``check_safety()``
+    already judged — no extra poll. Held VIs are refused manual control
+    (``Orchestrator._manual_action_admissible()``) and fail any run that
+    claims them, exactly like a fault, but recover automatically the moment
+    the flag clears — there is no hardware to retry, only a physical
+    condition to wait out.
+
+    Attributes:
+        vi_name: The concerned VI's registered name (NOT the VI that
+            reported the flag — see ``safety_flag_sources()`` for that).
+        flags: The safety flag name(s) causing this hold, e.g.
+            ``frozenset({"helium_low"})`` — more than one when this VI is
+            concerned with several flags tripped at once.
+        since: Unix time this hold was first recorded. Preserved across a
+            change in which flags compose the hold, as long as it stays
+            continuously active — the same ongoing incident, exactly like
+            ``FaultRecord``'s ``"stale"`` -> ``"disconnected"`` escalation.
+        acknowledged: Whether the operator has acknowledged this hold
+            (calms the operator UI), mirroring ``FaultRecord.acknowledged``.
+            Does NOT survive recovery — a cleared hold has nothing left to
+            acknowledge.
+    """
+
+    vi_name: str
+    flags: frozenset[str]
+    since: float
+    acknowledged: bool = False
+
+
 class Station:
     """Runtime registry and coordinator of all Virtual Instruments.
 
@@ -168,6 +206,12 @@ class Station:
         # since gone stale/disconnected during polling. Distinct from
         # _offline_vis (never connected at build time).
         self._vi_faults: dict[str, FaultRecord] = {}
+        # Safety-hold registry — a VI CONCERNED with a currently-tripped
+        # safety flag (see safety_concerns()/update_safety_holds()).
+        # Distinct from _vi_faults: a hold is a physical safety condition,
+        # not a communication failure, and clears itself once the
+        # condition recovers rather than needing a retry.
+        self._vi_safety_holds: dict[str, SafetyHoldRecord] = {}
 
     # ------------------------------------------------------------------
     # VI registration and access
@@ -880,6 +924,118 @@ class Station:
             except Exception:
                 logger.exception("evaluate_safety failed on VI '%s'", vi_name)
         return sources
+
+    def get_concerned_vis(self, flag: str) -> list[str]:
+        """Return the names of every VI whose ``safety_concerns()`` names *flag*.
+
+        The consumer-side lookup the safety-hold standard is built on: when
+        *flag* trips, these are the VIs a hold applies to — never the VI
+        that reported the flag (see ``safety_flag_sources()`` for that).
+
+        Args:
+            flag: The safety flag name, e.g. ``"helium_low"``.
+
+        Returns:
+            VI names, in registration order, whose ``safety_concerns()``
+            includes *flag*. Empty if no VI depends on it.
+        """
+        return [
+            vi_name
+            for vi_name, vi in self._virtual_instruments.items()
+            if flag in vi.safety_concerns()
+        ]
+
+    def critical_safety_flags(self) -> set[str]:
+        """Return the union of every registered VI's declared ``critical_safety_flags()``.
+
+        A purely declarative aggregation (mirrors ``check_safety()``'s
+        OR-combination, but over static classifications rather than live
+        readings — no hardware poll, no state snapshot needed). This is how
+        the Orchestrator learns which tripped flags force EMERGENCY without
+        hardcoding a flag-name literal of its own: the classification lives
+        entirely on the VI that reports the flag via ``evaluate_safety()``.
+
+        Returns:
+            Set of flag names that force a station-wide EMERGENCY when any
+            VI's ``evaluate_safety()`` reports them tripped.
+        """
+        critical: set[str] = set()
+        for vi in self._virtual_instruments.values():
+            critical |= vi.critical_safety_flags()
+        return critical
+
+    def update_safety_holds(
+        self, safety: dict[str, bool], *, tolerated_flags: frozenset[str] = frozenset()
+    ) -> None:
+        """Refresh the safety-hold registry from this tick's ``check_safety()`` result.
+
+        The write side of the safety-hold standard (GLOSSARY.md's **Safety
+        hold**): every VI whose ``safety_concerns()`` names a flag that is
+        tripped in *safety* and not in *tolerated_flags* gets (or keeps) a
+        hold; every other VI's hold is cleared — including one whose only
+        tripped concern just became tolerated. A VI concerned with more than
+        one simultaneously-tripped flag gets one record naming all of them.
+
+        Args:
+            safety: The ``{flag: bool}`` dict ``check_safety()`` already
+                computed this tick, passed in rather than recomputed here —
+                the Orchestrator calls ``check_safety()`` exactly once per
+                tick regardless of how many places consult the result.
+            tolerated_flags: Flags to treat as untripped for hold purposes —
+                the active run's own ``tolerated_safety_flags`` (only an
+                operation declares any; empty when a plain procedure or no
+                run is active). Resolved by the Orchestrator and passed in:
+                the Station never imports the procedure/operation layer
+                (contract C8) and has no notion of "the active run" itself.
+                This is what lets an operation like the helium fill —
+                tolerating ``helium_low`` while it claims and ramps every
+                magnet to zero — run to completion instead of being held on
+                (and having its own run failed for) the very condition it
+                exists to fix.
+        """
+        tripped = {flag for flag, is_tripped in safety.items() if is_tripped} - tolerated_flags
+
+        concerned: dict[str, set[str]] = {}
+        for flag in tripped:
+            for vi_name in self.get_concerned_vis(flag):
+                concerned.setdefault(vi_name, set()).add(flag)
+
+        for vi_name in list(self._vi_safety_holds):
+            if vi_name not in concerned:
+                del self._vi_safety_holds[vi_name]
+
+        for vi_name, flags in concerned.items():
+            existing = self._vi_safety_holds.get(vi_name)
+            since = existing.since if existing is not None else time.time()
+            acknowledged = existing.acknowledged if existing is not None else False
+            self._vi_safety_holds[vi_name] = SafetyHoldRecord(
+                vi_name, frozenset(flags), since, acknowledged
+            )
+
+    def vi_safety_holds(self) -> dict[str, SafetyHoldRecord]:
+        """Return the current safety-hold registry, ``{vi_name: SafetyHoldRecord}``."""
+        return dict(self._vi_safety_holds)
+
+    def acknowledge_safety_hold(self, vi_name: str) -> bool:
+        """Mark a VI's active safety hold as acknowledged (calms the operator UI).
+
+        Mirrors ``acknowledge_fault()``. Acknowledging does not lift the
+        hold — manual control stays refused (an operator needing to
+        intervene on a held VI itself uses the EMERGENCY manual-override
+        path, not this) — it only marks the condition as seen.
+
+        Args:
+            vi_name: Name of the held VI.
+
+        Returns:
+            True if a hold existed and was acknowledged; False if the VI
+            has no active hold.
+        """
+        existing = self._vi_safety_holds.get(vi_name)
+        if existing is None:
+            return False
+        self._vi_safety_holds[vi_name] = replace(existing, acknowledged=True)
+        return True
 
     # ------------------------------------------------------------------
     # Measurement command dispatch

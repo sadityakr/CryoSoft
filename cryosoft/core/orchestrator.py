@@ -336,6 +336,13 @@ class Orchestrator(QObject):
         # transition-detection cache.
         self._known_fault_vis: set[str] = set()
 
+        # Safety-hold registry tracking (the safety-hold standard,
+        # GLOSSARY.md): mirrors _known_fault_vis exactly, but for
+        # Station.vi_safety_holds() — detects a NEW hold (dispatch one
+        # standby(), not one per tick) versus one already active. Station
+        # is the source of truth; this is only a transition-detection cache.
+        self._known_safety_holds: set[str] = set()
+
         self._pre_pause_state = OrchestratorState.IDLE
         self._paused_wait_elapsed = 0.0
         # Last targets dispatched to the Station — re-dispatched on resume,
@@ -797,12 +804,20 @@ class Orchestrator(QObject):
     def acknowledge_emergency(self) -> None:
         """Acknowledge an EMERGENCY: unlock manual control, or return to IDLE.
 
-        If the safety condition is still active, acknowledging cannot return
-        to IDLE (the next tick would bounce straight back), but it does
-        unlock ``submit_vi_action`` for manual front-panel recovery — e.g.
-        cycling a switch heater by hand — while remaining in EMERGENCY.
-        Starting a procedure or operation stays refused throughout: those
-        gates check the state itself, which is unchanged here.
+        If the condition that triggered EMERGENCY (a critical safety flag —
+        ``BaseVirtualInstrument.critical_safety_flags()`` — or a session-
+        envelope violation) is still active, acknowledging cannot return to
+        IDLE (the next tick would bounce straight back), but it does unlock
+        manual control of held VIs (via ``_manual_action_admissible()``'s
+        override bypass) for front-panel recovery — e.g. cycling a switch
+        heater by hand — while remaining in EMERGENCY. Starting a procedure
+        or operation stays refused throughout: those gates check the state
+        itself, which is unchanged here.
+
+        A merely hold-only flag (e.g. ``helium_low``) never blocks this
+        return: it was never why EMERGENCY was entered, and it keeps
+        governing its concerned VIs identically in IDLE (the safety-hold
+        standard applies in every state, not only EMERGENCY).
 
         Once the condition has cleared, acknowledging again (the same
         button) returns to IDLE and relocks the override for the next
@@ -811,10 +826,11 @@ class Orchestrator(QObject):
         if self._state != OrchestratorState.EMERGENCY:
             return
         safety = self._station.check_safety()
-        active = sorted(flag for flag, tripped in safety.items() if tripped)
+        critical = self._station.critical_safety_flags()
+        active = sorted(flag for flag in critical if safety.get(flag))
         # A still-violated session envelope blocks the return to IDLE for the
-        # same reason a safety flag does — the next tick would bounce straight
-        # back.
+        # same reason a critical safety flag does — the next tick would
+        # bounce straight back.
         if self._session_envelope is not None:
             active.extend(self._session_envelope.check_state(self._station.cached_state))
         if active:
@@ -898,12 +914,23 @@ class Orchestrator(QObject):
            ``retry_fault()`` succeeds. Checked first, and here (not as a
            parallel check) so every caller (``submit_vi_action()``, the
            drain gate) inherits it for free.
-        1. IDLE, or a manual ramp (RAMPING with no active run), or EMERGENCY
-           once ``acknowledge_emergency()`` unlocked manual override: always
-           admitted (unchanged from before claims existed).
-        2. ERROR, or EMERGENCY without the override: always refused, naming
-           the state.
-        3. Otherwise a run is active. Admitted iff the active run's
+        0b. A VI with an active safety hold (the safety-hold standard: its
+            ``safety_concerns()`` names a currently-tripped, non-tolerated
+            flag — see ``Station.update_safety_holds()``) is refused next,
+            ALSO regardless of state, UNLESS ``acknowledge_emergency()`` has
+            unlocked the manual override — the operator's way to intervene
+            on the held instrument itself (e.g. cycling a switch heater by
+            hand after a quench). A VI with no hold is entirely unaffected
+            by this rule, whatever flags are tripped elsewhere.
+        1. IDLE, or a manual ramp (RAMPING with no active run): always
+           admitted.
+        2. EMERGENCY: always admitted from here — a VI concerned with the
+           tripped critical flag was already refused by rule 0b above; one
+           that reaches this point is either unconcerned with it (e.g.
+           temperature control during a magnet quench) or was let through
+           by the manual override, and is free to operate.
+        3. ERROR: always refused, naming the state.
+        4. Otherwise a run is active. Admitted iff the active run's
            ``claimed_vi_names()`` is not "claim everything" (``None``) AND
            *vi_name* is not in it. A claimed VI, or a run that claims
            everything (every procedure today), is refused naming the owning
@@ -923,6 +950,13 @@ class Orchestrator(QObject):
                 f"Cannot control {vi_name}: instrument fault ({fault.kind}) — "
                 f"{fault.message}. Retry the instrument or wait for it to recover."
             )
+        hold = self._station.vi_safety_holds().get(vi_name)
+        if hold is not None and not self._emergency_manual_override:
+            return False, (
+                f"Cannot control {vi_name}: safety hold active "
+                f"({', '.join(sorted(hold.flags))}). Resolve the condition, "
+                "or acknowledge the emergency for manual recovery."
+            )
         if self._state == OrchestratorState.IDLE:
             return True, ""
         manual_ramping = (
@@ -930,12 +964,9 @@ class Orchestrator(QObject):
         )
         if manual_ramping:
             return True, ""
-        emergency_override = (
-            self._state == OrchestratorState.EMERGENCY and self._emergency_manual_override
-        )
-        if emergency_override:
+        if self._state == OrchestratorState.EMERGENCY:
             return True, ""
-        if self._state in (OrchestratorState.ERROR, OrchestratorState.EMERGENCY):
+        if self._state == OrchestratorState.ERROR:
             return False, (
                 f"Cannot control {vi_name}: procedure is running in state {self._state.name}"
             )
@@ -957,11 +988,12 @@ class Orchestrator(QObject):
     def submit_vi_action(self, vi_name: str, method_name: str, **kwargs: Any) -> None:
         """Submit a GUI action to a specific VI.
 
-        Admission is decided by ``_manual_action_admissible()``:
-        IDLE / a manual ramp / an EMERGENCY manual override always admit;
-        ERROR / EMERGENCY (without override) always refuse; otherwise a run
-        is active and the action is admitted iff *vi_name* is not one of the
-        active run's claimed VIs.
+        Admission is decided by ``_manual_action_admissible()``: a faulted
+        or safety-held VI is always refused (the latter unless the
+        EMERGENCY manual override is unlocked); IDLE / a manual ramp /
+        EMERGENCY (for an unheld VI) always admit; ERROR always refuses;
+        otherwise a run is active and the action is admitted iff *vi_name*
+        is not one of the active run's claimed VIs.
         """
         admitted, reason = self._manual_action_admissible(vi_name)
         if not admitted:
@@ -1511,30 +1543,62 @@ class Orchestrator(QObject):
                 record = current_faults[vi_name]
                 self._emit_fault_event(vi_name, record.kind, record.message)
 
-            # Safety check — reuses this tick's snapshot (no second hardware poll).
-            # An active operation's tolerated_safety_flags are
-            # subtracted before deciding on EMERGENCY: a tolerated flag (e.g.
+            # Safety check — reuses this tick's snapshot (no second hardware
+            # poll), called exactly once regardless of how many decisions
+            # below consult it. An active operation's tolerated_safety_flags
+            # are resolved once here and applied uniformly to both EMERGENCY
+            # entry and the safety-hold registry: a tolerated flag (e.g.
             # helium_low during a helium-fill operation) must not abort the
-            # very operation that exists to fix it. A non-tolerated flag
-            # (e.g. quench) still enters EMERGENCY exactly as for any
-            # procedure. Only the ACTIVE procedure's tolerance applies here —
-            # a plain procedure (or IDLE) tolerates nothing, unchanged.
+            # very operation that exists to fix it, NOR hold the magnets
+            # that same operation claims and ramps to zero. Only the ACTIVE
+            # procedure's tolerance applies here — a plain procedure (or
+            # IDLE) tolerates nothing, unchanged.
             safety = self._station.check_safety(state)
             tripped_flags = {flag for flag, tripped in safety.items() if tripped}
+            tolerated: frozenset[str] = frozenset()
             if self._procedure is not None and (
                 getattr(self._procedure, "command_scope", "measurement") == "operation"
             ):
                 tolerated = frozenset(
                     getattr(self._procedure, "tolerated_safety_flags", frozenset())
                 )
-                tripped_flags = tripped_flags - tolerated
-            active_flags = sorted(tripped_flags)
-            if active_flags and self._state != OrchestratorState.EMERGENCY:
+
+            # Safety-hold registry (the safety-hold standard, GLOSSARY.md):
+            # every VI whose safety_concerns() names a still-tripped,
+            # non-tolerated flag gets (or keeps) a hold — refreshed BEFORE
+            # the EMERGENCY decision below, so a VI concerned with a flag
+            # that also turns out critical (e.g. a magnet during quench)
+            # already carries its hold by the time _enter_emergency() runs.
+            self._station.update_safety_holds(safety, tolerated_flags=tolerated)
+            holds = self._station.vi_safety_holds()
+
+            # One-shot standby on hold ONSET: only VIs whose hold is NEW
+            # this tick are told to standby, exactly like new-fault
+            # detection above — repeating it every tick while a hold
+            # persists would, for a persistent magnet, restart the full
+            # switch-heater warmup/cooldown cycle every few seconds.
+            new_holds = set(holds) - self._known_safety_holds
+            self._known_safety_holds = set(holds)
+            for vi_name in sorted(new_holds):
+                try:
+                    self._station.get_vi(vi_name).standby()
+                except Exception:
+                    logger.exception("standby failed on held VI '%s'", vi_name)
+
+            # EMERGENCY entry: only flags a VI declares CRITICAL via
+            # critical_safety_flags() (e.g. a magnet's quench) escalate to a
+            # station-wide EMERGENCY. Every other tripped flag (e.g.
+            # helium_low) is hold-only — it already stopped its concerned
+            # VIs above and never touches an instrument that isn't
+            # concerned with it.
+            critical = self._station.critical_safety_flags()
+            emergency_flags = sorted((tripped_flags & critical) - tolerated)
+            if emergency_flags and self._state != OrchestratorState.EMERGENCY:
                 sources = self._station.safety_flag_sources(state)
                 vi_names = tuple(sorted({
-                    vi_name for flag in active_flags for vi_name in sources.get(flag, [])
+                    vi_name for flag in emergency_flags for vi_name in sources.get(flag, [])
                 }))
-                self._enter_emergency(", ".join(active_flags), vi_names)
+                self._enter_emergency(", ".join(emergency_flags), vi_names)
                 return  # emergency entry already cleaned up; nothing else this tick
 
             # Session-envelope check — same snapshot, same consequence as a tripped
@@ -1545,6 +1609,23 @@ class Orchestrator(QObject):
                 if envelope_violations:
                     self._enter_emergency("; ".join(envelope_violations))
                     return
+
+            # Held ACTIVE (claimed/system) VI during a run: the hold-scoped
+            # sibling of the stale-VI check below. A non-tolerated safety
+            # concern on a VI the run watches fails the run (IDLE, not
+            # global ERROR — every other instrument stays usable) exactly
+            # like a stale VI would, but for a physical safety reason rather
+            # than a communication failure.
+            if run_active:
+                for vi_name in sorted(watched_vis):
+                    hold = holds.get(vi_name)
+                    if hold is not None:
+                        reason = (
+                            f"safety hold on '{vi_name}' "
+                            f"({', '.join(sorted(hold.flags))})"
+                        )
+                        self._fail_run_for_fault(vi_name, reason=reason)
+                        return
 
             # Stale ACTIVE (claimed/system) VI during a run: the
             # run fails and its VI's fault stands in the Station registry,
@@ -1763,11 +1844,19 @@ class Orchestrator(QObject):
 
         A plain procedure always returns to IDLE. An operation returns to
         EMERGENCY instead when it was started via the EMERGENCY carve-out, or
-        when any safety flag — even one this operation tolerated — is still
-        tripped at finish: a tolerated flag was tolerated for THIS operation
-        only, it was never cleared. An operation could not reach this "done"
-        path with a non-tolerated flag active, because the tick safety check
+        when any CRITICAL safety flag (``Station.critical_safety_flags()``)
+        — even one this operation tolerated — is still tripped at finish: a
+        tolerated flag was tolerated for THIS operation only, it was never
+        cleared. An operation could not reach this "done" path with a
+        non-tolerated CRITICAL flag active, because the tick safety check
         would already have escalated it to EMERGENCY and aborted the run.
+
+        A merely hold-only flag (e.g. ``helium_low``) still tripped at
+        finish does NOT send the operation to EMERGENCY: it never causes
+        EMERGENCY in the first place (see the safety-hold standard), and it
+        keeps governing its concerned VIs identically whether the machine
+        lands in IDLE or EMERGENCY — the common case for HeliumFillOperation
+        finishing before the level has fully recovered.
 
         Args:
             procedure: The procedure/operation that just finished (captured
@@ -1781,7 +1870,8 @@ class Orchestrator(QObject):
         if self._operation_started_from_emergency:
             return OrchestratorState.EMERGENCY
         safety = self._station.check_safety()
-        if any(safety.values()):
+        critical = self._station.critical_safety_flags()
+        if any(safety.get(flag) for flag in critical):
             return OrchestratorState.EMERGENCY
         return OrchestratorState.IDLE
 
@@ -1936,25 +2026,33 @@ class Orchestrator(QObject):
         self._emit_run_finished("failed", reason=message)
         self._change_state(OrchestratorState.ERROR)
 
-    def _fail_run_for_fault(self, vi_name: str) -> None:
-        """Fail the active run because its claimed VI faulted.
+    def _fail_run_for_fault(self, vi_name: str, reason: str | None = None) -> None:
+        """Fail the active run because its claimed/watched VI faulted or was held.
 
         Unlike ``_fail_to_error()``, this does NOT degrade to global ERROR:
         the blast radius is known (one VI, already recorded in the Station's
-        fault registry by ``get_state()``), so only the run ends — every
-        other instrument, including this one once it recovers or is
-        retried, stays usable. Deliberately does NOT call ``run_queue()``
-        afterward: a run failing for an instrument fault must not silently
+        fault registry by ``get_state()`` or its safety-hold registry by
+        ``update_safety_holds()``), so only the run ends — every other
+        instrument, including this one once it recovers, stays usable.
+        Deliberately does NOT call ``run_queue()`` afterward: a run failing
+        for an instrument fault or safety hold must not silently
         auto-continue to the next queued run, the same conservative
         behavior the old global-ERROR path had.
 
         Args:
-            vi_name: The claimed VI that went stale during the run.
+            vi_name: The claimed/watched VI that went stale, or was held by
+                a safety concern, during the run.
+            reason: Human-readable description of why the run is failing.
+                ``None`` (the default) assumes a stale VI — every other
+                caller (the safety-hold path) passes its own message.
         """
-        message = (
-            f"Run failed: active VI '{vi_name}' became stale. The instrument "
-            "is quarantined; every other instrument stays usable."
-        )
+        if reason is None:
+            message = (
+                f"Run failed: active VI '{vi_name}' became stale. The instrument "
+                "is quarantined; every other instrument stays usable."
+            )
+        else:
+            message = f"Run failed: {reason}"
         self._error(message, vi_name=vi_name, kind="run_failure", severity="error")
         try:
             self._abort_active_procedure()
@@ -1966,9 +2064,9 @@ class Orchestrator(QObject):
     def _enter_emergency(self, reason: str, vi_names: tuple[str, ...] = ()) -> None:
         """One-shot emergency entry: clean up the run, then safe shutdown.
 
-        The shutdown runs exactly once here (not every tick): repeating
-        standby_all() each tick would, for a persistent magnet, restart the
-        full switch-heater warmup/cooldown cycle every few seconds.
+        The shutdown runs exactly once here (not every tick): repeating it
+        each tick would, for a persistent magnet, restart the full
+        switch-heater warmup/cooldown cycle every few seconds.
 
         Args:
             reason: Human-readable description of the tripped condition(s)
@@ -1996,12 +2094,25 @@ class Orchestrator(QObject):
             logger.exception("Cleanup while entering EMERGENCY failed")
         self._emit_run_finished("failed", reason=f"EMERGENCY: {reason}")
         self._change_state(OrchestratorState.EMERGENCY)
-        try:
-            self._station.standby_all()
-            self._error("Emergency shutdown executed.")
-        except Exception:
-            logger.exception("standby_all during emergency entry failed")
-            self._error("Emergency shutdown could not complete — check instruments.")
+        # Concerned-VI shutdown, not a blanket standby_all(): a critical
+        # flag (vi_names non-empty, from safety_flag_sources()) always has
+        # per-VI attribution, and every VI concerned with it — per the
+        # safety-hold standard — was already stood down this same tick by
+        # the tick's hold-onset dispatch, BEFORE this method ever runs (see
+        # _tick_body()). An instrument unconcerned with the tripped flag
+        # (e.g. temperature control during a magnet quench) is deliberately
+        # left running. A session-envelope violation (vi_names empty — the
+        # one EMERGENCY cause with no safety-hold attribution at all, since
+        # it judges a live reading rather than a VI-tagged flag) still
+        # safes every instrument, because there is no "concerned VI" to
+        # narrow it to.
+        if not vi_names:
+            try:
+                self._station.standby_all()
+                self._error("Emergency shutdown executed.")
+            except Exception:
+                logger.exception("standby_all during emergency entry failed")
+                self._error("Emergency shutdown could not complete — check instruments.")
 
     def _error(
         self,

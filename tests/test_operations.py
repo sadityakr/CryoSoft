@@ -188,7 +188,17 @@ def orchestrator(station, qtbot):
 
 
 def test_tolerated_flag_does_not_abort_operation(orchestrator, station, qtbot):
-    """helium_low, when declared tolerated, must not abort a running operation."""
+    """helium_low, when declared tolerated, must not hold or abort a running operation.
+
+    Regression test: SimpleOperation both tolerates helium_low AND targets
+    magnet_z (a VI concerned with helium_low, via its initiate() plan) —
+    exactly the shape HeliumFillOperation has in production (it claims and
+    ramps every magnet to zero while tolerating the very condition it
+    exists to fix). Neither a safety hold on magnet_z nor a failed run may
+    result; only the Orchestrator composing the active run's
+    tolerated_safety_flags into Station.update_safety_holds() makes this
+    hold.
+    """
     op = SimpleOperation(station, tolerated_safety_flags=frozenset({"helium_low"}))
     orchestrator.run_operation(op)
     assert orchestrator._procedure is op
@@ -200,6 +210,7 @@ def test_tolerated_flag_does_not_abort_operation(orchestrator, station, qtbot):
     qtbot.wait(100)  # let several ticks pass with the flag active
     assert orchestrator._state != OrchestratorState.EMERGENCY
     assert orchestrator._procedure is op
+    assert "magnet_z" not in orchestrator._station.vi_safety_holds()
 
     orchestrator.finish_operation()
     qtbot.waitUntil(lambda: orchestrator._procedure is None, timeout=2000)
@@ -248,14 +259,21 @@ def test_run_operation_refused_while_procedure_runs(orchestrator, station, qtbot
 def test_run_operation_allowed_from_emergency_iff_flags_tolerated(
     orchestrator, station, qtbot
 ):
-    """run_operation from EMERGENCY succeeds iff active flags <= tolerated."""
-    station.level_meter._driver._force_helium_level = 5.0
+    """run_operation from EMERGENCY succeeds iff active flags <= tolerated.
+
+    Quench (not helium_low) is used to reach EMERGENCY here: helium_low is
+    hold-only under the safety-hold standard and can no longer trigger
+    EMERGENCY at all (see test_helium_low_holds_magnets_without_emergency
+    in test_l3_orchestrator.py) — quench remains the one flag any VI
+    declares via critical_safety_flags().
+    """
+    station.magnet_z._driver._simulate_quench = True
     qtbot.waitUntil(
         lambda: orchestrator._state == OrchestratorState.EMERGENCY, timeout=2000
     )
 
-    # Quench is not tolerated by this operation -> refused.
-    untolerant_op = SimpleOperation(station, tolerated_safety_flags=frozenset({"quench"}))
+    # helium_low is not what's tripped (quench is) -> refused.
+    untolerant_op = SimpleOperation(station, tolerated_safety_flags=frozenset({"helium_low"}))
     blocked: list[str] = []
     orchestrator.action_blocked.connect(blocked.append)
     orchestrator.run_operation(untolerant_op)
@@ -263,8 +281,8 @@ def test_run_operation_allowed_from_emergency_iff_flags_tolerated(
     assert orchestrator._state == OrchestratorState.EMERGENCY
     assert orchestrator._procedure is None
 
-    # helium_low IS tolerated -> allowed to start, straight from EMERGENCY.
-    op = SimpleOperation(station, tolerated_safety_flags=frozenset({"helium_low"}))
+    # quench IS tolerated -> allowed to start, straight from EMERGENCY.
+    op = SimpleOperation(station, tolerated_safety_flags=frozenset({"quench"}))
     orchestrator.run_operation(op)
     assert orchestrator._procedure is op
     assert orchestrator._state != OrchestratorState.EMERGENCY
@@ -273,19 +291,29 @@ def test_run_operation_allowed_from_emergency_iff_flags_tolerated(
 def test_operation_end_state_returns_to_emergency_when_flags_persist(
     orchestrator, station, qtbot
 ):
-    """A finishing operation returns to EMERGENCY, not IDLE, if flags persist."""
-    station.level_meter._driver._force_helium_level = 5.0
+    """A finishing operation returns to EMERGENCY, not IDLE, if flags persist.
+
+    Quench (not helium_low) is used here for the same reason as
+    test_run_operation_allowed_from_emergency_iff_flags_tolerated above.
+    magnet_y (not magnet_z) is quenched: the sim driver freezes a quenched
+    magnet's own ramp physics forever (get_status() reports "QUENCH", never
+    "HOLD"), which would deadlock SimpleOperation's magnet_z ramp if it were
+    the quenched one — quenching a DIFFERENT magnet keeps "quench" tripped
+    station-wide (Station.check_safety() ORs across every VI) while leaving
+    magnet_z free to ramp to completion.
+    """
+    station.magnet_y._driver._simulate_quench = True
     qtbot.waitUntil(
         lambda: orchestrator._state == OrchestratorState.EMERGENCY, timeout=2000
     )
 
     op = SimpleOperation(
-        station, tolerated_safety_flags=frozenset({"helium_low"}), open_ended=False
+        station, tolerated_safety_flags=frozenset({"quench"}), open_ended=False
     )
     orchestrator.run_operation(op)
     assert orchestrator._procedure is op
 
-    # helium stays low throughout -> the finishing run must land back in
+    # quench stays tripped throughout -> the finishing run must land back in
     # EMERGENCY, not IDLE.
     qtbot.waitUntil(
         lambda: orchestrator._procedure is None, timeout=5000
@@ -777,11 +805,15 @@ def test_stale_claimed_nonsystem_vi_fails_operation_run(
 
     # With the fill gone, its helium_low toleration is gone too — the still-
     # disconnected level meter force-trips helium_low ("can't monitor it,
-    # assume unsafe"), so the machine correctly proceeds to EMERGENCY on a
-    # following tick rather than resting in IDLE.
+    # assume unsafe"). helium_low is hold-only (see the safety-hold
+    # standard), so the machine correctly places a hold on every magnet
+    # rather than entering EMERGENCY, and rests in IDLE.
     qtbot.waitUntil(
-        lambda: orchestrator._state == OrchestratorState.EMERGENCY, timeout=2000
+        lambda: set(station.magnet_vi_names())
+        <= set(orchestrator._station.vi_safety_holds()),
+        timeout=2000,
     )
+    assert orchestrator._state == OrchestratorState.IDLE
 
     station.level_meter._driver._simulate_error = False
 
