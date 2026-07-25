@@ -155,8 +155,16 @@ def test_retry_reconnect_adopts_reconnected_scanner(tmp_path, qtbot):
 
 
 def test_basic_ticking(orchestrator, qtbot):
-    """Orchestrator starts, ticks at interval, emits states_updated."""
-    with qtbot.waitSignal(orchestrator.states_updated, timeout=500) as blocker:
+    """Orchestrator starts, ticks at interval, emits states_updated.
+
+    The timeout is deliberately generous. The fixture ticks every 10 ms, so
+    500 ticks of headroom is far more than correctness needs; it is sized
+    against Qt event-loop contention when the full suite runs, not against the
+    tick interval. At 500 ms this test was the suite's one persistent flake:
+    it passed standalone in 0.2 s and failed under load. A real regression
+    (no ticking at all) still fails here, just later. Do not trim it back.
+    """
+    with qtbot.waitSignal(orchestrator.states_updated, timeout=5000) as blocker:
         pass
     assert blocker.signal_triggered
     assert orchestrator._state == OrchestratorState.IDLE
@@ -950,7 +958,10 @@ def test_shutdown_stops_ticking(station, qtbot):
     """After shutdown() no tick fires: states_updated stays silent."""
     orch = Orchestrator(station, tick_interval_ms=10)
     orch.start_monitoring()
-    with qtbot.waitSignal(orch.states_updated, timeout=500):
+    # Generous for the same reason as test_basic_ticking: this is a positive
+    # "prove it ticks" wait, sized against suite-wide event-loop contention.
+    # The negative assertion below keeps its short timeout on purpose.
+    with qtbot.waitSignal(orch.states_updated, timeout=5000):
         pass  # ticking while monitoring: baseline
 
     orch.shutdown()

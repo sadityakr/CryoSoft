@@ -101,12 +101,23 @@ CryoSoft is organized in six strict layers. Each layer only knows about the laye
 
 ```bash
 cd CryoSoft
-python -m venv cryosoft/.venv
-cryosoft/.venv/Scripts/activate       # Windows
-pip install pyqt6==6.7.1 pyqtgraph h5py numpy ruamel.yaml pyvisa pymeasure
+python -m venv .venv
+.venv/Scripts/activate                # Windows
+pip install -e .[dev]                 # equivalently: make install
 ```
 
-> PyQt6 6.11+ has a DLL conflict with Anaconda on Windows. Pin to 6.7.1.
+`pyproject.toml` is the single source of truth for dependencies. There is no
+`requirements.txt`: it had drifted out of sync (it was missing `pyserial` and
+`rtm2`, so an environment built from it could not import two declared
+dependencies) and was removed rather than maintained in parallel.
+
+Note that `rtm2` is a git dependency, so `git` must be on `PATH` for the
+install to succeed.
+
+> PyQt6 6.11+ has a DLL conflict with Anaconda on Windows. Known-good here is
+> 6.7.1, but `pyproject.toml` declares `PyQt6>=6.5` with no upper bound, so a
+> fresh install can pull an incompatible version. Add an upper bound there if
+> you hit the conflict.
 
 ---
 
