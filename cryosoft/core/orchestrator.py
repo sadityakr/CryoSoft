@@ -108,6 +108,7 @@ from cryosoft.core.exceptions import CryoSoftSafetyError
 from cryosoft.core.operational_status import build_operational_status
 from cryosoft.core.plan import Command, SessionEnvelope, Target
 from cryosoft.core.station import FaultRecord, Station
+from cryosoft.core.tiered_trend_logger import TieredTrendLogger
 from cryosoft.core.watchdog import WatchdogConfig, WatchdogState, apply_watchdog
 # Procedures will be imported/type-checked but for now we expect a BaseProcedure mock.
 # We don't import BaseProcedure directly to avoid circular dependency.
@@ -295,6 +296,12 @@ class Orchestrator(QObject):
         self._status_logger = logging.getLogger("cryosoft.status")
         self._watchdog_state = WatchdogState()
         self._watchdog_config = WatchdogConfig()
+
+        # Tiered trend-history writer (docs/plans/trend-history-persistence.md
+        # §2). No arguments: its defaults resolve the cryosoft.trend_* loggers
+        # already configured by setup_logging(), so the Orchestrator never
+        # needs to know where trend logs live.
+        self._tiered_trend_logger = TieredTrendLogger()
 
         # Session envelope (sample-specific bounds, narrower than config
         # limits) — set by the session layer, enforced here so it binds every
@@ -1463,6 +1470,18 @@ class Orchestrator(QObject):
             # Operational-status record (runtime troubleshooting signal): assembled
             # from this tick's snapshot, emitted, and appended to logs/status.jsonl.
             self._update_operational_status(state)
+
+            # Tiered trend-history sample (docs/plans/trend-history-persistence.md
+            # §2): non-fatal, mirrors the operational-status guard above — a
+            # logging failure here must never fail the tick. record() is
+            # itself internally exception-safe; this guard is belt-and-braces
+            # around constructing its arguments (e.g. last_state_flat()).
+            try:
+                self._tiered_trend_logger.record(
+                    self._station.last_state_flat(), time.time(), self._state.name
+                )
+            except Exception:
+                logger.exception("tiered trend-history record failed (non-fatal)")
 
             # Runtime fault registry (plan §3): Station.get_state() (just
             # called above) already populated/cleared FaultRecords for

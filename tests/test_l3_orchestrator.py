@@ -6,6 +6,9 @@
 # last_updated: 2026-07-12
 # ---
 
+import json
+import logging
+
 import pytest
 
 
@@ -181,6 +184,49 @@ def test_operational_status_reports_live_ramp_target(orchestrator, station, qtbo
     assert magnet["target"] == pytest.approx(1.0)
     assert magnet["ramp_status"] == "RAMPING"
     assert magnet["gap"] is not None
+
+
+def test_tick_emits_raw_trend_record(orchestrator, station, qtbot):
+    """A tick writes exactly the documented raw-tier JSON shape to
+    cryosoft.trend_raw (docs/plans/trend-history-persistence.md §2), pinning
+    the "t"/"s"/"v" nesting and the measurement-VI exclusion at the
+    orchestrator boundary.
+
+    cryosoft.trend_raw has propagate=False (logging_config.py), so the
+    capturing handler must attach directly to it, not to root. The handler
+    is removed in a finally block since loggers are process-global.
+    """
+    trend_logger = logging.getLogger("cryosoft.trend_raw")
+    records: list[logging.LogRecord] = []
+    handler = logging.Handler()
+    handler.emit = records.append  # type: ignore[method-assign]
+    trend_logger.addHandler(handler)
+    previous_level = trend_logger.level
+    trend_logger.setLevel(logging.INFO)  # setup_logging() may not have run in-test
+
+    try:
+        orchestrator._tick()
+    finally:
+        trend_logger.removeHandler(handler)
+        trend_logger.setLevel(previous_level)
+
+    assert len(records) >= 1, "expected at least one raw-tier line from one tick"
+    payload = json.loads(records[0].getMessage())
+
+    assert set(payload) == {"t", "s", "v"}
+    assert isinstance(payload["t"], float)
+    assert payload["s"] == orchestrator._state.name
+
+    v = payload["v"]
+    assert isinstance(v, dict)
+    assert v, "expected a non-empty flattened state dict"
+    assert all(isinstance(key, str) and isinstance(val, float) for key, val in v.items())
+    assert set(v) == set(station.last_state_flat())
+
+    # keithley_dc_mode is vi_type: measurement in sim_cryostat/devices.yaml
+    # and exposes @monitored last_n_valid; last_state_flat() excludes every
+    # measurement VI, so this key must never reach the raw trend tier.
+    assert "keithley_dc_mode_last_n_valid" not in v
 
 
 def test_full_procedure_cycle(orchestrator, station, qtbot):
