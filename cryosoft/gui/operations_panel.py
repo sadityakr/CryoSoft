@@ -373,9 +373,16 @@ class OperationCard(QGroupBox):
         self._action_btn.setObjectName(f"{self._slug}_action_btn")
         self._action_btn.clicked.connect(self._on_action_clicked)
         button_row.addWidget(self._action_btn)
+
+        self._toggle_btn = QPushButton()
+        self._toggle_btn.setObjectName(f"{self._slug}_toggle_btn")
+        self._toggle_btn.setMaximumWidth(40)
+        self._toggle_btn.clicked.connect(self._on_toggle_clicked)
+        button_row.addWidget(self._toggle_btn)
         button_row.addStretch()
         outer.addLayout(button_row)
         self._sync_button()
+        self._sync_details_visibility()
 
         # Direct connection (not routed through the window's states_updated
         # forwarding): run_started/run_finished fire only at run boundaries,
@@ -565,6 +572,18 @@ class OperationCard(QGroupBox):
         self._action_btn.style().unpolish(self._action_btn)
         self._action_btn.style().polish(self._action_btn)
 
+    def _sync_details_visibility(self) -> None:
+        self._details_widget.setVisible(not self._collapsed)
+        icon_name = "fa5s.chevron-down" if self._collapsed else "fa5s.chevron-up"
+        self._toggle_btn.setIcon(qta.icon(icon_name, color=TEXT_PRIMARY))
+        self._toggle_btn.setToolTip("Show details" if self._collapsed else "Hide details")
+        self._toggle_btn.style().unpolish(self._toggle_btn)
+        self._toggle_btn.style().polish(self._toggle_btn)
+
+    def _on_toggle_clicked(self) -> None:
+        self._collapsed = not self._collapsed
+        self._sync_details_visibility()
+
     def _sync_confirmations_row(self) -> None:
         if self._confirmations_row is None:
             return
@@ -653,12 +672,28 @@ class OperationsPanel(QWidget):
         self._last_consumption_rate: float | None = None
         self._cards: list[OperationCard] = []
 
-        outer = QVBoxLayout(self)
+        outer = QHBoxLayout(self)
         outer.setContentsMargins(4, 4, 4, 4)
         outer.setSpacing(8)
 
-        self._build_operation_cards(outer)
-        outer.addStretch()
+        self._left_column = QWidget()
+        self._left_column.setObjectName("operations_left_column")
+        self._left_layout = QVBoxLayout(self._left_column)
+        self._left_layout.setContentsMargins(0, 0, 0, 0)
+        self._left_layout.setSpacing(8)
+
+        self._right_column = QWidget()
+        self._right_column.setObjectName("operations_right_column")
+        self._right_layout = QVBoxLayout(self._right_column)
+        self._right_layout.setContentsMargins(0, 0, 0, 0)
+        self._right_layout.setSpacing(8)
+
+        self._build_operation_cards()
+        self._left_layout.addStretch()
+        self._right_layout.addStretch()
+
+        outer.addWidget(self._left_column, stretch=1)
+        outer.addWidget(self._right_column, stretch=1)
 
         if self._cryogenics_config:
             self._recompute()
@@ -667,8 +702,8 @@ class OperationsPanel(QWidget):
     # Construction helpers
     # ------------------------------------------------------------------
 
-    def _build_operation_cards(self, outer: QVBoxLayout) -> None:
-        """Build one OperationCard per available operation."""
+    def _build_operation_cards(self) -> None:
+        """Build one OperationCard per available operation in two columns."""
         if self._cryogenics_config and self._station.has_vi(self._level_vi_name):
             try:
                 fill_display = HeliumFillOperation(self._station, **self._cryogenics_config)
@@ -694,9 +729,10 @@ class OperationsPanel(QWidget):
                     fill_display,
                     _fill_factory,
                     get_current_person=self._get_current_person,
+                    collapsed=True,
                     parent=self,
                 )
-                outer.addWidget(card)
+                self._left_layout.insertWidget(0, card)
                 self._cards.append(card)
 
         discovered = {cls.config_key: cls for cls in discover_operations() if cls.config_key}
@@ -733,9 +769,10 @@ class OperationsPanel(QWidget):
                 display_instance,
                 _factory,
                 get_current_person=self._get_current_person,
+                collapsed=True,
                 parent=self,
             )
-            outer.addWidget(card)
+            self._right_layout.insertWidget(len([c for c in self._cards if c != self._cards[0]]), card)
             self._cards.append(card)
 
     # ------------------------------------------------------------------
