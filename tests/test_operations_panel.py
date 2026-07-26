@@ -1,8 +1,7 @@
 # ---
 # description: |
 #   Behavior tests for cryosoft.gui.operations_panel: panel presence gated on
-#   cryogenics/operations config, live cryogenics-status readouts from a
-#   synthetic states_updated snapshot, on-screen geometry when selected in
+#   cryogenics/operations config, on-screen geometry when selected in
 #   MonitorWindow's bottom-right quadrant, generic OperationCard
 #   construction (helium fill + sample change), the readiness checklist
 #   flipping on a snapshot change, the start/finish button toggling on
@@ -14,7 +13,7 @@
 #   operation_status label
 #   (only for the currently-running card), and the unmet-postcondition
 #   warning badge on run_finished.
-# last_updated: 2026-07-21
+# last_updated: 2026-07-26
 # ---
 
 """Behavior tests for OperationsPanel / OperationCard / OperatorDialog."""
@@ -22,7 +21,7 @@
 from unittest.mock import MagicMock
 
 import pytest
-from PyQt6.QtWidgets import QDialog, QLabel, QScrollArea
+from PyQt6.QtWidgets import QDialog, QScrollArea
 
 from cryosoft.core.orchestrator import Orchestrator
 from cryosoft.core.station import build_station, read_cryogenics_config, read_operations_config
@@ -145,8 +144,6 @@ def test_operations_panel_without_cryogenics_but_with_operations_builds_sample_c
     cards = win._operations_panel._cards
     assert len(cards) == 1
     assert cards[0]._display_instance.name == SampleChangeOperation.name
-    # No cryogenics status section built.
-    assert win._operations_panel.findChild(QLabel, "cryo_helium_level_label") is None
 
 
 def test_operations_panel_geometry_fully_visible_when_selected(
@@ -173,20 +170,18 @@ def test_operations_panel_geometry_fully_visible_when_selected(
     viewport = scroll.viewport()
     assert scroll.horizontalScrollBar().maximum() == 0
 
-    helium_label = win._operations_panel.findChild(QLabel, "cryo_helium_level_label")
     fill_card = win.findChild(OperationCard, "operation_card_helium_fill")
-    assert helium_label is not None and fill_card is not None
-    assert _fully_inside(viewport, helium_label)
+    assert fill_card is not None
     assert _fully_inside(viewport, fill_card)
 
 
-# ── Live level readouts (cryogenics status section) ────────────────────────────
+# ── Consumption rate feeds next_due() even with no status display ──────────────
 
 
-def test_operations_panel_shows_levels_from_synthetic_states_updated(
+def test_states_updated_recomputes_consumption_rate_for_next_due(
     station, orchestrator, cryogenics_config, stores, qtbot
 ):
-    """on_states_updated() with a synthetic snapshot updates the He/N2 readouts."""
+    """on_states_updated() still recomputes the cached rate next_due() reads."""
     helium_store, servicing_store = stores
     panel = OperationsPanel(
         station,
@@ -198,12 +193,12 @@ def test_operations_panel_shows_levels_from_synthetic_states_updated(
         get_data_dir=lambda: "/tmp",
     )
     qtbot.addWidget(panel)
+    panel._last_recompute_mono = None  # force the throttle to fire
 
     level_vi = cryogenics_config["level_vi"]
     panel.on_states_updated({level_vi: {"helium_level": 62.5, "nitrogen_level": 44.0}})
 
-    assert "62.5" in panel._helium_label.text()
-    assert "44.0" in panel._nitrogen_label.text()
+    assert panel._last_recompute_mono is not None
 
 
 # ── Generic card construction ──────────────────────────────────────────────────

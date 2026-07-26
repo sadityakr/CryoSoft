@@ -1,27 +1,23 @@
 # ---
 # description: |
-#   OperationsPanel: MonitorWindow page 1's bottom-right selector entry
-#   (renamed from "Cryogenics" to "Operations" — absorbs, does not
-#   replace, the cryogenics status section). Built when cryogenics
-#   is enabled OR the operations: config is non-empty. Structure: when
-#   cryogenics is configured, a QSplitter divides the panel into a left pane
-#   (cryogenics status: He/N2 levels, consumption readout + window combo,
-#   level plot with fill markers — unchanged from Phase 5) and a right pane
-#   (one generic OperationCard per available operation); with no cryogenics
-#   config the panel is just the right pane's cards, unsplit. Cards: the
-#   helium fill (iff cryogenics is configured) plus one per operations:
-#   config block whose declared config_key matches a discovered
-#   OperationBase subclass. A card renders its operation's
-#   readiness_conditions() as a live checklist, its next_due() as a header
-#   line, an operator-confirmations row while it is the active run, a ready
-#   banner once a run finishes done with every condition holding, and a
-#   start/finish button — all driven purely by the operation class's
-#   declarations, so adding an operation to a setup never touches this file.
+#   OperationsPanel: MonitorWindow page 1's bottom-right selector entry.
+#   Built when cryogenics is enabled OR the operations: config is non-empty.
+#   Structure: a single column of one generic OperationCard per available
+#   operation — the helium fill (iff cryogenics is configured) plus one per
+#   operations: config block whose declared config_key matches a discovered
+#   OperationBase subclass. There is no separate cryogenics status
+#   display; the consumption rate is still computed internally (from the
+#   HeliumRecordStore) purely to feed the helium-fill card's next_due()
+#   prediction. A card renders its operation's readiness_conditions() as a
+#   live checklist, its next_due() as a header line, an operator-
+#   confirmations row while it is the active run, a ready banner once a run
+#   finishes done with every condition holding, and a start/finish button —
+#   all driven purely by the operation class's declarations, so adding an
+#   operation to a setup never touches this file.
 # entry_point: Not run directly. Built by MonitorWindow._build_bottom_right_quadrant
 #   whenever cryogenics is enabled or an operations: config block exists.
 # dependencies:
 #   - PyQt6 >= 6.5
-#   - pyqtgraph >= 0.13
 #   - qtawesome
 #   - cryosoft.core.operation (ReadinessCondition, NextDue — for type context
 #     only; OperationCard consumes instances via duck-typed calls)
@@ -47,32 +43,31 @@
 #   through the window instead, see monitor_window.py's teardown-race note:
 #   both fire every tick, unlike the run-boundary-only run_started/finished).
 # process: |
-#   on_states_updated() updates the He/N2 readouts and (throttled, exactly
-#   as Phase 5) recomputes the consumption rate and redraws the level plot,
-#   caching the rate; it then assembles one context dict ({"state",
-#   "now_unix", "consumption_rate_pct_per_h"}) per tick and forwards
-#   (state, context) to every OperationCard, which re-evaluates its
-#   readiness checklist, next-due label, and ready banner from it — no
-#   per-operation code here. on_operation_status() forwards one milestone
-#   line to every card; only the running one (if any) displays it (design
-#   doc operation-concurrency-and-error-scoping.md §2's hard status
-#   separation — this text never reaches the Procedure window). A card's
-#   button opens a generic OperatorDialog, constructs a FRESH operation
-#   instance via the panel-supplied factory closure, and calls
-#   orchestrator.run_operation(); while that operation is the active run the
-#   button becomes "Finish <name>" and calls orchestrator.finish_operation()
-#   (immediately going to a disabled "Finishing <name>…" state
-#   until run_finished arrives — which also surfaces any
-#   postconditions_unmet as a warning badge on the card); a declared
-#   operator_confirmations checkbox calls orchestrator.confirm_operation(key)
-#   and disables itself.
+#   on_states_updated() (throttled, unchanged cadence) recomputes the cached
+#   consumption rate from the HeliumRecordStore when cryogenics is
+#   configured; it then assembles one context dict ({"state", "now_unix",
+#   "consumption_rate_pct_per_h"}) per tick and forwards (state, context) to
+#   every OperationCard, which re-evaluates its readiness checklist,
+#   next-due label, and ready banner from it — no per-operation code here.
+#   on_operation_status() forwards one milestone line to every card; only
+#   the running one (if any) displays it (design doc
+#   operation-concurrency-and-error-scoping.md §2's hard status separation —
+#   this text never reaches the Procedure window). A card's button opens a
+#   generic OperatorDialog, constructs a FRESH operation instance via the
+#   panel-supplied factory closure, and calls orchestrator.run_operation();
+#   while that operation is the active run the button becomes "Finish
+#   <name>" and calls orchestrator.finish_operation() (immediately going to
+#   a disabled "Finishing <name>…" state until run_finished arrives — which
+#   also surfaces any postconditions_unmet as a warning badge on the card);
+#   a declared operator_confirmations checkbox calls
+#   orchestrator.confirm_operation(key) and disables itself.
 # output: |
 #   A QWidget hosted (scrolled) in MonitorWindow's bottom-right quadrant.
 #   Side effect: submits an operation to the Orchestrator.
-# last_updated: 2026-07-21
+# last_updated: 2026-07-26
 # ---
 
-"""OperationsPanel — cryogenics status (optional) + generic operation cards."""
+"""OperationsPanel — a single column of generic operation cards."""
 
 from __future__ import annotations
 
@@ -82,12 +77,10 @@ import time
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-import pyqtgraph as pg
 import qtawesome as qta
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -96,7 +89,6 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
-    QSplitter,
     QVBoxLayout,
     QWidget,
 )
@@ -107,7 +99,6 @@ from cryosoft.gui.procedure_discovery import discover_operations
 from cryosoft.gui.theme import (
     BTN_CLASS_DANGER,
     BTN_CLASS_PRIMARY,
-    PLOT_SERIES,
     STATUS_ERROR,
     STATUS_OK,
     TEXT_ON_ACCENT,
@@ -126,7 +117,9 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["OperationCard", "OperationsPanel", "OperatorDialog"]
 
-# Consumption / plot time-window options (1 h / 6 h / 24 h).
+# Trailing window the consumption rate is fit over (1 h / 6 h / 24 h choices,
+# no UI to pick between them since the status display was removed — 6 h is
+# used unconditionally).
 _CONSUMPTION_WINDOWS: list[tuple[str, float]] = [
     ("1 h", 3600.0),
     ("6 h", 21600.0),
@@ -135,15 +128,15 @@ _CONSUMPTION_WINDOWS: list[tuple[str, float]] = [
 # "1 h" would be the natural default but the helium record is sampled
 # hourly (history_sample_s, config-driven): two consecutive samples land
 # almost exactly 1 h apart, so a 1 h trailing window essentially never
-# contains 2 usable points and the consumption readout would sit at "--"
-# indefinitely. "6 h" reliably picks up multiple hourly samples.
+# contains 2 usable points and the rate would sit at None indefinitely.
+# "6 h" reliably picks up multiple hourly samples.
 _DEFAULT_WINDOW_LABEL = "6 h"
 
-# Minimum real seconds between consumption/plot recomputes, so a fast
+# Minimum real seconds between consumption-rate recomputes, so a fast
 # Orchestrator tick does not re-read the helium-record file every 3 s in
 # production. States_updated still drives every call; this only throttles
 # the (comparatively expensive) file read + refit inside it — not a QTimer.
-# The cached rate this produces is also what every OperationCard's next_due()
+# The cached rate this produces is what every OperationCard's next_due()
 # context uses — no card reads the store more often than this throttle.
 _RECOMPUTE_MIN_INTERVAL_S = 5.0
 
@@ -291,11 +284,9 @@ class OperationCard(QGroupBox):
 
         for condition in self._conditions:
             # Label and detail stack on separate lines (rather than one wide
-            # row) with the detail word-wrapped: the card now also renders in
-            # the ~half-width right pane of the split OperationsPanel layout,
-            # where a single-line "icon + label + detail" row clips text
-            # instead of wrapping (QLabel paints, but does not elide, text
-            # past its allotted width).
+            # row) with the detail word-wrapped: a single-line "icon + label
+            # + detail" row clips text instead of wrapping (QLabel paints,
+            # but does not elide, text past its allotted width).
             row = QHBoxLayout()
             icon_label = QLabel()
             icon_label.setObjectName(f"{self._slug}_condition_{condition.key}_icon")
@@ -596,7 +587,7 @@ class OperationCard(QGroupBox):
 
 
 class OperationsPanel(QWidget):
-    """Live cryogenics status (optional) + one OperationCard per available operation.
+    """A single column of one OperationCard per available operation.
 
     Args:
         station: The active Station (passed to every operation constructor).
@@ -604,8 +595,10 @@ class OperationsPanel(QWidget):
             ``OperationCard``).
         cryogenics_config: The resolved ``cryogenics:`` block
             (``Station.read_cryogenics_config()``'s result), or ``None``/``{}``
-            when cryogenics is not configured — the status section and the
-            helium-fill card are both omitted in that case.
+            when cryogenics is not configured — the helium-fill card is
+            omitted in that case. When present, still used to compute the
+            cached consumption rate the helium-fill card's ``next_due()``
+            reads, even though there is no dedicated status display for it.
         operations_config: The resolved ``operations:`` block
             (``Station.read_operations_config()``'s result: ``{config_key:
             {key: value}}``), or ``None``/``{}`` for none declared.
@@ -643,12 +636,6 @@ class OperationsPanel(QWidget):
         self._get_current_person = get_current_person or (lambda: "")
 
         self._level_vi_name: str = str(self._cryogenics_config.get("level_vi", "level_meter"))
-        volume = self._cryogenics_config.get("helium_volume_l")
-        self._helium_volume_l: float | None = float(volume) if volume else None
-        self._history_sample_s: float = float(
-            self._cryogenics_config.get("history_sample_s", 3600.0)
-        )
-        self._gap_threshold_s: float = 2.0 * self._history_sample_s
 
         self._last_recompute_mono: float | None = None
         self._last_consumption_rate: float | None = None
@@ -658,112 +645,15 @@ class OperationsPanel(QWidget):
         outer.setContentsMargins(4, 4, 4, 4)
         outer.setSpacing(8)
 
-        self._helium_label: QLabel | None = None
-        self._nitrogen_label: QLabel | None = None
-        self._window_combo: QComboBox | None = None
-        self._consumption_label: QLabel | None = None
-        self._plot_widget: pg.PlotWidget | None = None
-        self._curve = None
-        self._fill_markers = None
+        self._build_operation_cards(outer)
+        outer.addStretch()
 
         if self._cryogenics_config:
-            # Two sub-panels side by side: cryogenic status (left) vs.
-            # operation options (right) — a splitter (not a fixed ratio) so
-            # the operator can favour the level plot or the cards on a given
-            # screen; minimum widths + setChildrenCollapsible(False) keep
-            # either side from vanishing (gui-edit layout rules).
-            splitter = QSplitter(Qt.Orientation.Horizontal)
-            splitter.setObjectName("operations_panel_splitter")
-            splitter.setChildrenCollapsible(False)
-
-            left_pane = QWidget()
-            left_pane.setObjectName("cryogenics_status_pane")
-            left_pane.setMinimumWidth(220)
-            left_layout = QVBoxLayout(left_pane)
-            left_layout.setContentsMargins(0, 0, 0, 0)
-            left_layout.setSpacing(8)
-            self._build_cryogenics_status_section(left_layout)
-            left_layout.addStretch()
-
-            right_pane = QWidget()
-            right_pane.setObjectName("operation_cards_pane")
-            right_pane.setMinimumWidth(220)
-            right_layout = QVBoxLayout(right_pane)
-            right_layout.setContentsMargins(0, 0, 0, 0)
-            right_layout.setSpacing(8)
-            right_layout.addWidget(QLabel("<b>Operations</b>"))
-            self._build_operation_cards(right_layout)
-            right_layout.addStretch()
-
-            splitter.addWidget(left_pane)
-            splitter.addWidget(right_pane)
-            splitter.setSizes([260, 260])
-            outer.addWidget(splitter)
-
             self._recompute()
-        else:
-            self._build_operation_cards(outer)
-            outer.addStretch()
 
     # ------------------------------------------------------------------
     # Construction helpers
     # ------------------------------------------------------------------
-
-    def _build_cryogenics_status_section(self, outer: QVBoxLayout) -> None:
-        """Build the He/N2 readouts, consumption row, and level plot (Phase 5).
-
-        Rows stack vertically rather than packing multiple labels per line:
-        this section now also renders in the ~half-width left pane of the
-        split OperationsPanel layout, where a single wide row (levels side
-        by side, window combo + consumption label inline) no longer fits and
-        would clip instead of wrap.
-        """
-        outer.addWidget(QLabel("<b>Cryogenics</b>"))
-
-        self._helium_label = QLabel("He: — %")
-        self._helium_label.setObjectName("cryo_helium_level_label")
-        self._helium_label.setProperty("class", "value_readout")
-        outer.addWidget(self._helium_label)
-
-        self._nitrogen_label = QLabel("N₂: — %")
-        self._nitrogen_label.setObjectName("cryo_nitrogen_level_label")
-        self._nitrogen_label.setProperty("class", "value_readout")
-        outer.addWidget(self._nitrogen_label)
-
-        window_row = QHBoxLayout()
-        window_row.addWidget(QLabel("Window:"))
-        self._window_combo = QComboBox()
-        self._window_combo.setObjectName("cryo_window_combo")
-        for label, _seconds in _CONSUMPTION_WINDOWS:
-            self._window_combo.addItem(label)
-        self._window_combo.setCurrentText(_DEFAULT_WINDOW_LABEL)
-        self._window_combo.currentTextChanged.connect(self._recompute)
-        window_row.addWidget(self._window_combo)
-        window_row.addStretch()
-        outer.addLayout(window_row)
-
-        self._consumption_label = QLabel("Consumption: —")
-        self._consumption_label.setObjectName("cryo_consumption_label")
-        self._consumption_label.setWordWrap(True)
-        outer.addWidget(self._consumption_label)
-
-        self._plot_widget = pg.PlotWidget(
-            axisItems={"bottom": pg.DateAxisItem(orientation="bottom")}
-        )
-        self._plot_widget.setObjectName("cryo_plot")
-        self._plot_widget.setMinimumHeight(140)
-        self._plot_widget.showGrid(x=True, y=True, alpha=0.3)
-        self._plot_widget.setLabel("left", "Helium (%)")
-        level_pen = pg.mkPen(PLOT_SERIES[0], width=2)
-        # connect='finite' breaks the line at any inserted NaN point (see
-        # _build_gapped_series) — the gap is never bridged by a straight
-        # line, matching "gaps rendered as gaps, no interpolation".
-        self._curve = self._plot_widget.plot([], [], pen=level_pen, connect="finite")
-        self._fill_markers = pg.ScatterPlotItem(
-            symbol="t1", size=12, brush=pg.mkBrush(PLOT_SERIES[1]), pen=None
-        )
-        self._plot_widget.addItem(self._fill_markers)
-        outer.addWidget(self._plot_widget)
 
     def _build_operation_cards(self, outer: QVBoxLayout) -> None:
         """Build one OperationCard per available operation."""
@@ -841,13 +731,12 @@ class OperationsPanel(QWidget):
     # ------------------------------------------------------------------
 
     def on_states_updated(self, state: dict[str, Any]) -> None:
-        """Refresh the He/N2 readouts (throttled consumption/plot) and every card.
+        """Refresh the cached consumption rate (throttled) and every card.
 
         Args:
             state: ``{vi_name: {field: value, ...}}`` from the Orchestrator.
         """
         if self._cryogenics_config:
-            self._update_cryo_readouts(state)
             now_mono = time.monotonic()
             if (
                 self._last_recompute_mono is None
@@ -879,40 +768,15 @@ class OperationsPanel(QWidget):
         for card in self._cards:
             card.on_operation_status(text)
 
-    def _update_cryo_readouts(self, state: dict[str, Any]) -> None:
-        vi_state = state.get(self._level_vi_name)
-        if not isinstance(vi_state, dict):
-            return
-        helium = vi_state.get("helium_level")
-        nitrogen = vi_state.get("nitrogen_level")
-        if isinstance(helium, (int, float)) and not isinstance(helium, bool):
-            self._helium_label.setText(f"He: {helium:.1f} %")
-        if isinstance(nitrogen, (int, float)) and not isinstance(nitrogen, bool):
-            self._nitrogen_label.setText(f"N₂: {nitrogen:.1f} %")
-
     def _recompute(self) -> None:
-        """Recompute the consumption rate (cached for every card's next_due) and redraw the plot."""
+        """Recompute the consumption rate cached for every card's next_due()."""
         samples = self._helium_store.samples() if self._helium_store is not None else []
-        window_s = dict(_CONSUMPTION_WINDOWS).get(
-            self._window_combo.currentText(), dict(_CONSUMPTION_WINDOWS)[_DEFAULT_WINDOW_LABEL]
-        )
+        window_s = dict(_CONSUMPTION_WINDOWS)[_DEFAULT_WINDOW_LABEL]
         now = time.time()
         fill_intervals = self._fill_intervals()
-        rate = consumption_rate_pct_per_h(samples, window_s, now, fill_intervals)
-        self._last_consumption_rate = rate
-        if rate is None:
-            self._consumption_label.setText("Consumption: —")
-        else:
-            text = f"Consumption: {rate:.2f} %/h"
-            if self._helium_volume_l:
-                text += f" ({rate * self._helium_volume_l / 100.0:.2f} L/h)"
-            self._consumption_label.setText(text)
-
-        xs, ys = _build_gapped_series(samples, self._gap_threshold_s)
-        self._curve.setData(xs, ys)
-
-        marker_x, marker_y = self._fill_marker_points()
-        self._fill_markers.setData(marker_x, marker_y)
+        self._last_consumption_rate = consumption_rate_pct_per_h(
+            samples, window_s, now, fill_intervals
+        )
 
     def _fill_intervals(self) -> tuple[tuple[float, float], ...]:
         """Return ``(start_unix, end_unix)`` for every fill entry in the servicing log.
@@ -934,56 +798,3 @@ class OperationsPanel(QWidget):
                 continue
             intervals.append((start, end))
         return tuple(intervals)
-
-    def _fill_marker_points(self) -> tuple[list[float], list[float]]:
-        """Return marker (x, y) points at each fill's start time/level.
-
-        See ``_fill_intervals()`` for the unified ``"servicing"`` kind /
-        ``entry_kind`` filtering this mirrors.
-        """
-        if self._servicing_store is None:
-            return [], []
-        xs: list[float] = []
-        ys: list[float] = []
-        for entry in self._servicing_store.entries("servicing"):
-            if entry.values.get("entry_kind") != "helium_fill":
-                continue
-            try:
-                start = datetime.fromisoformat(str(entry.values.get("start_utc"))).timestamp()
-                level = float(entry.values.get("helium_start_pct", 0.0))
-            except (TypeError, ValueError):
-                continue
-            xs.append(start)
-            ys.append(level)
-        return xs, ys
-
-
-def _build_gapped_series(
-    samples: list[tuple[float, float, float]], gap_threshold_s: float
-) -> tuple[list[float], list[float]]:
-    """Build (x, y) arrays for the level curve, inserting NaN across gaps.
-
-    A NaN point is inserted whenever consecutive samples are separated by
-    more than ``gap_threshold_s`` — with the curve's ``connect='finite'``,
-    this breaks the line rather than interpolating a false straight line
-    across a period the app was closed or monitoring was off.
-
-    Args:
-        samples: ``(unix_time, helium_pct, nitrogen_pct)`` tuples, any order.
-        gap_threshold_s: Gap size (seconds) above which a break is inserted.
-
-    Returns:
-        Parallel ``(x, y)`` lists, chronological order.
-    """
-    ordered = sorted(samples, key=lambda sample: sample[0])
-    xs: list[float] = []
-    ys: list[float] = []
-    prev_t: float | None = None
-    for t, helium, _nitrogen in ordered:
-        if prev_t is not None and (t - prev_t) > gap_threshold_s:
-            xs.append(prev_t + 1e-3)
-            ys.append(float("nan"))
-        xs.append(t)
-        ys.append(helium)
-        prev_t = t
-    return xs, ys
