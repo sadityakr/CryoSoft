@@ -420,6 +420,12 @@ class TrendsQuadrant(QWidget):
             self._remove_trend_panel_widget(panel_id)
         self._default_trend_key_hints.clear()
 
+        # Migrate old channel keys to new names (e.g., magnet_z_get_field -> magnet_z_magnet_field_T)
+        key_migration = {
+            "magnet_z_get_field": "magnet_z_magnet_field_T",
+            "magnet_z_coil_current": "magnet_z_magnet_current",
+        }
+
         for entry in valid_entries:
             panel_id = self._add_trend_panel()
             panel = self._trend_panels[panel_id]
@@ -430,5 +436,7 @@ class TrendsQuadrant(QWidget):
 
             key = entry.get("key")
             if isinstance(key, str) and key:
+                # Apply migration mapping for renamed channel keys
+                key = key_migration.get(key, key)
                 panel.set_selected_key(key)  # no-op now if history is still empty
                 self._pending_trend_keys[panel_id] = key
