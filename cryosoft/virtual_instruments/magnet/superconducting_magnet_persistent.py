@@ -34,14 +34,14 @@
 #   Overrides start_ramp() to pick a normal vs manual ramp generator by the
 #   persistent-mode toggle; overrides magnet_current()/magnet_field_T() to read the
 #   coil current when the magnet is physically persistent (heater off). Adds
-#   @monitored switch_heater_state / coil_current / is_persistent /
-#   persistent_mode_enabled, and @control enable/disable_persistent_mode and
-#   manual switch_heater_on / switch_heater_off.
+#   @monitored switch_heater_state / is_persistent / persistent_mode_enabled /
+#   magnet_state (persistent-aware), and @control enable/disable_persistent_mode
+#   and manual switch_heater_on / switch_heater_off.
 # output: |
-#   All SuperconductingMagnetVI outputs (now persistent-mode-correct) plus
-#   switch_heater_state (str), is_persistent (bool),
-#   persistent_mode_enabled (bool) via @monitored.
-# last_updated: 2026-07-12
+#   All SuperconductingMagnetVI outputs (now persistent-mode-correct, magnet_state
+#   adding "persistent" as a possible value) plus switch_heater_state (str),
+#   is_persistent (bool), persistent_mode_enabled (bool) via @monitored.
+# last_updated: 2026-07-26
 # ---
 
 """SuperconductingMagnetPersistentVI — VI for SC magnet PSUs with switch heater."""
@@ -317,16 +317,27 @@ class SuperconductingMagnetPersistentVI(SuperconductingMagnetVI):
         """Return the logical magnet state (persistent-aware).
 
         Returns:
-            One of: "standby" (PSU ≈ 0 A, coil ≈ 0 A, heater off), "ramping" (ramp active),
-            "holding" (heater on, at target), "persistent" (heater off, coil holds field),
-            "quenched" (safety condition), "clamped" (compliance).
+            One of: "standby" (PSU ≈ 0 A, coil ≈ 0 A, heater off), "ramping"
+            (PSU status RAMPING, or a ramp/park generator not yet exhausted),
+            "holding" (heater on, at target), "persistent" (heater off, coil
+            holds field), "quenched" (safety condition), "clamped"
+            (compliance — no driver in this codebase reports CLAMPED today;
+            kept for a future one that does).
         """
-        hw_status = self.magnet_status()
+        psu_status = self.magnet_status()
 
-        if hw_status == "QUENCH":
+        if psu_status == "QUENCH":
             return "quenched"
-        if hw_status == "CLAMPED":
+        if psu_status == "CLAMPED":
             return "clamped"
+
+        # PSU status is the source of truth for "at rest": a ramp/park
+        # generator not yet exhausted (ramp_status() == "RAMPING") is OR'd in
+        # so a tick where the PSU happens to read HOLD mid-sequence (e.g.
+        # during the matching/warmup/cooldown/parking sub-phases) doesn't get
+        # misclassified as standby/persistent/holding.
+        if self.ramp_status() == "RAMPING" or psu_status not in ("HOLD", "CLAMPED"):
+            return "ramping"
 
         psu_A = self.psu_current()
         coil_A = self._driver.get_coil_current()  # type: ignore[attr-defined]
@@ -339,14 +350,6 @@ class SuperconductingMagnetPersistentVI(SuperconductingMagnetVI):
         # Persistent: heater off, coil holds nonzero field (> 0.1 A)
         if not heater_on and abs(coil_A) > 0.1:
             return "persistent"
-
-        # Active ramp
-        if self._ramp_gen is not None:
-            return "ramping"
-
-        # Heater on, holding
-        if heater_on and hw_status == "HOLD":
-            return "holding"
 
         return "holding"
 

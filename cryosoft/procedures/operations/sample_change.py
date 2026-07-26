@@ -12,10 +12,11 @@
 #   the moment the ramps finished. The run then stays open (step() never
 #   returns None on its own) until the operator clicks Finish — that is when
 #   the physical sample change happens. Completion is gated on verified
-#   postconditions only: zero field held, the switch heater off on any
-#   magnet whose cached state exposes one, the VTI within tolerance held,
-#   and — for a manual needle valve, the only supported mode today — an
-#   explicit operator confirmation.
+#   postconditions only: every magnet in standby (magnet_state() ==
+#   "standby" — for a persistent-capable magnet this already implies the
+#   switch heater is off, so no separate heater check is needed), the VTI
+#   within tolerance held, and — for a manual needle valve, the only
+#   supported mode today — an explicit operator confirmation.
 # entry_point: Not run directly. Constructed by the GUI's sample-change dialog
 #   (Phase 5) or a test, submitted via Orchestrator.run_operation()/
 #   queue_operation(); the needle-valve confirmation flows through
@@ -55,21 +56,21 @@
 #   ends.
 #   standby() is an empty PhasePlan — initiate() already parked everything.
 #   postcondition_gates() reads only cached state: zero_field (every
-#   magnet), heater_off (only for magnets whose cached state exposes
-#   switch_heater_state — plain SuperconductingMagnetVI has no such field
-#   and is silently skipped; if no magnet exposes one, no such gate is added
-#   at all), vti_at_target, and — only when needle_valve == "manual" —
-#   needle_valve_confirmed, reading the confirm()/confirmed() operator-ack
-#   flag the GUI (Phase 5) renders as a checkbox per declared
-#   operator_confirmations entry. An unmet gate never blocks completion; it
-#   is named in the run manifest's postconditions_unmet list.
+#   magnet's magnet_state() == "standby" — see GLOSSARY.md's Magnet state;
+#   this already covers the switch heater being off wherever one exists, so
+#   there is no separate heater_off gate), vti_at_target, and — only when
+#   needle_valve == "manual" — needle_valve_confirmed, reading the
+#   confirm()/confirmed() operator-ack flag the GUI (Phase 5) renders as a
+#   checkbox per declared operator_confirmations entry. An unmet gate never
+#   blocks completion; it is named in the run manifest's
+#   postconditions_unmet list.
 # output: |
 #   PhasePlan/StepPlan/Command/Gate objects consumed by the Orchestrator. No
 #   HDF5 side effect — the manifest's data_file stays empty, exactly as for
 #   any run with no DataManager. run_summary() -> {"recording": {...}} in
 #   OperationBase's generic shape, so CryogenicsRecorder writes it as this
 #   run's recordings/<run_id>.json sidecar exactly like the helium fill's.
-# last_updated: 2026-07-23
+# last_updated: 2026-07-26
 # ---
 
 """SampleChangeOperation — verify the cryostat is safe to open."""
@@ -141,13 +142,14 @@ class SampleChangeOperation(OperationBase):
     and confirmations are declared, not hardcoded.
 
     Readiness (Operations panel): ``readiness_conditions()``
-    mirrors the four ``postcondition_gates()`` checks as live checklist
-    rows -- ``zero_field``, ``heater_off`` (only meaningful on a station
-    with a magnet exposing ``switch_heater_state``; vacuously holds
-    otherwise), ``vti_at_target``, ``needle_valve_confirmed``. ``config_key
-    = "sample_change"`` maps the ``operations.sample_change:`` config block
-    to this class for the GUI's generic card-building discovery. No
-    ``next_due()`` override -- a sample change has no schedule.
+    mirrors the three ``postcondition_gates()`` checks as live checklist
+    rows -- ``zero_field`` (every magnet's ``magnet_state() == "standby"``,
+    which already implies the switch heater is off wherever one exists —
+    see GLOSSARY.md's **Magnet state**), ``vti_at_target``,
+    ``needle_valve_confirmed``. ``config_key = "sample_change"`` maps the
+    ``operations.sample_change:`` config block to this class for the GUI's
+    generic card-building discovery. No ``next_due()`` override -- a sample
+    change has no schedule.
     """
 
     name = "Sample Change"
@@ -332,24 +334,19 @@ class SampleChangeOperation(OperationBase):
     # ------------------------------------------------------------------
 
     def readiness_conditions(self) -> tuple[ReadinessCondition, ...]:
-        """Return the four postcondition checks as live checklist rows.
+        """Return the three postcondition checks as live checklist rows.
 
         Every ``check``/``detail`` closure reads only the state snapshot
         passed to it (never ``self._station.cached_state`` directly), per
-        the readiness-condition contract. ``heater_off`` is always present
-        (unlike ``postcondition_gates()``, which omits the gate entirely
-        when no magnet's *cached* state exposes ``switch_heater_state`` —
-        readiness_conditions() is built once, before any tick may have
-        populated that cache, so presence is instead decided per call from
-        the live snapshot passed to ``check()``): if the current snapshot
-        shows no magnet exposing the field, the row holds vacuously (there
-        is nothing to check on this station).
+        the readiness-condition contract. ``zero_field`` depends solely on
+        ``magnet_state() == "standby"`` (GLOSSARY.md's **Magnet state**),
+        which already implies the switch heater is off wherever a magnet has
+        one — there is no separate heater check.
 
         Returns:
-            ``(zero_field, heater_off, vti_at_target,
-            needle_valve_confirmed)`` — the last one included only while
-            ``needle_valve == "manual"`` (the only supported mode today, so
-            effectively always).
+            ``(zero_field, vti_at_target, needle_valve_confirmed)`` — the
+            last one included only while ``needle_valve == "manual"`` (the
+            only supported mode today, so effectively always).
         """
 
         def _magnet_not_standby(state: dict[str, Any]) -> tuple[str | None, str | None]:
@@ -376,36 +373,6 @@ class SampleChangeOperation(OperationBase):
                 return f"{name} state unavailable"
             return f"{name} {magnet_state}"
 
-        def _heater_relevant_magnets(state: dict[str, Any]) -> list[str]:
-            return [
-                magnet
-                for magnet in self._magnets
-                if "switch_heater_state" in state.get(magnet, {})
-            ]
-
-        def _heater_off_holds(state: dict[str, Any]) -> bool:
-            relevant = _heater_relevant_magnets(state)
-            if not relevant:
-                return True  # nothing on this station exposes a heater state
-            return all(
-                state.get(magnet, {}).get("switch_heater_state") == "OFF"
-                for magnet in relevant
-            )
-
-        def _heater_off_detail(state: dict[str, Any]) -> str:
-            relevant = _heater_relevant_magnets(state)
-            if not relevant:
-                return "no switch heater on this station"
-            offenders = [
-                magnet
-                for magnet in relevant
-                if state.get(magnet, {}).get("switch_heater_state") != "OFF"
-            ]
-            if not offenders:
-                return "all switch heaters off"
-            offender = offenders[0]
-            return f"{offender} heater {state.get(offender, {}).get('switch_heater_state')}"
-
         def _vti_holds(state: dict[str, Any]) -> bool:
             temperature = state.get(self._vti_vi_name, {}).get("temperature")
             if isinstance(temperature, bool) or not isinstance(temperature, (int, float)):
@@ -426,12 +393,6 @@ class SampleChangeOperation(OperationBase):
                 label="All magnets at zero field",
                 check=_zero_field_holds,
                 detail=_zero_field_detail,
-            ),
-            ReadinessCondition(
-                key="heater_off",
-                label="Switch heater off",
-                check=_heater_off_holds,
-                detail=_heater_off_detail,
             ),
             ReadinessCondition(
                 key="vti_at_target",
@@ -506,7 +467,9 @@ class SampleChangeOperation(OperationBase):
             )
         }
         for magnet in self._magnets:
-            values[f"{magnet}.get_field"] = float(self._station.get_vi(magnet).magnet_field_T())
+            values[f"{magnet}.magnet_field_T"] = float(
+                self._station.get_vi(magnet).magnet_field_T()
+            )
         self._record_sample(now, values)
 
     def step(self) -> StepPlan | None:
@@ -534,9 +497,9 @@ class SampleChangeOperation(OperationBase):
         return PhasePlan(targets={}, commands=(), wait_s=0.0)
 
     def postcondition_gates(self) -> tuple[Gate, ...]:
-        """Verify zero field, switch heater(s) off, VTI at target, valve confirmed.
+        """Verify zero field, VTI at target, valve confirmed.
 
-        All four checks read only cached state (or, for the valve, the
+        All three checks read only cached state (or, for the valve, the
         operator-confirmation flag) — no extra hardware poll. The
         Orchestrator evaluates each gate exactly once, immediately, as the
         run ends — an unmet gate is recorded on the run manifest's
@@ -546,14 +509,12 @@ class SampleChangeOperation(OperationBase):
         they are not, by any current caller).
 
         Returns:
-            ``zero_field`` (always); ``heater_off`` (only if at least one
-            magnet's cached state exposes ``switch_heater_state`` — plain
-            ``SuperconductingMagnetVI`` has no such field and is silently
-            excluded from the check; the gate itself is omitted entirely if
-            no magnet exposes the field); ``vti_at_target`` (always); and
-            ``needle_valve_confirmed`` (only when ``needle_valve ==
-            "manual"`` — the only supported mode today, so effectively
-            always).
+            ``zero_field`` (always — every magnet's ``magnet_state() ==
+            "standby"``, which already implies the switch heater is off
+            wherever a magnet has one, so there is no separate heater gate);
+            ``vti_at_target`` (always); and ``needle_valve_confirmed`` (only
+            when ``needle_valve == "manual"`` — the only supported mode
+            today, so effectively always).
         """
         gates: list[Gate] = []
 
@@ -568,22 +529,6 @@ class SampleChangeOperation(OperationBase):
         gates.append(
             Gate("zero_field", check=_all_magnets_standby, window_s=10.0)
         )
-
-        heater_magnets = [
-            magnet
-            for magnet in self._magnets
-            if "switch_heater_state" in self._station.cached_state.get(magnet, {})
-        ]
-        if heater_magnets:
-
-            def _all_heaters_off() -> bool:
-                state = self._station.cached_state
-                for magnet in heater_magnets:
-                    if state.get(magnet, {}).get("switch_heater_state") != "OFF":
-                        return False
-                return True
-
-            gates.append(Gate("heater_off", check=_all_heaters_off, window_s=0.0))
 
         def _vti_at_target() -> bool:
             state = self._station.cached_state

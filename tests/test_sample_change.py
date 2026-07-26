@@ -109,7 +109,6 @@ def _tick_until(orchestrator, predicate, *, max_ticks: int = 2000, sleep_s: floa
 def _make_op(station, *, person: str = "Alex Tech", **overrides) -> SampleChangeOperation:
     """Build a SampleChangeOperation with fast, test-friendly timing defaults."""
     config = dict(
-        zero_field_window_s=0.0,
         temperature_window_s=0.03,
         sample_period_s=0.0,  # tight tick-to-tick hold loop for test speed
     )
@@ -268,7 +267,7 @@ def test_sample_change_records_vti_and_magnet_fields(orchestrator, station, qtbo
     channels = recording["channels"]
     assert "temperature_vti.temperature" in channels
     for magnet in station.magnet_vi_names():
-        assert f"{magnet}.get_field" in channels
+        assert f"{magnet}.magnet_field_T" in channels
     assert len(recording["unix_time"]) >= 1
     for series in channels.values():
         assert len(series) == len(recording["unix_time"])
@@ -289,7 +288,7 @@ def test_needle_valve_not_confirmed_finishes_promptly_with_unmet_postcondition(
     # ITC503's start temperature) -> zero_field and vti_at_target hold
     # immediately, so needle_valve_confirmed is the only gate that can be
     # unmet, isolating it in the assertion below.
-    op = _make_op(station, temperature_window_s=0.0, zero_field_window_s=0.0)
+    op = _make_op(station, temperature_window_s=0.0)
 
     finished: list[dict] = []
     orchestrator.run_finished.connect(finished.append)

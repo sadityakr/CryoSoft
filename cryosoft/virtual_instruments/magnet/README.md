@@ -16,7 +16,13 @@ A driver dict `{"main": <PSU real driver>}` and optional `init_params`:
 
 ## Exit (what goes out)
 `@monitored` readings: `magnet_field_T() → float (T)`, `magnet_current() → float (A)`,
-`psu_current() → float (A)`, `magnet_status() → str`.
+`psu_current() → float (A)`, `magnet_status() → str` (the raw **PSU status** —
+HOLD/RAMPING/QUENCH/CLAMPED, read straight from the driver), `magnet_state() →
+str` (this VI's logical interpretation of PSU status plus the live current
+readings — "standby"/"ramping"/"holding"/"quenched"/"clamped", plus
+"persistent" on `SuperconductingMagnetPersistentVI`; see GLOSSARY.md's
+**Magnet state**). Operations gate readiness on `magnet_state()`, never on
+raw current thresholds — see GLOSSARY.md's **Magnet state**.
 `@control` actions: `set_field(target_T)` — bounded by the setup's field limit
 via the control-validation standard (`control_limits`); an out-of-range value
 raises `CryoSoftSafetyError` before any hardware command.
@@ -55,8 +61,9 @@ and `virtual_instruments/rampable.py`).
 ## Files
 - `superconducting_magnet.py` — `SuperconductingMagnetVI`: status-driven field ramp,
   optional segment-based rate scheduling; aborts the sequence on a QUENCH status.
-  Key API: `@monitored magnet_field_T` / `magnet_current` / `psu_current` / `magnet_status`,
-  `@control set_field`, the `RampableVI` methods, `evaluate_safety()`. tests:
+  Key API: `@monitored magnet_field_T` / `magnet_current` / `psu_current` /
+  `magnet_status` / `magnet_state`, `@control set_field`, the `RampableVI`
+  methods, `evaluate_safety()`. tests:
   `tests/test_l1_new_vis.py` (`TestSuperConductingMagnetVI`),
   `tests/test_l1_virtual_instruments.py`.
 - `superconducting_magnet_persistent.py` — `SuperconductingMagnetPersistentVI`:

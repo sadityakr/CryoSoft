@@ -156,7 +156,6 @@ def _make_fill(station, tmp_path, **overrides) -> HeliumFillOperation:
     """
     config = dict(
         fill_target_pct=50.0,  # sim ILM starts at 80% helium -> already "at target"
-        fill_zero_field_eps_T=0.01,
         fill_zero_field_window_s=0.0,
         fill_complete_window_s=0.03,
         max_fill_duration_s=30.0,
@@ -675,6 +674,11 @@ def test_manual_action_on_unclaimed_vi_admitted_during_helium_fill(
     assert orchestrator._procedure is op
     assert orchestrator._active_claims == {"level_meter", *station.magnet_vi_names()}
 
+    # set_needle_valve is refused unless needle valve mode is MANUAL (the
+    # instrument powers up in AUTO); switch it directly, bypassing the
+    # claim/admission gate under test here.
+    station.get_vi("temperature_vti").set_needle_valve_mode("MANUAL")
+
     blocked: list[str] = []
     succeeded: list[tuple[str, str]] = []
     orchestrator.action_blocked.connect(blocked.append)
@@ -832,6 +836,11 @@ def test_queued_action_drained_during_operation_gets_verdict(
     op = _make_fill(station, tmp_path)
     orchestrator.run_operation(op)
     assert orchestrator._procedure is op
+
+    # set_needle_valve is refused unless needle valve mode is MANUAL (the
+    # instrument powers up in AUTO); switch it directly, bypassing the
+    # claim/admission gate under test here.
+    station.get_vi("temperature_vti").set_needle_valve_mode("MANUAL")
 
     blocked: list[str] = []
     succeeded: list[tuple[str, str]] = []

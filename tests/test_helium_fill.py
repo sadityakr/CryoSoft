@@ -82,7 +82,6 @@ def _make_op(station, tmp_path=None, *, person: str = "Alex Tech", **overrides) 
     """
     config = dict(
         fill_target_pct=50.0,  # sim ILM starts at 80% helium -> already "at target"
-        fill_zero_field_eps_T=0.01,
         fill_zero_field_window_s=0.0,
         fill_complete_window_s=0.03,
         max_fill_duration_s=30.0,

@@ -6,7 +6,7 @@
 #   VTITemperatureControllerVI, CryogenLevelMeterVI, DCSeparateMeasurementVI,
 #   DCSingleInstrumentVI, and DCMeasurementBase.
 # entry_point: pytest tests/test_l1_new_vis.py -v
-# last_updated: 2026-07-25
+# last_updated: 2026-07-26
 # ---
 
 """Tests for behavior-based VIs (Stage 2 of VI refactor)."""
@@ -176,6 +176,51 @@ class TestSuperConductingMagnetVI:
         vi.stop_ramp()
         assert vi.ramp_target() is None
         assert vi.ramp_rate() is None
+
+    # -- magnet_state(): standby / ramping / holding / quenched -------------
+
+    def test_magnet_state_standby_initially(self, ips_driver):
+        vi = self._make_vi(ips_driver)
+        assert vi.magnet_state() == "standby"
+
+    def test_magnet_state_ramping_while_ramp_active(self, ips_driver):
+        vi = self._make_vi(ips_driver)
+        vi.start_ramp(1.0)
+        assert vi.magnet_state() == "ramping"
+
+    def test_magnet_state_holding_after_ramp_completes(self, ips_driver):
+        """Regression: a ramp generator is not reset to None on normal
+        completion (only stop_ramp() does that — see advance_ramp()), so
+        magnet_state() must not use `self._ramp_gen is not None` as its
+        ramping test, or it would report "ramping" forever after the first
+        completed ramp instead of "holding"."""
+        vi = self._make_vi(ips_driver)
+        ips_driver.set_ramp_rate(600.0)
+        vi.start_ramp(1.0)
+        for _ in range(20):
+            ips_driver._last_update = time.time() - 10.0
+            vi.advance_ramp()
+        assert vi.ramp_status() == "TARGET_REACHED"
+        assert vi.magnet_state() == "holding"
+
+    def test_magnet_state_standby_after_ramp_to_zero_completes(self, ips_driver):
+        vi = self._make_vi(ips_driver)
+        ips_driver._current = 50.0
+        vi.start_ramp(0.0)
+        # Force the simulated PSU to its target directly rather than
+        # depending on ramp-segment rates/timing (50 A crosses this fixture's
+        # 40 A segment boundary, so the clock-rewind trick used elsewhere in
+        # this file would need many more than 20 ticks to actually finish).
+        ips_driver._current = 0.0
+        ips_driver._status = "HOLD"
+        vi.advance_ramp()
+        assert vi.ramp_status() == "TARGET_REACHED"
+        assert vi.magnet_state() == "standby"
+
+    def test_magnet_state_quenched(self, ips_driver):
+        vi = self._make_vi(ips_driver)
+        ips_driver._simulate_quench = True
+        assert vi.magnet_state() == "quenched"
 
 
 # ---------------------------------------------------------------------------
@@ -525,6 +570,52 @@ class TestSuperConductingMagnetPersistentVI:
         assert vi.switch_heater_state() == "OFF"
         assert ips_driver.get_current() == pytest.approx(0.0, abs=0.01)
 
+    # -- magnet_state(): standby / ramping / holding / persistent / quenched --
+
+    def test_magnet_state_standby_initially(self, ips_driver):
+        vi = self._make_vi(ips_driver)
+        assert vi.magnet_state() == "standby"
+
+    def test_magnet_state_ramping_while_normal_ramp_active(self, ips_driver):
+        vi = self._make_vi(ips_driver, warmup_s=0.0)
+        vi.start_ramp(1.5)
+        assert vi.magnet_state() == "ramping"
+
+    def test_magnet_state_holding_after_normal_ramp_completes(self, ips_driver):
+        """Regression: same _ramp_gen-never-reset issue as the base VI (see
+        TestSuperConductingMagnetVI.test_magnet_state_holding_after_ramp_completes)
+        applies to this VI's start_ramp() override too."""
+        vi = self._make_vi(ips_driver, warmup_s=0.0)
+        vi.start_ramp(1.5)
+        assert self._drive_to_target_reached(vi, ips_driver)
+        assert vi.switch_heater_state() == "ON"
+        assert vi.magnet_state() == "holding"
+
+    def test_magnet_state_persistent_after_parking(self, ips_driver):
+        vi = self._make_vi(ips_driver, warmup_s=0.0)
+        vi.enable_persistent_mode()
+        vi.switch_heater_on()
+        vi.start_ramp(2.0)  # 20 A
+        assert self._drive_to_target_reached(vi, ips_driver)
+        vi.switch_heater_off()  # freeze coil at 20 A, heater off
+        vi.start_ramp(0.0)  # park PSU at zero; coil holds field
+        assert self._drive_to_target_reached(vi, ips_driver)
+        assert vi.magnet_state() == "persistent"
+
+    def test_magnet_state_standby_after_standby_parks_fully(self, ips_driver):
+        vi = self._make_vi(ips_driver, warmup_s=0.0)
+        vi.start_ramp(1.5)
+        assert self._drive_to_target_reached(vi, ips_driver)
+        vi.standby()
+        assert self._drive_to_target_reached(vi, ips_driver)
+        assert vi.switch_heater_state() == "OFF"
+        assert vi.magnet_state() == "standby"
+
+    def test_magnet_state_quenched(self, ips_driver):
+        vi = self._make_vi(ips_driver)
+        ips_driver._simulate_quench = True
+        assert vi.magnet_state() == "quenched"
+
 
 # ---------------------------------------------------------------------------
 # SampleTemperatureControllerVI
@@ -689,6 +780,22 @@ class TestSampleTemperatureControllerVI:
         state = vi.get_state()
         assert state["heater_mode"] == "AUTO"
 
+    # -- manual heater output (only meaningful, and only allowed, while
+    #    heater mode is MANUAL) --
+
+    def test_set_heater_output_rejects_while_auto(self, itc_driver):
+        from cryosoft.core.exceptions import CryoSoftSafetyError
+
+        vi = self._make_vi(itc_driver)
+        with pytest.raises(CryoSoftSafetyError, match="AUTO"):
+            vi.set_heater_output(50.0)
+
+    def test_set_heater_output_control(self, itc_driver):
+        vi = self._make_vi(itc_driver)
+        vi.set_heater_mode("MANUAL")
+        vi.set_heater_output(42.0)
+        assert vi.heater_output() == pytest.approx(42.0)
+
     # -- lifecycle: initiate() -> heater AUTO, standby() -> heater MANUAL
     #    at zero output (standardised across temperature controller VIs) --
 
@@ -743,11 +850,13 @@ class TestVTITemperatureControllerVI:
 
     def test_set_needle_valve_control(self, itc_driver):
         vi = self._make_vi(itc_driver)
+        vi.set_needle_valve_mode("MANUAL")
         vi.set_needle_valve(50.0)
         assert vi.needle_valve() == pytest.approx(50.0)
 
     def test_needle_valve_full_range(self, itc_driver):
         vi = self._make_vi(itc_driver)
+        vi.set_needle_valve_mode("MANUAL")
         vi.set_needle_valve(0.0)
         assert vi.needle_valve() == pytest.approx(0.0)
         vi.set_needle_valve(100.0)
@@ -771,6 +880,40 @@ class TestVTITemperatureControllerVI:
         vi.set_heater_mode("MANUAL")
         assert vi.heater_mode() == "MANUAL"
 
+    # -- needle valve mode (AUTO/MANUAL — the instrument's gas-flow control
+    #    loop drives the valve in AUTO and ignores explicit position
+    #    commands, the real-hardware bug this mode standard fixes) --
+
+    def test_needle_valve_mode_default_is_auto(self, itc_driver):
+        vi = self._make_vi(itc_driver)
+        assert vi.needle_valve_mode() == "AUTO"
+
+    def test_set_needle_valve_rejects_while_auto(self, itc_driver):
+        from cryosoft.core.exceptions import CryoSoftSafetyError
+
+        vi = self._make_vi(itc_driver)
+        with pytest.raises(CryoSoftSafetyError, match="AUTO"):
+            vi.set_needle_valve(50.0)
+
+    def test_set_needle_valve_mode_control(self, itc_driver):
+        vi = self._make_vi(itc_driver)
+        vi.set_needle_valve_mode("MANUAL")
+        assert vi.needle_valve_mode() == "MANUAL"
+        vi.set_needle_valve(50.0)
+        assert vi.needle_valve() == pytest.approx(50.0)
+        vi.set_needle_valve_mode("AUTO")
+        assert vi.needle_valve_mode() == "AUTO"
+
+    def test_set_needle_valve_mode_rejects_invalid(self, itc_driver):
+        vi = self._make_vi(itc_driver)
+        with pytest.raises(ValueError):
+            vi.set_needle_valve_mode("INVALID")
+
+    def test_get_state_includes_needle_valve_mode(self, itc_driver):
+        vi = self._make_vi(itc_driver)
+        state = vi.get_state()
+        assert state["needle_valve_mode"] == "AUTO"
+
     # -- lifecycle: standby() extends the inherited heater lifecycle to also
     #    close the needle valve --
 
@@ -783,10 +926,22 @@ class TestVTITemperatureControllerVI:
     def test_standby_closes_needle_valve_and_sets_heater_manual(self, itc_driver):
         vi = self._make_vi(itc_driver)
         vi.set_heater_mode("AUTO")
+        vi.set_needle_valve_mode("MANUAL")
         vi.set_needle_valve(75.0)
         vi.standby()
         assert vi.heater_mode() == "MANUAL"
         assert vi.heater_output() == pytest.approx(0.0)
+        assert vi.needle_valve() == pytest.approx(0.0)
+
+    def test_standby_switches_needle_valve_to_manual_from_auto(self, itc_driver):
+        """The real-hardware bug this fixes: standby() must force the needle
+        valve into MANUAL mode before closing it — while it is left in AUTO
+        (the instrument's power-up default), the gas-flow control loop
+        ignores the bare position command."""
+        vi = self._make_vi(itc_driver)
+        assert vi.needle_valve_mode() == "AUTO"
+        vi.standby()
+        assert vi.needle_valve_mode() == "MANUAL"
         assert vi.needle_valve() == pytest.approx(0.0)
 
 

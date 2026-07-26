@@ -22,7 +22,6 @@
 # input: |
 #   Constructor: station (positional), person (keyword, default ""), and
 #   **config carrying the cryogenics: keys (level_vi, fill_target_pct,
-#   fill_zero_field_eps_T,
 #   fill_zero_field_window_s, fill_complete_window_s, max_fill_duration_s,
 #   sample_period_s), each with a class-matching default — main.py can pass
 #   **read_cryogenics_config(config_path) verbatim (its extra keys, e.g.
@@ -32,8 +31,9 @@
 #   "level_meter") must be a registered VI.
 # process: |
 #   initiate() ramps every magnet to 0 T and switches the level meter to
-#   FAST. initiation_gates() holds until every magnet reads |B| < eps for
-#   fill_zero_field_window_s (from cached state — no extra hardware poll).
+#   FAST. initiation_gates() holds until every magnet's magnet_state() ==
+#   "standby" for fill_zero_field_window_s (from cached state — no extra
+#   hardware poll; see GLOSSARY.md's Magnet state).
 #   sample() reads the level, appends (unix_time, helium_pct) to a bounded
 #   in-memory series (decimated once it exceeds _MAX_CURVE_POINTS — see
 #   run_summary()'s docstring), and tracks the start level and a "stable
@@ -59,7 +59,7 @@
 #   name and the cap (via OperationBase._MAX_RECORDING_POINTS). No data
 #   file: data_filepath is not defined (getattr default is None/"" on the
 #   manifest), matching OperationBase's "data file is optional" contract.
-# last_updated: 2026-07-23
+# last_updated: 2026-07-26
 # ---
 
 """HeliumFillOperation — force all magnets to zero field and fill helium."""
@@ -164,8 +164,8 @@ class HeliumFillOperation(OperationBase):
                 ``get_params()``; the servicing-log recorder reads
                 ``params["person"]`` from the run manifest).
             **config: Plan §9 ``cryogenics:`` keys — ``level_vi``,
-                ``fill_target_pct``, ``fill_zero_field_eps_T``,
-                ``fill_zero_field_window_s``, ``fill_complete_window_s``,
+                ``fill_target_pct``, ``fill_zero_field_window_s``,
+                ``fill_complete_window_s``,
                 ``max_fill_duration_s``, ``sample_period_s``,
                 ``helium_warning_pct`` (read by ``next_due()`` — the same
                 key the recorder's advisory warning uses) — each with a
@@ -186,9 +186,6 @@ class HeliumFillOperation(OperationBase):
 
         self._level_vi_name: str = str(config.get("level_vi", "level_meter"))
         self._fill_target_pct: float = float(config.get("fill_target_pct", 90.0))
-        self._fill_zero_field_eps_T: float = float(
-            config.get("fill_zero_field_eps_T", 0.005)
-        )
         self._fill_zero_field_window_s: float = float(
             config.get("fill_zero_field_window_s", 10.0)
         )
@@ -292,7 +289,6 @@ class HeliumFillOperation(OperationBase):
             "person": self._person,
             "level_vi": self._level_vi_name,
             "fill_target_pct": self._fill_target_pct,
-            "fill_zero_field_eps_T": self._fill_zero_field_eps_T,
             "fill_zero_field_window_s": self._fill_zero_field_window_s,
             "fill_complete_window_s": self._fill_complete_window_s,
             "max_fill_duration_s": self._max_fill_duration_s,
@@ -312,35 +308,32 @@ class HeliumFillOperation(OperationBase):
         contract.
 
         Returns:
-            One ``ReadinessCondition`` naming the worst-offending magnet in
-            its detail text, or ``()`` if the station has no magnets.
+            One ``ReadinessCondition`` naming the first magnet not in
+            standby in its detail text, or ``()`` if the station has no
+            magnets.
         """
         if not self._magnets:
             return ()
 
-        def _worst_offender(state: dict[str, Any]) -> tuple[str, float | None]:
-            worst_name = self._magnets[0]
-            worst_field: float | None = None
-            worst_abs = -1.0
+        def _magnet_not_standby(state: dict[str, Any]) -> tuple[str | None, str | None]:
+            """Return the first magnet not in standby, or (None, None) if all standby."""
             for magnet in self._magnets:
-                field = state.get(magnet, {}).get("magnet_field_T")
-                if isinstance(field, bool) or not isinstance(field, (int, float)):
-                    return magnet, None
-                if abs(float(field)) > worst_abs:
-                    worst_abs = abs(float(field))
-                    worst_name = magnet
-                    worst_field = float(field)
-            return worst_name, worst_field
+                magnet_state = state.get(magnet, {}).get("magnet_state")
+                if magnet_state != "standby":
+                    return magnet, magnet_state
+            return None, None
 
         def _holds(state: dict[str, Any]) -> bool:
-            _name, field = _worst_offender(state)
-            return field is not None and abs(field) < self._fill_zero_field_eps_T
+            name, _state = _magnet_not_standby(state)
+            return name is None
 
         def _detail(state: dict[str, Any]) -> str:
-            name, field = _worst_offender(state)
-            if field is None:
-                return f"{name} field reading unavailable"
-            return f"{name} at {field:.2f} T"
+            name, magnet_state = _magnet_not_standby(state)
+            if name is None:
+                return "all magnets standby"
+            if magnet_state is None:
+                return f"{name} state unavailable"
+            return f"{name} {magnet_state}"
 
         return (
             ReadinessCondition(
@@ -432,28 +425,25 @@ class HeliumFillOperation(OperationBase):
         )
 
     def initiation_gates(self) -> tuple[Gate, ...]:
-        """Hold until every magnet reads zero field, from cached state only.
+        """Hold until every magnet is in standby, from cached state only.
 
         Returns:
-            One ``Gate("zero_field", ...)`` checking ``|field| <
-            fill_zero_field_eps_T`` on every magnet, held for
+            One ``Gate("zero_field", ...)`` checking ``magnet_state() ==
+            "standby"`` on every magnet, held for
             ``fill_zero_field_window_s``.
         """
 
-        def _all_zero_field() -> bool:
+        def _all_magnets_standby() -> bool:
             state = self._station.cached_state
             for magnet in self._magnets:
-                field = state.get(magnet, {}).get("magnet_field_T")
-                if isinstance(field, bool) or not isinstance(field, (int, float)):
-                    return False
-                if abs(float(field)) >= self._fill_zero_field_eps_T:
+                if state.get(magnet, {}).get("magnet_state") != "standby":
                     return False
             return True
 
         return (
             Gate(
                 "zero_field",
-                check=_all_zero_field,
+                check=_all_magnets_standby,
                 window_s=self._fill_zero_field_window_s,
             ),
         )

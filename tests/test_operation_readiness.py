@@ -4,11 +4,12 @@
 #   in Phase 6: the ReadinessCondition/
 #   NextDue dataclasses, OperationBase's defaults, HeliumFillOperation's
 #   zero_field checklist row + next_due() prediction math, and
-#   SampleChangeOperation's four checklist rows (including heater_off
-#   presence/absence and the needle_valve_confirmed/confirmed() flow). Qt-free
-#   — no Orchestrator ticking, just direct calls against synthetic state
-#   snapshots and context dicts, mirroring how OperationCard drives them.
-# last_updated: 2026-07-19
+#   SampleChangeOperation's three checklist rows (zero_field/vti_at_target/
+#   needle_valve_confirmed, the last via the confirmed()/confirm() flow).
+#   Qt-free — no Orchestrator ticking, just direct calls against synthetic
+#   state snapshots and context dicts, mirroring how OperationCard drives
+#   them.
+# last_updated: 2026-07-26
 # ---
 
 from __future__ import annotations
@@ -107,34 +108,25 @@ def test_helium_fill_readiness_zero_field_true(station):
     op = HeliumFillOperation(station)
     (condition,) = op.readiness_conditions()
     assert condition.key == "zero_field"
-    state = {name: {"magnet_field_T": 0.0} for name in station.magnet_vi_names()}
+    state = {name: {"magnet_state": "standby"} for name in station.magnet_vi_names()}
     assert condition.check(state) is True
 
 
-def test_helium_fill_readiness_zero_field_false_names_worst_offender(station):
+def test_helium_fill_readiness_zero_field_false_names_first_offender(station):
     op = HeliumFillOperation(station)
     (condition,) = op.readiness_conditions()
     magnets = station.magnet_vi_names()
-    state = {name: {"magnet_field_T": 0.0} for name in magnets}
-    state[magnets[0]] = {"magnet_field_T": 1.5}
+    state = {name: {"magnet_state": "standby"} for name in magnets}
+    state[magnets[0]] = {"magnet_state": "holding"}
     assert condition.check(state) is False
-    assert condition.detail(state) == f"{magnets[0]} at 1.50 T"
-
-
-def test_helium_fill_readiness_zero_field_worst_offender_is_largest_magnitude(station):
-    op = HeliumFillOperation(station)
-    (condition,) = op.readiness_conditions()
-    magnets = station.magnet_vi_names()
-    assert len(magnets) >= 2
-    state = {magnets[0]: {"magnet_field_T": 0.2}, magnets[1]: {"magnet_field_T": -0.9}}
-    assert condition.detail(state) == f"{magnets[1]} at -0.90 T"
+    assert condition.detail(state) == f"{magnets[0]} holding"
 
 
 def test_helium_fill_readiness_zero_field_missing_reading_fails_with_detail(station):
     op = HeliumFillOperation(station)
     (condition,) = op.readiness_conditions()
     magnets = station.magnet_vi_names()
-    state = {name: {} for name in magnets}  # no get_field key at all
+    state = {name: {} for name in magnets}  # no magnet_state key at all
     assert condition.check(state) is False
     assert "unavailable" in condition.detail(state)
 
@@ -199,13 +191,13 @@ def test_next_due_reads_the_configured_level_vi(station):
     assert op.next_due(ctx_wrong_vi) == NextDue(None, "Fill due: consumption unknown")
 
 
-# ── SampleChangeOperation: readiness (four rows) ─────────────────────────────
+# ── SampleChangeOperation: readiness (three rows) ────────────────────────────
 
 
 def test_sample_change_readiness_conditions_keys(station):
     op = SampleChangeOperation(station)
     keys = [c.key for c in op.readiness_conditions()]
-    assert keys == ["zero_field", "heater_off", "vti_at_target", "needle_valve_confirmed"]
+    assert keys == ["zero_field", "vti_at_target", "needle_valve_confirmed"]
 
 
 def test_sample_change_zero_field_true_and_false(station):
@@ -220,30 +212,6 @@ def test_sample_change_zero_field_true_and_false(station):
     nonzero_state[magnets[0]] = {"magnet_state": "holding"}
     assert conditions["zero_field"].check(nonzero_state) is False
     assert conditions["zero_field"].detail(nonzero_state) == f"{magnets[0]} holding"
-
-
-def test_sample_change_heater_off_absent_from_snapshot_holds_vacuously(station):
-    """No magnet in the live snapshot exposes switch_heater_state -> holds trivially."""
-    op = SampleChangeOperation(station)
-    conditions = {c.key: c for c in op.readiness_conditions()}
-    magnets = station.magnet_vi_names()
-    state = {name: {"magnet_field_T": 0.0} for name in magnets}  # no switch_heater_state key
-    assert conditions["heater_off"].check(state) is True
-    assert "no switch heater" in conditions["heater_off"].detail(state)
-
-
-def test_sample_change_heater_off_present_true_and_false(station):
-    op = SampleChangeOperation(station)
-    conditions = {c.key: c for c in op.readiness_conditions()}
-    magnets = station.magnet_vi_names()
-
-    off_state = {name: {"switch_heater_state": "OFF"} for name in magnets}
-    assert conditions["heater_off"].check(off_state) is True
-
-    on_state = dict(off_state)
-    on_state[magnets[0]] = {"switch_heater_state": "ON"}
-    assert conditions["heater_off"].check(on_state) is False
-    assert magnets[0] in conditions["heater_off"].detail(on_state)
 
 
 def test_sample_change_vti_at_target_true_and_false_with_detail(station):

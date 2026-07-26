@@ -22,8 +22,10 @@
 #   ramp_status() inspects generator exhaustion and hardware status.
 # output: |
 #   Logged psu_current (A), magnet_current (A), magnet_field_T (T), magnet_status
-#   strings via @monitored; set_field available as @control for manual GUI use.
-# last_updated: 2026-04-19
+#   (PSU status string) and magnet_state (logical state: standby/ramping/
+#   holding/quenched/clamped) via @monitored; set_field available as @control
+#   for manual GUI use.
+# last_updated: 2026-07-26
 # ---
 
 """SuperconductingMagnetVI — behavior-based VI for any SC magnet PSU (no switch heater)."""
@@ -302,7 +304,12 @@ class SuperconductingMagnetVI(MagnetBase, RampableVI):
 
     @monitored
     def magnet_status(self) -> str:
-        """Return the hardware status string (HOLD, RAMPING, or QUENCH)."""
+        """Return the PSU status string (HOLD, RAMPING, QUENCH, or CLAMPED).
+
+        The raw hardware report, read straight from the driver. Distinct
+        from ``magnet_state()``, which is this VI's logical interpretation
+        of that report plus the live current readings.
+        """
         return self._driver.get_status()  # type: ignore[attr-defined]
 
     @monitored
@@ -310,25 +317,30 @@ class SuperconductingMagnetVI(MagnetBase, RampableVI):
         """Return the logical magnet state.
 
         Returns:
-            One of: "standby" (PSU ≈ 0 A, heater off), "ramping" (ramp active),
-            "holding" (at target), "quenched" (safety condition), "clamped" (compliance).
+            One of: "standby" (PSU ≈ 0 A), "ramping" (PSU status RAMPING, or
+            a ramp generator not yet exhausted), "holding" (at target),
+            "quenched" (safety condition), "clamped" (compliance — no driver
+            in this codebase reports CLAMPED today; kept for a future one
+            that does).
         """
-        hw_status = self.magnet_status()
+        psu_status = self.magnet_status()
 
-        if hw_status == "QUENCH":
+        if psu_status == "QUENCH":
             return "quenched"
-        if hw_status == "CLAMPED":
+        if psu_status == "CLAMPED":
             return "clamped"
+
+        # PSU status is the source of truth for "at rest": a ramp generator
+        # not yet exhausted (ramp_status() == "RAMPING") is OR'd in so a
+        # tick where the PSU happens to read HOLD mid-ramp (e.g. between
+        # ramp segments, or during a wait) doesn't get misclassified as
+        # standby/holding.
+        if self.ramp_status() == "RAMPING" or psu_status not in ("HOLD", "CLAMPED"):
+            return "ramping"
 
         psu_A = self.psu_current()
         if abs(psu_A) <= 0.01:
             return "standby"
-
-        if self._ramp_gen is not None:
-            return "ramping"
-
-        if hw_status == "HOLD":
-            return "holding"
 
         return "holding"
 

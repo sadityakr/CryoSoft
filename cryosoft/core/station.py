@@ -1624,7 +1624,6 @@ _CRYOGENICS_DEFAULTS: dict[str, float | str] = {
     "level_vi": "level_meter",
     "helium_warning_pct": 35.0,
     "fill_target_pct": 90.0,
-    "fill_zero_field_eps_T": 0.005,
     "fill_zero_field_window_s": 10.0,
     "fill_complete_window_s": 120.0,
     "max_fill_duration_s": 3600.0,
@@ -1799,8 +1798,6 @@ _OPERATIONS_DEFAULTS: dict[str, dict[str, float | str]] = {
         "target_temperature_K": 300.0,
         "temperature_tolerance_K": 2.0,
         "temperature_window_s": 60.0,
-        "zero_field_eps_T": 0.005,
-        "zero_field_window_s": 10.0,
         "needle_valve": "manual",
         "postcondition_timeout_s": 7200.0,
         # How often the hold phase records station state into the shared

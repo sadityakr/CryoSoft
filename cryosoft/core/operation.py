@@ -548,7 +548,7 @@ class OperationBase:
             unix_time: The sample's wall-clock time.
             values: ``{channel_name: value}`` for every channel this
                 operation records, e.g. ``{"temperature_vti.temperature":
-                295.1, "magnet_z.get_field": 0.0}``. The channel set must be
+                295.1, "magnet_z.magnet_field_T": 0.0}``. The channel set must be
                 the SAME on every call within one run (first call fixes it).
 
         Raises:

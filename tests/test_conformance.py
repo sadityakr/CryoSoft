@@ -673,7 +673,6 @@ def test_cryogenics_config_block(config_dir: Path) -> None:
     positive_keys = (
         "helium_warning_pct",
         "fill_target_pct",
-        "fill_zero_field_eps_T",
         "fill_zero_field_window_s",
         "fill_complete_window_s",
         "max_fill_duration_s",
@@ -741,8 +740,6 @@ def test_operations_config_block(config_dir: Path) -> None:
     positive_keys = (
         "temperature_tolerance_K",
         "temperature_window_s",
-        "zero_field_eps_T",
-        "zero_field_window_s",
     )
     for key in positive_keys:
         if key not in sample_change:

@@ -267,16 +267,16 @@ def test_checklist_flips_on_snapshot_change(
     card = panel._cards[0]
     icon_label, detail_label = card._condition_rows["zero_field"]
 
-    zero_state = {"magnet_z": {"magnet_field_T": 0.0}, "magnet_y": {"magnet_field_T": 0.0}}
+    zero_state = {"magnet_z": {"magnet_state": "standby"}, "magnet_y": {"magnet_state": "standby"}}
     ctx = {"state": zero_state, "now_unix": 0.0, "consumption_rate_pct_per_h": None}
     card.on_states_updated(zero_state, ctx)
     assert not icon_label.pixmap().isNull()
-    assert "0.00" in detail_label.text()
+    assert detail_label.text() == "all magnets standby"
 
-    nonzero_state = {"magnet_z": {"magnet_field_T": 1.5}, "magnet_y": {"magnet_field_T": 0.0}}
+    nonzero_state = {"magnet_z": {"magnet_state": "holding"}, "magnet_y": {"magnet_state": "standby"}}
     ctx = {"state": nonzero_state, "now_unix": 0.0, "consumption_rate_pct_per_h": None}
     card.on_states_updated(nonzero_state, ctx)
-    assert "magnet_z at 1.50 T" == detail_label.text()
+    assert "magnet_z holding" == detail_label.text()
 
 
 # ── Start / finish button ────────────────────────────────────────────────────
