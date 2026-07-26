@@ -17,11 +17,13 @@
 #   All temperature ramp logic is inherited unchanged from
 #   SampleTemperatureControllerVI. Adds get/set for the needle valve position
 #   (0–100% open) which is forwarded to driver.get_needle_valve() /
-#   driver.set_needle_valve().
+#   driver.set_needle_valve(). standby() extends the inherited heater
+#   lifecycle (MANUAL, zero output) by also closing the needle valve;
+#   initiate() is inherited unchanged (heater AUTO).
 # output: |
 #   All SampleTemperatureControllerVI outputs plus needle_valve (%) via
 #   @monitored; set_needle_valve available as @control.
-# last_updated: 2026-04-19
+# last_updated: 2026-07-26
 # ---
 
 """VTITemperatureControllerVI — extends SampleTemperatureControllerVI with needle valve."""
@@ -41,7 +43,8 @@ class VTITemperatureControllerVI(SampleTemperatureControllerVI):
 
     Identical to ``SampleTemperatureControllerVI`` in all ramp and temperature
     control behaviour. Adds needle valve monitoring and control for managing
-    the cryostat VTI helium flow.
+    the cryostat VTI helium flow, and extends ``standby()`` to also close the
+    needle valve (see Lifecycle below).
 
     Driver contract (additions to SampleTemperatureControllerVI)
     -------------------------------------------------------------
@@ -83,3 +86,17 @@ class VTITemperatureControllerVI(SampleTemperatureControllerVI):
             position: Percent open, 0.0 (fully closed) to 100.0 (fully open).
         """
         self._driver.set_needle_valve(position)  # type: ignore[attr-defined]
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    def standby(self) -> None:
+        """Put the heater in a safe idle state and close the needle valve.
+
+        Extends ``SampleTemperatureControllerVI.standby()`` (heater MANUAL,
+        zero output) by fully closing the needle valve, cutting off bath
+        helium flow to the VTI while idle.
+        """
+        super().standby()
+        self._driver.set_needle_valve(0.0)  # type: ignore[attr-defined]

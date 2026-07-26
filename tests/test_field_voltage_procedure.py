@@ -82,7 +82,7 @@ def test_field_voltage_sweep_full_orchestrator_loop(station, tmp_path, qtbot):
     # switch heater left ON (persistent mode is a manual Monitor-window action).
     assert station.magnet_z.switch_heater_state() == "ON"
     assert station.magnet_z.is_persistent() is False
-    assert station.magnet_z.get_field() == pytest.approx(0.0, abs=1e-3)
+    assert station.magnet_z.magnet_field_T() == pytest.approx(0.0, abs=1e-3)
 
     h5_files = list(tmp_path.glob("*.h5"))
     assert len(h5_files) == 1

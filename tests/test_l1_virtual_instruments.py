@@ -176,7 +176,7 @@ def test_magnet_vi_ramp_cycle():
         driver._update_simulation()
 
     assert vi.ramp_status() in ("TARGET_REACHED", "IDLE")
-    assert vi.get_field() == pytest.approx(1.0, abs=0.1)
+    assert vi.magnet_field_T() == pytest.approx(1.0, abs=0.1)
 
 def test_magnet_vi_ramp_segments():
     from cryosoft.virtual_instruments.magnet.superconducting_magnet import SuperconductingMagnetVI
@@ -201,7 +201,7 @@ def test_magnet_vi_ramp_segments():
 
     assert 600.0 in rates_used
     assert 100.0 in rates_used
-    assert vi.get_field() == pytest.approx(3.0, abs=0.1)
+    assert vi.magnet_field_T() == pytest.approx(3.0, abs=0.1)
 
 def test_magnet_vi_safety_clamping():
     from cryosoft.virtual_instruments.magnet.superconducting_magnet import SuperconductingMagnetVI

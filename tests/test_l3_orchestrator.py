@@ -358,7 +358,7 @@ def test_standby_waits_for_its_own_ramp_before_finishing(orchestrator, station, 
         pass
 
     assert station.magnet_z.ramp_status() in ("TARGET_REACHED", "IDLE")
-    assert station.magnet_z.get_field() == pytest.approx(0.0, abs=0.01)
+    assert station.magnet_z.magnet_field_T() == pytest.approx(0.0, abs=0.01)
 
 
 def test_wait_time_respected(orchestrator, station, qtbot):
@@ -1175,7 +1175,7 @@ def test_envelope_rejects_out_of_bounds_target(orchestrator, station, qtbot):
     assert started == [], "a rejected run must not report as started"
     assert any("session envelope" in e and "magnet_z" in e for e in errors)
     # The magnet was never asked to move.
-    assert station.magnet_z.get_field() == pytest.approx(0.0, abs=1e-6)
+    assert station.magnet_z.magnet_field_T() == pytest.approx(0.0, abs=1e-6)
 
 
 def test_envelope_allows_within_bounds_and_clears(orchestrator, station, qtbot):

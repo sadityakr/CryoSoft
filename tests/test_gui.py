@@ -232,14 +232,14 @@ def test_instrument_panel_updates_values_on_signal(station, orchestrator, qtbot)
     qtbot.addWidget(panel)
 
     # Emit a fake state with known field value
-    fake_state = {vi_name: {"get_field": 1.5, "magnet_current": 15.0, "magnet_status": "HOLD"}}
+    fake_state = {vi_name: {"magnet_field_T": 1.5, "magnet_current": 15.0, "magnet_status": "HOLD"}}
     orchestrator.states_updated.emit(fake_state)
 
     # Unconditional: test_instrument_panel_creates_value_labels already proves a
     # value label exists for every @monitored method, so a missing label here is
     # a real regression, not a reason to skip the assertion.
-    field_label = panel.findChild(QLabel, f"{vi_name}_get_field_value")
-    assert field_label is not None, f"no value label for {vi_name}.get_field"
+    field_label = panel.findChild(QLabel, f"{vi_name}_magnet_field_T_value")
+    assert field_label is not None, f"no value label for {vi_name}.magnet_field_T"
     assert "1.5" in field_label.text()
 
 

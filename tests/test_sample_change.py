@@ -238,7 +238,7 @@ def test_sample_change_holds_until_finish_then_all_postconditions_held(orchestra
     assert finished[0]["postconditions_unmet"] == []  # every gate held, confirmed in time
 
     for name in station.magnet_vi_names():
-        assert abs(station.get_vi(name).get_field()) < 0.01, f"{name} did not reach zero field"
+        assert abs(station.get_vi(name).magnet_field_T()) < 0.01, f"{name} did not reach zero field"
 
     assert abs(station.temperature_vti.temperature() - 300.0) <= 2.0
     assert orchestrator._state == OrchestratorState.IDLE

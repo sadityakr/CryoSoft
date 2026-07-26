@@ -32,7 +32,7 @@
 #   Constructor: station (positional), person (keyword, default ""), and
 #   **config carrying the operations.sample_change: keys (vti_vi,
 #   target_temperature_K, temperature_tolerance_K, temperature_window_s,
-#   zero_field_eps_T, zero_field_window_s, needle_valve, sample_period_s —
+#   needle_valve, sample_period_s —
 #   new in Phase 3), each with a class-matching default so this constructs
 #   from a sim station alone. magnet_vi_names()/measurement_vi_names()/
 #   switch_vi_names() resolve the VI lists; vti_vi (default
@@ -179,8 +179,7 @@ class SampleChangeOperation(OperationBase):
                 ``get_params()``, mirroring the helium fill's ``person``).
             **config: ``operations.sample_change:`` keys — ``vti_vi``,
                 ``target_temperature_K``, ``temperature_tolerance_K``,
-                ``temperature_window_s``, ``zero_field_eps_T``,
-                ``zero_field_window_s``, ``needle_valve``,
+                ``temperature_window_s``, ``needle_valve``,
                 ``sample_period_s`` (new in Phase 3 — how often the hold
                 phase records station state; default 10.0 s, matching the
                 helium fill's own default) — each with a sane default so
@@ -206,10 +205,6 @@ class SampleChangeOperation(OperationBase):
         )
         self._temperature_window_s: float = float(
             config.get("temperature_window_s", 60.0)
-        )
-        self._zero_field_eps_T: float = float(config.get("zero_field_eps_T", 0.005))
-        self._zero_field_window_s: float = float(
-            config.get("zero_field_window_s", 10.0)
         )
         self._needle_valve: str = str(config.get("needle_valve", _NEEDLE_VALVE_MANUAL))
         self._sample_period_s: float = float(config.get("sample_period_s", 10.0))
@@ -310,8 +305,6 @@ class SampleChangeOperation(OperationBase):
             "target_temperature_K": self._target_temperature_K,
             "temperature_tolerance_K": self._temperature_tolerance_K,
             "temperature_window_s": self._temperature_window_s,
-            "zero_field_eps_T": self._zero_field_eps_T,
-            "zero_field_window_s": self._zero_field_window_s,
             "needle_valve": self._needle_valve,
             "sample_period_s": self._sample_period_s,
         }
@@ -359,35 +352,29 @@ class SampleChangeOperation(OperationBase):
             effectively always).
         """
 
-        def _worst_offender(state: dict[str, Any]) -> tuple[str | None, float | None]:
-            if not self._magnets:
-                return None, None
-            worst_name = self._magnets[0]
-            worst_field: float | None = None
-            worst_abs = -1.0
+        def _magnet_not_standby(state: dict[str, Any]) -> tuple[str | None, str | None]:
+            """Return the first magnet not in standby, or (None, None) if all standby."""
             for magnet in self._magnets:
-                field = state.get(magnet, {}).get("get_field")
-                if isinstance(field, bool) or not isinstance(field, (int, float)):
-                    return magnet, None
-                if abs(float(field)) > worst_abs:
-                    worst_abs = abs(float(field))
-                    worst_name = magnet
-                    worst_field = float(field)
-            return worst_name, worst_field
+                magnet_state = state.get(magnet, {}).get("magnet_state")
+                if magnet_state != "standby":
+                    return magnet, magnet_state
+            return None, None
 
         def _zero_field_holds(state: dict[str, Any]) -> bool:
             if not self._magnets:
                 return True
-            _name, field = _worst_offender(state)
-            return field is not None and abs(field) < self._zero_field_eps_T
+            _name, _state = _magnet_not_standby(state)
+            return _name is None
 
         def _zero_field_detail(state: dict[str, Any]) -> str:
             if not self._magnets:
                 return "no magnets on this station"
-            name, field = _worst_offender(state)
-            if field is None:
-                return f"{name} field reading unavailable"
-            return f"{name} at {field:.2f} T"
+            name, magnet_state = _magnet_not_standby(state)
+            if name is None:
+                return "all magnets standby"
+            if magnet_state is None:
+                return f"{name} state unavailable"
+            return f"{name} {magnet_state}"
 
         def _heater_relevant_magnets(state: dict[str, Any]) -> list[str]:
             return [
@@ -519,7 +506,7 @@ class SampleChangeOperation(OperationBase):
             )
         }
         for magnet in self._magnets:
-            values[f"{magnet}.get_field"] = float(self._station.get_vi(magnet).get_field())
+            values[f"{magnet}.get_field"] = float(self._station.get_vi(magnet).magnet_field_T())
         self._record_sample(now, values)
 
     def step(self) -> StepPlan | None:
@@ -570,18 +557,16 @@ class SampleChangeOperation(OperationBase):
         """
         gates: list[Gate] = []
 
-        def _all_zero_field() -> bool:
+        def _all_magnets_standby() -> bool:
+            """Check that all magnets are in standby state (PSU ≈ 0, coil ≈ 0, heater off)."""
             state = self._station.cached_state
             for magnet in self._magnets:
-                field = state.get(magnet, {}).get("get_field")
-                if isinstance(field, bool) or not isinstance(field, (int, float)):
-                    return False
-                if abs(float(field)) >= self._zero_field_eps_T:
+                if state.get(magnet, {}).get("magnet_state") != "standby":
                     return False
             return True
 
         gates.append(
-            Gate("zero_field", check=_all_zero_field, window_s=self._zero_field_window_s)
+            Gate("zero_field", check=_all_magnets_standby, window_s=10.0)
         )
 
         heater_magnets = [

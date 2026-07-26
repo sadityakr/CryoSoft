@@ -32,14 +32,14 @@
 #   before the switch is cold.
 # process: |
 #   Overrides start_ramp() to pick a normal vs manual ramp generator by the
-#   persistent-mode toggle; overrides magnet_current()/get_field() to read the
+#   persistent-mode toggle; overrides magnet_current()/magnet_field_T() to read the
 #   coil current when the magnet is physically persistent (heater off). Adds
 #   @monitored switch_heater_state / coil_current / is_persistent /
 #   persistent_mode_enabled, and @control enable/disable_persistent_mode and
 #   manual switch_heater_on / switch_heater_off.
 # output: |
 #   All SuperconductingMagnetVI outputs (now persistent-mode-correct) plus
-#   switch_heater_state (str), coil_current (A), is_persistent (bool),
+#   switch_heater_state (str), is_persistent (bool),
 #   persistent_mode_enabled (bool) via @monitored.
 # last_updated: 2026-07-12
 # ---
@@ -84,7 +84,7 @@ class SuperconductingMagnetPersistentVI(SuperconductingMagnetVI):
     Any step that observes the driver status ``"QUENCH"`` stops the ramp
     immediately; the Station safety check escalates a quench to EMERGENCY.
 
-    ``magnet_current()`` / ``get_field()`` read the frozen coil current whenever
+    ``magnet_current()`` / ``magnet_field_T()`` read the frozen coil current whenever
     the magnet is physically persistent (heater off), so a parked field reads
     back correctly instead of following the PSU. The warmup wait is timed by the
     ``SwitchHeater`` state object in wall-clock seconds and yields each tick, so
@@ -262,12 +262,20 @@ class SuperconductingMagnetPersistentVI(SuperconductingMagnetVI):
     # ------------------------------------------------------------------
 
     @monitored
+    def psu_current(self) -> float:
+        """Return the PSU output current in amperes."""
+        return self._driver.get_current()  # type: ignore[attr-defined]
+
+    @monitored
     def magnet_current(self) -> float:
         """Return the field-holding current in Amperes.
 
         While the magnet is persistent (switch heater off) the PSU current may
         differ from the field-holding current, so this reads the frozen
-        ``get_coil_current()`` instead of the inherited ``get_current()``.
+        ``get_coil_current()`` instead of the PSU current.
+
+        In normal mode (heater on): equals PSU output.
+        In persistent mode (heater off): equals coil current.
         """
         driver = self._driver  # type: ignore[attr-defined]
         if driver.get_persistent_mode():
@@ -275,7 +283,7 @@ class SuperconductingMagnetPersistentVI(SuperconductingMagnetVI):
         return driver.get_current()
 
     @monitored
-    def get_field(self) -> float:
+    def magnet_field_T(self) -> float:
         """Return the current magnetic field in tesla (persistent-mode-correct)."""
         return self.magnet_current() / self._amperes_per_tesla
 
@@ -287,14 +295,6 @@ class SuperconductingMagnetPersistentVI(SuperconductingMagnetVI):
     def switch_heater_state(self) -> str:
         """Return 'ON' if the switch heater is energised, 'OFF' otherwise."""
         return self._driver.get_switch_heater_state()  # type: ignore[attr-defined]
-
-    @monitored
-    def coil_current(self) -> float:
-        """Return the persistent coil current in Amperes.
-
-        Differs from ``magnet_current()`` (PSU output) when in persistent mode.
-        """
-        return self._driver.get_coil_current()  # type: ignore[attr-defined]
 
     @monitored
     def is_persistent(self) -> bool:
@@ -311,6 +311,44 @@ class SuperconductingMagnetPersistentVI(SuperconductingMagnetVI):
         manages the heater automatically (normal operation).
         """
         return self._persistent_mode_enabled
+
+    @monitored
+    def magnet_state(self) -> str:
+        """Return the logical magnet state (persistent-aware).
+
+        Returns:
+            One of: "standby" (PSU ≈ 0 A, coil ≈ 0 A, heater off), "ramping" (ramp active),
+            "holding" (heater on, at target), "persistent" (heater off, coil holds field),
+            "quenched" (safety condition), "clamped" (compliance).
+        """
+        hw_status = self.magnet_status()
+
+        if hw_status == "QUENCH":
+            return "quenched"
+        if hw_status == "CLAMPED":
+            return "clamped"
+
+        psu_A = self.psu_current()
+        coil_A = self._driver.get_coil_current()  # type: ignore[attr-defined]
+        heater_on = self._driver.get_switch_heater_state() == "ON"  # type: ignore[attr-defined]
+
+        # Standby: both currents ~zero, heater off
+        if abs(psu_A) <= 0.01 and abs(coil_A) <= 0.01 and not heater_on:
+            return "standby"
+
+        # Persistent: heater off, coil holds nonzero field
+        if not heater_on and abs(coil_A) > 0.01:
+            return "persistent"
+
+        # Active ramp
+        if self._ramp_gen is not None:
+            return "ramping"
+
+        # Heater on, holding
+        if heater_on and hw_status == "HOLD":
+            return "holding"
+
+        return "holding"
 
     # ------------------------------------------------------------------
     # @control methods — persistent-mode toggle and manual switch heater

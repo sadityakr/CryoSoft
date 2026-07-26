@@ -267,13 +267,13 @@ def test_checklist_flips_on_snapshot_change(
     card = panel._cards[0]
     icon_label, detail_label = card._condition_rows["zero_field"]
 
-    zero_state = {"magnet_z": {"get_field": 0.0}, "magnet_y": {"get_field": 0.0}}
+    zero_state = {"magnet_z": {"magnet_field_T": 0.0}, "magnet_y": {"magnet_field_T": 0.0}}
     ctx = {"state": zero_state, "now_unix": 0.0, "consumption_rate_pct_per_h": None}
     card.on_states_updated(zero_state, ctx)
     assert not icon_label.pixmap().isNull()
     assert "0.00" in detail_label.text()
 
-    nonzero_state = {"magnet_z": {"get_field": 1.5}, "magnet_y": {"get_field": 0.0}}
+    nonzero_state = {"magnet_z": {"magnet_field_T": 1.5}, "magnet_y": {"magnet_field_T": 0.0}}
     ctx = {"state": nonzero_state, "now_unix": 0.0, "consumption_rate_pct_per_h": None}
     card.on_states_updated(nonzero_state, ctx)
     assert "magnet_z at 1.50 T" == detail_label.text()
@@ -437,8 +437,8 @@ def test_ready_banner_appears_only_after_done_and_all_green(
     card = panel._cards[0]
 
     all_green_state = {
-        "magnet_z": {"get_field": 0.0},
-        "magnet_y": {"get_field": 0.0},
+        "magnet_z": {"magnet_state": "standby"},
+        "magnet_y": {"magnet_state": "standby"},
         "temperature_vti": {"temperature": 300.0},
     }
     ctx = {"state": all_green_state, "now_unix": 0.0, "consumption_rate_pct_per_h": None}
@@ -471,7 +471,7 @@ def test_ready_banner_appears_only_after_done_and_all_green(
     assert card._ready_banner.text() == f"✓ {SampleChangeOperation.ready_message}"
 
     # A condition stops holding -> banner clears.
-    not_green_state = dict(all_green_state, magnet_z={"get_field": 1.0})
+    not_green_state = dict(all_green_state, magnet_z={"magnet_state": "holding"})
     ctx = {"state": not_green_state, "now_unix": 0.0, "consumption_rate_pct_per_h": None}
     card.on_states_updated(not_green_state, ctx)
     assert card._ready_banner.isHidden()
@@ -494,8 +494,8 @@ def test_ready_banner_clears_when_new_run_starts(station, operations_config, qtb
     card._display_instance.confirm("needle_valve")
 
     all_green_state = {
-        "magnet_z": {"get_field": 0.0},
-        "magnet_y": {"get_field": 0.0},
+        "magnet_z": {"magnet_state": "standby"},
+        "magnet_y": {"magnet_state": "standby"},
         "temperature_vti": {"temperature": 300.0},
     }
     ctx = {"state": all_green_state, "now_unix": 0.0, "consumption_rate_pct_per_h": None}
@@ -538,8 +538,8 @@ def test_ready_banner_shows_mid_run_for_hold_phase_operation_once_conditions_hol
 
     running.confirm("needle_valve")
     all_green_state = {
-        "magnet_z": {"get_field": 0.0},
-        "magnet_y": {"get_field": 0.0},
+        "magnet_z": {"magnet_state": "standby"},
+        "magnet_y": {"magnet_state": "standby"},
         "temperature_vti": {"temperature": 300.0},
     }
     ctx = {"state": all_green_state, "now_unix": 0.0, "consumption_rate_pct_per_h": None}

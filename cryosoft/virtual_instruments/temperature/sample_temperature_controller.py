@@ -14,13 +14,15 @@
 # process: |
 #   _ramp_generator yields each tick, computing the next intermediate setpoint
 #   from time.monotonic(). ramp_status() checks generator exhaustion AND hardware
-#   temperature proximity to setpoint within tolerance.
+#   temperature proximity to setpoint within tolerance. initiate()/standby()
+#   drive the heater mode/output lifecycle standard: initiate() sets AUTO,
+#   standby() sets MANUAL with zero output.
 # output: |
 #   Logged temperature (K), setpoint (K), heater_output (%), heater_mode
 #   ('AUTO'/'MANUAL') via @monitored; set_temperature and set_ramp_rate
 #   available as @control; set_heater_mode and set_pid
 #   (@control(panel=False), grouped ParamSpecs) in the front panel only.
-# last_updated: 2026-07-25
+# last_updated: 2026-07-26
 # ---
 
 """SampleTemperatureControllerVI — behavior-based VI for sample-stage temperature control."""
@@ -63,6 +65,8 @@ class SampleTemperatureControllerVI(TemperatureControllerBase, RampableVI):
     * ``get_heater_mode() -> str``    — 'AUTO' (closed-loop PID) or 'MANUAL'
       (open-loop, heater output set directly)
     * ``set_heater_mode(str)``        — set 'AUTO' or 'MANUAL'
+    * ``set_heater_output(float)``    — set manual heater power 0–100%,
+      used by ``standby()`` to command zero power
 
     Both the Lakeshore 335 and Oxford ITC 503 drivers implement heater mode
     with this same two-value vocabulary (the ITC 503's combined heater/gas
@@ -336,7 +340,18 @@ class SampleTemperatureControllerVI(TemperatureControllerBase, RampableVI):
     # ------------------------------------------------------------------
 
     def initiate(self) -> None:
-        """Initialise; no special startup command needed."""
+        """Put the heater under closed-loop control.
+
+        Sets heater mode to AUTO so the PID loop drives the heater output
+        toward the setpoint (the standard startup state for a measurement).
+        """
+        self._driver.set_heater_mode("AUTO")  # type: ignore[attr-defined]
 
     def standby(self) -> None:
-        """Put temperature controller in a safe idle state (no action required)."""
+        """Put the heater in a safe idle state.
+
+        Switches heater mode to MANUAL and commands zero output, so no
+        closed-loop setpoint can drive heater power while idle.
+        """
+        self._driver.set_heater_mode("MANUAL")  # type: ignore[attr-defined]
+        self._driver.set_heater_output(0.0)  # type: ignore[attr-defined]

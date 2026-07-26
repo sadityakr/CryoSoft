@@ -323,7 +323,7 @@ class HeliumFillOperation(OperationBase):
             worst_field: float | None = None
             worst_abs = -1.0
             for magnet in self._magnets:
-                field = state.get(magnet, {}).get("get_field")
+                field = state.get(magnet, {}).get("magnet_field_T")
                 if isinstance(field, bool) or not isinstance(field, (int, float)):
                     return magnet, None
                 if abs(float(field)) > worst_abs:
@@ -443,7 +443,7 @@ class HeliumFillOperation(OperationBase):
         def _all_zero_field() -> bool:
             state = self._station.cached_state
             for magnet in self._magnets:
-                field = state.get(magnet, {}).get("get_field")
+                field = state.get(magnet, {}).get("magnet_field_T")
                 if isinstance(field, bool) or not isinstance(field, (int, float)):
                     return False
                 if abs(float(field)) >= self._fill_zero_field_eps_T:

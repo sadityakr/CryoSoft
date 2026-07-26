@@ -21,8 +21,8 @@
 #   a status-driven generator. advance_ramp() drives the generator each tick.
 #   ramp_status() inspects generator exhaustion and hardware status.
 # output: |
-#   Logged magnet_current (A), get_field (T), magnet_status strings via
-#   @monitored; set_field available as @control for manual GUI use.
+#   Logged psu_current (A), magnet_current (A), magnet_field_T (T), magnet_status
+#   strings via @monitored; set_field available as @control for manual GUI use.
 # last_updated: 2026-04-19
 # ---
 
@@ -215,7 +215,7 @@ class SuperconductingMagnetVI(MagnetBase, RampableVI):
 
     def ramp_value(self) -> float | None:
         """Return the current field in tesla (the value the ramp drives)."""
-        return self.get_field()
+        return self.magnet_field_T()
 
     # ------------------------------------------------------------------
     # Internal generator
@@ -283,12 +283,20 @@ class SuperconductingMagnetVI(MagnetBase, RampableVI):
     # ------------------------------------------------------------------
 
     @monitored
-    def magnet_current(self) -> float:
-        """Return the current PSU output current in amperes."""
+    def psu_current(self) -> float:
+        """Return the PSU output current in amperes."""
         return self._driver.get_current()  # type: ignore[attr-defined]
 
     @monitored
-    def get_field(self) -> float:
+    def magnet_current(self) -> float:
+        """Return the field-holding current in amperes.
+
+        In this VI (non-persistent), equals PSU output (switch heater always on).
+        """
+        return self._driver.get_current()  # type: ignore[attr-defined]
+
+    @monitored
+    def magnet_field_T(self) -> float:
         """Return the current magnetic field in tesla."""
         return self._driver.get_current() / self._amperes_per_tesla  # type: ignore[attr-defined]
 
@@ -296,6 +304,33 @@ class SuperconductingMagnetVI(MagnetBase, RampableVI):
     def magnet_status(self) -> str:
         """Return the hardware status string (HOLD, RAMPING, or QUENCH)."""
         return self._driver.get_status()  # type: ignore[attr-defined]
+
+    @monitored
+    def magnet_state(self) -> str:
+        """Return the logical magnet state.
+
+        Returns:
+            One of: "standby" (PSU ≈ 0 A, heater off), "ramping" (ramp active),
+            "holding" (at target), "quenched" (safety condition), "clamped" (compliance).
+        """
+        hw_status = self.magnet_status()
+
+        if hw_status == "QUENCH":
+            return "quenched"
+        if hw_status == "CLAMPED":
+            return "clamped"
+
+        psu_A = self.psu_current()
+        if abs(psu_A) <= 0.01:
+            return "standby"
+
+        if self._ramp_gen is not None:
+            return "ramping"
+
+        if hw_status == "HOLD":
+            return "holding"
+
+        return "holding"
 
     # ------------------------------------------------------------------
     # Safety

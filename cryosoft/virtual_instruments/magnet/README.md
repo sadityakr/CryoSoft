@@ -15,8 +15,8 @@ A driver dict `{"main": <PSU real driver>}` and optional `init_params`:
 (otherwise the field bound is derived as `±max_current / amperes_per_tesla`).
 
 ## Exit (what goes out)
-`@monitored` readings: `get_field() → float (T)`, `magnet_current() → float (A)`,
-`magnet_status() → str`.
+`@monitored` readings: `magnet_field_T() → float (T)`, `magnet_current() → float (A)`,
+`psu_current() → float (A)`, `magnet_status() → str`.
 `@control` actions: `set_field(target_T)` — bounded by the setup's field limit
 via the control-validation standard (`control_limits`); an out-of-range value
 raises `CryoSoftSafetyError` before any hardware command.
@@ -55,7 +55,7 @@ and `virtual_instruments/rampable.py`).
 ## Files
 - `superconducting_magnet.py` — `SuperconductingMagnetVI`: status-driven field ramp,
   optional segment-based rate scheduling; aborts the sequence on a QUENCH status.
-  Key API: `@monitored get_field` / `magnet_current` / `magnet_status`,
+  Key API: `@monitored magnet_field_T` / `magnet_current` / `psu_current` / `magnet_status`,
   `@control set_field`, the `RampableVI` methods, `evaluate_safety()`. tests:
   `tests/test_l1_new_vis.py` (`TestSuperConductingMagnetVI`),
   `tests/test_l1_virtual_instruments.py`.

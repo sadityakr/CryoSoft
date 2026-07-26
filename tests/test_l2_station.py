@@ -207,7 +207,7 @@ def test_get_state_format(sim_station: Station):
     # Assert a specific VI state contains its @monitored variables
     magnet_state = state["magnet_z"]
     assert "magnet_current" in magnet_state
-    assert "get_field" in magnet_state
+    assert "magnet_field_T" in magnet_state
     assert "magnet_status" in magnet_state
 
 

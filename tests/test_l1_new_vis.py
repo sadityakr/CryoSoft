@@ -103,7 +103,7 @@ class TestSuperConductingMagnetVI:
 
     def test_initial_field_is_zero(self, ips_driver):
         vi = self._make_vi(ips_driver)
-        assert vi.get_field() == pytest.approx(0.0)
+        assert vi.magnet_field_T() == pytest.approx(0.0)
 
     def test_initial_status_is_idle(self, ips_driver):
         vi = self._make_vi(ips_driver)
@@ -127,8 +127,9 @@ class TestSuperConductingMagnetVI:
     def test_get_state_returns_monitored_keys(self, ips_driver):
         vi = self._make_vi(ips_driver)
         state = vi.get_state()
+        assert "psu_current" in state
         assert "magnet_current" in state
-        assert "get_field" in state
+        assert "magnet_field_T" in state
         assert "magnet_status" in state
 
     def test_magnet_current_type(self, ips_driver):
@@ -205,10 +206,6 @@ class TestSuperConductingMagnetPersistentVI:
         vi = self._make_vi(ips_driver)
         assert vi.switch_heater_state() == "OFF"
 
-    def test_initial_coil_current(self, ips_driver):
-        vi = self._make_vi(ips_driver)
-        assert vi.coil_current() == pytest.approx(0.0)
-
     def test_initial_persistent_when_heater_cold(self, ips_driver):
         # Physical persistent state is heater-derived (mirrors the real Mercury
         # iPS): at startup the switch is cold, so the driver reports persistent.
@@ -227,7 +224,6 @@ class TestSuperConductingMagnetPersistentVI:
         vi = self._make_vi(ips_driver)
         state = vi.get_state()
         assert "switch_heater_state" in state
-        assert "coil_current" in state
         assert "is_persistent" in state
         assert "persistent_mode_enabled" in state
 
@@ -260,7 +256,7 @@ class TestSuperConductingMagnetPersistentVI:
         assert self._drive_to_target_reached(vi, ips_driver)
         assert vi.switch_heater_state() == "ON"
         assert vi.is_persistent() is False
-        assert vi.get_field() == pytest.approx(1.0, abs=0.01)
+        assert vi.magnet_field_T() == pytest.approx(1.0, abs=0.01)
         assert vi.magnet_current() == pytest.approx(10.0, abs=0.1)
 
     def test_repeated_normal_ramps_keep_heater_on(self, ips_driver):
@@ -273,7 +269,7 @@ class TestSuperConductingMagnetPersistentVI:
         vi.start_ramp(0.8)
         assert self._drive_to_target_reached(vi, ips_driver)
         assert vi.switch_heater_state() == "ON"
-        assert vi.get_field() == pytest.approx(0.8, abs=0.01)
+        assert vi.magnet_field_T() == pytest.approx(0.8, abs=0.01)
 
     def test_normal_ramp_waits_for_warmup_then_completes(self, ips_driver):
         """The first ramp blocks in warmup until the (wall-clock) switch heater
@@ -289,7 +285,7 @@ class TestSuperConductingMagnetPersistentVI:
         # Warm up, then it completes.
         clock["t"] = 60.0
         assert self._drive_to_target_reached(vi, ips_driver)
-        assert vi.get_field() == pytest.approx(1.0, abs=0.01)
+        assert vi.magnet_field_T() == pytest.approx(1.0, abs=0.01)
 
     def test_normal_ramp_completes_when_heater_already_on_at_construction(
         self, ips_driver
@@ -310,7 +306,7 @@ class TestSuperConductingMagnetPersistentVI:
         assert vi.ramp_phase() == "warmup"
         clock["t"] = 60.0
         assert self._drive_to_target_reached(vi, ips_driver)
-        assert vi.get_field() == pytest.approx(1.0, abs=0.01)
+        assert vi.magnet_field_T() == pytest.approx(1.0, abs=0.01)
         assert vi.switch_heater_state() == "ON"
 
     def test_manual_switch_heater_refused_in_normal_mode(self, ips_driver):
@@ -362,14 +358,14 @@ class TestSuperConductingMagnetPersistentVI:
         vi.switch_heater_on()
         vi.start_ramp(2.0)                       # raw PSU ramp; heater on -> field moves
         assert self._drive_to_target_reached(vi, ips_driver)
-        assert vi.get_field() == pytest.approx(2.0, abs=0.01)
+        assert vi.magnet_field_T() == pytest.approx(2.0, abs=0.01)
         vi.switch_heater_off()                   # freeze coil at 20 A, heater off
         assert vi.is_persistent() is True
         vi.start_ramp(0.0)                       # park PSU at zero; coil holds field
         assert self._drive_to_target_reached(vi, ips_driver)
         assert ips_driver.get_current() == pytest.approx(0.0, abs=0.01)
         # Field reads back from the coil, not the parked PSU.
-        assert vi.get_field() == pytest.approx(2.0, abs=0.01)
+        assert vi.magnet_field_T() == pytest.approx(2.0, abs=0.01)
         assert vi.magnet_current() == pytest.approx(20.0, abs=0.1)
 
     def test_exit_persistent_safely_then_ramp_normally(self, ips_driver):
@@ -392,7 +388,7 @@ class TestSuperConductingMagnetPersistentVI:
         assert vi.persistent_mode_enabled() is False
         vi.start_ramp(1.0)                       # normal ramp
         assert self._drive_to_target_reached(vi, ips_driver)
-        assert vi.get_field() == pytest.approx(1.0, abs=0.01)
+        assert vi.magnet_field_T() == pytest.approx(1.0, abs=0.01)
 
     # -- quench safety ------------------------------------------------------
 
@@ -508,12 +504,12 @@ class TestSuperConductingMagnetPersistentVI:
         vi.start_ramp(2.0)  # 20 A
         self._drive_to_target_reached(vi, ips_driver)
         vi.switch_heater_off()  # freeze coil at 20 A, heater off
-        assert vi.coil_current() == pytest.approx(20.0, abs=0.01)
+        assert vi.magnet_current() == pytest.approx(20.0, abs=0.01)
 
         vi.standby()
         self._drive_to_target_reached(vi, ips_driver)
         assert vi.switch_heater_state() == "OFF"
-        assert vi.coil_current() == pytest.approx(0.0, abs=0.01)
+        assert vi.magnet_current() == pytest.approx(0.0, abs=0.01)
         assert ips_driver.get_current() == pytest.approx(0.0, abs=0.01)
 
     def test_standby_with_heater_on_ramps_down_and_deenergises(self, ips_driver):
@@ -693,6 +689,23 @@ class TestSampleTemperatureControllerVI:
         state = vi.get_state()
         assert state["heater_mode"] == "AUTO"
 
+    # -- lifecycle: initiate() -> heater AUTO, standby() -> heater MANUAL
+    #    at zero output (standardised across temperature controller VIs) --
+
+    def test_initiate_sets_heater_mode_auto(self, itc_driver):
+        vi = self._make_vi(itc_driver)
+        vi.set_heater_mode("MANUAL")
+        vi.initiate()
+        assert vi.heater_mode() == "AUTO"
+
+    def test_standby_sets_heater_manual_and_zero_output(self, itc_driver):
+        vi = self._make_vi(itc_driver)
+        vi.set_heater_mode("MANUAL")
+        itc_driver.set_heater_output(50.0)
+        vi.standby()
+        assert vi.heater_mode() == "MANUAL"
+        assert vi.heater_output() == pytest.approx(0.0)
+
 
 # ---------------------------------------------------------------------------
 # VTITemperatureControllerVI
@@ -757,6 +770,24 @@ class TestVTITemperatureControllerVI:
         assert vi.heater_mode() == "AUTO"
         vi.set_heater_mode("MANUAL")
         assert vi.heater_mode() == "MANUAL"
+
+    # -- lifecycle: standby() extends the inherited heater lifecycle to also
+    #    close the needle valve --
+
+    def test_initiate_sets_heater_mode_auto(self, itc_driver):
+        vi = self._make_vi(itc_driver)
+        vi.set_heater_mode("MANUAL")
+        vi.initiate()
+        assert vi.heater_mode() == "AUTO"
+
+    def test_standby_closes_needle_valve_and_sets_heater_manual(self, itc_driver):
+        vi = self._make_vi(itc_driver)
+        vi.set_heater_mode("AUTO")
+        vi.set_needle_valve(75.0)
+        vi.standby()
+        assert vi.heater_mode() == "MANUAL"
+        assert vi.heater_output() == pytest.approx(0.0)
+        assert vi.needle_valve() == pytest.approx(0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -868,6 +899,18 @@ class TestLakeshore335SampleTemperatureControllerVI:
         vi = self._make_vi(lakeshore_driver)
         state = vi.get_state()
         assert state["heater_range"] == "OFF"
+
+    # -- lifecycle: standby()/initiate() are inherited unchanged from
+    #    SampleTemperatureControllerVI and must not touch heater_range — it
+    #    is a separate, driver-specific power gate the operator controls --
+
+    def test_standby_does_not_touch_heater_range(self, lakeshore_driver):
+        vi = self._make_vi(lakeshore_driver)
+        vi.set_heater_range("HIGH")
+        vi.set_heater_mode("AUTO")
+        vi.standby()
+        assert vi.heater_mode() == "MANUAL"
+        assert vi.heater_range() == "HIGH"
 
 
 # ---------------------------------------------------------------------------

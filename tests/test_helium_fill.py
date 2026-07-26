@@ -132,7 +132,7 @@ def test_helium_fill_end_to_end(orchestrator, station, tmp_path, qtbot):
     assert not hasattr(op, "data_filepath")
 
     for name in station.magnet_vi_names():
-        assert abs(station.get_vi(name).get_field()) < 0.01, f"{name} did not reach zero field"
+        assert abs(station.get_vi(name).magnet_field_T()) < 0.01, f"{name} did not reach zero field"
 
     assert station.level_meter.get_refresh_rate() == _REFRESH_SLOW
     assert orchestrator._state == OrchestratorState.IDLE

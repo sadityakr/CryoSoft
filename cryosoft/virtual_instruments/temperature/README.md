@@ -36,6 +36,15 @@ base); `set_needle_valve(%)` on the VTI is bounded to the physical 0–100 %;
 `RampableVI` interface: `start_ramp()`, `advance_ramp()`, `ramp_status()`,
 `stop_ramp()` (pins the setpoint to the current temperature — used by the
 Orchestrator on abort/pause/error).
+**Lifecycle** (standard, mirrored across VI types — see the magnet VI's
+README): `initiate()` sets heater mode AUTO (closed-loop PID to setpoint).
+`standby()` sets heater mode MANUAL and commands zero heater output, so no
+closed-loop setpoint can drive power while idle; on `VTITemperatureControllerVI`,
+`standby()` additionally closes the needle valve (0 % open), cutting bath
+helium flow. `Lakeshore335SampleTemperatureControllerVI` does not touch
+`heater_range` on standby/initiate — it is a separate, driver-specific
+power gate (see below) left as the operator set it.
+
 `TemperatureControllerBase` does not override `safety_concerns()` — it
 keeps the empty-set default, so a temperature controller is never subject
 to a safety hold: not for `helium_low` (only magnets, via `MagnetBase`,
@@ -64,11 +73,14 @@ All classes here extend `SampleTemperatureControllerVI` (itself inheriting from
   (`panel=False`), the `RampableVI` methods. `heater_mode` lives here (not on
   a driver-specific subclass) because both the Lakeshore 335 and Oxford
   ITC503 drivers implement `get_heater_mode`/`set_heater_mode` with the same
-  'AUTO'/'MANUAL' vocabulary. tests: `tests/test_l1_new_vis.py`
+  'AUTO'/'MANUAL' vocabulary. `initiate()`/`standby()` set heater mode
+  AUTO/MANUAL (standby also zeroes heater output) — the lifecycle standard.
+  tests: `tests/test_l1_new_vis.py`
   (`TestSampleTemperatureControllerVI`), `tests/test_l1_virtual_instruments.py`.
 - `vti_temperature_controller.py` — `VTITemperatureControllerVI`: extends above with
   needle valve `@monitored needle_valve` and `@control set_needle_valve` (same
-  ITC503 auxiliary output). tests: `tests/test_l1_new_vis.py`
+  ITC503 auxiliary output). `standby()` extends the inherited heater
+  lifecycle to also close the needle valve. tests: `tests/test_l1_new_vis.py`
   (`TestVTITemperatureControllerVI`).
 - `lakeshore_335_sample_temperature_controller.py` —
   `Lakeshore335SampleTemperatureControllerVI`: extends

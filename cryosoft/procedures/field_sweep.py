@@ -176,7 +176,7 @@ class FieldSweep(SweepMeasureProcedure):
 
     def _axis_readback(self) -> float:
         """Read the current field from ``magnet_z``."""
-        return self._station.magnet_z.get_field()
+        return self._station.magnet_z.magnet_field_T()
 
     def _initiate_wait_s(self) -> float:
         """Settle time after the initial ramp (``init_wait``)."""

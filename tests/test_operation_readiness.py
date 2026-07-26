@@ -107,7 +107,7 @@ def test_helium_fill_readiness_zero_field_true(station):
     op = HeliumFillOperation(station)
     (condition,) = op.readiness_conditions()
     assert condition.key == "zero_field"
-    state = {name: {"get_field": 0.0} for name in station.magnet_vi_names()}
+    state = {name: {"magnet_field_T": 0.0} for name in station.magnet_vi_names()}
     assert condition.check(state) is True
 
 
@@ -115,8 +115,8 @@ def test_helium_fill_readiness_zero_field_false_names_worst_offender(station):
     op = HeliumFillOperation(station)
     (condition,) = op.readiness_conditions()
     magnets = station.magnet_vi_names()
-    state = {name: {"get_field": 0.0} for name in magnets}
-    state[magnets[0]] = {"get_field": 1.5}
+    state = {name: {"magnet_field_T": 0.0} for name in magnets}
+    state[magnets[0]] = {"magnet_field_T": 1.5}
     assert condition.check(state) is False
     assert condition.detail(state) == f"{magnets[0]} at 1.50 T"
 
@@ -126,7 +126,7 @@ def test_helium_fill_readiness_zero_field_worst_offender_is_largest_magnitude(st
     (condition,) = op.readiness_conditions()
     magnets = station.magnet_vi_names()
     assert len(magnets) >= 2
-    state = {magnets[0]: {"get_field": 0.2}, magnets[1]: {"get_field": -0.9}}
+    state = {magnets[0]: {"magnet_field_T": 0.2}, magnets[1]: {"magnet_field_T": -0.9}}
     assert condition.detail(state) == f"{magnets[1]} at -0.90 T"
 
 
@@ -213,13 +213,13 @@ def test_sample_change_zero_field_true_and_false(station):
     conditions = {c.key: c for c in op.readiness_conditions()}
     magnets = station.magnet_vi_names()
 
-    zero_state = {name: {"get_field": 0.0} for name in magnets}
+    zero_state = {name: {"magnet_state": "standby"} for name in magnets}
     assert conditions["zero_field"].check(zero_state) is True
 
     nonzero_state = dict(zero_state)
-    nonzero_state[magnets[0]] = {"get_field": 2.0}
+    nonzero_state[magnets[0]] = {"magnet_state": "holding"}
     assert conditions["zero_field"].check(nonzero_state) is False
-    assert conditions["zero_field"].detail(nonzero_state) == f"{magnets[0]} at 2.00 T"
+    assert conditions["zero_field"].detail(nonzero_state) == f"{magnets[0]} holding"
 
 
 def test_sample_change_heater_off_absent_from_snapshot_holds_vacuously(station):
@@ -227,7 +227,7 @@ def test_sample_change_heater_off_absent_from_snapshot_holds_vacuously(station):
     op = SampleChangeOperation(station)
     conditions = {c.key: c for c in op.readiness_conditions()}
     magnets = station.magnet_vi_names()
-    state = {name: {"get_field": 0.0} for name in magnets}  # no switch_heater_state key
+    state = {name: {"magnet_field_T": 0.0} for name in magnets}  # no switch_heater_state key
     assert conditions["heater_off"].check(state) is True
     assert "no switch heater" in conditions["heater_off"].detail(state)
 
