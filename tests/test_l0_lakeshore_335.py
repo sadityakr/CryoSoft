@@ -2,9 +2,10 @@
 # description: |
 #   Unit tests for the SimLakeshore335 temperature controller driver.
 #   Covers basic properties, setpoints, manual output limits, heater control
-#   modes, PID parameter clamping, autotune toggles, and temperature simulation.
+#   modes, heater range (including the power-up-Off no-power regression),
+#   PID parameter clamping, autotune toggles, and temperature simulation.
 # entry_point: pytest tests/test_l0_lakeshore_335.py -v
-# last_updated: 2026-07-16
+# last_updated: 2026-07-25
 # ---
 
 """Unit tests for SimLakeshore335 driver."""
@@ -45,15 +46,48 @@ def test_heater_mode():
 
 def test_heater_output_limits():
     d = SimLakeshore335("SIM")
-    d.set_heater_output(50.0)
-    # Settle simulation should update
     d.set_heater_mode("MANUAL")
+    d.set_heater_range("HIGH")  # heater range must be on for output to apply
+    d.set_heater_output(50.0)
     assert d.get_heater_output() == pytest.approx(50.0)
-    
+
     d.set_heater_output(120.0)
     assert d.get_heater_output() == pytest.approx(99.9)
     d.set_heater_output(-10.0)
     assert d.get_heater_output() == pytest.approx(0.0)
+
+
+def test_heater_range():
+    d = SimLakeshore335("SIM")
+    assert d.get_heater_range() == "OFF"  # power-up default
+    for setting in ("LOW", "MEDIUM", "HIGH", "OFF"):
+        d.set_heater_range(setting)
+        assert d.get_heater_range() == setting
+    with pytest.raises(ValueError):
+        d.set_heater_range("INVALID")
+
+
+def test_heater_stays_off_while_range_is_off():
+    """Regression: even in AUTO mode with a valid setpoint, or with a manual
+    output value commanded, the heater must deliver no power while its range
+    is 'OFF' (the instrument's power-up default) — this was the reported bug."""
+    d = SimLakeshore335("SIM")
+    assert d.get_heater_range() == "OFF"
+
+    # AUTO mode with a large setpoint error: still no power.
+    d.set_heater_mode("AUTO")
+    d.set_setpoint(300.0)
+    d._temperature = 4.2
+    assert d.get_heater_output() == pytest.approx(0.0)
+
+    # MANUAL mode with a commanded output: still no power.
+    d.set_heater_mode("MANUAL")
+    d.set_heater_output(80.0)
+    assert d.get_heater_output() == pytest.approx(0.0)
+
+    # Turning the range on lets manual output apply.
+    d.set_heater_range("HIGH")
+    assert d.get_heater_output() == pytest.approx(80.0)
 
 
 def test_pid_clamping():
@@ -99,6 +133,7 @@ def test_auto_pid():
 def test_simulation_evolution():
     d = SimLakeshore335("SIM")
     d.set_heater_mode("MANUAL")
+    d.set_heater_range("HIGH")  # heater range must be on for output to apply
     d.set_heater_output(50.0)
     # T_target = 4.2 + (50 / 99.9) * 295.8 = ~152.2 K
     d._temperature = 300.0

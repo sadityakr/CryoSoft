@@ -16,10 +16,11 @@
 #   from time.monotonic(). ramp_status() checks generator exhaustion AND hardware
 #   temperature proximity to setpoint within tolerance.
 # output: |
-#   Logged temperature (K), setpoint (K), heater_output (%) via @monitored;
-#   set_temperature and set_ramp_rate available as @control; set_pid
+#   Logged temperature (K), setpoint (K), heater_output (%), heater_mode
+#   ('AUTO'/'MANUAL') via @monitored; set_temperature and set_ramp_rate
+#   available as @control; set_heater_mode and set_pid
 #   (@control(panel=False), grouped ParamSpecs) in the front panel only.
-# last_updated: 2026-07-21
+# last_updated: 2026-07-25
 # ---
 
 """SampleTemperatureControllerVI — behavior-based VI for sample-stage temperature control."""
@@ -59,6 +60,18 @@ class SampleTemperatureControllerVI(TemperatureControllerBase, RampableVI):
     * ``get_setpoint() -> float``     — current setpoint in Kelvin
     * ``set_setpoint(float)``         — set target temperature
     * ``get_heater_output() -> float`` — heater power 0–100%
+    * ``get_heater_mode() -> str``    — 'AUTO' (closed-loop PID) or 'MANUAL'
+      (open-loop, heater output set directly)
+    * ``set_heater_mode(str)``        — set 'AUTO' or 'MANUAL'
+
+    Both the Lakeshore 335 and Oxford ITC 503 drivers implement heater mode
+    with this same two-value vocabulary (the ITC 503's combined heater/gas
+    ``AUTO``/``AM``/``MA``/``MANUAL`` states are collapsed to the heater half
+    at the driver layer), so it lives here on the shared base rather than a
+    driver-specific subclass. A driver-specific concept that gates whether
+    the heater delivers power AT ALL regardless of mode — e.g. the Lakeshore
+    335's heater range, which defaults to Off at power-up — is NOT part of
+    this contract; see ``Lakeshore335SampleTemperatureControllerVI``.
     """
 
     # Control-validation standard (see BaseVirtualInstrument): temperature
@@ -214,6 +227,11 @@ class SampleTemperatureControllerVI(TemperatureControllerBase, RampableVI):
         """Return the heater output percentage (0–100%)."""
         return self._driver.get_heater_output()  # type: ignore[attr-defined]
 
+    @monitored
+    def heater_mode(self) -> str:
+        """Return the heater control mode: 'AUTO' (closed-loop PID) or 'MANUAL'."""
+        return self._driver.get_heater_mode()  # type: ignore[attr-defined]
+
     # ------------------------------------------------------------------
     # @control methods
     # ------------------------------------------------------------------
@@ -244,6 +262,33 @@ class SampleTemperatureControllerVI(TemperatureControllerBase, RampableVI):
             target_K: Desired temperature in kelvin.
         """
         self.start_ramp(target_K)
+
+    # panel=False: like PID tuning below, heater mode is an occasional bench
+    # setting rather than a routine sweep control, so it lives in the
+    # instrument front panel, not the compact monitor card.
+    @control(
+        panel=False,
+        params={
+            "mode": ParamSpec(
+                type=str,
+                default="AUTO",
+                choices={"Auto (closed-loop PID)": "AUTO", "Manual (open-loop)": "MANUAL"},
+                description="Heater control loop mode",
+            ),
+        },
+    )
+    def set_heater_mode(self, mode: str) -> None:
+        """Set the heater control mode.
+
+        Args:
+            mode: 'AUTO' for closed-loop PID control to the setpoint, or
+                'MANUAL' for open-loop control at a fixed heater output
+                (see the driver's manual-output setter).
+
+        Raises:
+            ValueError: If ``mode`` is not 'AUTO' or 'MANUAL'.
+        """
+        self._driver.set_heater_mode(mode)  # type: ignore[attr-defined]
 
     # panel=False: PID tuning is an occasional bench action — it lives in the
     # instrument front panel, never on the compact monitor card. The min/max
