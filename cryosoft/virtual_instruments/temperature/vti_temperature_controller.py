@@ -33,6 +33,8 @@ from __future__ import annotations
 from typing import Any
 
 from cryosoft.core.decorators import control, monitored
+from cryosoft.core.exceptions import CryoSoftSafetyError
+from cryosoft.core.plan import ParamSpec
 from cryosoft.virtual_instruments.temperature.sample_temperature_controller import (
     SampleTemperatureControllerVI,
 )
@@ -46,11 +48,22 @@ class VTITemperatureControllerVI(SampleTemperatureControllerVI):
     the cryostat VTI helium flow, and extends ``standby()`` to also close the
     needle valve (see Lifecycle below).
 
+    Needle valve mode
+    -----------------
+    Like the ITC503's heater, the needle valve has its own AUTO/MANUAL
+    control mode (the two are two halves of the same combined instrument
+    register): in AUTO the instrument's own gas-flow control loop drives the
+    valve, and ``set_needle_valve()`` is refused; switch to MANUAL first via
+    ``set_needle_valve_mode()``. The instrument powers up with gas flow in
+    AUTO.
+
     Driver contract (additions to SampleTemperatureControllerVI)
     -------------------------------------------------------------
     The ``"main"`` driver must also implement:
     * ``get_needle_valve() -> float``         — percent open (0–100)
     * ``set_needle_valve(position: float)``   — set percent open (0–100)
+    * ``get_needle_valve_mode() -> str``      — 'AUTO' or 'MANUAL'
+    * ``set_needle_valve_mode(str)``          — set 'AUTO' or 'MANUAL'
     """
 
     # Control-validation standard: inherit the temperature/rate limits and ADD

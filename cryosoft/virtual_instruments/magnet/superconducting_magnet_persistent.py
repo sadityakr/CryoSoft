@@ -332,12 +332,12 @@ class SuperconductingMagnetPersistentVI(SuperconductingMagnetVI):
         coil_A = self._driver.get_coil_current()  # type: ignore[attr-defined]
         heater_on = self._driver.get_switch_heater_state() == "ON"  # type: ignore[attr-defined]
 
-        # Standby: both currents ~zero, heater off
-        if abs(psu_A) <= 0.01 and abs(coil_A) <= 0.01 and not heater_on:
+        # Standby: both currents ~zero, heater off (ignore residual < 0.1 A)
+        if abs(psu_A) <= 0.1 and abs(coil_A) <= 0.1 and not heater_on:
             return "standby"
 
-        # Persistent: heater off, coil holds nonzero field
-        if not heater_on and abs(coil_A) > 0.01:
+        # Persistent: heater off, coil holds nonzero field (> 0.1 A)
+        if not heater_on and abs(coil_A) > 0.1:
             return "persistent"
 
         # Active ramp
@@ -481,7 +481,7 @@ class SuperconductingMagnetPersistentVI(SuperconductingMagnetVI):
         coil_A = driver.get_coil_current()
         heater_on = driver.get_switch_heater_state() == "ON"
 
-        if not heater_on and abs(coil_A) <= 0.01:
+        if not heater_on and abs(coil_A) <= 0.1:
             self._phase = "parking"
             yield from self._ramp_generator(0.0)
             while driver.get_status() == "RAMPING":
