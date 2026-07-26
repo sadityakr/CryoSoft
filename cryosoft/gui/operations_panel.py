@@ -220,6 +220,7 @@ class OperationCard(QGroupBox):
             class generic: the panel supplies the operation-specific
             construction (station, config, data_directory, …) as a closure.
         get_current_person: Returns the attribution prefill for the dialog.
+        collapsed: If True, start with details hidden (compact mode).
         parent: Optional Qt parent widget.
     """
 
@@ -229,6 +230,7 @@ class OperationCard(QGroupBox):
         display_instance: OperationBase,
         factory: Callable[[str], OperationBase],
         get_current_person: Callable[[], str] | None = None,
+        collapsed: bool = False,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(display_instance.name, parent)
@@ -238,6 +240,7 @@ class OperationCard(QGroupBox):
         self._get_current_person = get_current_person or (lambda: "")
         self._slug = _slug(display_instance.name)
         self.setObjectName(f"operation_card_{self._slug}")
+        self._collapsed = collapsed
 
         self._running = False
         #: Set the instant Finish is clicked (before run_finished arrives —
@@ -264,12 +267,19 @@ class OperationCard(QGroupBox):
         outer.setContentsMargins(6, 6, 6, 6)
         outer.setSpacing(4)
 
+        # Details container — hidden when collapsed
+        self._details_widget = QWidget()
+        self._details_widget.setObjectName(f"{self._slug}_details_widget")
+        details_layout = QVBoxLayout(self._details_widget)
+        details_layout.setContentsMargins(0, 0, 0, 0)
+        details_layout.setSpacing(4)
+
         self._next_due_label = QLabel("")
         self._next_due_label.setObjectName(f"{self._slug}_next_due_label")
         self._next_due_label.setProperty("class", "value_readout")
         self._next_due_label.setWordWrap(True)
         self._next_due_label.hide()
-        outer.addWidget(self._next_due_label)
+        details_layout.addWidget(self._next_due_label)
 
         # Live status line (design doc operation-concurrency-and-error-
         # scoping.md §2's hard status separation): shows this operation's own
@@ -280,7 +290,7 @@ class OperationCard(QGroupBox):
         self._status_label.setObjectName(f"{self._slug}_status_label")
         self._status_label.setProperty("class", "value_readout")
         self._status_label.hide()
-        outer.addWidget(self._status_label)
+        details_layout.addWidget(self._status_label)
 
         for condition in self._conditions:
             # Label and detail stack on separate lines (rather than one wide
@@ -296,7 +306,7 @@ class OperationCard(QGroupBox):
             text_label.setObjectName(f"{self._slug}_condition_{condition.key}_label")
             text_label.setWordWrap(True)
             row.addWidget(text_label, stretch=1)
-            outer.addLayout(row)
+            details_layout.addLayout(row)
 
             detail_label = QLabel("")
             detail_label.setObjectName(f"{self._slug}_condition_{condition.key}_detail")
@@ -305,7 +315,7 @@ class OperationCard(QGroupBox):
             detail_row = QHBoxLayout()
             detail_row.setContentsMargins(18, 0, 0, 0)  # indent under the icon column
             detail_row.addWidget(detail_label)
-            outer.addLayout(detail_row)
+            details_layout.addLayout(detail_row)
             self._condition_rows[condition.key] = (icon_label, detail_label)
 
         self._confirmations: dict[str, str] = dict(
@@ -327,7 +337,9 @@ class OperationCard(QGroupBox):
                 self._confirm_checkboxes[key] = checkbox
             confirm_layout.addStretch()
             self._confirmations_row.hide()
-            outer.addWidget(self._confirmations_row)
+            details_layout.addWidget(self._confirmations_row)
+
+        outer.addWidget(self._details_widget, stretch=1)
 
         # Reuses DiagnosticsWindow's validated "verdict_badge" QSS class
         # (severity="ok" -> STATUS_OK text, no fill, bold) rather than

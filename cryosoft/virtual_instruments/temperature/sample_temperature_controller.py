@@ -20,8 +20,9 @@
 # output: |
 #   Logged temperature (K), setpoint (K), heater_output (%), heater_mode
 #   ('AUTO'/'MANUAL') via @monitored; set_temperature and set_ramp_rate
-#   available as @control; set_heater_mode and set_pid
-#   (@control(panel=False), grouped ParamSpecs) in the front panel only.
+#   available as @control; set_heater_mode, set_heater_output, and set_pid
+#   (@control(panel=False)) in the front panel only. set_heater_output is
+#   refused (CryoSoftSafetyError) unless heater_mode is MANUAL.
 # last_updated: 2026-07-26
 # ---
 
@@ -33,6 +34,7 @@ import time
 from typing import Any, Generator
 
 from cryosoft.core.decorators import control, monitored
+from cryosoft.core.exceptions import CryoSoftSafetyError
 from cryosoft.core.plan import ParamSpec
 from cryosoft.virtual_instruments.base import TemperatureControllerBase
 from cryosoft.virtual_instruments.rampable import RampableVI
@@ -65,8 +67,9 @@ class SampleTemperatureControllerVI(TemperatureControllerBase, RampableVI):
     * ``get_heater_mode() -> str``    — 'AUTO' (closed-loop PID) or 'MANUAL'
       (open-loop, heater output set directly)
     * ``set_heater_mode(str)``        — set 'AUTO' or 'MANUAL'
-    * ``set_heater_output(float)``    — set manual heater power 0–100%,
-      used by ``standby()`` to command zero power
+    * ``set_heater_output(float)``    — set manual heater power 0–100%; used
+      by ``standby()`` to command zero power, and by the ``@control`` of the
+      same name (refused unless heater mode is MANUAL)
 
     Both the Lakeshore 335 and Oxford ITC 503 drivers implement heater mode
     with this same two-value vocabulary (the ITC 503's combined heater/gas
@@ -293,6 +296,41 @@ class SampleTemperatureControllerVI(TemperatureControllerBase, RampableVI):
             ValueError: If ``mode`` is not 'AUTO' or 'MANUAL'.
         """
         self._driver.set_heater_mode(mode)  # type: ignore[attr-defined]
+
+    # panel=False: manual heater output is only meaningful while heater mode
+    # is MANUAL — an occasional override, not a routine sweep control. The
+    # 0-99.9% bound is the instrument's own protocol range (both the
+    # Lakeshore 335 MOUT command and the ITC503 heater property clamp to it),
+    # not a setup limit, so it does not go through control_limits/config.
+    @control(
+        panel=False,
+        params={
+            "output_pct": ParamSpec(
+                type=float, default=0.0, unit="%", min=0.0, max=99.9,
+                description="Manual heater output power",
+            ),
+        },
+    )
+    def set_heater_output(self, output_pct: float) -> None:
+        """Set the manual heater output power.
+
+        Args:
+            output_pct: Percent of maximum heater power, 0.0-99.9.
+
+        Raises:
+            CryoSoftSafetyError: If heater mode is AUTO — the closed-loop
+                PID computes heater output from the setpoint and ignores an
+                explicit manual command. Call ``set_heater_mode('MANUAL')``
+                first.
+        """
+        if self._driver.get_heater_mode() != "MANUAL":  # type: ignore[attr-defined]
+            raise CryoSoftSafetyError(
+                "Cannot set heater output while heater mode is AUTO — the "
+                "closed-loop PID computes heater output from the setpoint "
+                "and ignores explicit manual commands. Call "
+                "set_heater_mode('MANUAL') first."
+            )
+        self._driver.set_heater_output(float(output_pct))  # type: ignore[attr-defined]
 
     # panel=False: PID tuning is an occasional bench action — it lives in the
     # instrument front panel, never on the compact monitor card. The min/max
