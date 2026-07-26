@@ -165,8 +165,15 @@ class TrendsQuadrant(QWidget):
             records = trend_history.read_tier(
                 self._log_dir, "raw", window_s=self._history.retention_s
             )
+            # Migrate old channel keys to new names during rehydration
+            key_migration = {
+                "magnet_z_get_field": "magnet_z_magnet_field_T",
+                "magnet_z_coil_current": "magnet_z_magnet_current",
+            }
             for timestamp, mapping in records:
-                self._history.record_flat(mapping, timestamp)
+                # Apply migration to each recorded mapping
+                migrated = {key_migration.get(k, k): v for k, v in mapping.items()}
+                self._history.record_flat(migrated, timestamp)
         except Exception:
             logger.exception(
                 "trends_quadrant: rehydration from %s failed; starting with empty history",
