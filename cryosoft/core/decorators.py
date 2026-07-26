@@ -64,6 +64,11 @@ def monitored(func: Callable) -> Callable:
     3. Wrapped with logging by __init_subclass__.
 
     The method must take no arguments (besides self) and return a value.
+
+    Renaming this method changes its channel key (``func.__name__``, used
+    as the dict key wherever this value is monitored, logged, or
+    persisted) — trend-history logs and saved GUI layouts referencing the
+    old key will need a migration path to keep reading historical data.
     """
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
