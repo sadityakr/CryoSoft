@@ -106,6 +106,7 @@ from typing import Any
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
+from cryosoft.core.availability import Availability
 from cryosoft.core.conditions import Condition, decide, envelope_conditions
 from cryosoft.core.events import ErrorEvent
 from cryosoft.core.exceptions import CryoSoftSafetyError
@@ -1194,6 +1195,29 @@ class Orchestrator(QObject):
             stale/disconnected fault.
         """
         return self._station.vi_faults()
+
+    def availability(self, vi_name: str) -> Availability:
+        """Return the Availability standard's unified record for one VI, GUI-safe.
+
+        Args:
+            vi_name: Name of a configured VI — live or offline.
+
+        Returns:
+            The :class:`~cryosoft.core.availability.Availability` record.
+
+        Raises:
+            KeyError: If `vi_name` is not a configured VI at all.
+        """
+        return self._station.availability(vi_name)
+
+    def availabilities(self) -> dict[str, Availability]:
+        """Return the Availability standard's unified record for every VI, GUI-safe.
+
+        Returns:
+            ``{vi_name: Availability}`` for every configured VI, live and
+            offline alike.
+        """
+        return self._station.availabilities()
 
     def acknowledge_fault(self, vi_name: str) -> None:
         """Acknowledge a VI's active runtime fault (calms the Monitor UI).

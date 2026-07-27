@@ -98,7 +98,7 @@ class OfflineInstrumentPanel(QGroupBox):
         self._vi_name = vi_name
         self._orchestrator = orchestrator
         self._details: OfflineFrontPanel | None = None  # lazily created
-        self._by_operator = info.origin == "operator"
+        self._by_operator = "operator" in info.tags
         self.setObjectName(f"{vi_name}_offline_card")
 
         outer = QVBoxLayout()

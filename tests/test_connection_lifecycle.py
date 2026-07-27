@@ -117,7 +117,7 @@ def test_disconnect_moves_the_vi_into_the_offline_registry(station: Station):
     assert "magnet_z" in station.offline_vi_names()
     assert station.has_vi("magnet_z") is False
     info = station.get_offline_info("magnet_z")
-    assert info.origin == "operator"
+    assert "operator" in info.tags
     assert info.vi_type == "system"
 
 
@@ -220,7 +220,7 @@ def test_build_sends_only_the_identity_check(tmp_path):
     assert station.offline_vi_names() == ["mute_vi"]
     reason = station.get_offline_info("mute_vi").reason
     assert "identity query" in reason
-    assert station.get_offline_info("mute_vi").origin == "connect_failed"
+    assert "connect_failed" in station.get_offline_info("mute_vi").tags
 
 
 # ── L3: the Orchestrator's gating and verdicts ───────────────────────────────

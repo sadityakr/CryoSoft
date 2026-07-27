@@ -78,6 +78,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from cryosoft.core.availability import Availability, state_for
 from cryosoft.core.conditions import Condition
 from cryosoft.core.exceptions import (
     CryoSoftCommunicationError,
@@ -181,21 +182,27 @@ class OfflineInstrument:
         failed_drivers: Config aliases of the drivers that failed to
             construct. Empty when the drivers were fine but the VI's own
             construction raised a communication error.
-        origin: Why this VI is offline — ``"connect_failed"`` (the default:
-            the hardware could not be reached at build time or on a
-            reconnect attempt) or ``"operator"`` (the connection-lifecycle
-            standard: the operator deliberately disconnected it, e.g. to
-            drive the instrument from its front panel or the vendor's
-            software). The degraded behaviour is deliberately IDENTICAL for
-            both — one offline path, not two — so this only ever changes
-            what the GUI *says*, never what the station *does*.
+        tags: Why this VI is offline, as a set drawn from the Availability
+            standard's closed vocabulary (``cryosoft.core.availability``):
+            ``"connect_failed"`` (the default: the hardware could not be
+            reached at build time or on a reconnect attempt) and/or
+            ``"operator"`` (the connection-lifecycle standard: the operator
+            deliberately disconnected it, e.g. to drive the instrument from
+            its front panel or the vendor's software). Both tags can hold at
+            once — a reconnect attempt on an operator-disconnected VI that
+            then fails on hardware carries both. The degraded behaviour is
+            deliberately IDENTICAL regardless of which tags apply — one
+            offline path, not several — so this only ever changes what the
+            GUI *says*, never what the station *does*.
+        since: Unix timestamp this VI became offline.
     """
 
     vi_name: str
     vi_type: str
     reason: str
     failed_drivers: tuple[str, ...] = field(default=())
-    origin: str = "connect_failed"
+    tags: frozenset[str] = field(default=frozenset({"connect_failed"}))
+    since: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -413,6 +420,97 @@ class Station:
         """
         return self._offline_vis[vi_name]
 
+    def _build_availability(self, vi_name: str) -> Availability:
+        """Assemble *vi_name*'s :class:`Availability` from its sources of truth.
+
+        The Availability standard (``cryosoft.core.availability``) is a
+        derived VIEW, not a fourth registry: this method reads the existing
+        ``_offline_vis`` / ``_conditions`` registries and the VI itself,
+        never storing anything new. An offline VI's own ``tags`` carry the
+        absence tags; a live VI's tags are the union of a standing comm
+        condition's ``"not_responding"`` and the VI's own attachment state.
+
+        Args:
+            vi_name: Name of a CONFIGURED VI — live or offline.
+
+        Returns:
+            The assembled :class:`Availability` record.
+
+        Raises:
+            KeyError: If `vi_name` is not a configured VI at all.
+        """
+        offline = self._offline_vis.get(vi_name)
+        if offline is not None:
+            return Availability(
+                vi_name=vi_name,
+                vi_type=offline.vi_type,
+                state=state_for(offline.tags),
+                tags=offline.tags,
+                reason=offline.reason,
+                since=offline.since,
+            )
+
+        vi = self._virtual_instruments[vi_name]  # KeyError if not configured at all
+        vi_type = self._vi_registry.get(vi_name, "system")
+        tags: set[str] = set()
+        reason = ""
+        since = 0.0
+
+        condition = self._conditions.get(f"comm:{vi_name}")
+        if condition is not None:
+            tags.add("not_responding")
+            reason = condition.message
+            since = condition.since
+
+        # Phase 4 of the Availability standard makes is_attached() a real
+        # BaseVirtualInstrument method (see virtual_instruments/base.py);
+        # until then, duck-type defensively — a VI with no such method is
+        # attached.
+        is_attached = getattr(vi, "is_attached", None)
+        if callable(is_attached) and not is_attached():
+            tags.add("detached")
+
+        frozen_tags = frozenset(tags)
+        return Availability(
+            vi_name=vi_name,
+            vi_type=vi_type,
+            state=state_for(frozen_tags),
+            tags=frozen_tags,
+            reason=reason,
+            since=since,
+        )
+
+    def availability(self, vi_name: str) -> Availability:
+        """Return the unified Availability record for one configured VI.
+
+        The Availability standard's (``cryosoft.core.availability``) single
+        accessor: whether `vi_name` is live, offline, or faulted, this is
+        the one place to ask "why can't I use this instrument?".
+
+        Args:
+            vi_name: Name of a configured VI — live or offline.
+
+        Returns:
+            The :class:`Availability` record.
+
+        Raises:
+            KeyError: If `vi_name` is not a configured VI at all, mirroring
+                ``get_vi()``/``get_offline_info()``.
+        """
+        return self._build_availability(vi_name)
+
+    def availabilities(self) -> dict[str, Availability]:
+        """Return the unified Availability record for every configured VI.
+
+        Covers both the live registry and the offline registry, so a caller
+        sees every configured VI — not just the ones currently held.
+
+        Returns:
+            ``{vi_name: Availability}`` for every configured VI.
+        """
+        names = list(self._virtual_instruments.keys()) + list(self._offline_vis.keys())
+        return {name: self._build_availability(name) for name in names}
+
     def connect_instrument(self, vi_name: str) -> tuple[bool, str]:
         """Bring an offline VI online: rebuild its drivers, the VI, then verify.
 
@@ -462,7 +560,10 @@ class Station:
                     if a not in self._drivers
                 )
                 self._offline_vis[vi_name] = replace(
-                    info, reason=reason, failed_drivers=still_failed
+                    info,
+                    tags=info.tags | {"connect_failed"},
+                    reason=reason,
+                    failed_drivers=still_failed,
                 )
                 logger.warning("Connect of '%s' failed: %s", vi_name, reason)
                 return False, reason
@@ -474,7 +575,10 @@ class Station:
             vi = cls(driver_refs, **init_params)
         except Exception as exc:  # noqa: BLE001 — verdict, never a crash, in GUI context
             self._offline_vis[vi_name] = replace(
-                info, reason=str(exc), failed_drivers=()
+                info,
+                tags=info.tags | {"connect_failed"},
+                reason=str(exc),
+                failed_drivers=(),
             )
             logger.warning(
                 "Connect of '%s' failed in VI construction: %s", vi_name, exc
@@ -487,7 +591,10 @@ class Station:
         if not _identity_check(vi_name, vi):
             reason = _IDENTITY_FAILED_REASON
             self._offline_vis[vi_name] = replace(
-                info, reason=reason, failed_drivers=()
+                info,
+                tags=info.tags | {"connect_failed"},
+                reason=reason,
+                failed_drivers=(),
             )
             self._release_drivers(_exclusive_aliases(role_aliases, self._vi_specs, vi_name))
             logger.warning("Connect of '%s' failed the identity check", vi_name)
@@ -518,7 +625,7 @@ class Station:
         3. Closes the bus session of every driver the VI was the LAST live
            user of. A driver shared with a VI that is staying online is left
            open, so disconnecting one instrument can never break another.
-        4. Records an ``OfflineInstrument`` with ``origin="operator"``, which
+        4. Records an ``OfflineInstrument`` tagged ``{"operator"}``, which
            is what ``connect_instrument()`` later reads to bring it back.
 
         Args:
@@ -560,7 +667,9 @@ class Station:
             "to CryoSoft."
         )
         self.register_offline_vi(
-            OfflineInstrument(vi_name, vi_type, reason, (), origin="operator")
+            OfflineInstrument(
+                vi_name, vi_type, reason, (), tags=frozenset({"operator"}), since=time.time()
+            )
         )
         return True, f"'{vi_name}' disconnected"
 
@@ -1621,7 +1730,7 @@ def build_station(config_path: str) -> Station:
                 f"driver '{alias}': {offline_drivers[alias]}" for alias in unique
             )
             station.register_offline_vi(
-                OfflineInstrument(vi_name, vi_type, reason, tuple(unique))
+                OfflineInstrument(vi_name, vi_type, reason, tuple(unique), since=time.time())
             )
             continue
 
@@ -1633,7 +1742,7 @@ def build_station(config_path: str) -> Station:
             # hardware. Other exceptions (bad init_params, limit-validation
             # errors) are config/software faults and propagate.
             station.register_offline_vi(
-                OfflineInstrument(vi_name, vi_type, str(exc), ())
+                OfflineInstrument(vi_name, vi_type, str(exc), (), since=time.time())
             )
             continue
 
@@ -1645,7 +1754,9 @@ def build_station(config_path: str) -> Station:
         vi.vi_name = vi_name
         if not _identity_check(vi_name, vi):
             station.register_offline_vi(
-                OfflineInstrument(vi_name, vi_type, _IDENTITY_FAILED_REASON, ())
+                OfflineInstrument(
+                    vi_name, vi_type, _IDENTITY_FAILED_REASON, (), since=time.time()
+                )
             )
             continue
         station.register_vi(vi_name, vi, vi_type)
