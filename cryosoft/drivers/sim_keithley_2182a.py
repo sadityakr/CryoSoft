@@ -47,9 +47,15 @@ class SimKeithley2182A:
         self._base_voltage: float = 1.5e-6  # Volts — simulated signal level
         self._noise_std: float = 1e-8       # Gaussian noise standard deviation
         self._range: float = 0.1            # Volts measurement range
+        # Free-running (continuous initiation) is the instrument's power-up
+        # default; CryoSoft's reading paths pin it off when they arm.
+        self._continuous_initiation: bool = True
 
         # Test control flags
         self._simulate_error: bool = False
+        # Connection-lifecycle standard: True once close() has released
+        # the session; every command then fails (see _check_error).
+        self._closed: bool = False
 
     # ------------------------------------------------------------------
     # Public API
@@ -77,10 +83,40 @@ class SimKeithley2182A:
         self._check_error()
         return self._range
 
+    def set_continuous_initiation(self, enabled: bool) -> None:
+        """Turn the simulated free-running (continuous initiation) mode on/off.
+
+        Mirrors the real driver's ``:INIT:CONT`` write. The flag is recorded
+        so a test can assert the arming path pinned single-shot mode — and
+        that nothing did so at Station build time.
+
+        Args:
+            enabled: True to leave the instrument free-running, False for
+                single-shot.
+        """
+        self._check_error()
+        self._continuous_initiation = bool(enabled)
+
     def get_idn(self) -> str:
         """Return simulated *IDN? response string."""
         self._check_error()
         return "KEITHLEY,2182A,SIM,1.0"
+
+    # ------------------------------------------------------------------
+    # Connection lifecycle (the connection-lifecycle standard)
+    # ------------------------------------------------------------------
+
+    def close(self) -> None:
+        """Release the simulated bus session; the instrument is left untouched.
+
+        Idempotent and never raises. Afterwards every command — including
+        ``get_idn()`` — raises ``CryoSoftCommunicationError`` via
+        :meth:`_check_error`, modelling a released session so a
+        use-after-disconnect bug fails in a test instead of on hardware.
+        A closed driver is never reopened in place: the Station builds a
+        fresh instance when the operator reconnects.
+        """
+        self._closed = True
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -88,6 +124,12 @@ class SimKeithley2182A:
 
     def _check_error(self) -> None:
         """Raise CryoSoftCommunicationError if error simulation is active."""
+        if self._closed:
+            raise CryoSoftCommunicationError(
+                "SimKeithley2182A: the session is closed — the driver was "
+                "disconnected from CryoSoft",
+                vi_name="SimKeithley2182A",
+            )
         if self._simulate_error:
             raise CryoSoftCommunicationError(
                 "Simulated communication error on Keithley 2182A",

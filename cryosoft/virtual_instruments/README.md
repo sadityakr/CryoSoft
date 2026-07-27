@@ -77,7 +77,34 @@ Read this before adding or "hiding" a control — the split trips people up:
 ## Interface contract
 The written standards all live in this root and are enforced by
 `tests/test_conformance.py`, which auto-discovers and checks every concrete VI:
-- `__init__(self, drivers, **init_params)` with no required args beyond `drivers`.
+- `__init__(self, drivers, **init_params)` with no required args beyond
+  `drivers`, and **silent**: it validates config and stores state, and sends no
+  command that changes what the instrument is doing. The **connection
+  lifecycle** (GLOSSARY.md) puts setup commands in `initiate()` — pole mode,
+  slew rate, heater mode — so building the Station never disturbs an instrument
+  an operator is using. Machine-checked by
+  `test_vi_construction_sends_no_commands`, which builds every VI in every
+  shipped config against recording drivers.
+- The connection lifecycle's VI half, both inherited from
+  `BaseVirtualInstrument` and rarely overridden: `ping()` (identity query on
+  every driver — the one command a Station build sends) and `disconnect()` (a
+  release hook for VI-held state; the *Station* closes the driver sessions,
+  because a driver may be shared with a VI that stays online).
+- The declared `detach_when_idle` standard (`BaseVirtualInstrument`'s
+  "Detach-when-idle declaration"; GLOSSARY.md's **Availability**): a
+  single-client VI opts in by overriding the `detach_when_idle` property with
+  one line (e.g. `return self._configured_externally`), never by writing
+  release behaviour itself. The base does the rest — `is_attached()` (the
+  observable half, deliberately NOT `@monitored`; it reaches the GUI only
+  through the Availability record's `detached` tag), `_attach()`/`_detach()`
+  (idempotent, never-raising helpers over each driver's opt-in
+  `ensure_connected()` / contract `close()`), an `__init_subclass__` wrap of a
+  directly defined `standby()` so the release fires after the VI's own
+  safe-off commands, and a `ping()` verify-and-release path for a VI that has
+  opted in. A VI never needs its own `ping()` override or a hand-written
+  release branch in `standby()` to get this — see
+  `virtual_instruments/measurement/README.md`'s "Externally configured
+  instruments" section for the motivating case.
 - A `vi_type` class attribute (`system` / `measurement` / `level` / `switch`).
 - The control-validation standard: bounded `@control` parameters declared in
   `control_limits`, limit values populated from `init_params`, enforced by the

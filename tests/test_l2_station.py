@@ -16,15 +16,26 @@ from cryosoft.virtual_instruments.base import BaseVirtualInstrument
 
 
 class _AddressCapturingDriver:
-    """Test double for build_station(): records the resource string it was built with."""
+    """Test double for build_station(): records the resource string it was built with.
+
+    Honours the driver contract's connection half (``get_idn`` / ``close``)
+    so a station built from it passes the build's identity check.
+    """
 
     last_resource: str | None = None
 
     def __init__(self, resource_string: str) -> None:
         type(self).last_resource = resource_string
+        self.closed = False
 
     def get_state(self) -> dict:
         return {}
+
+    def get_idn(self) -> str:
+        return "CRYOSOFT,ADDRESS-CAPTURING-STUB,0,0"
+
+    def close(self) -> None:
+        self.closed = True
 
 
 @pytest.fixture
@@ -866,14 +877,27 @@ class _FlakyDriver:
             raise CryoSoftCommunicationError(
                 f"Cannot open instrument at {resource_string}"
             )
+        self.closed = False
+
+    def get_idn(self) -> str:
+        return "CRYOSOFT,FLAKY-STUB,0,0"
+
+    def close(self) -> None:
+        self.closed = True
 
 
-class _StubVI:
-    """Minimal VI test double satisfying the build contract."""
+class _StubVI(BaseVirtualInstrument):
+    """Minimal VI test double satisfying the build contract.
+
+    Inherits the connection-lifecycle standard's ``ping()`` / ``disconnect()``
+    from the base, so a station built from it behaves exactly like a real one
+    at the identity check and on connect/disconnect.
+    """
+
+    vi_type = "system"
 
     def __init__(self, drivers: dict, **init_params) -> None:
-        self._drivers = drivers
-        self._init_params = init_params
+        super().__init__(drivers, **init_params)
 
 
 class _CommFailVI(_StubVI):
@@ -984,8 +1008,8 @@ def test_fallback_keeps_config_with_unreachable_instrument(tmp_path):
     assert station.offline_vi_names() == ["bad_vi"]
 
 
-def test_retry_instrument_reconnects_after_transient_failure(tmp_path):
-    """retry_instrument() brings a VI live once its driver becomes reachable."""
+def test_connect_instrument_reconnects_after_transient_failure(tmp_path):
+    """connect_instrument() brings a VI live once its driver becomes reachable."""
     _FlakyDriver.fail_times = 1
     _FlakyDriver.attempts = 0
     station = build_station(
@@ -993,7 +1017,7 @@ def test_retry_instrument_reconnects_after_transient_failure(tmp_path):
     )
     assert station.offline_vi_names() == ["bad_vi"]
 
-    ok, message = station.retry_instrument("bad_vi")
+    ok, message = station.connect_instrument("bad_vi")
 
     assert ok is True
     assert "bad_vi" in message
@@ -1002,13 +1026,13 @@ def test_retry_instrument_reconnects_after_transient_failure(tmp_path):
     assert station.measurement_vi_names() == ["bad_vi"]
 
 
-def test_retry_instrument_failure_updates_reason_and_stays_offline(tmp_path):
+def test_connect_instrument_failure_updates_reason_and_stays_offline(tmp_path):
     """A failed retry keeps the VI offline and refreshes the failure reason."""
     station = build_station(
         _write_degraded_config(tmp_path, "tests.test_l2_station._UnreachableDriver")
     )
 
-    ok, message = station.retry_instrument("bad_vi")
+    ok, message = station.connect_instrument("bad_vi")
 
     assert ok is False
     assert "bad_drv" in message
@@ -1017,11 +1041,115 @@ def test_retry_instrument_failure_updates_reason_and_stays_offline(tmp_path):
     assert "bad_drv" in station.get_offline_info("bad_vi").reason
 
 
-def test_retry_instrument_rejects_non_offline_name(sim_station: Station):
+def test_connect_instrument_rejects_non_offline_name(sim_station: Station):
     """Retrying a live or unknown VI returns an explicit failure verdict."""
-    ok, message = sim_station.retry_instrument("magnet_z")
+    ok, message = sim_station.connect_instrument("magnet_z")
     assert ok is False
     assert "not offline" in message
 
-    ok, message = sim_station.retry_instrument("no_such_vi")
+    ok, message = sim_station.connect_instrument("no_such_vi")
     assert ok is False
+
+
+# ---------------------------------------------------------------------------
+# The Availability standard (cryosoft.core.availability): Station.availability()
+# / availabilities() as a derived view over the offline registry, the unified
+# condition registry, and the VI's own attachment state.
+# ---------------------------------------------------------------------------
+
+
+class _SucceedsOnceDriver:
+    """Test double that connects successfully once, then fails on every retry.
+
+    Models the bug-fix scenario a failed reconnect exercises: a driver that
+    was reachable at build time (so the VI came up live) becomes unreachable
+    by the time an operator-disconnected VI is reconnected. Class-level
+    counter so build_station's import-by-dotted-path sees the same state as
+    the test; reset it in each test that uses this class.
+    """
+
+    attempts: int = 0
+
+    def __init__(self, resource_string: str) -> None:
+        from cryosoft.core.exceptions import CryoSoftCommunicationError
+
+        type(self).attempts += 1
+        if type(self).attempts > 1:
+            raise CryoSoftCommunicationError(
+                f"Cannot open instrument at {resource_string}"
+            )
+        self.closed = False
+
+    def get_idn(self) -> str:
+        return "CRYOSOFT,SUCCEEDS-ONCE-STUB,0,0"
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_availability_live_for_a_healthy_vi(sim_station: Station):
+    """A VI with no offline record and no active condition is simply live."""
+    avail = sim_station.availability("magnet_z")
+
+    assert avail.state == "live"
+    assert avail.tags == frozenset()
+    assert avail.reason == ""
+
+
+def test_availability_absent_with_operator_tag_after_disconnect(sim_station: Station):
+    """disconnect_instrument() must be visible through availability(), not just get_offline_info()."""
+    sim_station.disconnect_instrument("magnet_z")
+
+    avail = sim_station.availability("magnet_z")
+
+    assert avail.state == "absent"
+    assert avail.tags == frozenset({"operator"})
+
+
+def test_availability_faulted_with_not_responding_tag_under_standing_comm_condition(
+    sim_station: Station,
+):
+    """A live VI under a standing comm fault reports faulted/not_responding."""
+    sim_station._record_comm_condition("level_meter", "disconnected", "boom")
+
+    avail = sim_station.availability("level_meter")
+
+    assert avail.state == "faulted"
+    assert avail.tags == frozenset({"not_responding"})
+    assert avail.reason == "boom"
+
+
+def test_availability_covers_every_configured_vi(sim_station: Station):
+    """availabilities() must answer for both live and offline VIs."""
+    sim_station.disconnect_instrument("magnet_z")
+
+    result = sim_station.availabilities()
+
+    assert set(result) == set(sim_station.get_vi_names()) | set(
+        sim_station.offline_vi_names()
+    )
+    assert result["magnet_z"].state == "absent"
+
+
+def test_availability_failed_reconnect_of_operator_disconnected_vi_adds_connect_failed(
+    tmp_path,
+):
+    """Bug fix: a failed reconnect ADDS connect_failed rather than overwriting operator."""
+    _SucceedsOnceDriver.attempts = 0
+    station = build_station(
+        _write_degraded_config(tmp_path, "tests.test_l2_station._SucceedsOnceDriver")
+    )
+    assert station.has_vi("bad_vi") is True
+
+    station.disconnect_instrument("bad_vi")
+    assert station.get_offline_info("bad_vi").tags == frozenset({"operator"})
+
+    ok, _ = station.connect_instrument("bad_vi")
+    assert ok is False
+
+    info = station.get_offline_info("bad_vi")
+    assert info.tags == frozenset({"operator", "connect_failed"})
+
+    avail = station.availability("bad_vi")
+    assert avail.state == "absent"
+    assert avail.tags == frozenset({"operator", "connect_failed"})

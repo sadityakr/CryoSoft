@@ -247,18 +247,6 @@ class LockInHarmonicMeasurementVI(MeasurementInstrumentBase):
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def ping(self) -> bool:
-        """Query IDN from the lock-in driver to verify it is reachable.
-
-        Returns:
-            True if the lock-in responds to ``get_idn()``.
-        """
-        try:
-            self._lockin.get_idn()  # type: ignore[attr-defined]
-            return True
-        except Exception:
-            return False
-
     def standby(self) -> None:
         """Zero the oscillator amplitude and reset the initiated state."""
         self._lockin.set_oscillator_amplitude(0.0)  # type: ignore[attr-defined]

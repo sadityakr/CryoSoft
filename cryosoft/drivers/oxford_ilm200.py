@@ -83,8 +83,12 @@ class OxfordILM200:
         self._instr.write_termination = "\r"
         self._instr.read_termination = "\r"
 
-        # Put instrument into remote-unlocked mode so control commands work
-        self._set_remote(3)
+        # No ISOBUS command is sent here. Under the connection-lifecycle
+        # standard, building the Station must leave every instrument exactly
+        # as the operator left it; the only command CryoSoft sends at build
+        # time is the identity query. Level reads (R1/R2/X/V) work in local
+        # mode, and set_refresh_rate() — the one control this driver has —
+        # already takes and releases remote around its own writes.
 
     # ------------------------------------------------------------------
     # Public API  (matches SimOxfordILM200)
@@ -169,6 +173,26 @@ class OxfordILM200:
     def get_idn(self) -> str:
         """Return the instrument version string."""
         return self._execute("V").strip()
+
+    # ------------------------------------------------------------------
+    # Connection lifecycle (the connection-lifecycle standard)
+    # ------------------------------------------------------------------
+
+    def close(self) -> None:
+        """Hand the meter back to its front panel and release the VISA session.
+
+        The driver half of the connection-lifecycle standard (see
+        ``drivers/README.md``): sends no measurement-state command — the probe
+        keeps whatever refresh rate it is on — and never raises. ``C2``
+        (local, unlocked) is what returns control to the ILM 200's own front
+        panel, which is the point of disconnecting; ``_set_remote`` already
+        swallows its own failures.
+        """
+        self._set_remote(2)   # local & unlocked — operator has the front panel
+        try:
+            self._instr.close()
+        except Exception as exc:  # noqa: BLE001 — best effort, close must not raise
+            log.debug("ILM 200: error closing VISA session: %s", exc)
 
     # ------------------------------------------------------------------
     # Private helpers

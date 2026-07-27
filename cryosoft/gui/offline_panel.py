@@ -1,24 +1,33 @@
 # ---
 # description: |
 #   OfflineInstrumentPanel + OfflineFrontPanel: the GUI face of an instrument
-#   that failed to connect at startup (Station's offline registry, degraded
-#   build). The card shows WHAT is offline and WHY in the instrument grid,
-#   styled like a disconnected panel; its detail window carries the one
-#   reconnect control ("Try reconnect" — the offline counterpart of the
-#   Initiate button), which flows through Orchestrator.retry_reconnect().
-#   On success MonitorWindow swaps the card for a live InstrumentPanel.
+#   that is not currently CryoSoft's — either it failed to connect at startup
+#   (degraded build) or the operator released it (the connection-lifecycle
+#   standard, see virtual_instruments/base.py). Both land in the Station's ONE
+#   offline registry and render through this same card; only the wording
+#   differs, keyed off the Availability standard's tags
+#   (cryosoft.core.availability: OfflineInstrument.tags, a subset of
+#   "connect_failed"/"operator"), because the degraded behavior is
+#   deliberately identical. The card shows WHAT is offline and WHY in the
+#   instrument grid and carries the Connect button (the offline card's half of
+#   the ConnectionButton pair the live card shows as Disconnect); its detail
+#   window repeats it with the full reason and a diagnosis hint. Both flow
+#   through Orchestrator.connect_instrument(). On success MonitorWindow swaps
+#   the card for a live InstrumentPanel.
 # entry_point: Not run directly. Instantiated by MonitorWindow for each name
 #   in Station.offline_vi_names().
 # dependencies:
 #   - PyQt6 >= 6.5
 #   - cryosoft.core.station (OfflineInstrument)
 #   - cryosoft.core.orchestrator (Orchestrator)
+#   - cryosoft.gui.lifecycle_toggle (ConnectionButton)
 # input: |
 #   vi_name (str), the Station's OfflineInstrument record, Orchestrator.
 # process: |
-#   The card renders name + [OFFLINE] + reason from the record. The lazily
-#   created detail window submits retry_reconnect() and listens to
-#   action_failed / instrument_reconnected to report the verdict inline.
+#   The card renders name + [OFFLINE]/[DISCONNECTED] + reason from the record,
+#   plus a Connect button. The lazily created detail window submits
+#   connect_instrument() and listens to action_failed / instrument_reconnected
+#   to report the verdict inline.
 # output: |
 #   A QGroupBox card for the instrument grid and its floating detail window.
 # ---
@@ -26,6 +35,8 @@
 """OfflineInstrumentPanel — grid card and detail window for an offline VI."""
 
 from __future__ import annotations
+
+from dataclasses import dataclass
 
 import qtawesome as qta
 from PyQt6.QtCore import Qt
@@ -40,27 +51,127 @@ from PyQt6.QtWidgets import (
 
 from cryosoft.core.orchestrator import Orchestrator
 from cryosoft.core.station import OfflineInstrument
-from cryosoft.gui.theme import BTN_CLASS_PRIMARY, TEXT_ON_ACCENT, TEXT_PRIMARY
+from cryosoft.gui.lifecycle_toggle import ConnectionButton
+from cryosoft.gui.theme import TEXT_PRIMARY
 
 _HINT_TEXT = (
     "Check that the instrument is powered on and its cable and address match "
-    "the config, then try to reconnect. For a deeper diagnosis run:\n"
+    "the config, then try to connect. For a deeper diagnosis run:\n"
+    "python -m cryosoft.troubleshoot check"
+)
+
+_OPERATOR_HINT_TEXT = (
+    "You released this instrument, so it is free for its own front panel or "
+    "vendor software. Nothing was changed on it. Press Connect to hand it "
+    "back to CryoSoft — then Initiate to bring it to its operating state."
+)
+
+_RECONNECT_FAILED_HINT_TEXT = (
+    "You released this instrument, so it was free for its own front panel or "
+    "vendor software — but the last attempt to hand it back to CryoSoft "
+    "failed on hardware (see the reason above). Check that it is powered on "
+    "and its cable and address match the config, then press Connect again. "
+    "For a deeper diagnosis run:\n"
     "python -m cryosoft.troubleshoot check"
 )
 
 
-class OfflineInstrumentPanel(QGroupBox):
-    """Instrument-grid card for a VI that failed to connect at startup.
+@dataclass(frozen=True)
+class _OfflineWording:
+    """The card/detail-window wording one offline availability tag set selects.
 
-    Deliberately control-free: it states the fault and opens the detail
-    window, where the single "Try reconnect" action lives (the offline
-    counterpart of a live card's Initiate button). Everything else on the
-    station keeps working around it.
+    ``OfflineInstrument.tags`` (the Availability standard's closed vocabulary,
+    ``cryosoft.core.availability``) can hold ``"connect_failed"``,
+    ``"operator"``, or both at once — an operator-released VI whose reconnect
+    then failed on hardware. Each combination gets its own row so the
+    two-tag case can say BOTH things are true, rather than a bool picking one
+    over the other.
+
+    Attributes:
+        badge: Header badge text (``"[OFFLINE]"`` / ``"[DISCONNECTED]"``).
+        note: One-line card note under the reason.
+        header: Detail-window header sentence; ``{vi_name}`` is substituted.
+        hint: Detail-window diagnosis/recovery hint.
+        window_title: Detail-window title; ``{vi_name}`` is substituted.
+    """
+
+    badge: str
+    note: str
+    header: str
+    hint: str
+    window_title: str
+
+
+_WORDING: dict[frozenset[str], _OfflineWording] = {
+    frozenset({"connect_failed"}): _OfflineWording(
+        badge="[OFFLINE]",
+        note="Not connected at startup — all other instruments are unaffected.",
+        header="{vi_name} failed to connect at startup.",
+        hint=_HINT_TEXT,
+        window_title="{vi_name} — Instrument Offline",
+    ),
+    frozenset({"operator"}): _OfflineWording(
+        badge="[DISCONNECTED]",
+        note="Released to its front panel — all other instruments are unaffected.",
+        header="{vi_name} is disconnected — CryoSoft is not holding it.",
+        hint=_OPERATOR_HINT_TEXT,
+        window_title="{vi_name} — Instrument Disconnected",
+    ),
+    frozenset({"operator", "connect_failed"}): _OfflineWording(
+        badge="[DISCONNECTED]",
+        note=(
+            "Released to its front panel, and the reconnect attempt then "
+            "failed — all other instruments are unaffected."
+        ),
+        header=(
+            "{vi_name} is disconnected — you released it, and the last "
+            "attempt to hand it back failed on hardware."
+        ),
+        hint=_RECONNECT_FAILED_HINT_TEXT,
+        window_title="{vi_name} — Instrument Disconnected",
+    ),
+}
+
+_DEFAULT_WORDING = _WORDING[frozenset({"connect_failed"})]
+
+
+def _wording_for(tags: frozenset[str]) -> _OfflineWording:
+    """Return the `_OfflineWording` an offline VI's tag set selects.
+
+    Args:
+        tags: An `OfflineInstrument.tags` value — a non-empty subset of the
+            Availability standard's absence tags, ``{"connect_failed",
+            "operator"}`` (`cryosoft.core.availability`).
+
+    Returns:
+        The exact-match wording for `tags`; falls back to the
+        `connect_failed`-only wording for any combination the offline
+        registry does not actually produce (defensive).
+    """
+    return _WORDING.get(tags, _DEFAULT_WORDING)
+
+
+class OfflineInstrumentPanel(QGroupBox):
+    """Instrument-grid card for a VI CryoSoft does not currently hold.
+
+    Covers every offline tag combination with one card, because the Station
+    degrades them identically (see the connection-lifecycle standard on
+    ``BaseVirtualInstrument``): an instrument that never connected, one the
+    operator deliberately released, or both at once (a released instrument
+    whose reconnect then failed on hardware). Only the label, the note and
+    the hint differ, selected from ``info.tags`` via a tag-keyed mapping
+    (``_wording_for()``), so the operator can tell "something is wrong" from
+    "I did this" — or both.
+
+    Control-free apart from the one action that applies here: Connect — the
+    offline half of the ConnectionButton pair whose live-card half reads
+    Disconnect. Everything else on the station keeps working around it.
 
     Args:
         vi_name: The VI's configured name.
-        info: The Station's offline record (reason shown verbatim).
-        orchestrator: Orchestrator handling the reconnect request.
+        info: The Station's offline record (reason shown verbatim; ``tags``
+            selects the wording).
+        orchestrator: Orchestrator handling the connect request.
         parent: Optional Qt parent widget.
         type_tag: Optional role label ("Measurement", "Scanner"), mirroring
             the live cards so the grid stays recognisable.
@@ -78,6 +189,8 @@ class OfflineInstrumentPanel(QGroupBox):
         self._vi_name = vi_name
         self._orchestrator = orchestrator
         self._details: OfflineFrontPanel | None = None  # lazily created
+        self._tags = info.tags
+        wording = _wording_for(info.tags)
         self.setObjectName(f"{vi_name}_offline_card")
 
         outer = QVBoxLayout()
@@ -85,7 +198,7 @@ class OfflineInstrumentPanel(QGroupBox):
         outer.setContentsMargins(8, 8, 8, 8)
 
         header_row = QHBoxLayout()
-        self._name_label = QLabel(f"<b>{vi_name}</b>  [OFFLINE]")
+        self._name_label = QLabel(f"<b>{vi_name}</b>  {wording.badge}")
         self._name_label.setObjectName(f"{vi_name}_offline_name_label")
         self._name_label.setProperty("class", "panel_name_label")
         header_row.addWidget(self._name_label)
@@ -99,8 +212,8 @@ class OfflineInstrumentPanel(QGroupBox):
         details_btn.setObjectName(f"{vi_name}_offline_details_btn")
         details_btn.setIcon(qta.icon("fa5s.sliders-h", color=TEXT_PRIMARY))
         details_btn.setToolTip(
-            "Open the offline-instrument details (full failure reason and "
-            "the Try Reconnect action)"
+            "Open the offline-instrument details (full reason and the "
+            "Connect action)"
         )
         details_btn.clicked.connect(self._open_details)
         header_row.addWidget(details_btn)
@@ -112,16 +225,34 @@ class OfflineInstrumentPanel(QGroupBox):
         reason_lbl.setWordWrap(True)
         outer.addWidget(reason_lbl)
 
-        note_lbl = QLabel(
-            "Not connected at startup — all other instruments are unaffected."
+        self._note_lbl = QLabel(wording.note)
+        self._note_lbl.setObjectName(f"{vi_name}_offline_note")
+        self._note_lbl.setProperty("class", "secondary_label")
+        self._note_lbl.setWordWrap(True)
+        outer.addWidget(self._note_lbl)
+
+        self._status_lbl = QLabel("")
+        self._status_lbl.setObjectName(f"{vi_name}_offline_card_status")
+        self._status_lbl.setProperty("class", "secondary_label")
+        self._status_lbl.setWordWrap(True)
+        outer.addWidget(self._status_lbl)
+
+        # Connect lives in the body, not the header: an offline card has room
+        # to spare where a live card's header does not, so the one action that
+        # applies here gets its word rather than the live card's compact icon.
+        action_row = QHBoxLayout()
+        action_row.setContentsMargins(0, 2, 0, 2)
+        self._connect_btn = ConnectionButton(
+            vi_name, "connect", self._on_connect_clicked, parent=self
         )
-        note_lbl.setObjectName(f"{vi_name}_offline_note")
-        note_lbl.setProperty("class", "secondary_label")
-        note_lbl.setWordWrap(True)
-        outer.addWidget(note_lbl)
+        action_row.addWidget(self._connect_btn)
+        action_row.addStretch()
+        outer.addLayout(action_row)
 
         outer.addStretch()
         self.setLayout(outer)
+
+        orchestrator.action_failed.connect(self._on_action_failed)
         self.setMinimumWidth(300)
         self.setMinimumHeight(self.sizeHint().height())
 
@@ -130,6 +261,35 @@ class OfflineInstrumentPanel(QGroupBox):
             widget.style().unpolish(widget)
             widget.style().polish(widget)
 
+    def _on_connect_clicked(self) -> None:
+        """Submit the connect request; the verdict arrives via signals."""
+        self._status_lbl.setText("Connecting…")
+        self._orchestrator.connect_instrument(self._vi_name)
+
+    def _on_action_failed(self, vi_name: str, method_name: str, reason: str) -> None:
+        """Report a failed connect attempt on the card itself.
+
+        Success needs no handler here: MonitorWindow replaces this card with
+        a live panel the moment ``instrument_reconnected`` fires. A failed
+        reconnect of an ALREADY-offline VI can change its tags (the
+        Availability standard's ``connect_instrument()`` bug fix: a failed
+        reconnect of an operator-disconnected VI ADDS ``connect_failed``
+        rather than overwriting ``operator`` — see
+        ``cryosoft.core.station``), so the badge/note are re-derived here
+        rather than staying fixed at construction.
+        """
+        if vi_name != self._vi_name or method_name != "connect":
+            return
+        self._status_lbl.setText(f"Still not reachable: {reason}")
+        self._refresh_wording()
+
+    def _refresh_wording(self) -> None:
+        """Re-select badge/note from the offline registry's current tags."""
+        self._tags = self._orchestrator.availability(self._vi_name).tags
+        wording = _wording_for(self._tags)
+        self._name_label.setText(f"<b>{self._vi_name}</b>  {wording.badge}")
+        self._note_lbl.setText(wording.note)
+
     def _open_details(self) -> None:
         """Lazily create and show this VI's offline detail window."""
         if self._details is None:
@@ -137,6 +297,7 @@ class OfflineInstrumentPanel(QGroupBox):
                 self._vi_name,
                 self._orchestrator,
                 parent=self.window(),
+                tags=self._tags,
             )
         self._details.show()
         self._details.raise_()
@@ -151,18 +312,22 @@ class OfflineInstrumentPanel(QGroupBox):
 
 
 class OfflineFrontPanel(QWidget):
-    """Detail window for one offline VI: full reason, hint, Try Reconnect.
+    """Detail window for one offline VI: full reason, hint, Connect.
 
-    The offline counterpart of :class:`InstrumentFrontPanel`. The reconnect
-    request goes through ``Orchestrator.retry_reconnect()`` (IDLE-gated); the
-    verdict comes back via ``instrument_reconnected`` / ``action_failed`` and
-    is reported inline.
+    The offline counterpart of :class:`InstrumentFrontPanel`. The connect
+    request goes through ``Orchestrator.connect_instrument()`` (IDLE-gated);
+    the verdict comes back via ``instrument_reconnected`` / ``action_failed``
+    and is reported inline.
 
     Args:
         vi_name: The offline VI's configured name.
-        orchestrator: Orchestrator handling the reconnect request; its
+        orchestrator: Orchestrator handling the connect request; its
             station's offline registry provides the live failure reason.
         parent: The owning widget (parented, but flagged as a real window).
+        tags: The offline VI's Availability tags (`cryosoft.core.availability`
+            — a subset of ``{"connect_failed", "operator"}``), selecting the
+            title/header/hint via ``_wording_for()``. The action and the
+            code path are identical regardless of which tags apply.
     """
 
     def __init__(
@@ -170,21 +335,23 @@ class OfflineFrontPanel(QWidget):
         vi_name: str,
         orchestrator: Orchestrator,
         parent: QWidget | None = None,
+        tags: frozenset[str] = frozenset({"connect_failed"}),
     ) -> None:
         super().__init__(parent, Qt.WindowType.Window)
         self._vi_name = vi_name
         self._orchestrator = orchestrator
+        wording = _wording_for(tags)
         self.setObjectName(f"{vi_name}_offline_front_panel")
-        self.setWindowTitle(f"{vi_name} — Instrument Offline")
+        self.setWindowTitle(wording.window_title.format(vi_name=vi_name))
         self.setMinimumSize(420, 220)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(8, 8, 8, 8)
         outer.setSpacing(6)
 
-        header = QLabel(f"<b>{vi_name}</b> failed to connect at startup.")
-        header.setObjectName(f"{vi_name}_offline_detail_header")
-        outer.addWidget(header)
+        self._header_lbl = QLabel(wording.header.format(vi_name=vi_name))
+        self._header_lbl.setObjectName(f"{vi_name}_offline_detail_header")
+        outer.addWidget(self._header_lbl)
 
         self._reason_lbl = QLabel("")
         self._reason_lbl.setObjectName(f"{vi_name}_offline_detail_reason")
@@ -192,27 +359,26 @@ class OfflineFrontPanel(QWidget):
         outer.addWidget(self._reason_lbl)
         self._refresh_reason()
 
-        hint = QLabel(_HINT_TEXT)
-        hint.setObjectName(f"{vi_name}_offline_detail_hint")
-        hint.setProperty("class", "secondary_label")
-        hint.setWordWrap(True)
-        outer.addWidget(hint)
+        self._hint_lbl = QLabel(wording.hint)
+        self._hint_lbl.setObjectName(f"{vi_name}_offline_detail_hint")
+        self._hint_lbl.setProperty("class", "secondary_label")
+        self._hint_lbl.setWordWrap(True)
+        outer.addWidget(self._hint_lbl)
 
         action_row = QHBoxLayout()
-        self._reconnect_btn = QPushButton("Try Reconnect")
-        self._reconnect_btn.setObjectName(f"{vi_name}_reconnect_btn")
-        self._reconnect_btn.setProperty("class", BTN_CLASS_PRIMARY)
-        self._reconnect_btn.setIcon(qta.icon("fa5s.plug", color=TEXT_ON_ACCENT))
-        self._reconnect_btn.setToolTip(
-            "Rebuild this instrument's connection (allowed while no "
-            "procedure is running). The app may pause for a few seconds "
-            "if the instrument is still unreachable."
+        self._connect_btn = ConnectionButton(
+            vi_name,
+            "connect",
+            self._on_connect_clicked,
+            parent=self,
+            # Keep this window's long-standing objectName (objectNames are
+            # API) and keep it distinct from the card's own Connect button.
+            object_name=f"{vi_name}_reconnect_btn",
         )
-        self._reconnect_btn.clicked.connect(self._on_reconnect_clicked)
         self._status_lbl = QLabel("")
         self._status_lbl.setObjectName(f"{vi_name}_reconnect_status")
         self._status_lbl.setProperty("class", "secondary_label")
-        action_row.addWidget(self._reconnect_btn)
+        action_row.addWidget(self._connect_btn)
         action_row.addWidget(self._status_lbl)
         action_row.addStretch()
         outer.addLayout(action_row)
@@ -222,24 +388,38 @@ class OfflineFrontPanel(QWidget):
         orchestrator.action_failed.connect(self._on_action_failed)
 
     def _refresh_reason(self) -> None:
-        """Show the offline registry's current failure reason."""
+        """Show the offline registry's current reason."""
         self._reason_lbl.setText(self._orchestrator.offline_reason(self._vi_name))
 
-    def _on_reconnect_clicked(self) -> None:
-        """Submit the reconnect request; the verdict arrives via signals."""
-        self._status_lbl.setText("Reconnecting…")
-        self._orchestrator.retry_reconnect(self._vi_name)
+    def _on_connect_clicked(self) -> None:
+        """Submit the connect request; the verdict arrives via signals."""
+        self._status_lbl.setText("Connecting…")
+        self._orchestrator.connect_instrument(self._vi_name)
 
     def _on_reconnected(self, vi_name: str) -> None:
         """Report success; MonitorWindow swaps the card and closes us."""
         if vi_name != self._vi_name:
             return
-        self._status_lbl.setText("Reconnected — instrument is live.")
-        self._reconnect_btn.setEnabled(False)
+        self._status_lbl.setText("Connected — instrument is live.")
+        self._connect_btn.setEnabled(False)
 
     def _on_action_failed(self, vi_name: str, method_name: str, reason: str) -> None:
-        """Report a failed reconnect attempt inline, with the fresh reason."""
-        if vi_name != self._vi_name or method_name != "reconnect":
+        """Report a failed connect attempt inline, with the fresh reason and wording.
+
+        A reconnect attempt on an already-offline VI can change its tags (see
+        ``OfflineInstrumentPanel._on_action_failed()``'s docstring), so the
+        title/header/hint are re-derived here too, not just the reason text.
+        """
+        if vi_name != self._vi_name or method_name != "connect":
             return
         self._status_lbl.setText("Still not reachable.")
         self._refresh_reason()
+        self._refresh_wording()
+
+    def _refresh_wording(self) -> None:
+        """Re-select title/header/hint from the offline registry's current tags."""
+        tags = self._orchestrator.availability(self._vi_name).tags
+        wording = _wording_for(tags)
+        self.setWindowTitle(wording.window_title.format(vi_name=self._vi_name))
+        self._header_lbl.setText(wording.header.format(vi_name=self._vi_name))
+        self._hint_lbl.setText(wording.hint)

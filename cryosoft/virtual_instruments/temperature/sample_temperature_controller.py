@@ -382,6 +382,14 @@ class SampleTemperatureControllerVI(TemperatureControllerBase, RampableVI):
 
         Sets heater mode to AUTO so the PID loop drives the heater output
         toward the setpoint (the standard startup state for a measurement).
+
+        This is the ONLY place closed-loop control is switched on. The ITC
+        503 driver used to force AUTO from its own ``__init__``, so merely
+        starting CryoSoft took over the heater; under the
+        connection-lifecycle standard (see ``BaseVirtualInstrument``)
+        building the Station changes nothing the instrument is doing, and
+        the operator decides when the loop is handed to CryoSoft by
+        pressing Initiate.
         """
         self._driver.set_heater_mode("AUTO")  # type: ignore[attr-defined]
 

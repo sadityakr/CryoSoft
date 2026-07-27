@@ -1,34 +1,47 @@
 # ---
 # description: |
-#   LifecycleToggleButton: one state-dependent button (+ status glow dot)
-#   replacing the old separate Initiate/Standby QPushButton pair. Shared by
-#   every InstrumentPanel card (system, measurement, and switch alike) so all
-#   places render and update identically.
-# entry_point: Not run directly. Instantiated by InstrumentPanel / MonitorWindow.
+#   The two per-instrument lifecycle controls every card carries, side by side
+#   in its header — the two axes of the connection-lifecycle standard (see
+#   virtual_instruments/base.py):
+#     * LifecycleToggleButton — one state-dependent Initiate/Standby button
+#       (+ status glow dot), the OPERATING axis: what the instrument is doing.
+#     * ConnectionButton — a one-way Connect or Disconnect button, the
+#       CONNECTION axis: who owns the bus session. It is one-way by design,
+#       not a toggle: a live card can only offer Disconnect and an offline
+#       card only Connect, because the card itself is swapped when the state
+#       flips (MonitorWindow._on_instrument_disconnected / _reconnected).
+#   Shared by every InstrumentPanel card (system, measurement, and switch
+#   alike) and by OfflineInstrumentPanel, so all places render identically.
+# entry_point: Not run directly. Instantiated by InstrumentPanel /
+#   OfflineInstrumentPanel / MonitorWindow.
 # dependencies:
 #   - PyQt6 >= 6.5
 #   - qtawesome
 # input: |
-#   A callback invoked with "initiate" or "standby" when clicked.
+#   LifecycleToggleButton: a callback invoked with "initiate" or "standby".
+#   ConnectionButton: a no-argument callback, plus the direction to render.
 # process: |
-#   The button starts in the standby ("Initiate", red dot) state. Clicking it
-#   only submits the opposite action via the callback — it does NOT flip
-#   state optimistically. set_initiated() is the only thing that changes the
-#   displayed state, and callers wire it to Orchestrator.action_succeeded so
-#   the glow reflects confirmed instrument state, not a hopeful click.
+#   The lifecycle button starts in the standby ("Initiate", red dot) state.
+#   Clicking it only submits the opposite action via the callback — it does
+#   NOT flip state optimistically. set_initiated() is the only thing that
+#   changes the displayed state, and callers wire it to
+#   Orchestrator.action_succeeded so the glow reflects confirmed instrument
+#   state, not a hopeful click. ConnectionButton likewise only submits; the
+#   Orchestrator's instrument_connected/disconnected signals drive the card
+#   swap that changes what is displayed.
 # output: |
-#   A QWidget (dot + button). set_initiated(bool) updates it; is_initiated()
-#   reads it back.
+#   LifecycleToggleButton: a QWidget (dot + button); set_initiated(bool)
+#   updates it, is_initiated() reads it back. ConnectionButton: a QPushButton.
 # ---
 
-"""LifecycleToggleButton — single state-dependent Initiate/Standby control."""
+"""Per-instrument lifecycle controls: Initiate/Standby and Connect/Disconnect."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
 
 import qtawesome as qta
-from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QWidget
+from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSizePolicy, QWidget
 
 from cryosoft.gui.theme import BTN_CLASS_PRIMARY, BTN_CLASS_SECONDARY, TEXT_ON_ACCENT, TEXT_PRIMARY
 
@@ -53,6 +66,12 @@ class LifecycleToggleButton(QWidget):
         self._vi_name = vi_name
         self._on_toggle = on_toggle
         self._initiated = False
+        # Hold the natural width: in the two-column instrument grid the header
+        # is contested (name + front-panel icon + Disconnect + this), and Qt
+        # would otherwise shrink the button below its size hint and clip
+        # "Initiate" (gui-edit: never cap an icon button below its size hint).
+        # The VI-name label beside it is the one that gives way instead.
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
@@ -109,3 +128,94 @@ class LifecycleToggleButton(QWidget):
         for widget in (self._btn, self._dot):
             widget.style().unpolish(widget)
             widget.style().polish(widget)
+
+
+class ConnectionButton(QPushButton):
+    """The Connect or Disconnect button every instrument card carries.
+
+    The CONNECTION axis of the connection-lifecycle standard (see
+    ``BaseVirtualInstrument``), sitting next to the Initiate/Standby toggle so
+    the two axes read as the pair they are: Initiate/Standby changes what the
+    instrument is *doing*, Connect/Disconnect changes who *owns* it.
+
+    Deliberately one-way rather than a toggle. A live card can only ever offer
+    Disconnect and an offline card only Connect, because the card itself is
+    replaced when the connection state flips — so a toggle would have to track
+    a state it can never actually be in.
+
+    Args:
+        vi_name: The VI's registered name, used to scope the objectName and
+            to word the tooltip.
+        direction: ``"disconnect"`` (shown on a live card) or ``"connect"``
+            (shown on an offline card).
+        on_click: Called with no arguments when the button is pressed. It only
+            SUBMITS the request; the displayed state never changes optimistically.
+        parent: Optional Qt parent widget.
+        object_name: Override for the button's objectName (objectNames are
+            API — see the gui-edit skill). Defaults to
+            ``"{vi_name}_{direction}_btn"``; the offline detail window passes
+            its long-standing ``"{vi_name}_reconnect_btn"`` so its own name
+            survives, and so the card's button and the window's button stay
+            distinguishable by ``findChild``.
+        compact: Render icon-only, for the monitor card's header row. The
+            instrument grid is two narrow columns, and a labelled button there
+            squeezes the VI name and the Initiate/Standby toggle down to
+            ellipses — so on the card this matches the front-panel icon button
+            beside it and carries its meaning in the tooltip, while every
+            roomier surface (the offline card's body, the detail window) keeps
+            the word.
+
+    Raises:
+        ValueError: If *direction* is not "connect" or "disconnect".
+    """
+
+    def __init__(
+        self,
+        vi_name: str,
+        direction: str,
+        on_click: Callable[[], None],
+        parent: QWidget | None = None,
+        object_name: str | None = None,
+        compact: bool = False,
+    ) -> None:
+        super().__init__(parent)
+        if direction not in ("connect", "disconnect"):
+            raise ValueError(
+                f"ConnectionButton direction must be 'connect' or "
+                f"'disconnect', got {direction!r}"
+            )
+        self._vi_name = vi_name
+        self._direction = direction
+        self.setObjectName(object_name or f"{vi_name}_{direction}_btn")
+        # Same reasoning as LifecycleToggleButton: hold the natural width and
+        # let the VI-name label absorb a narrow card instead.
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+        if direction == "disconnect":
+            if not compact:
+                self.setText("Disconnect")
+            self.setProperty("class", BTN_CLASS_SECONDARY)
+            self.setIcon(qta.icon("fa5s.unlink", color=TEXT_PRIMARY))
+            self.setToolTip(
+                f"Disconnect {vi_name} — release it so it can be used from "
+                f"its own front panel or vendor software. Nothing on the "
+                f"instrument changes: press Standby first if you want it "
+                f"idle. CryoSoft stops polling it until you press Connect."
+            )
+        else:
+            if not compact:
+                self.setText("Connect")
+            self.setProperty("class", BTN_CLASS_PRIMARY)
+            self.setIcon(qta.icon("fa5s.link", color=TEXT_ON_ACCENT))
+            self.setToolTip(
+                f"Connect {vi_name} — hand it back to CryoSoft: reopen its "
+                f"connection and check its identity. Nothing on the "
+                f"instrument changes; press Initiate afterwards to bring it "
+                f"to its operating state."
+            )
+
+        self.clicked.connect(lambda _checked=False: on_click())
+
+    def direction(self) -> str:
+        """Return the direction this button submits ("connect"/"disconnect")."""
+        return self._direction

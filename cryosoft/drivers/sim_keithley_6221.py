@@ -79,6 +79,9 @@ class SimKeithley6221:
 
         # Test control flags
         self._simulate_error: bool = False
+        # Connection-lifecycle standard: True once close() has released
+        # the session; every command then fails (see _check_error).
+        self._closed: bool = False
         # When set (int), acquire_delta_readings() returns only this many
         # samples instead of the full n_readings — models the real 6221's
         # short-return path (compliance abort / repeated read failures) so
@@ -307,8 +310,30 @@ class SimKeithley6221:
             return self._paired_meter.get_range()
         return 0.01
 
+    # ------------------------------------------------------------------
+    # Connection lifecycle (the connection-lifecycle standard)
+    # ------------------------------------------------------------------
+
+    def close(self) -> None:
+        """Release the simulated bus session; the instrument is left untouched.
+
+        Idempotent and never raises. Afterwards every command — including
+        ``get_idn()`` — raises ``CryoSoftCommunicationError`` via
+        :meth:`_check_error`, modelling a released session so a
+        use-after-disconnect bug fails in a test instead of on hardware.
+        A closed driver is never reopened in place: the Station builds a
+        fresh instance when the operator reconnects.
+        """
+        self._closed = True
+
     def _check_error(self) -> None:
         """Raise CryoSoftCommunicationError if error simulation is active."""
+        if self._closed:
+            raise CryoSoftCommunicationError(
+                "SimKeithley6221: the session is closed — the driver was "
+                "disconnected from CryoSoft",
+                vi_name="SimKeithley6221",
+            )
         if self._simulate_error:
             raise CryoSoftCommunicationError(
                 "Simulated communication error on Keithley 6221",

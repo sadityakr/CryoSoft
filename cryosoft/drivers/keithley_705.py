@@ -139,6 +139,11 @@ class Keithley705:
         # REMOTE is mandatory: without REN the 705 silently discards every
         # command (see the command-block note). Assert it once, here, so no
         # caller can produce the silent-no-op failure mode.
+        #
+        # Under the connection-lifecycle standard this is bus-link access
+        # (a GPIB control line, not a DDC command): it changes nothing the
+        # instrument is doing, no channel opens or closes, and close() drops
+        # it again so the operator gets the front panel back on disconnect.
         try:
             self._instr.control_ren(pyvisa.constants.VI_GPIB_REN_ASSERT_ADDRESS)
         except (pyvisa.VisaIOError, AttributeError) as exc:
@@ -176,6 +181,26 @@ class Keithley705:
             The stripped status word, beginning with ``"705"``.
         """
         return self._query(_CMD_IDENTIFY)
+
+    def close(self) -> None:
+        """Return the scanner to LOCAL and release the VISA session.
+
+        The driver half of the connection-lifecycle standard (see
+        ``drivers/README.md``): sends no DDC command, so every channel keeps
+        whatever state the operator left it in — opening the channels is
+        ``standby()``'s job, not a disconnect's. Dropping REMOTE is what makes
+        the 705's own front panel usable again, which is the point of
+        disconnecting; it is a GPIB control line, not an instrument command.
+        Never raises: a disconnect must always succeed.
+        """
+        try:
+            self._instr.control_ren(pyvisa.constants.VI_GPIB_REN_ADDRESS_GTL)
+        except Exception as exc:  # noqa: BLE001 — best effort, close must not raise
+            log.debug("Keithley 705: could not return to local: %s", exc)
+        try:
+            self._instr.close()
+        except Exception as exc:  # noqa: BLE001 — best effort, close must not raise
+            log.debug("Keithley 705: error closing VISA session: %s", exc)
 
     def first_last_channel(self) -> tuple[int, int]:
         """Return the instrument's first and last addressable channel numbers.

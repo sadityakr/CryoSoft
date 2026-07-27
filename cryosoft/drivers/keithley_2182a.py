@@ -68,19 +68,33 @@ class Keithley2182A:
         self._instr.write_termination = "\n"
         self._instr.read_termination = "\n"
 
-        # Live commissioning (2026-07-22, GPIB0::28) found the instrument
-        # ships with continuous initiation on (:INIT:CONT? -> 1, :TRIG:COUN?
-        # -> ~9.9e37 — free-running). READ?'s implicit :INIT is then always
-        # rejected as "-213 Init ignored" (harmless — :FETCh? still returns a
-        # fresh conversion since one is always in flight) but it fills the
-        # error queue on every get_voltage() call. Pinning single-shot mode
-        # here makes each READ? do exactly what it looks like it does: one
-        # trigger, one fresh reading, idle in between, zero spurious errors.
-        self._write(":INIT:CONT OFF")
-
     # ------------------------------------------------------------------
     # Public API  (matches SimKeithley2182A)
     # ------------------------------------------------------------------
+
+    def set_continuous_initiation(self, enabled: bool) -> None:
+        """Turn the instrument's free-running (continuous initiation) mode on/off.
+
+        Live commissioning (2026-07-22, GPIB0::28) found the instrument ships
+        with continuous initiation on (``:INIT:CONT?`` -> 1, ``:TRIG:COUN?``
+        -> ~9.9e37 — free-running). ``READ?``'s implicit ``:INIT`` is then
+        always rejected as "-213 Init ignored" (harmless — ``:FETCh?`` still
+        returns a fresh conversion since one is always in flight) but it fills
+        the error queue on every ``get_voltage()`` call. Pinning single-shot
+        mode makes each ``READ?`` do exactly what it looks like it does: one
+        trigger, one fresh reading, idle in between, zero spurious errors.
+
+        This is an instrument-state command, so under the connection-lifecycle
+        standard it belongs to the arming path (a measurement VI's
+        ``initiate_measurement()``), never to driver construction — building
+        the Station must leave every instrument exactly as the operator left
+        it.
+
+        Args:
+            enabled: True to leave the instrument free-running, False (what
+                every CryoSoft reading path wants) for single-shot.
+        """
+        self._write(":INIT:CONT " + ("ON" if enabled else "OFF"))
 
     def get_voltage(self) -> float:
         """Trigger and return a single DC voltage reading in Volts.
@@ -126,6 +140,29 @@ class Keithley2182A:
     def get_idn(self) -> str:
         """Return the instrument identification string."""
         return self._query("*IDN?").strip()
+
+    # ------------------------------------------------------------------
+    # Connection lifecycle (the connection-lifecycle standard)
+    # ------------------------------------------------------------------
+
+    def close(self) -> None:
+        """Release the VISA session; the instrument is left exactly as it is.
+
+        The driver half of the connection-lifecycle standard (see
+        ``drivers/README.md``): returns the bus session, sends no
+        instrument-state command, and never raises — a disconnect must
+        always succeed. ``GTL`` hands the front panel back to the operator,
+        which is the whole point of disconnecting. A closed driver is never
+        reopened in place; the Station builds a fresh instance to reconnect.
+        """
+        try:
+            self._instr.control_ren(pyvisa.constants.VI_GPIB_REN_ADDRESS_GTL)
+        except Exception as exc:  # noqa: BLE001 — best effort, close must not raise
+            log.debug("Keithley 2182A: could not return to local: %s", exc)
+        try:
+            self._instr.close()
+        except Exception as exc:  # noqa: BLE001 — best effort, close must not raise
+            log.debug("Keithley 2182A: error closing VISA session: %s", exc)
 
     # ------------------------------------------------------------------
     # Private helpers

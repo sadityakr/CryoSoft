@@ -226,9 +226,11 @@ class SwitchMatrixVI(BaseVirtualInstrument):
         # _currently_closed()). Kept in whatever spec form the caller gave.
         self._active_specs: list[str] = []
 
-        # Pole mode is a wiring property of the setup, so it lives in config and
-        # is applied here — before any route is selected, since it renumbers the
-        # channels the route table names.
+        # Pole mode is a wiring property of the setup, so it lives in config.
+        # Validated here, APPLIED in initiate() — the connection-lifecycle
+        # standard (see BaseVirtualInstrument): construction validates config
+        # and sends no command; the setup command that renumbers the
+        # instrument's channels is an explicit Initiate action.
         pole_mode = init_params.get("pole_mode")
         if pole_mode is not None:
             if isinstance(pole_mode, bool) or not isinstance(pole_mode, int):
@@ -240,7 +242,6 @@ class SwitchMatrixVI(BaseVirtualInstrument):
                 raise CryoSoftConfigError(
                     f"SwitchMatrixVI 'pole_mode' must be 1, 2 or 4, got {pole_mode!r}"
                 )
-            self._driver.set_pole_mode(pole_mode)
         self._pole_mode: int | None = pole_mode
 
     # ------------------------------------------------------------------
@@ -538,14 +539,17 @@ class SwitchMatrixVI(BaseVirtualInstrument):
         """Put the switch in a safe idle state: open every channel."""
         self.open_all()
 
-    def ping(self) -> bool:
-        """Return True if the switch driver answers ``get_idn()``.
+    def initiate(self) -> None:
+        """Apply the setup commands this switch needs before routing.
 
-        Returns:
-            True if the driver responds; False on any exception.
+        Today that is the configured pole mode (1, 2 or 4), which renumbers
+        the channels every route names and so must be applied before any
+        route is selected. It used to be written from ``__init__``; under
+        the connection-lifecycle standard (see ``BaseVirtualInstrument``)
+        building the Station must send no such command, so it moved here —
+        the operator (or Initiate All) decides when the scanner is
+        reconfigured. A setup that declares no ``pole_mode`` leaves the
+        instrument on whatever mode it is already in.
         """
-        try:
-            self._driver.get_idn()  # type: ignore[attr-defined]
-            return True
-        except Exception:
-            return False
+        if self._pole_mode is not None:
+            self._driver.set_pole_mode(int(self._pole_mode))  # type: ignore[attr-defined]

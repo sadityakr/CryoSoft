@@ -68,9 +68,20 @@ class OxfordITC503:
         try:
             self._itc = ITC503(resource_string, clear_buffer=False)
             self._itc.adapter.connection.write_termination = "\r"
-            # Enable programmatic control — essential for set_setpoint() to work
+            # Bus-link access, not instrument state: "Remote Unlocked" is what
+            # makes the ISOBUS carry commands at all (without it set_setpoint()
+            # is a silent no-op), and "Unlocked" deliberately leaves the LOC/REM
+            # button live so the operator can still take the front panel.
+            # close() returns the controller to Local on disconnect.
+            #
+            # NOTHING that changes what the cryostat is doing is sent here —
+            # the connection-lifecycle standard: building the Station leaves
+            # every instrument exactly as the operator left it. In particular
+            # the heater/gas mode is NOT forced to AUTO here (it used to be,
+            # which silently started closed-loop control on every app start);
+            # that is a setup command and now lives in
+            # ``SampleTemperatureControllerVI.initiate()``.
             self._itc.control_mode = "RU"   # Remote Unlocked
-            self._itc.heater_gas_mode = "AUTO"
         except Exception as exc:
             raise CryoSoftCommunicationError(
                 f"Cannot connect to ITC 503 at {resource_string}: {exc}",
@@ -149,6 +160,30 @@ class OxfordITC503:
                 f"ITC503: could not read version string: {exc}",
                 vi_name="OxfordITC503",
             ) from exc
+
+    # ------------------------------------------------------------------
+    # Connection lifecycle (the connection-lifecycle standard)
+    # ------------------------------------------------------------------
+
+    def close(self) -> None:
+        """Return the controller to Local and release the ISOBUS session.
+
+        The driver half of the connection-lifecycle standard (see
+        ``drivers/README.md``): sends no control-state command — the heater
+        mode, setpoint and needle valve all keep whatever the operator left
+        them on, because disconnecting is not a safe-off action (that is the
+        VI's ``standby()``) — and never raises. ``LU`` (Local Unlocked)
+        undoes the ``RU`` taken at construction, handing the ITC's own front
+        panel back, which is the point of disconnecting.
+        """
+        try:
+            self._itc.control_mode = "LU"   # Local Unlocked
+        except Exception as exc:  # noqa: BLE001 — best effort, close must not raise
+            log.debug("ITC503: could not return to local control: %s", exc)
+        try:
+            self._itc.adapter.connection.close()
+        except Exception as exc:  # noqa: BLE001 — best effort, close must not raise
+            log.debug("ITC503: error closing ISOBUS session: %s", exc)
 
     # ------------------------------------------------------------------
     # Needle-valve API  (VTITemperatureControllerVI only)

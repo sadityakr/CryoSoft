@@ -39,20 +39,33 @@ def _vi(routes=None, settle_time_s=0.0, **extra):
 
 # ── Pole mode (a config-owned wiring property) ───────────────────────────────
 
-def test_pole_mode_from_config_is_applied_to_the_instrument():
-    """pole_mode reaches the driver at construction, before any route runs.
+def test_construction_does_not_touch_the_instrument():
+    """Building the VI sends no pole-mode command (connection-lifecycle standard).
+
+    Construction validates the config and nothing else, so starting CryoSoft
+    can never renumber a scanner an operator is using by hand.
+    """
+    _, driver = _vi(pole_mode=4)
+    assert driver._pole_mode == 2  # the sim's power-up default, untouched
+
+
+def test_pole_mode_from_config_is_applied_on_initiate():
+    """pole_mode reaches the driver at initiate(), before any route runs.
 
     The mode renumbers the scanner's channels, so it has to be applied before
-    the route table means anything.
+    the route table means anything — but as an explicit Initiate action, not
+    as a side effect of building the Station.
     """
     vi, driver = _vi(pole_mode=4)
+    vi.initiate()
     assert driver._pole_mode == 4
     assert driver.first_last_channel() == (1, 10)
 
 
 def test_pole_mode_omitted_leaves_the_instrument_alone():
-    """No pole_mode in config -> the driver's mode is untouched."""
-    _, driver = _vi()
+    """No pole_mode in config -> the driver's mode is untouched, even on initiate."""
+    vi, driver = _vi()
+    vi.initiate()
     assert driver._pole_mode == 2  # the sim's power-up default
 
 

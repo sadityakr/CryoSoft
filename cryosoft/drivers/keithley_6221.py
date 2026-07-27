@@ -166,6 +166,29 @@ class Keithley6221:
         return self._query("*IDN?").strip()
 
     # ------------------------------------------------------------------
+    # Connection lifecycle (the connection-lifecycle standard)
+    # ------------------------------------------------------------------
+
+    def close(self) -> None:
+        """Release the VISA session; the instrument is left exactly as it is.
+
+        The driver half of the connection-lifecycle standard (see
+        ``drivers/README.md``): returns the bus session, sends no
+        instrument-state command — in particular it does NOT zero the source
+        current, because disconnecting is not a safe-off action (that is the
+        VI's ``standby()``) — and never raises. ``GTL`` hands the front panel
+        back to the operator, which is the whole point of disconnecting.
+        """
+        try:
+            self._instr.control_ren(pyvisa.constants.VI_GPIB_REN_ADDRESS_GTL)
+        except Exception as exc:  # noqa: BLE001 — best effort, close must not raise
+            log.debug("Keithley 6221: could not return to local: %s", exc)
+        try:
+            self._instr.close()
+        except Exception as exc:  # noqa: BLE001 — best effort, close must not raise
+            log.debug("Keithley 6221: error closing VISA session: %s", exc)
+
+    # ------------------------------------------------------------------
     # Legacy delta API  (matches SimKeithley6221 — keeps tests green)
     # ------------------------------------------------------------------
 

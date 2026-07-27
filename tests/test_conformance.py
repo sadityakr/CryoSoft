@@ -50,6 +50,12 @@ import pytest
 import cryosoft.drivers
 import cryosoft.procedures
 import cryosoft.virtual_instruments
+from cryosoft.core.availability import (
+    AVAILABILITY_STATES,
+    AVAILABILITY_TAGS,
+    TAG_POLICY,
+    TAG_PRECEDENCE,
+)
 from cryosoft.core.conditions import SEVERITIES
 from cryosoft.core.decorators import (
     VALID_CONTROL_SCOPES,
@@ -57,7 +63,7 @@ from cryosoft.core.decorators import (
     get_control_scope,
     get_control_specs,
 )
-from cryosoft.core.exceptions import CryoSoftSafetyError
+from cryosoft.core.exceptions import CryoSoftCommunicationError, CryoSoftSafetyError
 from cryosoft.core.operation import OperationBase, ReadinessCondition
 from cryosoft.core.plan import ParamSpec
 from cryosoft.core.procedure import BaseProcedure
@@ -221,6 +227,38 @@ def test_driver_has_get_idn(module_name: str) -> None:
     )
 
 
+@pytest.mark.parametrize("module_name", _driver_module_names())
+def test_driver_has_close(module_name: str) -> None:
+    """Every driver exposes close() taking no arguments.
+
+    The driver half of the connection-lifecycle standard (see
+    ``BaseVirtualInstrument`` and ``drivers/README.md``): ``close()`` releases
+    the bus session so the operator can drive the instrument from its own
+    front panel or vendor software. ``Station.disconnect_instrument()`` calls
+    it on every driver the disconnecting VI exclusively owns, so a driver
+    without one would silently leak a session that keeps the instrument
+    locked to CryoSoft.
+    """
+    module = importlib.import_module(f"cryosoft.drivers.{module_name}")
+    (cls,) = _public_classes(module)
+    method = getattr(cls, "close", None)
+    assert callable(method), (
+        f"{cls.__name__} lacks close() — every driver must be able to "
+        f"release its session (the connection-lifecycle standard)"
+    )
+    required = [
+        p
+        for p in inspect.signature(method).parameters.values()
+        if p.name != "self"
+        and p.default is inspect.Parameter.empty
+        and p.kind not in (p.VAR_POSITIONAL, p.VAR_KEYWORD)
+    ]
+    assert not required, (
+        f"{cls.__name__}.close() must take no required arguments, "
+        f"got {[p.name for p in required]}"
+    )
+
+
 @pytest.mark.parametrize(
     "module_name",
     [m for m in _driver_module_names() if m.startswith("sim_")],
@@ -230,6 +268,29 @@ def test_sim_driver_constructs_without_hardware(module_name: str) -> None:
     module = importlib.import_module(f"cryosoft.drivers.{module_name}")
     (cls,) = _public_classes(module)
     cls("SIM::CONFORMANCE")
+
+
+@pytest.mark.parametrize(
+    "module_name",
+    [m for m in _driver_module_names() if m.startswith("sim_")],
+)
+def test_sim_driver_is_dead_after_close(module_name: str) -> None:
+    """A closed sim driver fails every command, starting with get_idn().
+
+    The sim half of the connection-lifecycle standard's ``close()`` contract:
+    a released session is really gone. Sims model it (rather than no-opping)
+    for the same reason they model every other failure mode — so a
+    use-after-disconnect bug fails here instead of on hardware. ``close()``
+    itself must stay idempotent and silent: a disconnect always succeeds.
+    """
+    module = importlib.import_module(f"cryosoft.drivers.{module_name}")
+    (cls,) = _public_classes(module)
+    driver = cls("SIM::CONFORMANCE")
+    driver.get_idn()  # reachable before the close
+    driver.close()
+    driver.close()  # idempotent — must not raise
+    with pytest.raises(CryoSoftCommunicationError):
+        driver.get_idn()
 
 
 @pytest.mark.parametrize(
@@ -302,6 +363,332 @@ def test_vi_contract(vi_cls: type) -> None:
         f"{[p.name for p in extra_required]} — give them defaults and read them "
         f"from **init_params instead"
     )
+
+
+# ── Connection-lifecycle standard ─────────────────────────────────────────────
+# See BaseVirtualInstrument's "Connection-lifecycle standard" docstring:
+# connect/disconnect own the bus session, initiate/standby own the instrument's
+# state, and building the Station sends nothing but an identity query. These
+# tests make rule 1 ("construction is silent") binding for every present and
+# future VI, which is the rule a new driver or VI is most likely to break by
+# accident — a single convenience command in __init__ is easy to write and
+# invisible until it clobbers a running experiment at app startup.
+
+# Commands a VI's __init__ MAY still issue on its drivers. `close` is a
+# RELEASE, not a state change: an externally configured VI is born detached so
+# that starting CryoSoft while the vendor tool holds the instrument works at
+# all (see MeasurementInstrumentBase's "Externally configured instruments").
+_SILENT_CONSTRUCTION_ALLOWED = frozenset({"close"})
+
+
+def _vi_specs_from_configs() -> list[tuple[str, str, type, dict]]:
+    """Return ``(config, vi_name, vi_class, init_params)`` for every configured VI.
+
+    Drawn from the shipped configs rather than a hand-written list, so a VI
+    added to any setup is covered the moment its config entry exists — and
+    with the REAL init_params it will be built with, which is what decides
+    whether a constructor takes a command path or not.
+    """
+    specs: list[tuple[str, str, type, dict]] = []
+    # CONFIGS_DIR directly rather than _config_dirs(), which is defined
+    # further down with the config-contract tests; this parametrize runs at
+    # import time.
+    for config_dir in sorted(p for p in CONFIGS_DIR.iterdir() if p.is_dir()):
+        devices = _load_yaml(config_dir / "devices.yaml")
+        for vi_name, vi_cfg in (devices.get("virtual_instruments") or {}).items():
+            specs.append(
+                (
+                    config_dir.name,
+                    vi_name,
+                    _import_class(vi_cfg["class"]),
+                    dict(vi_cfg.get("init_params") or {}),
+                )
+            )
+    return specs
+
+
+@pytest.mark.parametrize(
+    "config_name, vi_name, vi_cls, init_params",
+    _vi_specs_from_configs(),
+    ids=lambda v: v if isinstance(v, str) else "",
+)
+def test_vi_construction_sends_no_commands(
+    config_name: str, vi_name: str, vi_cls: type, init_params: dict
+) -> None:
+    """Building a VI must not command its instruments (connection-lifecycle rule 1).
+
+    Constructs the VI with recording stand-ins for its drivers and asserts
+    nothing was called on them. Building the Station is a *connection* act:
+    the only command it sends is the identity query, so an operator who
+    starts CryoSoft mid-experiment — or while the instrument is on its own
+    front panel — finds every instrument exactly as they left it. A setup
+    command that wants to run at bring-up belongs in ``initiate()``.
+
+    ``MagicMock`` stands in for each driver: it accepts any call and any
+    attribute, so this exercises the constructor's real path (config
+    validation included) while recording every command it would have sent.
+    """
+    from unittest.mock import MagicMock
+
+    drivers: dict[str, MagicMock] = {}
+
+    class _RecordingDrivers(dict):
+        """A driver dict that mints a recording driver for any role asked for."""
+
+        def __missing__(self, role: str) -> MagicMock:
+            driver = MagicMock(name=f"driver:{role}")
+            drivers[role] = driver
+            self[role] = driver
+            return driver
+
+    vi_cls(_RecordingDrivers(), **init_params)
+
+    offenders: list[str] = []
+    for role, driver in drivers.items():
+        for call in driver.mock_calls:
+            # call[0] is the dotted name: "" for the driver itself being
+            # called, "set_rate" for a method, "adapter.write" for nesting.
+            name = call[0]
+            if not name or name.split(".")[0] in _SILENT_CONSTRUCTION_ALLOWED:
+                continue
+            offenders.append(f"{role}.{name}")
+
+    assert not offenders, (
+        f"{config_name}/{vi_name} ({vi_cls.__name__}).__init__ commanded its "
+        f"instrument(s): {sorted(set(offenders))}. Building the Station must "
+        f"send nothing but the identity query (the connection-lifecycle "
+        f"standard, see BaseVirtualInstrument) — move these to initiate()."
+    )
+
+
+@pytest.mark.parametrize("vi_cls", _all_vi_classes(), ids=lambda c: c.__name__)
+def test_vi_has_connection_lifecycle_hooks(vi_cls: type) -> None:
+    """Every VI answers ping() and disconnect() with no required arguments.
+
+    Both are inherited from ``BaseVirtualInstrument``, so this only ever
+    fails on a VI that overrode one with a different shape — which would
+    break ``build_station()``'s identity check or
+    ``Station.disconnect_instrument()`` for that instrument alone, silently,
+    on whichever setup happens to configure it. ``is_attached()`` — the
+    detach-when-idle declaration's observable state (see the class
+    docstring) — is part of the same hook set.
+    """
+    for name in ("ping", "disconnect", "initiate", "standby", "is_attached"):
+        method = getattr(vi_cls, name, None)
+        assert callable(method), f"{vi_cls.__name__} lacks {name}()"
+        required = [
+            p
+            for p in inspect.signature(method).parameters.values()
+            if p.name != "self"
+            and p.default is inspect.Parameter.empty
+            and p.kind not in (p.VAR_POSITIONAL, p.VAR_KEYWORD)
+        ]
+        assert not required, (
+            f"{vi_cls.__name__}.{name}() must take no required arguments, "
+            f"got {[p.name for p in required]}"
+        )
+
+
+# ── Availability standard (cryosoft.core.availability) ───────────────────────
+# See availability.py's module docstring: a closed tag vocabulary, a derived
+# state vocabulary, and a declared tag -> policy table (TAG_POLICY) are the
+# one place the "why can't I use this instrument?" policies are stated. These
+# tests make the table's own internal consistency binding, the moment a tag
+# or a policy row is added or edited — a fixed module, not one pkgutil
+# auto-discovers, but the checked-in harness (`make check`) is where a future
+# edit meets them regardless of whether the author also knows about
+# tests/test_availability.py's pure-policy coverage of the same invariants.
+
+
+def test_tag_policy_covers_exactly_the_availability_tags() -> None:
+    """TAG_POLICY has one row per tag, no orphan row, no undeclared tag."""
+    assert set(TAG_POLICY) == set(AVAILABILITY_TAGS), (
+        f"TAG_POLICY keys {sorted(TAG_POLICY)} must exactly match "
+        f"AVAILABILITY_TAGS {sorted(AVAILABILITY_TAGS)} — no orphan row, no "
+        f"undeclared tag"
+    )
+    for tag, policy in TAG_POLICY.items():
+        assert policy.tag == tag, (
+            f"TAG_POLICY[{tag!r}].tag == {policy.tag!r} — a TagPolicy's own "
+            f"'tag' field must match the key it is filed under"
+        )
+
+
+def test_tag_policy_states_and_precedence_stay_in_vocabulary() -> None:
+    """Every TagPolicy.state is declared; TAG_PRECEDENCE is a permutation of the tags."""
+    for tag, policy in TAG_POLICY.items():
+        assert policy.state in AVAILABILITY_STATES, (
+            f"TAG_POLICY[{tag!r}].state {policy.state!r} is not one of "
+            f"AVAILABILITY_STATES {AVAILABILITY_STATES}"
+        )
+    assert sorted(TAG_PRECEDENCE) == sorted(AVAILABILITY_TAGS), (
+        f"TAG_PRECEDENCE {TAG_PRECEDENCE} must be a permutation of "
+        f"AVAILABILITY_TAGS {AVAILABILITY_TAGS}"
+    )
+    assert len(TAG_PRECEDENCE) == len(set(TAG_PRECEDENCE)), (
+        f"TAG_PRECEDENCE {TAG_PRECEDENCE} names a tag more than once"
+    )
+
+
+# ── Detach-when-idle standard (BaseVirtualInstrument.detach_when_idle) ───────
+# See BaseVirtualInstrument's "Detach-when-idle declaration": a VI opts in by
+# overriding the detach_when_idle property; __init_subclass__'s wrap (or the
+# base's own standby()) then releases the driver session automatically. These
+# tests make the opt-in binding for every present and future VI that declares
+# it — currently only TensormeterRTM2MeasurementVI (12t-cryo's
+# tensormeter_measurement, configured_externally: true).
+
+
+def _sim_driver_class_for(real_dotted: str) -> type:
+    """Return the sim twin class for a driver's dotted class path.
+
+    A config may already reference a ``sim_*`` module directly (e.g.
+    ``sim_cryostat``) — imported as-is. Otherwise uses the same
+    ``sim_<module>`` naming convention as ``test_sim_real_driver_api_parity``
+    — the one existing derivation from a real driver's dotted path to its
+    sim twin.
+    """
+    module_path, _, _ = real_dotted.rpartition(".")
+    package, _, module_name = module_path.rpartition(".")
+    sim_module_name = module_name if module_name.startswith("sim_") else f"sim_{module_name}"
+    sim_module = importlib.import_module(f"{package}.{sim_module_name}")
+    (sim_cls,) = _public_classes(sim_module)
+    return sim_cls
+
+
+def _detach_when_idle_vi_specs() -> list[tuple[str, type, dict, dict[str, type]]]:
+    """(spec id, vi_cls, init_params, {role: sim driver class}) for every
+    configured VI whose REAL config build declares ``detach_when_idle``.
+
+    Drawn from the shipped configs' real ``drivers`` role mapping and real
+    ``init_params`` — e.g. 12t-cryo's ``tensormeter_measurement``,
+    ``configured_externally: true`` — with each real driver class swapped
+    for its sim twin so the checks run with no hardware. Filtering is done
+    by actually constructing the VI and reading ``detach_when_idle``, so a
+    future config declaring it is covered automatically, without this file
+    needing to know which VI or config that will be.
+    """
+    specs: list[tuple[str, type, dict, dict[str, type]]] = []
+    for config_dir in sorted(p for p in CONFIGS_DIR.iterdir() if p.is_dir()):
+        devices = _load_yaml(config_dir / "devices.yaml")
+        real_drivers_cfg = devices.get("real_drivers") or {}
+        for vi_name, vi_cfg in (devices.get("virtual_instruments") or {}).items():
+            vi_cls = _import_class(vi_cfg["class"])
+            if not issubclass(vi_cls, MeasurementInstrumentBase):
+                continue
+            init_params = dict(vi_cfg.get("init_params") or {})
+            role_map = vi_cfg.get("drivers") or {}
+            sim_driver_classes = {
+                role: _sim_driver_class_for(real_drivers_cfg[driver_key]["class"])
+                for role, driver_key in role_map.items()
+            }
+            probe_drivers = {
+                role: cls("SIM::CONFORMANCE") for role, cls in sim_driver_classes.items()
+            }
+            vi = vi_cls(probe_drivers, **init_params)
+            if vi.detach_when_idle:
+                specs.append(
+                    (f"{config_dir.name}/{vi_name}", vi_cls, init_params, sim_driver_classes)
+                )
+    return specs
+
+
+@pytest.mark.parametrize(
+    "spec_id, vi_cls, init_params, sim_driver_classes",
+    _detach_when_idle_vi_specs(),
+    ids=lambda v: v if isinstance(v, str) else "",
+)
+def test_detach_when_idle_vi_drivers_support_ensure_connected(
+    spec_id: str, vi_cls: type, init_params: dict, sim_driver_classes: dict[str, type]
+) -> None:
+    """A VI declaring detach_when_idle must have reconnect-capable drivers.
+
+    ``BaseVirtualInstrument._attach()`` duck-types ``ensure_connected()``
+    (deliberately not part of the driver contract — see
+    ``drivers/README.md``): a VI that declares ``detach_when_idle`` without
+    a driver implementing it would silently never reacquire its session.
+    """
+    for role, cls in sim_driver_classes.items():
+        driver = cls("SIM::CONFORMANCE")
+        assert callable(getattr(driver, "ensure_connected", None)), (
+            f"{spec_id} ({vi_cls.__name__}) declares detach_when_idle but "
+            f"its {role!r} driver ({cls.__name__}) has no ensure_connected() "
+            f"— the detach-when-idle standard's opt-in reconnect capability"
+        )
+
+
+@pytest.mark.parametrize(
+    "spec_id, vi_cls, init_params, sim_driver_classes",
+    _detach_when_idle_vi_specs(),
+    ids=lambda v: v if isinstance(v, str) else "",
+)
+def test_detach_when_idle_vi_really_releases_and_reacquires(
+    spec_id: str, vi_cls: type, init_params: dict, sim_driver_classes: dict[str, type]
+) -> None:
+    """standby() really releases the session; arming really reacquires it.
+
+    Built against the sim driver — proves the declaration is framework
+    behaviour that actually moves ``is_attached()``, not just a flag that
+    reads true without anything happening underneath.
+    """
+    drivers = {role: cls("SIM::CONFORMANCE") for role, cls in sim_driver_classes.items()}
+    vi = vi_cls(drivers, **init_params)
+    defaults = {name: spec.default for name, spec in vi_cls.measurement_parameters.items()}
+
+    vi.initiate_measurement(**defaults)
+    assert vi.is_attached() is True, (
+        f"{spec_id} ({vi_cls.__name__}).initiate_measurement() must "
+        f"reacquire the session for a detach_when_idle VI"
+    )
+
+    vi.standby()
+    assert vi.is_attached() is False, (
+        f"{spec_id} ({vi_cls.__name__}).standby() must release the session "
+        f"for a detach_when_idle VI"
+    )
+
+
+def test_detach_when_idle_vi_owns_its_driver_aliases_exclusively() -> None:
+    """A detach_when_idle VI must not share a config driver alias with any other VI.
+
+    ``BaseVirtualInstrument._detach()`` releases every driver in
+    ``self._drivers`` unconditionally (see the "Detach-when-idle
+    declaration" docstring) — it has no notion of another VI still needing
+    that same session, because a VI may never consult the Station's alias
+    map (Layer 1 cannot import Layer 2). ``Station.disconnect_instrument()``
+    avoids exactly this hazard for its own release path by routing through
+    ``_exclusive_aliases()`` before closing anything; this test applies the
+    SAME predicate to every shipped config, for every VI this file's
+    ``_detach_when_idle_vi_specs()`` found to declare ``detach_when_idle``,
+    so a future config that lets two VIs share an alias with one of them
+    detach_when_idle fails CI instead of silently breaking the other VI's
+    session in the field.
+    """
+    from cryosoft.core.station import _exclusive_aliases
+
+    detach_when_idle_spec_ids = {spec_id for spec_id, *_ in _detach_when_idle_vi_specs()}
+
+    for config_dir in sorted(p for p in CONFIGS_DIR.iterdir() if p.is_dir()):
+        devices = _load_yaml(config_dir / "devices.yaml")
+        vi_cfgs = devices.get("virtual_instruments") or {}
+        for vi_name, vi_cfg in vi_cfgs.items():
+            spec_id = f"{config_dir.name}/{vi_name}"
+            if spec_id not in detach_when_idle_spec_ids:
+                continue
+            role_aliases = vi_cfg.get("drivers") or {}
+            mine = set(role_aliases.values())
+            exclusive = set(_exclusive_aliases(role_aliases, vi_cfgs, vi_name))
+            shared = mine - exclusive
+            assert not shared, (
+                f"{spec_id}: declares detach_when_idle but driver alias/es "
+                f"{sorted(shared)} are also named by another VI in "
+                f"{config_dir.name}/devices.yaml — _detach() would close "
+                f"them unconditionally on standby(), breaking whichever "
+                f"other VI still needs the shared session; a "
+                f"detach_when_idle VI must own its driver aliases "
+                f"exclusively (see BaseVirtualInstrument's "
+                f"'Detach-when-idle declaration')"
+            )
 
 
 # ── Safety-flag manifest standard ─────────────────────────────────────────────

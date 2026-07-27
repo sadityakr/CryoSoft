@@ -251,6 +251,26 @@ class OxfordMercuryiPS:
         return resp.strip()
 
     # ------------------------------------------------------------------
+    # Connection lifecycle (the connection-lifecycle standard)
+    # ------------------------------------------------------------------
+
+    def close(self) -> None:
+        """Release the VISA session; the magnet PSU is left exactly as it is.
+
+        The driver half of the connection-lifecycle standard (see
+        ``drivers/README.md``): returns the bus session, sends no
+        instrument-state command, and never raises. It deliberately does NOT
+        ramp down, change the ACTN, or touch the switch heater — a magnet at
+        field stays at field, exactly as when the operator drives the PSU
+        from its own front panel. Standing the magnet down is ``standby()``'s
+        job and must be done BEFORE disconnecting if that is what is wanted.
+        """
+        try:
+            self._instr.close()
+        except Exception as exc:  # noqa: BLE001 — best effort, close must not raise
+            log.debug("Mercury iPS: error closing VISA session: %s", exc)
+
+    # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
 

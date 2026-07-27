@@ -68,12 +68,106 @@ class BaseVirtualInstrument:
 
     Subclass contract
     -----------------
-    * Override ``initiate()`` to open communication and put the instrument in a
-      known state.
+    * Override ``initiate()`` to put the instrument into its operating state.
     * Override ``standby()`` to put the instrument in a safe idle state.
     * Tag read-only polling methods with ``@monitored``.
     * Tag user-callable action methods with ``@control``.
     * The constructor signature MUST be ``__init__(self, drivers, **init_params)``.
+
+    Connection-lifecycle standard
+    -----------------------------
+    Every instrument has TWO independent lifecycles, and mixing them is the
+    mistake this standard exists to prevent:
+
+    * **Connection** — ``connect`` / ``disconnect``: who owns the *bus
+      session*. Disconnected means CryoSoft holds nothing, so the operator
+      can drive the instrument from its physical front panel or from the
+      vendor's own software. Connecting and disconnecting NEVER change what
+      the instrument is doing.
+    * **Operating state** — ``initiate()`` / ``standby()``: what the
+      instrument is *doing*. ``initiate()`` sends the setup commands that
+      bring it to its operating state; ``standby()`` returns it to a safe
+      idle one. Both are explicit operator (or procedure) actions.
+
+    Three rules follow, and they bind every VI and every driver:
+
+    1. **Construction is silent.** A VI's ``__init__`` (and its drivers')
+       must send NO command that changes what the instrument is doing — no
+       output, mode, range, rate or setpoint. Building the Station is a
+       *connection* act: the only command it sends is the identity query
+       (``ping()`` below). A setup command that used to live in ``__init__``
+       belongs in ``initiate()``. Enforced by
+       ``tests/test_conformance.py::test_vi_construction_sends_no_commands``.
+    2. **Disconnecting is not standing down.** ``disconnect()`` releases; it
+       must not zero a source, ramp a magnet down, or open a switch. An
+       operator who wants the instrument safe first presses Standby first —
+       that ordering is theirs to choose, and a magnet at field deliberately
+       stays at field across a disconnect, exactly as it would if they were
+       driving the PSU by hand.
+    3. **A disconnected instrument degrades exactly like one that never
+       connected.** ``Station.disconnect_instrument()`` moves the VI out of
+       the live registry and into the offline registry, so polling, safety
+       evaluation, procedures and the GUI all see the same "this instrument
+       is not here" state they see for a startup connection failure — one
+       degraded path, not two.
+
+    The VI's own hooks are ``ping()`` (the identity check) and
+    ``disconnect()`` (release VI-held state). Reconnecting is the Station's
+    job (``Station.connect_instrument()``), because only it holds the build
+    recipe needed to construct fresh drivers.
+
+    Detach-when-idle declaration
+    -----------------------------
+    A single-client instrument — firmware that serves one connection at a
+    time, so the vendor's own tool and CryoSoft cannot both hold it — may
+    additionally opt into automatic release between uses. This is narrower
+    than ``disconnect()``: connect/disconnect is still the OPERATOR's choice
+    to give the instrument up entirely, whereas detach-when-idle is the VI
+    itself releasing its session at the end of every ``standby()`` call, so
+    the operator can open the vendor's tool between runs with no explicit
+    Disconnect.
+
+    A VI opts in by overriding the read-only ``detach_when_idle`` property
+    with its own one-liner, e.g. ``return self._configured_externally`` (the
+    RTM2's whole opt-in — see ``MeasurementInstrumentBase``'s "Externally
+    configured instruments" section). Overriding this property is declaring
+    a FIRMWARE FACT — this instrument serves one client at a time — never a
+    place to write behaviour: the release itself is entirely the base
+    class's job, driven automatically by ``__init_subclass__``'s wrap of a
+    directly defined ``standby()`` (the same inherited-enforcement idiom the
+    control-validation standard uses for ``@control``), or by the base
+    ``standby()`` itself for a VI that inherits it unchanged.
+
+    A VI declaring ``detach_when_idle`` MUST own every driver alias in its
+    config ``drivers:`` mapping exclusively — no other configured VI may
+    name the same alias. ``_detach()`` releases every driver in
+    ``self._drivers`` unconditionally; it has no notion of another VI still
+    needing that same session, unlike ``Station.disconnect_instrument()``,
+    which routes a shared alias through ``_exclusive_aliases()`` before
+    closing anything (``core/station.py``). A VI cannot make that same
+    check itself — a VI is Layer 1 and the alias map lives on the Station
+    (Layer 2); consulting it would be an upward import, which this
+    architecture forbids. So the constraint is declared here and
+    machine-checked at the config level instead (see
+    ``tests/test_conformance.py``'s exclusivity test over every shipped
+    config), rather than guarded at runtime.
+
+    ``is_attached()`` is the observable half: ``True`` (the default) for a
+    VI that always holds its session, ``False`` while a ``detach_when_idle``
+    VI is detached. Deliberately NOT ``@monitored`` — that would add a row
+    to every instrument card and a channel to every trend tier — it reaches
+    the GUI only through the Availability standard's ``"detached"`` tag (see
+    GLOSSARY.md's **Availability** and ``core/availability.py``), which
+    ``Station._build_availability()`` derives from it. ``_attach()`` /
+    ``_detach()`` are the base helpers that do the acquiring/releasing
+    (``driver.ensure_connected()`` / ``driver.close()`` across
+    ``self._drivers``) and flip the flag ``is_attached()`` reads; both are
+    idempotent and never raise, so a failed reattach or release never blocks
+    a caller. ``ensure_connected()`` is deliberately NOT part of the driver
+    contract (``drivers/README.md`` states a closed driver is never reopened
+    in place — the Station builds a fresh instance instead) — it is an
+    opt-in capability duck-typed via ``getattr``, present only on firmware
+    that genuinely supports resuming a session in place.
 
     Control-validation standard
     ---------------------------
@@ -242,6 +336,52 @@ class BaseVirtualInstrument:
                     wrapped._control_panel = getattr(attr_value, "_control_panel", True)
                 setattr(cls, attr_name, wrapped)
 
+        # The detach-when-idle declaration's enforcement (see the class
+        # docstring): wrap a directly defined standby() so the release
+        # fires after it returns, the same inherited-enforcement idiom used
+        # above for @control. This wrap is UNCONDITIONAL — at class-creation
+        # time ``vars(cls)["detach_when_idle"]`` (when overridden at all) is
+        # a property OBJECT, not a resolved bool, so whether to detach can
+        # only be decided at CALL time, inside the wrapper itself (see
+        # _make_detach_wrapper). A VI that does not define its own
+        # standby() is not touched here — it inherits BaseVirtualInstrument.
+        # standby(), which detaches directly, without needing this wrap.
+        standby_method = vars(cls).get("standby")
+        if callable(standby_method):
+            cls.standby = BaseVirtualInstrument._make_detach_wrapper(standby_method)
+
+    # ------------------------------------------------------------------
+    # Detach-when-idle wrapper factory (see the class docstring's
+    # "Detach-when-idle declaration")
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _make_detach_wrapper(method):
+        """Return *method* wrapped to release the driver session afterward.
+
+        Calls the ORIGINAL ``standby()`` first — so a concrete VI's own
+        safe-off commands still run exactly as written — then
+        ``self._detach()`` if ``self.detach_when_idle`` is true. The flag is
+        read on ``self`` at CALL time (never at class-creation time — see
+        ``__init_subclass__``'s comment for why it cannot be resolved
+        earlier).
+
+        Args:
+            method: The subclass's directly defined ``standby``.
+
+        Returns:
+            The wrapped method, to be set back onto the class.
+        """
+
+        @functools.wraps(method)
+        def wrapper(self, *args: Any, **kwargs: Any):
+            result = method(self, *args, **kwargs)
+            if self.detach_when_idle:
+                self._detach()
+            return result
+
+        return wrapper
+
     # ------------------------------------------------------------------
     # Limit-enforcement wrapper factory (control-validation standard)
     # ------------------------------------------------------------------
@@ -347,21 +487,214 @@ class BaseVirtualInstrument:
         # VI's __init__ from init_params (None = unbounded on that side).
         # Referenced by name from the class's control_limits declaration.
         self._limits: dict[str, tuple[float | None, float | None]] = {}
+        # The detach-when-idle declaration's attachment flag (see the class
+        # docstring): True until a detach_when_idle VI's __init__ or
+        # standby() calls self._detach(). Read by is_attached().
+        self._attached: bool = True
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     def initiate(self) -> None:
-        """Establish communication and put the instrument in a known state.
+        """Put the instrument into its operating state.
 
-        Override in subclasses to send initialisation commands.
+        The *operating* half of the connection-lifecycle standard (see the
+        class docstring): this is where every setup command lives — heater
+        mode, pole mode, slew rate, anything the instrument needs before it
+        can be used. It is an explicit operator or procedure action, never
+        something the Station does while building, so an operator who starts
+        CryoSoft while an instrument is mid-experiment finds it untouched.
+
+        Override in subclasses to send those setup commands.
         """
 
     def standby(self) -> None:
         """Put the instrument in a safe idle state.
 
-        Override in subclasses to send safe-idle commands (e.g. disable outputs).
+        The opposite of ``initiate()``: override in subclasses to send
+        safe-idle commands (e.g. disable outputs). Distinct from
+        ``disconnect()``, which releases the bus session and changes nothing
+        the instrument is doing.
+
+        Honours the detach-when-idle declaration (see the class docstring):
+        a VI that inherits this base implementation unchanged — never
+        overriding ``standby()`` itself — still releases its driver session
+        here when ``detach_when_idle`` is true. A subclass that DOES
+        override ``standby()`` gets the same release from
+        ``__init_subclass__``'s wrap instead, so this line is only ever
+        reached directly by a VI with no override of its own.
+        """
+        if self.detach_when_idle:
+            self._detach()
+
+    # ------------------------------------------------------------------
+    # Connection lifecycle (the connection-lifecycle standard)
+    # ------------------------------------------------------------------
+
+    # Capability default for the detach-when-idle declaration (see the class
+    # docstring): most VIs never release their session on their own, so the
+    # base property below returns this. A config-sensitive VI narrows the
+    # PROPERTY (not this ClassVar) in one line — see its docstring.
+    _detach_when_idle_default: ClassVar[bool] = False
+
+    @property
+    def detach_when_idle(self) -> bool:
+        """Whether this VI releases its driver session automatically at standby.
+
+        The detach-when-idle declaration's opt-in (see the class docstring):
+        a plain ``ClassVar[bool]`` cannot express it alone because the
+        decision may depend on INSTANCE state, not just the class — e.g.
+        the RTM2 detaches only when its ``configured_externally`` init
+        param is true, not for every instance of the class. A VI opts in by
+        overriding this property with its own one-liner::
+
+            @property
+            def detach_when_idle(self) -> bool:
+                return self._configured_externally
+
+        Overriding this property is declaring a FIRMWARE FACT — this
+        instrument serves one client at a time — never a place to write
+        behaviour: the release itself is entirely ``_detach()``'s job,
+        dispatched automatically by ``__init_subclass__``'s ``standby()``
+        wrap (or by this base's own ``standby()``, for a VI that inherits
+        it unchanged).
+
+        Returns:
+            ``True`` if this VI should release its driver session whenever
+            it stands down. Default ``False``.
+        """
+        return self._detach_when_idle_default
+
+    def is_attached(self) -> bool:
+        """Whether this VI currently holds its driver session(s).
+
+        The observable half of the detach-when-idle declaration (GAP the
+        Availability standard closes, see ``core/availability.py``):
+        ``Station._build_availability()`` reads this to add the
+        ``"detached"`` tag, so a released VI is visibly distinct from one
+        that is fully held, instead of looking identical in the GUI.
+        Deliberately NOT ``@monitored`` — that would add a row to every
+        instrument card and a channel to every trend tier; it reaches the
+        GUI only through the Availability record.
+
+        Returns:
+            ``True`` (the default) for a VI that always holds its session;
+            ``False`` while a ``detach_when_idle`` VI is detached.
+        """
+        return self._attached
+
+    def _attach(self) -> None:
+        """Reacquire this VI's driver session(s) (detach-when-idle standard).
+
+        Calls each driver's OPT-IN ``ensure_connected()`` capability,
+        duck-typed via ``getattr`` — deliberately NOT part of the driver
+        contract, which guarantees the opposite (``drivers/README.md``: a
+        closed driver is never reopened in place, the Station builds a
+        fresh instance to reconnect instead). ``ensure_connected()`` exists
+        only for firmware that genuinely supports resuming a session in
+        place; a driver with no such method is left untouched.
+
+        Idempotent (a no-op once already attached) and NEVER RAISES — a
+        failed reconnect here must not block a caller such as ``ping()``'s
+        verify-and-release path. Leaves ``is_attached()`` False if any
+        driver fails to reconnect, so a subsequent command against it fails
+        on its own terms instead of this method masking the problem.
+        """
+        if self._attached:
+            return
+        ok = True
+        for driver in self._drivers.values():
+            ensure_connected = getattr(driver, "ensure_connected", None)
+            if not callable(ensure_connected):
+                continue
+            try:
+                ensure_connected()
+            except Exception:  # noqa: BLE001 — a failed reattach must not raise
+                logging.getLogger(f"cryosoft.vi.{self.vi_name}").warning(
+                    "%s: ensure_connected() failed while reattaching",
+                    self.vi_name or type(self).__name__,
+                    exc_info=True,
+                )
+                ok = False
+        self._attached = ok
+
+    def _detach(self) -> None:
+        """Release this VI's driver session(s) (detach-when-idle standard).
+
+        Calls ``close()`` — part of the driver contract, so unlike
+        ``_attach()`` this needs no duck-typing — on every driver.
+        Idempotent and NEVER RAISES: ``is_attached()`` is flipped False
+        regardless of whether any individual ``close()`` call raised, since
+        a failing release must never block standing down.
+        """
+        for driver in self._drivers.values():
+            try:
+                driver.close()  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001 — a failing release must not raise
+                logging.getLogger(f"cryosoft.vi.{self.vi_name}").warning(
+                    "%s: close() failed while detaching",
+                    self.vi_name or type(self).__name__,
+                    exc_info=True,
+                )
+        self._attached = False
+
+    def ping(self) -> bool:
+        """Send an identity query to every driver; True if all of them answer.
+
+        The single connection check in CryoSoft — the ONLY command sent when
+        the Station is built (see the class docstring's connection-lifecycle
+        standard) and what the front panel's "Check connection" button and
+        ``Station.connect_instrument()`` use. Harmless by construction: an
+        identity query changes nothing.
+
+        The default covers every VI whose drivers follow the driver contract
+        (``get_idn()`` on each). A ``detach_when_idle`` VI gets a different
+        shape automatically — the detach-when-idle declaration's
+        verify-and-release path (see the class docstring): reattach, a TRUE
+        round trip, then release again — returning a clean ``False`` rather
+        than raising when the instrument is currently held by the external
+        tool, and always releasing afterward so it is never left attached
+        while idle. This is the ONE place that path lives; no VI needs its
+        own ``ping()`` override to get it.
+
+        Returns:
+            True if every driver answered ``get_idn()``; False on any
+            failure, including a driver that does not implement it.
+        """
+        if not self.detach_when_idle:
+            try:
+                for driver in self._drivers.values():
+                    driver.get_idn()  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001 — any failure means "not reachable"
+                return False
+            return True
+
+        self._attach()
+        try:
+            for driver in self._drivers.values():
+                driver.get_idn()  # type: ignore[attr-defined]
+            return True
+        except Exception:  # noqa: BLE001 — any failure means "not reachable"
+            return False
+        finally:
+            self._detach()
+
+    def disconnect(self) -> None:
+        """Release whatever this VI holds beyond its driver sessions.
+
+        Called by ``Station.disconnect_instrument()`` immediately BEFORE the
+        Station closes the driver sessions this VI exclusively owns (the
+        Station, not the VI, owns that step, because a driver may be shared
+        with another VI that is staying online).
+
+        The default is a no-op: most VIs hold nothing but their drivers.
+        Override to drop VI-level state that would be wrong after a
+        reconnect — a cached "armed" flag, a ramp generator mid-flight.
+        NEVER send a safe-off or configuration command here: disconnecting
+        must leave the instrument doing exactly what it was doing (rule 2 of
+        the connection-lifecycle standard). That is ``standby()``'s job, and
+        the operator chooses whether to press it first.
         """
 
     # ------------------------------------------------------------------
@@ -703,20 +1036,30 @@ class MeasurementInstrumentBase(BaseVirtualInstrument):
     configuration. ``tests/test_conformance.py`` checks every declared name
     is a real ``measurement_parameters`` key.
 
-    **Detached-idle lifecycle**: an externally configured VI holds its
+    **Detached-idle lifecycle**: an externally configured VI is the
+    motivating case for ``BaseVirtualInstrument``'s detach-when-idle
+    declaration (see its class docstring — ``detach_when_idle``,
+    ``is_attached()``, ``_attach()``/``_detach()``); it holds its
     instrument connection only from ``initiate_measurement()`` to
-    ``standby()``.
+    ``standby()``:
 
-    * Born detached: ``__init__`` releases the connection before returning,
-      so starting CryoSoft while the vendor tool is open builds cleanly.
-    * ``initiate()`` / ``ping()`` verify-and-release: connect, a TRUE ROUND
-      TRIP, then close — returning a clean failure verdict rather than
-      raising when the instrument is currently held by the external tool.
-    * ``initiate_measurement()`` (re)acquires the connection for the
-      measurement window.
-    * ``standby()`` releases it again. Every run path already ends in
-      ``standby()``, so the instrument frees itself automatically and the
-      operator may attach the vendor tool at any time between runs.
+    * Declare it by overriding the ``detach_when_idle`` property, e.g.
+      ``return self._configured_externally``.
+    * Born detached: ``__init__`` calls ``self._detach()`` before
+      returning, so starting CryoSoft while the vendor tool is open builds
+      cleanly.
+    * ``ping()`` — and so the base's ``initiate()``, which calls it —
+      verify-and-release automatically: reattach, a TRUE ROUND TRIP, then
+      release, returning a clean failure verdict rather than raising when
+      the instrument is currently held by the external tool. No VI-specific
+      override needed.
+    * ``initiate_measurement()`` (re)acquires the connection (via
+      ``self._attach()``) for the measurement window — still the concrete
+      VI's own job, since arming itself is VI-specific.
+    * ``standby()`` releases it again automatically, via the base's
+      declared wrap. Every run path already ends in ``standby()``, so the
+      instrument frees itself and the operator may attach the vendor tool
+      at any time between runs.
     * Never reconnect opportunistically in the background (e.g. from a
       monitored poll): a wrongly-timed connect can fail silently against the
       external tool's session, not loudly.
@@ -991,18 +1334,6 @@ class MeasurementInstrumentBase(BaseVirtualInstrument):
             NotImplementedError: If not overridden by a concrete VI.
         """
         raise NotImplementedError
-
-    def ping(self) -> bool:
-        """Send IDN queries to all drivers and return True if all respond.
-
-        Override in subclasses to call ``get_idn()`` on each driver.
-        The base implementation always returns False (unknown).
-
-        Returns:
-            True if all drivers respond; False on any exception or if not
-            overridden.
-        """
-        return False
 
 
 class DCMeasurementBase(MeasurementInstrumentBase):

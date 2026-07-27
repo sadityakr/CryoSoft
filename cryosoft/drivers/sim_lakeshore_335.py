@@ -59,6 +59,9 @@ class SimLakeshore335:
         self._last_update: float = time.time()
         self._tau: float = 30.0  # thermal time constant in seconds
         self._simulate_error: bool = False
+        # Connection-lifecycle standard: True once close() has released
+        # the session; every command then fails (see _check_error).
+        self._closed: bool = False
 
     def get_temperature(self) -> float:
         """Return the current simulated temperature in Kelvin."""
@@ -204,10 +207,32 @@ class SimLakeshore335:
         self._sensor_curves[ch] = int(curve)
 
     # ------------------------------------------------------------------
+    # Connection lifecycle (the connection-lifecycle standard)
+    # ------------------------------------------------------------------
+
+    def close(self) -> None:
+        """Release the simulated bus session; the instrument is left untouched.
+
+        Idempotent and never raises. Afterwards every command — including
+        ``get_idn()`` — raises ``CryoSoftCommunicationError`` via
+        :meth:`_check_error`, modelling a released session so a
+        use-after-disconnect bug fails in a test instead of on hardware.
+        A closed driver is never reopened in place: the Station builds a
+        fresh instance when the operator reconnects.
+        """
+        self._closed = True
+
+    # ------------------------------------------------------------------
     # Simulation & Internal helpers
     # ------------------------------------------------------------------
 
     def _check_error(self) -> None:
+        if self._closed:
+            raise CryoSoftCommunicationError(
+                "SimLakeshore335: the session is closed — the driver was "
+                "disconnected from CryoSoft",
+                vi_name="SimLakeshore335",
+            )
         if self._simulate_error:
             raise CryoSoftCommunicationError(
                 "Simulated communication error on Lakeshore 335",

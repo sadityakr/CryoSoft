@@ -131,8 +131,8 @@ When `self._configured_externally` is true:
   accepted (procedures pass them regardless of mode); log one INFO listing
   the ignored parameters.
 - `standby()` MUST NOT overwrite externally-owned source state. It resets
-  only CryoSoft's own internal arming state and RELEASES the hardware
-  resource (the driver's `close()`).
+  only CryoSoft's own internal arming state; releasing the hardware resource
+  is no longer this method's own job — see "Detached-idle lifecycle" below.
 
 A VI supporting external configuration MUST declare
 `externally_owned_parameters: ClassVar[frozenset[str]]` — the
@@ -154,21 +154,28 @@ A VI that captures a provenance snapshot at arming time SHOULD expose it as
 into the run's HDF5 `/metadata` automatically, once per run, via
 `DataManager.record_settings_snapshot()` — no per-VI plumbing required.
 
-**Detached-idle lifecycle**: an externally configured VI holds its
-instrument connection only from `initiate_measurement()` to `standby()`.
-Born detached — `__init__` releases the connection before returning, so
-starting CryoSoft while the vendor tool is open builds cleanly.
-`initiate()` / `ping()` verify-and-release (connect, a true round trip,
-then close), returning a clean failure verdict rather than raising when the
-instrument is currently held by the external tool. `initiate_measurement()`
-(re)acquires the connection for the measurement window; `standby()`
-releases it again — every run path already ends in `standby()`, so the
-instrument frees itself automatically and the operator may attach the
-vendor tool at any time between runs. Never reconnect opportunistically in
-the background (e.g. from a monitored poll): a wrongly-timed connect can
-fail silently against the external tool's session, not loudly. Full text:
-`MeasurementInstrumentBase`'s docstring, "Externally configured
-instruments".
+**Detached-idle lifecycle**: an externally configured VI is the motivating
+case for `BaseVirtualInstrument`'s declared `detach_when_idle` standard
+(full text there — "Detach-when-idle declaration" — and in GLOSSARY.md's
+**Availability**); this section states only how the two fit together, never
+restates the standard itself. A VI opts in with one line —
+`detach_when_idle` returning `self._configured_externally` — and the base
+does everything else: born detached (`__init__` calls `self._detach()`
+before returning, so starting CryoSoft while the vendor tool is open builds
+cleanly), a `ping()` verify-and-release path (reattach, a true round trip,
+then release — so `initiate()`, which calls `ping()`, returns a clean
+failure verdict rather than raising when the instrument is currently held
+by the external tool), `initiate_measurement()` reacquiring the connection
+(via `self._attach()`) for the measurement window, and `standby()`'s
+`__init_subclass__`-wrapped release handing the session back the instant
+the VI's own safe-off commands return — every run path already ends in
+`standby()`, so the instrument frees itself automatically and the operator
+may attach the vendor tool at any time between runs. No VI-specific
+`ping()` override or release branch in `standby()` is needed to get this.
+Never reconnect opportunistically in the background (e.g. from a monitored
+poll): a wrongly-timed connect can fail silently against the external
+tool's session, not loudly. Full text: `MeasurementInstrumentBase`'s
+docstring, "Externally configured instruments".
 
 ## Shared-instrument mode discipline
 Several measurement methods here can be wired to the SAME physical driver

@@ -273,12 +273,24 @@ class TensormeterRTM2MeasurementVI(MeasurementInstrumentBase):
         self.last_settings_snapshot: dict | None = None
 
         if self._configured_externally:
-            # Detached-idle lifecycle: born detached, so starting CryoSoft
-            # while the vendor tool (TMCS) is open builds cleanly — the
-            # RTM2 firmware serves only one TCP client at a time. This VI
-            # has no @monitored fields, so idle-detached generates zero
+            # Detach-when-idle standard (see MeasurementInstrumentBase's
+            # "Detached-idle lifecycle" / BaseVirtualInstrument's
+            # "Detach-when-idle declaration"): born detached, so starting
+            # CryoSoft while the vendor tool (TMCS) is open builds cleanly —
+            # the RTM2 firmware serves only one TCP client at a time. This
+            # VI has no @monitored fields, so idle-detached generates zero
             # tick-loop traffic.
-            self._main.close()
+            self._detach()
+
+    @property
+    def detach_when_idle(self) -> bool:
+        """Declare the RTM2's single-client firmware fact (see the base standard).
+
+        Narrows ``BaseVirtualInstrument.detach_when_idle`` from config
+        state: the RTM2 only needs to release its session when the vendor
+        tool (TMCS) owns configuration, never in internal mode.
+        """
+        return self._configured_externally
 
     # ------------------------------------------------------------------
     # MeasurementInstrumentBase implementation
@@ -456,10 +468,13 @@ class TensormeterRTM2MeasurementVI(MeasurementInstrumentBase):
                 tool) — see ``TensormeterRTM2.ensure_connected()``/
                 ``get_idn()``.
         """
-        # (1) Acquire + connectivity: a TRUE round trip (raises on a hung or
-        # externally-held channel, per the driver's liveness fix), never a
-        # check that can succeed vacuously.
-        driver.ensure_connected()
+        # (1) Acquire + connectivity: reacquire via the base's _attach()
+        # (the detach-when-idle standard, see BaseVirtualInstrument) so
+        # is_attached() correctly reflects the reacquired session for the
+        # duration of the measurement window, then a TRUE round trip
+        # (raises on a hung or externally-held channel, per the driver's
+        # liveness fix), never a check that can succeed vacuously.
+        self._attach()
         driver.get_idn()
 
         # (2) Data-path arming (CryoSoft-owned, always asserted): the
@@ -663,51 +678,20 @@ class TensormeterRTM2MeasurementVI(MeasurementInstrumentBase):
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def ping(self) -> bool:
-        """Query IDN from the driver to verify it is reachable.
-
-        In externally configured mode this is verify-and-release: connect,
-        a true round trip, then close — the detached-idle lifecycle (see
-        ``MeasurementInstrumentBase``'s "Externally configured
-        instruments" standard) — returning a clean ``False`` rather than
-        raising when the instrument is currently held by the external tool
-        or hung, and always releasing the connection afterward so the
-        instrument is never left attached while idle.
-        """
-        if not self._configured_externally:
-            try:
-                self._main.get_idn()  # type: ignore[attr-defined]
-                return True
-            except Exception:
-                return False
-
-        try:
-            self._main.ensure_connected()  # type: ignore[attr-defined]
-            self._main.get_idn()  # type: ignore[attr-defined]
-            return True
-        except Exception:
-            return False
-        finally:
-            try:
-                self._main.close()  # type: ignore[attr-defined]
-            except Exception:
-                pass
-
     def standby(self) -> None:
         """Put the instrument in a safe-off idle state.
 
         Internal mode: zeros the source current. Externally configured
         mode: skips the zero (it would clobber the external tool's own
         source state — sample-access operations call ``standby()`` on
-        every measurement VI, not just after a run this VI armed) and
-        instead RELEASES the connection (``driver.close()``) — the
-        automatic handoff that lets the operator open the vendor tool
-        between runs (see the detached-idle lifecycle in
-        ``MeasurementInstrumentBase``'s "Externally configured
-        instruments" standard).
+        every measurement VI, not just after a run this VI armed). The
+        session release itself is no longer this method's job — the
+        ``detach_when_idle`` property declared above makes
+        ``BaseVirtualInstrument``'s detach-when-idle standard release the
+        connection automatically once this method returns (see its class
+        docstring), which is the automatic handoff that lets the operator
+        open the vendor tool between runs.
         """
-        if self._configured_externally:
-            self._main.close()  # type: ignore[attr-defined]
-        else:
+        if not self._configured_externally:
             self._main.set_current_amplitude(0.0)  # type: ignore[attr-defined]
         self._initiated = False

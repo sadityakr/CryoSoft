@@ -53,6 +53,9 @@ class SimOxfordILM200:
 
         # Test control flags
         self._simulate_error: bool = False
+        # Connection-lifecycle standard: True once close() has released
+        # the session; every command then fails (see _check_error).
+        self._closed: bool = False
 
     # ------------------------------------------------------------------
     # Public API
@@ -113,8 +116,30 @@ class SimOxfordILM200:
         drift = self._helium_drift_rate * dt_min
         self._helium_level = max(0.0, self._helium_level - drift)
 
+    # ------------------------------------------------------------------
+    # Connection lifecycle (the connection-lifecycle standard)
+    # ------------------------------------------------------------------
+
+    def close(self) -> None:
+        """Release the simulated bus session; the instrument is left untouched.
+
+        Idempotent and never raises. Afterwards every command — including
+        ``get_idn()`` — raises ``CryoSoftCommunicationError`` via
+        :meth:`_check_error`, modelling a released session so a
+        use-after-disconnect bug fails in a test instead of on hardware.
+        A closed driver is never reopened in place: the Station builds a
+        fresh instance when the operator reconnects.
+        """
+        self._closed = True
+
     def _check_error(self) -> None:
         """Raise CryoSoftCommunicationError if error simulation is active."""
+        if self._closed:
+            raise CryoSoftCommunicationError(
+                "SimOxfordILM200: the session is closed — the driver was "
+                "disconnected from CryoSoft",
+                vi_name="SimOxfordILM200",
+            )
         if self._simulate_error:
             raise CryoSoftCommunicationError(
                 "Simulated communication error on ILM 200",

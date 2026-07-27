@@ -125,6 +125,11 @@ class DCSeparateMeasurementVI(DCMeasurementBase):
         meter = self._meter    # type: ignore[attr-defined]
         source.set_compliance(self._compliance_A)
         source.set_current(self._current_A)
+        # Pin the voltmeter single-shot so each READ? is one fresh triggered
+        # conversion. The 2182A ships free-running and the driver used to
+        # force this from its own __init__; under the connection-lifecycle
+        # standard that is a setup command, so it belongs on the arming path.
+        meter.set_continuous_initiation(False)
         meter.set_range(self._voltmeter_range_V)
 
     def take_reading(self) -> dict[str, list[float] | float]:
@@ -185,15 +190,6 @@ class DCSeparateMeasurementVI(DCMeasurementBase):
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
-
-    def ping(self) -> bool:
-        """Query IDN from both drivers to verify they are reachable."""
-        try:
-            self._source.get_idn()  # type: ignore[attr-defined]
-            self._meter.get_idn()   # type: ignore[attr-defined]
-            return True
-        except Exception:
-            return False
 
     def standby(self) -> None:
         """Zero the current source and reset the initiated state."""
