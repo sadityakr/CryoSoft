@@ -105,6 +105,11 @@ class RotatorVI(RotatorBase, RampableVI):
         self._ramp_gen: Generator | None = None
         self._ramp_exhausted: bool = True
         self._ramp_target_deg: float | None = None
+        #: The last setpoint commanded to the stage, in degrees — the "next
+        #: setpoint" of the ramp-introspection standard (RampableVI.
+        #: ramp_setpoint). This VI commands its target in one shot, so it
+        #: equals _ramp_target_deg once the generator has sent it.
+        self._ramp_setpoint_deg: float | None = None
 
     # ------------------------------------------------------------------
     # RampableVI implementation
@@ -121,6 +126,10 @@ class RotatorVI(RotatorBase, RampableVI):
         """
         _ = persistent
         self._ramp_target_deg = float(target)
+        # Cleared here, not in the generator: the first next() below sends the
+        # first setpoint and records it, so a stale value from the previous
+        # ramp is never reported for this one.
+        self._ramp_setpoint_deg = None
 
         self._ramp_gen = self._ramp_generator(self._ramp_target_deg)
         self._ramp_exhausted = False
@@ -171,6 +180,7 @@ class RotatorVI(RotatorBase, RampableVI):
         else:
             driver.set_position_setpoint(driver.get_position())
         self._ramp_target_deg = None
+        self._ramp_setpoint_deg = None
 
     def ramp_target(self) -> float | None:
         """Return the active angle target in degrees, or ``None`` when idle."""
@@ -181,6 +191,15 @@ class RotatorVI(RotatorBase, RampableVI):
         if self._ramp_target_deg is None:
             return None
         return self._rate_deg_per_min
+
+    def ramp_setpoint(self) -> float | None:
+        """Return the setpoint last commanded to the stage, in degrees.
+
+        The stage is driven to its target in a single command, so this equals
+        ``ramp_target()`` from the moment the generator sends it. Recorded by
+        the generator as it commands the setpoint; no hardware read.
+        """
+        return self._ramp_setpoint_deg
 
     def ramp_value(self) -> float | None:
         """Return the current sample angle in degrees (the value the ramp drives)."""
@@ -204,6 +223,7 @@ class RotatorVI(RotatorBase, RampableVI):
 
             driver.set_rate(self._rate_deg_per_min)
             driver.set_position_setpoint(target_deg)
+            self._ramp_setpoint_deg = target_deg
             yield
 
     # ------------------------------------------------------------------

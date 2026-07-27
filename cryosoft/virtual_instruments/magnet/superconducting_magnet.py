@@ -102,6 +102,11 @@ class SuperconductingMagnetVI(MagnetBase, RampableVI):
         self._ramp_gen: Generator | None = None
         self._ramp_exhausted: bool = True
         self._ramp_target_T: float | None = None
+        #: The last setpoint commanded to the PSU, in tesla — the "next
+        #: setpoint" of the ramp-introspection standard (RampableVI.
+        #: ramp_setpoint). Distinct from _ramp_target_T whenever the
+        #: generator stops at a ramp-segment boundary on the way there.
+        self._ramp_setpoint_T: float | None = None
 
     # ------------------------------------------------------------------
     # RampableVI implementation
@@ -122,6 +127,10 @@ class SuperconductingMagnetVI(MagnetBase, RampableVI):
         _ = persistent
         target_A = self._clamp_target_A(target * self._amperes_per_tesla)
         self._ramp_target_T = target_A / self._amperes_per_tesla
+        # Cleared here, not in the generator: the first next() below sends the
+        # first setpoint and records it, so a stale value from the previous
+        # ramp is never reported for this one.
+        self._ramp_setpoint_T = None
 
         self._ramp_gen = self._ramp_generator(target_A)
         self._ramp_exhausted = False
@@ -191,6 +200,7 @@ class SuperconductingMagnetVI(MagnetBase, RampableVI):
         else:
             driver.set_current_setpoint(driver.get_current())
         self._ramp_target_T = None
+        self._ramp_setpoint_T = None
 
     def ramp_target(self) -> float | None:
         """Return the active field target in tesla, or ``None`` when idle.
@@ -214,6 +224,16 @@ class SuperconductingMagnetVI(MagnetBase, RampableVI):
         target_A = self._ramp_target_T * self._amperes_per_tesla
         direction = 1 if target_A >= curr_A else -1
         return self._get_segment_rate(curr_A, direction) / self._amperes_per_tesla
+
+    def ramp_setpoint(self) -> float | None:
+        """Return the setpoint last commanded to the PSU, in tesla.
+
+        The ramp walks to its target through the configured ``ramp_segments``,
+        stopping at each boundary to change rate, so this is the boundary the
+        PSU is driving to *now* — not necessarily ``ramp_target()``. Recorded
+        by the generator as it commands each setpoint; no hardware read.
+        """
+        return self._ramp_setpoint_T
 
     def ramp_value(self) -> float | None:
         """Return the current field in tesla (the value the ramp drives)."""
@@ -261,6 +281,7 @@ class SuperconductingMagnetVI(MagnetBase, RampableVI):
 
             driver.set_ramp_rate(rate)
             driver.set_current_setpoint(next_boundary)
+            self._ramp_setpoint_T = next_boundary / self._amperes_per_tesla
             yield
 
     # ------------------------------------------------------------------

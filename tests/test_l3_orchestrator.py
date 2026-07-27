@@ -413,6 +413,135 @@ def test_abort_to_idle(orchestrator, station):
     assert orchestrator._procedure is None
 
 
+# ── Ramp tracker: active_ramps() / ramps_updated / stop_ramp() ────────────────
+
+
+def test_active_ramps_empty_while_nothing_ramps(orchestrator, qtbot):
+    """An idle machine publishes an empty list, not a stale or missing one."""
+    orchestrator._tick()
+    assert orchestrator.active_ramps() == []
+
+
+def test_tick_publishes_a_record_for_a_manual_ramp(orchestrator, station, qtbot):
+    """A ramp started from a GUI action shows up with its rate and both setpoints."""
+    station.get_vi("magnet_z").set_field(5.0)
+    orchestrator._tick()
+
+    records = orchestrator.active_ramps()
+    assert [r.vi_name for r in records] == ["magnet_z"]
+    record = records[0]
+    assert record.label == "field"
+    assert record.unit == "T"
+    assert record.target == pytest.approx(5.0)
+    assert record.setpoint is not None
+    assert record.rate is not None
+    # Nothing owns a manual ramp, so the operator may stop it.
+    assert record.owner is None
+    assert record.stoppable is True
+
+
+def test_ramps_updated_emits_the_same_records(orchestrator, station, qtbot):
+    """The push and read halves of the tracker surface agree."""
+    station.get_vi("magnet_z").set_field(5.0)
+    with qtbot.waitSignal(orchestrator.ramps_updated, timeout=1000) as blocker:
+        orchestrator._tick()
+    emitted = blocker.args[0]
+    assert [r.vi_name for r in emitted] == [r.vi_name for r in orchestrator.active_ramps()]
+
+
+def test_ramp_snapshot_is_polled_once_per_tick(orchestrator, station, monkeypatch):
+    """Both consumers share one Station poll — ramp accessors are real bus reads."""
+    calls = []
+    real = station.get_ramp_status
+
+    def counting():
+        calls.append(1)
+        return real()
+
+    monkeypatch.setattr(station, "get_ramp_status", counting)
+    station.get_vi("magnet_z").set_field(5.0)
+    orchestrator._tick()
+    # One poll for the operational-status record AND the ramp tracker
+    # together; a second is only ever allowed on a tick that drained a GUI
+    # action (which this one did not — set_field was called directly).
+    assert len(calls) == 1
+
+
+def test_procedure_owns_its_ramps_and_they_cannot_be_stopped_individually(
+    orchestrator, station, qtbot
+):
+    """A run's ramp names its owner and refuses a single-VI stop.
+
+    Stopping one VI mid-run would strand the run waiting on a setpoint it can
+    never reach — aborting the run is the only correct stop.
+    """
+    procedure = MockProcedure(station)
+    orchestrator.run_procedure(procedure)
+    orchestrator._tick()
+
+    records = [r for r in orchestrator.active_ramps() if r.vi_name == "magnet_z"]
+    assert records, "the procedure's magnet ramp should be tracked"
+    record = records[0]
+    assert record.owner == "procedure 'Mock Sweep'"
+    assert record.stoppable is False
+    assert "Mock Sweep" in record.stop_blocked_reason
+
+    with qtbot.waitSignal(orchestrator.action_blocked, timeout=500):
+        orchestrator.stop_ramp("magnet_z")
+    # Refused means refused: the ramp is still running.
+    assert station.get_vi("magnet_z").ramp_status() == "RAMPING"
+
+    orchestrator.abort_procedure()
+
+
+def test_stop_ramp_holds_that_vi_and_leaves_the_others_alone(
+    orchestrator, station, qtbot
+):
+    """A manual ramp is stopped per instrument, unlike abort_procedure()."""
+    station.get_vi("magnet_z").set_field(5.0)
+    station.get_vi("magnet_y").set_field(2.0)
+    orchestrator._tick()
+    assert {r.vi_name for r in orchestrator.active_ramps()} == {"magnet_z", "magnet_y"}
+
+    with qtbot.waitSignal(orchestrator.action_succeeded, timeout=500) as blocker:
+        orchestrator.stop_ramp("magnet_z")
+    assert blocker.args == ["magnet_z", "stop_ramp"]
+
+    assert station.get_vi("magnet_z").ramp_status() == "IDLE"
+    assert station.get_vi("magnet_y").ramp_status() == "RAMPING"
+    # The stopped row leaves the tracker immediately, not a tick later.
+    assert [r.vi_name for r in orchestrator.active_ramps()] == ["magnet_y"]
+
+
+def test_stop_ramp_returns_the_machine_to_idle_on_the_next_tick(
+    orchestrator, station, qtbot
+):
+    """The state machine still owns the RAMPING -> IDLE transition."""
+    station.get_vi("magnet_z").set_field(5.0)
+    orchestrator._tick()
+    assert orchestrator._state == OrchestratorState.RAMPING
+
+    orchestrator.stop_ramp("magnet_z")
+    orchestrator._tick()
+    assert orchestrator._state == OrchestratorState.IDLE
+
+
+def test_quiet_machine_publishes_no_ramps_without_polling(station, qtbot, monkeypatch):
+    """Monitoring off + IDLE polls nothing: a fresh launch stays quiet."""
+    orch = Orchestrator(station, tick_interval_ms=10_000)
+    try:
+        calls = []
+        monkeypatch.setattr(
+            station, "get_ramp_status", lambda: calls.append(1) or {}
+        )
+        assert orch.is_monitoring() is False
+        orch._tick()
+        assert calls == []
+        assert orch.active_ramps() == []
+    finally:
+        orch.shutdown()
+
+
 def test_action_blocking(orchestrator, station, qtbot):
     """submit_vi_action() during procedure emits action_blocked."""
     procedure = MockProcedure(station)

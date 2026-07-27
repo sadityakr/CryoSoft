@@ -112,6 +112,7 @@ from cryosoft.core.events import ErrorEvent
 from cryosoft.core.exceptions import CryoSoftSafetyError
 from cryosoft.core.operational_status import build_operational_status
 from cryosoft.core.plan import Command, SessionEnvelope, Target
+from cryosoft.core.ramps import RampRecord, build_ramp_records
 from cryosoft.core.station import FaultRecord, Station
 from cryosoft.core.tiered_trend_logger import TieredTrendLogger
 from cryosoft.core.watchdog import WatchdogConfig, WatchdogState, apply_watchdog
@@ -242,6 +243,7 @@ class Orchestrator(QObject):
     instrument_disconnected = pyqtSignal(str)  # live VI released via disconnect_instrument()
     measurement_ready = pyqtSignal(dict)  # emitted after each measure() with last_datapoint
     operational_status = pyqtSignal(dict)  # per-tick runtime status record (troubleshooting)
+    ramps_updated = pyqtSignal(list)  # list[RampRecord] — every ramp running right now
     status_message = pyqtSignal(str)  # concise, human-readable PROCEDURE milestone line
     operation_status = pyqtSignal(str)  # concise, human-readable OPERATION milestone line
     operation_progress = pyqtSignal(float)  # 0.0-1.0 progress of the current OPERATION run
@@ -348,6 +350,14 @@ class Orchestrator(QObject):
         # exactly like a safety-hold condition. Station is the source of
         # truth; this is only a transition-detection cache.
         self._known_condition_keys: set[str] = set()
+
+        # Ramp tracking (see _publish_ramps): the running-ramp records as of
+        # the last tick, and the per-tick memo of the Station snapshot they
+        # and the operational-status record are both built from. The memo is
+        # cleared at the top of every _tick_body() so a tick polls each VI's
+        # ramp state exactly once no matter how many consumers read it.
+        self._active_ramps: list[RampRecord] = []
+        self._tick_ramp_info: dict[str, dict] | None = None
 
         self._pre_pause_state = OrchestratorState.IDLE
         self._paused_wait_elapsed = 0.0
@@ -754,6 +764,67 @@ class Orchestrator(QObject):
         self._change_state(OrchestratorState.IDLE)
         self._emit_status("Aborted by user")
         self.run_queue()
+
+    def active_ramps(self) -> list[RampRecord]:
+        """Return the ramps running as of the last tick, ordered by VI name.
+
+        The read half of the ramp-tracker surface (``ramps_updated`` is the
+        push half — same payload, same objects). Returns the CACHED records
+        built during the tick, so calling this from GUI code costs nothing
+        and, crucially, touches no instrument: the tick is the only thing
+        that polls hardware.
+
+        Returns:
+            One ``RampRecord`` per system VI whose ``ramp_status()`` was
+            ``"RAMPING"`` at the last tick, ordered by VI name. Empty when
+            nothing is ramping.
+        """
+        return list(self._active_ramps)
+
+    def stop_ramp(self, vi_name: str) -> None:
+        """Stop one VI's ramp, holding that instrument where it is.
+
+        The per-instrument counterpart of ``abort_procedure()``: it stops a
+        single ramp instead of tearing down the whole run, so an operator can
+        cancel a manual field or temperature ramp started from the Monitor
+        window without stopping anything else. Hardware is held where it is
+        — there is no ramp-to-zero, exactly like an abort.
+
+        Admission goes through ``_manual_action_admissible()``, the same
+        predicate that governs every other manual action: a faulted or
+        safety-held VI is refused, ERROR and (unless unlocked) EMERGENCY are
+        refused, and — the case that matters here — a VI claimed by an active
+        run is refused naming that run. Stopping one VI's ramp mid-run would
+        strand the run waiting on a setpoint it can never reach, so aborting
+        the run is the only correct way to stop a run's ramp.
+
+        Unlike ``submit_vi_action()`` this is not queued for the next tick:
+        a stop is a safety action and follows ``abort_procedure()``'s
+        precedent of holding the hardware immediately. The state machine
+        still owns the RAMPING → IDLE transition, which happens on the next
+        tick once every remaining ramp has settled.
+
+        Args:
+            vi_name: The system VI whose ramp to stop.
+        """
+        admitted, reason = self._manual_action_admissible(vi_name)
+        if not admitted:
+            logger.info("Blocked stop_ramp on %s: %s", vi_name, reason)
+            self.action_blocked.emit(reason)
+            return
+        try:
+            self._station.stop_ramps({vi_name})
+        except Exception as exc:  # noqa: BLE001 — every action gets a verdict
+            logger.exception("stop_ramp failed on VI '%s'", vi_name)
+            self.action_failed.emit(vi_name, "stop_ramp", str(exc))
+            return
+        logger.info("Ramp on '%s' stopped by user — hardware held", vi_name)
+        self.action_succeeded.emit(vi_name, "stop_ramp")
+        self._emit_status(f"Ramp on {vi_name} stopped by user")
+        # Drop the row from the tracker immediately rather than leaving a
+        # stopped ramp on screen until the next tick rebuilds the snapshot.
+        self._active_ramps = [r for r in self._active_ramps if r.vi_name != vi_name]
+        self.ramps_updated.emit(list(self._active_ramps))
 
     def finish_operation(self) -> None:
         """Request a graceful stop of the active operation.
@@ -1422,7 +1493,7 @@ class Orchestrator(QObject):
         must never degrade a running procedure to ERROR via the tick boundary.
         """
         try:
-            ramp_info = self._station.get_ramp_status()
+            ramp_info = self._ramp_info()
             wait_target = self._current_wait_time if self._wait_started else None
             wait_elapsed = (
                 time.time() - self._wait_start_time if self._wait_started else None
@@ -1468,6 +1539,57 @@ class Orchestrator(QObject):
             self._status_logger.info(json.dumps(record))
         except Exception:
             logger.exception("operational-status update failed (non-fatal)")
+
+    # ------------------------------------------------------------------
+    # Ramp tracking
+    # ------------------------------------------------------------------
+
+    def _ramp_info(self) -> dict[str, dict]:
+        """Return this tick's ``Station.get_ramp_status()`` snapshot, polled once.
+
+        Memoised for the duration of one tick (``_tick_body()`` clears the
+        memo on entry) because two consumers want the same answer — the
+        operational-status record and the ramp tracker — and each VI's ramp
+        accessors are real instrument reads. Polling twice per tick would
+        double that bus traffic for no new information.
+        """
+        if self._tick_ramp_info is None:
+            self._tick_ramp_info = self._station.get_ramp_status()
+        return self._tick_ramp_info
+
+    def _publish_ramps(self) -> None:
+        """Rebuild this tick's running-ramp records, cache them, and emit them.
+
+        Guarded exactly like ``_update_operational_status()``: ramp tracking
+        is a reporting surface, so a failure here must never degrade a
+        running procedure to ERROR via the tick's exception boundary.
+
+        Nothing is polled while the machine is quiet (monitoring off AND
+        IDLE): a freshly launched app polls no instrument until its
+        instruments are initiated, and the tracker must not be the one thing
+        that breaks that silence. Any ramp — manual or run-driven — leaves
+        IDLE on the tick it starts, so nothing that is actually ramping is
+        ever missed by this guard.
+        """
+        try:
+            if not self._monitoring and self._state == OrchestratorState.IDLE:
+                records: list[RampRecord] = []
+            else:
+                run_active = self._procedure is not None
+                records = build_ramp_records(
+                    self._ramp_info(),
+                    setpoint_meta=self._station.system_setpoint_meta,
+                    # The SAME predicate stop_ramp() itself uses, so a row's
+                    # Abort button can never look enabled for a stop the
+                    # action would refuse (or vice versa).
+                    stop_policy=self._manual_action_admissible,
+                    run_label=self._active_run_label() if run_active else None,
+                    run_claims=self._active_claims if run_active else None,
+                )
+            self._active_ramps = records
+            self.ramps_updated.emit(list(records))
+        except Exception:
+            logger.exception("ramp-tracker update failed (non-fatal)")
 
     # ------------------------------------------------------------------
     # Concise status feed (Procedure-window status log)
@@ -1610,6 +1732,10 @@ class Orchestrator(QObject):
             self._fail_to_error(f"Internal error: {exc}")
 
     def _tick_body(self) -> None:
+        # Fresh tick: whatever ramp snapshot the last one memoised is stale.
+        # See _ramp_info() — one poll per tick, shared by every consumer.
+        self._tick_ramp_info = None
+
         # 1.+2. Monitor cycle — only while monitoring is active (see
         # start_monitoring()). While it is off, no instrument is polled at
         # all: a freshly launched app stays quiet until the instruments have
@@ -1797,6 +1923,14 @@ class Orchestrator(QObject):
                 self.action_failed.emit(
                     action["vi_name"], action["method_name"], str(e)
                 )
+        if pending_actions:
+            # A drained action may have started, retargeted, or stopped a
+            # ramp, which the snapshot taken at the top of this tick predates
+            # — so the tracker re-polls rather than showing the operator a
+            # tick-old view of the click they just made. Only on ticks that
+            # actually ran an action: an ordinary tick still polls once.
+            self._tick_ramp_info = None
+
         # If a GUI action started (or restarted) a manual ramp, enter RAMPING.
         if self._state == OrchestratorState.IDLE and not self._station.check_ramps():
             self._change_state(OrchestratorState.RAMPING)
@@ -1915,6 +2049,12 @@ class Orchestrator(QObject):
             # Shutdown already ran once on entry (_enter_emergency).
             # Monitoring continues; awaiting acknowledge_emergency().
             pass
+
+        # 5. Ramp tracker — last, so the run/claim context the records carry
+        # is the state machine's verdict for this tick (a run that just
+        # started or just ended) rather than the one it was in on entry.
+        # Reads this tick's memoised snapshot; no extra poll.
+        self._publish_ramps()
 
     # ------------------------------------------------------------------
     # Failure handling

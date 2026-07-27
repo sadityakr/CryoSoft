@@ -7,7 +7,9 @@
 #   measurement and switch cards, tagged by role), top-right is a
 #   TrendsQuadrant (cryosoft.gui.trends_quadrant), bottom-left is a
 #   SessionInfoPanel (cryosoft.gui.session_info_panel), and bottom-right is
-#   the optional OperationsPanel. Splitter boundaries are draggable but nothing can
+#   a horizontal splitter of two sub-panels: the always-present
+#   RampTrackerPanel (cryosoft.gui.ramp_tracker_panel) on the left and the
+#   optional OperationsPanel on the right. Splitter boundaries are draggable but nothing can
 #   be closed, detached, or floated. This module is the composition shell:
 #   quadrant assembly, menus, status bar, Orchestrator signal wiring, and
 #   session/geometry persistence — the quadrant content lives in the
@@ -31,6 +33,7 @@
 #   - cryosoft.core.orchestrator (Orchestrator)
 #   - cryosoft.gui.instrument_panel (InstrumentPanel)
 #   - cryosoft.gui.trends_quadrant (TrendsQuadrant)
+#   - cryosoft.gui.ramp_tracker_panel (RampTrackerPanel)
 #   - cryosoft.gui.session_info_panel (SessionInfoPanel)
 #   - cryosoft.gui.session_dialogs (LoadSessionDialog)
 #   - cryosoft.gui.log_panel (LogPanel)
@@ -97,6 +100,7 @@ from cryosoft.gui.log_panel import LogPanel
 from cryosoft.gui.notification_banner import NotificationBanner
 from cryosoft.gui.offline_panel import OfflineInstrumentPanel
 from cryosoft.gui.operations_panel import OperationsPanel
+from cryosoft.gui.ramp_tracker_panel import RampTrackerPanel
 from cryosoft.gui.servicing_log_page import ServicingLogPage
 from cryosoft.gui.session_dialogs import LoadSessionDialog
 from cryosoft.gui.session_info_panel import SessionInfoPanel
@@ -134,6 +138,28 @@ _GEOMETRY_KEY = "MonitorWindow/geometry"
 _MAIN_SPLITTER_KEY = "MonitorWindow/quadrant_main_splitter"
 _LEFT_SPLITTER_KEY = "MonitorWindow/quadrant_left_splitter"
 _RIGHT_SPLITTER_KEY = "MonitorWindow/quadrant_right_splitter"
+_BOTTOM_RIGHT_SPLITTER_KEY = "MonitorWindow/quadrant_bottom_right_splitter"
+
+# Minimum widths for the bottom-right quadrant's two sub-panels, and the
+# default split between them. Asymmetric on purpose: a ramp row is one line of
+# numbers plus a button, while an OperationCard column carries checklists and
+# wrapped detail text and the OperationsPanel stacks two of those columns side
+# by side (its own minimumSizeHint is ~375 px). The MINIMUMS are deliberately
+# well under that: they exist only so a drag cannot crush either pane to
+# nothing, and their sum must stay small enough that the right quadrant column
+# never outgrows half the window — otherwise the main 50/50 quadrant split is
+# forced open on a small screen. Reaching the Operations panel's comfortable
+# width is the DEFAULT SIZES' job instead, which Qt honours whenever the
+# quadrant has the room (and scales down proportionally when it does not,
+# leaving the Operations scroll area to scroll as scroll areas do).
+_RAMPS_MIN_WIDTH = 140
+_OPERATIONS_MIN_WIDTH = 200
+_BOTTOM_RIGHT_DEFAULT_SIZES = [220, 440]
+# Stretch factors, not just initial sizes: setSizes() alone is a one-shot
+# hint that Qt re-divides EVENLY on the next resize, which would hand the
+# ramp tracker half the quadrant it does not need. 1:2 keeps the split
+# proportional at every window width.
+_BOTTOM_RIGHT_STRETCH = (1, 2)
 
 # Orchestrator state names that colour the status bar (dynamic 'level' property).
 _ACTIVE_STATES = frozenset({
@@ -161,7 +187,8 @@ class MonitorWindow(QMainWindow):
     measurement and switch cards tagged by role (the switch card carries the
     station-wide Enable Scanner checkbox) — top-right is the
     :class:`TrendsQuadrant`, bottom-left is the :class:`SessionInfoPanel`,
-    and bottom-right is the optional :class:`OperationsPanel`. Every splitter
+    and bottom-right splits horizontally into the :class:`RampTrackerPanel`
+    (left) and the optional :class:`OperationsPanel` (right). Every splitter
     boundary is draggable; nothing in the grid can be closed, detached, or
     floated. Page 2 (Logs) is a :class:`ServicingLogPage` hosting one table
     per configured servicing-log kind plus the relocated :class:`LogPanel`.
@@ -237,6 +264,9 @@ class MonitorWindow(QMainWindow):
         self._servicing_log_kinds = list(servicing_log_kinds or [])
         self._cryogenics_recorder = cryogenics_recorder
         self._operations_panel: OperationsPanel | None = None
+        #: Always built (unlike the Operations panel): every setup can ramp
+        #: something, and the tracker shows its own empty state otherwise.
+        self._ramp_tracker: RampTrackerPanel | None = None
         self._cryogenics_enabled = bool(
             self._cryogenics_config
             and self._helium_store is not None
@@ -866,11 +896,67 @@ class MonitorWindow(QMainWindow):
                 chk.blockSignals(False)
 
     def _build_operations_quadrant(self) -> QWidget:
-        """Build the bottom-right quadrant: the optional Operations panel.
+        """Build the bottom-right quadrant: the Ramps and Operations sub-panels.
+
+        The quadrant is split horizontally into two titled sub-panels: the
+        always-present ``RampTrackerPanel`` on the left (every ramp running
+        right now, each with its own Abort) and the optional
+        ``OperationsPanel`` on the right. They are siblings rather than one
+        stacked column because they answer different questions and are read
+        at different moments — "what is moving right now, and stop it" vs
+        "what servicing action should I start".
+
+        Returns:
+            A QSplitter holding both sub-panels.
+        """
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setObjectName("bottom_right_splitter")
+        splitter.setChildrenCollapsible(False)
+        splitter.addWidget(self._build_ramps_subpanel())
+        splitter.addWidget(self._build_operations_subpanel())
+        splitter.setSizes(list(_BOTTOM_RIGHT_DEFAULT_SIZES))
+        splitter.setStretchFactor(0, _BOTTOM_RIGHT_STRETCH[0])
+        splitter.setStretchFactor(1, _BOTTOM_RIGHT_STRETCH[1])
+        self._operations_splitter = splitter
+        return splitter
+
+    def _build_ramps_subpanel(self) -> QWidget:
+        """Build the bottom-right quadrant's left sub-panel: the ramp tracker.
+
+        Always built — a setup with no rampable VI simply shows the panel's
+        own "No ramps running." empty state, and every setup has at least
+        one system VI in practice. ``ramps_updated`` is connected on the
+        window, not here (see ``_connect_signals``).
+
+        Returns:
+            A QWidget containing the title and the scrolled tracker.
+        """
+        container = QWidget()
+        container.setObjectName("ramps_quadrant")
+        # Layout rule: a pane that displays data gets a real minimum so the
+        # splitter can never crush a ramp row's numbers out of readability.
+        # Kept modest — a row is one short line plus a button, and every
+        # pixel here is one the (much hungrier) Operations sub-panel loses.
+        container.setMinimumWidth(_RAMPS_MIN_WIDTH)
+        outer = QVBoxLayout(container)
+        outer.setContentsMargins(4, 4, 4, 4)
+        outer.setSpacing(4)
+        outer.addWidget(QLabel("<b>Ramps</b>"))
+
+        self._ramp_tracker = RampTrackerPanel(self._orchestrator, parent=self)
+        ramps_scroll = QScrollArea()
+        ramps_scroll.setObjectName("ramps_scroll")
+        ramps_scroll.setWidgetResizable(True)
+        ramps_scroll.setWidget(self._ramp_tracker)
+        outer.addWidget(ramps_scroll)
+        return container
+
+    def _build_operations_subpanel(self) -> QWidget:
+        """Build the bottom-right quadrant's right sub-panel: the Operations panel.
 
         The Other Devices section that used to share this quadrant is
         retired — measurement and switch VIs are full cards in the
-        instrument grid now — so the quadrant holds the OperationsPanel when
+        instrument grid now — so the sub-panel holds the OperationsPanel when
         ``self._operations_panel_enabled``, else a placeholder label.
 
         Returns:
@@ -878,6 +964,11 @@ class MonitorWindow(QMainWindow):
         """
         container = QWidget()
         container.setObjectName("operations_quadrant")
+        # The OperationsPanel lays its cards out in two columns, so it needs
+        # materially more width than the ramp tracker to render without a
+        # horizontal scrollbar — hence the asymmetric minimums and the
+        # Operations-favouring default split above.
+        container.setMinimumWidth(_OPERATIONS_MIN_WIDTH)
         outer = QVBoxLayout(container)
         outer.setContentsMargins(4, 4, 4, 4)
         outer.setSpacing(4)
@@ -1181,6 +1272,10 @@ class MonitorWindow(QMainWindow):
         # connecting the panel directly (gui-edit skill's destruction-order
         # rule).
         self._orchestrator.operation_status.connect(self._on_operation_status)
+        # ramps_updated likewise fires every tick, so it routes through this
+        # window rather than connecting the tracker directly (gui-edit
+        # skill's destruction-order rule).
+        self._orchestrator.ramps_updated.connect(self._on_ramps_updated)
         # run_finished fires only at run boundaries (not every tick), so
         # there is no teardown-race concern connecting it here directly.
         self._orchestrator.run_finished.connect(self._on_run_finished_for_logs)
@@ -1302,6 +1397,20 @@ class MonitorWindow(QMainWindow):
         """
         if self._operations_panel is not None:
             self._operations_panel.on_operation_status(text)
+
+    def _on_ramps_updated(self, records: list) -> None:
+        """Forward this tick's running-ramp records to the Ramps sub-panel.
+
+        Routed through the window for the same teardown-race reason as
+        ``_on_states_updated`` — ``ramps_updated`` fires every tick.
+
+        Args:
+            records: ``list[cryosoft.core.ramps.RampRecord]`` from the
+                Orchestrator (typed loosely here because a Qt ``list``
+                signal payload carries no element type).
+        """
+        if self._ramp_tracker is not None:
+            self._ramp_tracker.on_ramps_updated(records)
 
     def _on_run_finished_for_logs(self, _manifest: dict) -> None:
         """Refresh the Logs page's tables after any run finishes.
@@ -1441,6 +1550,9 @@ class MonitorWindow(QMainWindow):
         settings.setValue(_MAIN_SPLITTER_KEY, self._main_splitter.saveState())
         settings.setValue(_LEFT_SPLITTER_KEY, self._left_splitter.saveState())
         settings.setValue(_RIGHT_SPLITTER_KEY, self._right_splitter.saveState())
+        settings.setValue(
+            _BOTTOM_RIGHT_SPLITTER_KEY, self._operations_splitter.saveState()
+        )
         self._trends.save_settings()
         super().closeEvent(event)
 
@@ -1461,6 +1573,7 @@ class MonitorWindow(QMainWindow):
             (self._main_splitter, _MAIN_SPLITTER_KEY),
             (self._left_splitter, _LEFT_SPLITTER_KEY),
             (self._right_splitter, _RIGHT_SPLITTER_KEY),
+            (self._operations_splitter, _BOTTOM_RIGHT_SPLITTER_KEY),
         ):
             state = settings.value(key)
             if state is None:

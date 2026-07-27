@@ -4,8 +4,11 @@
 #   Defines the abstract Ramp API (start_ramp, advance_ramp, ramp_status,
 #   stop_ramp) that the Orchestrator calls every tick while a ramp is active
 #   (stop_ramp on abort/ERROR/EMERGENCY: kills the generator AND holds the
-#   hardware).
-# entry_point: Not run directly; mixed into magnet and temperature VIs.
+#   hardware), plus the optional, bus-free introspection hooks
+#   (ramp_value/ramp_setpoint/ramp_target/ramp_rate/ramp_phase) that
+#   Station.get_ramp_status() aggregates for the ramp tracker and the
+#   operational-status record.
+# entry_point: Not run directly; mixed into magnet, temperature, and rotator VIs.
 # dependencies:
 #   - abc
 # input: |
@@ -15,7 +18,7 @@
 #   on the generator. ramp_status() returns one of RAMPING / TARGET_REACHED / IDLE.
 # output: |
 #   Status strings consumed by Station.check_ramps() and Orchestrator.
-# last_updated: 2026-04-06
+# last_updated: 2026-07-27
 # ---
 
 """RampableVI mixin — abstract ramp API for system VIs."""
@@ -106,6 +109,27 @@ class RampableVI:
         Tesla/min for magnets, kelvin/min for temperature — consistent with
         ``ramp_target()`` — so a rough ETA (gap ÷ rate) can be estimated. The
         default returns ``None``; ramp-tracking VIs override it.
+        """
+        return None
+
+    def ramp_setpoint(self) -> float | None:
+        """Return the setpoint currently commanded to hardware, or ``None``.
+
+        The *next* setpoint, in the same user units as ``ramp_target()``:
+        the intermediate value the ramp generator last wrote to the
+        instrument on its way to the end setpoint. It is distinct from
+        ``ramp_target()`` (the END setpoint the ramp is walking toward) for
+        every VI whose generator approaches its target in steps — a magnet
+        crossing a ramp-segment boundary, a temperature controller advancing
+        a time-based setpoint each tick — and equals the target for a VI
+        whose generator commands it in one shot.
+
+        Read from the VI's own record of what it last commanded, never
+        polled back from the instrument: it must stay a pure accessor with
+        no bus traffic, because the ramp tracker reads it every tick.
+        Implementations MUST clear it in ``stop_ramp()`` alongside the
+        target. The default returns ``None`` (setpoint not exposed);
+        ramp-tracking VIs override it.
         """
         return None
 
