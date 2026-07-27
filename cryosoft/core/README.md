@@ -28,9 +28,22 @@ is the typed currency shared by all of them.
   `monitor.yaml`) and constructs the driver + VI stack into a `Station`. The
   build is degraded-tolerant: an instrument that fails to *connect* lands in
   the Station's offline registry (`OfflineInstrument`, `offline_vi_names()`)
-  instead of aborting, and `Station.retry_instrument()` /
-  `Orchestrator.retry_reconnect()` can bring it live later; only *config*
-  errors abort the build (and trigger the startup fallback chain).
+  instead of aborting, and `Station.connect_instrument()` /
+  `Orchestrator.connect_instrument()` can bring it live later; only *config*
+  errors abort the build (and trigger the startup fallback chain). The build
+  sends exactly one command per instrument — an identity query
+  (`_identity_check()` -> `BaseVirtualInstrument.ping()`); an instrument whose
+  session opens but which never answers is degraded too, since an open session
+  is no proof anything is on the other end of the cable. See the **connection
+  lifecycle** in GLOSSARY.md.
+- `Station.disconnect_instrument()` is that standard's other half: it releases
+  a live VI to its own front panel (or vendor software) WITHOUT standing it
+  down — a magnet at field stays at field — and degrades it into the same
+  offline registry, closing only the driver sessions no other live VI still
+  needs (`_exclusive_aliases()`). `Orchestrator.connect_instrument()` /
+  `disconnect_instrument()` are the IDLE-gated public surface, reporting
+  through `action_succeeded`/`action_failed` plus
+  `instrument_reconnected`/`instrument_disconnected`.
 - `Orchestrator(station, tick_interval_ms)` receives a `Station`; the GUI then
   submits `Procedure` objects and VI/global action requests to it.
 - A `Procedure` is constructed with a `Station`, `sample_info`,
@@ -67,8 +80,12 @@ is the typed currency shared by all of them.
   GUI-facing surface of the comm-origin slice of the Station's unified
   condition registry (the System-Condition standard; GLOSSARY.md's
   **Instrument fault**) — the RUNTIME sibling of `offline_vi_names()` /
-  `retry_reconnect()` for a VI that DID connect but has since gone
-  stale/disconnected.
+  `connect_instrument()` for a VI that DID connect but has since gone
+  stale/disconnected. Deliberately NOT the same thing as an operator
+  disconnect: a fault means the instrument stopped answering while CryoSoft
+  still held it, so it refuses manual control and can fail a run, whereas a
+  disconnect is expected and `disconnect_instrument()` clears any standing
+  fault on the way out.
 - `DataManager` writes one HDF5 file to disk per procedure run.
 - `plan.py` hands immutable value objects to every layer; a malformed plan
   raises at construction, at the guilty module, not deep in the tick loop.

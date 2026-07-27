@@ -264,7 +264,10 @@ def test_instrument_panel_disconnected_border(station, orchestrator, qtbot):
 
     orchestrator.states_updated.emit({vi_name: {"_stale": True, "_disconnected": True}})
     assert panel.property("status") == "disconnected"
-    assert "[DISCONNECTED]" in panel._name_label.text()
+    # "NOT RESPONDING", not "DISCONNECTED": under the connection-lifecycle
+    # standard "disconnected" is the operator's own verb (and the offline
+    # card's badge), so a comm fault must not claim the same word.
+    assert "[NOT RESPONDING]" in panel._name_label.text()
 
 
 def test_instrument_panel_status_resets_to_ok(station, orchestrator, qtbot):
@@ -2910,8 +2913,11 @@ def test_offline_instrument_gets_fault_card_and_banner(tmp_path, qtbot):
         assert card.property("status") == "offline"
         reason = win.findChild(QLabel, "bad_vi_offline_reason")
         assert "bad_drv" in reason.text()
-        # No lifecycle toggle or control buttons on a fault card.
+        # No lifecycle toggle or control buttons on a fault card — only the
+        # details icon and the one action that applies here, Connect.
         assert card.findChild(QPushButton, "bad_vi_offline_details_btn") is not None
+        assert card.findChild(QPushButton, "bad_vi_connect_btn") is not None
+        assert card.findChild(QPushButton, "bad_vi_lifecycle_btn") is None
         # Banner announces the degraded state.
         assert win._banner.isVisible()
         assert "bad_vi" in win._banner._label.text()
@@ -2959,4 +2965,97 @@ def test_offline_reconnect_failure_reports_inline(tmp_path, qtbot):
         detail_reason = win.findChild(QLabel, "bad_vi_offline_detail_reason")
         assert "bad_drv" in detail_reason.text()
     finally:
+        orch.shutdown()
+
+
+# ── Connection-lifecycle standard: the Connect/Disconnect pair ───────────────
+# See virtual_instruments/base.py's "Connection-lifecycle standard". The GUI
+# half is one button on every card, and a card SWAP when it is pressed: a live
+# InstrumentPanel becomes an OfflineInstrumentPanel and back again.
+
+
+def _sim_monitor(qtbot):
+    """A Monitor window over the full sim station, plus its Orchestrator."""
+    station = build_station(CONFIG_PATH)
+    orch = Orchestrator(station, tick_interval_ms=50)
+    win = MonitorWindow(station, orch)
+    qtbot.addWidget(win)
+    win.show()
+    return station, orch, win
+
+
+def test_every_live_instrument_card_has_a_disconnect_button(qtbot):
+    """The standard is only a standard if EVERY card carries it.
+
+    System, level, measurement and switch cards alike — the whole point of
+    the connection-lifecycle standard is that no instrument category is a
+    special case.
+    """
+    station, orch, win = _sim_monitor(qtbot)
+    try:
+        assert station.get_vi_names()
+        for vi_name in station.get_vi_names():
+            card = win.findChild(QGroupBox, f"{vi_name}_panel")
+            assert card is not None, vi_name
+            disconnect_btn = card.findChild(QPushButton, f"{vi_name}_disconnect_btn")
+            assert disconnect_btn is not None, vi_name
+            # Next to Initiate/Standby, not instead of it: two axes, two controls.
+            assert card.findChild(QPushButton, f"{vi_name}_lifecycle_btn") is not None
+    finally:
+        orch.shutdown()
+
+
+def test_disconnect_click_swaps_the_live_card_for_an_offline_one(qtbot):
+    """Pressing Disconnect degrades the card exactly like a failed connect."""
+    station, orch, win = _sim_monitor(qtbot)
+    try:
+        card = win.findChild(QGroupBox, "magnet_z_panel")
+        card.findChild(QPushButton, "magnet_z_disconnect_btn").click()
+
+        assert station.has_vi("magnet_z") is False
+        assert "magnet_z" in win._offline_cards
+        assert not any(p.vi_name == "magnet_z" for p in win._panels)
+        offline_card = win.findChild(QGroupBox, "magnet_z_offline_card")
+        assert offline_card is not None
+        # Worded for an operator who did this on purpose, not for a fault.
+        name_label = offline_card.findChild(QLabel, "magnet_z_offline_name_label")
+        assert "DISCONNECTED" in name_label.text()
+    finally:
+        orch.shutdown()
+
+
+def test_connect_click_swaps_the_offline_card_back(qtbot):
+    """Connect on the card restores the live panel — the round trip closes."""
+    station, orch, win = _sim_monitor(qtbot)
+    try:
+        win.findChild(QGroupBox, "magnet_z_panel").findChild(
+            QPushButton, "magnet_z_disconnect_btn"
+        ).click()
+        offline_card = win.findChild(QGroupBox, "magnet_z_offline_card")
+        offline_card.findChild(QPushButton, "magnet_z_connect_btn").click()
+
+        assert station.has_vi("magnet_z") is True
+        assert win._offline_cards == {}
+        assert any(p.vi_name == "magnet_z" for p in win._panels)
+        live_card = win.findChild(QGroupBox, "magnet_z_panel")
+        assert live_card is not None
+        assert live_card.findChild(QPushButton, "magnet_z_disconnect_btn") is not None
+    finally:
+        orch.shutdown()
+
+
+def test_disconnect_is_blocked_while_a_run_is_active(qtbot):
+    """The refusal reaches the operator through the banner, not a dialog."""
+    station, orch, win = _sim_monitor(qtbot)
+    try:
+        orch._state = OrchestratorState.MEASURING
+        win.findChild(QGroupBox, "magnet_z_panel").findChild(
+            QPushButton, "magnet_z_disconnect_btn"
+        ).click()
+
+        assert station.has_vi("magnet_z") is True
+        assert win._banner.isVisible()
+        assert "magnet_z" in win._banner._label.text()
+    finally:
+        orch._state = OrchestratorState.IDLE
         orch.shutdown()

@@ -96,8 +96,11 @@ class RotatorVI(RotatorBase, RampableVI):
             float(max_rate) if max_rate is not None else None,
         )
 
+        # The slew rate is a setup command, so it is applied by initiate(),
+        # not here: the connection-lifecycle standard (see
+        # BaseVirtualInstrument) requires construction to send nothing that
+        # changes what the stage is doing.
         self._rate_deg_per_min: float = self._default_rate
-        self._driver.set_rate(self._rate_deg_per_min)  # type: ignore[attr-defined]
 
         self._ramp_gen: Generator | None = None
         self._ramp_exhausted: bool = True
@@ -250,7 +253,15 @@ class RotatorVI(RotatorBase, RampableVI):
     # ------------------------------------------------------------------
 
     def initiate(self) -> None:
-        """Put the rotation stage in HOLD mode on startup."""
+        """Program the configured slew rate and leave the stage holding.
+
+        The setup command this VI owns: the stage's rate comes from the
+        setup's ``default_rate_deg_per_min``. It used to be written from
+        ``__init__``; under the connection-lifecycle standard (see
+        ``BaseVirtualInstrument``) building the Station sends no such
+        command, so it is applied here when the operator initiates.
+        """
+        self._driver.set_rate(self._rate_deg_per_min)  # type: ignore[attr-defined]
 
     def standby(self) -> None:
         """Hold the stage at its current angle."""

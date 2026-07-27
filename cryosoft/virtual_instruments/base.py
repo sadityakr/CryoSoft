@@ -68,12 +68,53 @@ class BaseVirtualInstrument:
 
     Subclass contract
     -----------------
-    * Override ``initiate()`` to open communication and put the instrument in a
-      known state.
+    * Override ``initiate()`` to put the instrument into its operating state.
     * Override ``standby()`` to put the instrument in a safe idle state.
     * Tag read-only polling methods with ``@monitored``.
     * Tag user-callable action methods with ``@control``.
     * The constructor signature MUST be ``__init__(self, drivers, **init_params)``.
+
+    Connection-lifecycle standard
+    -----------------------------
+    Every instrument has TWO independent lifecycles, and mixing them is the
+    mistake this standard exists to prevent:
+
+    * **Connection** — ``connect`` / ``disconnect``: who owns the *bus
+      session*. Disconnected means CryoSoft holds nothing, so the operator
+      can drive the instrument from its physical front panel or from the
+      vendor's own software. Connecting and disconnecting NEVER change what
+      the instrument is doing.
+    * **Operating state** — ``initiate()`` / ``standby()``: what the
+      instrument is *doing*. ``initiate()`` sends the setup commands that
+      bring it to its operating state; ``standby()`` returns it to a safe
+      idle one. Both are explicit operator (or procedure) actions.
+
+    Three rules follow, and they bind every VI and every driver:
+
+    1. **Construction is silent.** A VI's ``__init__`` (and its drivers')
+       must send NO command that changes what the instrument is doing — no
+       output, mode, range, rate or setpoint. Building the Station is a
+       *connection* act: the only command it sends is the identity query
+       (``ping()`` below). A setup command that used to live in ``__init__``
+       belongs in ``initiate()``. Enforced by
+       ``tests/test_conformance.py::test_vi_construction_sends_no_commands``.
+    2. **Disconnecting is not standing down.** ``disconnect()`` releases; it
+       must not zero a source, ramp a magnet down, or open a switch. An
+       operator who wants the instrument safe first presses Standby first —
+       that ordering is theirs to choose, and a magnet at field deliberately
+       stays at field across a disconnect, exactly as it would if they were
+       driving the PSU by hand.
+    3. **A disconnected instrument degrades exactly like one that never
+       connected.** ``Station.disconnect_instrument()`` moves the VI out of
+       the live registry and into the offline registry, so polling, safety
+       evaluation, procedures and the GUI all see the same "this instrument
+       is not here" state they see for a startup connection failure — one
+       degraded path, not two.
+
+    The VI's own hooks are ``ping()`` (the identity check) and
+    ``disconnect()`` (release VI-held state). Reconnecting is the Station's
+    job (``Station.connect_instrument()``), because only it holds the build
+    recipe needed to construct fresh drivers.
 
     Control-validation standard
     ---------------------------
@@ -353,15 +394,72 @@ class BaseVirtualInstrument:
     # ------------------------------------------------------------------
 
     def initiate(self) -> None:
-        """Establish communication and put the instrument in a known state.
+        """Put the instrument into its operating state.
 
-        Override in subclasses to send initialisation commands.
+        The *operating* half of the connection-lifecycle standard (see the
+        class docstring): this is where every setup command lives — heater
+        mode, pole mode, slew rate, anything the instrument needs before it
+        can be used. It is an explicit operator or procedure action, never
+        something the Station does while building, so an operator who starts
+        CryoSoft while an instrument is mid-experiment finds it untouched.
+
+        Override in subclasses to send those setup commands.
         """
 
     def standby(self) -> None:
         """Put the instrument in a safe idle state.
 
-        Override in subclasses to send safe-idle commands (e.g. disable outputs).
+        The opposite of ``initiate()``: override in subclasses to send
+        safe-idle commands (e.g. disable outputs). Distinct from
+        ``disconnect()``, which releases the bus session and changes nothing
+        the instrument is doing.
+        """
+
+    # ------------------------------------------------------------------
+    # Connection lifecycle (the connection-lifecycle standard)
+    # ------------------------------------------------------------------
+
+    def ping(self) -> bool:
+        """Send an identity query to every driver; True if all of them answer.
+
+        The single connection check in CryoSoft — the ONLY command sent when
+        the Station is built (see the class docstring's connection-lifecycle
+        standard) and what the front panel's "Check connection" button and
+        ``Station.connect_instrument()`` use. Harmless by construction: an
+        identity query changes nothing.
+
+        The default covers every VI whose drivers follow the driver contract
+        (``get_idn()`` on each). Override only when a VI's connection check
+        is genuinely different — e.g. an externally configured instrument
+        whose firmware serves one client at a time and must connect, query,
+        then release again.
+
+        Returns:
+            True if every driver answered ``get_idn()``; False on any
+            failure, including a driver that does not implement it.
+        """
+        try:
+            for driver in self._drivers.values():
+                driver.get_idn()  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 — any failure means "not reachable"
+            return False
+        return True
+
+    def disconnect(self) -> None:
+        """Release whatever this VI holds beyond its driver sessions.
+
+        Called by ``Station.disconnect_instrument()`` immediately BEFORE the
+        Station closes the driver sessions this VI exclusively owns (the
+        Station, not the VI, owns that step, because a driver may be shared
+        with another VI that is staying online).
+
+        The default is a no-op: most VIs hold nothing but their drivers.
+        Override to drop VI-level state that would be wrong after a
+        reconnect — a cached "armed" flag, a ramp generator mid-flight.
+        NEVER send a safe-off or configuration command here: disconnecting
+        must leave the instrument doing exactly what it was doing (rule 2 of
+        the connection-lifecycle standard). That is ``standby()``'s job, and
+        the operator chooses whether to press it first.
         """
 
     # ------------------------------------------------------------------
@@ -991,18 +1089,6 @@ class MeasurementInstrumentBase(BaseVirtualInstrument):
             NotImplementedError: If not overridden by a concrete VI.
         """
         raise NotImplementedError
-
-    def ping(self) -> bool:
-        """Send IDN queries to all drivers and return True if all respond.
-
-        Override in subclasses to call ``get_idn()`` on each driver.
-        The base implementation always returns False (unknown).
-
-        Returns:
-            True if all drivers respond; False on any exception or if not
-            overridden.
-        """
-        return False
 
 
 class DCMeasurementBase(MeasurementInstrumentBase):

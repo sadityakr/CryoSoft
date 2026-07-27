@@ -11,9 +11,16 @@
 #   build_station() is the factory that constructs the full instrument stack
 #   from a YAML config directory; it builds DEGRADED on connection failures —
 #   unreachable instruments land in the offline registry (OfflineInstrument,
-#   offline_vi_names(), get_offline_info()) instead of aborting the build, and
-#   retry_instrument() can bring one back later from the retained build
-#   recipe. magnet_vi_names() mirrors switch_vi_names()
+#   offline_vi_names(), get_offline_info()) instead of aborting the build.
+#   The only command a build sends per instrument is an identity query
+#   (_identity_check(), the connection-lifecycle standard — see
+#   virtual_instruments/base.py). connect_instrument()/disconnect_instrument()
+#   are that standard's Station half: connect rebuilds a VI from the retained
+#   build recipe and re-runs the identity check; disconnect releases the
+#   sessions the VI exclusively owns (_exclusive_aliases()) and degrades it
+#   into the SAME offline registry, so an operator-disconnected instrument and
+#   one that never connected behave identically everywhere above L2.
+#   magnet_vi_names() mirrors switch_vi_names()
 #   for registry-system VIs whose class vi_type == "magnet". read_cryogenics_
 #   config()/read_servicing_logs_config()/read_operations_config() mirror
 #   read_instrument_metadata()'s GUI-safe YAML-only pattern for the optional
@@ -29,7 +36,7 @@
 #   adapters over the comm-origin slice of that one registry; clear_fault()
 #   auto-clears on the next successful poll, and retry_fault() resets the
 #   error counter and forces one fresh poll (never rebuilds drivers — that is
-#   retry_instrument()'s job, for a VI that never connected at all).
+#   connect_instrument()'s job, for a VI that is not live at all).
 #   safety_flag_sources() mirrors check_safety() but names the VI(s) that
 #   tripped each flag, for EMERGENCY reasons/ErrorEvents and for
 #   update_conditions()'s Condition.source_vis.
@@ -83,6 +90,74 @@ from cryosoft.virtual_instruments.rampable import RampableVI
 
 logger = logging.getLogger(__name__)
 
+# The one reason string used wherever an instrument opened a session but did
+# not answer the identity query — the single connection check of the
+# connection-lifecycle standard (see BaseVirtualInstrument).
+_IDENTITY_FAILED_REASON = (
+    "Opened the connection but the instrument did not answer an identity "
+    "query — check that it is powered on and that the address in the config "
+    "points at it."
+)
+
+
+def _identity_check(vi_name: str, vi: BaseVirtualInstrument) -> bool:
+    """Return whether *vi* answers an identity query, never raising.
+
+    The ONLY command CryoSoft sends when it brings an instrument up (the
+    connection-lifecycle standard's rule 1: construction is silent). A VI
+    whose ``ping()`` itself raises is treated as unreachable rather than
+    aborting the build — a degraded station is always better than no station.
+
+    Args:
+        vi_name: The VI's configured name, for the log line.
+        vi: The freshly constructed VI.
+
+    Returns:
+        True if the instrument answered.
+    """
+    try:
+        return bool(vi.ping())
+    except Exception:  # noqa: BLE001 — any failure means "not reachable"
+        logger.warning("Identity check raised for VI '%s'", vi_name, exc_info=True)
+        return False
+
+
+def _exclusive_aliases(
+    role_aliases: Mapping[str, str],
+    vi_specs: Mapping[str, dict],
+    vi_name: str,
+    live_registry: Mapping[str, str] | None = None,
+) -> list[str]:
+    """Return *vi_name*'s driver aliases that no OTHER live VI still needs.
+
+    Drivers are shared by config (a 6221 serving both a delta-mode and a
+    DC-mode VI, say), so disconnecting one instrument must never close a
+    session another live instrument is using. This is the single place that
+    decides which sessions a disconnect may actually release.
+
+    Args:
+        role_aliases: The disconnecting VI's ``{role: alias}`` mapping.
+        vi_specs: Every VI's retained build recipe, ``{vi_name: spec}``.
+        vi_name: The VI being disconnected (excluded from the "other users"
+            search).
+        live_registry: The names of the VIs that are currently live. ``None``
+            means "consider every configured VI a user", the conservative
+            choice used when unwinding a failed connect: nothing is closed
+            that any other VI's recipe references.
+
+    Returns:
+        Aliases safe to close, order-preserving and de-duplicated.
+    """
+    mine = list(dict.fromkeys(role_aliases.values()))
+    others: set[str] = set()
+    for other_name, spec in vi_specs.items():
+        if other_name == vi_name:
+            continue
+        if live_registry is not None and other_name not in live_registry:
+            continue
+        others.update((spec.get("drivers") or {}).values())
+    return [alias for alias in mine if alias not in others]
+
 
 # `@dataclass(frozen=True)` generates an immutable value class: __init__,
 # __eq__ and __repr__ come for free, and instances cannot be mutated after
@@ -106,12 +181,21 @@ class OfflineInstrument:
         failed_drivers: Config aliases of the drivers that failed to
             construct. Empty when the drivers were fine but the VI's own
             construction raised a communication error.
+        origin: Why this VI is offline — ``"connect_failed"`` (the default:
+            the hardware could not be reached at build time or on a
+            reconnect attempt) or ``"operator"`` (the connection-lifecycle
+            standard: the operator deliberately disconnected it, e.g. to
+            drive the instrument from its front panel or the vendor's
+            software). The degraded behaviour is deliberately IDENTICAL for
+            both — one offline path, not two — so this only ever changes
+            what the GUI *says*, never what the station *does*.
     """
 
     vi_name: str
     vi_type: str
     reason: str
     failed_drivers: tuple[str, ...] = field(default=())
+    origin: str = "connect_failed"
 
 
 @dataclass(frozen=True)
@@ -168,7 +252,7 @@ class Station:
         self._scanner_enabled: bool = False
         # Degraded-build support: VIs whose hardware failed to connect at
         # build time, plus the build recipes and live driver instances that
-        # retry_instrument() needs to bring one back without a restart.
+        # connect_instrument() needs to bring one back without a restart.
         self._offline_vis: dict[str, OfflineInstrument] = {}
         self._driver_specs: dict[str, dict] = {}   # {alias: driver config}
         self._vi_specs: dict[str, dict] = {}       # {vi_name: vi config}
@@ -329,21 +413,26 @@ class Station:
         """
         return self._offline_vis[vi_name]
 
-    def retry_instrument(self, vi_name: str) -> tuple[bool, str]:
-        """Try to bring an offline VI online: rebuild its drivers, then the VI.
+    def connect_instrument(self, vi_name: str) -> tuple[bool, str]:
+        """Bring an offline VI online: rebuild its drivers, the VI, then verify.
 
-        Re-runs the same construction ``build_station()`` performed, from the
-        retained build recipe: each of the VI's drivers that is not already
-        live is constructed (its ``__init__`` opens the hardware connection),
-        then the VI itself. On success the VI joins the live registry exactly
-        as if it had connected at startup; on failure the offline record's
-        ``reason`` is refreshed with the latest error.
+        The ``connect`` half of the connection-lifecycle standard (see
+        ``BaseVirtualInstrument``), and the only way a VI rejoins the live
+        registry — whether it never connected at startup or the operator
+        disconnected it deliberately. Re-runs the same construction
+        ``build_station()`` performed, from the retained build recipe: each
+        of the VI's drivers that is not already live is constructed (its
+        ``__init__`` opens the bus session and sends nothing else), then the
+        VI itself, then one identity query to prove the instrument is really
+        there. On success the VI joins the live registry exactly as if it had
+        connected at startup; on failure the offline record's ``reason`` is
+        refreshed with the latest error.
 
         A driver brought up here is shared: another offline VI referencing the
-        same alias will find it already live on its own retry.
+        same alias will find it already live on its own connect.
 
         Args:
-            vi_name: Name of the offline VI to reconnect.
+            vi_name: Name of the offline VI to connect.
 
         Returns:
             An explicit ``(ok, message)`` verdict for the GUI, mirroring the
@@ -375,7 +464,7 @@ class Station:
                 self._offline_vis[vi_name] = replace(
                     info, reason=reason, failed_drivers=still_failed
                 )
-                logger.warning("Reconnect of '%s' failed: %s", vi_name, reason)
+                logger.warning("Connect of '%s' failed: %s", vi_name, reason)
                 return False, reason
 
         driver_refs = {role: self._drivers[alias] for role, alias in role_aliases.items()}
@@ -388,14 +477,123 @@ class Station:
                 info, reason=str(exc), failed_drivers=()
             )
             logger.warning(
-                "Reconnect of '%s' failed in VI construction: %s", vi_name, exc
+                "Connect of '%s' failed in VI construction: %s", vi_name, exc
             )
             return False, str(exc)
 
+        # The identity check, exactly as build_station() applies it: an open
+        # session is not proof the instrument is answering.
+        vi.vi_name = vi_name
+        if not _identity_check(vi_name, vi):
+            reason = _IDENTITY_FAILED_REASON
+            self._offline_vis[vi_name] = replace(
+                info, reason=reason, failed_drivers=()
+            )
+            self._release_drivers(_exclusive_aliases(role_aliases, self._vi_specs, vi_name))
+            logger.warning("Connect of '%s' failed the identity check", vi_name)
+            return False, reason
+
         del self._offline_vis[vi_name]
         self.register_vi(vi_name, vi, spec.get("vi_type", "system"))
-        logger.info("Instrument '%s' reconnected", vi_name)
-        return True, f"'{vi_name}' reconnected"
+        logger.info("Instrument '%s' connected", vi_name)
+        return True, f"'{vi_name}' connected"
+
+    def disconnect_instrument(self, vi_name: str) -> tuple[bool, str]:
+        """Release a live VI's instrument and degrade it to the offline registry.
+
+        The ``disconnect`` half of the connection-lifecycle standard (see
+        ``BaseVirtualInstrument``): hands the instrument back so the operator
+        can drive it from its physical front panel or the vendor's own
+        software, without stopping anything else on the station.
+
+        What it does, in order:
+
+        1. ``vi.disconnect()`` — the VI's own release hook. NOT
+           ``standby()``: disconnecting never changes what the instrument is
+           doing (rule 2 of the standard). An operator who wants it safe
+           first presses Standby first.
+        2. Removes the VI from the live registry, so polling, safety
+           evaluation, ramps and procedures stop seeing it — the same
+           degraded state a startup connection failure produces.
+        3. Closes the bus session of every driver the VI was the LAST live
+           user of. A driver shared with a VI that is staying online is left
+           open, so disconnecting one instrument can never break another.
+        4. Records an ``OfflineInstrument`` with ``origin="operator"``, which
+           is what ``connect_instrument()`` later reads to bring it back.
+
+        Args:
+            vi_name: Name of the live VI to disconnect.
+
+        Returns:
+            An explicit ``(ok, message)`` verdict, mirroring
+            ``connect_instrument()``.
+        """
+        vi = self._virtual_instruments.get(vi_name)
+        if vi is None:
+            if vi_name in self._offline_vis:
+                return False, f"'{vi_name}' is already disconnected"
+            return False, f"'{vi_name}' is not a registered VI"
+
+        try:
+            vi.disconnect()
+        except Exception:  # noqa: BLE001 — a failing hook must not block the release
+            logger.exception("disconnect() hook failed on VI '%s'", vi_name)
+
+        vi_type = self._vi_registry.get(vi_name, "system")
+        del self._virtual_instruments[vi_name]
+        self._vi_registry.pop(vi_name, None)
+        self._error_counts.pop(vi_name, None)
+        self._last_known_state.pop(vi_name, None)
+        # A VI that is no longer live cannot be in a comm fault — clearing it
+        # keeps the fault banner from naming an instrument nobody is polling.
+        self.clear_fault(vi_name)
+
+        spec = self._vi_specs.get(vi_name, {})
+        role_aliases = dict(spec.get("drivers") or {})
+        self._release_drivers(
+            _exclusive_aliases(role_aliases, self._vi_specs, vi_name, self._vi_registry)
+        )
+
+        reason = (
+            "Disconnected by the operator — the instrument is free for its "
+            "front panel or vendor software. Press Connect to hand it back "
+            "to CryoSoft."
+        )
+        self.register_offline_vi(
+            OfflineInstrument(vi_name, vi_type, reason, (), origin="operator")
+        )
+        return True, f"'{vi_name}' disconnected"
+
+    def _release_drivers(self, aliases: Sequence[str]) -> None:
+        """Close and forget the named driver sessions, guarded and idempotent.
+
+        Each ``close()`` is individually guarded: a driver that fails to
+        release must not stop the others, and a disconnect must always
+        succeed (see the connection-lifecycle standard). The alias is dropped
+        from the live driver map either way, so a later
+        ``connect_instrument()`` builds a fresh instance rather than reusing
+        a half-closed session.
+
+        Args:
+            aliases: Config aliases of the drivers to release.
+        """
+        for alias in aliases:
+            driver = self._drivers.pop(alias, None)
+            if driver is None:
+                continue
+            closer = getattr(driver, "close", None)
+            if not callable(closer):
+                logger.warning(
+                    "Driver '%s' (%s) has no close() — the session is dropped "
+                    "but may stay open until the process exits",
+                    alias,
+                    type(driver).__name__,
+                )
+                continue
+            try:
+                closer()
+            except Exception:  # noqa: BLE001 — a disconnect must always succeed
+                logger.exception("close() failed on driver '%s'", alias)
 
     def set_scanner_enabled(self, enabled: bool) -> None:
         """Toggle whether scanner-sensitive procedures may use the switch VI.
@@ -783,7 +981,7 @@ class Station:
     def retry_fault(self, vi_name: str) -> tuple[bool, str]:
         """Reset *vi_name*'s error counter and force one fresh poll.
 
-        The runtime counterpart of ``retry_instrument()``: it does NOT
+        The runtime counterpart of ``connect_instrument()``: it does NOT
         rebuild any driver (the VI is already live) — it only resets the
         comm-error streak and re-polls once, exactly what a stale/
         disconnected but otherwise-live instrument needs to recover.
@@ -793,7 +991,7 @@ class Station:
 
         Returns:
             An explicit ``(ok, message)`` verdict, mirroring
-            ``retry_instrument()``'s style: ``message`` is a human-readable
+            ``connect_instrument()``'s style: ``message`` is a human-readable
             success confirmation or failure reason.
         """
         vi = self._virtual_instruments.get(vi_name)
@@ -1436,6 +1634,18 @@ def build_station(config_path: str) -> Station:
             # errors) are config/software faults and propagate.
             station.register_offline_vi(
                 OfflineInstrument(vi_name, vi_type, str(exc), ())
+            )
+            continue
+
+        # The build's ONE command per instrument: an identity query (the
+        # connection-lifecycle standard, see BaseVirtualInstrument). An open
+        # session is not proof the instrument is answering, and an instrument
+        # that does not answer degrades to the offline registry instead of
+        # pretending to be live.
+        vi.vi_name = vi_name
+        if not _identity_check(vi_name, vi):
+            station.register_offline_vi(
+                OfflineInstrument(vi_name, vi_type, _IDENTITY_FAILED_REASON, ())
             )
             continue
         station.register_vi(vi_name, vi, vi_type)

@@ -149,14 +149,6 @@ class DCSingleInstrumentVI(DCMeasurementBase):
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def ping(self) -> bool:
-        """Query IDN from the SMU to verify it is reachable."""
-        try:
-            self._instrument.get_idn()  # type: ignore[attr-defined]
-            return True
-        except Exception:
-            return False
-
     def standby(self) -> None:
         """Zero the source current and reset the initiated state."""
         self._instrument.set_current(0.0)  # type: ignore[attr-defined]

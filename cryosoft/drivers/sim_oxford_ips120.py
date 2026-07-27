@@ -71,6 +71,9 @@ class SimOxfordIPS120:
 
         # Test control flags
         self._simulate_error: bool = False   # Raises CryoSoftCommunicationError on any get_
+        # Connection-lifecycle standard: True once close() has released
+        # the session; every command then fails (see _check_error).
+        self._closed: bool = False
         self._simulate_quench: bool = False  # Forces status to "QUENCH"
         self._simulate_clamp: bool = False   # Forces a hardware CLMP ("red Clamped") condition
 
@@ -282,8 +285,30 @@ class SimOxfordIPS120:
             direction = 1 if remaining > 0 else -1
             self._current += direction * max_step
 
+    # ------------------------------------------------------------------
+    # Connection lifecycle (the connection-lifecycle standard)
+    # ------------------------------------------------------------------
+
+    def close(self) -> None:
+        """Release the simulated bus session; the instrument is left untouched.
+
+        Idempotent and never raises. Afterwards every command — including
+        ``get_idn()`` — raises ``CryoSoftCommunicationError`` via
+        :meth:`_check_error`, modelling a released session so a
+        use-after-disconnect bug fails in a test instead of on hardware.
+        A closed driver is never reopened in place: the Station builds a
+        fresh instance when the operator reconnects.
+        """
+        self._closed = True
+
     def _check_error(self) -> None:
         """Raise CryoSoftCommunicationError if error simulation is active."""
+        if self._closed:
+            raise CryoSoftCommunicationError(
+                "SimOxfordIPS120: the session is closed — the driver was "
+                "disconnected from CryoSoft",
+                vi_name="SimOxfordIPS120",
+            )
         if self._simulate_error:
             raise CryoSoftCommunicationError(
                 "Simulated communication error on IPS 120",

@@ -57,7 +57,7 @@ from cryosoft.core.decorators import (
     get_control_scope,
     get_control_specs,
 )
-from cryosoft.core.exceptions import CryoSoftSafetyError
+from cryosoft.core.exceptions import CryoSoftCommunicationError, CryoSoftSafetyError
 from cryosoft.core.operation import OperationBase, ReadinessCondition
 from cryosoft.core.plan import ParamSpec
 from cryosoft.core.procedure import BaseProcedure
@@ -221,6 +221,38 @@ def test_driver_has_get_idn(module_name: str) -> None:
     )
 
 
+@pytest.mark.parametrize("module_name", _driver_module_names())
+def test_driver_has_close(module_name: str) -> None:
+    """Every driver exposes close() taking no arguments.
+
+    The driver half of the connection-lifecycle standard (see
+    ``BaseVirtualInstrument`` and ``drivers/README.md``): ``close()`` releases
+    the bus session so the operator can drive the instrument from its own
+    front panel or vendor software. ``Station.disconnect_instrument()`` calls
+    it on every driver the disconnecting VI exclusively owns, so a driver
+    without one would silently leak a session that keeps the instrument
+    locked to CryoSoft.
+    """
+    module = importlib.import_module(f"cryosoft.drivers.{module_name}")
+    (cls,) = _public_classes(module)
+    method = getattr(cls, "close", None)
+    assert callable(method), (
+        f"{cls.__name__} lacks close() — every driver must be able to "
+        f"release its session (the connection-lifecycle standard)"
+    )
+    required = [
+        p
+        for p in inspect.signature(method).parameters.values()
+        if p.name != "self"
+        and p.default is inspect.Parameter.empty
+        and p.kind not in (p.VAR_POSITIONAL, p.VAR_KEYWORD)
+    ]
+    assert not required, (
+        f"{cls.__name__}.close() must take no required arguments, "
+        f"got {[p.name for p in required]}"
+    )
+
+
 @pytest.mark.parametrize(
     "module_name",
     [m for m in _driver_module_names() if m.startswith("sim_")],
@@ -230,6 +262,29 @@ def test_sim_driver_constructs_without_hardware(module_name: str) -> None:
     module = importlib.import_module(f"cryosoft.drivers.{module_name}")
     (cls,) = _public_classes(module)
     cls("SIM::CONFORMANCE")
+
+
+@pytest.mark.parametrize(
+    "module_name",
+    [m for m in _driver_module_names() if m.startswith("sim_")],
+)
+def test_sim_driver_is_dead_after_close(module_name: str) -> None:
+    """A closed sim driver fails every command, starting with get_idn().
+
+    The sim half of the connection-lifecycle standard's ``close()`` contract:
+    a released session is really gone. Sims model it (rather than no-opping)
+    for the same reason they model every other failure mode — so a
+    use-after-disconnect bug fails here instead of on hardware. ``close()``
+    itself must stay idempotent and silent: a disconnect always succeeds.
+    """
+    module = importlib.import_module(f"cryosoft.drivers.{module_name}")
+    (cls,) = _public_classes(module)
+    driver = cls("SIM::CONFORMANCE")
+    driver.get_idn()  # reachable before the close
+    driver.close()
+    driver.close()  # idempotent — must not raise
+    with pytest.raises(CryoSoftCommunicationError):
+        driver.get_idn()
 
 
 @pytest.mark.parametrize(
@@ -302,6 +357,128 @@ def test_vi_contract(vi_cls: type) -> None:
         f"{[p.name for p in extra_required]} — give them defaults and read them "
         f"from **init_params instead"
     )
+
+
+# ── Connection-lifecycle standard ─────────────────────────────────────────────
+# See BaseVirtualInstrument's "Connection-lifecycle standard" docstring:
+# connect/disconnect own the bus session, initiate/standby own the instrument's
+# state, and building the Station sends nothing but an identity query. These
+# tests make rule 1 ("construction is silent") binding for every present and
+# future VI, which is the rule a new driver or VI is most likely to break by
+# accident — a single convenience command in __init__ is easy to write and
+# invisible until it clobbers a running experiment at app startup.
+
+# Commands a VI's __init__ MAY still issue on its drivers. `close` is a
+# RELEASE, not a state change: an externally configured VI is born detached so
+# that starting CryoSoft while the vendor tool holds the instrument works at
+# all (see MeasurementInstrumentBase's "Externally configured instruments").
+_SILENT_CONSTRUCTION_ALLOWED = frozenset({"close"})
+
+
+def _vi_specs_from_configs() -> list[tuple[str, str, type, dict]]:
+    """Return ``(config, vi_name, vi_class, init_params)`` for every configured VI.
+
+    Drawn from the shipped configs rather than a hand-written list, so a VI
+    added to any setup is covered the moment its config entry exists — and
+    with the REAL init_params it will be built with, which is what decides
+    whether a constructor takes a command path or not.
+    """
+    specs: list[tuple[str, str, type, dict]] = []
+    # CONFIGS_DIR directly rather than _config_dirs(), which is defined
+    # further down with the config-contract tests; this parametrize runs at
+    # import time.
+    for config_dir in sorted(p for p in CONFIGS_DIR.iterdir() if p.is_dir()):
+        devices = _load_yaml(config_dir / "devices.yaml")
+        for vi_name, vi_cfg in (devices.get("virtual_instruments") or {}).items():
+            specs.append(
+                (
+                    config_dir.name,
+                    vi_name,
+                    _import_class(vi_cfg["class"]),
+                    dict(vi_cfg.get("init_params") or {}),
+                )
+            )
+    return specs
+
+
+@pytest.mark.parametrize(
+    "config_name, vi_name, vi_cls, init_params",
+    _vi_specs_from_configs(),
+    ids=lambda v: v if isinstance(v, str) else "",
+)
+def test_vi_construction_sends_no_commands(
+    config_name: str, vi_name: str, vi_cls: type, init_params: dict
+) -> None:
+    """Building a VI must not command its instruments (connection-lifecycle rule 1).
+
+    Constructs the VI with recording stand-ins for its drivers and asserts
+    nothing was called on them. Building the Station is a *connection* act:
+    the only command it sends is the identity query, so an operator who
+    starts CryoSoft mid-experiment — or while the instrument is on its own
+    front panel — finds every instrument exactly as they left it. A setup
+    command that wants to run at bring-up belongs in ``initiate()``.
+
+    ``MagicMock`` stands in for each driver: it accepts any call and any
+    attribute, so this exercises the constructor's real path (config
+    validation included) while recording every command it would have sent.
+    """
+    from unittest.mock import MagicMock
+
+    drivers: dict[str, MagicMock] = {}
+
+    class _RecordingDrivers(dict):
+        """A driver dict that mints a recording driver for any role asked for."""
+
+        def __missing__(self, role: str) -> MagicMock:
+            driver = MagicMock(name=f"driver:{role}")
+            drivers[role] = driver
+            self[role] = driver
+            return driver
+
+    vi_cls(_RecordingDrivers(), **init_params)
+
+    offenders: list[str] = []
+    for role, driver in drivers.items():
+        for call in driver.mock_calls:
+            # call[0] is the dotted name: "" for the driver itself being
+            # called, "set_rate" for a method, "adapter.write" for nesting.
+            name = call[0]
+            if not name or name.split(".")[0] in _SILENT_CONSTRUCTION_ALLOWED:
+                continue
+            offenders.append(f"{role}.{name}")
+
+    assert not offenders, (
+        f"{config_name}/{vi_name} ({vi_cls.__name__}).__init__ commanded its "
+        f"instrument(s): {sorted(set(offenders))}. Building the Station must "
+        f"send nothing but the identity query (the connection-lifecycle "
+        f"standard, see BaseVirtualInstrument) — move these to initiate()."
+    )
+
+
+@pytest.mark.parametrize("vi_cls", _all_vi_classes(), ids=lambda c: c.__name__)
+def test_vi_has_connection_lifecycle_hooks(vi_cls: type) -> None:
+    """Every VI answers ping() and disconnect() with no required arguments.
+
+    Both are inherited from ``BaseVirtualInstrument``, so this only ever
+    fails on a VI that overrode one with a different shape — which would
+    break ``build_station()``'s identity check or
+    ``Station.disconnect_instrument()`` for that instrument alone, silently,
+    on whichever setup happens to configure it.
+    """
+    for name in ("ping", "disconnect", "initiate", "standby"):
+        method = getattr(vi_cls, name, None)
+        assert callable(method), f"{vi_cls.__name__} lacks {name}()"
+        required = [
+            p
+            for p in inspect.signature(method).parameters.values()
+            if p.name != "self"
+            and p.default is inspect.Parameter.empty
+            and p.kind not in (p.VAR_POSITIONAL, p.VAR_KEYWORD)
+        ]
+        assert not required, (
+            f"{vi_cls.__name__}.{name}() must take no required arguments, "
+            f"got {[p.name for p in required]}"
+        )
 
 
 # ── Safety-flag manifest standard ─────────────────────────────────────────────

@@ -237,7 +237,8 @@ class Orchestrator(QObject):
     action_blocked = pyqtSignal(str)
     action_succeeded = pyqtSignal(str, str)
     action_failed = pyqtSignal(str, str, str)
-    instrument_reconnected = pyqtSignal(str)  # offline VI brought live via retry_reconnect()
+    instrument_reconnected = pyqtSignal(str)  # offline VI brought live via connect_instrument()
+    instrument_disconnected = pyqtSignal(str)  # live VI released via disconnect_instrument()
     measurement_ready = pyqtSignal(dict)  # emitted after each measure() with last_datapoint
     operational_status = pyqtSignal(dict)  # per-tick runtime status record (troubleshooting)
     status_message = pyqtSignal(str)  # concise, human-readable PROCEDURE milestone line
@@ -1085,45 +1086,90 @@ class Orchestrator(QObject):
                 {"vi_name": vi_name, "method_name": method, "kwargs": {}}
             )
 
-    def retry_reconnect(self, vi_name: str) -> None:
-        """Try to bring an offline instrument online (GUI reconnect action).
+    def connect_instrument(self, vi_name: str) -> None:
+        """Bring an offline instrument online (the GUI's Connect action).
 
-        Delegates to ``Station.retry_instrument()`` and reports the verdict
+        The ``connect`` half of the connection-lifecycle standard (see
+        ``BaseVirtualInstrument``) at the Orchestrator's public API — the one
+        entry point for both cases that leave a VI offline: it never
+        connected at startup, or the operator disconnected it deliberately.
+        Delegates to ``Station.connect_instrument()`` and reports the verdict
         through the standard action signals: ``action_succeeded(vi_name,
-        "reconnect")`` plus ``instrument_reconnected(vi_name)`` on success,
+        "connect")`` plus ``instrument_reconnected(vi_name)`` on success,
         ``action_failed`` with the reason otherwise.
 
         Allowed only in IDLE: a VI joining the station mid-procedure would
         bypass the run's safety review. Runs synchronously rather than via the
         GUI action queue — the queue dispatches to *registered* VIs, which an
         offline one is not, and everything is on the one thread anyway, so no
-        tick can interleave with the reconnect (the single-writer guarantee
+        tick can interleave with the connect (the single-writer guarantee
         holds).
 
         Args:
-            vi_name: Name of the offline VI to reconnect.
+            vi_name: Name of the offline VI to connect.
         """
         if self._state != OrchestratorState.IDLE:
             msg = (
-                f"Cannot reconnect {vi_name}: Orchestrator is in state "
-                f"{self._state.name}, reconnect requires IDLE"
+                f"Cannot connect {vi_name}: Orchestrator is in state "
+                f"{self._state.name}, connecting requires IDLE"
             )
-            logger.info("Blocked reconnect: %s", msg)
+            logger.info("Blocked connect: %s", msg)
             self.action_blocked.emit(msg)
             return
-        ok, message = self._station.retry_instrument(vi_name)
+        ok, message = self._station.connect_instrument(vi_name)
         if ok:
             # A reconnected switch VI must be adoptable as the scanner —
             # re-run the same first-switch resolution done at construction.
             if self._scanner_vi_name is None:
                 switch_names = self._station.switch_vi_names()
                 self._scanner_vi_name = switch_names[0] if switch_names else None
-            logger.info("Reconnect succeeded for '%s'", vi_name)
+            logger.info("Connect succeeded for '%s'", vi_name)
             self.instrument_reconnected.emit(vi_name)
-            self.action_succeeded.emit(vi_name, "reconnect")
+            self.action_succeeded.emit(vi_name, "connect")
         else:
-            logger.warning("Reconnect failed for '%s': %s", vi_name, message)
-            self.action_failed.emit(vi_name, "reconnect", message)
+            logger.warning("Connect failed for '%s': %s", vi_name, message)
+            self.action_failed.emit(vi_name, "connect", message)
+
+    def disconnect_instrument(self, vi_name: str) -> None:
+        """Release a live instrument to its front panel (the GUI's Disconnect action).
+
+        The ``disconnect`` half of the connection-lifecycle standard (see
+        ``BaseVirtualInstrument``): delegates to
+        ``Station.disconnect_instrument()``, which hands the instrument back
+        WITHOUT standing it down — a magnet at field stays at field — and
+        degrades the VI into the offline registry, exactly as if it had never
+        connected. Reports through ``action_succeeded(vi_name, "disconnect")``
+        plus ``instrument_disconnected(vi_name)``, or ``action_failed``.
+
+        Allowed only in IDLE, and refused for a VI the active run claims —
+        the same admission rule ``connect_instrument()`` uses, for the same
+        reason: a station that loses an instrument mid-procedure has escaped
+        the run's safety review. A disconnected instrument is not a fault, so
+        no ``ErrorEvent`` is raised: the operator asked for this.
+
+        Args:
+            vi_name: Name of the live VI to disconnect.
+        """
+        if self._state != OrchestratorState.IDLE:
+            msg = (
+                f"Cannot disconnect {vi_name}: Orchestrator is in state "
+                f"{self._state.name}, disconnecting requires IDLE"
+            )
+            logger.info("Blocked disconnect: %s", msg)
+            self.action_blocked.emit(msg)
+            return
+        ok, message = self._station.disconnect_instrument(vi_name)
+        if ok:
+            # The scanner slot must not keep naming a VI that is gone; the
+            # next connect re-resolves it (see connect_instrument()).
+            if self._scanner_vi_name == vi_name:
+                self._scanner_vi_name = None
+            logger.info("Instrument '%s' disconnected by the operator", vi_name)
+            self.instrument_disconnected.emit(vi_name)
+            self.action_succeeded.emit(vi_name, "disconnect")
+        else:
+            logger.warning("Disconnect failed for '%s': %s", vi_name, message)
+            self.action_failed.emit(vi_name, "disconnect", message)
 
     def offline_reason(self, vi_name: str) -> str:
         """Return the current failure reason for an offline VI, GUI-safe.
@@ -1169,9 +1215,9 @@ class Orchestrator(QObject):
     def retry_fault(self, vi_name: str) -> None:
         """Retry a VI's active runtime fault: reset counters, poll once.
 
-        The runtime counterpart of ``retry_reconnect()``: it never rebuilds
+        The runtime counterpart of ``connect_instrument()``: it never rebuilds
         a driver (the VI is already live) — only ``Station.retry_fault()``'s
-        counter-reset-and-repoll. Unlike ``retry_reconnect()`` this is not
+        counter-reset-and-repoll. Unlike ``connect_instrument()`` this is not
         restricted to IDLE: an unclaimed VI's fault (the common case this
         exists for) does not require aborting whatever run is in progress
         to retry it, and everything still runs on the one tick-driven

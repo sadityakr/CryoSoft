@@ -6,6 +6,10 @@
 #   widget per parameter. Controls that declare ParamSpecs render through
 #   gui/param_form (combo for choices, checkbox for bool, tooltipped and
 #   unit-labelled fields); bare @control methods keep plain QLineEdits.
+#   The header carries both axes of the connection-lifecycle standard (see
+#   virtual_instruments/base.py): a ConnectionButton ("Disconnect" — who owns
+#   the instrument, via Orchestrator.disconnect_instrument()) next to the
+#   LifecycleToggleButton (Initiate/Standby — what the instrument is doing).
 #   Connects to Orchestrator.states_updated for live updates each monitor tick.
 #   A runtime fault (stale/disconnected — the SAME status the QSS border
 #   already reflects) additionally shows a fault row (message + Acknowledge +
@@ -65,7 +69,7 @@ from cryosoft.core.decorators import (
     get_monitored_methods,
 )
 from cryosoft.core.orchestrator import Orchestrator
-from cryosoft.gui.lifecycle_toggle import LifecycleToggleButton
+from cryosoft.gui.lifecycle_toggle import ConnectionButton, LifecycleToggleButton
 from cryosoft.gui.param_form import (
     build_param_tooltip,
     build_param_widget,
@@ -118,6 +122,9 @@ class InstrumentPanel(QGroupBox):
         extra_widget: QWidget | None = None,
     ) -> None:
         super().__init__(parent)  # no native title — see module docstring
+        # objectNames are API (gui-edit skill): MonitorWindow finds this card
+        # by name when a disconnect swaps it for an offline one.
+        self.setObjectName(f"{vi_name}_panel")
         self._vi_name = vi_name
         self._vi = vi
         self._orchestrator = orchestrator
@@ -171,6 +178,12 @@ class InstrumentPanel(QGroupBox):
         self._name_label = QLabel(f"<b>{self._vi_name}</b>")
         self._name_label.setObjectName(f"{self._vi_name}_name_label")
         self._name_label.setProperty("class", "panel_name_label")
+        # The header's elastic element: the two lifecycle controls and the
+        # front-panel icon hold their natural widths, so a long VI name in a
+        # narrow grid column is what gives way — never a clipped button. The
+        # floor keeps enough characters to tell two cards apart; widening the
+        # instruments splitter shows the rest.
+        self._name_label.setMinimumWidth(70)
         header_row.addWidget(self._name_label)
         if self._type_tag:
             tag_lbl = QLabel(self._type_tag)
@@ -188,6 +201,18 @@ class InstrumentPanel(QGroupBox):
             )
             fp_btn.clicked.connect(self._open_front_panel)
             header_row.addWidget(fp_btn)
+        # The two axes of the connection-lifecycle standard, side by side:
+        # Disconnect (who owns the instrument) next to Initiate/Standby
+        # (what the instrument is doing). Every card carries both, whatever
+        # its role — that uniformity IS the standard.
+        self._connection = ConnectionButton(
+            self._vi_name,
+            "disconnect",
+            self._submit_disconnect,
+            parent=self,
+            compact=True,
+        )
+        header_row.addWidget(self._connection)
         self._lifecycle = LifecycleToggleButton(self._vi_name, self._submit_lifecycle, parent=self)
         header_row.addWidget(self._lifecycle)
         outer.addLayout(header_row)
@@ -250,6 +275,23 @@ class InstrumentPanel(QGroupBox):
         outer.addStretch()
 
         self.setLayout(outer)
+
+    @property
+    def vi_name(self) -> str:
+        """Return the registered name of the VI this card renders."""
+        return self._vi_name
+
+    def close_front_panel(self) -> None:
+        """Close this VI's front-panel window, if open.
+
+        Called before the card is replaced by an offline one on disconnect —
+        the mirror of ``OfflineInstrumentPanel.close_details()``. A front
+        panel left open would keep offering controls for an instrument
+        CryoSoft no longer holds.
+        """
+        if self._front_panel is not None:
+            self._front_panel.close()
+            self._front_panel = None
 
     def _open_front_panel(self) -> None:
         """Lazily create and show this VI's full front-panel window."""
@@ -439,7 +481,16 @@ class InstrumentPanel(QGroupBox):
                 widget.style().polish(widget)
 
             if new_status == "disconnected":
-                self._name_label.setText(f"<b>{self._vi_name}</b>  [DISCONNECTED]")
+                # "NOT RESPONDING", not "DISCONNECTED": since the
+                # connection-lifecycle standard made Disconnect an operator
+                # verb, that word on a card means "the operator released this
+                # instrument" (the offline card's badge). This badge is the
+                # opposite situation — CryoSoft still holds the instrument and
+                # it has stopped answering. The underlying
+                # Condition/FaultRecord kind stays "disconnected" (the
+                # established Instrument-fault vocabulary, see GLOSSARY.md);
+                # only the operator-facing wording is disambiguated.
+                self._name_label.setText(f"<b>{self._vi_name}</b>  [NOT RESPONDING]")
             elif new_status == "stale":
                 self._name_label.setText(f"<b>{self._vi_name}</b>  [stale]")
             else:
@@ -557,6 +608,18 @@ class InstrumentPanel(QGroupBox):
             action: ``"initiate"`` or ``"standby"``.
         """
         self._orchestrator.submit_vi_action(self._vi_name, action)
+
+    def _submit_disconnect(self) -> None:
+        """Ask the Orchestrator to release this instrument to its front panel.
+
+        Runs through ``Orchestrator.disconnect_instrument()`` rather than the
+        GUI action queue: a disconnect removes the VI from the live registry,
+        which the queue (built to dispatch to *registered* VIs) cannot express.
+        The verdict arrives on ``instrument_disconnected`` / ``action_failed``,
+        and MonitorWindow — not this panel — swaps the card, because a card
+        cannot replace itself.
+        """
+        self._orchestrator.disconnect_instrument(self._vi_name)
 
     def _on_action_succeeded(self, vi_name: str, method_name: str) -> None:
         """Flip the lifecycle toggle once Orchestrator confirms initiate/standby ran.

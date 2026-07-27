@@ -775,7 +775,8 @@ class MonitorWindow(QMainWindow):
         """Swap an offline card for a live InstrumentPanel in place.
 
         Args:
-            vi_name: The VI just brought live by Orchestrator.retry_reconnect().
+            vi_name: The VI just brought live by
+                Orchestrator.connect_instrument().
         """
         card = self._offline_cards.pop(vi_name, None)
         if card is None:
@@ -790,6 +791,42 @@ class MonitorWindow(QMainWindow):
         card.close_details()
         card.deleteLater()
         logger.info("Offline card for '%s' replaced by live panel", vi_name)
+
+    def _on_instrument_disconnected(self, vi_name: str) -> None:
+        """Swap a live InstrumentPanel for an offline card in place.
+
+        The exact inverse of ``_on_instrument_reconnected()`` — the GUI half
+        of the connection-lifecycle standard's "a disconnected instrument
+        degrades exactly like one that never connected". The card is swapped
+        rather than restyled because the live panel's controls, monitored
+        values and lifecycle toggle all describe an instrument CryoSoft no
+        longer holds; showing them greyed out would invite clicks that can
+        only be refused.
+
+        Args:
+            vi_name: The VI just released by
+                Orchestrator.disconnect_instrument().
+        """
+        panel = next((p for p in self._panels if p.vi_name == vi_name), None)
+        if panel is None:
+            return
+        tag_by_type = {"measurement": "Measurement", "switch": "Scanner"}
+        info = self._station.get_offline_info(vi_name)
+        card = OfflineInstrumentPanel(
+            vi_name,
+            info,
+            self._orchestrator,
+            parent=self,
+            type_tag=tag_by_type.get(info.vi_type),
+        )
+        card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._offline_cards[vi_name] = card
+        self._panels.remove(panel)
+        self._instruments_grid.replaceWidget(panel, card)
+        card.show()
+        panel.close_front_panel()
+        panel.deleteLater()
+        logger.info("Live panel for '%s' replaced by offline card", vi_name)
 
     def _build_scanner_enable_checkbox(self, vi_name: str) -> QCheckBox:
         """Build one switch card's Enable Scanner checkbox.
@@ -1125,6 +1162,9 @@ class MonitorWindow(QMainWindow):
         )
         self._orchestrator.instrument_reconnected.connect(
             self._on_instrument_reconnected
+        )
+        self._orchestrator.instrument_disconnected.connect(
+            self._on_instrument_disconnected
         )
         self._orchestrator.state_changed.connect(self._on_state_changed)
         self._orchestrator.error_occurred.connect(self._on_error)

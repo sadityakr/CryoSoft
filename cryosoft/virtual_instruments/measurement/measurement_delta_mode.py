@@ -335,19 +335,6 @@ class DeltaModeMeasurementVI(MeasurementInstrumentBase):
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def ping(self) -> bool:
-        """Query IDN from both drivers to verify they are reachable.
-
-        Returns:
-            True if both source and meter respond to ``get_idn()``.
-        """
-        try:
-            self._source.get_idn()   # type: ignore[attr-defined]
-            self._meter.get_idn()    # type: ignore[attr-defined]
-            return True
-        except Exception:
-            return False
-
     def standby(self) -> None:
         """Abort the delta engine, turn off outputs, and reset state."""
         try:

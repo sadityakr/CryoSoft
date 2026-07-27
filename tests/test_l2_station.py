@@ -16,15 +16,26 @@ from cryosoft.virtual_instruments.base import BaseVirtualInstrument
 
 
 class _AddressCapturingDriver:
-    """Test double for build_station(): records the resource string it was built with."""
+    """Test double for build_station(): records the resource string it was built with.
+
+    Honours the driver contract's connection half (``get_idn`` / ``close``)
+    so a station built from it passes the build's identity check.
+    """
 
     last_resource: str | None = None
 
     def __init__(self, resource_string: str) -> None:
         type(self).last_resource = resource_string
+        self.closed = False
 
     def get_state(self) -> dict:
         return {}
+
+    def get_idn(self) -> str:
+        return "CRYOSOFT,ADDRESS-CAPTURING-STUB,0,0"
+
+    def close(self) -> None:
+        self.closed = True
 
 
 @pytest.fixture
@@ -866,14 +877,27 @@ class _FlakyDriver:
             raise CryoSoftCommunicationError(
                 f"Cannot open instrument at {resource_string}"
             )
+        self.closed = False
+
+    def get_idn(self) -> str:
+        return "CRYOSOFT,FLAKY-STUB,0,0"
+
+    def close(self) -> None:
+        self.closed = True
 
 
-class _StubVI:
-    """Minimal VI test double satisfying the build contract."""
+class _StubVI(BaseVirtualInstrument):
+    """Minimal VI test double satisfying the build contract.
+
+    Inherits the connection-lifecycle standard's ``ping()`` / ``disconnect()``
+    from the base, so a station built from it behaves exactly like a real one
+    at the identity check and on connect/disconnect.
+    """
+
+    vi_type = "system"
 
     def __init__(self, drivers: dict, **init_params) -> None:
-        self._drivers = drivers
-        self._init_params = init_params
+        super().__init__(drivers, **init_params)
 
 
 class _CommFailVI(_StubVI):
@@ -984,8 +1008,8 @@ def test_fallback_keeps_config_with_unreachable_instrument(tmp_path):
     assert station.offline_vi_names() == ["bad_vi"]
 
 
-def test_retry_instrument_reconnects_after_transient_failure(tmp_path):
-    """retry_instrument() brings a VI live once its driver becomes reachable."""
+def test_connect_instrument_reconnects_after_transient_failure(tmp_path):
+    """connect_instrument() brings a VI live once its driver becomes reachable."""
     _FlakyDriver.fail_times = 1
     _FlakyDriver.attempts = 0
     station = build_station(
@@ -993,7 +1017,7 @@ def test_retry_instrument_reconnects_after_transient_failure(tmp_path):
     )
     assert station.offline_vi_names() == ["bad_vi"]
 
-    ok, message = station.retry_instrument("bad_vi")
+    ok, message = station.connect_instrument("bad_vi")
 
     assert ok is True
     assert "bad_vi" in message
@@ -1002,13 +1026,13 @@ def test_retry_instrument_reconnects_after_transient_failure(tmp_path):
     assert station.measurement_vi_names() == ["bad_vi"]
 
 
-def test_retry_instrument_failure_updates_reason_and_stays_offline(tmp_path):
+def test_connect_instrument_failure_updates_reason_and_stays_offline(tmp_path):
     """A failed retry keeps the VI offline and refreshes the failure reason."""
     station = build_station(
         _write_degraded_config(tmp_path, "tests.test_l2_station._UnreachableDriver")
     )
 
-    ok, message = station.retry_instrument("bad_vi")
+    ok, message = station.connect_instrument("bad_vi")
 
     assert ok is False
     assert "bad_drv" in message
@@ -1017,11 +1041,11 @@ def test_retry_instrument_failure_updates_reason_and_stays_offline(tmp_path):
     assert "bad_drv" in station.get_offline_info("bad_vi").reason
 
 
-def test_retry_instrument_rejects_non_offline_name(sim_station: Station):
+def test_connect_instrument_rejects_non_offline_name(sim_station: Station):
     """Retrying a live or unknown VI returns an explicit failure verdict."""
-    ok, message = sim_station.retry_instrument("magnet_z")
+    ok, message = sim_station.connect_instrument("magnet_z")
     assert ok is False
     assert "not offline" in message
 
-    ok, message = sim_station.retry_instrument("no_such_vi")
+    ok, message = sim_station.connect_instrument("no_such_vi")
     assert ok is False
