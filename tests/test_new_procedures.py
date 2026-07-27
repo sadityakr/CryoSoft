@@ -1013,6 +1013,44 @@ def test_full_orchestrator_run_value_slot(station, tmp_path, qtbot):
         assert np.allclose(f["data"]["current_A"][:, 1, 0], -1e-6)
 
 
+def test_full_orchestrator_run_releases_the_rtm2_session_on_standby(
+    station, tmp_path, qtbot
+):
+    """The RTM2's detach-when-idle release fires through a real Orchestrator run.
+
+    Every other check of this standard (test_tensormeter_measurement_vi.py,
+    test_connection_lifecycle.py, test_conformance.py) exercises the VI
+    directly. This is the end-to-end gap: SweepMeasureProcedure.standby(),
+    dispatched by a real Orchestrator at the end of a real run, must really
+    release the externally configured RTM2's driver session — proof the
+    declaration (BaseVirtualInstrument.detach_when_idle, see its class
+    docstring) is framework behaviour all the way through the tick loop,
+    not something the procedure or Orchestrator special-cases for this one
+    VI.
+    """
+    from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
+
+    station.magnet_z._default_ramp_rate = 6000.0
+    station.magnet_z._ramp_segments = []
+
+    vi = _register_rtm2(station, configured_externally=True)
+    driver = vi._main
+    driver._averaging_time_s = 0.0  # keep the test fast
+    assert driver._closed is True  # born detached
+    assert vi.is_attached() is False
+
+    proc = _field_proc(station, tmp_path, {"measurement_vi": "tensormeter_measurement"})
+    orch = Orchestrator(station, tick_interval_ms=10)
+    orch.run_procedure(proc)
+
+    with qtbot.waitSignal(orch.procedure_finished, timeout=10000):
+        pass
+
+    assert orch._state == OrchestratorState.IDLE
+    assert vi.is_attached() is False
+    assert driver._closed is True
+
+
 # ── Temperature-channel on/off toggles ───────────────────────────────────────
 # Both sweep procedures expose set_vti_temperature / set_sample_temperature.
 # "Off" means the procedure emits no Target for that VI, so the Orchestrator
