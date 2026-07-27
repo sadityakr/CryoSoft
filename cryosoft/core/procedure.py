@@ -906,6 +906,12 @@ class SweepMeasureProcedure(BaseProcedure):
             if not key.endswith("_array")
         ]
 
+        # Externally configured provenance hook (see MeasurementInstrumentBase's
+        # "Externally configured instruments" standard): set once measure()
+        # has checked the selected VI for a last_settings_snapshot attribute,
+        # so that check runs at most once per run — see measure().
+        self._snapshot_recorded: bool = False
+
     # ------------------------------------------------------------------
     # Reading-loop plumbing (shared by __init__, the form, and the plots)
     # ------------------------------------------------------------------
@@ -1438,6 +1444,19 @@ class SweepMeasureProcedure(BaseProcedure):
         if self._data_manager is None:
             raise RuntimeError("measure() called before initiate()")
         vi = self._station.get_vi(self._measurement_vi)
+
+        # Externally configured provenance hook, checked at most once per run
+        # (see MeasurementInstrumentBase's "Externally configured
+        # instruments" standard): any measurement VI that exposes a
+        # last_settings_snapshot dict attribute gets it recorded into the
+        # run's HDF5 /metadata automatically; VIs without the attribute are
+        # untouched (getattr default is None).
+        if not self._snapshot_recorded:
+            self._snapshot_recorded = True
+            snapshot = getattr(vi, "last_settings_snapshot", None)
+            if isinstance(snapshot, dict):
+                self._data_manager.record_settings_snapshot(snapshot)
+
         n_loop1, n_loop2 = self._loop_shape
         keys = list(vi.measurement_data_keys) + list(vi.measurement_scalar_columns)
         grids: dict[str, list[list[Any]]] = {

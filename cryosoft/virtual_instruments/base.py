@@ -576,10 +576,11 @@ class MeasurementInstrumentBase(BaseVirtualInstrument):
       carry ``"{quantity}"`` (the mean — the value the GUI plots) and
       ``"{quantity}_error"`` (the standard error of the mean), both dtype
       "float" — exactly what ``quantity_columns()`` derives. It may also
-      carry VI-specific extras unrelated to any single array, e.g. ``n_valid``
-      (dtype "int") reporting how many of the padded samples were real.
-      ``tests/test_conformance.py`` enforces the mean/error pairing
-      automatically for every ``_array`` key.
+      carry VI-specific extras unrelated to any single array; a VI whose
+      ``take_reading()`` can deliver fewer raw samples than ``data_arrays()``
+      declared MUST carry ``n_valid`` (dtype "int") — see "Under-delivery:
+      the ``n_valid`` standard" below. ``tests/test_conformance.py`` enforces
+      the mean/error pairing automatically for every ``_array`` key.
 
     Uniform lifecycle (methods)
     ---------------------------
@@ -608,12 +609,101 @@ class MeasurementInstrumentBase(BaseVirtualInstrument):
       declared for the same ``params`` — always), the mean (``"{quantity}"``),
       and the standard error of the mean (``"{quantity}_error"``), computed
       over the VALID samples with ``self.mean_and_sem(...)``. It must also
-      return every other ``measurement_scalar_columns`` key (e.g. ``n_valid``).
-      A VI whose instrument may return fewer points than requested still pads
-      the array to the declared length with ``float("nan")`` and computes the
-      mean/error only from the valid samples. This fixed-shape guarantee is
-      the contract that prevents HDF5 layout mismatches mid-run.
+      return every other ``measurement_scalar_columns`` key (e.g. ``n_valid``
+      — see "Under-delivery: the ``n_valid`` standard" below). A VI whose
+      instrument may return fewer points than requested still pads the array
+      to the declared length with ``float("nan")``, but computes the
+      mean/error/``n_valid`` over the samples actually delivered, BEFORE that
+      padding is applied — never by filtering NaN back out of the padded
+      array. This fixed-shape guarantee is the contract that prevents HDF5
+      layout mismatches mid-run.
     * ``standby() -> None`` — put the instrument in a safe-off idle state.
+
+    Under-delivery: the ``n_valid`` standard
+    -----------------------------------------
+    A VI whose ``take_reading()`` can deliver fewer raw samples than
+    ``data_arrays()`` declared for a quantity MUST report an ``n_valid``
+    scalar column (dtype ``"int"``, added to ``measurement_scalar_columns``)
+    — the number of samples the mean and SEM were actually computed over.
+
+    * The returned array preserves the delivered rows verbatim (including
+      any instrument-emitted NaN, e.g. a ratiometric divide-by-zero),
+      padded with ``float("nan")`` out to the declared length.
+    * The mean, SEM, and ``n_valid`` are computed over the delivered samples
+      BEFORE padding — never by filtering NaN out of the padded array, which
+      would conflate CryoSoft's own padding with a NaN the instrument itself
+      emitted.
+    * Row selection when more samples arrived than requested (first-*n* vs
+      last-*n*) is per-instrument physics — e.g. an instrument with a
+      free-running buffer and a settling transient prefers the last *n*
+      delivered rows — and is documented on that VI's own ``take_reading()``,
+      not standardised here.
+
+    A VI whose instrument always delivers exactly the requested sample count
+    has nothing to report and may omit ``n_valid`` entirely.
+
+    Externally configured instruments
+    ----------------------------------
+    Some instruments expose far more configuration surface than a VI wraps
+    (analysis modes, pulse trains, reference muxing, preamp modes, …). A VI
+    may support an operator configuring the instrument with the vendor's own
+    tool and letting CryoSoft run only the measurement — arm the data path,
+    trigger, read, and save a fixed-shape data block — without touching that
+    configuration. This is the ``configured_externally`` standard, motivated
+    by single-client instrument firmware where the vendor tool and CryoSoft
+    are mutually exclusive at the instrument, and it applies to every
+    externally configured VI, not just the one that first needed it.
+
+    ``__init__`` reads the optional init param ``configured_externally: bool``
+    (default ``False``) from ``init_params`` and stores it as
+    ``self._configured_externally`` — config-driven, per-VI, via
+    ``devices.yaml``'s ``init_params``, with zero per-subclass boilerplate.
+    Omitted or ``False`` leaves every existing VI's behavior unchanged.
+
+    When ``self._configured_externally`` is true:
+
+    * ``initiate_measurement()`` MUST NOT write any excitation, analysis, or
+      routing parameter to the instrument — the external tool owns them. It
+      MUST still: (a) verify connectivity with a TRUE ROUND TRIP — a query
+      that fails loudly on a dead or externally-held channel, never a
+      liveness check that can succeed vacuously; (b) arm the data path
+      (buffers, channel/format selection, anything ``take_reading()``'s
+      decode depends on); (c) read back from the instrument any value its
+      own timing or decoding depends on (e.g. an externally set averaging
+      time that determines the settle sleep); and (d) set the internal state
+      ``take_reading()`` / ``data_arrays()`` require. Inert
+      ``measurement_parameters`` MUST still be accepted (procedures pass
+      them regardless of mode); log one INFO listing the ignored parameters.
+    * ``standby()`` MUST NOT overwrite externally-owned source state (e.g.
+      must not zero a current the external tool set). It resets only
+      CryoSoft's own internal arming state and RELEASES the hardware
+      resource (the driver's ``close()``).
+
+    A VI that captures a provenance snapshot of the instrument's
+    arming-time configuration SHOULD expose it as ``self.last_settings_
+    snapshot`` (a plain ``dict``, ``None`` until a run has armed in
+    external mode): ``SweepMeasureProcedure.measure()`` duck-types this
+    attribute and records it into the run's HDF5 ``/metadata`` the first
+    time it sees a non-``None`` value (see ``DataManager.
+    record_settings_snapshot()``), with no per-VI plumbing required.
+
+    **Detached-idle lifecycle**: an externally configured VI holds its
+    instrument connection only from ``initiate_measurement()`` to
+    ``standby()``.
+
+    * Born detached: ``__init__`` releases the connection before returning,
+      so starting CryoSoft while the vendor tool is open builds cleanly.
+    * ``initiate()`` / ``ping()`` verify-and-release: connect, a TRUE ROUND
+      TRIP, then close — returning a clean failure verdict rather than
+      raising when the instrument is currently held by the external tool.
+    * ``initiate_measurement()`` (re)acquires the connection for the
+      measurement window.
+    * ``standby()`` releases it again. Every run path already ends in
+      ``standby()``, so the instrument frees itself automatically and the
+      operator may attach the vendor tool at any time between runs.
+    * Never reconnect opportunistically in the background (e.g. from a
+      monitored poll): a wrongly-timed connect can fail silently against the
+      external tool's session, not loudly.
 
     The reading loop (optional): ``reading_setters``
     ------------------------------------------------
@@ -667,6 +757,26 @@ class MeasurementInstrumentBase(BaseVirtualInstrument):
     # Reading-loop declaration: parameter name -> per-reading setter method.
     # Empty (the default) means no parameter of this VI can be looped.
     reading_setters: ClassVar[dict[str, str]] = {}
+
+    def __init__(self, drivers: dict[str, object], **init_params: Any) -> None:
+        """Initialise the measurement VI.
+
+        Args:
+            drivers: Mapping of role -> driver instance.
+            **init_params: Additional parameters from YAML config. Recognises
+                the externally-configured standard's ``configured_externally``
+                (bool, default ``False``) — see the class docstring's
+                "Externally configured instruments" section — in addition to
+                whatever a concrete VI's own ``__init__`` reads.
+        """
+        super().__init__(drivers, **init_params)
+        # The externally-configured standard's mode flag. Config-driven, no
+        # per-subclass boilerplate: a concrete VI's __init__ chains to this
+        # one (via super().__init__(drivers, **init_params)) and never needs
+        # to read this key itself.
+        self._configured_externally: bool = bool(
+            init_params.get("configured_externally", False)
+        )
 
     @property
     def reading_parameters(self) -> dict[str, ParamSpec]:

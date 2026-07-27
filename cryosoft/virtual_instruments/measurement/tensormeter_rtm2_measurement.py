@@ -17,32 +17,39 @@
 #   routes (dict[str, list[dict]] — named switch-state cycles, each state a
 #   {"drv_minus": [...], "drv_plus": [...], "sns_minus": [...], "sns_plus":
 #   [...]} mapping of BNC port lists 1-8), max_current_A (default 0.01),
-#   max_voltage_V (default 10.0). initiate_measurement(current_amplitude_A,
-#   averaging_time_s, analysis_mode, switch_sequence, readings_per_point)
+#   max_voltage_V (default 10.0), configured_externally (default False — see
+#   MeasurementInstrumentBase's "Externally configured instruments"
+#   standard). initiate_measurement(current_amplitude_A, averaging_time_s,
+#   analysis_mode, switch_sequence, readings_per_point, tensor_component)
 #   must be called before the argument-less take_reading().
 # process: |
 #   initiate_measurement() optionally builds the configured switch_sequence's
 #   states via the driver's build_switch_state() and arms set_switch_states(),
 #   sets the Analysis Mode, averaging time, and source current amplitude, and
-#   clears the device data buffer. take_reading() triggers readings_per_point
-#   demodulation windows (one averaging_time_s apart) and reads back that many
-#   Res A / Res B samples.
+#   clears the device data buffer — unless configured_externally, in which
+#   case only the data path is armed (channel selection, buffer, timing
+#   readback, provenance snapshot) and the external tool's own configuration
+#   is left untouched. take_reading() triggers readings_per_point
+#   demodulation windows (one averaging_time_s apart) and reads back that
+#   many Res A / Res B samples for the selected tensor_component.
 # output: |
 #   Mean/error/array triple per quantity: {"res_a_ohm": float, "res_a_ohm_error":
 #   float, "res_a_ohm_array": list[float], "res_b_ohm": float,
 #   "res_b_ohm_error": float, "res_b_ohm_array": list[float]}, arrays of
-#   length readings_per_point. Named after the firmware's own "Res A"/"Res B"
+#   length readings_per_point, plus "n_valid": int (rows actually delivered
+#   before NaN padding). Named after the firmware's own "Res A"/"Res B"
 #   terms rather than asserting "sheet"/"Hall" semantics this VI cannot
 #   verify — which physical quantity each represents depends on the
 #   operator's chosen switch_sequence and analysis_mode, exactly as on the
 #   real instrument.
-# last_updated: 2026-07-23
+# last_updated: 2026-07-27
 # ---
 
 """TensormeterRTM2MeasurementVI — resistance-tensor measurement method (RTM2)."""
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from typing import Any, ClassVar
@@ -51,6 +58,8 @@ from cryosoft.core.decorators import control
 from cryosoft.core.exceptions import CryoSoftConfigError
 from cryosoft.core.plan import ParamSpec
 from cryosoft.virtual_instruments.base import MeasurementInstrumentBase
+
+log = logging.getLogger(__name__)
 
 # Duplicated from the driver's documented Analysis Mode encoding (vendor TCP
 # Commands §3.12) — the VI layer cannot import cryosoft.drivers.* (layer
@@ -68,6 +77,16 @@ _ANALYSIS_MODE_VALUES: dict[str, int] = {
 # port lists (see TensormeterRTM2.build_switch_state()).
 _ROUTE_KEYS = frozenset({"drv_minus", "drv_plus", "sns_minus", "sns_plus"})
 
+# Tensor components the driver's 44-column data block carries per side (Res A
+# / Res B), each a "{c}" slot in the res_a_{c}_ohm / res_b_{c}_ohm column pair
+# — see tensormeter_rtm2._DATA_COLUMNS. Data-path only (extracting a column
+# pair writes nothing to the instrument), so this parameter stays ACTIVE even
+# when configured_externally, unlike every excitation/analysis/routing param
+# below.
+_TENSOR_COMPONENTS: frozenset[str] = frozenset(
+    {"dc", "1st_re", "1st_im", "2nd_re", "2nd_im", "3rd_re", "3rd_im"}
+)
+
 
 class TensormeterRTM2MeasurementVI(MeasurementInstrumentBase):
     """Virtual Instrument for RTM2 resistance-tensor measurements.
@@ -83,7 +102,16 @@ class TensormeterRTM2MeasurementVI(MeasurementInstrumentBase):
         data = vi.take_reading()
         # data = {"res_a_ohm": float, "res_a_ohm_error": float,
         #         "res_a_ohm_array": list[float](5,), "res_b_ohm": float,
-        #         "res_b_ohm_error": float, "res_b_ohm_array": list[float](5,)}
+        #         "res_b_ohm_error": float, "res_b_ohm_array": list[float](5,),
+        #         "n_valid": int}
+
+    With ``init_params["configured_externally"] = True`` (see
+    ``MeasurementInstrumentBase``'s "Externally configured instruments"
+    standard), ``initiate_measurement()`` only arms the CryoSoft-owned data
+    path and leaves ``current_amplitude_A``/``averaging_time_s``/
+    ``analysis_mode``/``switch_sequence`` to whatever the external tool
+    (e.g. TMCS) set; ``tensor_component`` still selects the extracted
+    column pair either way.
 
     Driver contract
     ---------------
@@ -91,7 +119,9 @@ class TensormeterRTM2MeasurementVI(MeasurementInstrumentBase):
     ``set_switch_states(*states)``, ``set_analysis_mode(mode)``,
     ``set_averaging_time(seconds)``, ``set_current_amplitude(amps)``,
     ``clear_data()``, ``trigger_demodulation()``, ``read_new_data()``,
-    ``get_idn() -> str``.
+    ``get_idn() -> str``, and, for the externally configured standard:
+    ``close()``, ``ensure_connected()``, ``get_averaging_time()``,
+    ``get_settings_snapshot() -> dict``, ``select_data_channels(*indices)``.
     """
 
     display_label: str = "Resistance tensor (RTM2)"
@@ -101,7 +131,9 @@ class TensormeterRTM2MeasurementVI(MeasurementInstrumentBase):
         "res_a_ohm", "res_b_ohm"
     )
     measurement_data_keys: ClassVar[list[str]] = _ARRAY_KEYS
-    measurement_scalar_columns: ClassVar[dict[str, str]] = _SCALAR_COLUMNS
+    measurement_scalar_columns: ClassVar[dict[str, str]] = {
+        **_SCALAR_COLUMNS, "n_valid": "int"
+    }
     measurement_parameters: ClassVar[dict[str, ParamSpec]] = {
         "current_amplitude_A": ParamSpec(
             type=float, default=1e-3, unit="A",
@@ -134,6 +166,27 @@ class TensormeterRTM2MeasurementVI(MeasurementInstrumentBase):
         "readings_per_point": ParamSpec(
             type=int, default=5, min=1,
             description="Demodulation windows averaged per point",
+        ),
+        "tensor_component": ParamSpec(
+            type=str, default="1st_re",
+            choices={
+                "DC": "dc",
+                "1st Harmonic (Re)": "1st_re",
+                "1st Harmonic (Im)": "1st_im",
+                "2nd Harmonic (Re)": "2nd_re",
+                "2nd Harmonic (Im)": "2nd_im",
+                "3rd Harmonic (Re)": "3rd_re",
+                "3rd Harmonic (Im)": "3rd_im",
+            },
+            description=(
+                "Tensor component extracted from the driver's data block "
+                "into the saved res_a_ohm/res_b_ohm columns (res_a_{c}_ohm/"
+                "res_b_{c}_ohm). Data-path only — writes nothing to the "
+                "instrument, so it stays active in externally configured "
+                "mode too; the operator picks it to match the drive "
+                "configured on the instrument (dc drive -> 'dc', sine AC -> "
+                "'1st_re', harmonic studies -> '2nd_*'/'3rd_*')."
+            ),
         ),
     }
 
@@ -200,6 +253,21 @@ class TensormeterRTM2MeasurementVI(MeasurementInstrumentBase):
         self._averaging_time_s: float = 0.05
         self._readings_per_point: int = 5
         self._initiated: bool = False
+        self._tensor_component: str = "1st_re"
+        # The externally configured standard's provenance snapshot (see
+        # MeasurementInstrumentBase's "Externally configured instruments"
+        # section): set by initiate_measurement() in external mode, read
+        # (duck-typed) by the sweep procedure to record it into the run's
+        # HDF5 /metadata. None until a run has armed in external mode.
+        self.last_settings_snapshot: dict | None = None
+
+        if self._configured_externally:
+            # Detached-idle lifecycle: born detached, so starting CryoSoft
+            # while the vendor tool (TMCS) is open builds cleanly — the
+            # RTM2 firmware serves only one TCP client at a time. This VI
+            # has no @monitored fields, so idle-detached generates zero
+            # tick-loop traffic.
+            self._main.close()
 
     # ------------------------------------------------------------------
     # MeasurementInstrumentBase implementation
@@ -220,23 +288,55 @@ class TensormeterRTM2MeasurementVI(MeasurementInstrumentBase):
         analysis_mode: str = "van_der_pauw",
         switch_sequence: str = "",
         readings_per_point: int = 5,
+        tensor_component: str = "1st_re",
     ) -> None:
         """Arm the RTM2's Analysis Mode engine and configure the source.
 
+        When ``self._configured_externally`` is true (see
+        ``MeasurementInstrumentBase``'s "Externally configured instruments"
+        standard), ``current_amplitude_A``, ``averaging_time_s``,
+        ``analysis_mode``, and ``switch_sequence`` are accepted but NOT
+        written to the instrument — the external tool (e.g. TMCS) owns
+        excitation, analysis, and routing. Only the CryoSoft-owned data
+        path (channel selection, buffer, timing readback, provenance
+        snapshot) is armed; see ``_initiate_measurement_external()``.
+
         Args:
             current_amplitude_A: AC source current amplitude in Amperes.
-            averaging_time_s: Averaging/sampling period in seconds.
+                Ignored in externally configured mode.
+            averaging_time_s: Averaging/sampling period in seconds. Ignored
+                in externally configured mode — the actual value is read
+                back from the instrument instead (see
+                ``_initiate_measurement_external()``).
             analysis_mode: One of ``measurement_parameters["analysis_mode"]``'s
-                choice values (e.g. ``"van_der_pauw"``).
+                choice values (e.g. ``"van_der_pauw"``). Ignored in
+                externally configured mode.
             switch_sequence: Name of a configured ``routes`` switch-state
                 cycle, or ``""`` to leave the switch matrix untouched.
+                Ignored in externally configured mode.
             readings_per_point: Number of demodulation windows
                 ``take_reading()`` averages per datapoint.
+            tensor_component: One of ``measurement_parameters
+                ["tensor_component"]``'s choice values (e.g. ``"1st_re"``)
+                selecting which ``res_a_{c}_ohm``/``res_b_{c}_ohm`` column
+                pair ``take_reading()`` extracts. Data-path only — active
+                in every mode, including externally configured.
 
         Raises:
-            ValueError: If ``analysis_mode`` or ``switch_sequence`` is not
-                recognised.
+            ValueError: If ``analysis_mode``, ``switch_sequence``, or
+                ``tensor_component`` is not recognised.
+            CryoSoftCommunicationError: In externally configured mode, if
+                the instrument is unreachable, held by the external tool,
+                or hung (see ``_initiate_measurement_external()``).
         """
+        if tensor_component not in _TENSOR_COMPONENTS:
+            raise ValueError(
+                f"initiate_measurement: unknown tensor_component "
+                f"{tensor_component!r}; must be one of "
+                f"{sorted(_TENSOR_COMPONENTS)}"
+            )
+        self._tensor_component = tensor_component
+
         mode_int = _ANALYSIS_MODE_VALUES.get(analysis_mode)
         if mode_int is None:
             raise ValueError(
@@ -254,6 +354,17 @@ class TensormeterRTM2MeasurementVI(MeasurementInstrumentBase):
                     f"{switch_sequence!r}; configured sequences are "
                     f"{list(self._routes)}"
                 )
+        else:
+            cycle = None
+
+        if self._configured_externally:
+            self._initiate_measurement_external(
+                driver, readings_per_point, current_amplitude_A,
+                averaging_time_s, analysis_mode, switch_sequence,
+            )
+            return
+
+        if cycle is not None:
             states = [driver.build_switch_state(**state_cfg) for state_cfg in cycle]
             driver.set_switch_states(*states)
 
@@ -298,15 +409,160 @@ class TensormeterRTM2MeasurementVI(MeasurementInstrumentBase):
         self._readings_per_point = int(readings_per_point)
         self._initiated = True
 
+    def _initiate_measurement_external(
+        self,
+        driver: Any,
+        readings_per_point: int,
+        current_amplitude_A: float,
+        averaging_time_s: float,
+        analysis_mode: str,
+        switch_sequence: str,
+    ) -> None:
+        """Arm the data path only — the externally configured initiate branch.
+
+        Implements the externally configured standard's
+        ``initiate_measurement()`` contract (see
+        ``MeasurementInstrumentBase``): never writes excitation, analysis,
+        or routing state (the external tool, e.g. TMCS, owns it); verifies
+        connectivity with a true round trip; arms only what
+        ``take_reading()``'s decode and timing depend on; and records a
+        provenance snapshot.
+
+        Args:
+            driver: The ``"tensormeter"`` driver (``self._main``).
+            readings_per_point: Demodulation windows per point (CryoSoft-
+                side data concept, still honored in this mode).
+            current_amplitude_A: Ignored; logged as an ignored parameter.
+            averaging_time_s: Ignored; logged as an ignored parameter (the
+                actual value is read back from the instrument instead).
+            analysis_mode: Ignored; logged as an ignored parameter.
+            switch_sequence: Ignored; logged as an ignored parameter.
+
+        Raises:
+            CryoSoftCommunicationError: If the instrument cannot be
+                reconnected, or the connectivity round trip fails (hung
+                firmware, or the channel currently held by the external
+                tool) — see ``TensormeterRTM2.ensure_connected()``/
+                ``get_idn()``.
+        """
+        # (1) Acquire + connectivity: a TRUE round trip (raises on a hung or
+        # externally-held channel, per the driver's liveness fix), never a
+        # check that can succeed vacuously.
+        driver.ensure_connected()
+        driver.get_idn()
+
+        # (2) Data-path arming (CryoSoft-owned, always asserted): the
+        # explicit full ascending channel list is confirmed the ONLY way to
+        # restore the default 44-column decode take_reading() depends on —
+        # a bare/empty selc collapses to zero rows, and a leftover subset
+        # silently mis-keys every column (see
+        # TensormeterRTM2.select_data_channels()). clear_data() discards
+        # whatever the free-running instrument accumulated before this
+        # session — the newd pointer is device-global, so a fresh session
+        # would otherwise ingest a previous client's backlog.
+        driver.select_data_channels(*range(44))
+        driver.clear_data()
+
+        # (3) Timing readback: the settle sleep in take_reading() must
+        # reflect what the external tool actually set, not the ignored
+        # averaging_time_s argument above.
+        self._averaging_time_s = driver.get_averaging_time()
+
+        # (4) Provenance snapshot: in external mode the snapshot — not the
+        # ignored measurement_parameters — is the record of what the data
+        # was actually taken with. The sweep procedure records this into
+        # the run's HDF5 /metadata (see DataManager.record_settings_snapshot()).
+        self.last_settings_snapshot = driver.get_settings_snapshot()
+        log.info(
+            "TensormeterRTM2MeasurementVI: externally configured — armed "
+            "data path, recorded settings snapshot: %s",
+            self.last_settings_snapshot,
+        )
+
+        # (6) Skip (external-tool-owned): set_control_mode, set_waveform_mode,
+        # DC-setpoint zeroing, set_voltage_amplitude/set_voltage_protection,
+        # set_analysis_mode, set_averaging_time, set_current_amplitude,
+        # switch routing.
+        log.info(
+            "TensormeterRTM2MeasurementVI: externally configured — ignoring "
+            "current_amplitude_A=%r, averaging_time_s=%r, analysis_mode=%r, "
+            "switch_sequence=%r (external tool owns excitation/analysis/"
+            "routing)",
+            current_amplitude_A, averaging_time_s, analysis_mode, switch_sequence,
+        )
+
+        # (7) Soft consistency check: WARNING only, never a refusal —
+        # external configuration is human-owned.
+        self._warn_if_tensor_component_inconsistent(self.last_settings_snapshot)
+
+        # (5) Internal state.
+        self._readings_per_point = int(readings_per_point)
+        self._initiated = True
+
+    def _warn_if_tensor_component_inconsistent(self, snapshot: dict) -> None:
+        """Log a WARNING when ``self._tensor_component`` looks inconsistent with *snapshot*.
+
+        Soft consistency check only — never raises or refuses; external
+        configuration is human-owned (see ``MeasurementInstrumentBase``'s
+        "Externally configured instruments" standard), so this is a hint,
+        not a gate. Two checks, both guarded with ``.get()`` so a missing
+        snapshot key never crashes:
+
+        * A harmonic component (``1st_*``/``2nd_*``/``3rd_*``) is selected
+          while the snapshot's Waveform Mode (``wfmd``) is Pulse Train
+          (``1``) — harmonic demodulation assumes a continuous sine drive.
+        * A non-``dc`` component is selected while the snapshot reports no
+          AC current amplitude (``camp`` == 0) — nothing is being driven
+          for a harmonic component to measure.
+
+        Args:
+            snapshot: The arming-time settings snapshot (``get_settings_
+                snapshot()``'s return value).
+        """
+        component = self._tensor_component
+        wfmd = snapshot.get("wfmd")
+        if component != "dc" and wfmd == 1:
+            log.warning(
+                "TensormeterRTM2MeasurementVI: tensor_component=%r selected "
+                "(a harmonic component) but the arming-time snapshot reports "
+                "Waveform Mode = Pulse Train (wfmd=1) — harmonic demodulation "
+                "expects a continuous sine drive.",
+                component,
+            )
+        camp = snapshot.get("camp")
+        if component != "dc" and camp is not None and float(camp) == 0.0:
+            log.warning(
+                "TensormeterRTM2MeasurementVI: tensor_component=%r selected "
+                "but the arming-time snapshot reports zero AC current "
+                "amplitude (camp=0) — no drive for a harmonic component to "
+                "measure.",
+                component,
+            )
+
     def take_reading(self) -> dict[str, list[float] | float]:
         """Trigger ``readings_per_point`` demodulation windows and read the tensor.
+
+        Row selection is LAST-*n*, not first-*n*: the RTM2 free-runs once
+        armed, so the buffer can hold more than ``n`` rows by the time this
+        reads it, and the earliest of those can still be a settling
+        transient from whatever the source was doing just before this call
+        (e.g. ramping from 0 A to the armed setpoint) — see the call
+        sequence note below. Stats are computed over the delivered rows
+        BEFORE they are padded to the declared length (the ``n_valid``
+        standard's ordering, see ``MeasurementInstrumentBase``): filtering
+        NaN out of an already-padded array would conflate CryoSoft's own
+        padding with a NaN the instrument itself emitted (e.g. a
+        ratiometric divide-by-zero, plausible under an externally
+        configured analysis mode).
 
         Returns:
             The mean/error/array triple for both quantities (``res_a_ohm``,
             ``res_a_ohm_error``, ``res_a_ohm_array``, ``res_b_ohm``,
             ``res_b_ohm_error``, ``res_b_ohm_array``), arrays of length
             ``readings_per_point`` (fixed at ``initiate_measurement()``,
-            NaN-padded if the instrument returns fewer rows than requested).
+            NaN-padded if the instrument returns fewer rows than
+            requested), plus ``n_valid`` — the number of rows the
+            instrument actually delivered before padding.
 
         Raises:
             RuntimeError: If ``initiate_measurement()`` has not been called first.
@@ -339,18 +595,38 @@ class TensormeterRTM2MeasurementVI(MeasurementInstrumentBase):
         time.sleep(self._averaging_time_s * (n + 1))
 
         rows = driver.read_new_data()[-n:]
-        # initiate_measurement() sources via current_amplitude_A (the AC
-        # setpoint, camp) — live commissioning (2026-07-23) found the "Res
-        # A"/"Res B" DC columns are correspondingly near-zero noise (no DC
-        # component is being sourced), while the 1st-harmonic (in-phase,
-        # real) column tracks the AC excitation actually being driven.
-        res_a = [float(row["res_a_1st_re_ohm"]) for row in rows]
-        res_b = [float(row["res_b_1st_re_ohm"]) for row in rows]
-        res_a += [float("nan")] * (n - len(res_a))
-        res_b += [float("nan")] * (n - len(res_b))
 
-        a_mean, a_error = self.mean_and_sem([v for v in res_a if not math.isnan(v)])
-        b_mean, b_error = self.mean_and_sem([v for v in res_b if not math.isnan(v)])
+        # The operator-chosen tensor_component picks which Res A/Res B
+        # column pair to extract (see measurement_parameters
+        # ["tensor_component"]) — data-path only, so this runs identically
+        # regardless of configured_externally. Live commissioning
+        # (2026-07-23) found the DC columns are near-zero noise under AC
+        # drive, which is why the default is the 1st-harmonic (real) pair
+        # rather than "dc".
+        key_a = f"res_a_{self._tensor_component}_ohm"
+        key_b = f"res_b_{self._tensor_component}_ohm"
+        delivered_a = [float(row[key_a]) for row in rows]
+        delivered_b = [float(row[key_b]) for row in rows]
+
+        # n_valid: the delta-mode ordering (stats computed BEFORE padding).
+        # It reports how many rows the instrument delivered — the
+        # under-delivery count both quantities' extraction drew from. An
+        # instrument-emitted NaN inside an individual delivered value
+        # (e.g. a ratiometric divide-by-zero) is additionally excluded
+        # from that quantity's own mean/SEM below, without narrowing this
+        # single, per-row n_valid further.
+        n_valid = len(rows)
+        a_mean, a_error = self.mean_and_sem(
+            [v for v in delivered_a if not math.isnan(v)]
+        )
+        b_mean, b_error = self.mean_and_sem(
+            [v for v in delivered_b if not math.isnan(v)]
+        )
+
+        pad = n - len(rows)
+        res_a = delivered_a + [float("nan")] * pad
+        res_b = delivered_b + [float("nan")] * pad
+
         return {
             "res_a_ohm_array": res_a,
             "res_a_ohm": a_mean,
@@ -358,6 +634,7 @@ class TensormeterRTM2MeasurementVI(MeasurementInstrumentBase):
             "res_b_ohm_array": res_b,
             "res_b_ohm": b_mean,
             "res_b_ohm_error": b_error,
+            "n_valid": n_valid,
         }
 
     # ------------------------------------------------------------------
@@ -365,14 +642,50 @@ class TensormeterRTM2MeasurementVI(MeasurementInstrumentBase):
     # ------------------------------------------------------------------
 
     def ping(self) -> bool:
-        """Query IDN from the driver to verify it is reachable."""
+        """Query IDN from the driver to verify it is reachable.
+
+        In externally configured mode this is verify-and-release: connect,
+        a true round trip, then close — the detached-idle lifecycle (see
+        ``MeasurementInstrumentBase``'s "Externally configured
+        instruments" standard) — returning a clean ``False`` rather than
+        raising when the instrument is currently held by the external tool
+        or hung, and always releasing the connection afterward so the
+        instrument is never left attached while idle.
+        """
+        if not self._configured_externally:
+            try:
+                self._main.get_idn()  # type: ignore[attr-defined]
+                return True
+            except Exception:
+                return False
+
         try:
+            self._main.ensure_connected()  # type: ignore[attr-defined]
             self._main.get_idn()  # type: ignore[attr-defined]
             return True
         except Exception:
             return False
+        finally:
+            try:
+                self._main.close()  # type: ignore[attr-defined]
+            except Exception:
+                pass
 
     def standby(self) -> None:
-        """Zero the source current and reset the initiated state."""
-        self._main.set_current_amplitude(0.0)  # type: ignore[attr-defined]
+        """Put the instrument in a safe-off idle state.
+
+        Internal mode: zeros the source current. Externally configured
+        mode: skips the zero (it would clobber the external tool's own
+        source state — sample-access operations call ``standby()`` on
+        every measurement VI, not just after a run this VI armed) and
+        instead RELEASES the connection (``driver.close()``) — the
+        automatic handoff that lets the operator open the vendor tool
+        between runs (see the detached-idle lifecycle in
+        ``MeasurementInstrumentBase``'s "Externally configured
+        instruments" standard).
+        """
+        if self._configured_externally:
+            self._main.close()  # type: ignore[attr-defined]
+        else:
+            self._main.set_current_amplitude(0.0)  # type: ignore[attr-defined]
         self._initiated = False

@@ -782,3 +782,169 @@ class TestSimTensormeterRTM2:
         d._simulate_error = True
         with pytest.raises(CryoSoftCommunicationError):
             d.get_idn()
+
+    # ------------------------------------------------------------------
+    # Liveness (hung-firmware mode)
+    # ------------------------------------------------------------------
+
+    def test_hung_get_idn_raises(self):
+        """Hung firmware: gass yields zero settings, so get_idn() must raise."""
+        from cryosoft.core.exceptions import CryoSoftCommunicationError
+        from cryosoft.drivers.sim_tensormeter_rtm2 import SimTensormeterRTM2
+
+        d = SimTensormeterRTM2("SIM")
+        d._hung = True
+        with pytest.raises(CryoSoftCommunicationError):
+            d.get_idn()
+
+    def test_hung_get_settings_snapshot_raises(self):
+        from cryosoft.core.exceptions import CryoSoftCommunicationError
+        from cryosoft.drivers.sim_tensormeter_rtm2 import SimTensormeterRTM2
+
+        d = SimTensormeterRTM2("SIM")
+        d._hung = True
+        with pytest.raises(CryoSoftCommunicationError):
+            d.get_settings_snapshot()
+
+    def test_not_hung_get_idn_succeeds(self):
+        """Sanity check: the hung flag, not some other precondition, is what raises."""
+        from cryosoft.drivers.sim_tensormeter_rtm2 import SimTensormeterRTM2
+
+        d = SimTensormeterRTM2("SIM")
+        assert isinstance(d.get_idn(), str)
+
+    # ------------------------------------------------------------------
+    # Connection lifecycle (close / ensure_connected)
+    # ------------------------------------------------------------------
+
+    def test_use_after_close_raises(self):
+        from cryosoft.core.exceptions import CryoSoftCommunicationError
+        from cryosoft.drivers.sim_tensormeter_rtm2 import SimTensormeterRTM2
+
+        d = SimTensormeterRTM2("SIM")
+        d.close()
+        with pytest.raises(CryoSoftCommunicationError):
+            d.get_idn()
+
+    def test_ensure_connected_recovers_after_close(self):
+        from cryosoft.drivers.sim_tensormeter_rtm2 import SimTensormeterRTM2
+
+        d = SimTensormeterRTM2("SIM")
+        d.close()
+        d.ensure_connected()
+        assert isinstance(d.get_idn(), str)
+
+    def test_close_is_idempotent(self):
+        """Calling close() twice must not raise."""
+        from cryosoft.drivers.sim_tensormeter_rtm2 import SimTensormeterRTM2
+
+        d = SimTensormeterRTM2("SIM")
+        d.close()
+        d.close()  # must not raise
+
+    def test_close_when_never_connected_is_safe(self):
+        """Calling close() before any use must not raise."""
+        from cryosoft.drivers.sim_tensormeter_rtm2 import SimTensormeterRTM2
+
+        d = SimTensormeterRTM2("SIM")
+        d.close()  # must not raise
+
+    def test_ensure_connected_when_already_connected_is_noop(self):
+        from cryosoft.drivers.sim_tensormeter_rtm2 import SimTensormeterRTM2
+
+        d = SimTensormeterRTM2("SIM")
+        d.ensure_connected()  # must not raise
+        assert isinstance(d.get_idn(), str)
+
+    # ------------------------------------------------------------------
+    # get_settings_snapshot()
+    # ------------------------------------------------------------------
+
+    def test_settings_snapshot_contains_externally_set_values(self):
+        """Snapshot reflects a setting changed directly on the sim (as an
+        external tool like TMCS would), not just CryoSoft's own setters."""
+        from cryosoft.drivers.sim_tensormeter_rtm2 import SimTensormeterRTM2
+
+        d = SimTensormeterRTM2("SIM")
+        d.set_averaging_time(0.25)
+        d.set_current_amplitude(3e-6)
+        snapshot = d.get_settings_snapshot()
+        assert isinstance(snapshot, dict)
+        assert snapshot["avgt"] == pytest.approx(0.25)
+        assert snapshot["camp"] == pytest.approx(3e-6)
+
+    # ------------------------------------------------------------------
+    # select_data_channels() / selc semantics
+    # ------------------------------------------------------------------
+
+    def test_select_data_channels_subset_shortens_rows(self):
+        """A non-default subset selection narrows rows to that many columns."""
+        from cryosoft.drivers.sim_tensormeter_rtm2 import SimTensormeterRTM2
+
+        d = SimTensormeterRTM2("SIM")
+        d.clear_data()
+        d.trigger_demodulation()
+        d.select_data_channels(12, 22, 33)
+        rows = d.read_new_data()
+        assert len(rows) == 1
+        assert len(rows[0]) == 3
+
+    def test_select_data_channels_subset_mis_keys_positionally(self):
+        """The subset's values land under the first-N default column names
+        (positional mis-keying), matching the real driver's decode bug."""
+        from cryosoft.drivers.sim_tensormeter_rtm2 import (
+            _DATA_COLUMNS,
+            SimTensormeterRTM2,
+        )
+
+        d = SimTensormeterRTM2("SIM")
+        d._true_sheet_resistance_ohm = 150_000.0
+        d._noise_ohm = 0.0
+        d.clear_data()
+        d.trigger_demodulation()
+        full_row = d.read_all_data()[0]
+        d.select_data_channels(9, 16, 0)  # res_a_dc_ohm, res_b_dc_ohm, time_s
+        rows = d.read_all_data()
+        row = rows[0]
+        assert set(row.keys()) == set(_DATA_COLUMNS[:3])
+        assert row[_DATA_COLUMNS[0]] == pytest.approx(full_row["res_a_dc_ohm"])
+        assert row[_DATA_COLUMNS[1]] == pytest.approx(full_row["res_b_dc_ohm"])
+        assert row[_DATA_COLUMNS[2]] == pytest.approx(full_row["time_s"])
+
+    def test_select_data_channels_empty_collapses_to_zero_rows(self):
+        from cryosoft.drivers.sim_tensormeter_rtm2 import SimTensormeterRTM2
+
+        d = SimTensormeterRTM2("SIM")
+        d.clear_data()
+        d.trigger_demodulation()
+        d.trigger_demodulation()
+        d.select_data_channels()
+        assert d.read_new_data() == []
+        assert d.read_all_data() == []
+
+    def test_select_data_channels_full_ascending_restores_default(self):
+        """Only the explicit full ascending list restores the 44-column block."""
+        from cryosoft.drivers.sim_tensormeter_rtm2 import (
+            _DATA_COLUMNS,
+            SimTensormeterRTM2,
+        )
+
+        d = SimTensormeterRTM2("SIM")
+        d.clear_data()
+        d.select_data_channels(12, 22, 33)
+        d.select_data_channels(*range(len(_DATA_COLUMNS)))
+        d.trigger_demodulation()
+        rows = d.read_new_data()
+        assert len(rows) == 1
+        assert set(rows[0].keys()) == set(_DATA_COLUMNS)
+
+    def test_select_data_channels_bare_empty_does_not_restore_default(self):
+        """A bare/empty selc does NOT reset to default — it stays collapsed."""
+        from cryosoft.drivers.sim_tensormeter_rtm2 import SimTensormeterRTM2
+
+        d = SimTensormeterRTM2("SIM")
+        d.clear_data()
+        d.select_data_channels(12, 22, 33)
+        d.select_data_channels()
+        d.trigger_demodulation()
+        assert d.read_new_data() == []

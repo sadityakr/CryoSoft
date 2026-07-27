@@ -405,6 +405,50 @@ def test_no_snapshot_for_unsaved_index(saved_dm):
         assert "4" not in f["snapshots"]
 
 
+# ── record_settings_snapshot() (externally configured provenance) ─────────────
+
+def test_record_settings_snapshot_writes_metadata_attr(dm):
+    """record_settings_snapshot() writes a JSON attr under /metadata."""
+    dm.record_settings_snapshot({"camp": 1e-3, "avgt": 0.05, "wfmd": 0})
+    dm.close()
+    with h5py.File(dm.filepath, "r") as f:
+        raw = f["metadata"].attrs["measurement_settings_snapshot"]
+        snapshot = json.loads(raw)
+        assert snapshot == {"camp": 1e-3, "avgt": 0.05, "wfmd": 0}
+
+
+def test_record_settings_snapshot_before_close_is_readable_live(dm):
+    """The attr is present immediately (before close()), not only after."""
+    dm.record_settings_snapshot({"camp": 2e-3})
+    assert json.loads(dm._file["metadata"].attrs["measurement_settings_snapshot"]) == {
+        "camp": 2e-3
+    }
+
+
+def test_record_settings_snapshot_is_idempotent_overwrite(dm):
+    """A second call overwrites the first snapshot rather than erroring."""
+    dm.record_settings_snapshot({"camp": 1e-3})
+    dm.record_settings_snapshot({"camp": 9e-3})
+    dm.close()
+    with h5py.File(dm.filepath, "r") as f:
+        snapshot = json.loads(f["metadata"].attrs["measurement_settings_snapshot"])
+        assert snapshot == {"camp": 9e-3}
+
+
+def test_record_settings_snapshot_on_closed_raises(dm):
+    """record_settings_snapshot() after close() raises RuntimeError."""
+    dm.close()
+    with pytest.raises(RuntimeError):
+        dm.record_settings_snapshot({"camp": 1e-3})
+
+
+def test_no_snapshot_attr_when_never_recorded(dm):
+    """A run that never calls record_settings_snapshot() has no such attr."""
+    dm.close()
+    with h5py.File(dm.filepath, "r") as f:
+        assert "measurement_settings_snapshot" not in f["metadata"].attrs
+
+
 # ── close() and trim on abort ─────────────────────────────────────────────────
 
 def test_close_full_sweep(dm):

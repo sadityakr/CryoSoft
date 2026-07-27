@@ -348,6 +348,35 @@ class DataManager:
         self.last_datapoint: dict = measured_data
         self._file.flush()
 
+    def record_settings_snapshot(self, snapshot: dict) -> None:
+        """Record an externally configured measurement VI's arming-time settings.
+
+        Writes *snapshot* as a JSON-encoded HDF5 attribute
+        ``/metadata.measurement_settings_snapshot`` — the provenance record
+        for a run where a measurement VI's ``initiate_measurement()`` skips
+        CryoSoft's own excitation/analysis configuration (see
+        ``MeasurementInstrumentBase``'s "Externally configured instruments"
+        standard) and instead exposes what it was actually armed with as
+        ``last_settings_snapshot``. HDF5 group attributes are writable any
+        time before ``close()``, so this may be called after construction,
+        once the measurement VI has armed.
+
+        Args:
+            snapshot: The externally configured VI's arming-time settings
+                (e.g. ``TensormeterRTM2MeasurementVI.last_settings_snapshot``).
+
+        Raises:
+            RuntimeError: If called on a closed DataManager.
+        """
+        if self._closed:
+            raise RuntimeError(
+                "record_settings_snapshot() called on a closed DataManager"
+            )
+        self._file["metadata"].attrs["measurement_settings_snapshot"] = json.dumps(
+            snapshot
+        )
+        self._file.flush()
+
     def close(self) -> None:
         """Close the HDF5 file, record end_time, and trim on early abort."""
         if self._closed:

@@ -204,6 +204,39 @@ class TensormeterRTM2:
         }
 
     # ------------------------------------------------------------------
+    # Connection lifecycle
+    # ------------------------------------------------------------------
+
+    def close(self) -> None:
+        """Cleanly close the TCP session.
+
+        Idempotent: safe to call when already closed or never connected
+        (the underlying ``rtm2`` client's ``disconnect()`` is best-effort
+        and does not raise). Live commissioning (2026-07-27) confirmed a
+        clean socket close frees the RTM2 firmware's single served-client
+        slot immediately, letting another client (e.g. the vendor TMCS
+        tool) connect and be serviced right away, with no power cycle
+        needed.
+        """
+        self._rtm.disconnect()
+
+    def ensure_connected(self) -> None:
+        """Reconnect the TCP session if closed; no-op if already connected.
+
+        Raises:
+            CryoSoftCommunicationError: If the connection cannot be
+                (re-)established (e.g. the firmware's single served-client
+                slot is held by another client).
+        """
+        try:
+            self._rtm.connect()
+        except ConnectionError as exc:
+            raise CryoSoftCommunicationError(
+                f"Cannot reconnect Tensormeter RTM2 at {self._host}:{self._port}: {exc}",
+                vi_name="TensormeterRTM2",
+            ) from exc
+
+    # ------------------------------------------------------------------
     # Low-level command primitives
     # ------------------------------------------------------------------
 
@@ -266,7 +299,20 @@ class TensormeterRTM2:
         )
 
     def _refresh_all_settings(self, timeout: float | None = None) -> None:
-        """Round-trip `gass` and drain the burst of setting updates it triggers."""
+        """Round-trip `gass` and drain the burst of setting updates it triggers.
+
+        Raises:
+            CryoSoftCommunicationError: On a transport failure, a
+                protocol-level error, or if the `gass` burst yields zero
+                setting updates. Live commissioning found this last case is
+                the signature of hung firmware: a hung RTM2 still completes
+                the TCP handshake and accepts writes, but sends no packets
+                back, so `gass` yields zero cached settings where healthy
+                firmware yields roughly 28. Without this check, a hung
+                instrument would silently look healthy to every caller that
+                only inspects ``result.error`` (which stays unset). This is
+                what makes :meth:`get_idn` a true round-trip liveness check.
+        """
         try:
             result = self._rtm.read_until(
                 "any", send="gass", timeout=timeout or self._timeout_s, listen=0.5
@@ -278,6 +324,14 @@ class TensormeterRTM2:
         if result.error:
             raise CryoSoftCommunicationError(
                 f"Tensormeter RTM2 'gass' protocol error: {result.error}",
+                vi_name="TensormeterRTM2",
+            )
+        if not result.updates:
+            raise CryoSoftCommunicationError(
+                "Tensormeter RTM2 'gass' returned zero settings — the "
+                "instrument accepted the query but sent no data, the "
+                "signature of hung firmware (healthy firmware reports "
+                "roughly 28 settings)",
                 vi_name="TensormeterRTM2",
             )
 
@@ -715,11 +769,17 @@ class TensormeterRTM2:
         """Select which data columns are sent by future `newd`/`alld` reads.
 
         Note:
-            Once called, :meth:`read_new_data`/:meth:`read_all_data`'s
-            fixed column-name decoding no longer applies (it assumes the
-            default, unfiltered, ascending-order channel set). This method
-            is provided for driver completeness; the shipped measurement
-            VI never calls it.
+            Once called with a non-default selection,
+            :meth:`read_new_data`/:meth:`read_all_data`'s fixed
+            column-name decoding no longer applies (it assumes the
+            default, unfiltered, ascending-order channel set) — live
+            commissioning confirmed this decode then silently mis-keys
+            every column (a probed subset (12, 22, 33) decoded as
+            ``time_s``/``input_voltage_dc_V``/``current_dc_A``). Also
+            confirmed live: a bare/empty selection does NOT reset to the
+            default — it collapses `newd`/`alld` to a zero-row state.
+            The only restore is the explicit full ascending list,
+            ``select_data_channels(*range(44))``.
 
         Args:
             *column_indices: Data-array column indices (see the vendor
@@ -784,3 +844,25 @@ class TensormeterRTM2:
         """
         self._refresh_all_settings()
         return f"Tensormeter RTM2 @ {self._host}:{self._port}"
+
+    def get_settings_snapshot(self) -> dict:
+        """Return every cached instrument setting as a plain dict.
+
+        Round-trips one `gass` burst (via :meth:`_refresh_all_settings`,
+        which raises if the instrument is silent) and returns the
+        resulting cache — healthy firmware reports roughly 28 keys. Used
+        for data provenance: when an external tool (e.g. TMCS) owns the
+        instrument's configuration, this snapshot is the record of what
+        the data was actually taken with.
+
+        Returns:
+            A plain dict of the instrument's current settings, keyed by
+            the RTM2 protocol's own short parameter names (e.g. ``"camp"``,
+            ``"avgt"``).
+
+        Raises:
+            CryoSoftCommunicationError: If the instrument is unreachable
+                or silent (see :meth:`_refresh_all_settings`).
+        """
+        self._refresh_all_settings()
+        return self._rtm.get_state()

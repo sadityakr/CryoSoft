@@ -48,6 +48,50 @@ present in the rack, not an active driver.
   `tensormeter_measurement`'s `init_params` is sized for THIS resistor —
   rescale before wiring a lower-resistance sample.
 
+## External configuration (TMCS) — Tensormeter RTM2
+
+`tensormeter_measurement`'s `init_params.configured_externally` ships
+`false`. Flip it to `true` only when the operator wants to configure the
+RTM2's analysis engine with the vendor's own TMCS tool (or vendor Python
+client) and have CryoSoft run only the measurement — arm the data path,
+trigger, read, and save — without touching that configuration. This is the
+externally configured standard on `MeasurementInstrumentBase`
+(`virtual_instruments/base.py`), applied here because the RTM2 firmware
+serves only ONE TCP client at a time (see Known Quirks below).
+
+Workflow:
+
+1. Power-cycle the RTM2 if it isn't already configured the way you want —
+   power-on defaults **erase any prior external configuration** (probed
+   2026-07-27: `cmod=0` Direct Voltage, `wfmd=1` Pulse Train, `camp=1` µA,
+   `avgt=0.08` s, no contacts armed).
+2. Open TMCS and configure excitation, Analysis Mode, and switch routing as
+   needed. Leave TMCS connected while you sanity-check the instrument.
+3. **Close TMCS** before starting a CryoSoft run — the RTM2 firmware
+   serves only the first-connected TCP client; a second client's commands
+   are never answered (confirmed live, healthy firmware, TMCS connected).
+   CryoSoft and TMCS are mutually exclusive at the instrument, never
+   simultaneous.
+4. Start CryoSoft and run the sweep/measurement procedure with
+   `tensormeter_measurement` selected. CryoSoft attaches only for the
+   duration of a run (`initiate_measurement()` through `standby()` — the
+   detached-idle lifecycle) and releases the connection the instant the
+   run ends, so TMCS may be reopened between runs with no CryoSoft restart.
+
+**Accepted safety note**: external configuration bypasses CryoSoft's own
+excitation safety envelope (`max_current_A`/`max_voltage_V` in
+`tensormeter_measurement`'s `init_params` are only enforced when CryoSoft
+itself sources the current). This is a deliberate, human-owned workflow —
+the TMCS operator owns the excitation while `configured_externally` is
+true.
+
+**Hang symptom/remedy**: if the RTM2 goes silent — accepts a TCP
+connection and commands but sends nothing back (`gass` yields zero
+settings instead of the healthy ~28) — while still answering a plain
+network `ping` (UDP `Discover()` is also silent when hung), the firmware
+has hung. Power-cycle the instrument, then reconfigure in TMCS per the
+workflow above (see Known Quirks below for the full liveness signature).
+
 ## Safe testing limits (overrides)
 
 Overrides the default in `setup-supervisor/references/safe-testing.md`

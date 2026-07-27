@@ -148,13 +148,45 @@ class SimTensormeterRTM2:
         self._sent_count: int = 0
         self._time_s: float = 0.0
 
+        # Data-channel selection: None means the default, unfiltered,
+        # ascending-order 44-column set (mirrors the real driver's power-on
+        # default and the effect of the explicit full ascending list
+        # select_data_channels(*range(44))). A tuple, including the empty
+        # tuple, models a non-default `selc` selection — see
+        # select_data_channels() and _apply_channel_selection().
+        self._selected_channels: tuple[int, ...] | None = None
+
         # Physics test hooks
         self._true_sheet_resistance_ohm: float = 100.0
         self._true_hall_resistance_ohm: float = 0.0
         self._noise_ohm: float = 1e-3
 
-        # Test control flag
+        # Test control flags. _closed models the TCP session being closed
+        # (see close()/ensure_connected()); _hung models hung firmware that
+        # accepts commands but sends nothing back (see get_idn()/
+        # get_settings_snapshot(), the liveness-check callers).
         self._simulate_error: bool = False
+        self._closed: bool = False
+        self._hung: bool = False
+
+    # ------------------------------------------------------------------
+    # Connection lifecycle
+    # ------------------------------------------------------------------
+
+    def close(self) -> None:
+        """Model cleanly closing the TCP session.
+
+        Idempotent: safe to call twice or when never "connected". Sets the
+        closed state so any subsequent command raises
+        CryoSoftCommunicationError (see :meth:`_check_error`) instead of
+        silently succeeding — modeling the real driver's use-after-close
+        failure without needing a real socket.
+        """
+        self._closed = True
+
+    def ensure_connected(self) -> None:
+        """Model reconnecting: clears the closed state; no-op if not closed."""
+        self._closed = False
 
     # ------------------------------------------------------------------
     # Switch matrix (§3.11)
@@ -514,20 +546,62 @@ class SimTensormeterRTM2:
         self._sent_count = 0
 
     def select_data_channels(self, *column_indices: int) -> None:
-        """Stored for parity; the sim always returns the full default column set."""
+        """Select which data columns future read_new_data()/read_all_data() calls return.
+
+        Models the confirmed live semantics (2026-07-27 commissioning): a
+        non-default subset selection makes the returned rows only as wide
+        as the selection, positionally re-keyed against the fixed 44-name
+        default layout — mirroring the real driver's positional `zip`,
+        which silently mis-keys every column when the selection is not the
+        default. An empty selection collapses `newd`/`alld` to a zero-row
+        state. Only the explicit full ascending list,
+        ``select_data_channels(*range(44))``, restores the default
+        44-column block; a bare/empty call does NOT.
+
+        Args:
+            *column_indices: Data-array column indices to include, in the
+                desired order.
+        """
         self._check_error()
+        indices = tuple(int(i) for i in column_indices)
+        if indices == tuple(range(len(_DATA_COLUMNS))):
+            self._selected_channels = None
+        else:
+            self._selected_channels = indices
 
     def read_new_data(self, timeout: float | None = None) -> list[dict[str, float]]:
         """Return rows appended since the last read_new_data() call."""
         self._check_error()
         rows = self._data_buffer[self._sent_count :]
         self._sent_count = len(self._data_buffer)
-        return rows
+        return self._apply_channel_selection(rows)
 
     def read_all_data(self, timeout: float | None = None) -> list[dict[str, float]]:
         """Return every buffered row."""
         self._check_error()
-        return list(self._data_buffer)
+        return self._apply_channel_selection(list(self._data_buffer))
+
+    def _apply_channel_selection(
+        self, rows: list[dict[str, float]]
+    ) -> list[dict[str, float]]:
+        """Reshape *rows* per the current `selc` selection (see select_data_channels()).
+
+        Default selection (``None``): rows pass through unchanged. Empty
+        selection: zero rows. Non-empty subset: each row is narrowed to the
+        selected columns' values, then re-keyed against the first N default
+        column names in order — the same positional mis-keying the real
+        driver's fixed `zip(_DATA_COLUMNS, row)` decode performs on a
+        non-default wire layout.
+        """
+        if self._selected_channels is None:
+            return rows
+        if not self._selected_channels:
+            return []
+        values_per_row = [
+            [row[_DATA_COLUMNS[i]] for i in self._selected_channels] for row in rows
+        ]
+        keys = _DATA_COLUMNS[: len(self._selected_channels)]
+        return [dict(zip(keys, values)) for values in values_per_row]
 
     def _make_row(self) -> dict[str, float]:
         """Synthesize one data row from the stored setpoints and true-resistance hooks."""
@@ -570,14 +644,95 @@ class SimTensormeterRTM2:
     # ------------------------------------------------------------------
 
     def get_idn(self) -> str:
-        """Return a simulated identity string."""
+        """Return a simulated identity string.
+
+        Raises:
+            CryoSoftCommunicationError: If closed, error-injection is
+                active, or the hung-firmware mode is active (see
+                :meth:`close`/:attr:`_hung`) — mirrors the real driver's
+                liveness fix, where a hung instrument's `gass` yields zero
+                settings instead of silently looking healthy.
+        """
         self._check_error()
+        self._check_hung()
         return "Tensormeter RTM2 @ SIM"
 
+    def get_settings_snapshot(self) -> dict:
+        """Return every simulated instrument setting as a plain dict.
+
+        Mirrors the real driver's cached-`gass`-state dict, keyed by the
+        same RTM2 protocol short names, so a VI's provenance-snapshot
+        logic behaves identically against sim and real hardware.
+
+        Raises:
+            CryoSoftCommunicationError: If closed, error-injection is
+                active, or the hung-firmware mode is active (see
+                :meth:`close`/:attr:`_hung`).
+        """
+        self._check_error()
+        self._check_hung()
+        return {
+            "camp": self._current_amplitude_A,
+            "cudc": self._current_dc_A,
+            "vamp": self._voltage_amplitude_V,
+            "vodc": self._voltage_dc_V,
+            "vpro": self._voltage_protection_V,
+            "ipro": self._current_protection_A,
+            "virg": self._voltage_input_range_V,
+            "vorg": self._voltage_output_range_V,
+            "crng": self._current_range_A,
+            "sres": self._series_resistance_ohm,
+            "avgt": self._averaging_time_s,
+            "lfrq": self._lockin_frequency_Hz,
+            "phsh": self._phase_shift_cycles,
+            "refm": self._reference_mux,
+            "phlk": self._phase_lock_source,
+            "amod": self._analysis_mode,
+            "mod?": self._detected_analysis_mode,
+            "mult": self._multisample_mode,
+            "cmod": self._control_mode,
+            "wfmd": self._waveform_mode,
+            "snsa": self._sns_preamp_mode,
+            "coax": self._coax_shell_mode,
+            "meas": self._measurement_count,
+            "swit": tuple(self._switch_states),
+            "dio0": self._dio_voltage[0],
+            "dio1": self._dio_voltage[1],
+        }
+
     def _check_error(self) -> None:
-        """Raise CryoSoftCommunicationError if error simulation is active."""
+        """Raise CryoSoftCommunicationError if closed or error-injection is active.
+
+        Called at the top of every command, mirroring the real driver: once
+        :meth:`close` has been called, any command must fail loudly instead
+        of silently succeeding, so use-after-close bugs are caught in tests
+        rather than on hardware (see :meth:`close`/:meth:`ensure_connected`).
+        """
+        if self._closed:
+            raise CryoSoftCommunicationError(
+                "Simulated Tensormeter RTM2: session is closed — call "
+                "ensure_connected() to reconnect",
+                vi_name="SimTensormeterRTM2",
+            )
         if self._simulate_error:
             raise CryoSoftCommunicationError(
                 "Simulated communication error on Tensormeter RTM2",
+                vi_name="SimTensormeterRTM2",
+            )
+
+    def _check_hung(self) -> None:
+        """Raise CryoSoftCommunicationError if the hung-firmware mode is active.
+
+        Models the live-probed hung-firmware signature: commands are
+        accepted but the instrument sends nothing back, so a `gass`
+        settings refresh yields zero settings. Set :attr:`_hung` directly
+        (matching this file's other test hooks, e.g. `_simulate_error`) to
+        exercise the liveness-check callers, :meth:`get_idn` and
+        :meth:`get_settings_snapshot`.
+        """
+        if self._hung:
+            raise CryoSoftCommunicationError(
+                "Simulated Tensormeter RTM2 'gass' returned zero settings "
+                "(hung-firmware mode; see _hung)",
                 vi_name="SimTensormeterRTM2",
             )

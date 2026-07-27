@@ -105,6 +105,26 @@ default (`init_params.get("max_current_A", 0.01)`), never require it.
 deliberate act, reachable from the front panel and procedures, never from
 the compact monitor card.
 
+### Optional: supporting externally configured instruments
+
+If your instrument exposes far more configuration surface than the VI wraps
+(analysis modes, pulse trains, reference muxing, …) and the operator may
+want to configure it with the vendor's own tool while CryoSoft only arms,
+triggers, reads, and saves — the `configured_externally` contract already
+exists on `MeasurementInstrumentBase` (its docstring's "Externally
+configured instruments" section, restated in
+`virtual_instruments/measurement/README.md`) and needs no new base-class
+code, only your VI branching on `self._configured_externally`. When true,
+your `initiate_measurement()` MUST still (a) verify connectivity with a
+TRUE ROUND TRIP, (b) arm the data path, (c) read back anything its own
+timing/decoding depends on, and (d) set the internal state
+`take_reading()`/`data_arrays()` require — while never writing any
+excitation/analysis/routing parameter. Your VI also inherits the
+**detached-idle lifecycle**: born detached at the end of `__init__`,
+`initiate()`/`ping()` verify-and-release, `initiate_measurement()`
+(re)acquires the connection, `standby()` releases it (without touching the
+externally-owned source state).
+
 ## 4. GUI surface: monitor card vs. instrument front panel
 
 Both are driven by the SAME decorator metadata (`cryosoft/gui/instrument_panel.py`)
