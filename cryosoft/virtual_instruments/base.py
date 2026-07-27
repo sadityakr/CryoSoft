@@ -138,6 +138,20 @@ class BaseVirtualInstrument:
     control-validation standard uses for ``@control``), or by the base
     ``standby()`` itself for a VI that inherits it unchanged.
 
+    A VI declaring ``detach_when_idle`` MUST own every driver alias in its
+    config ``drivers:`` mapping exclusively — no other configured VI may
+    name the same alias. ``_detach()`` releases every driver in
+    ``self._drivers`` unconditionally; it has no notion of another VI still
+    needing that same session, unlike ``Station.disconnect_instrument()``,
+    which routes a shared alias through ``_exclusive_aliases()`` before
+    closing anything (``core/station.py``). A VI cannot make that same
+    check itself — a VI is Layer 1 and the alias map lives on the Station
+    (Layer 2); consulting it would be an upward import, which this
+    architecture forbids. So the constraint is declared here and
+    machine-checked at the config level instead (see
+    ``tests/test_conformance.py``'s exclusivity test over every shipped
+    config), rather than guarded at runtime.
+
     ``is_attached()`` is the observable half: ``True`` (the default) for a
     VI that always holds its session, ``False`` while a ``detach_when_idle``
     VI is detached. Deliberately NOT ``@monitored`` — that would add a row

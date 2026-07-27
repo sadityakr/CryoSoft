@@ -235,6 +235,55 @@ def test_ping_returns_false_and_still_releases_when_unreachable():
     assert driver._closed is True
 
 
+def test_shared_driver_alias_with_detach_when_idle_is_flagged_not_permitted():
+    """Two VIs' config naming the same driver alias, one detach_when_idle: the hazard.
+
+    ``_detach()`` (``BaseVirtualInstrument``) iterates ``self._drivers`` and
+    closes every one of them unconditionally — it has no notion of another
+    VI still needing that same driver instance, because a VI may never
+    import the Station to ask (Layer 1 cannot import Layer 2). Two VIs
+    sharing one driver, one of them detach_when_idle, is exactly the
+    configuration ``BaseVirtualInstrument``'s "Detach-when-idle
+    declaration" docstring forbids: that VI's ``standby()`` would silently
+    close a session the other VI still needs.
+
+    This is why the fix lives at the config/conformance level
+    (``tests/test_conformance.py::test_detach_when_idle_vi_owns_its_driver_
+    aliases_exclusively``) rather than as a runtime guard inside
+    ``_detach()`` itself, which a VI cannot make. This test proves the
+    SAME predicate that conformance test (and ``Station.
+    disconnect_instrument()``, for its own analogous release path) trusts —
+    ``cryosoft.core.station._exclusive_aliases()`` — actually flags this
+    scenario, rather than exercising the broken behaviour (letting
+    ``standby()`` really close the shared driver and break the other VI).
+    """
+    from cryosoft.core.station import _exclusive_aliases
+
+    driver = _DetachableDriver("SIM::TEST")
+    detaching_vi = _DetachWhenIdleNoOverrideVI({"main": driver})
+    sharing_vi = _PlainVI({"main": driver})
+    assert detaching_vi._drivers["main"] is sharing_vi._drivers["main"], (
+        "the hazard requires a literally shared driver instance"
+    )
+    assert detaching_vi.detach_when_idle is True
+
+    # The two VIs' devices.yaml-shaped specs, as Station._vi_specs would
+    # hold them: both name the same alias.
+    vi_specs = {
+        "detaching_vi": {"drivers": {"main": "shared_alias"}},
+        "sharing_vi": {"drivers": {"main": "shared_alias"}},
+    }
+    role_aliases = vi_specs["detaching_vi"]["drivers"]
+
+    exclusive = _exclusive_aliases(role_aliases, vi_specs, "detaching_vi")
+
+    assert "shared_alias" not in exclusive, (
+        "a driver alias another configured VI also names must never be "
+        "reported exclusive — this is the constraint a detach_when_idle "
+        "VI's config must satisfy"
+    )
+
+
 # ── L2: the Station degrades and restores ────────────────────────────────────
 
 

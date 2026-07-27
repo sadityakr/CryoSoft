@@ -648,6 +648,49 @@ def test_detach_when_idle_vi_really_releases_and_reacquires(
     )
 
 
+def test_detach_when_idle_vi_owns_its_driver_aliases_exclusively() -> None:
+    """A detach_when_idle VI must not share a config driver alias with any other VI.
+
+    ``BaseVirtualInstrument._detach()`` releases every driver in
+    ``self._drivers`` unconditionally (see the "Detach-when-idle
+    declaration" docstring) — it has no notion of another VI still needing
+    that same session, because a VI may never consult the Station's alias
+    map (Layer 1 cannot import Layer 2). ``Station.disconnect_instrument()``
+    avoids exactly this hazard for its own release path by routing through
+    ``_exclusive_aliases()`` before closing anything; this test applies the
+    SAME predicate to every shipped config, for every VI this file's
+    ``_detach_when_idle_vi_specs()`` found to declare ``detach_when_idle``,
+    so a future config that lets two VIs share an alias with one of them
+    detach_when_idle fails CI instead of silently breaking the other VI's
+    session in the field.
+    """
+    from cryosoft.core.station import _exclusive_aliases
+
+    detach_when_idle_spec_ids = {spec_id for spec_id, *_ in _detach_when_idle_vi_specs()}
+
+    for config_dir in sorted(p for p in CONFIGS_DIR.iterdir() if p.is_dir()):
+        devices = _load_yaml(config_dir / "devices.yaml")
+        vi_cfgs = devices.get("virtual_instruments") or {}
+        for vi_name, vi_cfg in vi_cfgs.items():
+            spec_id = f"{config_dir.name}/{vi_name}"
+            if spec_id not in detach_when_idle_spec_ids:
+                continue
+            role_aliases = vi_cfg.get("drivers") or {}
+            mine = set(role_aliases.values())
+            exclusive = set(_exclusive_aliases(role_aliases, vi_cfgs, vi_name))
+            shared = mine - exclusive
+            assert not shared, (
+                f"{spec_id}: declares detach_when_idle but driver alias/es "
+                f"{sorted(shared)} are also named by another VI in "
+                f"{config_dir.name}/devices.yaml — _detach() would close "
+                f"them unconditionally on standby(), breaking whichever "
+                f"other VI still needs the shared session; a "
+                f"detach_when_idle VI must own its driver aliases "
+                f"exclusively (see BaseVirtualInstrument's "
+                f"'Detach-when-idle declaration')"
+            )
+
+
 # ── Safety-flag manifest standard ─────────────────────────────────────────────
 # See BaseVirtualInstrument's "Safety-flag manifest standard" docstring: every
 # flag a VI's evaluate_safety() can report is declared, once, in the class
