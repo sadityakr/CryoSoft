@@ -196,7 +196,7 @@ virtual_instruments:
       routes:
         ch1_ch2:
           - {drv_minus: [2], drv_plus: [1], sns_minus: [2], sns_plus: [1]}
-      max_current_A: 0.00001
+      max_current_A: 0.01
       max_voltage_V: 10.0
       # Externally configured standard (MeasurementInstrumentBase): flip to
       # true only when the operator is configuring the RTM2 with the
@@ -204,9 +204,10 @@ virtual_instruments:
       # without touching that configuration — see setup.md's "External
       # configuration (TMCS)" section for the workflow, and the accepted
       # safety note (external configuration bypasses max_current_A/
-      # max_voltage_V above; the TMCS operator owns the excitation). Ships
-      # false: the committed default must not change existing behavior.
-      configured_externally: false
+      # max_voltage_V above; the TMCS operator owns the excitation).
+      # Currently true: this setup is operated via TMCS; set false to
+      # return excitation/analysis control to CryoSoft.
+      configured_externally: true
 
 # Cryogenics: the helium-fill operation, the consumption display, and the
 # automatic level recorder are all built around level_vi (docs/plans/

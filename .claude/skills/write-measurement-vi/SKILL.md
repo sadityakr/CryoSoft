@@ -123,7 +123,11 @@ excitation/analysis/routing parameter. Your VI also inherits the
 **detached-idle lifecycle**: born detached at the end of `__init__`,
 `initiate()`/`ping()` verify-and-release, `initiate_measurement()`
 (re)acquires the connection, `standby()` releases it (without touching the
-externally-owned source state).
+externally-owned source state). Also declare `externally_owned_parameters:
+ClassVar[frozenset[str]]` naming the `measurement_parameters` the external
+tool owns — the procedure form and the reading-loop registry both hide
+them automatically once `configured_externally` is true, with no GUI code
+of your own.
 
 ## 4. GUI surface: monitor card vs. instrument front panel
 

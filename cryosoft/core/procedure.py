@@ -1148,8 +1148,13 @@ class SweepMeasureProcedure(BaseProcedure):
                 )
             )
 
-        # (c) The selected VI's own parameters.
-        vi_specs: dict[str, ParamSpec] = dict(vi.measurement_parameters)
+        # (c) The selected VI's own parameters. Renders active_measurement_
+        # parameters, not the full measurement_parameters: the externally-
+        # configured standard's self-description (MeasurementInstrumentBase)
+        # hides the parameters the external tool owns so the operator is
+        # never shown an inert excitation/analysis/routing knob. The title
+        # carries a marker in that mode so the operator sees WHY they're gone.
+        vi_specs: dict[str, ParamSpec] = dict(vi.active_measurement_parameters)
         collisions = sorted(
             (set(cls.parameters) | _STRUCTURAL_PARAM_NAMES) & set(vi_specs)
         )
@@ -1158,10 +1163,13 @@ class SweepMeasureProcedure(BaseProcedure):
                 f"{cls.name!r}: measurement VI {selected!r} parameter(s) "
                 f"{collisions} collide with the procedure's own parameters."
             )
+        title = station.measurement_label(selected)
+        if vi.configured_externally:
+            title = f"{title} — externally configured"
         groups.append(
             ParamGroup(
                 key=f"measurement:{selected}",
-                title=station.measurement_label(selected),
+                title=title,
                 params=vi_specs,
             )
         )

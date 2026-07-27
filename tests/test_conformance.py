@@ -1210,6 +1210,31 @@ def test_measurement_vi_self_description(vi_cls: type) -> None:
 @pytest.mark.parametrize(
     "vi_cls", _all_measurement_vi_classes(), ids=lambda c: c.__name__
 )
+def test_measurement_vi_externally_owned_parameters_contract(vi_cls: type) -> None:
+    """externally_owned_parameters obeys the externally-configured standard.
+
+    A ``frozenset`` (or at least a ``set`` — the type the standard names on
+    ``MeasurementInstrumentBase``), and every name in it must be an existing
+    ``measurement_parameters`` key. The empty default (no external-
+    configuration support) always passes trivially.
+    """
+    assert isinstance(vi_cls.externally_owned_parameters, (frozenset, set)), (
+        f"{vi_cls.__name__}.externally_owned_parameters must be a frozenset "
+        f"(or set), got {vi_cls.externally_owned_parameters!r}"
+    )
+    unknown = sorted(
+        set(vi_cls.externally_owned_parameters) - set(vi_cls.measurement_parameters)
+    )
+    assert not unknown, (
+        f"{vi_cls.__name__}.externally_owned_parameters names {unknown}, "
+        f"which {'is' if len(unknown) == 1 else 'are'} not (an) existing "
+        f"measurement_parameters key(s)"
+    )
+
+
+@pytest.mark.parametrize(
+    "vi_cls", _all_measurement_vi_classes(), ids=lambda c: c.__name__
+)
 def test_measurement_vi_mean_error_array_convention(vi_cls: type) -> None:
     """Every array-valued quantity gets a companion mean + SEM scalar column.
 

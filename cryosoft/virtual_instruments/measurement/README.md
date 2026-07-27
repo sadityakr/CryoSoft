@@ -134,6 +134,20 @@ When `self._configured_externally` is true:
   only CryoSoft's own internal arming state and RELEASES the hardware
   resource (the driver's `close()`).
 
+A VI supporting external configuration MUST declare
+`externally_owned_parameters: ClassVar[frozenset[str]]` — the
+`measurement_parameters` names the external tool owns in that mode
+(excitation/analysis/routing). Declare-and-derive: the procedure form
+(`active_measurement_parameters`) and the reading-loop registry
+(`reading_parameters`) both hide those names automatically once
+`configured_externally` is true, with no per-VI form code. Data-path
+parameters (e.g. a tensor-component selector, a readings-per-point count —
+anything that writes nothing to the instrument) stay off this set, so they
+remain operator-controlled, and rendered, in every mode. The empty default
+changes nothing for a VI that does not support external configuration;
+`tests/test_conformance.py` checks every declared name is a real
+`measurement_parameters` key.
+
 A VI that captures a provenance snapshot at arming time SHOULD expose it as
 `self.last_settings_snapshot` (a plain `dict`); the sweep procedure
 (`SweepMeasureProcedure.measure()`) duck-types this attribute and records it

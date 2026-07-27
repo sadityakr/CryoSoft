@@ -27,8 +27,12 @@ import pytest
 
 from cryosoft.core.plan import Command, PhasePlan, StepPlan, Target
 from cryosoft.core.station import build_station
+from cryosoft.drivers.sim_tensormeter_rtm2 import SimTensormeterRTM2
 from cryosoft.procedures.field_sweep import FieldSweep
 from cryosoft.procedures.temperature_sweep import TemperatureSweep
+from cryosoft.virtual_instruments.measurement.tensormeter_rtm2_measurement import (
+    TensormeterRTM2MeasurementVI,
+)
 
 CONFIG_PATH = "cryosoft/configs/sim_cryostat"
 
@@ -903,6 +907,60 @@ def test_live_plot_loop_labels_none_when_nothing_loopable(station):
     assert FieldSweep.live_plot_loop_labels(
         station, {"measurement_vi": "lockin_harmonic"}
     ) == (None, None)
+
+
+# ── Externally-configured standard: the measurement group self-filters ──────
+# The RTM2 measurement VI isn't in sim_cryostat's devices.yaml (its driver
+# needs a real TCP address), so it's registered directly onto the station
+# fixture with Station.register_vi() — the same dependency-injection path
+# build_station() itself uses — rather than editing any config.
+
+_RTM2_OWNED = {
+    "current_amplitude_A", "averaging_time_s", "analysis_mode", "switch_sequence",
+}
+
+
+def _register_rtm2(station, configured_externally: bool) -> TensormeterRTM2MeasurementVI:
+    vi = TensormeterRTM2MeasurementVI(
+        {"tensormeter": SimTensormeterRTM2("SIM")},
+        configured_externally=configured_externally,
+    )
+    station.register_vi("tensormeter_measurement", vi, "measurement")
+    return vi
+
+
+def test_measurement_group_full_set_and_plain_title_when_not_external(station):
+    """Default (configured_externally False): every declared param renders, plain title."""
+    _register_rtm2(station, False)
+    groups = FieldSweep.get_param_groups(
+        station, {"measurement_vi": "tensormeter_measurement"}
+    )
+    meas_group = next(
+        g for g in groups if g.key == "measurement:tensormeter_measurement"
+    )
+    assert set(meas_group.params) == set(TensormeterRTM2MeasurementVI.measurement_parameters)
+    assert meas_group.title == "Resistance tensor (RTM2)"
+
+
+def test_measurement_group_hides_owned_params_and_marks_title_when_external(station):
+    """configured_externally True: the group omits the owned four; title says why."""
+    _register_rtm2(station, True)
+    groups = FieldSweep.get_param_groups(
+        station, {"measurement_vi": "tensormeter_measurement"}
+    )
+    meas_group = next(
+        g for g in groups if g.key == "measurement:tensormeter_measurement"
+    )
+    assert (
+        set(meas_group.params)
+        == set(TensormeterRTM2MeasurementVI.measurement_parameters) - _RTM2_OWNED
+    )
+    # Data-path parameters stay visible — they write nothing to the instrument.
+    assert "tensor_component" in meas_group.params
+    assert "readings_per_point" in meas_group.params
+    for name in _RTM2_OWNED:
+        assert name not in meas_group.params
+    assert meas_group.title == "Resistance tensor (RTM2) — externally configured"
 
 
 # ── End-to-end Orchestrator runs ─────────────────────────────────────────────

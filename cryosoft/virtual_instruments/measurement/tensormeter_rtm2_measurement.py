@@ -194,6 +194,17 @@ class TensormeterRTM2MeasurementVI(MeasurementInstrumentBase):
         "initiate_measurement": {"current_amplitude_A": "current_amplitude_A"},
     }
 
+    # The externally-configured standard's self-description (see
+    # MeasurementInstrumentBase's "Externally configured instruments"
+    # section): the external tool (e.g. TMCS) owns excitation, analysis, and
+    # routing. tensor_component and readings_per_point are data-path only
+    # (they write nothing to the instrument) and stay out of this set, so
+    # they remain operator-controlled — and hence rendered in the procedure
+    # form — in every mode.
+    externally_owned_parameters: ClassVar[frozenset[str]] = frozenset(
+        {"current_amplitude_A", "averaging_time_s", "analysis_mode", "switch_sequence"}
+    )
+
     def __init__(self, drivers: dict[str, object], **init_params: Any) -> None:
         """Validate the switch-sequence route table and safety limits from config.
 
@@ -482,13 +493,24 @@ class TensormeterRTM2MeasurementVI(MeasurementInstrumentBase):
         # (6) Skip (external-tool-owned): set_control_mode, set_waveform_mode,
         # DC-setpoint zeroing, set_voltage_amplitude/set_voltage_protection,
         # set_analysis_mode, set_averaging_time, set_current_amplitude,
-        # switch routing.
+        # switch routing. The ignored-parameter list is derived from
+        # externally_owned_parameters (the externally-configured standard's
+        # self-description) rather than hardcoded here, so the ClassVar
+        # stays the single source of truth.
+        ignored_values = {
+            "current_amplitude_A": current_amplitude_A,
+            "averaging_time_s": averaging_time_s,
+            "analysis_mode": analysis_mode,
+            "switch_sequence": switch_sequence,
+        }
+        ignored_str = ", ".join(
+            f"{name}={ignored_values[name]!r}"
+            for name in sorted(self.externally_owned_parameters)
+        )
         log.info(
             "TensormeterRTM2MeasurementVI: externally configured — ignoring "
-            "current_amplitude_A=%r, averaging_time_s=%r, analysis_mode=%r, "
-            "switch_sequence=%r (external tool owns excitation/analysis/"
-            "routing)",
-            current_amplitude_A, averaging_time_s, analysis_mode, switch_sequence,
+            "%s (external tool owns excitation/analysis/routing)",
+            ignored_str,
         )
 
         # (7) Soft consistency check: WARNING only, never a refusal —

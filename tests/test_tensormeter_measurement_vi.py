@@ -391,3 +391,71 @@ def test_initiate_control_params_include_tensor_component(
 ) -> None:
     params = getattr(vi.initiate_measurement, "_control_params", {})
     assert "tensor_component" in params
+
+
+# ------------------------------------------------------------------
+# externally_owned_parameters / active_measurement_parameters /
+# reading_parameters — the externally-configured standard's self-description
+# (see MeasurementInstrumentBase's "Externally configured instruments"
+# section). The procedure form and the reading-loop registry both derive
+# from this ClassVar automatically.
+# ------------------------------------------------------------------
+
+_EXTERNALLY_OWNED = {
+    "current_amplitude_A", "averaging_time_s", "analysis_mode", "switch_sequence",
+}
+
+
+def test_active_measurement_parameters_internal_mode_is_full_set(
+    vi: TensormeterRTM2MeasurementVI,
+) -> None:
+    """Internal mode: active_measurement_parameters is measurement_parameters, unchanged."""
+    assert vi.configured_externally is False
+    assert (
+        vi.active_measurement_parameters == TensormeterRTM2MeasurementVI.measurement_parameters
+    )
+
+
+def test_active_measurement_parameters_external_mode_hides_owned_four(
+    external_vi_and_driver,
+) -> None:
+    """External mode omits exactly the four excitation/analysis/routing params."""
+    inst, _d = external_vi_and_driver
+    assert inst.configured_externally is True
+    active = inst.active_measurement_parameters
+    assert set(active) == set(TensormeterRTM2MeasurementVI.measurement_parameters) - _EXTERNALLY_OWNED
+    # Data-path parameters stay active — they write nothing to the instrument.
+    assert "tensor_component" in active
+    assert "readings_per_point" in active
+    for name in _EXTERNALLY_OWNED:
+        assert name not in active
+
+
+def test_reading_parameters_excludes_externally_owned_in_external_mode(
+    driver: SimTensormeterRTM2,
+) -> None:
+    """A loopable-but-externally-owned parameter disappears from reading_parameters.
+
+    Uses a small in-test subclass declaring a reading_setters entry for a
+    parameter that is ALSO externally owned — RTM2 itself declares no
+    reading_setters — so the loop-protection standard (see
+    MeasurementInstrumentBase.reading_parameters) can be exercised: without
+    it, a reading loop over this parameter in external mode would dispatch
+    setter WRITES to the instrument mid-run, clobbering the external tool's
+    configuration.
+    """
+
+    class _LoopableExternalVI(TensormeterRTM2MeasurementVI):
+        reading_setters = {"current_amplitude_A": "set_current_amplitude"}
+
+        def set_current_amplitude(self, current_amplitude_A: float) -> None:
+            pass
+
+    internal_vi = _LoopableExternalVI({"tensormeter": driver})
+    assert "current_amplitude_A" in internal_vi.reading_parameters
+
+    external_driver = SimTensormeterRTM2("SIM")
+    external_vi = _LoopableExternalVI(
+        {"tensormeter": external_driver}, configured_externally=True
+    )
+    assert "current_amplitude_A" not in external_vi.reading_parameters

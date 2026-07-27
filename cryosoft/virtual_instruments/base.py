@@ -687,6 +687,22 @@ class MeasurementInstrumentBase(BaseVirtualInstrument):
     time it sees a non-``None`` value (see ``DataManager.
     record_settings_snapshot()``), with no per-VI plumbing required.
 
+    A VI supporting external configuration MUST declare, via the class
+    attribute ``externally_owned_parameters: ClassVar[frozenset[str]]``,
+    the names of its ``measurement_parameters`` the external tool owns in
+    that mode (excitation/analysis/routing — the ones ``initiate_measurement()``
+    must not write). Parameters NOT listed (data-path parameters, e.g. a
+    tensor-component selector or a readings-per-point count — anything that
+    only picks how CryoSoft decodes/shapes the data, writing nothing to the
+    instrument) stay operator-controlled in every mode. This is the single
+    source of truth two other surfaces derive from automatically: the
+    ``active_measurement_parameters`` property (what the procedure form
+    renders) and ``reading_parameters`` (what the reading-loop registry
+    offers) both subtract it when ``configured_externally`` is true. The
+    empty default changes nothing for a VI that does not support external
+    configuration. ``tests/test_conformance.py`` checks every declared name
+    is a real ``measurement_parameters`` key.
+
     **Detached-idle lifecycle**: an externally configured VI holds its
     instrument connection only from ``initiate_measurement()`` to
     ``standby()``.
@@ -757,6 +773,12 @@ class MeasurementInstrumentBase(BaseVirtualInstrument):
     # Reading-loop declaration: parameter name -> per-reading setter method.
     # Empty (the default) means no parameter of this VI can be looped.
     reading_setters: ClassVar[dict[str, str]] = {}
+    # The externally-configured standard's self-description (see the class
+    # docstring's "Externally configured instruments" section): the
+    # measurement_parameters names the external tool owns when
+    # configured_externally is true. Empty (the default) changes nothing for
+    # a VI that does not support external configuration.
+    externally_owned_parameters: ClassVar[frozenset[str]] = frozenset()
 
     def __init__(self, drivers: dict[str, object], **init_params: Any) -> None:
         """Initialise the measurement VI.
@@ -779,18 +801,67 @@ class MeasurementInstrumentBase(BaseVirtualInstrument):
         )
 
     @property
+    def configured_externally(self) -> bool:
+        """Whether this VI is in the externally-configured standard's external mode.
+
+        Public, read-only accessor for ``self._configured_externally`` (set
+        from the ``configured_externally`` init param — see the class
+        docstring's "Externally configured instruments" section), so
+        procedures and the GUI can read the mode without touching the
+        private attribute.
+
+        Returns:
+            ``True`` when the external tool owns excitation/analysis/routing
+            configuration for this instrument.
+        """
+        return self._configured_externally
+
+    @property
+    def active_measurement_parameters(self) -> dict[str, ParamSpec]:
+        """Return the ``measurement_parameters`` a form should actually render.
+
+        This is what parameter FORMS render — not the call contract of
+        ``initiate_measurement()``, which remains ``measurement_parameters``
+        in full: a hidden parameter still falls back to its declared default
+        and is simply ignored by the external branch (see the class
+        docstring's "Externally configured instruments" section).
+
+        Returns:
+            ``measurement_parameters`` unchanged when not externally
+            configured; otherwise ``measurement_parameters`` minus
+            ``externally_owned_parameters``.
+        """
+        if not self._configured_externally:
+            return dict(self.measurement_parameters)
+        return {
+            name: spec
+            for name, spec in self.measurement_parameters.items()
+            if name not in self.externally_owned_parameters
+        }
+
+    @property
     def reading_parameters(self) -> dict[str, ParamSpec]:
         """Return the ``ParamSpec`` of every loopable measurement parameter.
 
         A measurement VI's loopable parameters are, by definition, a subset of
         its ``measurement_parameters``, so this reads their specs from there.
+        When ``configured_externally`` is true, an externally-owned name is
+        excluded here too: a loopable-but-externally-owned parameter would
+        otherwise dispatch setter WRITES to the instrument mid-run in
+        external mode, clobbering the external tool's configuration. Excluding
+        it here makes ``SweepMeasureProcedure._loopable_registry`` skip it
+        automatically — the registry already drops any entry with no spec.
 
         Returns:
             ``{name: measurement_parameters[name]}`` for every
-            ``reading_setters`` key.
+            ``reading_setters`` key, minus any externally-owned name while
+            ``configured_externally`` is true.
         """
+        owned = self.externally_owned_parameters if self._configured_externally else frozenset()
         return {
-            name: self.measurement_parameters[name] for name in self.reading_setters
+            name: self.measurement_parameters[name]
+            for name in self.reading_setters
+            if name not in owned
         }
 
     @classmethod
