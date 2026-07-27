@@ -210,6 +210,11 @@ class SuperconductingMagnetPersistentVI(SuperconductingMagnetVI):
             if abs(driver.get_current() - coil_A) > 0.01:
                 driver.set_ramp_rate(self._default_ramp_rate)
                 driver.set_current_setpoint(coil_A)
+                # The matching phase drives the PSU to the coil current, so
+                # that is the setpoint the hardware is working toward right
+                # now (ramp-introspection standard: ramp_setpoint() is
+                # whatever was last commanded, in every phase).
+                self._ramp_setpoint_T = coil_A / self._amperes_per_tesla
                 while (
                     driver.get_status() == "RAMPING"
                     or abs(driver.get_current() - coil_A) > 0.01
@@ -470,6 +475,9 @@ class SuperconductingMagnetPersistentVI(SuperconductingMagnetVI):
         a full park, not just wherever normal-mode ramping would leave it.
         """
         self._ramp_target_T = 0.0
+        # Mirrors start_ramp(): the previous ramp's setpoint must not be
+        # reported for this one before the generator commands its first.
+        self._ramp_setpoint_T = None
         self._ramp_gen = self._standby_generator()
         self._ramp_exhausted = False
         try:
@@ -498,6 +506,11 @@ class SuperconductingMagnetPersistentVI(SuperconductingMagnetVI):
             if abs(driver.get_current() - coil_A) > 0.01:
                 driver.set_ramp_rate(self._default_ramp_rate)
                 driver.set_current_setpoint(coil_A)
+                # The matching phase drives the PSU to the coil current, so
+                # that is the setpoint the hardware is working toward right
+                # now (ramp-introspection standard: ramp_setpoint() is
+                # whatever was last commanded, in every phase).
+                self._ramp_setpoint_T = coil_A / self._amperes_per_tesla
                 while (
                     driver.get_status() == "RAMPING"
                     or abs(driver.get_current() - coil_A) > 0.01

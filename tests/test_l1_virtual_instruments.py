@@ -745,3 +745,111 @@ def test_delta_mode_initiate_recovers_from_prior_dc_current():
 
     data = delta_vi.take_reading()
     assert data["n_valid"] == 5
+
+
+# 4b. Ramp-introspection standard: ramp_setpoint() — the NEXT setpoint
+def test_rampable_default_ramp_setpoint_is_none():
+    """RampableVI's optional hook has a safe default, like every other one."""
+    from cryosoft.virtual_instruments.rampable import RampableVI
+
+    class BareRampable(RampableVI):
+        def start_ramp(self, target): ...
+        def advance_ramp(self): ...
+        def ramp_status(self): return "IDLE"
+        def stop_ramp(self): ...
+
+    assert BareRampable().ramp_setpoint() is None
+
+
+def test_magnet_ramp_setpoint_is_the_segment_boundary_not_the_target():
+    """Mid-ramp the magnet drives to the next segment boundary, not the end setpoint.
+
+    This distinction is the whole reason the tracker shows two numbers: the
+    PSU is heading for 2 T right now while the ramp finishes at 3 T.
+    """
+    from cryosoft.virtual_instruments.magnet.superconducting_magnet import (
+        SuperconductingMagnetVI,
+    )
+
+    driver = SimOxfordIPS120("SIM")
+    segments = [
+        {"max_current_A": 20.0, "rate_A_per_min": 600.0},
+        {"max_current_A": float("inf"), "rate_A_per_min": 100.0},
+    ]
+    vi = SuperconductingMagnetVI(
+        {"main": driver},
+        default_ramp_rate=5.0,
+        amperes_per_tesla=10.0,
+        ramp_segments=segments,
+    )
+
+    assert vi.ramp_setpoint() is None  # idle: nothing commanded
+
+    vi.start_ramp(3.0)
+    assert vi.ramp_setpoint() == pytest.approx(2.0)  # the 20 A boundary
+    assert vi.ramp_target() == pytest.approx(3.0)
+
+    for _ in range(100):
+        vi.advance_ramp()
+        driver._last_update = time.time() - 0.5
+        driver._update_simulation()
+        if vi.ramp_status() == "TARGET_REACHED":
+            break
+    # Past the boundary the setpoint becomes the end setpoint itself.
+    assert vi.ramp_setpoint() == pytest.approx(3.0)
+
+
+def test_magnet_stop_ramp_clears_the_setpoint():
+    """Implementations MUST clear ramp_setpoint() in stop_ramp(), like the target."""
+    from cryosoft.virtual_instruments.magnet.superconducting_magnet import (
+        SuperconductingMagnetVI,
+    )
+
+    driver = SimOxfordIPS120("SIM")
+    vi = SuperconductingMagnetVI({"main": driver}, amperes_per_tesla=10.0)
+    vi.start_ramp(1.0)
+    assert vi.ramp_setpoint() is not None
+
+    vi.stop_ramp()
+    assert vi.ramp_setpoint() is None
+    assert vi.ramp_target() is None
+
+
+def test_temperature_ramp_setpoint_trails_the_target():
+    """A time-based ramp's commanded setpoint walks from start toward target."""
+    from cryosoft.virtual_instruments.temperature.sample_temperature_controller import (
+        SampleTemperatureControllerVI,
+    )
+
+    driver = SimOxfordITC503("SIM")
+    vi = SampleTemperatureControllerVI(
+        {"main": driver}, default_ramp_rate=1.0, tolerance=2.0
+    )
+    start_T = driver.get_temperature()
+    vi.start_ramp(start_T - 100.0)
+
+    setpoint = vi.ramp_setpoint()
+    assert setpoint is not None
+    assert vi.ramp_target() == pytest.approx(start_T - 100.0)
+    # A 1 K/min ramp has barely moved on its first tick, so the commanded
+    # setpoint is still near the start and nowhere near the end setpoint.
+    assert setpoint == pytest.approx(start_T, abs=1.0)
+    assert setpoint != vi.ramp_target()
+
+    vi.stop_ramp()
+    assert vi.ramp_setpoint() is None
+
+
+def test_rotator_ramp_setpoint_equals_its_target():
+    """A one-shot generator's next setpoint IS the end setpoint — also valid."""
+    from cryosoft.drivers.sim_rotator import SimRotator
+    from cryosoft.virtual_instruments.rotator.rotator import RotatorVI
+
+    driver = SimRotator("SIM")
+    vi = RotatorVI({"main": driver}, max_angle_deg=360.0, min_angle_deg=-360.0)
+    vi.start_ramp(45.0)
+    assert vi.ramp_setpoint() == pytest.approx(45.0)
+    assert vi.ramp_target() == pytest.approx(45.0)
+
+    vi.stop_ramp()
+    assert vi.ramp_setpoint() is None

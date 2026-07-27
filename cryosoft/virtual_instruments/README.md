@@ -49,7 +49,16 @@ a `drivers` dict of role → driver instance (e.g. `{"main": ...}`,
   tick, with no extra poll, to build that tick's safety-origin `Condition`s
   (GLOSSARY.md's **Safety hold** / **Critical safety flag**).
 - For rampable VIs, the `start_ramp` / `advance_ramp` / `ramp_status` /
-  `stop_ramp` generator API the Orchestrator drives each tick.
+  `stop_ramp` generator API the Orchestrator drives each tick, plus the
+  optional **ramp-introspection standard** — `ramp_value()` /
+  `ramp_setpoint()` / `ramp_target()` / `ramp_rate()` / `ramp_phase()`, each
+  with a safe `None` default. Implementing them is what puts a VI on the
+  Monitor window's Ramps sub-panel (current value, next setpoint, end
+  setpoint, rate) and into the operational-status record; no GUI or
+  Orchestrator code changes for a new rampable VI. `ramp_setpoint()` in
+  particular must be a pure accessor over what the generator last commanded
+  — never a hardware read — and must be cleared in `stop_ramp()` alongside
+  the target.
 
 ## GUI presentation: who decides what a card shows
 Read this before adding or "hiding" a control — the split trips people up:
@@ -137,7 +146,13 @@ Shared contracts at the root; concrete classes live in the subfolders.
 - `rampable.py` — `RampableVI` mixin: the abstract ramp API
   (`start_ramp`, `advance_ramp`, `ramp_status`, `stop_ramp`) the Orchestrator
   calls each tick; `stop_ramp` on abort/ERROR/EMERGENCY kills the generator and
-  holds the hardware. Mixed into magnet and temperature VIs. tests:
+  holds the hardware. Also the optional, bus-free introspection hooks
+  (`ramp_value`, `ramp_setpoint`, `ramp_target`, `ramp_rate`, `ramp_phase`)
+  that `Station.get_ramp_status()` aggregates once per tick for the ramp
+  tracker and the operational-status record — `ramp_setpoint()` is the NEXT
+  setpoint (the intermediate value the hardware is driving to), distinct
+  from `ramp_target()`'s END setpoint. Mixed into magnet, temperature, and
+  rotator VIs. tests: `tests/test_l1_virtual_instruments.py`,
   `tests/test_l1_new_vis.py` (via the concrete rampable VIs).
 - `__init__.py` — package marker (docstring only). tests: none.
 - `magnet/` — superconducting magnet PSU VIs (field ramp, persistent mode).

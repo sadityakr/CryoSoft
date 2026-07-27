@@ -53,6 +53,12 @@ BTN_PRIMARY_DISABLED = "#9ec5f4"  # with white text
 BTN_DANGER_FILL = "#d03b3b"     # white text 4.80:1
 BTN_DANGER_HOVER = "#b53232"    # white text 6.06:1
 BTN_DANGER_PRESSED = "#9c2a2a"  # derived (darker); white text 7.56:1
+# Danger fill lightened ~60% toward white, the same construction (and the same
+# ~1.8:1 white-text contrast) as BTN_PRIMARY_DISABLED above. Deliberately low
+# contrast: WCAG 1.4.3 exempts disabled controls, and looking washed out is
+# precisely the signal — a destructive action the app is currently refusing
+# must not read as available (e.g. a ramp claimed by a running procedure).
+BTN_DANGER_DISABLED = "#ecb1b1"  # with white text
 
 # ---------------------------------------------------------------------------
 # Buttons — secondary (white, outlined)
@@ -242,6 +248,10 @@ QPushButton[class="danger"]:hover {{
 }}
 QPushButton[class="danger"]:pressed {{
     background-color: {BTN_DANGER_PRESSED};
+}}
+QPushButton[class="danger"]:disabled {{
+    background-color: {BTN_DANGER_DISABLED};
+    color: {TEXT_ON_ACCENT};
 }}
 
 /* ── Emergency acknowledge (targeted by objectName) ──────────────────── */

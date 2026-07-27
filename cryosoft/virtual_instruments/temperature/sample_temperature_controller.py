@@ -111,6 +111,11 @@ class SampleTemperatureControllerVI(TemperatureControllerBase, RampableVI):
         self._ramp_exhausted: bool = True
         self._ramp_target: float | None = None
         self._ramp_rate: float | None = None
+        #: The last setpoint written to the controller, in kelvin — the "next
+        #: setpoint" of the ramp-introspection standard (RampableVI.
+        #: ramp_setpoint). A time-based ramp advances it every tick, so it
+        #: trails _ramp_target for the whole ramp.
+        self._ramp_setpoint: float | None = None
 
     # ------------------------------------------------------------------
     # RampableVI implementation
@@ -126,6 +131,10 @@ class SampleTemperatureControllerVI(TemperatureControllerBase, RampableVI):
         self._ramp_target = float(target)
         rate_per_min = float(rate) if rate is not None else self._default_ramp_rate
         self._ramp_rate = rate_per_min
+        # Cleared here, not in the generator: the first next() below writes
+        # the first setpoint and records it, so a stale value from the
+        # previous ramp is never reported for this one.
+        self._ramp_setpoint = None
 
         self._ramp_gen = self._ramp_generator(self._ramp_target, rate_per_min)
         self._ramp_exhausted = False
@@ -173,6 +182,7 @@ class SampleTemperatureControllerVI(TemperatureControllerBase, RampableVI):
         self._ramp_exhausted = True
         self._ramp_target = None
         self._ramp_rate = None
+        self._ramp_setpoint = None
         driver = self._driver  # type: ignore[attr-defined]
         driver.set_setpoint(driver.get_temperature())
 
@@ -183,6 +193,17 @@ class SampleTemperatureControllerVI(TemperatureControllerBase, RampableVI):
     def ramp_rate(self) -> float | None:
         """Return the active ramp rate in kelvin/min, or ``None`` when idle."""
         return self._ramp_rate
+
+    def ramp_setpoint(self) -> float | None:
+        """Return the setpoint last written to the controller, in kelvin.
+
+        A time-based ramp walks the controller's setpoint from the starting
+        temperature to the target at ``ramp_rate()``, so this is where the
+        controller is regulating *now* — it reaches ``ramp_target()`` only on
+        the ramp's final tick. Recorded by the generator as it writes each
+        setpoint; no hardware read.
+        """
+        return self._ramp_setpoint
 
     def ramp_value(self) -> float | None:
         """Return the current temperature in kelvin (the value the ramp drives)."""
@@ -210,6 +231,7 @@ class SampleTemperatureControllerVI(TemperatureControllerBase, RampableVI):
                 new_setpoint = max(new_setpoint, target)
 
             driver.set_setpoint(new_setpoint)
+            self._ramp_setpoint = new_setpoint
 
             if new_setpoint == target:
                 return

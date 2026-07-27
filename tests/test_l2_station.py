@@ -321,6 +321,40 @@ def test_check_ramps(sim_station: Station):
     assert sim_station.check_ramps() is True
 
 
+def test_get_ramp_status_carries_the_full_introspection_snapshot(sim_station: Station):
+    """get_ramp_status() aggregates every RampableVI introspection hook per VI.
+
+    One snapshot serves both consumers (the operational-status record and the
+    ramp tracker), so every documented key must be present for every system
+    VI — a missing key would silently become a ``None`` column downstream.
+    """
+    status = sim_station.get_ramp_status()
+    assert status, "expected at least one rampable system VI"
+    keys = {"value", "setpoint", "target", "rate", "ramp_status", "phase"}
+    for vi_name, entry in status.items():
+        assert keys <= set(entry), f"{vi_name} missing {keys - set(entry)}"
+        assert entry["ramp_status"] == "IDLE"
+        assert entry["setpoint"] is None
+
+
+def test_get_ramp_status_reports_next_and_end_setpoint_during_a_ramp(
+    sim_station: Station,
+):
+    """Mid-ramp the snapshot distinguishes the commanded setpoint from the target."""
+    sim_station.process_system_targets({"magnet_z": Target(5.0)})
+    entry = sim_station.get_ramp_status()["magnet_z"]
+
+    assert entry["ramp_status"] == "RAMPING"
+    assert entry["target"] == pytest.approx(5.0)
+    assert entry["setpoint"] is not None
+    # sim_cryostat's magnet ramps in current-dependent segments, so the first
+    # commanded setpoint is a boundary short of the 5 T end setpoint.
+    assert entry["setpoint"] < entry["target"]
+
+    sim_station.stop_ramps({"magnet_z"})
+    assert sim_station.get_ramp_status()["magnet_z"]["setpoint"] is None
+
+
 def test_check_safety(sim_station: Station):
     """check_safety() aggregates the level meter's DEBOUNCED helium verdict.
 

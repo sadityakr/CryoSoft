@@ -907,20 +907,27 @@ class Station:
                 logger.exception("stop_ramp failed on VI '%s'", vi_name)
 
     def get_ramp_status(self) -> dict[str, dict]:
-        """Aggregate each system VI's ramp target, rate, and status.
+        """Aggregate each system VI's ramp value, setpoint, target, rate, and status.
 
-        For operational-status display ("what is the run waiting on, and how far
-        from setpoint?"). For every system VI implementing ``RampableVI``,
-        collects ``ramp_target()`` / ``ramp_rate()`` (user units — tesla,
-        kelvin; ``None`` if the VI does not expose them) and its
-        ``ramp_status()`` string. Each VI is guarded individually: a
-        communication error on one instrument yields a stale entry rather than
-        breaking the whole snapshot.
+        The single aggregation point for the ramp-introspection standard
+        (``RampableVI``'s optional hooks): both the operational-status record
+        ("what is the run waiting on, and how far from setpoint?") and the
+        ramp tracker ("what is ramping right now, and where to?") read this
+        one snapshot, so a tick never polls a VI's ramp state twice. For every
+        system VI implementing ``RampableVI``, collects ``ramp_value()`` /
+        ``ramp_setpoint()`` / ``ramp_target()`` / ``ramp_rate()`` (user units —
+        tesla, kelvin, degrees; ``None`` if the VI does not expose them), its
+        ``ramp_phase()``, and its ``ramp_status()`` string. Each VI is guarded
+        individually: a communication error on one instrument yields a stale
+        entry rather than breaking the whole snapshot.
 
         Returns:
-            ``{vi_name: {"target": float|None, "rate": float|None,
-            "ramp_status": str}}`` for every system VI. A VI that raised on read
-            also carries ``"_stale": True``.
+            ``{vi_name: {"value": float|None, "setpoint": float|None,
+            "target": float|None, "rate": float|None, "ramp_status": str,
+            "phase": str|None}}`` for every system VI. ``setpoint`` is the
+            NEXT setpoint the hardware is driving to (an intermediate ramp
+            step), ``target`` the END setpoint the ramp finishes at. A VI that
+            raised on read also carries ``"_stale": True``.
         """
         result: dict[str, dict] = {}
         for vi_name, vi_type in self._vi_registry.items():
@@ -932,6 +939,7 @@ class Station:
             try:
                 result[vi_name] = {
                     "value": vi.ramp_value(),
+                    "setpoint": vi.ramp_setpoint(),
                     "target": vi.ramp_target(),
                     "rate": vi.ramp_rate(),
                     "ramp_status": vi.ramp_status(),
@@ -940,6 +948,7 @@ class Station:
             except CryoSoftCommunicationError:
                 result[vi_name] = {
                     "value": None,
+                    "setpoint": None,
                     "target": None,
                     "rate": None,
                     "ramp_status": "IDLE",
