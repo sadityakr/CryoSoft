@@ -462,12 +462,11 @@ class Station:
             reason = condition.message
             since = condition.since
 
-        # Phase 4 of the Availability standard makes is_attached() a real
-        # BaseVirtualInstrument method (see virtual_instruments/base.py);
-        # until then, duck-type defensively — a VI with no such method is
-        # attached.
-        is_attached = getattr(vi, "is_attached", None)
-        if callable(is_attached) and not is_attached():
+        # is_attached() is a real BaseVirtualInstrument method (see the
+        # "Detach-when-idle declaration" in virtual_instruments/base.py):
+        # True for every VI by default, False while a detach_when_idle VI
+        # has released its session.
+        if not vi.is_attached():
             tags.add("detached")
 
         frozen_tags = frozenset(tags)

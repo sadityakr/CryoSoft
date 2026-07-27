@@ -104,6 +104,137 @@ def test_disconnect_hook_sends_no_commands(station: Station):
     assert vi._driver.get_setpoint() == pytest.approx(setpoint_before)
 
 
+# ── L1: the detach-when-idle declaration ─────────────────────────────────────
+# See BaseVirtualInstrument's "Detach-when-idle declaration" (part of the
+# connection-lifecycle standard): a VI opts in by overriding the read-only
+# detach_when_idle property; the base then releases the driver session
+# automatically — via __init_subclass__'s wrap of a directly defined
+# standby(), or via the base's own standby() for a VI that inherits it
+# unchanged. TensormeterRTM2MeasurementVI is the one production VI that
+# declares it; these tests use a plain double that does NOT hand-write the
+# release at all, to prove it really is framework behaviour.
+
+
+def test_detach_when_idle_is_false_by_default():
+    """A VI that never overrides the property never detaches — the regression guard."""
+    driver = _DetachableDriver("SIM::TEST")
+    vi = _PlainVI({"main": driver})
+    assert vi.detach_when_idle is False
+
+    vi.standby()
+
+    assert vi.is_attached() is True
+    assert driver._closed is False
+
+
+def test_declared_vi_is_born_attached():
+    """Declaring detach_when_idle alone does not imply born-detached.
+
+    Born-detached (RTM2's __init__ calling self._detach()) is each VI's own
+    choice; the base only guarantees the release on standby().
+    """
+    vi = _DetachWhenIdleNoOverrideVI({"main": _DetachableDriver("SIM::TEST")})
+    assert vi.is_attached() is True
+
+
+def test_base_standby_detaches_for_a_vi_with_no_standby_override():
+    """A VI that never defines its own standby() still detaches on standby().
+
+    Exercises BaseVirtualInstrument.standby() itself (the fallback path
+    __init_subclass__'s wrap does not touch, since there is nothing directly
+    defined on this class to wrap).
+    """
+    driver = _DetachableDriver("SIM::TEST")
+    vi = _DetachWhenIdleNoOverrideVI({"main": driver})
+    assert vi.is_attached() is True
+
+    vi.standby()
+
+    assert vi.is_attached() is False
+    assert driver._closed is True
+
+
+def test_subclass_standby_still_detaches_via_the_init_subclass_wrap():
+    """A VI's OWN standby() override still triggers the release automatically.
+
+    _DetachWhenIdleWithOwnStandbyVI.standby() does nothing about the
+    connection itself — the release comes entirely from
+    __init_subclass__'s wrap, proving the declaration is enforced, not
+    merely offered.
+    """
+    driver = _DetachableDriver("SIM::TEST")
+    vi = _DetachWhenIdleWithOwnStandbyVI({"main": driver})
+
+    vi.standby()
+
+    assert vi.own_standby_ran is True  # the override's own body really ran
+    assert vi.is_attached() is False
+    assert driver._closed is True
+
+
+def test_is_attached_tracks_manual_attach_and_detach():
+    """is_attached() reflects _attach()/_detach() directly, not just standby()."""
+    driver = _DetachableDriver("SIM::TEST")
+    vi = _DetachWhenIdleNoOverrideVI({"main": driver})
+
+    vi._detach()
+    assert vi.is_attached() is False
+    assert driver._closed is True
+
+    vi._attach()
+    assert vi.is_attached() is True
+    assert driver._closed is False
+
+
+def test_detach_is_idempotent_and_never_raises():
+    driver = _DetachableDriver("SIM::TEST")
+    vi = _DetachWhenIdleNoOverrideVI({"main": driver})
+
+    vi._detach()
+    vi._detach()  # idempotent, must not raise
+
+    assert vi.is_attached() is False
+
+
+def test_attach_never_raises_when_ensure_connected_fails():
+    """A failing reattach must not block the caller — is_attached() stays False."""
+
+    class _FailsToReconnectDriver(_DetachableDriver):
+        def ensure_connected(self) -> None:
+            raise CryoSoftCommunicationError("cannot reopen")
+
+    driver = _FailsToReconnectDriver("SIM::TEST")
+    vi = _DetachWhenIdleNoOverrideVI({"main": driver})
+    vi._detach()
+
+    vi._attach()  # must not raise
+
+    assert vi.is_attached() is False
+
+
+def test_ping_verify_and_release_through_the_base_for_a_plain_double():
+    """The base's ping() reattaches, round-trips, then releases again — no VI code."""
+    driver = _DetachableDriver("SIM::TEST")
+    vi = _DetachWhenIdleNoOverrideVI({"main": driver})
+    vi._detach()
+
+    assert vi.ping() is True
+    assert driver._closed is True  # released again after the round trip
+
+
+def test_ping_returns_false_and_still_releases_when_unreachable():
+    class _NeverAnswersDriver(_DetachableDriver):
+        def get_idn(self) -> str:
+            raise CryoSoftCommunicationError("hung")
+
+    driver = _NeverAnswersDriver("SIM::TEST")
+    vi = _DetachWhenIdleNoOverrideVI({"main": driver})
+    vi._detach()
+
+    assert vi.ping() is False
+    assert driver._closed is True
+
+
 # ── L2: the Station degrades and restores ────────────────────────────────────
 
 
@@ -322,3 +453,61 @@ class _PlainVI(BaseVirtualInstrument):
     """A VI double with no overrides — it inherits every lifecycle hook."""
 
     vi_type = "system"
+
+
+class _DetachableDriver:
+    """A driver double modelling the detach-when-idle standard's session.
+
+    ``close()``/``ensure_connected()`` model the TCP-style session a
+    single-client instrument holds; a command sent while closed raises,
+    exactly like the real drivers' use-after-close failure.
+    """
+
+    def __init__(self, resource_string: str) -> None:
+        self.resource_string = resource_string
+        self._closed = False
+
+    def get_idn(self) -> str:
+        if self._closed:
+            raise CryoSoftCommunicationError("closed")
+        return "TEST,DETACHABLE,0,0"
+
+    def close(self) -> None:
+        self._closed = True
+
+    def ensure_connected(self) -> None:
+        self._closed = False
+
+
+class _DetachWhenIdleNoOverrideVI(BaseVirtualInstrument):
+    """Declares detach_when_idle but relies entirely on the inherited standby().
+
+    Proves the release is framework behaviour — BaseVirtualInstrument's own
+    standby() and ping() — not something every declaring VI must hand-write,
+    the way TensormeterRTM2MeasurementVI no longer does.
+    """
+
+    vi_type = "measurement"
+
+    @property
+    def detach_when_idle(self) -> bool:
+        return True
+
+
+class _DetachWhenIdleWithOwnStandbyVI(BaseVirtualInstrument):
+    """Declares detach_when_idle AND defines its own standby().
+
+    Its standby() does nothing about the connection — the release comes
+    entirely from __init_subclass__'s wrap, proving that wrap fires for a
+    directly defined standby() too, not just the base's fallback.
+    """
+
+    vi_type = "measurement"
+    own_standby_ran: bool = False
+
+    @property
+    def detach_when_idle(self) -> bool:
+        return True
+
+    def standby(self) -> None:
+        self.own_standby_ran = True

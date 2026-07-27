@@ -50,6 +50,12 @@ import pytest
 import cryosoft.drivers
 import cryosoft.procedures
 import cryosoft.virtual_instruments
+from cryosoft.core.availability import (
+    AVAILABILITY_STATES,
+    AVAILABILITY_TAGS,
+    TAG_POLICY,
+    TAG_PRECEDENCE,
+)
 from cryosoft.core.conditions import SEVERITIES
 from cryosoft.core.decorators import (
     VALID_CONTROL_SCOPES,
@@ -463,9 +469,11 @@ def test_vi_has_connection_lifecycle_hooks(vi_cls: type) -> None:
     fails on a VI that overrode one with a different shape — which would
     break ``build_station()``'s identity check or
     ``Station.disconnect_instrument()`` for that instrument alone, silently,
-    on whichever setup happens to configure it.
+    on whichever setup happens to configure it. ``is_attached()`` — the
+    detach-when-idle declaration's observable state (see the class
+    docstring) — is part of the same hook set.
     """
-    for name in ("ping", "disconnect", "initiate", "standby"):
+    for name in ("ping", "disconnect", "initiate", "standby", "is_attached"):
         method = getattr(vi_cls, name, None)
         assert callable(method), f"{vi_cls.__name__} lacks {name}()"
         required = [
@@ -479,6 +487,165 @@ def test_vi_has_connection_lifecycle_hooks(vi_cls: type) -> None:
             f"{vi_cls.__name__}.{name}() must take no required arguments, "
             f"got {[p.name for p in required]}"
         )
+
+
+# ── Availability standard (cryosoft.core.availability) ───────────────────────
+# See availability.py's module docstring: a closed tag vocabulary, a derived
+# state vocabulary, and a declared tag -> policy table (TAG_POLICY) are the
+# one place the "why can't I use this instrument?" policies are stated. These
+# tests make the table's own internal consistency binding, the moment a tag
+# or a policy row is added or edited — a fixed module, not one pkgutil
+# auto-discovers, but the checked-in harness (`make check`) is where a future
+# edit meets them regardless of whether the author also knows about
+# tests/test_availability.py's pure-policy coverage of the same invariants.
+
+
+def test_tag_policy_covers_exactly_the_availability_tags() -> None:
+    """TAG_POLICY has one row per tag, no orphan row, no undeclared tag."""
+    assert set(TAG_POLICY) == set(AVAILABILITY_TAGS), (
+        f"TAG_POLICY keys {sorted(TAG_POLICY)} must exactly match "
+        f"AVAILABILITY_TAGS {sorted(AVAILABILITY_TAGS)} — no orphan row, no "
+        f"undeclared tag"
+    )
+    for tag, policy in TAG_POLICY.items():
+        assert policy.tag == tag, (
+            f"TAG_POLICY[{tag!r}].tag == {policy.tag!r} — a TagPolicy's own "
+            f"'tag' field must match the key it is filed under"
+        )
+
+
+def test_tag_policy_states_and_precedence_stay_in_vocabulary() -> None:
+    """Every TagPolicy.state is declared; TAG_PRECEDENCE is a permutation of the tags."""
+    for tag, policy in TAG_POLICY.items():
+        assert policy.state in AVAILABILITY_STATES, (
+            f"TAG_POLICY[{tag!r}].state {policy.state!r} is not one of "
+            f"AVAILABILITY_STATES {AVAILABILITY_STATES}"
+        )
+    assert sorted(TAG_PRECEDENCE) == sorted(AVAILABILITY_TAGS), (
+        f"TAG_PRECEDENCE {TAG_PRECEDENCE} must be a permutation of "
+        f"AVAILABILITY_TAGS {AVAILABILITY_TAGS}"
+    )
+    assert len(TAG_PRECEDENCE) == len(set(TAG_PRECEDENCE)), (
+        f"TAG_PRECEDENCE {TAG_PRECEDENCE} names a tag more than once"
+    )
+
+
+# ── Detach-when-idle standard (BaseVirtualInstrument.detach_when_idle) ───────
+# See BaseVirtualInstrument's "Detach-when-idle declaration": a VI opts in by
+# overriding the detach_when_idle property; __init_subclass__'s wrap (or the
+# base's own standby()) then releases the driver session automatically. These
+# tests make the opt-in binding for every present and future VI that declares
+# it — currently only TensormeterRTM2MeasurementVI (12t-cryo's
+# tensormeter_measurement, configured_externally: true).
+
+
+def _sim_driver_class_for(real_dotted: str) -> type:
+    """Return the sim twin class for a driver's dotted class path.
+
+    A config may already reference a ``sim_*`` module directly (e.g.
+    ``sim_cryostat``) — imported as-is. Otherwise uses the same
+    ``sim_<module>`` naming convention as ``test_sim_real_driver_api_parity``
+    — the one existing derivation from a real driver's dotted path to its
+    sim twin.
+    """
+    module_path, _, _ = real_dotted.rpartition(".")
+    package, _, module_name = module_path.rpartition(".")
+    sim_module_name = module_name if module_name.startswith("sim_") else f"sim_{module_name}"
+    sim_module = importlib.import_module(f"{package}.{sim_module_name}")
+    (sim_cls,) = _public_classes(sim_module)
+    return sim_cls
+
+
+def _detach_when_idle_vi_specs() -> list[tuple[str, type, dict, dict[str, type]]]:
+    """(spec id, vi_cls, init_params, {role: sim driver class}) for every
+    configured VI whose REAL config build declares ``detach_when_idle``.
+
+    Drawn from the shipped configs' real ``drivers`` role mapping and real
+    ``init_params`` — e.g. 12t-cryo's ``tensormeter_measurement``,
+    ``configured_externally: true`` — with each real driver class swapped
+    for its sim twin so the checks run with no hardware. Filtering is done
+    by actually constructing the VI and reading ``detach_when_idle``, so a
+    future config declaring it is covered automatically, without this file
+    needing to know which VI or config that will be.
+    """
+    specs: list[tuple[str, type, dict, dict[str, type]]] = []
+    for config_dir in sorted(p for p in CONFIGS_DIR.iterdir() if p.is_dir()):
+        devices = _load_yaml(config_dir / "devices.yaml")
+        real_drivers_cfg = devices.get("real_drivers") or {}
+        for vi_name, vi_cfg in (devices.get("virtual_instruments") or {}).items():
+            vi_cls = _import_class(vi_cfg["class"])
+            if not issubclass(vi_cls, MeasurementInstrumentBase):
+                continue
+            init_params = dict(vi_cfg.get("init_params") or {})
+            role_map = vi_cfg.get("drivers") or {}
+            sim_driver_classes = {
+                role: _sim_driver_class_for(real_drivers_cfg[driver_key]["class"])
+                for role, driver_key in role_map.items()
+            }
+            probe_drivers = {
+                role: cls("SIM::CONFORMANCE") for role, cls in sim_driver_classes.items()
+            }
+            vi = vi_cls(probe_drivers, **init_params)
+            if vi.detach_when_idle:
+                specs.append(
+                    (f"{config_dir.name}/{vi_name}", vi_cls, init_params, sim_driver_classes)
+                )
+    return specs
+
+
+@pytest.mark.parametrize(
+    "spec_id, vi_cls, init_params, sim_driver_classes",
+    _detach_when_idle_vi_specs(),
+    ids=lambda v: v if isinstance(v, str) else "",
+)
+def test_detach_when_idle_vi_drivers_support_ensure_connected(
+    spec_id: str, vi_cls: type, init_params: dict, sim_driver_classes: dict[str, type]
+) -> None:
+    """A VI declaring detach_when_idle must have reconnect-capable drivers.
+
+    ``BaseVirtualInstrument._attach()`` duck-types ``ensure_connected()``
+    (deliberately not part of the driver contract — see
+    ``drivers/README.md``): a VI that declares ``detach_when_idle`` without
+    a driver implementing it would silently never reacquire its session.
+    """
+    for role, cls in sim_driver_classes.items():
+        driver = cls("SIM::CONFORMANCE")
+        assert callable(getattr(driver, "ensure_connected", None)), (
+            f"{spec_id} ({vi_cls.__name__}) declares detach_when_idle but "
+            f"its {role!r} driver ({cls.__name__}) has no ensure_connected() "
+            f"— the detach-when-idle standard's opt-in reconnect capability"
+        )
+
+
+@pytest.mark.parametrize(
+    "spec_id, vi_cls, init_params, sim_driver_classes",
+    _detach_when_idle_vi_specs(),
+    ids=lambda v: v if isinstance(v, str) else "",
+)
+def test_detach_when_idle_vi_really_releases_and_reacquires(
+    spec_id: str, vi_cls: type, init_params: dict, sim_driver_classes: dict[str, type]
+) -> None:
+    """standby() really releases the session; arming really reacquires it.
+
+    Built against the sim driver — proves the declaration is framework
+    behaviour that actually moves ``is_attached()``, not just a flag that
+    reads true without anything happening underneath.
+    """
+    drivers = {role: cls("SIM::CONFORMANCE") for role, cls in sim_driver_classes.items()}
+    vi = vi_cls(drivers, **init_params)
+    defaults = {name: spec.default for name, spec in vi_cls.measurement_parameters.items()}
+
+    vi.initiate_measurement(**defaults)
+    assert vi.is_attached() is True, (
+        f"{spec_id} ({vi_cls.__name__}).initiate_measurement() must "
+        f"reacquire the session for a detach_when_idle VI"
+    )
+
+    vi.standby()
+    assert vi.is_attached() is False, (
+        f"{spec_id} ({vi_cls.__name__}).standby() must release the session "
+        f"for a detach_when_idle VI"
+    )
 
 
 # ── Safety-flag manifest standard ─────────────────────────────────────────────
