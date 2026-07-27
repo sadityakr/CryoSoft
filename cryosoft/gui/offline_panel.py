@@ -5,8 +5,10 @@
 #   (degraded build) or the operator released it (the connection-lifecycle
 #   standard, see virtual_instruments/base.py). Both land in the Station's ONE
 #   offline registry and render through this same card; only the wording
-#   differs, keyed off OfflineInstrument.origin, because the degraded behavior
-#   is deliberately identical. The card shows WHAT is offline and WHY in the
+#   differs, keyed off the Availability standard's tags
+#   (cryosoft.core.availability: OfflineInstrument.tags, a subset of
+#   "connect_failed"/"operator"), because the degraded behavior is
+#   deliberately identical. The card shows WHAT is offline and WHY in the
 #   instrument grid and carries the Connect button (the offline card's half of
 #   the ConnectionButton pair the live card shows as Disconnect); its detail
 #   window repeats it with the full reason and a diagnosis hint. Both flow
@@ -33,6 +35,8 @@
 """OfflineInstrumentPanel — grid card and detail window for an offline VI."""
 
 from __future__ import annotations
+
+from dataclasses import dataclass
 
 import qtawesome as qta
 from PyQt6.QtCore import Qt
@@ -62,15 +66,102 @@ _OPERATOR_HINT_TEXT = (
     "back to CryoSoft — then Initiate to bring it to its operating state."
 )
 
+_RECONNECT_FAILED_HINT_TEXT = (
+    "You released this instrument, so it was free for its own front panel or "
+    "vendor software — but the last attempt to hand it back to CryoSoft "
+    "failed on hardware (see the reason above). Check that it is powered on "
+    "and its cable and address match the config, then press Connect again. "
+    "For a deeper diagnosis run:\n"
+    "python -m cryosoft.troubleshoot check"
+)
+
+
+@dataclass(frozen=True)
+class _OfflineWording:
+    """The card/detail-window wording one offline availability tag set selects.
+
+    ``OfflineInstrument.tags`` (the Availability standard's closed vocabulary,
+    ``cryosoft.core.availability``) can hold ``"connect_failed"``,
+    ``"operator"``, or both at once — an operator-released VI whose reconnect
+    then failed on hardware. Each combination gets its own row so the
+    two-tag case can say BOTH things are true, rather than a bool picking one
+    over the other.
+
+    Attributes:
+        badge: Header badge text (``"[OFFLINE]"`` / ``"[DISCONNECTED]"``).
+        note: One-line card note under the reason.
+        header: Detail-window header sentence; ``{vi_name}`` is substituted.
+        hint: Detail-window diagnosis/recovery hint.
+        window_title: Detail-window title; ``{vi_name}`` is substituted.
+    """
+
+    badge: str
+    note: str
+    header: str
+    hint: str
+    window_title: str
+
+
+_WORDING: dict[frozenset[str], _OfflineWording] = {
+    frozenset({"connect_failed"}): _OfflineWording(
+        badge="[OFFLINE]",
+        note="Not connected at startup — all other instruments are unaffected.",
+        header="{vi_name} failed to connect at startup.",
+        hint=_HINT_TEXT,
+        window_title="{vi_name} — Instrument Offline",
+    ),
+    frozenset({"operator"}): _OfflineWording(
+        badge="[DISCONNECTED]",
+        note="Released to its front panel — all other instruments are unaffected.",
+        header="{vi_name} is disconnected — CryoSoft is not holding it.",
+        hint=_OPERATOR_HINT_TEXT,
+        window_title="{vi_name} — Instrument Disconnected",
+    ),
+    frozenset({"operator", "connect_failed"}): _OfflineWording(
+        badge="[DISCONNECTED]",
+        note=(
+            "Released to its front panel, and the reconnect attempt then "
+            "failed — all other instruments are unaffected."
+        ),
+        header=(
+            "{vi_name} is disconnected — you released it, and the last "
+            "attempt to hand it back failed on hardware."
+        ),
+        hint=_RECONNECT_FAILED_HINT_TEXT,
+        window_title="{vi_name} — Instrument Disconnected",
+    ),
+}
+
+_DEFAULT_WORDING = _WORDING[frozenset({"connect_failed"})]
+
+
+def _wording_for(tags: frozenset[str]) -> _OfflineWording:
+    """Return the `_OfflineWording` an offline VI's tag set selects.
+
+    Args:
+        tags: An `OfflineInstrument.tags` value — a non-empty subset of the
+            Availability standard's absence tags, ``{"connect_failed",
+            "operator"}`` (`cryosoft.core.availability`).
+
+    Returns:
+        The exact-match wording for `tags`; falls back to the
+        `connect_failed`-only wording for any combination the offline
+        registry does not actually produce (defensive).
+    """
+    return _WORDING.get(tags, _DEFAULT_WORDING)
+
 
 class OfflineInstrumentPanel(QGroupBox):
     """Instrument-grid card for a VI CryoSoft does not currently hold.
 
-    Covers both offline origins with one card, because the Station degrades
-    them identically (see the connection-lifecycle standard on
-    ``BaseVirtualInstrument``): an instrument that never connected, and one
-    the operator deliberately released. Only the label, the note and the hint
-    differ, so the operator can tell "something is wrong" from "I did this".
+    Covers every offline tag combination with one card, because the Station
+    degrades them identically (see the connection-lifecycle standard on
+    ``BaseVirtualInstrument``): an instrument that never connected, one the
+    operator deliberately released, or both at once (a released instrument
+    whose reconnect then failed on hardware). Only the label, the note and
+    the hint differ, selected from ``info.tags`` via a tag-keyed mapping
+    (``_wording_for()``), so the operator can tell "something is wrong" from
+    "I did this" — or both.
 
     Control-free apart from the one action that applies here: Connect — the
     offline half of the ConnectionButton pair whose live-card half reads
@@ -78,7 +169,7 @@ class OfflineInstrumentPanel(QGroupBox):
 
     Args:
         vi_name: The VI's configured name.
-        info: The Station's offline record (reason shown verbatim; ``origin``
+        info: The Station's offline record (reason shown verbatim; ``tags``
             selects the wording).
         orchestrator: Orchestrator handling the connect request.
         parent: Optional Qt parent widget.
@@ -98,7 +189,8 @@ class OfflineInstrumentPanel(QGroupBox):
         self._vi_name = vi_name
         self._orchestrator = orchestrator
         self._details: OfflineFrontPanel | None = None  # lazily created
-        self._by_operator = "operator" in info.tags
+        self._tags = info.tags
+        wording = _wording_for(info.tags)
         self.setObjectName(f"{vi_name}_offline_card")
 
         outer = QVBoxLayout()
@@ -106,8 +198,7 @@ class OfflineInstrumentPanel(QGroupBox):
         outer.setContentsMargins(8, 8, 8, 8)
 
         header_row = QHBoxLayout()
-        badge = "[DISCONNECTED]" if self._by_operator else "[OFFLINE]"
-        self._name_label = QLabel(f"<b>{vi_name}</b>  {badge}")
+        self._name_label = QLabel(f"<b>{vi_name}</b>  {wording.badge}")
         self._name_label.setObjectName(f"{vi_name}_offline_name_label")
         self._name_label.setProperty("class", "panel_name_label")
         header_row.addWidget(self._name_label)
@@ -134,16 +225,11 @@ class OfflineInstrumentPanel(QGroupBox):
         reason_lbl.setWordWrap(True)
         outer.addWidget(reason_lbl)
 
-        note_lbl = QLabel(
-            "Released to its front panel — all other instruments are "
-            "unaffected."
-            if self._by_operator
-            else "Not connected at startup — all other instruments are unaffected."
-        )
-        note_lbl.setObjectName(f"{vi_name}_offline_note")
-        note_lbl.setProperty("class", "secondary_label")
-        note_lbl.setWordWrap(True)
-        outer.addWidget(note_lbl)
+        self._note_lbl = QLabel(wording.note)
+        self._note_lbl.setObjectName(f"{vi_name}_offline_note")
+        self._note_lbl.setProperty("class", "secondary_label")
+        self._note_lbl.setWordWrap(True)
+        outer.addWidget(self._note_lbl)
 
         self._status_lbl = QLabel("")
         self._status_lbl.setObjectName(f"{vi_name}_offline_card_status")
@@ -184,11 +270,25 @@ class OfflineInstrumentPanel(QGroupBox):
         """Report a failed connect attempt on the card itself.
 
         Success needs no handler here: MonitorWindow replaces this card with
-        a live panel the moment ``instrument_reconnected`` fires.
+        a live panel the moment ``instrument_reconnected`` fires. A failed
+        reconnect of an ALREADY-offline VI can change its tags (the
+        Availability standard's ``connect_instrument()`` bug fix: a failed
+        reconnect of an operator-disconnected VI ADDS ``connect_failed``
+        rather than overwriting ``operator`` — see
+        ``cryosoft.core.station``), so the badge/note are re-derived here
+        rather than staying fixed at construction.
         """
         if vi_name != self._vi_name or method_name != "connect":
             return
         self._status_lbl.setText(f"Still not reachable: {reason}")
+        self._refresh_wording()
+
+    def _refresh_wording(self) -> None:
+        """Re-select badge/note from the offline registry's current tags."""
+        self._tags = self._orchestrator.availability(self._vi_name).tags
+        wording = _wording_for(self._tags)
+        self._name_label.setText(f"<b>{self._vi_name}</b>  {wording.badge}")
+        self._note_lbl.setText(wording.note)
 
     def _open_details(self) -> None:
         """Lazily create and show this VI's offline detail window."""
@@ -197,7 +297,7 @@ class OfflineInstrumentPanel(QGroupBox):
                 self._vi_name,
                 self._orchestrator,
                 parent=self.window(),
-                by_operator=self._by_operator,
+                tags=self._tags,
             )
         self._details.show()
         self._details.raise_()
@@ -224,10 +324,10 @@ class OfflineFrontPanel(QWidget):
         orchestrator: Orchestrator handling the connect request; its
             station's offline registry provides the live failure reason.
         parent: The owning widget (parented, but flagged as a real window).
-        by_operator: Whether the operator disconnected this instrument
-            deliberately (the connection-lifecycle standard) rather than it
-            failing to connect. Selects the wording only — the action and
-            the code path are identical.
+        tags: The offline VI's Availability tags (`cryosoft.core.availability`
+            — a subset of ``{"connect_failed", "operator"}``), selecting the
+            title/header/hint via ``_wording_for()``. The action and the
+            code path are identical regardless of which tags apply.
     """
 
     def __init__(
@@ -235,31 +335,23 @@ class OfflineFrontPanel(QWidget):
         vi_name: str,
         orchestrator: Orchestrator,
         parent: QWidget | None = None,
-        by_operator: bool = False,
+        tags: frozenset[str] = frozenset({"connect_failed"}),
     ) -> None:
         super().__init__(parent, Qt.WindowType.Window)
         self._vi_name = vi_name
         self._orchestrator = orchestrator
-        self._by_operator = by_operator
+        wording = _wording_for(tags)
         self.setObjectName(f"{vi_name}_offline_front_panel")
-        self.setWindowTitle(
-            f"{vi_name} — Instrument Disconnected"
-            if by_operator
-            else f"{vi_name} — Instrument Offline"
-        )
+        self.setWindowTitle(wording.window_title.format(vi_name=vi_name))
         self.setMinimumSize(420, 220)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(8, 8, 8, 8)
         outer.setSpacing(6)
 
-        header = QLabel(
-            f"<b>{vi_name}</b> is disconnected — CryoSoft is not holding it."
-            if by_operator
-            else f"<b>{vi_name}</b> failed to connect at startup."
-        )
-        header.setObjectName(f"{vi_name}_offline_detail_header")
-        outer.addWidget(header)
+        self._header_lbl = QLabel(wording.header.format(vi_name=vi_name))
+        self._header_lbl.setObjectName(f"{vi_name}_offline_detail_header")
+        outer.addWidget(self._header_lbl)
 
         self._reason_lbl = QLabel("")
         self._reason_lbl.setObjectName(f"{vi_name}_offline_detail_reason")
@@ -267,11 +359,11 @@ class OfflineFrontPanel(QWidget):
         outer.addWidget(self._reason_lbl)
         self._refresh_reason()
 
-        hint = QLabel(_OPERATOR_HINT_TEXT if by_operator else _HINT_TEXT)
-        hint.setObjectName(f"{vi_name}_offline_detail_hint")
-        hint.setProperty("class", "secondary_label")
-        hint.setWordWrap(True)
-        outer.addWidget(hint)
+        self._hint_lbl = QLabel(wording.hint)
+        self._hint_lbl.setObjectName(f"{vi_name}_offline_detail_hint")
+        self._hint_lbl.setProperty("class", "secondary_label")
+        self._hint_lbl.setWordWrap(True)
+        outer.addWidget(self._hint_lbl)
 
         action_row = QHBoxLayout()
         self._connect_btn = ConnectionButton(
@@ -312,8 +404,22 @@ class OfflineFrontPanel(QWidget):
         self._connect_btn.setEnabled(False)
 
     def _on_action_failed(self, vi_name: str, method_name: str, reason: str) -> None:
-        """Report a failed connect attempt inline, with the fresh reason."""
+        """Report a failed connect attempt inline, with the fresh reason and wording.
+
+        A reconnect attempt on an already-offline VI can change its tags (see
+        ``OfflineInstrumentPanel._on_action_failed()``'s docstring), so the
+        title/header/hint are re-derived here too, not just the reason text.
+        """
         if vi_name != self._vi_name or method_name != "connect":
             return
         self._status_lbl.setText("Still not reachable.")
         self._refresh_reason()
+        self._refresh_wording()
+
+    def _refresh_wording(self) -> None:
+        """Re-select title/header/hint from the offline registry's current tags."""
+        tags = self._orchestrator.availability(self._vi_name).tags
+        wording = _wording_for(tags)
+        self.setWindowTitle(wording.window_title.format(vi_name=self._vi_name))
+        self._header_lbl.setText(wording.header.format(vi_name=self._vi_name))
+        self._hint_lbl.setText(wording.hint)

@@ -501,14 +501,19 @@ class InstrumentPanel(QGroupBox):
     def _sync_fault_row(self) -> None:
         """Show/hide the fault row and enable/disable controls from the fault registry.
 
-        Reads ``Orchestrator.vi_faults()`` (backed by the Station's runtime
-        fault registry) every tick, but only actually toggles
-        widget state on a fault/recovery TRANSITION — matching the existing
-        status-border repolish discipline (never restyle unless something
-        changed).
+        Visibility follows the Availability standard's unified record
+        (``Orchestrator.availability()``, ``cryosoft.core.availability``):
+        the row shows exactly while this VI carries the ``not_responding``
+        tag, the same "faulted" state the QSS status border already reflects.
+        The row's message still reads ``Orchestrator.vi_faults()`` for
+        ``kind``/``message``/``acknowledged`` — fields the unified record
+        does not carry, since acknowledge/retry are comm-specific actions
+        (see GLOSSARY.md's **Instrument fault**). Reads every tick, but only
+        actually toggles widget state on a fault/recovery TRANSITION —
+        matching the existing status-border repolish discipline (never
+        restyle unless something changed).
         """
-        fault = self._orchestrator.vi_faults().get(self._vi_name)
-        is_faulted = fault is not None
+        is_faulted = "not_responding" in self._orchestrator.availability(self._vi_name).tags
         if is_faulted != self._faulted:
             self._faulted = is_faulted
             self._fault_row.setVisible(is_faulted)
@@ -517,9 +522,11 @@ class InstrumentPanel(QGroupBox):
             for inputs in self._control_inputs.values():
                 for widget in inputs.values():
                     widget.setEnabled(not is_faulted)
-        if fault is not None:
-            self._fault_label.setText(f"Fault ({fault.kind}): {fault.message}")
-            self._ack_fault_btn.setEnabled(not fault.acknowledged)
+        if is_faulted:
+            fault = self._orchestrator.vi_faults().get(self._vi_name)
+            if fault is not None:
+                self._fault_label.setText(f"Fault ({fault.kind}): {fault.message}")
+                self._ack_fault_btn.setEnabled(not fault.acknowledged)
 
     # ------------------------------------------------------------------
     # Fault row actions (runtime fault registry)

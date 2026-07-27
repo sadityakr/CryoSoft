@@ -1375,3 +1375,105 @@ def test_pause_resume_during_reading_gate_holds_and_resumes(orchestrator, statio
     assert orchestrator._state == OrchestratorState.READING_GATE
     orchestrator._tick()
     assert calls["n"] == n_before_pause + 1
+
+
+def test_not_responding_refuses_control_via_tag_policy(orchestrator, station, qtbot):
+    """Rule 0 refuses a ``not_responding`` VI, driven by ``TAG_POLICY`` rather
+    than a hardcoded ``held.origin == "comm"`` branch.
+
+    ``Station.availability()`` (the Availability standard,
+    ``cryosoft.core.availability``) reports the ``not_responding`` tag the
+    moment a comm-origin hold exists, and ``TAG_POLICY["not_responding"]
+    .controllable`` is ``False`` — the same refusal
+    ``test_stale_claimed_vi_during_procedure_fails_run_to_idle`` observes
+    indirectly through a failed run, checked here directly against
+    ``_manual_action_admissible()``.
+    """
+    from cryosoft.core.availability import TAG_POLICY
+
+    assert TAG_POLICY["not_responding"].controllable is False
+
+    station.magnet_z._driver._simulate_error = True
+
+    def has_fault():
+        return "magnet_z" in station.vi_faults()
+
+    qtbot.waitUntil(has_fault, timeout=1000)
+    assert "not_responding" in orchestrator._station.availability("magnet_z").tags
+
+    admitted, reason = orchestrator._manual_action_admissible("magnet_z")
+    assert admitted is False
+    assert "instrument fault" in reason
+
+    station.magnet_z._driver._simulate_error = False
+
+
+def test_not_responding_never_bypassed_by_emergency_override(orchestrator, station, qtbot):
+    """The comm-vs-safety ``acknowledge_emergency()`` asymmetry still holds.
+
+    ``TAG_POLICY["not_responding"]`` carries no override column at all, so
+    unlike a safety hold (rule 0b), acknowledging an EMERGENCY can never
+    unlock a ``not_responding`` VI — only recovery or ``retry_fault()`` can.
+    A DIFFERENT VI's quench drives the EMERGENCY here so the fault under test
+    is purely a comm condition on ``temperature_vti``, isolating rule 0 from
+    rule 0b.
+    """
+    station.temperature_vti._driver._simulate_error = True
+
+    def has_fault():
+        return "temperature_vti" in station.vi_faults()
+
+    qtbot.waitUntil(has_fault, timeout=1000)
+
+    station.magnet_z._driver._simulate_quench = True
+    qtbot.waitUntil(
+        lambda: orchestrator._state == OrchestratorState.EMERGENCY, timeout=2000
+    )
+    orchestrator.acknowledge_emergency()
+    assert orchestrator._emergency_manual_override is True
+
+    # The override unlocks a VI with no fault of its own...
+    with qtbot.waitSignal(orchestrator.action_succeeded, timeout=500):
+        orchestrator.submit_vi_action("dc_measurement", "initiate")
+
+    # ...but NOT the not_responding VI, override notwithstanding.
+    admitted, reason = orchestrator._manual_action_admissible("temperature_vti")
+    assert admitted is False
+    assert "instrument fault" in reason
+
+    station.magnet_z._driver._simulate_quench = False
+    qtbot.waitUntil(
+        lambda: not orchestrator._station.check_safety().get("quench"), timeout=2000
+    )
+    orchestrator.acknowledge_emergency()
+    assert orchestrator._state == OrchestratorState.IDLE
+
+    station.temperature_vti._driver._simulate_error = False
+
+
+def test_detached_vi_admitted_by_tag_policy(orchestrator, station):
+    """A VI carrying only the ``detached`` tag is admitted, per ``TAG_POLICY``.
+
+    ``detached`` (a single-client VI whose session is released between runs
+    — the Availability standard, ``cryosoft.core.availability``) is the
+    least-restrictive tag: ``TAG_POLICY["detached"].controllable`` is
+    ``True``, and a detached VI is never a ``_held_vis()`` entry at all (it
+    is not a ``Condition``), so it reaches rule 0 with ``held is None`` and
+    falls through to ordinary admission. This VI carries no ``is_attached()``
+    method for real yet (that declaration is a later phase of the
+    Availability standard); a duck-typed stand-in exercises
+    ``Station._build_availability()``'s existing ``is_attached()`` probe.
+    """
+    from cryosoft.core.availability import TAG_POLICY
+
+    assert TAG_POLICY["detached"].controllable is True
+
+    vi = station.get_vi("dc_measurement")
+    vi.is_attached = lambda: False
+    try:
+        assert station.availability("dc_measurement").tags == frozenset({"detached"})
+        admitted, reason = orchestrator._manual_action_admissible("dc_measurement")
+        assert admitted is True
+        assert reason == ""
+    finally:
+        del vi.is_attached

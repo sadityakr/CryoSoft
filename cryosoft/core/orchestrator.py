@@ -106,7 +106,7 @@ from typing import Any
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
-from cryosoft.core.availability import Availability
+from cryosoft.core.availability import TAG_POLICY, Availability
 from cryosoft.core.conditions import Condition, decide, envelope_conditions
 from cryosoft.core.events import ErrorEvent
 from cryosoft.core.exceptions import CryoSoftSafetyError
@@ -946,13 +946,17 @@ class Orchestrator(QObject):
 
         Admission rules, in order:
 
-        0. A VI with an active comm-origin condition (an instrument
-           fault — GLOSSARY.md's **Instrument fault**) is ALWAYS refused,
-           regardless of state — including IDLE, and NEVER bypassed by the
-           EMERGENCY manual override — until it recovers or
-           ``retry_fault()`` succeeds. Checked first, and here (not as a
-           parallel check) so every caller (``submit_vi_action()``, the
-           drain gate) inherits it for free.
+        0. A VI carrying the Availability standard's ``not_responding`` tag
+           (``cryosoft.core.availability`` — a comm-origin condition, an
+           instrument fault, GLOSSARY.md's **Instrument fault**) is ALWAYS
+           refused, regardless of state — including IDLE, and NEVER bypassed
+           by the EMERGENCY manual override — until it recovers or
+           ``retry_fault()`` succeeds. ``TAG_POLICY["not_responding"]
+           .controllable`` is ``False`` and carries no override column, which
+           is what makes the refusal unconditional; a safety hold (rule 0b)
+           is a separate mechanism with its own override. Checked first, and
+           here (not as a parallel check) so every caller
+           (``submit_vi_action()``, the drain gate) inherits it for free.
         0b. A VI with an active safety-origin hold condition (the
             System-Condition standard: its ``safety_concerns()`` names a
             currently-tripped, non-tolerated flag — see ``Station.
@@ -988,12 +992,14 @@ class Orchestrator(QObject):
         """
         held = self._held_vis().get(vi_name)
         if held is not None:
-            if held.origin == "comm":
-                return False, (
-                    f"Cannot control {vi_name}: instrument fault ({held.kind}) — "
-                    f"{held.message}. Retry the instrument or wait for it to recover."
-                )
-            if not self._emergency_manual_override:
+            not_responding = "not_responding" in self._station.availability(vi_name).tags
+            if not_responding:
+                if not TAG_POLICY["not_responding"].controllable:
+                    return False, (
+                        f"Cannot control {vi_name}: instrument fault ({held.kind}) — "
+                        f"{held.message}. Retry the instrument or wait for it to recover."
+                    )
+            elif not self._emergency_manual_override:
                 return False, (
                     f"Cannot control {vi_name}: safety hold active "
                     f"({held.kind}). Resolve the condition, "
@@ -1142,11 +1148,15 @@ class Orchestrator(QObject):
         connected. Reports through ``action_succeeded(vi_name, "disconnect")``
         plus ``instrument_disconnected(vi_name)``, or ``action_failed``.
 
-        Allowed only in IDLE, and refused for a VI the active run claims —
-        the same admission rule ``connect_instrument()`` uses, for the same
-        reason: a station that loses an instrument mid-procedure has escaped
-        the run's safety review. A disconnected instrument is not a fault, so
-        no ``ErrorEvent`` is raised: the operator asked for this.
+        Allowed only in IDLE, the same restriction ``connect_instrument()``
+        uses, for the same reason: a station that loses an instrument
+        mid-procedure has escaped the run's safety review. Since a run is
+        never active while IDLE, this alone keeps a claimed VI from being
+        disconnected out from under it — no separate claims check is needed
+        (contrast ``_manual_action_admissible()``, which also runs outside
+        IDLE and does check claims explicitly). A disconnected instrument is
+        not a fault, so no ``ErrorEvent`` is raised: the operator asked for
+        this.
 
         Args:
             vi_name: Name of the live VI to disconnect.

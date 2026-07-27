@@ -2968,6 +2968,119 @@ def test_offline_reconnect_failure_reports_inline(tmp_path, qtbot):
         orch.shutdown()
 
 
+# ── Availability standard: tag-keyed offline wording ─────────────────────────
+# The offline card's badge/note and the detail window's title/header/hint are
+# selected from OfflineInstrument.tags (cryosoft.core.availability) via a
+# tag-keyed mapping (offline_panel._wording_for()), covering every tag
+# combination the offline registry can produce.
+
+
+def test_offline_card_wording_for_connect_failed_only(tmp_path, qtbot):
+    """A VI that never connected: [OFFLINE] badge, "not connected" note."""
+    station, orch = _degraded_monitor_setup(tmp_path, fail_times=0)
+    try:
+        win = MonitorWindow(station, orch)
+        qtbot.addWidget(win)
+        win.show()
+
+        assert station.get_offline_info("bad_vi").tags == frozenset({"connect_failed"})
+        name_label = win.findChild(QLabel, "bad_vi_offline_name_label")
+        assert "[OFFLINE]" in name_label.text()
+        note = win.findChild(QLabel, "bad_vi_offline_note")
+        assert "Not connected at startup" in note.text()
+
+        win.findChild(QGroupBox, "bad_vi_offline_card")._open_details()
+        header = win.findChild(QLabel, "bad_vi_offline_detail_header")
+        assert "failed to connect at startup" in header.text()
+        hint = win.findChild(QLabel, "bad_vi_offline_detail_hint")
+        assert "troubleshoot check" in hint.text()
+    finally:
+        orch.shutdown()
+
+
+def test_offline_card_wording_for_operator_only(qtbot):
+    """An operator-disconnected VI: [DISCONNECTED] badge, "released" note/hint."""
+    station, orch, win = _sim_monitor(qtbot)
+    try:
+        win.findChild(QGroupBox, "magnet_z_panel").findChild(
+            QPushButton, "magnet_z_disconnect_btn"
+        ).click()
+
+        assert station.get_offline_info("magnet_z").tags == frozenset({"operator"})
+        name_label = win.findChild(QLabel, "magnet_z_offline_name_label")
+        assert "[DISCONNECTED]" in name_label.text()
+        note = win.findChild(QLabel, "magnet_z_offline_note")
+        assert "Released to its front panel" in note.text()
+
+        win.findChild(QGroupBox, "magnet_z_offline_card")._open_details()
+        header = win.findChild(QLabel, "magnet_z_offline_detail_header")
+        assert "CryoSoft is not holding it" in header.text()
+        hint = win.findChild(QLabel, "magnet_z_offline_detail_hint")
+        assert "you released this instrument" in hint.text().lower()
+        assert "front panel or" in hint.text().lower()
+    finally:
+        orch.shutdown()
+
+
+def test_offline_card_wording_for_operator_and_connect_failed(tmp_path, qtbot):
+    """The two-tag case: operator-released, then a reconnect fails on hardware.
+
+    Bug fix the Availability standard's tag SET (rather than a bool) enables:
+    the card and detail window must say BOTH things — that the operator did
+    this AND that the last reconnect attempt failed on hardware — rather than
+    the pre-tag-set behavior of only ever reporting "you released this
+    instrument" over a hardware-failure reason.
+    """
+    from tests.test_l2_station import _SucceedsOnceDriver, _write_degraded_config
+
+    _SucceedsOnceDriver.attempts = 0
+    station = build_station(
+        _write_degraded_config(
+            tmp_path, "tests.test_l2_station._SucceedsOnceDriver"
+        )
+    )
+    assert station.has_vi("bad_vi") is True
+    orch = Orchestrator(station, tick_interval_ms=50)
+    try:
+        win = MonitorWindow(station, orch)
+        qtbot.addWidget(win)
+        win.show()
+
+        # Operator disconnects the live VI...
+        win.findChild(QGroupBox, "bad_vi_panel").findChild(
+            QPushButton, "bad_vi_disconnect_btn"
+        ).click()
+        assert station.get_offline_info("bad_vi").tags == frozenset({"operator"})
+
+        # ...then Connect is pressed, and the driver (already used its one
+        # success) fails on hardware, so the offline card now carries BOTH
+        # "operator" and "connect_failed".
+        win.findChild(QGroupBox, "bad_vi_offline_card").findChild(
+            QPushButton, "bad_vi_connect_btn"
+        ).click()
+        assert station.has_vi("bad_vi") is False
+        assert station.get_offline_info("bad_vi").tags == frozenset(
+            {"operator", "connect_failed"}
+        )
+
+        name_label = win.findChild(QLabel, "bad_vi_offline_name_label")
+        assert "[DISCONNECTED]" in name_label.text()
+        note = win.findChild(QLabel, "bad_vi_offline_note")
+        # Says both: released AND the reconnect failed.
+        assert "released" in note.text().lower()
+        assert "reconnect attempt" in note.text().lower() and "failed" in note.text().lower()
+
+        win.findChild(QGroupBox, "bad_vi_offline_card")._open_details()
+        header = win.findChild(QLabel, "bad_vi_offline_detail_header")
+        assert "you released it" in header.text().lower()
+        assert "failed on hardware" in header.text().lower()
+        hint = win.findChild(QLabel, "bad_vi_offline_detail_hint")
+        assert "you released this instrument" in hint.text().lower()
+        assert "failed on hardware" in hint.text().lower()
+    finally:
+        orch.shutdown()
+
+
 # ── Connection-lifecycle standard: the Connect/Disconnect pair ───────────────
 # See virtual_instruments/base.py's "Connection-lifecycle standard". The GUI
 # half is one button on every card, and a card SWAP when it is pressed: a live
