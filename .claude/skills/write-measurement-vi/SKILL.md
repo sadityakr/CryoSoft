@@ -99,11 +99,19 @@ default (`init_params.get("max_current_A", 0.01)`), never require it.
 | `initiate() -> None` | Bulk "Initiate All", the card's lifecycle toggle | **Never arm, never source.** Inherited from the base as a harmless `ping()`-based connection check — do not override it to call `initiate_measurement()` |
 | `take_reading() -> dict` | Once per sweep point, no arguments | Assume anything not fixed at `initiate_measurement()`. NaN-pad every array to the length `data_arrays()` declared for the same params; compute `self.mean_and_sem()` only over the valid (non-NaN) samples |
 | `standby() -> None` | End of run, abort, or explicit action | Leave a source energised |
-| `ping() -> bool` | `initiate()`, GUI reachability checks | Poll anything expensive — should be near-instant |
+| `ping() -> bool` | `initiate()`, GUI reachability checks | Poll anything expensive — should be near-instant. Inherited from the base — do not override it (see below) |
 
 `initiate_measurement` is normally `@control(panel=False)` — arming is a
 deliberate act, reachable from the front panel and procedures, never from
 the compact monitor card.
+
+Do not write your own `ping()`. The base's default already does the plain
+`get_idn()`-on-every-driver check the table above describes; a VI that also
+declares `detach_when_idle` (see below) gets a different `ping()` shape —
+reattach, a true round trip, then release — entirely from the base's
+`detach_when_idle` declaration, never from a VI-specific override. Writing
+one yourself just duplicates base-class logic that inherited-enforcement
+already gives you for free.
 
 ### Optional: supporting externally configured instruments
 
@@ -119,11 +127,28 @@ your `initiate_measurement()` MUST still (a) verify connectivity with a
 TRUE ROUND TRIP, (b) arm the data path, (c) read back anything its own
 timing/decoding depends on, and (d) set the internal state
 `take_reading()`/`data_arrays()` require — while never writing any
-excitation/analysis/routing parameter. Your VI also inherits the
-**detached-idle lifecycle**: born detached at the end of `__init__`,
-`initiate()`/`ping()` verify-and-release, `initiate_measurement()`
-(re)acquires the connection, `standby()` releases it (without touching the
-externally-owned source state). Also declare `externally_owned_parameters:
+excitation/analysis/routing parameter.
+
+Your VI also inherits the **detach-when-idle** standard
+(`BaseVirtualInstrument`'s "Detach-when-idle declaration"; GLOSSARY.md's
+**Availability**) rather than hand-writing any of it: declare it by
+overriding the `detach_when_idle` property with one line —
+
+```python
+@property
+def detach_when_idle(self) -> bool:
+    return self._configured_externally
+```
+
+— and the base does the rest: born detached (its `__init__` releases the
+session before returning, so starting CryoSoft while the vendor tool is
+open builds cleanly), `ping()`'s verify-and-release path (no override
+needed), `initiate_measurement()` (re)acquiring the connection via
+`self._attach()`, and `standby()`'s automatic release (via
+`__init_subclass__`'s wrap) once your own `standby()` returns — without
+touching the externally-owned source state. Never write your own
+`ping()` override or a release branch inside `standby()`; the property is
+the entire opt-in. Also declare `externally_owned_parameters:
 ClassVar[frozenset[str]]` naming the `measurement_parameters` the external
 tool owns — the procedure form and the reading-loop registry both hide
 them automatically once `configured_externally` is true, with no GUI code

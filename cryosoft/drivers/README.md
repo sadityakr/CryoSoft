@@ -40,6 +40,14 @@ Enforced mechanically by `tests/test_conformance.py`:
   — a disconnect must always succeed. Idempotent. A closed driver is never
   reopened in place; the Station builds a fresh instance to reconnect, so sim
   twins model the release by failing every command afterwards (`_check_error`).
+- `ensure_connected()` is deliberately **NOT** part of this contract — it
+  would contradict the rule directly above. It is an OPT-IN capability,
+  present only on firmware that genuinely supports resuming a session in
+  place (e.g. `tensormeter_rtm2.py`), duck-typed via `getattr` by
+  `BaseVirtualInstrument._attach()` (the declared `detach_when_idle`
+  standard, GLOSSARY.md's **Availability**) — never called on a driver that
+  does not implement it, and never a substitute for the Station rebuilding a
+  fresh instance on a real reconnect (`Station.connect_instrument()`).
 - Sim drivers must construct with a dummy resource string (no hardware).
 - A real driver and its `sim_<name>.py` twin must expose **identical public
   APIs** (`test_sim_real_driver_api_parity`). This parity test pairs twins by the

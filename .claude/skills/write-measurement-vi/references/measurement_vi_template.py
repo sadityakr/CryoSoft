@@ -167,13 +167,14 @@ class InstrumentNameMeasurementVI(MeasurementInstrumentBase):
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def ping(self) -> bool:
-        """Query IDN to verify the driver is reachable."""
-        try:
-            self._main.get_idn()  # type: ignore[attr-defined]
-            return True
-        except Exception:
-            return False
+    # Do NOT write your own ping() here. BaseVirtualInstrument's default
+    # already covers this VI: query get_idn() on every driver, True iff all
+    # answer. Only a VI that declares detach_when_idle (see the
+    # write-measurement-vi skill's "supporting externally configured
+    # instruments" section) needs anything different, and that different
+    # shape — reattach, a true round trip, release — is the base's job too,
+    # driven entirely by the detach_when_idle property. No VI overrides
+    # ping() in this codebase.
 
     def standby(self) -> None:
         """Put the instrument in a safe idle state and reset the initiated flag."""
