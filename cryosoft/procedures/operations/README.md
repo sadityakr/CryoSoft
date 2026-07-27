@@ -3,8 +3,9 @@
 ## Purpose
 
 `procedures/operations/` holds the concrete cryostat-**servicing** actions —
-one class per operation (helium fill, sample change) — each a subclass of
-`cryosoft.core.operation.OperationBase`. An operation is declarative like a
+one class per operation (helium fill, sample load, sample unload) — each a
+subclass of `cryosoft.core.operation.OperationBase`. An operation is
+declarative like a
 procedure (it returns plans, it never touches a VI directly), but is a
 different request type: operation-scope command access, tolerated safety
 flags, verified postconditions, an optional (not required) data file, and
@@ -36,11 +37,11 @@ Every operation here is constructed with:
 - `person` (keyword, default `""`): who is performing the servicing action,
   recorded via `get_params()` so the servicing-log recorder can attribute it.
 - `**config`: the operation's own config keys (e.g. the helium fill's
-  `docs/plans/archive/cryogenics-logbook.md` §9 `cryogenics:` block keys, or the
-  sample change's `operations.sample_change:` block keys), each with a
-  class-level default so the conformance suite's
-  `test_operation_constructs_from_defaults` can build the class from a sim
-  station alone.
+  `docs/plans/archive/cryogenics-logbook.md` §9 `cryogenics:` block keys, or
+  the sample-access pair's `operations.sample_load:`/
+  `operations.sample_unload:` block keys), each with a class-level default
+  so the conformance suite's `test_operation_constructs_from_defaults` can
+  build the class from a sim station alone.
 
 ## Exit (what it hands to other layers)
 
@@ -102,10 +103,11 @@ operation) — the capability a plain procedure's plan does not have.
   operation commands or holds as an invariant. `HeliumFillOperation` claims
   its configured level meter AND every magnet (it drives them to 0 T and
   holds zero field for the whole fill), so the VTI (and everything else)
-  stays under manual control during a fill. `SampleChangeOperation` claims exactly the
-  VIs its `initiate()` commands (magnets, VTI, switch, measurement VIs) —
-  narrower than "everything" only on a station with instruments it never
-  touches (e.g. a rotator).
+  stays under manual control during a fill. `SampleLoadOperation`/
+  `SampleUnloadOperation` (both sharing `_SampleAccessOperationBase`) claim
+  exactly the VIs their `initiate()` commands (magnets, VTI, measurement
+  VIs) — narrower than "everything" only on a station with instruments they
+  never touch (e.g. a rotator or a switch matrix).
 - `postcondition_gates()` is the operation-specific addition over the
   procedure contract: gates verifying the cryostat actually reached the
   promised state (not just that the commands were sent). The Orchestrator
@@ -143,25 +145,28 @@ operation) — the capability a plain procedure's plan does not have.
   bounds memory via stride-doubling decimation (`series[::2]`, generalising
   the fill's original `_MAX_CURVE_POINTS`); call `self._reset_recording()`
   from `initiate()` so a fresh run starts with an empty series.
-  `HeliumFillOperation` (one channel) and `SampleChangeOperation` (VTI
-  temperature + every magnet's field) both use it.
+  `HeliumFillOperation` (one channel) and `_SampleAccessOperationBase` (VTI
+  temperature + every magnet's field, shared by `SampleLoadOperation` and
+  `SampleUnloadOperation`) both use it.
 
 ## Hold phase (plan §1)
 
 `step()`'s normal contract is "return a `StepPlan` to keep sampling, or
 `None` to end the run" — that "or `None`" part is a choice, not a
 requirement. An operation whose physical action happens WHILE the run is
-active rather than after a fixed condition (e.g. `SampleChangeOperation`:
-the operator opens the cryostat during the hold, not after some elapsed
-time or level threshold) declares a **hold phase**: `step()` never returns
-`None` on its own once its setup work (ramps, etc.) is done — it keeps
-returning a fresh `StepPlan` (mirroring an open-ended sampling loop like the
-fill's) — so the run stays active indefinitely. The run ends only when the
-operator clicks Finish (`Orchestrator.finish_operation()` ->
-`request_finish()`): the very next `change_sweep_step()` (the
+active rather than after a fixed condition (e.g. `SampleLoadOperation`/
+`SampleUnloadOperation`: the operator opens the cryostat during the hold,
+not after some elapsed time or level threshold) declares a **hold phase**:
+`step()` never returns `None` on its own once its setup work (ramps, etc.)
+is done — it keeps returning a fresh `StepPlan` (mirroring an open-ended
+sampling loop like the fill's) — so the run stays active indefinitely. The
+run ends when the operator clicks Finish (`Orchestrator.finish_operation()`
+-> `request_finish()`): the very next `change_sweep_step()` (the
 `OperationBase` adapter) then returns `None` regardless of what `step()`
 would return, exactly the existing graceful-finish mechanism — no new
-Orchestrator code needed.
+Orchestrator code needed. Abort (`Orchestrator.abort_procedure()`) ends it
+just as well, skipping `postcondition_gates()` entirely, same as for any
+other run.
 
 - Set the class attribute `hold_for_operator = True` to declare this. The
   Operations panel reads it to decide WHEN the ready banner may show: a
@@ -235,10 +240,42 @@ VI method) replaces the confirmation with a real `Gate` and drops the
 `operator_confirmations` declaration entirely — the postcondition contract
 already supports both, which is why this is declared, not hardcoded.
 
+## Pre-run toggles
+
+A sibling declaration to operator confirmations, for the opposite timing:
+some behavior should be *skippable per run*, decided *before* the run
+starts, rather than confirmed after. `SampleLoadOperation`/
+`SampleUnloadOperation` (via `SampleAccessOperationBase`) use this for
+`disarm_measurement_vis` — an operator may want to run one of these while a
+measurement VI is already armed for something unrelated, so `initiate()`'s
+"stand by every measurement VI" step needs to be skippable, and
+`claimed_vi_names()` needs to stop claiming them too when it is skipped.
+
+- A class-level `pre_run_toggles: dict[str, str]` maps a config kwarg name
+  (e.g. `"disarm_measurement_vis"`) to a human-readable checkbox label. The
+  key must be a `**config` keyword the constructor already understands (a
+  toggle is just a per-run override of a config default, nothing more).
+- The GUI renders one checkbox per declared entry, **persistent** on the
+  card (visible and editable whether or not a run is active — unlike
+  `operator_confirmations`, which shows only while running), checked by
+  default. Its state at the instant Start is clicked is passed to the
+  panel's factory closure as an extra `bool` keyword matching the declared
+  key, which merges it into the constructed instance's `**config` — an
+  operation with no declared toggles receives no extra keywords, so this
+  costs nothing for every other operation.
+- The constructor resolves the key exactly like any other config value
+  (`config.get("disarm_measurement_vis", True)`) and the rest of the class
+  reads its own resolved attribute (`self._disarm_measurement_vis`) —
+  `initiate()`/`claimed_vi_names()` branch on it directly; there is no
+  separate toggle-specific plumbing beyond the declaration and the
+  constructor read.
+
 ## Files
 
 | File | Responsibility | Key public API | Tests |
 |------|----------------|-----------------|-------|
 | `__init__.py` | Package marker | (none) | none |
 | `helium_fill.py` | Ramps every magnet (`Station.magnet_vi_names()`) to zero field, switches the level meter to FAST refresh, samples the helium level once per `sample_period_s` into the shared `OperationBase` recorder (no HDF5 file — plan operation-concurrency-and-error-scoping.md §4), and finishes once the level holds at/above `fill_target_pct` for `fill_complete_window_s` (or `max_fill_duration_s` elapses); restores SLOW refresh on standby/abort and verifies it via `postcondition_gates()`. Tolerates `helium_low` (its whole purpose). `readiness_conditions()` exposes one aggregate `zero_field` row; `next_due()` predicts time-to-`helium_warning_pct` from the panel-supplied consumption rate (plan §12). `run_summary()` hands the recorded level curve, in the generic `"recording"` shape (docs/plans/archive/unified-servicing-log-and-run-recording.md §3), plus start/end level to the run manifest. `claimed_vi_names()` returns the configured level meter AND every magnet (it holds zero field as an invariant for the whole fill) — the VTI and everything else stays manually controllable during a fill. Not a **Hold phase** operation (`hold_for_operator` stays the default `False`) — its own completion condition ends the run, not the operator. | `HeliumFillOperation` | `tests/test_helium_fill.py`, `tests/test_operation_readiness.py`, `tests/test_operations.py` |
-| `sample_change.py` | "Verify the cryostat is safe to open": ramps every magnet (`Station.magnet_vi_names()`) to zero field and the configured VTI VI to `target_temperature_K` (default 300 K), opens the first switch VI (if any), and sends `standby` to every measurement VI (`Station.measurement_vi_names()`). The reference **Hold phase** operation (`hold_for_operator = True`, plan §1): once the ramps land, `step()` never returns `None` on its own — the run holds while `sample()` records the VTI temperature and every magnet's field once per `sample_period_s` (new config key, default 10 s) into the shared recorder — until the operator clicks Finish; `run_summary()` hands the series off as `{"recording": {...}}`. No data file. `postcondition_gates()`, evaluated once as the run ends, verifies `zero_field` (every magnet's `magnet_state() == "standby"`, which already covers the switch heater being off wherever a magnet has one — no separate heater gate), `vti_at_target`, and — for the only supported `needle_valve: manual` mode — an **operator confirmation** (`needle_valve_confirmed`). `tolerated_safety_flags` is empty. `readiness_conditions()` mirrors the same three checks as live checklist rows, shown mid-run by the Operations panel's ready banner because of `hold_for_operator`; `config_key = "sample_change"` (plan §12). `claimed_vi_names()` returns exactly the magnets, VTI, switch (if any), and measurement VIs it commands in `initiate()`. | `SampleChangeOperation` | `tests/test_sample_change.py`, `tests/test_operation_readiness.py` |
+| `sample_access_base.py` | Shared base for the sample-access pair: "verify the cryostat is safe to open" — commands every magnet (`Station.magnet_vi_names()`) to `standby()`, ramps the configured VTI VI to `target_temperature_K` (default 290 K), and sends `standby` to every measurement VI (`Station.measurement_vi_names()`). No switch-VI dispatch (dropped when this operation split from the original `SampleChangeOperation`). The reference **Hold phase** logic (`hold_for_operator = True`, plan §1): once the ramps land, `step()` never returns `None` on its own — the run holds while `sample()` records the VTI temperature and every magnet's field once per `sample_period_s` (default 10 s) into the shared recorder — until the operator clicks Finish or Abort; `run_summary()` hands the series off as `{"recording": {...}}`. No data file. `postcondition_gates()`, evaluated once as the run ends (Finish only), verifies `zero_field` (every magnet's `magnet_state() == "standby"`, which already covers the switch heater being off wherever a magnet has one — no separate heater gate), `vti_at_target`, and — for the only supported `needle_valve: manual` mode — an **operator confirmation** (`needle_valve_confirmed`). `tolerated_safety_flags` is empty. `readiness_conditions()` mirrors the same three checks as live checklist rows, shown mid-run by the Operations panel's ready banner because of `hold_for_operator`. `claimed_vi_names()` returns exactly the magnets, VTI, and measurement VIs it commands in `initiate()` — unless the **pre-run toggle** `disarm_measurement_vis` (default `True`, GUI checkbox "Disarm measurement instruments") is unchecked for this run, in which case measurement VIs are neither commanded in `initiate()` nor claimed, so a measurement instrument already armed for something else is left alone and stays manually usable for the whole run. Concrete subclasses set only `name`/`description`/`ready_message`/`config_key`. | `_SampleAccessOperationBase` | `tests/test_sample_access.py`, `tests/test_operation_readiness.py` |
+| `sample_load.py` | Identity declaration for the "load a sample" half of the pair: `name = "Sample Load"`, `config_key = "sample_load"`. All behavior inherited from `sample_access_base.py`. | `SampleLoadOperation` | `tests/test_sample_access.py` |
+| `sample_unload.py` | Identity declaration for the "unload a sample" half of the pair: `name = "Sample Unload"`, `config_key = "sample_unload"`. All behavior inherited from `sample_access_base.py`. | `SampleUnloadOperation` | `tests/test_sample_access.py` |

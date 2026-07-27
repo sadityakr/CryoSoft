@@ -201,9 +201,16 @@ servicing_logs:                  # which declared log kinds this setup keeps
 # an operation's block still gets that operation's class-level defaults
 # (read_operations_config() only fills in what's declared here).
 operations:
-  sample_change:
+  sample_load:
     vti_vi: temperature_vti
-    target_temperature_K: 300.0
+    target_temperature_K: 290.0
+    temperature_tolerance_K: 2.0
+    temperature_window_s: 60.0
+    needle_valve: manual           # "manual" -> operator confirmation; a VI-capability ref is future work
+    sample_period_s: 10.0          # hold-phase recording cadence (VTI temperature + magnet fields)
+  sample_unload:
+    vti_vi: temperature_vti
+    target_temperature_K: 290.0
     temperature_tolerance_K: 2.0
     temperature_window_s: 60.0
     needle_valve: manual           # "manual" -> operator confirmation; a VI-capability ref is future work

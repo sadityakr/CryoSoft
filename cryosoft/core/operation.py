@@ -22,7 +22,8 @@
 #   run manifest's "summary" key on run_finished. A shared, decimating,
 #   multi-channel recorder helper (_record_sample()/_recording_dict(), plan
 #   unified-servicing-log-and-run-recording.md §3) is opt-in for exactly this
-#   hand-off — HeliumFillOperation and SampleChangeOperation both use it.
+#   hand-off — HeliumFillOperation and _SampleAccessOperationBase (shared by
+#   SampleLoadOperation/SampleUnloadOperation) both use it.
 #   hold_for_operator declares a "hold phase" operation whose
 #   step() stays open-ended (never returns None on its own) until the
 #   operator clicks Finish; the Operations panel reads it to show the ready
@@ -211,7 +212,7 @@ class OperationBase:
         ready_message: Shown in the Operations panel's green ready banner;
             see "Readiness / next-due contract" above. Empty by default.
         config_key: Maps a ``config:`` sub-block key (e.g.
-            ``operations.sample_change:``) to this class for the GUI's
+            ``operations.sample_load:``) to this class for the GUI's
             generic card-building discovery; see "Readiness / next-due
             contract" above. Empty by default.
         run_kind: Recorded verbatim into the Orchestrator's run manifests
@@ -234,9 +235,10 @@ class OperationBase:
             (``request_finish()``). The Operations panel's ready banner
             reads this: for a hold-phase operation it shows mid-run, the
             instant every readiness condition holds, instead of waiting for
-            the run to finish. ``SampleChangeOperation`` sets this ``True``;
-            ``HeliumFillOperation`` leaves the default (its own completion
-            condition, not the operator, ends the run).
+            the run to finish. ``_SampleAccessOperationBase`` (shared by
+            ``SampleLoadOperation``/``SampleUnloadOperation``) sets this
+            ``True``; ``HeliumFillOperation`` leaves the default (its own
+            completion condition, not the operator, ends the run).
 
     Lifecycle (override in a concrete subclass):
         initiate() -> PhasePlan: Initial targets/commands, mirroring
@@ -309,7 +311,8 @@ class OperationBase:
     #: Operations panel reads this to decide WHEN the ready banner may show:
     #: ``False`` (default) keeps the existing post-run-only banner
     #: (``ready_message`` shown once the run finished ``done`` AND every
-    #: readiness condition holds); ``True`` (``SampleChangeOperation``) also
+    #: readiness condition holds); ``True`` (``_SampleAccessOperationBase``,
+    #: shared by ``SampleLoadOperation``/``SampleUnloadOperation``) also
     #: shows it mid-run, the instant every readiness condition holds — for a
     #: hold-phase operation "ready" means "you may act now", true well
     #: before Finish is clicked. Finish itself is unaffected either way.

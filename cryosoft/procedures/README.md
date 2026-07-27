@@ -164,8 +164,8 @@ editing them — which is what forced the 2026-07-20 global `magnet_x` ->
 
 This violates the "config files are the single source of truth" principle: the
 VI a procedure drives is a *setup* property and belongs in the config, exactly
-as `sample_change` already does it (`operations.sample_change.vti_vi`, defaulted
-in `station.py`). The intended fix is to derive the names from the Station
+as `sample_load`/`sample_unload` already do it (`operations.sample_load.vti_vi`,
+defaulted in `station.py`). The intended fix is to derive the names from the Station
 (a `magnet_vi_names()` / `temperature_vi_names()` discovery pair, mirroring the
 existing `measurement_vi_names()` / `switch_vi_names()`) and expose them as
 procedure parameters, so adding an axis or renaming a magnet needs no procedure

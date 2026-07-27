@@ -3,13 +3,15 @@
 #   Behavior tests for the readiness/next-due contract added to OperationBase
 #   in Phase 6: the ReadinessCondition/
 #   NextDue dataclasses, OperationBase's defaults, HeliumFillOperation's
-#   zero_field checklist row + next_due() prediction math, and
-#   SampleChangeOperation's three checklist rows (zero_field/vti_at_target/
-#   needle_valve_confirmed, the last via the confirmed()/confirm() flow).
-#   Qt-free — no Orchestrator ticking, just direct calls against synthetic
-#   state snapshots and context dicts, mirroring how OperationCard drives
-#   them.
-# last_updated: 2026-07-26
+#   zero_field checklist row + next_due() prediction math, and the shared
+#   _SampleAccessOperationBase's three checklist rows (zero_field/
+#   vti_at_target/needle_valve_confirmed, the last via the confirmed()/
+#   confirm() flow) exercised through both concrete subclasses,
+#   SampleLoadOperation and SampleUnloadOperation, which share this behavior
+#   entirely (parametrized rather than duplicated). Qt-free — no
+#   Orchestrator ticking, just direct calls against synthetic state
+#   snapshots and context dicts, mirroring how OperationCard drives them.
+# last_updated: 2026-07-27
 # ---
 
 from __future__ import annotations
@@ -19,9 +21,12 @@ import pytest
 from cryosoft.core.operation import NextDue, OperationBase, ReadinessCondition
 from cryosoft.core.station import build_station
 from cryosoft.procedures.operations.helium_fill import HeliumFillOperation
-from cryosoft.procedures.operations.sample_change import SampleChangeOperation
+from cryosoft.procedures.operations.sample_load import SampleLoadOperation
+from cryosoft.procedures.operations.sample_unload import SampleUnloadOperation
 
 CONFIG_PATH = "cryosoft/configs/sim_cryostat"
+_SAMPLE_ACCESS_CLASSES = [SampleLoadOperation, SampleUnloadOperation]
+_SAMPLE_ACCESS_IDS = ["load", "unload"]
 
 
 @pytest.fixture
@@ -191,17 +196,20 @@ def test_next_due_reads_the_configured_level_vi(station):
     assert op.next_due(ctx_wrong_vi) == NextDue(None, "Fill due: consumption unknown")
 
 
-# ── SampleChangeOperation: readiness (three rows) ────────────────────────────
+# ── _SampleAccessOperationBase (via SampleLoadOperation/SampleUnloadOperation):
+# readiness (three rows) ──────────────────────────────────────────────────────
 
 
-def test_sample_change_readiness_conditions_keys(station):
-    op = SampleChangeOperation(station)
+@pytest.mark.parametrize("op_cls", _SAMPLE_ACCESS_CLASSES, ids=_SAMPLE_ACCESS_IDS)
+def test_sample_access_readiness_conditions_keys(op_cls, station):
+    op = op_cls(station)
     keys = [c.key for c in op.readiness_conditions()]
     assert keys == ["zero_field", "vti_at_target", "needle_valve_confirmed"]
 
 
-def test_sample_change_zero_field_true_and_false(station):
-    op = SampleChangeOperation(station)
+@pytest.mark.parametrize("op_cls", _SAMPLE_ACCESS_CLASSES, ids=_SAMPLE_ACCESS_IDS)
+def test_sample_access_zero_field_true_and_false(op_cls, station):
+    op = op_cls(station)
     conditions = {c.key: c for c in op.readiness_conditions()}
     magnets = station.magnet_vi_names()
 
@@ -214,22 +222,24 @@ def test_sample_change_zero_field_true_and_false(station):
     assert conditions["zero_field"].detail(nonzero_state) == f"{magnets[0]} holding"
 
 
-def test_sample_change_vti_at_target_true_and_false_with_detail(station):
-    op = SampleChangeOperation(station)
+@pytest.mark.parametrize("op_cls", _SAMPLE_ACCESS_CLASSES, ids=_SAMPLE_ACCESS_IDS)
+def test_sample_access_vti_at_target_true_and_false_with_detail(op_cls, station):
+    op = op_cls(station)  # default target_temperature_K = 290.0
     conditions = {c.key: c for c in op.readiness_conditions()}
     vti_name = "temperature_vti"
 
-    at_target = {vti_name: {"temperature": 300.0}}
+    at_target = {vti_name: {"temperature": 290.0}}
     assert conditions["vti_at_target"].check(at_target) is True
-    assert conditions["vti_at_target"].detail(at_target) == "currently 300.0 K"
+    assert conditions["vti_at_target"].detail(at_target) == "currently 290.0 K"
 
     off_target = {vti_name: {"temperature": 250.3}}
     assert conditions["vti_at_target"].check(off_target) is False
     assert conditions["vti_at_target"].detail(off_target) == "currently 250.3 K"
 
 
-def test_sample_change_needle_valve_confirmed_uses_confirmed_and_ignores_snapshot(station):
-    op = SampleChangeOperation(station)
+@pytest.mark.parametrize("op_cls", _SAMPLE_ACCESS_CLASSES, ids=_SAMPLE_ACCESS_IDS)
+def test_sample_access_needle_valve_confirmed_uses_confirmed_and_ignores_snapshot(op_cls, station):
+    op = op_cls(station)
     conditions = {c.key: c for c in op.readiness_conditions()}
     condition = conditions["needle_valve_confirmed"]
     assert condition.detail is None
@@ -239,8 +249,11 @@ def test_sample_change_needle_valve_confirmed_uses_confirmed_and_ignores_snapsho
     assert condition.check({"anything": "irrelevant"}) is True
 
 
-def test_sample_change_config_key_and_ready_message():
-    assert SampleChangeOperation.config_key == "sample_change"
-    assert SampleChangeOperation.ready_message
+def test_sample_access_config_key_and_ready_message():
+    assert SampleLoadOperation.config_key == "sample_load"
+    assert SampleUnloadOperation.config_key == "sample_unload"
+    assert SampleLoadOperation.config_key != SampleUnloadOperation.config_key
+    assert SampleLoadOperation.ready_message
+    assert SampleUnloadOperation.ready_message
     assert HeliumFillOperation.ready_message
     assert HeliumFillOperation.config_key == ""  # wired via cryogenics_config, not config_key

@@ -699,17 +699,62 @@ def test_cryogenics_config_block(config_dir: Path) -> None:
 
 
 # ── Operations config block ───────────────────────────────────────────────────
-# An optional operations: block, one
-# named sub-block per OperationBase subclass (only sample_change ships so
-# far). A config that declares none carries zero footprint; a declared
-# operations.sample_change: must reference a real vi_type: system VI with
+# An optional operations: block, one named sub-block per OperationBase
+# subclass (sample_load and sample_unload ship so far, sharing the same
+# block shape via _SampleAccessOperationBase). A config that declares none
+# carries zero footprint; a declared operations.sample_load:/
+# operations.sample_unload: must reference a real vi_type: system VI with
 # sane, ordered timing/tolerance values, and needle_valve must be "manual"
 # (a VI-capability reference is future work).
 
+_SAMPLE_ACCESS_CONFIG_KEYS = ("sample_load", "sample_unload")
+
+
+def _check_sample_access_block(config_dir: Path, devices: dict, operations: dict, key: str) -> None:
+    """Validate one operations.<key>: block against the sample-access shape."""
+    block = operations.get(key)
+    if block is None:
+        pytest.skip(f"{config_dir.name} declares no operations.{key}: block")
+    assert isinstance(block, dict), (
+        f"{config_dir.name}: operations.{key}: must be a mapping"
+    )
+
+    vti_vi_name = block.get("vti_vi", "temperature_vti")
+    virtual_instruments = devices.get("virtual_instruments", {})
+    vi_cfg = virtual_instruments.get(vti_vi_name)
+    assert vi_cfg is not None, (
+        f"{config_dir.name}: operations.{key}.vti_vi={vti_vi_name!r} "
+        f"does not name a registered VI"
+    )
+    assert vi_cfg.get("vi_type") == "system", (
+        f"{config_dir.name}: operations.{key}.vti_vi={vti_vi_name!r} "
+        f"must be a vi_type: system VI, got {vi_cfg.get('vi_type')!r}"
+    )
+
+    positive_keys = (
+        "temperature_tolerance_K",
+        "temperature_window_s",
+    )
+    for pos_key in positive_keys:
+        if pos_key not in block:
+            continue
+        assert float(block[pos_key]) > 0, (
+            f"{config_dir.name}: operations.{key}.{pos_key} must be "
+            f"positive, got {block[pos_key]!r}"
+        )
+
+    needle_valve = block.get("needle_valve", "manual")
+    assert needle_valve == "manual", (
+        f"{config_dir.name}: operations.{key}.needle_valve="
+        f"{needle_valve!r} is not supported; only 'manual' is implemented "
+        f"today (a VI-capability reference is future work)"
+    )
+
 
 @pytest.mark.parametrize("config_dir", _config_dirs(), ids=lambda p: p.name)
-def test_operations_config_block(config_dir: Path) -> None:
-    """A declared operations.sample_change: block is well-formed."""
+@pytest.mark.parametrize("config_key", _SAMPLE_ACCESS_CONFIG_KEYS)
+def test_operations_config_block(config_dir: Path, config_key: str) -> None:
+    """A declared operations.sample_load:/operations.sample_unload: block is well-formed."""
     devices = _load_yaml(config_dir / "devices.yaml")
     operations = devices.get("operations")
     if operations is None:
@@ -718,43 +763,7 @@ def test_operations_config_block(config_dir: Path) -> None:
         f"{config_dir.name}: operations: must be a mapping"
     )
 
-    sample_change = operations.get("sample_change")
-    if sample_change is None:
-        pytest.skip(f"{config_dir.name} declares no operations.sample_change: block")
-    assert isinstance(sample_change, dict), (
-        f"{config_dir.name}: operations.sample_change: must be a mapping"
-    )
-
-    vti_vi_name = sample_change.get("vti_vi", "temperature_vti")
-    virtual_instruments = devices.get("virtual_instruments", {})
-    vi_cfg = virtual_instruments.get(vti_vi_name)
-    assert vi_cfg is not None, (
-        f"{config_dir.name}: operations.sample_change.vti_vi={vti_vi_name!r} "
-        f"does not name a registered VI"
-    )
-    assert vi_cfg.get("vi_type") == "system", (
-        f"{config_dir.name}: operations.sample_change.vti_vi={vti_vi_name!r} "
-        f"must be a vi_type: system VI, got {vi_cfg.get('vi_type')!r}"
-    )
-
-    positive_keys = (
-        "temperature_tolerance_K",
-        "temperature_window_s",
-    )
-    for key in positive_keys:
-        if key not in sample_change:
-            continue
-        assert float(sample_change[key]) > 0, (
-            f"{config_dir.name}: operations.sample_change.{key} must be "
-            f"positive, got {sample_change[key]!r}"
-        )
-
-    needle_valve = sample_change.get("needle_valve", "manual")
-    assert needle_valve == "manual", (
-        f"{config_dir.name}: operations.sample_change.needle_valve="
-        f"{needle_valve!r} is not supported; only 'manual' is implemented "
-        f"today (a VI-capability reference is future work)"
-    )
+    _check_sample_access_block(config_dir, devices, operations, config_key)
 
 
 # ── Control-validation standard ───────────────────────────────────────────────
@@ -1093,8 +1102,9 @@ def test_operation_claimed_vi_names_contract(op_cls: type) -> None:
     Mirrors ``test_procedure_claimed_vi_names_contract``: ``None`` (claim
     everything) is always valid; a non-``None`` return must be a
     ``set[str]`` naming real station VIs, so a typo in a narrowed claim
-    (e.g. ``HeliumFillOperation``'s level meter, ``SampleChangeOperation``'s
-    magnets/VTI/switch/measurement VIs) can never silently under-claim.
+    (e.g. ``HeliumFillOperation``'s level meter, ``SampleLoadOperation``'s/
+    ``SampleUnloadOperation``'s magnets/VTI/measurement VIs) can never
+    silently under-claim.
     """
     station = build_station("cryosoft/configs/sim_cryostat")
     op = op_cls(station)

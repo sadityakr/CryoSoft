@@ -332,14 +332,15 @@ _OPERATIONS_KIND = LogKindSpec(
 )
 
 # The unified log kind: ONE flat common table for every servicing event —
-# helium fills, sample changes, future operations, and hand-added entries
-# all share exactly these fields, no kind-specific columns and no `status`
-# field. Supersedes the split between `cryogenics` and `operations`, though
-# both stay declared and functional in this phase (see the module docstring).
-# `entry_kind` names what happened ("helium_fill" | "sample_change" | a
-# future operation's key | "manual") — deliberately a plain str, not a
-# `choices` enum, because future operation keys are open-ended and cannot be
-# enumerated here. `origin` is a closed two-value set and does use `choices`.
+# helium fills, sample loads/unloads, future operations, and hand-added
+# entries all share exactly these fields, no kind-specific columns and no
+# `status` field. Supersedes the split between `cryogenics` and
+# `operations`, though both stay declared and functional in this phase (see
+# the module docstring). `entry_kind` names what happened ("helium_fill" |
+# "sample_load" | "sample_unload" | a future operation's key | "manual") —
+# deliberately a plain str, not a `choices` enum, because future operation
+# keys are open-ended and cannot be enumerated here. `origin` is a closed
+# two-value set and does use `choices`.
 _SERVICING_KIND = LogKindSpec(
     key="servicing",
     title="Servicing log",
@@ -348,8 +349,9 @@ _SERVICING_KIND = LogKindSpec(
             type=str,
             default="manual",
             description=(
-                'What happened: "helium_fill", "sample_change", another '
-                'operation\'s key, or "manual" for a hand-added entry'
+                'What happened: "helium_fill", "sample_load", '
+                '"sample_unload", another operation\'s key, or "manual" '
+                'for a hand-added entry'
             ),
         ),
         "person": ParamSpec(
@@ -1308,7 +1310,7 @@ class CryogenicsRecorder(QObject):
     ``entry_kind`` is derived from the run manifest's ``"procedure"`` name via
     the same lowercase/underscore normalisation the legacy migration already
     uses (``_normalize_entry_kind``) so both paths agree on stable keys like
-    ``"helium_fill"``/``"sample_change"``. A recording sidecar is written
+    ``"helium_fill"``/``"sample_load"``/``"sample_unload"``. A recording sidecar is written
     whenever the manifest's ``summary`` carries a well-formed generic
     ``"recording"`` series (``{"unix_time": [...], "channels": {...}}}``) —
     not fill-specific.

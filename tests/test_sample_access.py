@@ -1,36 +1,48 @@
 # ---
 # description: |
-#   End-to-end behavior tests for SampleChangeOperation
-#   (cryosoft/procedures/operations/sample_change.py), driven by a
-#   real Orchestrator (ticked directly, not via the QTimer) against the
-#   sim_cryostat station. This is a "hold phase" operation: the run no longer
-#   finishes on its own once the ramps land — every test that wants the run
-#   to end now calls orchestrator.finish_operation() explicitly, mirroring
-#   what the OperationCard's Finish click does. Covers: the run staying
-#   active (never IDLE) after the ramps settle; sample() recording the VTI
-#   temperature + magnet fields into the shared recorder every tick; Finish
-#   producing a "done" manifest with every postcondition held (empty
-#   postconditions_unmet) and the recording in run_summary(); the needle-
-#   valve operator-confirmation gate — one-shot evaluated as the run ends:
-#   unconfirmed finishes promptly with "needle_valve_confirmed" named in
-#   postconditions_unmet, never blocking — measurement-VI standby + switch-VI
-#   open_all dispatch, an end-to-end run through a real CryogenicsRecorder
-#   (writing exactly one unified "servicing" entry, entry_kind=
-#   "sample_change", never the legacy "cryogenics"/"operations" kinds, with
-#   its recording written as a sidecar), refusal while a procedure is running,
-#   construction-time validation, and the operator-confirmation declaration
-#   standard itself (confirm()/confirmed()).
+#   End-to-end behavior tests for the sample-access operation pair
+#   (cryosoft/procedures/operations/sample_access_base.py's
+#   _SampleAccessOperationBase, plus the two thin concrete classes
+#   SampleLoadOperation / SampleUnloadOperation), driven by a real
+#   Orchestrator (ticked directly, not via the QTimer) against the
+#   sim_cryostat station. The two classes differ only in identity attributes
+#   (name/config_key/ready_message) — every behavioral test below is
+#   parametrized over both rather than duplicated. This is a "hold phase"
+#   operation: the run no longer finishes on its own once the ramps land —
+#   every test that wants the run to end now calls
+#   orchestrator.finish_operation() (or abort_procedure()) explicitly,
+#   mirroring what the OperationCard's Finish/Abort clicks do. Covers: the
+#   run staying active (never IDLE) after the ramps settle; sample()
+#   recording the VTI temperature + magnet fields into the shared recorder
+#   every tick; Finish producing a "done" manifest with every postcondition
+#   held (empty postconditions_unmet) and the recording in run_summary();
+#   the needle-valve operator-confirmation gate — one-shot evaluated as the
+#   run ends: unconfirmed finishes promptly with "needle_valve_confirmed"
+#   named in postconditions_unmet, never blocking — measurement-VI standby
+#   dispatch (no switch-VI dispatch — dropped when this operation split into
+#   load/unload), the disarm_measurement_vis pre-run toggle (default True;
+#   False skips both the standby() commands and the claimed_vi_names()
+#   claim on every measurement VI, so one already armed for something else
+#   is left alone), an end-to-end run through a real CryogenicsRecorder
+#   (writing exactly one unified "servicing" entry per class, entry_kind
+#   matching each class's config_key, with its recording written as a
+#   sidecar), refusal while a procedure is running, construction-time
+#   validation, and the operator-confirmation declaration standard itself
+#   (confirm()/confirmed()).
 #
 #   The sim ITC503 (cryosoft/drivers/sim_oxford_itc503.py) starts at 300 K
 #   already (its "room temperature" default) with a 60 s thermal time
-#   constant. To actually exercise the ramp/settle path (rather than a test
-#   that starts already-at-target and never proves anything) tests that care
-#   about the ramp first knock the VTI's simulated temperature away from
-#   300 K, then use `_fast_vti()` below (a large ramp rate plus a shrunk
-#   `driver._tau`) so the settle completes in test time — the same
-#   monkeypatch-the-sim-internals idiom test_helium_fill.py uses for the
-#   ILM's `_force_helium_level`.
-# last_updated: 2026-07-23
+#   constant — note this operation's own default target_temperature_K is
+#   290 K, not 300 K, so tests relying on "VTI already at target" pass an
+#   explicit target_temperature_K=300.0 override rather than assuming the
+#   defaults coincide. To actually exercise the ramp/settle path (rather
+#   than a test that starts already-at-target and never proves anything)
+#   tests that care about the ramp first knock the VTI's simulated
+#   temperature away from the target, then use `_fast_vti()` below (a large
+#   ramp rate plus a shrunk `driver._tau`) so the settle completes in test
+#   time — the same monkeypatch-the-sim-internals idiom test_helium_fill.py
+#   uses for the ILM's `_force_helium_level`.
+# last_updated: 2026-07-27
 # ---
 
 from __future__ import annotations
@@ -44,12 +56,18 @@ from cryosoft.core.exceptions import CryoSoftConfigError
 from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 from cryosoft.core.plan import PhasePlan, Target
 from cryosoft.core.station import build_station
-from cryosoft.procedures.operations.sample_change import SampleChangeOperation
+from cryosoft.procedures.operations.sample_load import SampleLoadOperation
+from cryosoft.procedures.operations.sample_unload import SampleUnloadOperation
 from cryosoft.session.servicing_log import (
     CryogenicsRecorder,
     HeliumRecordStore,
     ServicingLogStore,
 )
+
+# Both concrete classes share 100% of their behavior (_SampleAccessOperationBase);
+# every test in this file is parametrized over the pair rather than duplicated.
+_OPERATION_CLASSES = [SampleLoadOperation, SampleUnloadOperation]
+_OPERATION_IDS = ["load", "unload"]
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -82,10 +100,10 @@ def _fast_vti(station) -> None:
     """Make the VTI's ramp instant and its thermal settling near-instant.
 
     See the module docstring: the sim ITC503 starts at 300 K with a 60 s
-    time constant, so a test that perturbs it away from 300 K needs both a
-    fast ramp (setpoint reaches target immediately) and a shrunk thermal
-    time constant (the simulated temperature actually catches up to the
-    setpoint within a tick or two) to finish in test time.
+    time constant, so a test that perturbs it away from its target needs
+    both a fast ramp (setpoint reaches target immediately) and a shrunk
+    thermal time constant (the simulated temperature actually catches up to
+    the setpoint within a tick or two) to finish in test time.
     """
     vti = station.temperature_vti
     vti._default_ramp_rate = 6000.0
@@ -106,14 +124,14 @@ def _tick_until(orchestrator, predicate, *, max_ticks: int = 2000, sleep_s: floa
     raise AssertionError(f"condition not satisfied within {max_ticks} ticks")
 
 
-def _make_op(station, *, person: str = "Alex Tech", **overrides) -> SampleChangeOperation:
-    """Build a SampleChangeOperation with fast, test-friendly timing defaults."""
+def _make_op(op_cls, station, *, person: str = "Alex Tech", **overrides):
+    """Build a sample-access operation with fast, test-friendly timing defaults."""
     config = dict(
         temperature_window_s=0.03,
         sample_period_s=0.0,  # tight tick-to-tick hold loop for test speed
     )
     config.update(overrides)
-    return SampleChangeOperation(station, person=person, **config)
+    return op_cls(station, person=person, **config)
 
 
 class _BlockingProcedure:
@@ -145,30 +163,34 @@ class _BlockingProcedure:
 # ── Construction ─────────────────────────────────────────────────────────────
 
 
-def test_constructs_from_defaults(station):
+@pytest.mark.parametrize("op_cls", _OPERATION_CLASSES, ids=_OPERATION_IDS)
+def test_constructs_from_defaults(op_cls, station):
     """The conformance suite's own check, made explicit: station alone suffices."""
-    op = SampleChangeOperation(station)
-    assert op.name == "Sample Change"
+    op = op_cls(station)
+    assert op.name == op_cls.name
     assert op.tolerated_safety_flags == frozenset()
 
 
-def test_construction_rejects_missing_vti_vi(station):
+@pytest.mark.parametrize("op_cls", _OPERATION_CLASSES, ids=_OPERATION_IDS)
+def test_construction_rejects_missing_vti_vi(op_cls, station):
     """A vti_vi naming no registered VI is refused at construction, not later."""
     with pytest.raises(CryoSoftConfigError):
-        SampleChangeOperation(station, vti_vi="does_not_exist")
+        op_cls(station, vti_vi="does_not_exist")
 
 
-def test_construction_rejects_non_manual_needle_valve(station):
+@pytest.mark.parametrize("op_cls", _OPERATION_CLASSES, ids=_OPERATION_IDS)
+def test_construction_rejects_non_manual_needle_valve(op_cls, station):
     """Only needle_valve == 'manual' is implemented today."""
     with pytest.raises(CryoSoftConfigError):
-        SampleChangeOperation(station, needle_valve="auto")
+        op_cls(station, needle_valve="auto")
 
 
 # ── Operator confirmations (the declaration standard itself) ─────────────────
 
 
-def test_operator_confirmations_declared_and_confirm_confirmed_roundtrip(station):
-    op = SampleChangeOperation(station)
+@pytest.mark.parametrize("op_cls", _OPERATION_CLASSES, ids=_OPERATION_IDS)
+def test_operator_confirmations_declared_and_confirm_confirmed_roundtrip(op_cls, station):
+    op = op_cls(station)
     assert op.operator_confirmations == {"needle_valve": "Needle valve closed"}
     assert op.confirmed("needle_valve") is False
 
@@ -176,8 +198,9 @@ def test_operator_confirmations_declared_and_confirm_confirmed_roundtrip(station
     assert op.confirmed("needle_valve") is True
 
 
-def test_confirm_unknown_key_raises(station):
-    op = SampleChangeOperation(station)
+@pytest.mark.parametrize("op_cls", _OPERATION_CLASSES, ids=_OPERATION_IDS)
+def test_confirm_unknown_key_raises(op_cls, station):
+    op = op_cls(station)
     with pytest.raises(ValueError):
         op.confirm("not_a_declared_key")
 
@@ -185,13 +208,9 @@ def test_confirm_unknown_key_raises(station):
 # ── Full happy-path run ────────────────────────────────────────────────────
 
 
-def test_sample_change_holds_until_finish_then_all_postconditions_held(orchestrator, station, qtbot):
-    """Zero-field + 300 K ramps, run holds, Finish -> done manifest, no data file.
-
-    Phase 3: the
-    run no longer ends on its own once the ramps land — it stays active
-    (never IDLE) until finish_operation() is called.
-    """
+@pytest.mark.parametrize("op_cls", _OPERATION_CLASSES, ids=_OPERATION_IDS)
+def test_holds_until_finish_then_all_postconditions_held(op_cls, orchestrator, station, qtbot):
+    """Zero-field + target-temperature ramps, run holds, Finish -> done manifest, no data file."""
     _fast_magnets(station)
     _fast_vti(station)
     station.magnet_z._driver._current = 5.0
@@ -199,7 +218,7 @@ def test_sample_change_holds_until_finish_then_all_postconditions_held(orchestra
     station.temperature_vti._driver._temperature = 250.0
     station.temperature_vti._driver._setpoint = 250.0
 
-    op = _make_op(station)
+    op = _make_op(op_cls, station, target_temperature_K=290.0)
 
     started: list[dict] = []
     finished: list[dict] = []
@@ -209,15 +228,16 @@ def test_sample_change_holds_until_finish_then_all_postconditions_held(orchestra
     orchestrator.run_operation(op)
     assert orchestrator._procedure is op
     assert started and started[0]["kind"] == "operation"
-    assert started[0]["procedure"] == "Sample Change"
+    assert started[0]["procedure"] == op_cls.name
 
     orchestrator.confirm_operation("needle_valve")
 
-    # Let the ramps settle to zero field / 300 K, then run a further batch of
-    # ticks — the run must NOT finish on its own (the hold phase).
+    # Let the ramps settle to zero field / target temperature, then run a
+    # further batch of ticks — the run must NOT finish on its own (the hold
+    # phase).
     _tick_until(
         orchestrator,
-        lambda: abs(station.temperature_vti.temperature() - 300.0) <= 2.0,
+        lambda: abs(station.temperature_vti.temperature() - 290.0) <= 2.0,
         max_ticks=2000,
         sleep_s=0.01,
     )
@@ -232,23 +252,24 @@ def test_sample_change_holds_until_finish_then_all_postconditions_held(orchestra
 
     assert finished[0]["status"] == "done"
     assert finished[0]["kind"] == "operation"
-    assert finished[0]["procedure"] == "Sample Change"
+    assert finished[0]["procedure"] == op_cls.name
     assert not finished[0]["data_file"]  # no DataManager -> manifest data_file stays empty
     assert finished[0]["postconditions_unmet"] == []  # every gate held, confirmed in time
 
     for name in station.magnet_vi_names():
         assert abs(station.get_vi(name).magnet_field_T()) < 0.01, f"{name} did not reach zero field"
 
-    assert abs(station.temperature_vti.temperature() - 300.0) <= 2.0
+    assert abs(station.temperature_vti.temperature() - 290.0) <= 2.0
     assert orchestrator._state == OrchestratorState.IDLE
 
 
-def test_sample_change_records_vti_and_magnet_fields(orchestrator, station, qtbot):
+@pytest.mark.parametrize("op_cls", _OPERATION_CLASSES, ids=_OPERATION_IDS)
+def test_records_vti_and_magnet_fields(op_cls, orchestrator, station, qtbot):
     """sample() records the VTI temperature + every magnet's field every hold-phase tick."""
     _fast_magnets(station)
     _fast_vti(station)
 
-    op = _make_op(station, sample_period_s=0.0)
+    op = _make_op(op_cls, station, sample_period_s=0.0)
     finished: list[dict] = []
     orchestrator.run_finished.connect(finished.append)
 
@@ -278,17 +299,19 @@ def test_sample_change_records_vti_and_magnet_fields(orchestrator, station, qtbo
 # out) ─────────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.parametrize("op_cls", _OPERATION_CLASSES, ids=_OPERATION_IDS)
 def test_needle_valve_not_confirmed_finishes_promptly_with_unmet_postcondition(
-    orchestrator, station, qtbot
+    op_cls, orchestrator, station, qtbot
 ):
     """An unconfirmed needle valve does not block finish; it is named unmet."""
     _fast_magnets(station)
     _fast_vti(station)
-    # Defaults: magnets already at 0 T, VTI already at 300 K (the sim
-    # ITC503's start temperature) -> zero_field and vti_at_target hold
-    # immediately, so needle_valve_confirmed is the only gate that can be
-    # unmet, isolating it in the assertion below.
-    op = _make_op(station, temperature_window_s=0.0)
+    # target_temperature_K=300.0 (not this operation's 290 K default) matches
+    # the sim ITC503's actual start temperature, and magnets already sit at
+    # 0 T -> zero_field and vti_at_target hold immediately, so
+    # needle_valve_confirmed is the only gate that can be unmet, isolating
+    # it in the assertion below.
+    op = _make_op(op_cls, station, temperature_window_s=0.0, target_temperature_K=300.0)
 
     finished: list[dict] = []
     orchestrator.run_finished.connect(finished.append)
@@ -307,11 +330,13 @@ def test_needle_valve_not_confirmed_finishes_promptly_with_unmet_postcondition(
     assert orchestrator._state == OrchestratorState.IDLE
 
 
-# ── initiate() dispatch: measurement standby + switch open_all ───────────────
+# ── initiate() dispatch: measurement standby (no switch dispatch — dropped
+# when this operation split into load/unload) ────────────────────────────
 
 
-def test_measurement_vis_get_standby_and_switch_gets_open_all(orchestrator, station, qtbot):
-    """Every measurement VI is disarmed and the switch VI's active route is cleared."""
+@pytest.mark.parametrize("op_cls", _OPERATION_CLASSES, ids=_OPERATION_IDS)
+def test_measurement_vis_get_standby(op_cls, orchestrator, station, qtbot):
+    """Every measurement VI is disarmed on initiate()."""
     _fast_magnets(station)
     _fast_vti(station)
 
@@ -329,26 +354,86 @@ def test_measurement_vis_get_standby_and_switch_gets_open_all(orchestrator, stat
 
         vi.standby = _wrap(original_standby, name)
 
-    station.switch_matrix.select_route("Mux-Ch1")
-    assert station.switch_matrix.get_state()["active_route"] == "Mux-Ch1"
-
-    op = _make_op(station)
+    op = _make_op(op_cls, station)
     orchestrator.run_operation(op)
 
     # initiate()'s commands are dispatched synchronously, before the first
     # tick even runs (mirrors HeliumFillOperation's FAST-refresh assertion).
     assert all(count == 1 for count in standby_calls.values()), standby_calls
-    assert station.switch_matrix.get_state()["active_route"] == ""
 
     orchestrator.confirm_operation("needle_valve")
     orchestrator.abort_procedure()
 
 
+def test_claimed_vi_names_excludes_switch(station):
+    """claimed_vi_names() no longer names the switch matrix (dropped from initiate())."""
+    op = SampleLoadOperation(station)
+    assert "switch_matrix" not in op.claimed_vi_names()
+
+
+# ── disarm_measurement_vis pre-run toggle: default on, skippable per run ─────
+
+
+@pytest.mark.parametrize("op_cls", _OPERATION_CLASSES, ids=_OPERATION_IDS)
+def test_disarm_measurement_vis_defaults_true(op_cls, station):
+    op = op_cls(station)
+    assert op.get_params()["disarm_measurement_vis"] is True
+    assert set(station.measurement_vi_names()) <= op.claimed_vi_names()
+
+
+@pytest.mark.parametrize("op_cls", _OPERATION_CLASSES, ids=_OPERATION_IDS)
+def test_disarm_measurement_vis_false_excludes_measurement_vis_from_claim(op_cls, station):
+    op = op_cls(station, disarm_measurement_vis=False)
+    assert op.get_params()["disarm_measurement_vis"] is False
+    claimed = op.claimed_vi_names()
+    for name in station.measurement_vi_names():
+        assert name not in claimed
+
+
+@pytest.mark.parametrize("op_cls", _OPERATION_CLASSES, ids=_OPERATION_IDS)
+def test_disarm_measurement_vis_false_skips_measurement_standby_commands(
+    op_cls, orchestrator, station, qtbot
+):
+    """With the toggle off, initiate() never calls standby() on any measurement VI."""
+    _fast_magnets(station)
+    _fast_vti(station)
+
+    standby_calls = {name: 0 for name in station.measurement_vi_names()}
+    for name in station.measurement_vi_names():
+        vi = station.get_vi(name)
+        original_standby = vi.standby
+
+        def _wrap(original, name):
+            def wrapper():
+                standby_calls[name] += 1
+                return original()
+
+            return wrapper
+
+        vi.standby = _wrap(original_standby, name)
+
+    op = _make_op(op_cls, station, disarm_measurement_vis=False)
+    orchestrator.run_operation(op)
+
+    assert all(count == 0 for count in standby_calls.values()), standby_calls
+
+    orchestrator.confirm_operation("needle_valve")
+    orchestrator.abort_procedure()
+
+
+def test_pre_run_toggles_declares_disarm_measurement_vis():
+    assert SampleLoadOperation.pre_run_toggles == {
+        "disarm_measurement_vis": "Disarm measurement instruments"
+    }
+    assert SampleUnloadOperation.pre_run_toggles == SampleLoadOperation.pre_run_toggles
+
+
 # ── End-to-end with a real CryogenicsRecorder ─────────────────────────────
 
 
-def test_cryogenics_recorder_records_one_servicing_entry(orchestrator, station, tmp_path, qtbot):
-    """A finished sample change produces exactly ONE "servicing" entry, never a legacy-kind one."""
+@pytest.mark.parametrize("op_cls", _OPERATION_CLASSES, ids=_OPERATION_IDS)
+def test_cryogenics_recorder_records_one_servicing_entry(op_cls, orchestrator, station, tmp_path, qtbot):
+    """A finished run produces exactly ONE "servicing" entry, keyed by this class's entry_kind."""
     _fast_magnets(station)
     _fast_vti(station)
     helium_store = HeliumRecordStore(tmp_path / "servicing", "sim_cryostat")
@@ -363,7 +448,7 @@ def test_cryogenics_recorder_records_one_servicing_entry(orchestrator, station, 
     orchestrator.run_started.connect(recorder.on_run_started)
     orchestrator.run_finished.connect(recorder.on_run_finished)
 
-    op = _make_op(station, person="Dr. Change")
+    op = _make_op(op_cls, station, person="Dr. Change")
     finished: list[dict] = []
     orchestrator.run_finished.connect(finished.append)
     orchestrator.run_operation(op)
@@ -383,7 +468,7 @@ def test_cryogenics_recorder_records_one_servicing_entry(orchestrator, station, 
     assert len(entries) == 1
     entry = entries[0]
     assert entry.source == "operation"
-    assert entry.values["entry_kind"] == "sample_change"
+    assert entry.values["entry_kind"] == op_cls.config_key
     assert entry.values["person"] == "Dr. Change"
     # needle_valve was confirmed -> its postcondition gate passes -> no
     # "unmet: ..." trace in notes (see GLOSSARY.md's Operator confirmation).
@@ -404,7 +489,8 @@ def test_cryogenics_recorder_records_one_servicing_entry(orchestrator, station, 
 # ── Refused while a procedure runs ────────────────────────────────────────
 
 
-def test_sample_change_refused_while_procedure_runs(orchestrator, station, qtbot):
+@pytest.mark.parametrize("op_cls", _OPERATION_CLASSES, ids=_OPERATION_IDS)
+def test_refused_while_procedure_runs(op_cls, orchestrator, station, qtbot):
     """A running procedure is never auto-aborted by run_operation()."""
     proc = _BlockingProcedure(station)
     orchestrator.run_procedure(proc)
@@ -414,7 +500,7 @@ def test_sample_change_refused_while_procedure_runs(orchestrator, station, qtbot
     blocked: list[str] = []
     orchestrator.action_blocked.connect(blocked.append)
 
-    op = _make_op(station)
+    op = _make_op(op_cls, station)
     orchestrator.run_operation(op)
 
     assert blocked, "run_operation must be refused with action_blocked"

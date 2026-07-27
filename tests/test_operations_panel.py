@@ -3,17 +3,28 @@
 #   Behavior tests for cryosoft.gui.operations_panel: panel presence gated on
 #   cryogenics/operations config, on-screen geometry when selected in
 #   MonitorWindow's bottom-right quadrant, generic OperationCard
-#   construction (helium fill + sample change), the readiness checklist
-#   flipping on a snapshot change, the start/finish button toggling on
-#   run_started/run_finished, the operator-confirmation checkbox calling
-#   confirm_operation(), the ready banner appearing only once a run is done
-#   and every condition holds, a cryogenics-less/operations-only panel
-#   building only the sample-change card, and the immediate-finish contract:
-#   Finish click -> instant disabled "Finishing…" state, the live
-#   operation_status label
-#   (only for the currently-running card), and the unmet-postcondition
-#   warning badge on run_finished.
-# last_updated: 2026-07-26
+#   construction (helium fill + sample load + sample unload), the readiness
+#   checklist flipping on a snapshot change, the start/finish/abort buttons
+#   toggling on run_started/run_finished, the operator-confirmation checkbox
+#   calling confirm_operation(), the ready banner appearing only once a run
+#   is done and every condition holds, a cryogenics-less/operations-only
+#   panel building one card per declared operations: block, and the
+#   immediate-finish contract: Finish click -> instant disabled
+#   "Finishing…" state, the live operation_status label (only for the
+#   currently-running card), the unmet-postcondition warning badge on
+#   run_finished, and Abort (hidden while idle, shown while running,
+#   confirms via QMessageBox before calling abort_procedure()). Also
+#   pre_run_toggles: a persistent, always-visible/editable checkbox (unlike
+#   an operator confirmation) checked by default, read once at Start-click
+#   time and passed to the factory as an extra bool keyword — verified both
+#   ways (checked/unchecked) construct the operation with the matching
+#   get_params() value, and that an operation with no declared toggles
+#   (HeliumFillOperation) gets zero checkboxes. Most generic-card tests use
+#   SampleLoadOperation as a representative hold-phase, confirmation- and
+#   toggle-bearing operation — this file tests the CARD mechanics, not
+#   sample-load-specific behavior (see test_sample_access.py for that), so
+#   any one such operation exercises the same code paths.
+# last_updated: 2026-07-27
 # ---
 
 """Behavior tests for OperationsPanel / OperationCard / OperatorDialog."""
@@ -21,7 +32,7 @@
 from unittest.mock import MagicMock
 
 import pytest
-from PyQt6.QtWidgets import QDialog, QScrollArea
+from PyQt6.QtWidgets import QDialog, QMessageBox, QScrollArea
 
 from cryosoft.core.orchestrator import Orchestrator
 from cryosoft.core.station import build_station, read_cryogenics_config, read_operations_config
@@ -29,7 +40,8 @@ from cryosoft.gui import operations_panel as operations_panel_module
 from cryosoft.gui.monitor_window import MonitorWindow
 from cryosoft.gui.operations_panel import OperationCard, OperationsPanel
 from cryosoft.procedures.operations.helium_fill import HeliumFillOperation
-from cryosoft.procedures.operations.sample_change import SampleChangeOperation
+from cryosoft.procedures.operations.sample_load import SampleLoadOperation
+from cryosoft.procedures.operations.sample_unload import SampleUnloadOperation
 from cryosoft.session.servicing_log import HeliumRecordStore, ServicingLogStore
 
 CONFIG_PATH = "cryosoft/configs/sim_cryostat"
@@ -124,10 +136,10 @@ def test_operations_panel_present_with_cryogenics_config(
     assert win.findChild(QScrollArea, "operations_scroll") is not None
 
 
-def test_operations_panel_without_cryogenics_but_with_operations_builds_sample_change_only(
+def test_operations_panel_without_cryogenics_but_with_operations_builds_declared_cards_only(
     station, orchestrator, operations_config, qtbot
 ):
-    """No cryogenics block, but an operations: block -> panel with only the sample-change card."""
+    """No cryogenics block, but an operations: block -> panel with one card per declared block."""
     win = MonitorWindow(
         station,
         orchestrator,
@@ -142,8 +154,8 @@ def test_operations_panel_without_cryogenics_but_with_operations_builds_sample_c
     assert win.findChild(QScrollArea, "operations_scroll") is not None
 
     cards = win._operations_panel._cards
-    assert len(cards) == 1
-    assert cards[0]._display_instance.name == SampleChangeOperation.name
+    names = [card._display_instance.name for card in cards]
+    assert names == [SampleLoadOperation.name, SampleUnloadOperation.name]
 
 
 def test_operations_panel_geometry_fully_visible_when_selected(
@@ -204,7 +216,7 @@ def test_states_updated_recomputes_consumption_rate_for_next_due(
 # ── Generic card construction ──────────────────────────────────────────────────
 
 
-def test_cards_built_for_fill_and_sample_change_on_sim_cryostat(
+def test_cards_built_for_fill_and_sample_load_and_sample_unload_on_sim_cryostat(
     station, orchestrator, cryogenics_config, operations_config, stores, qtbot
 ):
     """sim_cryostat's config builds one card per configured operation."""
@@ -221,9 +233,10 @@ def test_cards_built_for_fill_and_sample_change_on_sim_cryostat(
     qtbot.addWidget(panel)
 
     names = [card._display_instance.name for card in panel._cards]
-    assert names == [HeliumFillOperation.name, SampleChangeOperation.name]
+    assert names == [HeliumFillOperation.name, SampleLoadOperation.name, SampleUnloadOperation.name]
     assert panel.findChild(OperationCard, "operation_card_helium_fill") is not None
-    assert panel.findChild(OperationCard, "operation_card_sample_change") is not None
+    assert panel.findChild(OperationCard, "operation_card_sample_load") is not None
+    assert panel.findChild(OperationCard, "operation_card_sample_unload") is not None
 
 
 def test_unknown_operations_config_key_is_skipped_with_warning(
@@ -383,6 +396,117 @@ def test_run_started_for_other_procedure_does_not_toggle_button(
     assert card._action_btn.text() == "Helium Fill…"
 
 
+# ── Abort button ─────────────────────────────────────────────────────────────
+# Generic OperationCard feature (every running operation gets one, not just a
+# hold-phase one) — exercised here with the Helium Fill card, same as the
+# Finish-button tests above.
+
+
+def test_abort_button_hidden_while_idle_shown_while_running(
+    station, cryogenics_config, stores, qtbot, tmp_path
+):
+    """Abort is hidden until a run starts, then visible and enabled."""
+    helium_store, servicing_store = stores
+    mock_orch = MagicMock(spec=Orchestrator)
+    panel = OperationsPanel(
+        station,
+        mock_orch,
+        cryogenics_config,
+        {},
+        helium_store,
+        servicing_store,
+        get_data_dir=lambda: str(tmp_path),
+    )
+    qtbot.addWidget(panel)
+    card = panel._cards[0]
+
+    assert card._abort_btn.isHidden()
+
+    card._on_run_started({"procedure": HeliumFillOperation.name})
+    assert not card._abort_btn.isHidden()
+    assert card._abort_btn.isEnabled()
+
+    card._on_run_finished({"procedure": HeliumFillOperation.name, "status": "done"})
+    assert card._abort_btn.isHidden()
+
+
+def test_abort_button_disabled_while_finishing(
+    station, cryogenics_config, stores, qtbot, tmp_path
+):
+    """Abort stays visible but disabled during the brief 'Finishing…' window."""
+    helium_store, servicing_store = stores
+    mock_orch = MagicMock(spec=Orchestrator)
+    panel = OperationsPanel(
+        station,
+        mock_orch,
+        cryogenics_config,
+        {},
+        helium_store,
+        servicing_store,
+        get_data_dir=lambda: str(tmp_path),
+    )
+    qtbot.addWidget(panel)
+    card = panel._cards[0]
+
+    card._on_run_started({"procedure": HeliumFillOperation.name})
+    card._action_btn.click()  # Finish
+    assert card._finishing is True
+    assert not card._abort_btn.isHidden()
+    assert not card._abort_btn.isEnabled()
+
+
+def test_abort_button_confirms_then_calls_abort_procedure(
+    station, cryogenics_config, stores, qtbot, tmp_path, monkeypatch
+):
+    """Clicking Abort asks for confirmation, then calls orchestrator.abort_procedure() on Yes."""
+    helium_store, servicing_store = stores
+    mock_orch = MagicMock(spec=Orchestrator)
+    panel = OperationsPanel(
+        station,
+        mock_orch,
+        cryogenics_config,
+        {},
+        helium_store,
+        servicing_store,
+        get_data_dir=lambda: str(tmp_path),
+    )
+    qtbot.addWidget(panel)
+    card = panel._cards[0]
+    card._on_run_started({"procedure": HeliumFillOperation.name})
+
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes
+    )
+    card._abort_btn.click()
+    mock_orch.abort_procedure.assert_called_once()
+
+
+def test_abort_button_does_nothing_when_confirmation_declined(
+    station, cryogenics_config, stores, qtbot, tmp_path, monkeypatch
+):
+    """Declining the confirmation dialog never calls abort_procedure()."""
+    helium_store, servicing_store = stores
+    mock_orch = MagicMock(spec=Orchestrator)
+    panel = OperationsPanel(
+        station,
+        mock_orch,
+        cryogenics_config,
+        {},
+        helium_store,
+        servicing_store,
+        get_data_dir=lambda: str(tmp_path),
+    )
+    qtbot.addWidget(panel)
+    card = panel._cards[0]
+    card._on_run_started({"procedure": HeliumFillOperation.name})
+
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.No
+    )
+    card._abort_btn.click()
+    mock_orch.abort_procedure.assert_not_called()
+
+
 # ── Operator confirmations ────────────────────────────────────────────────────
 
 
@@ -402,10 +526,10 @@ def test_confirmation_checkbox_calls_confirm_operation(
     )
     qtbot.addWidget(panel)
     card = panel._cards[0]
-    assert card._display_instance.name == SampleChangeOperation.name
+    assert card._display_instance.name == SampleLoadOperation.name
 
     assert card._confirmations_row.isHidden()
-    card._on_run_started({"procedure": SampleChangeOperation.name})
+    card._on_run_started({"procedure": SampleLoadOperation.name})
     assert not card._confirmations_row.isHidden()
 
     checkbox = card._confirm_checkboxes["needle_valve"]
@@ -414,6 +538,108 @@ def test_confirmation_checkbox_calls_confirm_operation(
 
     mock_orch.confirm_operation.assert_called_once_with("needle_valve")
     assert not checkbox.isEnabled()
+
+
+# ── Pre-run toggles (disarm_measurement_vis) ─────────────────────────────────
+# Distinct from operator confirmations above: persistent (visible/editable
+# regardless of run state), read once at Start-click time rather than
+# confirmed against a running instance.
+
+
+def test_pre_run_toggle_checkbox_visible_and_checked_by_default(
+    station, operations_config, qtbot
+):
+    """A declared pre_run_toggles checkbox exists, is checked, and is always visible."""
+    mock_orch = MagicMock(spec=Orchestrator)
+    panel = OperationsPanel(
+        station, mock_orch, None, operations_config, None, None, get_data_dir=lambda: "/tmp"
+    )
+    qtbot.addWidget(panel)
+    card = panel._cards[0]
+    assert card._display_instance.name == SampleLoadOperation.name
+
+    checkbox = card._option_checkboxes["disarm_measurement_vis"]
+    assert checkbox.isChecked()
+    assert checkbox.isEnabled()
+    assert not checkbox.isHidden()  # persistent, unlike the confirmations row
+
+
+def test_pre_run_toggle_checkbox_disabled_but_not_hidden_while_running(
+    station, operations_config, qtbot
+):
+    mock_orch = MagicMock(spec=Orchestrator)
+    panel = OperationsPanel(
+        station, mock_orch, None, operations_config, None, None, get_data_dir=lambda: "/tmp"
+    )
+    qtbot.addWidget(panel)
+    card = panel._cards[0]
+
+    card._on_run_started({"procedure": SampleLoadOperation.name})
+    checkbox = card._option_checkboxes["disarm_measurement_vis"]
+    assert not checkbox.isEnabled()
+    assert not checkbox.isHidden()
+
+    card._on_run_finished({"procedure": SampleLoadOperation.name, "status": "done"})
+    assert checkbox.isEnabled()
+
+
+def test_unchecking_pre_run_toggle_constructs_operation_with_it_off(
+    station, operations_config, qtbot, monkeypatch
+):
+    """Unchecking the box before Start builds an operation with disarm_measurement_vis=False."""
+    mock_orch = MagicMock(spec=Orchestrator)
+    monkeypatch.setattr(operations_panel_module, "OperatorDialog", _FakeOperatorDialog)
+    panel = OperationsPanel(
+        station, mock_orch, None, operations_config, None, None, get_data_dir=lambda: "/tmp"
+    )
+    qtbot.addWidget(panel)
+    card = panel._cards[0]
+
+    card._option_checkboxes["disarm_measurement_vis"].setChecked(False)
+    card._action_btn.click()
+
+    mock_orch.run_operation.assert_called_once()
+    submitted = mock_orch.run_operation.call_args[0][0]
+    assert submitted.get_params()["disarm_measurement_vis"] is False
+
+
+def test_leaving_pre_run_toggle_checked_constructs_operation_with_default(
+    station, operations_config, qtbot, monkeypatch
+):
+    """Leaving the box checked (the default) builds an operation with the toggle on."""
+    mock_orch = MagicMock(spec=Orchestrator)
+    monkeypatch.setattr(operations_panel_module, "OperatorDialog", _FakeOperatorDialog)
+    panel = OperationsPanel(
+        station, mock_orch, None, operations_config, None, None, get_data_dir=lambda: "/tmp"
+    )
+    qtbot.addWidget(panel)
+    card = panel._cards[0]
+
+    card._action_btn.click()
+
+    submitted = mock_orch.run_operation.call_args[0][0]
+    assert submitted.get_params()["disarm_measurement_vis"] is True
+
+
+def test_helium_fill_card_has_no_pre_run_toggle_checkboxes(
+    station, cryogenics_config, stores, qtbot
+):
+    """HeliumFillOperation declares no pre_run_toggles -> zero checkboxes, unaffected call shape."""
+    helium_store, servicing_store = stores
+    mock_orch = MagicMock(spec=Orchestrator)
+    panel = OperationsPanel(
+        station,
+        mock_orch,
+        cryogenics_config,
+        {},
+        helium_store,
+        servicing_store,
+        get_data_dir=lambda: "/tmp",
+    )
+    qtbot.addWidget(panel)
+    card = panel._cards[0]
+    assert card._display_instance.name == HeliumFillOperation.name
+    assert card._option_checkboxes == {}
 
 
 # ── Ready banner ─────────────────────────────────────────────────────────────
@@ -439,7 +665,7 @@ def test_ready_banner_appears_only_after_done_and_all_green(
     all_green_state = {
         "magnet_z": {"magnet_state": "standby"},
         "magnet_y": {"magnet_state": "standby"},
-        "temperature_vti": {"temperature": 300.0},
+        "temperature_vti": {"temperature": 290.0},
     }
     ctx = {"state": all_green_state, "now_unix": 0.0, "consumption_rate_pct_per_h": None}
 
@@ -455,11 +681,11 @@ def test_ready_banner_appears_only_after_done_and_all_green(
     # could never show for exactly the operation that needs it).
     running = card._factory("tester")
     card._pending_instance = running
-    card._on_run_started({"procedure": SampleChangeOperation.name})
+    card._on_run_started({"procedure": SampleLoadOperation.name})
 
     # The run finishes "done", but needle_valve_confirmed has never been
     # confirmed -> not all-green -> banner stays hidden.
-    card._on_run_finished({"procedure": SampleChangeOperation.name, "status": "done"})
+    card._on_run_finished({"procedure": SampleLoadOperation.name, "status": "done"})
     card.on_states_updated(all_green_state, ctx)
     assert card._ready_banner.isHidden()
 
@@ -468,7 +694,7 @@ def test_ready_banner_appears_only_after_done_and_all_green(
     running.confirm("needle_valve")
     card.on_states_updated(all_green_state, ctx)
     assert not card._ready_banner.isHidden()
-    assert card._ready_banner.text() == f"✓ {SampleChangeOperation.ready_message}"
+    assert card._ready_banner.text() == f"✓ {SampleLoadOperation.ready_message}"
 
     # A condition stops holding -> banner clears.
     not_green_state = dict(all_green_state, magnet_z={"magnet_state": "holding"})
@@ -496,18 +722,18 @@ def test_ready_banner_clears_when_new_run_starts(station, operations_config, qtb
     all_green_state = {
         "magnet_z": {"magnet_state": "standby"},
         "magnet_y": {"magnet_state": "standby"},
-        "temperature_vti": {"temperature": 300.0},
+        "temperature_vti": {"temperature": 290.0},
     }
     ctx = {"state": all_green_state, "now_unix": 0.0, "consumption_rate_pct_per_h": None}
-    card._on_run_finished({"procedure": SampleChangeOperation.name, "status": "done"})
+    card._on_run_finished({"procedure": SampleLoadOperation.name, "status": "done"})
     card.on_states_updated(all_green_state, ctx)
     assert not card._ready_banner.isHidden()
 
-    card._on_run_started({"procedure": SampleChangeOperation.name})
+    card._on_run_started({"procedure": SampleLoadOperation.name})
     assert card._ready_banner.isHidden()
 
 
-# ── Mid-run ready banner for a hold-phase operation: SampleChangeOperation
+# ── Mid-run ready banner for a hold-phase operation: SampleLoadOperation
 # declares hold_for_operator = True, so the banner may show WHILE the run
 # is still active, not only after it finishes done. ─────────────────────────
 
@@ -528,26 +754,26 @@ def test_ready_banner_shows_mid_run_for_hold_phase_operation_once_conditions_hol
     )
     qtbot.addWidget(panel)
     card = panel._cards[0]
-    assert card._display_instance.name == SampleChangeOperation.name
+    assert card._display_instance.name == SampleLoadOperation.name
     assert card._display_instance.hold_for_operator is True
 
     running = card._factory("tester")
     card._pending_instance = running
-    card._on_run_started({"procedure": SampleChangeOperation.name})
+    card._on_run_started({"procedure": SampleLoadOperation.name})
     assert card._ready_banner.isHidden()  # no state snapshot evaluated for THIS run yet
 
     running.confirm("needle_valve")
     all_green_state = {
         "magnet_z": {"magnet_state": "standby"},
         "magnet_y": {"magnet_state": "standby"},
-        "temperature_vti": {"temperature": 300.0},
+        "temperature_vti": {"temperature": 290.0},
     }
     ctx = {"state": all_green_state, "now_unix": 0.0, "consumption_rate_pct_per_h": None}
 
     # Still running (no run_finished at all) -> banner shows anyway.
     card.on_states_updated(all_green_state, ctx)
     assert not card._ready_banner.isHidden()
-    assert card._ready_banner.text() == f"✓ {SampleChangeOperation.ready_message}"
+    assert card._ready_banner.text() == f"✓ {SampleLoadOperation.ready_message}"
 
 
 def test_ready_banner_hidden_mid_run_while_conditions_unmet(
@@ -569,12 +795,12 @@ def test_ready_banner_hidden_mid_run_while_conditions_unmet(
 
     running = card._factory("tester")
     card._pending_instance = running
-    card._on_run_started({"procedure": SampleChangeOperation.name})
+    card._on_run_started({"procedure": SampleLoadOperation.name})
     # needle_valve never confirmed -> needle_valve_confirmed condition fails.
     not_green_state = {
         "magnet_z": {"get_field": 0.0},
         "magnet_y": {"get_field": 0.0},
-        "temperature_vti": {"temperature": 300.0},
+        "temperature_vti": {"temperature": 290.0},
     }
     ctx = {"state": not_green_state, "now_unix": 0.0, "consumption_rate_pct_per_h": None}
     card.on_states_updated(not_green_state, ctx)

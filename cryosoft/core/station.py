@@ -1788,23 +1788,27 @@ def read_servicing_logs_config(config_path: str) -> list[str]:
 
 
 # Per-operation-kind defaults for read_operations_config()'s merge.
-# Only "sample_change" exists today; a future operation
-# kind adds its own entry here. An operation name declared in devices.yaml
-# but absent from this dict is passed through unmerged — forward-compatible
-# with an operation this function does not yet know defaults for.
+# "sample_load" and "sample_unload" (SampleLoadOperation/SampleUnloadOperation,
+# sharing _SampleAccessOperationBase) exist today, with identical defaults —
+# a future operation kind adds its own entry here. An operation name declared
+# in devices.yaml but absent from this dict is passed through unmerged —
+# forward-compatible with an operation this function does not yet know
+# defaults for.
+_SAMPLE_ACCESS_DEFAULTS: dict[str, float | str] = {
+    "vti_vi": "temperature_vti",
+    "target_temperature_K": 290.0,
+    "temperature_tolerance_K": 2.0,
+    "temperature_window_s": 60.0,
+    "needle_valve": "manual",
+    "postcondition_timeout_s": 7200.0,
+    # How often the hold phase records station state into the shared
+    # recording, in seconds. Matches HeliumFillOperation's own
+    # sample_period_s default.
+    "sample_period_s": 10.0,
+}
 _OPERATIONS_DEFAULTS: dict[str, dict[str, float | str]] = {
-    "sample_change": {
-        "vti_vi": "temperature_vti",
-        "target_temperature_K": 300.0,
-        "temperature_tolerance_K": 2.0,
-        "temperature_window_s": 60.0,
-        "needle_valve": "manual",
-        "postcondition_timeout_s": 7200.0,
-        # How often the hold phase records station state into the shared
-        # recording, in seconds. Matches HeliumFillOperation's own
-        # sample_period_s default.
-        "sample_period_s": 10.0,
-    },
+    "sample_load": dict(_SAMPLE_ACCESS_DEFAULTS),
+    "sample_unload": dict(_SAMPLE_ACCESS_DEFAULTS),
 }
 
 
@@ -1812,8 +1816,8 @@ def read_operations_config(config_path: str) -> dict[str, dict[str, Any]]:
     """Read the optional ``operations:`` block, GUI-safe, with defaults applied.
 
     Unlike ``cryogenics:`` (one flat mapping), ``operations:`` is a mapping
-    of *named* operation configs (``sample_change:``, and future kinds).
-    Parses YAML only, mirroring ``read_cryogenics_config`` —
+    of *named* operation configs (``sample_load:``/``sample_unload:``, and
+    future kinds). Parses YAML only, mirroring ``read_cryogenics_config`` —
     never imports the operations layer or instantiates anything, so it is
     safe to call from the GUI thread on a config that may describe
     unreachable hardware.
@@ -1829,8 +1833,8 @@ def read_operations_config(config_path: str) -> dict[str, dict[str, Any]]:
         ``operations:`` block is absent, malformed, or the config
         directory/file/YAML is unreadable — never raises. A caller
         constructs the concrete operation with
-        ``SampleChangeOperation(station, **read_operations_config(path)
-        ["sample_change"])``.
+        ``SampleLoadOperation(station, **read_operations_config(path)
+        ["sample_load"])`` (or ``SampleUnloadOperation``/``"sample_unload"``).
     """
     devices_config = _load_devices_yaml(config_path)
     if devices_config is None:

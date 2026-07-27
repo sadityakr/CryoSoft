@@ -26,8 +26,8 @@ revision** / **Helium record** / **Recording** entries in `GLOSSARY.md`.
 the legacy `cryogenics` (editable, one entry per fill) and `operations`
 (machine-only audit trail) kinds are superseded by ONE flat `servicing`
 kind — every entry, regardless of what happened (`entry_kind`:
-`"helium_fill"` / `"sample_change"` / a future operation's key /
-`"manual"`), shares exactly the same field table (`person`,
+`"helium_fill"` / `"sample_load"` / `"sample_unload"` / a future
+operation's key / `"manual"`), shares exactly the same field table (`person`,
 `start_utc`/`end_utc`, `helium_start_pct`/`helium_end_pct`,
 `ln2_start_pct`/`ln2_end_pct`, `notes`, `recording`, `origin`) — no
 kind-specific columns, no `status` field. Phase 1 added the declaration,

@@ -11,9 +11,14 @@
 #   prediction. A card renders its operation's readiness_conditions() as a
 #   live checklist, its next_due() as a header line, an operator-
 #   confirmations row while it is the active run, a ready banner once a run
-#   finishes done with every condition holding, and a start/finish button —
-#   all driven purely by the operation class's declarations, so adding an
-#   operation to a setup never touches this file.
+#   finishes done with every condition holding, and a start/finish button
+#   plus an Abort button (shown only while the card's run is active) — all
+#   driven purely by the operation class's declarations, so adding an
+#   operation to a setup never touches this file. Abort is generic (every
+#   running operation gets one, not just a hold-phase one): it confirms via
+#   a QMessageBox, then calls orchestrator.abort_procedure() directly —
+#   distinct from ProcedureWindow's own Abort button, which is deliberately
+#   operation-blind (see that window's module docstring).
 # entry_point: Not run directly. Built by MonitorWindow._build_bottom_right_quadrant
 #   whenever cryogenics is enabled or an operations: config block exists.
 # dependencies:
@@ -60,11 +65,20 @@
 #   a disabled "Finishing <name>…" state until run_finished arrives — which
 #   also surfaces any postconditions_unmet as a warning badge on the card);
 #   a declared operator_confirmations checkbox calls
-#   orchestrator.confirm_operation(key) and disables itself.
+#   orchestrator.confirm_operation(key) and disables itself. The Abort
+#   button appears alongside Finish once running, disabled (not hidden) for
+#   the brief "Finishing…" window so a graceful Finish already under way is
+#   never raced by a second, harder stop. A declared pre_run_toggles
+#   checkbox (e.g. SampleLoadOperation's/SampleUnloadOperation's "Disarm
+#   measurement instruments") is persistent — visible and editable whether
+#   or not a run is active, disabled only while one is, unlike
+#   operator_confirmations — and is read once, at the instant Start is
+#   clicked, passed to the factory as an extra bool keyword matching its
+#   declared key.
 # output: |
 #   A QWidget hosted (scrolled) in MonitorWindow's bottom-right quadrant.
 #   Side effect: submits an operation to the Orchestrator.
-# last_updated: 2026-07-26
+# last_updated: 2026-07-27
 # ---
 
 """OperationsPanel — a single column of generic operation cards."""
@@ -88,6 +102,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -198,7 +213,7 @@ class OperatorDialog(QDialog):
 
 
 class OperationCard(QGroupBox):
-    """One operation's live readiness checklist, next-due line, and start/finish control.
+    """One operation's live readiness checklist, next-due line, and start/finish/abort control.
 
     Built generically from an operation *instance* — this class contains no
     per-operation logic (the hybrid-declaration standard: the
@@ -207,18 +222,22 @@ class OperationCard(QGroupBox):
 
     Args:
         orchestrator: The active Orchestrator (``run_operation``,
-            ``finish_operation``, ``confirm_operation``, and the
-            ``run_started``/``run_finished`` signals this card connects
-            directly, per the established direct-connection precedent for
-            run-boundary signals).
+            ``finish_operation``, ``abort_procedure``, ``confirm_operation``,
+            and the ``run_started``/``run_finished`` signals this card
+            connects directly, per the established direct-connection
+            precedent for run-boundary signals).
         display_instance: An operation instance constructed once by the
             panel, used only to read ``name``/``description``/
-            ``ready_message``/``operator_confirmations`` and to call
-            ``readiness_conditions()``/``next_due()`` — never run.
+            ``ready_message``/``operator_confirmations``/``pre_run_toggles``
+            and to call ``readiness_conditions()``/``next_due()`` — never run.
         factory: Builds a FRESH operation instance for an actual run, given
-            the operator name entered in the ``OperatorDialog``. Keeps this
-            class generic: the panel supplies the operation-specific
-            construction (station, config, data_directory, …) as a closure.
+            the operator name entered in the ``OperatorDialog`` plus one
+            ``bool`` keyword per declared ``pre_run_toggles`` key (read from
+            its checkbox at the instant Start is clicked — empty for an
+            operation with no declared toggles, so this is a plain
+            ``factory(person)`` call in that case). Keeps this class
+            generic: the panel supplies the operation-specific construction
+            (station, config, data_directory, …) as a closure.
         get_current_person: Returns the attribution prefill for the dialog.
         collapsed: If True, start with details hidden (compact mode).
         parent: Optional Qt parent widget.
@@ -228,7 +247,7 @@ class OperationCard(QGroupBox):
         self,
         orchestrator: Orchestrator,
         display_instance: OperationBase,
-        factory: Callable[[str], OperationBase],
+        factory: Callable[..., OperationBase],
         get_current_person: Callable[[], str] | None = None,
         collapsed: bool = False,
         parent: QWidget | None = None,
@@ -339,6 +358,30 @@ class OperationCard(QGroupBox):
             self._confirmations_row.hide()
             details_layout.addWidget(self._confirmations_row)
 
+        # Pre-run option toggles (e.g. SampleLoadOperation's/
+        # SampleUnloadOperation's "Disarm measurement instruments"): unlike
+        # operator_confirmations above, these are persistent — visible and
+        # editable whether or not a run is active — and are read once, at
+        # the instant Start is clicked, rather than confirmed against a
+        # running instance. Checked (matching every declared toggle's
+        # existing default behavior) until the operator says otherwise.
+        self._pre_run_toggles: dict[str, str] = dict(
+            getattr(display_instance, "pre_run_toggles", {}) or {}
+        )
+        self._option_checkboxes: dict[str, QCheckBox] = {}
+        if self._pre_run_toggles:
+            options_row = QWidget()
+            options_layout = QHBoxLayout(options_row)
+            options_layout.setContentsMargins(0, 0, 0, 0)
+            for key, label in self._pre_run_toggles.items():
+                checkbox = QCheckBox(label)
+                checkbox.setObjectName(f"{self._slug}_option_{key}_checkbox")
+                checkbox.setChecked(True)
+                options_layout.addWidget(checkbox)
+                self._option_checkboxes[key] = checkbox
+            options_layout.addStretch()
+            details_layout.addWidget(options_row)
+
         outer.addWidget(self._details_widget, stretch=1)
 
         # Reuses DiagnosticsWindow's validated "verdict_badge" QSS class
@@ -374,6 +417,19 @@ class OperationCard(QGroupBox):
         self._action_btn.clicked.connect(self._on_action_clicked)
         button_row.addWidget(self._action_btn)
 
+        # Abort: a harder stop than Finish — holds hardware where it is right
+        # now instead of running standby()/postcondition_gates(). Shown only
+        # while this card's run is active (see _sync_abort_button()); a
+        # generic OperationCard feature, not special-cased to any one
+        # operation (every running operation may be aborted the same way).
+        self._abort_btn = QPushButton()
+        self._abort_btn.setObjectName(f"{self._slug}_abort_btn")
+        self._abort_btn.setProperty("class", BTN_CLASS_DANGER)
+        self._abort_btn.setIcon(qta.icon("fa5s.ban", color=TEXT_PRIMARY))
+        self._abort_btn.clicked.connect(self._on_abort_clicked)
+        self._abort_btn.hide()
+        button_row.addWidget(self._abort_btn)
+
         self._toggle_btn = QPushButton()
         self._toggle_btn.setObjectName(f"{self._slug}_toggle_btn")
         self._toggle_btn.setMaximumWidth(40)
@@ -382,6 +438,8 @@ class OperationCard(QGroupBox):
         button_row.addStretch()
         outer.addLayout(button_row)
         self._sync_button()
+        self._sync_abort_button()
+        self._sync_option_checkboxes()
         self._sync_details_visibility()
 
         # Direct connection (not routed through the window's states_updated
@@ -466,6 +524,7 @@ class OperationCard(QGroupBox):
             # instantaneous from here.
             self._finishing = True
             self._sync_button()
+            self._sync_abort_button()
             return
         dialog = OperatorDialog(
             self._display_instance.name,
@@ -476,7 +535,13 @@ class OperationCard(QGroupBox):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         person = dialog.operator_name()
-        operation = self._factory(person)
+        # Read each declared pre-run toggle's checked state right now (not
+        # confirmed later like operator_confirmations — Start is the one
+        # moment that matters) and pass it straight through as the matching
+        # **config keyword; an operation with no pre_run_toggles gets an
+        # empty dict, so this is a no-op call-shape for every other card.
+        toggle_values = {key: cb.isChecked() for key, cb in self._option_checkboxes.items()}
+        operation = self._factory(person, **toggle_values)
         self._pending_instance = operation
         self._orchestrator.run_operation(operation)
 
@@ -505,6 +570,8 @@ class OperationCard(QGroupBox):
             self._pending_instance = None
         self._reset_confirmations()
         self._sync_button()
+        self._sync_abort_button()
+        self._sync_option_checkboxes()
         self._sync_confirmations_row()
         self._sync_ready_banner()
 
@@ -525,6 +592,8 @@ class OperationCard(QGroupBox):
         else:
             self._postcondition_warning.hide()
         self._sync_button()
+        self._sync_abort_button()
+        self._sync_option_checkboxes()
         self._sync_confirmations_row()
         self._sync_ready_banner()
 
@@ -533,6 +602,16 @@ class OperationCard(QGroupBox):
             return
         self._orchestrator.confirm_operation(key)
         checkbox.setEnabled(False)  # confirmations are one-way
+
+    def _on_abort_clicked(self) -> None:
+        answer = QMessageBox.question(
+            self,
+            f"Abort {self._display_instance.name}",
+            f"Abort the running {self._display_instance.name}? "
+            f"Hardware is held where it is now.",
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._orchestrator.abort_procedure()
 
     def _reset_confirmations(self) -> None:
         """Clear every confirmation checkbox for a fresh run."""
@@ -571,6 +650,35 @@ class OperationCard(QGroupBox):
             self._action_btn.setToolTip(self._display_instance.description)
         self._action_btn.style().unpolish(self._action_btn)
         self._action_btn.style().polish(self._action_btn)
+
+    def _sync_abort_button(self) -> None:
+        """Show Abort only while this card's run is active.
+
+        Disabled while ``_finishing`` (a graceful Finish is already in
+        flight — a second, harder stop clicked in that window would only
+        race the Finish already under way) rather than hidden, so the
+        button doesn't jump around during the brief "Finishing…" window.
+        """
+        self._abort_btn.setVisible(self._running)
+        self._abort_btn.setEnabled(self._running and not self._finishing)
+        self._abort_btn.setToolTip(
+            f"Abort the running {self._display_instance.name} — "
+            f"hold hardware where it is now"
+        )
+        self._abort_btn.style().unpolish(self._abort_btn)
+        self._abort_btn.style().polish(self._abort_btn)
+
+    def _sync_option_checkboxes(self) -> None:
+        """Disable (never hide) every pre-run toggle while a run is active.
+
+        Unlike ``_sync_confirmations_row()``, visibility never changes here
+        — a pre-run toggle answers "what should the NEXT run do", so it
+        stays on the card at all times; it is only disabled while a run
+        already reflects a decision already baked into the running
+        instance, to avoid suggesting a mid-run change would do anything.
+        """
+        for checkbox in self._option_checkboxes.values():
+            checkbox.setEnabled(not self._running and not self._finishing)
 
     def _sync_details_visibility(self) -> None:
         self._details_widget.setVisible(not self._collapsed)
@@ -760,9 +868,18 @@ class OperationsPanel(QWidget):
             block_copy = dict(block)
 
             def _factory(
-                person: str, cls: type[OperationBase] = cls, cfg: dict[str, Any] = block_copy
+                person: str,
+                cls: type[OperationBase] = cls,
+                cfg: dict[str, Any] = block_copy,
+                **toggles: bool,
             ) -> OperationBase:
-                return cls(self._station, person=person, **cfg)
+                # toggles (e.g. disarm_measurement_vis, read from a declared
+                # pre_run_toggles checkbox at Start-click time) override the
+                # config block's own value for this run only — empty for an
+                # operation with no declared toggles, so this is a no-op merge.
+                merged = dict(cfg)
+                merged.update(toggles)
+                return cls(self._station, person=person, **merged)
 
             card = OperationCard(
                 self._orchestrator,

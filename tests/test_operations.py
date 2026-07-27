@@ -64,7 +64,7 @@ class SimpleOperation(OperationBase):
         self.postcondition_gates_calls = 0
         self.run_summary_calls = 0
         # Minimal operator-confirmation surface, mirroring
-        # SampleChangeOperation's confirm()/confirmed() closely
+        # _SampleAccessOperationBase's confirm()/confirmed() closely
         # enough to exercise Orchestrator.confirm_operation()'s duck-typed
         # dispatch generically, without depending on the concrete operation.
         self._confirmations: set[str] = set()
@@ -538,9 +538,9 @@ def test_run_summary_merged_into_manifest_on_abort(orchestrator, station, qtbot)
 # ── confirm_operation() ───────────────────────────────────────
 # Mirrors finish_operation()'s tests exactly: confirm_operation() is the
 # same duck-typed-active-operation / action_blocked pattern, generalised
-# from request_finish() to confirm(key). SampleChangeOperation's own
+# from request_finish() to confirm(key). _SampleAccessOperationBase's own
 # postcondition-gate usage of confirmed() is covered end-to-end in
-# tests/test_sample_change.py; these two tests exercise the Orchestrator
+# tests/test_sample_access.py; these two tests exercise the Orchestrator
 # method itself against the generic SimpleOperation double.
 
 

@@ -184,7 +184,8 @@ class MonitorWindow(QMainWindow):
             block (``Station.read_operations_config()``), or None/empty when
             the setup declares none. The Operations panel is available when
             cryogenics is enabled OR this is non-empty — a setup with only
-            ``sample_change`` still gets the panel, minus the cryo section.
+            ``sample_load``/``sample_unload`` still gets the panel, minus
+            the cryo section.
         helium_store: The active setup's HeliumRecordStore, or None.
         servicing_store: The active setup's ServicingLogStore, or None.
         servicing_log_kinds: The declared, editable log-kind keys this setup
@@ -244,7 +245,8 @@ class MonitorWindow(QMainWindow):
         )
         # The Operations panel is available when cryogenics is
         # enabled OR an operations: config block is declared — a setup with
-        # only sample_change still gets the panel, minus the cryo section.
+        # only sample_load/sample_unload still gets the panel, minus the
+        # cryo section.
         self._operations_panel_enabled = self._cryogenics_enabled or bool(
             self._operations_config
         )
