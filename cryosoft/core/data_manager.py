@@ -22,7 +22,10 @@
 #   and exposes save_datapoint() and close() for the procedure loop.
 # output: |
 #   A single HDF5 file written to disk.  Datasets are trimmed to the number of
-#   actually-saved points when close() is called after an early abort.
+#   actually-saved points when close() is called after an early abort.  A
+#   measurement block's own dataset carries "axes" and (when declared)
+#   "channel_names" attributes describing its own dimensions, so the file is
+#   self-describing without parsing the metadata group's data_config JSON.
 # ---
 
 from __future__ import annotations
@@ -104,11 +107,20 @@ class DataManager:
                     "sweep_columns": {"field_T": "float", ...},        # (N,)
                     "measurement_scalars": {"voltage_V": "float", ...},  # (N, n_loop1, n_loop2)
                     "measurement_arrays": {"voltage_V_array": 100, ...}, # (N, n_loop1, n_loop2, 100)
+                    "measurement_blocks": {"raw_channels_block": (5, 44), ...},
+                                                                # (N, n_loop1, n_loop2, 5, 44)
+                    "measurement_block_labels": {"raw_channels_block": ["ch0", ...]},
+                                                                # ordered channel names, len == cols
                     "loop_shape": [n_loop1, n_loop2],                   # each >= 1
                 }
 
             ``loop_shape`` defaults to ``[1, 1]`` (no reading loop) when
             absent, so callers that never loop can omit it.
+            ``measurement_block_labels`` is optional; when a block name is
+            present, its label list is written as the ``channel_names``
+            HDF5 attribute directly on that block's dataset (see
+            :meth:`_allocate_datasets`), so the file is self-describing
+            without parsing this ``data_config`` JSON blob.
 
         n_sweep_points:
             Total number of sweep points expected (used for pre-allocation).
@@ -136,6 +148,14 @@ class DataManager:
         self._measurement_arrays: dict[str, int] = data_config.get(
             "measurement_arrays", {}
         )
+        self._measurement_blocks: dict[str, tuple[int, int]] = {
+            name: (int(shape[0]), int(shape[1]))
+            for name, shape in data_config.get("measurement_blocks", {}).items()
+        }
+        self._measurement_block_labels: dict[str, list[str]] = {
+            name: list(labels)
+            for name, labels in data_config.get("measurement_block_labels", {}).items()
+        }
         loop_shape = data_config.get("loop_shape", [1, 1])
         self._loop_shape: tuple[int, int] = (int(loop_shape[0]), int(loop_shape[1]))
 
@@ -230,6 +250,39 @@ class DataManager:
                 fillvalue=np.nan,
             )
 
+        # Raw diagnostic blocks — a (rows, cols) grid per sweep point, UNLESS
+        # a reading loop is actually configured, in which case it gains the
+        # (n_loop1, n_loop2) axis like a measurement array does (see
+        # MeasurementInstrumentBase's "Raw diagnostic blocks" standard and
+        # DataSchema.measurement_blocks's docstring for why the trivial
+        # (1, 1) axis is skipped rather than always carried).
+        block_loop_prefix = (n_loop1, n_loop2) if (n_loop1, n_loop2) != (1, 1) else ()
+        for block_name, (rows, cols) in self._measurement_blocks.items():
+            shape = (N, *block_loop_prefix, rows, cols)
+            maxshape = (None, *block_loop_prefix, rows, cols)
+            block_ds = data_group.create_dataset(
+                block_name,
+                shape=shape,
+                maxshape=maxshape,
+                dtype=np.float64,
+                fillvalue=np.nan,
+            )
+            # Self-description: which column index is which physical
+            # channel, and what each axis means, written directly on the
+            # dataset so a reader never needs to parse the JSON
+            # data_config metadata blob (see the __init__ docstring's
+            # measurement_block_labels entry).
+            axis_names = (
+                "sweep_point",
+                *(("loop1", "loop2") if block_loop_prefix else ()),
+                "row",
+                "channel",
+            )
+            block_ds.attrs["axes"] = ", ".join(axis_names)
+            labels = self._measurement_block_labels.get(block_name)
+            if labels is not None:
+                block_ds.attrs["channel_names"] = np.array(labels, dtype=h5py.string_dtype())
+
         # Timestamp column (variable-length strings)
         dt = h5py.string_dtype()
         data_group.create_dataset(
@@ -265,20 +318,23 @@ class DataManager:
         sweep_index:
             Zero-based index of this sweep point (0 … n_sweep_points-1).
         measured_data:
-            Dict whose keys match sweep_columns, measurement_scalars or
-            measurement_arrays names. Sweep-column values are plain scalars;
-            measurement_scalars values are a nested ``(n_loop1, n_loop2)``
-            grid; measurement_arrays values are a nested ``(n_loop1, n_loop2,
-            length)`` grid. Lists, tuples and numpy arrays are all accepted.
+            Dict whose keys match sweep_columns, measurement_scalars,
+            measurement_arrays or measurement_blocks names. Sweep-column
+            values are plain scalars; measurement_scalars values are a
+            nested ``(n_loop1, n_loop2)`` grid; measurement_arrays values
+            are a nested ``(n_loop1, n_loop2, length)`` grid;
+            measurement_blocks values are a nested ``(n_loop1, n_loop2,
+            rows, cols)`` grid. Lists, tuples and numpy arrays are all
+            accepted.
         station_snapshot:
             Full instrument-state snapshot to store as a JSON string.
 
         Raises:
             ValueError: If a measurement scalar's grid shape doesn't match
-                ``loop_shape``, or a measurement array's grid shape doesn't
-                match ``loop_shape`` on the loop axes (a per-point sample
-                count mismatch on the innermost axis is NOT an error — see
-                below).
+                ``loop_shape``, or a measurement array's/block's grid shape
+                doesn't match ``loop_shape`` on the loop axes (a per-point
+                sample/row count mismatch on the innermost — for a block,
+                second-to-innermost — axis is NOT an error — see below).
         """
         if self._closed:
             raise RuntimeError("save_datapoint() called on a closed DataManager")
@@ -326,6 +382,35 @@ class DataManager:
                     else:
                         raise ValueError(
                             f"DataManager: measurement array '{col_name}' at "
+                            f"index {sweep_index} has shape {arr.shape}, "
+                            f"expected {expected_shape}"
+                        )
+                data_group[col_name][sweep_index, ...] = arr
+            elif col_name in self._measurement_blocks:
+                expected_rows, expected_cols = self._measurement_blocks[col_name]
+                # No loop-axis prefix when no reading loop is configured —
+                # see DataSchema.measurement_blocks's docstring.
+                block_loop_prefix = loop_shape if loop_shape != (1, 1) else ()
+                expected_shape = (*block_loop_prefix, expected_rows, expected_cols)
+                arr = np.asarray(value, dtype=np.float64)
+                if arr.shape != expected_shape:
+                    if arr.shape[:-2] == block_loop_prefix and arr.shape[-1] == expected_cols:
+                        # Same "pad the under-delivered rows axis with NaN"
+                        # fallback the measurement-array branch above has —
+                        # the channel axis is fixed and never padded, only
+                        # the ROWS axis (see raw_block_row_counts()).
+                        logger.warning(
+                            "DataManager: block '%s' at index %d has %d rows "
+                            "(expected %d) — padding/truncating with NaN",
+                            col_name, sweep_index, arr.shape[-2], expected_rows,
+                        )
+                        padded = np.full(expected_shape, np.nan)
+                        n = min(arr.shape[-2], expected_rows)
+                        padded[..., :n, :] = arr[..., :n, :]
+                        arr = padded
+                    else:
+                        raise ValueError(
+                            f"DataManager: measurement block '{col_name}' at "
                             f"index {sweep_index} has shape {arr.shape}, "
                             f"expected {expected_shape}"
                         )

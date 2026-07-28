@@ -21,13 +21,14 @@ import pytest
 from cryosoft.core.exceptions import CryoSoftCommunicationError
 from cryosoft.drivers.sim_tensormeter_rtm2 import SimTensormeterRTM2, _DATA_COLUMNS
 from cryosoft.virtual_instruments.measurement.tensormeter_rtm2_measurement import (
+    _RAW_CHANNEL_NAMES,
     TensormeterRTM2MeasurementVI,
 )
 
 _EXPECTED_KEYS = {
     "res_a_ohm_array", "res_a_ohm", "res_a_ohm_error",
     "res_b_ohm_array", "res_b_ohm", "res_b_ohm_error",
-    "n_valid",
+    "n_valid", "raw_channels_block",
 }
 
 
@@ -92,6 +93,73 @@ def test_internal_mode_take_reading_shape(vi: TensormeterRTM2MeasurementVI) -> N
     assert len(data["res_a_ohm_array"]) == 4
     assert len(data["res_b_ohm_array"]) == 4
     assert data["n_valid"] == 4
+
+
+# ------------------------------------------------------------------
+# raw_channels_block (see MeasurementInstrumentBase's "Raw diagnostic
+# blocks" standard) — all 44 raw driver columns preserved per reading,
+# alongside the tensor_component-selected res_a_ohm/res_b_ohm pair.
+# ------------------------------------------------------------------
+
+def test_raw_channels_block_shape(vi: TensormeterRTM2MeasurementVI) -> None:
+    vi.initiate_measurement(readings_per_point=4)
+    data = vi.take_reading()
+    block = data["raw_channels_block"]
+    assert len(block) == 4
+    for row in block:
+        assert len(row) == 44
+
+
+def test_raw_block_row_counts_declares_readings_per_point(
+    vi: TensormeterRTM2MeasurementVI,
+) -> None:
+    counts = vi.raw_block_row_counts({"readings_per_point": 7})
+    assert counts == {"raw_channels_block": 7}
+
+
+def test_measurement_raw_blocks_declares_44_channel_names() -> None:
+    labels = TensormeterRTM2MeasurementVI.measurement_raw_blocks["raw_channels_block"]
+    assert len(labels) == 44
+    assert labels == list(_RAW_CHANNEL_NAMES)
+
+
+def test_raw_channels_block_pads_short_delivery_on_row_axis_only(
+    vi: TensormeterRTM2MeasurementVI, driver: SimTensormeterRTM2
+) -> None:
+    """Row-axis NaN padding mirrors res_a_ohm_array's — channel axis never pads."""
+    vi.initiate_measurement(readings_per_point=5)
+
+    real_read_new_data = driver.read_new_data
+
+    def truncated_read_new_data(timeout: float | None = None) -> list[dict[str, float]]:
+        return real_read_new_data(timeout)[:2]
+
+    driver.read_new_data = truncated_read_new_data  # type: ignore[method-assign]
+
+    data = vi.take_reading()
+    block = data["raw_channels_block"]
+
+    assert len(block) == 5
+    for row in block[:2]:
+        assert len(row) == 44
+        assert not any(math.isnan(v) for v in row)
+    for row in block[2:]:
+        assert len(row) == 44
+        assert all(math.isnan(v) for v in row)
+
+
+def test_raw_channels_block_agrees_with_res_a_res_b_arrays(
+    vi: TensormeterRTM2MeasurementVI,
+) -> None:
+    """The block's res_a/res_b columns match the extracted mean/error/array pair."""
+    vi.initiate_measurement(readings_per_point=4, tensor_component="1st_re")
+    data = vi.take_reading()
+
+    idx_a = _RAW_CHANNEL_NAMES.index("res_a_1st_re_ohm")
+    idx_b = _RAW_CHANNEL_NAMES.index("res_b_1st_re_ohm")
+    for i, row in enumerate(data["raw_channels_block"]):
+        assert row[idx_a] == pytest.approx(data["res_a_ohm_array"][i])
+        assert row[idx_b] == pytest.approx(data["res_b_ohm_array"][i])
 
 
 def test_internal_mode_standby_zeros_current(

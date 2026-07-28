@@ -551,3 +551,218 @@ def test_experiment_info_written(tmp_path):
     dm.close()
     with h5py.File(dm.filepath, "r") as f:
         assert json.loads(f["metadata"].attrs["experiment_info"]) == info
+
+
+# ── Raw diagnostic blocks (measurement_blocks) ────────────────────────────────
+# See MeasurementInstrumentBase's "Raw diagnostic blocks" standard: a fixed-
+# shape (rows x channels) grid per sweep point, orthogonal to the mean/error/
+# array convention the other sections above cover. UNLIKE measurement_arrays,
+# a block carries the (n_loop1, n_loop2) loop axis ONLY when a reading loop is
+# actually configured (loop_shape != (1, 1)) — see DataSchema.measurement_blocks.
+# BLOCK_CONFIG below uses the default loop_shape (1, 1), so every value in this
+# section is bare (rows, cols); test_block_dataset_shape_with_loop_axis /
+# test_save_block_with_active_loop cover the (n_loop1, n_loop2, rows, cols)
+# case with a non-trivial loop_shape.
+
+BLOCK_CONFIG = {
+    "sweep_columns": {"field_T": "float"},
+    "measurement_arrays": {},
+    "measurement_blocks": {"raw_channels_block": (5, 3)},
+}
+
+
+@pytest.fixture
+def block_dm(tmp_path):
+    """A fresh DataManager whose data_config declares one raw block, no reading loop."""
+    manager = DataManager(
+        data_directory=str(tmp_path),
+        procedure_name="Block_Sweep",
+        procedure_params=PROCEDURE_PARAMS,
+        sample_info=SAMPLE_INFO,
+        instrument_state={},
+        system_targets={},
+        measurement_commands={},
+        data_config=BLOCK_CONFIG,
+        n_sweep_points=5,
+    )
+    yield manager
+    if not manager._closed:
+        manager.close()
+
+
+def test_block_dataset_shape_and_nan_fill(block_dm):
+    """No reading loop: a declared block pre-allocates bare (N, rows, cols), NaN-filled."""
+    with h5py.File(block_dm.filepath, "r") as f:
+        ds = f["data"]["raw_channels_block"]
+        assert ds.shape == (5, 5, 3)
+        assert np.all(np.isnan(ds[:]))
+
+
+def test_block_dataset_shape_with_loop_axis(tmp_path):
+    """A non-trivial loop_shape sizes the block dataset on that axis too."""
+    config = {
+        "sweep_columns": {},
+        "measurement_blocks": {"raw_channels_block": (5, 3)},
+        "loop_shape": [2, 1],
+    }
+    manager = DataManager(
+        data_directory=str(tmp_path),
+        procedure_name="Loop_Block_Sweep",
+        procedure_params={},
+        sample_info=SAMPLE_INFO,
+        instrument_state={},
+        system_targets={},
+        measurement_commands={},
+        data_config=config,
+        n_sweep_points=2,
+    )
+    try:
+        with h5py.File(manager.filepath, "r") as f:
+            assert f["data"]["raw_channels_block"].shape == (2, 2, 1, 5, 3)
+    finally:
+        manager.close()
+
+
+def test_block_dataset_axes_attr_no_loop(block_dm):
+    """No labels declared: the dataset still self-describes its axis order."""
+    with h5py.File(block_dm.filepath, "r") as f:
+        ds = f["data"]["raw_channels_block"]
+        assert ds.attrs["axes"] == "sweep_point, row, channel"
+        assert "channel_names" not in ds.attrs
+
+
+def test_block_dataset_channel_names_attr(tmp_path):
+    """measurement_block_labels is written as the block's channel_names attribute."""
+    config = {
+        **BLOCK_CONFIG,
+        "measurement_block_labels": {"raw_channels_block": ["res_a_ohm", "res_b_ohm", "phase_deg"]},
+    }
+    manager = DataManager(
+        data_directory=str(tmp_path),
+        procedure_name="Labelled_Block_Sweep",
+        procedure_params=PROCEDURE_PARAMS,
+        sample_info=SAMPLE_INFO,
+        instrument_state={},
+        system_targets={},
+        measurement_commands={},
+        data_config=config,
+        n_sweep_points=5,
+    )
+    try:
+        with h5py.File(manager.filepath, "r") as f:
+            ds = f["data"]["raw_channels_block"]
+            assert list(ds.attrs["channel_names"]) == ["res_a_ohm", "res_b_ohm", "phase_deg"]
+            assert ds.attrs["axes"] == "sweep_point, row, channel"
+    finally:
+        manager.close()
+
+
+def test_block_dataset_axes_attr_with_loop(tmp_path):
+    """A non-trivial loop_shape includes loop1/loop2 in the axes attribute."""
+    config = {
+        "sweep_columns": {},
+        "measurement_blocks": {"raw_channels_block": (5, 3)},
+        "measurement_block_labels": {"raw_channels_block": ["res_a_ohm", "res_b_ohm", "phase_deg"]},
+        "loop_shape": [2, 1],
+    }
+    manager = DataManager(
+        data_directory=str(tmp_path),
+        procedure_name="Loop_Block_Sweep",
+        procedure_params={},
+        sample_info=SAMPLE_INFO,
+        instrument_state={},
+        system_targets={},
+        measurement_commands={},
+        data_config=config,
+        n_sweep_points=2,
+    )
+    try:
+        with h5py.File(manager.filepath, "r") as f:
+            ds = f["data"]["raw_channels_block"]
+            assert ds.attrs["axes"] == "sweep_point, loop1, loop2, row, channel"
+            assert list(ds.attrs["channel_names"]) == ["res_a_ohm", "res_b_ohm", "phase_deg"]
+    finally:
+        manager.close()
+
+
+def test_save_block_round_trip(block_dm):
+    """No reading loop: save_datapoint() writes the bare (rows, cols) grid verbatim."""
+    block = [[float(r * 3 + c) for c in range(3)] for r in range(5)]
+    block_dm.save_datapoint(
+        sweep_index=1,
+        measured_data={"field_T": 0.2, "raw_channels_block": block},
+        station_snapshot={},
+    )
+    with h5py.File(block_dm.filepath, "r") as f:
+        stored = f["data"]["raw_channels_block"][1]
+        assert stored.shape == (5, 3)
+        assert np.allclose(stored, block)
+
+
+def test_save_block_with_active_loop(tmp_path):
+    """A non-trivial loop_shape: save_datapoint() writes the full (n_loop1, n_loop2, rows, cols) grid."""
+    config = {
+        "sweep_columns": {},
+        "measurement_blocks": {"raw_channels_block": (5, 3)},
+        "loop_shape": [2, 1],
+    }
+    manager = DataManager(
+        data_directory=str(tmp_path),
+        procedure_name="Loop_Block_Sweep",
+        procedure_params={},
+        sample_info=SAMPLE_INFO,
+        instrument_state={},
+        system_targets={},
+        measurement_commands={},
+        data_config=config,
+        n_sweep_points=1,
+    )
+    try:
+        block0 = [[float(r * 3 + c) for c in range(3)] for r in range(5)]
+        block1 = [[float(r * 3 + c + 100) for c in range(3)] for r in range(5)]
+        manager.save_datapoint(
+            sweep_index=0,
+            measured_data={"raw_channels_block": [[block0], [block1]]},
+            station_snapshot={},
+        )
+        with h5py.File(manager.filepath, "r") as f:
+            stored = f["data"]["raw_channels_block"][0]
+            assert stored.shape == (2, 1, 5, 3)
+            assert np.allclose(stored[0, 0], block0)
+            assert np.allclose(stored[1, 0], block1)
+    finally:
+        manager.close()
+
+
+def test_save_block_pads_short_row_count(block_dm):
+    """A block with fewer rows than allocated is NaN-padded on the ROW axis only."""
+    short_block = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]  # only 2 of 5 allocated rows
+    block_dm.save_datapoint(
+        sweep_index=0,
+        measured_data={"raw_channels_block": short_block},
+        station_snapshot={},
+    )
+    stored = block_dm._file["data"]["raw_channels_block"][0]
+    assert stored.shape == (5, 3)
+    assert np.allclose(stored[:2], short_block)
+    assert np.all(np.isnan(stored[2:]))
+
+
+def test_save_block_wrong_channel_count_raises(block_dm):
+    """A channel-axis (column count) mismatch is a hard error, never padded."""
+    with pytest.raises(ValueError, match="measurement block"):
+        block_dm.save_datapoint(
+            sweep_index=0,
+            measured_data={"raw_channels_block": [[1.0, 2.0]]},  # 2 cols, wants 3
+            station_snapshot={},
+        )
+
+
+def test_close_trims_block_dataset_on_abort(block_dm):
+    """close()'s trim-to-actual-points loop resizes a block's axis 0 too."""
+    block = [[0.0] * 3 for _ in range(5)]
+    block_dm.save_datapoint(0, {"raw_channels_block": block}, {})
+    block_dm.save_datapoint(1, {"raw_channels_block": block}, {})
+    block_dm.close()
+    with h5py.File(block_dm.filepath, "r") as f:
+        assert f["data"]["raw_channels_block"].shape == (2, 5, 3)

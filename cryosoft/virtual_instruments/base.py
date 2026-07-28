@@ -975,6 +975,59 @@ class MeasurementInstrumentBase(BaseVirtualInstrument):
     A VI whose instrument always delivers exactly the requested sample count
     has nothing to report and may omit ``n_valid`` entirely.
 
+    Raw diagnostic blocks
+    ----------------------
+    Some instruments return far more raw data per reading than any single
+    physical quantity — e.g. a lock-in-style engine that reports dozens of
+    channels (voltages, ranges, setpoints, lock quality, …) alongside the
+    one or two the operator actually derives a result from. The mean/error/
+    array convention above cannot express this: it hard-requires every
+    ``"{quantity}_array"`` key to pair with a same-quantity mean/error, which
+    makes no sense for a block mixing many different physical units with no
+    single mean to report. A VI with this need declares a SECOND, orthogonal
+    self-description instead of forcing the block through the convention
+    above:
+
+    * ``measurement_raw_blocks: ClassVar[dict[str, list[str]]]`` — block
+      name -> ordered channel-label list. The label list's length fixes the
+      block's channel axis; it is never companioned by a mean/error pair and
+      never excluded from HDF5 the way an unpaired array would need to be.
+      Empty (the default) means the VI has no raw block.
+    * ``raw_block_row_counts(params) -> dict[str, int]`` — declared block
+      name -> row count (readings) for the SAME ``params`` mapping
+      ``initiate_measurement()`` will receive, mirroring ``data_arrays()``'s
+      per-instance, params-dependent role. Base returns ``{}``.
+    * ``take_reading()`` returns a block's value as a nested ``rows x
+      channels`` list (row order matching the declared row count, column
+      order matching the declared label list), keyed by the block name,
+      alongside the mean/error/array triples and scalar columns it already
+      returns. A VI whose instrument may under-deliver rows pads the ROW
+      axis with ``float("nan")`` the same way an array quantity does; the
+      channel axis is fixed and never padded.
+
+    A raw block's own ``rows x channels`` matrix is a diagnostic/provenance
+    record, not itself a plotted quantity: it is deliberately excluded from
+    ``measurement_data_keys`` / ``measurement_scalar_columns``, so the block
+    as a whole never appears in the GUI's plot axis dropdowns, exactly like
+    an ``_array`` column today. Its declared CHANNELS are a different
+    matter: ``SweepMeasureProcedure`` automatically derives one scalar
+    column per channel — the row axis reduced by a NaN-safe mean, the same
+    "N readings at one measurement point" treatment ``mean_and_sem`` already
+    gives a quantity's own array column — so every channel is independently
+    plottable and carries the real ``(n_loop1, n_loop2)`` loop grid, with
+    zero VI-side code. This needs no declaration beyond
+    ``measurement_raw_blocks`` itself; see
+    ``SweepMeasureProcedure._raw_block_channel_columns``/``measure()``.
+
+    A block's HDF5 storage is also the one exception to the reading loop's
+    "every measurement column carries a real ``(n_loop1, n_loop2)`` axis"
+    rule (see ``reading_setters`` below and ``DataSchema.measurement_blocks``):
+    with no reading loop configured for the run, a block is stored bare —
+    ``(rows, cols)`` — rather than ``(1, 1, rows, cols)``. This is handled
+    entirely by ``SweepMeasureProcedure``/``DataSchema``/``DataManager``; a
+    VI's own ``take_reading()`` always returns the block as a flat ``rows x
+    channels`` list regardless of any loop, exactly as described above.
+
     Externally configured instruments
     ----------------------------------
     Some instruments expose far more configuration surface than a VI wraps
@@ -1113,6 +1166,10 @@ class MeasurementInstrumentBase(BaseVirtualInstrument):
     measurement_parameters: ClassVar[dict[str, ParamSpec]] = {}
     measurement_data_keys: ClassVar[list[str]] = []
     measurement_scalar_columns: ClassVar[dict[str, str]] = {}
+    # Raw diagnostic blocks (see the class docstring's "Raw diagnostic
+    # blocks" section): block name -> ordered channel-label list. Empty
+    # (the default) means no raw block.
+    measurement_raw_blocks: ClassVar[dict[str, list[str]]] = {}
     # Reading-loop declaration: parameter name -> per-reading setter method.
     # Empty (the default) means no parameter of this VI can be looped.
     reading_setters: ClassVar[dict[str, str]] = {}
@@ -1287,6 +1344,23 @@ class MeasurementInstrumentBase(BaseVirtualInstrument):
             NotImplementedError: If not overridden by a concrete VI.
         """
         raise NotImplementedError
+
+    def raw_block_row_counts(self, params: Mapping[str, Any]) -> dict[str, int]:
+        """Return declared raw-block name → row count for these *params*.
+
+        See the class docstring's "Raw diagnostic blocks" section. Mirrors
+        ``data_arrays()``'s per-instance, params-dependent role for blocks.
+
+        Args:
+            params: The same parameter mapping ``initiate_measurement()`` will
+                be called with (the ``measurement_parameters`` keys).
+
+        Returns:
+            ``{block_name: rows}`` for every name in ``measurement_raw_blocks``.
+            Base returns ``{}`` — a VI with no raw block need not override
+            this.
+        """
+        return {}
 
     def initiate_measurement(self, **params: Any) -> None:
         """Arm / configure the hardware for taking readings.

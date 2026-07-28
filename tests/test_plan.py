@@ -434,6 +434,71 @@ def test_dataschema_defensive_copy():
     assert "n" not in s.measurement_scalars
 
 
+def test_dataschema_measurement_blocks_default_empty():
+    s = DataSchema(sweep_columns={}, measurement_scalars={}, measurement_arrays={})
+    assert s.measurement_blocks == {}
+
+
+def test_dataschema_measurement_blocks_happy():
+    s = DataSchema(
+        sweep_columns={},
+        measurement_scalars={},
+        measurement_arrays={},
+        measurement_blocks={"raw_channels_block": (5, 44)},
+    )
+    assert s.measurement_blocks == {"raw_channels_block": (5, 44)}
+
+
+def test_dataschema_measurement_blocks_must_be_dict():
+    with pytest.raises(TypeError, match="measurement_blocks"):
+        DataSchema(
+            sweep_columns={}, measurement_scalars={}, measurement_arrays={},
+            measurement_blocks="nope",
+        )
+
+
+def test_dataschema_measurement_blocks_shape_must_be_two_ints():
+    with pytest.raises(TypeError, match="measurement_blocks"):
+        DataSchema(
+            sweep_columns={}, measurement_scalars={}, measurement_arrays={},
+            measurement_blocks={"b": (5,)},
+        )
+
+
+def test_dataschema_measurement_blocks_shape_entries_must_be_positive():
+    with pytest.raises(ValueError, match="measurement_blocks"):
+        DataSchema(
+            sweep_columns={}, measurement_scalars={}, measurement_arrays={},
+            measurement_blocks={"b": (0, 44)},
+        )
+
+
+def test_dataschema_measurement_blocks_shape_bool_rejected():
+    with pytest.raises(TypeError, match="measurement_blocks"):
+        DataSchema(
+            sweep_columns={}, measurement_scalars={}, measurement_arrays={},
+            measurement_blocks={"b": (True, 44)},
+        )
+
+
+def test_dataschema_measurement_blocks_empty_name_rejected():
+    with pytest.raises(ValueError, match="measurement_blocks"):
+        DataSchema(
+            sweep_columns={}, measurement_scalars={}, measurement_arrays={},
+            measurement_blocks={"": (5, 44)},
+        )
+
+
+def test_dataschema_measurement_blocks_defensive_copy():
+    blocks = {"b": (5, 44)}
+    s = DataSchema(
+        sweep_columns={}, measurement_scalars={}, measurement_arrays={},
+        measurement_blocks=blocks,
+    )
+    blocks["c"] = (1, 1)
+    assert "c" not in s.measurement_blocks
+
+
 # ── DataSchema.validate ───────────────────────────────────────────────────────
 
 
@@ -484,6 +549,62 @@ def test_validate_wrong_scalar_type():
     s = DataSchema(sweep_columns={"field_T": "float"}, measurement_scalars={}, measurement_arrays={})
     with pytest.raises(DataSchemaError, match="field_T"):
         s.validate({"field_T": "high"})
+
+
+def test_validate_block_passes():
+    """No reading loop (loop_shape default (1, 1)): a block is stored bare (rows, cols)."""
+    s = DataSchema(
+        sweep_columns={},
+        measurement_scalars={},
+        measurement_arrays={},
+        measurement_blocks={"raw_channels_block": (2, 3)},
+    )
+    datapoint = {
+        "raw_channels_block": [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],  # bare (rows, cols), no loop axis
+    }
+    assert s.validate(datapoint) is None
+
+
+def test_validate_block_missing_key():
+    s = DataSchema(
+        sweep_columns={}, measurement_scalars={}, measurement_arrays={},
+        measurement_blocks={"raw_channels_block": (2, 3)},
+    )
+    with pytest.raises(DataSchemaError, match="missing declared key 'raw_channels_block'"):
+        s.validate({})
+
+
+def test_validate_block_wrong_shape():
+    s = DataSchema(
+        sweep_columns={}, measurement_scalars={}, measurement_arrays={},
+        measurement_blocks={"raw_channels_block": (2, 3)},
+    )
+    with pytest.raises(DataSchemaError, match="raw_channels_block"):
+        s.validate({"raw_channels_block": [[1.0, 2.0], [3.0, 4.0]]})  # 2 channels, wants 3
+
+
+def test_validate_block_wrong_row_count():
+    s = DataSchema(
+        sweep_columns={}, measurement_scalars={}, measurement_arrays={},
+        measurement_blocks={"raw_channels_block": (2, 3)},
+    )
+    with pytest.raises(DataSchemaError, match="does not match shape"):
+        s.validate({"raw_channels_block": [[1.0, 2.0, 3.0]]})  # only 1 row, wants 2
+
+
+def test_validate_block_with_loop_axis():
+    s = DataSchema(
+        sweep_columns={}, measurement_scalars={}, measurement_arrays={},
+        measurement_blocks={"raw_channels_block": (2, 3)},
+        loop_shape=(2, 1),
+    )
+    datapoint = {
+        "raw_channels_block": [
+            [[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]],
+            [[[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]],
+        ],
+    }
+    assert s.validate(datapoint) is None
 
 
 def test_validate_bool_scalar_rejected():

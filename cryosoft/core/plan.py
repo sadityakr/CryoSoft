@@ -549,6 +549,33 @@ def _validate_array_lengths(field_name: str, arrays: Any) -> dict[str, int]:
     return dict(arrays)
 
 
+def _validate_block_shapes(field_name: str, blocks: Any) -> dict[str, tuple[int, int]]:
+    """Validate a ``{name: (rows, cols)}`` mapping and return a defensive copy."""
+    if not isinstance(blocks, dict):
+        raise TypeError(f"DataSchema.{field_name} must be a dict, got {blocks!r}")
+    validated: dict[str, tuple[int, int]] = {}
+    for name, shape in blocks.items():
+        if not isinstance(name, str):
+            raise TypeError(f"DataSchema.{field_name} key must be a str, got {name!r}")
+        if not name:
+            raise ValueError(f"DataSchema.{field_name} key must be a non-empty str")
+        if (
+            not isinstance(shape, tuple)
+            or len(shape) != 2
+            or any(isinstance(n, bool) or not isinstance(n, int) for n in shape)
+        ):
+            raise TypeError(
+                f"DataSchema.{field_name}[{name!r}] must be a (int, int) tuple, "
+                f"got {shape!r}"
+            )
+        if any(n <= 0 for n in shape):
+            raise ValueError(
+                f"DataSchema.{field_name}[{name!r}] entries must be > 0, got {shape!r}"
+            )
+        validated[name] = (int(shape[0]), int(shape[1]))
+    return validated
+
+
 def _nested_shape_leaves(value: Any, shape: tuple[int, ...]) -> list[Any] | None:
     """Return the flat leaves of *value* if its nesting matches *shape*, else None.
 
@@ -579,13 +606,16 @@ class DataSchema:
     sweep column and the station its system columns — both ``sweep_columns``,
     one value per sweep point, never looped — and the selected measurement VI
     contributes its scalar columns (``measurement_scalars``, e.g. a
-    quantity's mean/error, or ``n_valid``) and raw-sample arrays
-    (``measurement_arrays``). Every measurement column carries a real
-    reading-loop axis: shape ``(n_loop1, n_loop2)`` for a scalar, or
-    ``(n_loop1, n_loop2, length)`` for an array — ``loop_shape`` declares the
-    axis lengths (``1`` means that slot is not looping). This is the single
-    owner of the run's shape contract, the thing that catches "HDF5 expected a
-    different format" mismatches before any data is written. All three dicts
+    quantity's mean/error, or ``n_valid``), raw-sample arrays
+    (``measurement_arrays``), and raw diagnostic blocks (``measurement_blocks``).
+    Every measurement scalar/array carries a real reading-loop axis: shape
+    ``(n_loop1, n_loop2)`` for a scalar, or ``(n_loop1, n_loop2, length)`` for
+    an array — ``loop_shape`` declares the axis lengths (``1`` means that
+    slot is not looping). A block is the one exception: it carries that axis
+    only when a reading loop is actually configured (see
+    ``measurement_blocks``'s own docstring below). This is the single owner
+    of the run's shape contract, the thing that catches "HDF5 expected a
+    different format" mismatches before any data is written. All dict fields
     are defensively copied.
 
     Attributes:
@@ -597,6 +627,18 @@ class DataSchema:
         measurement_arrays: Mapping of array name to its per-point length (an
             ``int`` > 0; ``bool`` is rejected). One ``(n_loop1, n_loop2,
             length)`` grid of raw samples per sweep point.
+        measurement_blocks: Mapping of raw diagnostic block name (see
+            ``MeasurementInstrumentBase``'s "Raw diagnostic blocks" standard)
+            to its ``(rows, cols)`` shape, both ``> 0``. UNLIKE
+            ``measurement_scalars``/``measurement_arrays``, a block carries
+            the ``(n_loop1, n_loop2)`` reading-loop axis only when
+            ``loop_shape != (1, 1)`` (an active reading loop) — with no
+            reading loop configured its per-point grid is bare ``(rows,
+            cols)``, not ``(1, 1, rows, cols)``. A block is a diagnostic
+            per-reading record, not a quantity meant to be sliced by loop
+            axis, so the standard deliberately skips the trivial axis
+            instead of always carrying it. Defaults to ``{}`` — no VI
+            declares a raw block.
         loop_shape: ``(n_loop1, n_loop2)``, each ``>= 1``. Defaults to
             ``(1, 1)`` — no reading loop.
     """
@@ -604,6 +646,7 @@ class DataSchema:
     sweep_columns: dict[str, str]
     measurement_scalars: dict[str, str]
     measurement_arrays: dict[str, int]
+    measurement_blocks: dict[str, tuple[int, int]] = field(default_factory=dict)
     loop_shape: tuple[int, int] = (1, 1)
 
     def __post_init__(self) -> None:
@@ -611,11 +654,11 @@ class DataSchema:
 
         Raises:
             TypeError: If a dict field is not a dict, a name is not a string,
-                an array length is not an int, or ``loop_shape`` is not a
-                ``(int, int)`` tuple.
+                an array length/block shape is not an int / (int, int) tuple,
+                or ``loop_shape`` is not a ``(int, int)`` tuple.
             ValueError: If a name is empty, a dtype is not in the allowed set,
-                an array length is not strictly positive, or a ``loop_shape``
-                entry is not ``>= 1``.
+                an array length or block shape entry is not strictly
+                positive, or a ``loop_shape`` entry is not ``>= 1``.
         """
         sweep_columns = _validate_dtype_columns("sweep_columns", self.sweep_columns)
         measurement_scalars = _validate_dtype_columns(
@@ -623,6 +666,9 @@ class DataSchema:
         )
         measurement_arrays = _validate_array_lengths(
             "measurement_arrays", self.measurement_arrays
+        )
+        measurement_blocks = _validate_block_shapes(
+            "measurement_blocks", self.measurement_blocks
         )
 
         loop_shape = self.loop_shape
@@ -642,6 +688,7 @@ class DataSchema:
         object.__setattr__(self, "sweep_columns", sweep_columns)
         object.__setattr__(self, "measurement_scalars", measurement_scalars)
         object.__setattr__(self, "measurement_arrays", measurement_arrays)
+        object.__setattr__(self, "measurement_blocks", measurement_blocks)
         object.__setattr__(self, "loop_shape", tuple(loop_shape))
 
     def validate(self, datapoint: Mapping[str, Any]) -> None:
@@ -662,9 +709,11 @@ class DataSchema:
               dtype rule as sweep columns);
             * each ``measurement_arrays`` value is a nested structure shaped
               exactly ``loop_shape + (length,)``.
+            * each ``measurement_blocks`` value is a nested structure shaped
+              exactly ``loop_shape + (rows, cols)``.
 
         Args:
-            datapoint: Mapping of column/array name to value to check.
+            datapoint: Mapping of column/array/block name to value to check.
 
         Returns:
             None if the datapoint conforms.
@@ -676,6 +725,7 @@ class DataSchema:
             set(self.sweep_columns)
             | set(self.measurement_scalars)
             | set(self.measurement_arrays)
+            | set(self.measurement_blocks)
         )
         present = set(datapoint)
         problems: list[str] = []
@@ -728,6 +778,19 @@ class DataSchema:
             if leaves is None:
                 problems.append(
                     f"measurement array {name!r} does not match shape {shape}"
+                )
+
+        for name, block_shape in self.measurement_blocks.items():
+            if name not in datapoint:
+                continue
+            # No loop-axis prefix when no reading loop is configured — see
+            # measurement_blocks' docstring above.
+            block_loop_prefix = self.loop_shape if self.loop_shape != (1, 1) else ()
+            shape = (*block_loop_prefix, *block_shape)
+            leaves = _nested_shape_leaves(datapoint[name], shape)
+            if leaves is None:
+                problems.append(
+                    f"measurement block {name!r} does not match shape {shape}"
                 )
 
         if problems:

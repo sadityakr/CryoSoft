@@ -41,8 +41,10 @@
 #   terms rather than asserting "sheet"/"Hall" semantics this VI cannot
 #   verify — which physical quantity each represents depends on the
 #   operator's chosen switch_sequence and analysis_mode, exactly as on the
-#   real instrument.
-# last_updated: 2026-07-27
+#   real instrument. Plus "raw_channels_block": list[list[float]]
+#   (readings_per_point x 44), every raw driver column for every reading —
+#   see MeasurementInstrumentBase's "Raw diagnostic blocks" standard.
+# last_updated: 2026-07-28
 # ---
 
 """TensormeterRTM2MeasurementVI — resistance-tensor measurement method (RTM2)."""
@@ -87,6 +89,60 @@ _TENSOR_COMPONENTS: frozenset[str] = frozenset(
     {"dc", "1st_re", "1st_im", "2nd_re", "2nd_im", "3rd_re", "3rd_im"}
 )
 
+# Duplicated from the driver's documented data-block column order (vendor TCP
+# Commands §3.1) — the VI layer cannot import cryosoft.drivers.* (layer
+# contract C3), so it owns its own copy, same reasoning as
+# _ANALYSIS_MODE_VALUES above. Must stay in lockstep with
+# tensormeter_rtm2._DATA_COLUMNS; this is the raw diagnostic block's declared
+# channel-label list (see MeasurementInstrumentBase's "Raw diagnostic
+# blocks" standard).
+_RAW_CHANNEL_NAMES: tuple[str, ...] = (
+    "time_s",
+    "input_voltage_dc_V",
+    "current_dc_A",
+    "output_voltage_dc_V",
+    "resistance_2w_dc_ohm",
+    "input_voltage_ampl_V",
+    "current_ampl_A",
+    "output_voltage_ampl_V",
+    "impedance_2w_ac_ohm",
+    "res_a_dc_ohm",
+    "res_a_1st_re_ohm",
+    "res_a_1st_im_ohm",
+    "res_a_2nd_re_ohm",
+    "res_a_2nd_im_ohm",
+    "res_a_3rd_re_ohm",
+    "res_a_3rd_im_ohm",
+    "res_b_dc_ohm",
+    "res_b_1st_re_ohm",
+    "res_b_1st_im_ohm",
+    "res_b_2nd_re_ohm",
+    "res_b_2nd_im_ohm",
+    "res_b_3rd_re_ohm",
+    "res_b_3rd_im_ohm",
+    "switch_status",
+    "lockin_frequency_Hz",
+    "voltage_dc_setpoint_V",
+    "current_dc_setpoint_A",
+    "current_dc_setpoint_A_2",
+    "current_ampl_setpoint_A",
+    "voltage_protection_V",
+    "current_protection_A",
+    "input_voltage_peak_range_fill",
+    "current_peak_range_fill",
+    "output_voltage_peak_range_fill",
+    "reference_voltage_peak_range_fill",
+    "voltage_input_range_V",
+    "voltage_output_range_V",
+    "current_range_A",
+    "series_resistance_ohm",
+    "sampling_duration_s",
+    "lock_quality",
+    "analysis_multisample_mode",
+    "dio0_V",
+    "dio1_V",
+)
+
 
 class TensormeterRTM2MeasurementVI(MeasurementInstrumentBase):
     """Virtual Instrument for RTM2 resistance-tensor measurements.
@@ -103,7 +159,8 @@ class TensormeterRTM2MeasurementVI(MeasurementInstrumentBase):
         # data = {"res_a_ohm": float, "res_a_ohm_error": float,
         #         "res_a_ohm_array": list[float](5,), "res_b_ohm": float,
         #         "res_b_ohm_error": float, "res_b_ohm_array": list[float](5,),
-        #         "n_valid": int}
+        #         "n_valid": int,
+        #         "raw_channels_block": list[list[float]](5, 44)}
 
     With ``init_params["configured_externally"] = True`` (see
     ``MeasurementInstrumentBase``'s "Externally configured instruments"
@@ -133,6 +190,12 @@ class TensormeterRTM2MeasurementVI(MeasurementInstrumentBase):
     measurement_data_keys: ClassVar[list[str]] = _ARRAY_KEYS
     measurement_scalar_columns: ClassVar[dict[str, str]] = {
         **_SCALAR_COLUMNS, "n_valid": "int"
+    }
+    # Raw diagnostic block (see MeasurementInstrumentBase's "Raw diagnostic
+    # blocks" standard): every one of the driver's 44 raw columns, preserved
+    # per reading alongside the res_a_ohm/res_b_ohm pair selected above.
+    measurement_raw_blocks: ClassVar[dict[str, list[str]]] = {
+        "raw_channels_block": list(_RAW_CHANNEL_NAMES)
     }
     measurement_parameters: ClassVar[dict[str, ParamSpec]] = {
         "current_amplitude_A": ParamSpec(
@@ -181,7 +244,14 @@ class TensormeterRTM2MeasurementVI(MeasurementInstrumentBase):
             description=(
                 "Tensor component extracted from the driver's data block "
                 "into the saved res_a_ohm/res_b_ohm columns (res_a_{c}_ohm/"
-                "res_b_{c}_ohm). Data-path only — writes nothing to the "
+                "res_b_{c}_ohm) — the pair that gets the statistically "
+                "rigorous mean/SEM/n_valid treatment for analysis and "
+                "session export. Every raw component (res_a_dc_ohm, "
+                "res_a_1st_re_ohm, ...) is independently plottable "
+                "regardless of this choice (see MeasurementInstrumentBase's "
+                "'Raw diagnostic blocks' standard), so getting this wrong "
+                "no longer hides data — it only decides which pair is "
+                "analyzed. Data-path only — writes nothing to the "
                 "instrument, so it stays active in externally configured "
                 "mode too; the operator picks it to match the drive "
                 "configured on the instrument (dc drive -> 'dc', sine AC -> "
@@ -300,6 +370,10 @@ class TensormeterRTM2MeasurementVI(MeasurementInstrumentBase):
         """Return ``{"res_a_ohm_array": n, "res_b_ohm_array": n}``, n = readings_per_point."""
         n = int(params["readings_per_point"])
         return {key: n for key in self.measurement_data_keys}
+
+    def raw_block_row_counts(self, params) -> dict[str, int]:
+        """Return ``{"raw_channels_block": n}``, n = readings_per_point."""
+        return {"raw_channels_block": int(params["readings_per_point"])}
 
     # panel=False: arming is a deliberate act — reachable from the front
     # panel and from procedures, never from the compact monitor card.
@@ -542,8 +616,13 @@ class TensormeterRTM2MeasurementVI(MeasurementInstrumentBase):
         Soft consistency check only — never raises or refuses; external
         configuration is human-owned (see ``MeasurementInstrumentBase``'s
         "Externally configured instruments" standard), so this is a hint,
-        not a gate. Two checks, both guarded with ``.get()`` so a missing
-        snapshot key never crashes:
+        not a gate. A wrong guess here no longer hides data — every raw
+        component is independently plottable regardless of
+        ``tensor_component`` (see the "Raw diagnostic blocks" standard's
+        plot-column extension) — it only means ``res_a_ohm``/``res_b_ohm``,
+        the pair with proper mean/SEM/n_valid statistics, was computed from
+        the wrong component. Two checks, both guarded with ``.get()`` so a
+        missing snapshot key never crashes:
 
         * A harmonic component (``1st_*``/``2nd_*``/``3rd_*``) is selected
           while the snapshot's Waveform Mode (``wfmd``) is Pulse Train
@@ -633,6 +712,18 @@ class TensormeterRTM2MeasurementVI(MeasurementInstrumentBase):
 
         rows = driver.read_new_data()[-n:]
 
+        # Raw diagnostic block: every one of the driver's 44 columns for
+        # every delivered row, preserved verbatim alongside the
+        # tensor_component-selected pair below (see MeasurementInstrumentBase's
+        # "Raw diagnostic blocks" standard). Row-axis padding mirrors the
+        # res_a/res_b padding a few lines below; the channel axis is fixed by
+        # _RAW_CHANNEL_NAMES and never padded.
+        raw_block = [
+            [float(row[name]) for name in _RAW_CHANNEL_NAMES] for row in rows
+        ]
+        block_pad = n - len(rows)
+        raw_block += [[float("nan")] * len(_RAW_CHANNEL_NAMES)] * block_pad
+
         # The operator-chosen tensor_component picks which Res A/Res B
         # column pair to extract (see measurement_parameters
         # ["tensor_component"]) — data-path only, so this runs identically
@@ -672,6 +763,7 @@ class TensormeterRTM2MeasurementVI(MeasurementInstrumentBase):
             "res_b_ohm": b_mean,
             "res_b_ohm_error": b_error,
             "n_valid": n_valid,
+            "raw_channels_block": raw_block,
         }
 
     # ------------------------------------------------------------------

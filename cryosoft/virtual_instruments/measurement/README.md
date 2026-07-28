@@ -84,6 +84,62 @@ written standard in its docstring. `tests/test_conformance.py` enforces the
 standard (declaration validity, lifecycle presence, and a sim round-trip) for
 every measurement VI automatically.
 
+## Raw diagnostic blocks
+Some instruments return far more raw data per reading than any single
+physical quantity — e.g. a lock-in-style engine reporting dozens of channels
+(voltages, ranges, setpoints, lock quality, …) alongside the one or two the
+operator actually derives a result from. The mean/error/array convention
+above cannot express this: it hard-requires every `_array` key to pair with
+a same-quantity mean/error, which makes no sense for a block mixing many
+different physical units with no single mean to report. A VI with this need
+declares a SECOND, orthogonal self-description instead of forcing the block
+through the convention above:
+
+- `measurement_raw_blocks: ClassVar[dict[str, list[str]]]` — block name →
+  ordered channel-label list, fixing the block's channel axis. Empty (the
+  default) means no raw block.
+- `raw_block_row_counts(params) -> dict[str, int]` — declared block name →
+  row count for the same `params` `initiate_measurement()` will receive,
+  mirroring `data_arrays()`'s per-instance, params-dependent role. Base
+  returns `{}`.
+- `take_reading()` returns a block's value under its block-name key as a
+  nested `rows x channels` list — row order matching the declared row
+  count, column order matching the declared label list. An instrument that
+  under-delivers rows pads the ROW axis with `float("nan")` the same way an
+  array quantity does; the channel axis is fixed and never padded.
+
+A block's own `rows x channels` matrix is deliberately excluded from
+`measurement_data_keys`/`measurement_scalar_columns` — it never itself
+appears in the GUI's plot-axis dropdowns, exactly like an `_array` column
+today. Its declared channels are independently plottable, though:
+`SweepMeasureProcedure` automatically derives one scalar column per
+channel (row axis reduced by a NaN-safe mean — the same "N readings at one
+measurement point" treatment `mean_and_sem` gives a quantity's own array
+column, also seen in `measurement_delta_mode.py`'s `n_readings`), merged
+into `DataSchema.measurement_scalars` and `live_plot_measurement_keys()`
+with zero VI-side code (`_raw_block_channel_columns`/`measure()` in
+`procedure.py`) — a `CryoSoftConfigError` at `initiate()` if a channel
+label collides with a sweep/scalar column or another block's channel.
+Unlike every other
+measurement column, a block does NOT always carry the reading loop's real
+`(n_loop1, n_loop2)` **loop axis**: `DataSchema.measurement_blocks` only
+adds that axis when a reading loop is actually configured for the run
+(`loop_shape != (1, 1)`); with no reading loop its HDF5 shape stays bare
+`(rows, cols)` per sweep point, not `(1, 1, rows, cols)`. This is handled
+entirely at the procedure/schema layer (`SweepMeasureProcedure.measure()`
+squeezes the trivial axis away before saving) — a VI's own `take_reading()`
+always returns the block as a flat `rows x channels` list regardless of any
+loop. See `TensormeterRTM2MeasurementVI`'s `raw_channels_block` (all 44 raw
+driver columns, alongside the operator-selected `res_a_ohm`/`res_b_ohm`
+pair) for the pattern.
+
+The declared `measurement_raw_blocks` label list is not just an in-memory
+contract — `DataManager` writes it to disk as the block dataset's own
+`channel_names` HDF5 attribute (column index → channel name), alongside an
+`axes` attribute naming every dimension in order. A reader opening the file
+directly (h5py, HDFView) sees both attached to `/data/<block_name>` itself,
+with no need to parse the `/metadata` group's JSON `data_config` blob.
+
 ## Under-delivery: the n_valid standard
 A VI whose `take_reading()` can deliver fewer raw samples than `data_arrays()`
 declared for a quantity MUST report an `n_valid` scalar column (dtype `"int"`,

@@ -1692,7 +1692,11 @@ def test_measurement_vi_round_trip(vi_cls: type) -> None:
     vi.initiate_measurement(**defaults)
     data = vi.take_reading()
 
-    expected_keys = set(vi_cls.measurement_data_keys) | set(vi_cls.measurement_scalar_columns)
+    expected_keys = (
+        set(vi_cls.measurement_data_keys)
+        | set(vi_cls.measurement_scalar_columns)
+        | set(vi_cls.measurement_raw_blocks)
+    )
     assert set(data) == expected_keys, (
         f"{vi_cls.__name__}.take_reading() returned keys {sorted(data)}, "
         f"expected {sorted(expected_keys)}"
@@ -1709,6 +1713,25 @@ def test_measurement_vi_round_trip(vi_cls: type) -> None:
             f"{len(data[name])}, but data_arrays declared {length}"
         )
 
+    block_rows = vi.raw_block_row_counts(defaults)
+    assert set(block_rows) == set(vi_cls.measurement_raw_blocks), (
+        f"{vi_cls.__name__}.raw_block_row_counts() keys {sorted(block_rows)} != "
+        f"measurement_raw_blocks {sorted(vi_cls.measurement_raw_blocks)}"
+    )
+    for name, labels in vi_cls.measurement_raw_blocks.items():
+        rows = block_rows[name]
+        block = data[name]
+        assert len(block) == rows, (
+            f"{vi_cls.__name__}.take_reading()['{name}'] has {len(block)} rows, "
+            f"but raw_block_row_counts declared {rows}"
+        )
+        for row in block:
+            assert len(row) == len(labels), (
+                f"{vi_cls.__name__}.take_reading()['{name}'] row has "
+                f"{len(row)} channels, but measurement_raw_blocks declared "
+                f"{len(labels)}"
+            )
+
     for name in vi_cls.measurement_scalar_columns:
         value = data[name]
         assert isinstance(value, (int, float)) and not isinstance(value, bool), (
@@ -1722,6 +1745,33 @@ def test_measurement_vi_round_trip(vi_cls: type) -> None:
         assert error >= 0.0 or math.isnan(error), (
             f"{vi_cls.__name__}.take_reading()['{base_name}_error'] must be "
             f">= 0 (or NaN, when zero samples are valid), got {error!r}"
+        )
+
+
+@pytest.mark.parametrize(
+    "vi_cls", _all_measurement_vi_classes(), ids=lambda c: c.__name__
+)
+def test_measurement_vi_raw_block_names_dont_collide(vi_cls: type) -> None:
+    """A raw diagnostic block never shadows a data-key/scalar-column name.
+
+    Per MeasurementInstrumentBase's "Raw diagnostic blocks" standard: blocks
+    are deliberately excluded from measurement_data_keys/
+    measurement_scalar_columns (so they never appear in a GUI plot-axis
+    dropdown); a colliding name would make the two self-descriptions
+    ambiguous. Every declared block's channel-label list must also be
+    non-empty — an empty block declares a zero-width channel axis, which
+    HDF5 cannot allocate meaningfully.
+    """
+    other_names = set(vi_cls.measurement_data_keys) | set(vi_cls.measurement_scalar_columns)
+    for block_name, labels in vi_cls.measurement_raw_blocks.items():
+        assert block_name not in other_names, (
+            f"{vi_cls.__name__}.measurement_raw_blocks name {block_name!r} "
+            f"collides with a measurement_data_keys/measurement_scalar_columns "
+            f"name"
+        )
+        assert labels, (
+            f"{vi_cls.__name__}.measurement_raw_blocks[{block_name!r}] must "
+            f"be a non-empty channel-label list"
         )
 
 

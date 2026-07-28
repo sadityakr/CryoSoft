@@ -31,6 +31,7 @@ from cryosoft.drivers.sim_tensormeter_rtm2 import SimTensormeterRTM2
 from cryosoft.procedures.field_sweep import FieldSweep
 from cryosoft.procedures.temperature_sweep import TemperatureSweep
 from cryosoft.virtual_instruments.measurement.tensormeter_rtm2_measurement import (
+    _RAW_CHANNEL_NAMES,
     TensormeterRTM2MeasurementVI,
 )
 
@@ -1051,6 +1052,125 @@ def test_full_orchestrator_run_releases_the_rtm2_session_on_standby(
     assert orch._state == OrchestratorState.IDLE
     assert vi.is_attached() is False
     assert driver._closed is True
+
+
+# ── Raw diagnostic blocks: loop-axis skip standard ───────────────────────────
+# See MeasurementInstrumentBase's "Raw diagnostic blocks" standard and
+# DataSchema.measurement_blocks: unlike every other measurement column, a
+# raw block carries the (n_loop1, n_loop2) loop axis only when a reading
+# loop is actually configured for the run.
+
+RTM2_FAST = {
+    "measurement_vi": "tensormeter_measurement",
+    "averaging_time_s": 0.0,
+    "readings_per_point": 2,
+}
+
+
+def test_raw_block_no_loop_axis_when_no_reading_loop(station, tmp_path):
+    """No reading loop configured: raw_channels_block is stored bare (N, rows, cols).
+
+    Only sweep_index 0 is ever measure()'d (a single call, not a full sweep
+    loop), so standby()'s close() trims the file's declared 3 points down to
+    the 1 actually saved — same trimming test_field_sweep_measure_saves_data
+    relies on for its own single-point shape assertion.
+    """
+    _register_rtm2(station, False)
+    proc = _field_proc(station, tmp_path, RTM2_FAST)
+    proc.initiate()
+    _arm(station, RTM2_FAST, proc)
+    proc.measure()
+    filepath = proc._data_manager.filepath
+    proc.standby()
+
+    with h5py.File(filepath, "r") as f:
+        assert f["data"]["raw_channels_block"].shape == (1, 2, 44)
+        assert not np.any(np.isnan(f["data"]["raw_channels_block"][0]))
+
+
+def test_raw_block_carries_loop_axis_when_reading_loop_active(station, tmp_path):
+    """A configured reading loop (switch route): the block gains the (n_loop1, n_loop2) axis."""
+    _register_rtm2(station, False)
+    proc = _field_proc_scanner(station, tmp_path, RTM2_FAST, ROUTES2)
+    proc.initiate()
+    _arm(station, RTM2_FAST, proc)
+    proc.measure()
+    filepath = proc._data_manager.filepath
+    proc.standby()
+
+    with h5py.File(filepath, "r") as f:
+        assert f["data"]["raw_channels_block"].shape == (1, 2, 1, 2, 44)
+        assert not np.any(np.isnan(f["data"]["raw_channels_block"][0, 0, 0]))
+        assert not np.any(np.isnan(f["data"]["raw_channels_block"][0, 1, 0]))
+
+
+# ── Raw diagnostic blocks: per-channel plot columns ──────────────────────────
+# See MeasurementInstrumentBase's "Raw diagnostic blocks" standard's
+# plot-column extension: SweepMeasureProcedure derives one row-mean scalar
+# column per declared raw-block channel, alongside the untouched block.
+
+def test_live_plot_keys_include_raw_block_channels(station):
+    """Every RTM2 raw-block channel is an independently selectable plot key."""
+    _register_rtm2(station, False)
+    keys = FieldSweep.live_plot_measurement_keys(
+        station, {"measurement_vi": "tensormeter_measurement"}
+    )
+    assert set(_RAW_CHANNEL_NAMES) <= set(keys)
+    assert "res_a_ohm" in keys
+    assert "res_a_ohm_array" not in keys  # arrays stay excluded
+
+
+def test_raw_block_channels_saved_as_scalars_matching_block_mean(station, tmp_path):
+    """Each channel is saved as its own (N, 1, 1) scalar, equal to the block's
+    row-mean for that channel — the block itself is unchanged."""
+    _register_rtm2(station, False)
+    proc = _field_proc(station, tmp_path, RTM2_FAST)
+    proc.initiate()
+    _arm(station, RTM2_FAST, proc)
+    proc.measure()
+    filepath = proc._data_manager.filepath
+    proc.standby()
+
+    with h5py.File(filepath, "r") as f:
+        block = f["data"]["raw_channels_block"][0]  # (rows, cols)
+        assert block.shape == (2, 44)
+        for col_index, label in enumerate(_RAW_CHANNEL_NAMES):
+            assert f["data"][label].shape == (1, 1, 1)
+            expected = np.nanmean(block[:, col_index])
+            assert f["data"][label][0, 0, 0] == pytest.approx(expected)
+
+
+def test_raw_block_channels_carry_loop_axis_when_reading_loop_active(station, tmp_path):
+    """Channel columns get the real (n_loop1, n_loop2) grid, same as res_a_ohm —
+    unlike the block itself, which only gains that axis conditionally."""
+    _register_rtm2(station, False)
+    proc = _field_proc_scanner(station, tmp_path, RTM2_FAST, ROUTES2)
+    proc.initiate()
+    _arm(station, RTM2_FAST, proc)
+    proc.measure()
+    filepath = proc._data_manager.filepath
+    proc.standby()
+
+    with h5py.File(filepath, "r") as f:
+        label = _RAW_CHANNEL_NAMES[0]
+        assert f["data"][label].shape == (1, 2, 1)
+        block = f["data"]["raw_channels_block"]
+        for i1 in range(2):
+            expected = np.nanmean(block[0, i1, 0, :, 0])
+            assert f["data"][label][0, i1, 0] == pytest.approx(expected)
+
+
+def test_raw_block_channel_collision_raises_config_error(station, tmp_path):
+    """A raw-block channel label colliding with an existing scalar column is refused."""
+    from cryosoft.core.exceptions import CryoSoftConfigError
+
+    vi = _register_rtm2(station, False)
+    # Shadow the class-level declaration for this instance only: a raw block
+    # whose one channel collides with the VI's own res_a_ohm scalar column.
+    vi.measurement_raw_blocks = {"raw_channels_block": ["res_a_ohm"]}
+    proc = _field_proc(station, tmp_path, RTM2_FAST)
+    with pytest.raises(CryoSoftConfigError, match="res_a_ohm"):
+        proc.initiate()
 
 
 # ── Temperature-channel on/off toggles ───────────────────────────────────────

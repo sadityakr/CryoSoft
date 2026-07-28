@@ -50,8 +50,10 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import math
+import statistics
 import time
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from cryosoft.core.data_manager import DataManager
@@ -70,6 +72,26 @@ from cryosoft.core.station import Station
 from cryosoft.core.sweep_builder import SweepAxis, build_axis_sweep, sweep_axis_param_specs
 
 logger = logging.getLogger(__name__)
+
+
+def _nanmean(values: Iterable[float]) -> float:
+    """Mean of *values*, NaN entries excluded; NaN if none are valid.
+
+    Reduces a raw diagnostic block's row axis into one scalar per channel
+    (see ``SweepMeasureProcedure._raw_block_channel_columns``) — the row
+    axis is the same "N readings at one measurement point" count as
+    ``measurement_delta_mode.py``'s ``n_readings``, just without a
+    companion SEM, since a diagnostic channel has no declared error column.
+
+    Args:
+        values: Raw per-row values for one channel, possibly including
+            NaN (instrument-emitted or CryoSoft row-count padding).
+
+    Returns:
+        The mean of the non-NaN values, or NaN if every value is NaN.
+    """
+    valid = [v for v in values if not math.isnan(v)]
+    return statistics.fmean(valid) if valid else float("nan")
 
 
 class BaseProcedure:
@@ -1187,7 +1209,12 @@ class SweepMeasureProcedure(BaseProcedure):
         which ``(loop1, loop2)`` grid index is drawn, and the panel indexes
         into that axis at draw time. Raw-sample-array columns (``*_array``)
         are excluded — they are saved but never a plot axis; only the
-        mean/error/other scalar columns are offered.
+        mean/error/other scalar columns are offered, including every raw
+        diagnostic block's channel labels (see
+        ``_raw_block_channel_labels``) — each is a row-mean-reduced scalar
+        column carrying the real loop grid exactly like any other, per the
+        "Raw diagnostic blocks" standard's plot-column extension
+        (``MeasurementInstrumentBase``).
         """
         names = station.measurement_vi_names()
         if not names:
@@ -1199,7 +1226,11 @@ class SweepMeasureProcedure(BaseProcedure):
         vi = station.get_vi(selected)
         return [
             key
-            for key in list(vi.measurement_data_keys) + list(vi.measurement_scalar_columns)
+            for key in (
+                list(vi.measurement_data_keys)
+                + list(vi.measurement_scalar_columns)
+                + cls._raw_block_channel_labels(vi)
+            )
             if not key.endswith("_array")
         ]
 
@@ -1317,6 +1348,64 @@ class SweepMeasureProcedure(BaseProcedure):
         n2 = len(self._params.get("loop2_values") or []) or 1
         return (n1, n2)
 
+    @staticmethod
+    def _raw_block_channel_labels(vi: Any) -> list[str]:
+        """Flatten every raw block's channel label list, in block-then-column order.
+
+        Shared by ``_build_data_schema`` (collision-checked column
+        derivation), ``measure()`` (per-channel grid population), and
+        ``live_plot_measurement_keys`` (plot key exposure) so the three stay
+        in lock-step — see ``MeasurementInstrumentBase``'s "Raw diagnostic
+        blocks" standard's plot-column extension.
+        """
+        return [label for labels in vi.measurement_raw_blocks.values() for label in labels]
+
+    def _raw_block_channel_columns(
+        self, vi: Any, sweep_columns: dict[str, str]
+    ) -> dict[str, str]:
+        """Return ``{channel_label: "float"}`` for every raw block channel.
+
+        Each declared raw-block channel becomes an ordinary scalar column —
+        reduced from the block's row axis by ``measure()`` via ``_nanmean``,
+        the same "N readings at one measurement point" treatment
+        ``measurement_delta_mode.py``'s ``n_readings`` already gets via
+        ``mean_and_sem`` — so it is plottable and carries the real
+        ``(n_loop1, n_loop2)`` loop grid like any other ``measurement_
+        scalars`` entry.
+
+        Args:
+            vi: The selected measurement VI instance.
+            sweep_columns: This run's sweep-column names, checked for
+                collisions.
+
+        Returns:
+            ``{label: "float"}`` for every channel across every declared
+            raw block.
+
+        Raises:
+            CryoSoftConfigError: A channel label collides with a sweep
+                column, an existing ``measurement_scalar_columns`` entry,
+                or another block's channel label.
+        """
+        columns: dict[str, str] = {}
+        origin: dict[str, str] = {}
+        for block_name, labels in vi.measurement_raw_blocks.items():
+            for label in labels:
+                if label in sweep_columns or label in vi.measurement_scalar_columns:
+                    raise CryoSoftConfigError(
+                        f"{type(self).name!r}: raw block {block_name!r} channel "
+                        f"{label!r} collides with an existing sweep/scalar column."
+                    )
+                if label in origin:
+                    raise CryoSoftConfigError(
+                        f"{type(self).name!r}: raw block {block_name!r} channel "
+                        f"{label!r} collides with block {origin[label]!r}'s "
+                        f"channel of the same name."
+                    )
+                origin[label] = block_name
+                columns[label] = "float"
+        return columns
+
     def _build_data_schema(self, vi: Any) -> DataSchema:
         """Assemble this run's ``DataSchema`` from the axis, station, and VI.
 
@@ -1325,7 +1414,15 @@ class SweepMeasureProcedure(BaseProcedure):
         in ``initiate()``) + the axis data-key. Measurement scalars/arrays:
         the VI's ``measurement_scalar_columns`` / ``data_arrays`` for the
         selected measurement params, each carrying the real ``_loop_shape``
-        axis (see ``DataSchema``) instead of suffixed column names.
+        axis (see ``DataSchema``) instead of suffixed column names, PLUS one
+        derived scalar column per raw-block channel (see
+        ``_raw_block_channel_columns``) — a row-mean reduction of the raw
+        diagnostic block, so every one of its channels is independently
+        plottable without changing the block's own storage shape. Raw
+        diagnostic blocks themselves (see ``MeasurementInstrumentBase``'s
+        "Raw diagnostic blocks" standard): the VI's ``measurement_raw_blocks``
+        label lists (channel-axis length) combined with
+        ``raw_block_row_counts()`` (row-axis length) for the same params.
 
         Args:
             vi: The selected measurement VI instance.
@@ -1337,10 +1434,20 @@ class SweepMeasureProcedure(BaseProcedure):
         for key in self._station.last_state_flat():
             sweep_columns[key] = "float"
         sweep_columns[type(self).sweep_axis.data_key] = "float"
+        row_counts = vi.raw_block_row_counts(self._measurement_params)
+        measurement_blocks = {
+            name: (row_counts[name], len(labels))
+            for name, labels in vi.measurement_raw_blocks.items()
+        }
+        measurement_scalars = {
+            **dict(vi.measurement_scalar_columns),
+            **self._raw_block_channel_columns(vi, sweep_columns),
+        }
         return DataSchema(
             sweep_columns=sweep_columns,
-            measurement_scalars=dict(vi.measurement_scalar_columns),
+            measurement_scalars=measurement_scalars,
             measurement_arrays=dict(vi.data_arrays(self._measurement_params)),
+            measurement_blocks=measurement_blocks,
             loop_shape=self._loop_shape,
         )
 
@@ -1386,6 +1493,8 @@ class SweepMeasureProcedure(BaseProcedure):
             "sweep_columns": dict(self._data_schema.sweep_columns),
             "measurement_scalars": dict(self._data_schema.measurement_scalars),
             "measurement_arrays": dict(self._data_schema.measurement_arrays),
+            "measurement_blocks": dict(self._data_schema.measurement_blocks),
+            "measurement_block_labels": dict(vi.measurement_raw_blocks),
             "loop_shape": list(self._data_schema.loop_shape),
         }
 
@@ -1444,6 +1553,16 @@ class SweepMeasureProcedure(BaseProcedure):
         ``(n_loop1, n_loop2)`` (or ``(n_loop1, n_loop2, length)`` for an
         array) grid — column names are never suffixed.
 
+        A raw diagnostic block (``vi.measurement_raw_blocks``) is the one
+        exception to the "every column carries a real loop axis" rule above:
+        with no reading loop configured (``_loop_shape == (1, 1)``), its
+        grid is squeezed down to the bare per-reading block before saving —
+        see ``DataSchema.measurement_blocks``'s docstring for why. Each
+        block's declared channels ALSO land in the grid, one row-mean-
+        reduced scalar per channel (see ``_raw_block_channel_columns``) —
+        those are ordinary scalar columns and always keep their real
+        ``(n_loop1, n_loop2)`` grid, never squeezed like the block itself.
+
         Raises:
             RuntimeError: If called before ``initiate()``.
             DataSchemaError: If the datapoint does not match the declared schema
@@ -1466,7 +1585,13 @@ class SweepMeasureProcedure(BaseProcedure):
                 self._data_manager.record_settings_snapshot(snapshot)
 
         n_loop1, n_loop2 = self._loop_shape
-        keys = list(vi.measurement_data_keys) + list(vi.measurement_scalar_columns)
+        channel_labels = self._raw_block_channel_labels(vi)
+        keys = (
+            list(vi.measurement_data_keys)
+            + list(vi.measurement_scalar_columns)
+            + list(vi.measurement_raw_blocks)
+            + channel_labels
+        )
         grids: dict[str, list[list[Any]]] = {
             key: [[None] * n_loop2 for _ in range(n_loop1)] for key in keys
         }
@@ -1485,10 +1610,23 @@ class SweepMeasureProcedure(BaseProcedure):
             for i2 in range(n_loop2):
                 if axis2 is not None:
                     _dispatch(axis2, axis2["values"][i2])
-                for key, value in vi.take_reading().items():
+                reading = vi.take_reading()
+                for key, value in reading.items():
                     grids[key][i1][i2] = value
+                for block_name, labels in vi.measurement_raw_blocks.items():
+                    block_rows = reading[block_name]  # this reading's rows x cols
+                    for col_index, label in enumerate(labels):
+                        grids[label][i1][i2] = _nanmean(
+                            row[col_index] for row in block_rows
+                        )
 
         measured_data: dict[str, Any] = dict(grids)
+        if (n_loop1, n_loop2) == (1, 1):
+            # No reading loop configured: a raw block skips the trivial
+            # (1, 1) axis entirely rather than carrying it like a scalar/
+            # array column does (see DataSchema.measurement_blocks).
+            for block_key in vi.measurement_raw_blocks:
+                measured_data[block_key] = grids[block_key][0][0]
         measured_data[type(self).sweep_axis.data_key] = self._axis_readback()
         self._save_datapoint(measured_data)
 
