@@ -1970,10 +1970,23 @@ class Orchestrator(QObject):
                             self._first_measurement = False
                             self._change_state(OrchestratorState.MEASURING)
         elif self._state in (OrchestratorState.INITIATION_GATE, OrchestratorState.READING_GATE):
-            self._pending_gates = [g for g in self._pending_gates if not g.step()]
-            if not self._pending_gates:
-                self._first_measurement = False
-                self._change_state(OrchestratorState.MEASURING)
+            if self._is_operation_active() and getattr(
+                self._procedure, "finish_requested", False
+            ):
+                # A gate (e.g. HeliumFillOperation's zero_field wait) can hold
+                # forever if its check() never turns true. finish_operation()
+                # only flips finish_requested — it is not itself wired into
+                # this branch — so without this check a Finish click here
+                # would appear to do nothing and the run would look stuck.
+                # Abandon the gate wait and go straight to STANDBY, exactly
+                # like a SWEEPING-state finish.
+                self._pending_gates = []
+                self._change_state(OrchestratorState.STANDBY)
+            else:
+                self._pending_gates = [g for g in self._pending_gates if not g.step()]
+                if not self._pending_gates:
+                    self._first_measurement = False
+                    self._change_state(OrchestratorState.MEASURING)
         elif self._state == OrchestratorState.MEASURING:
             if self._procedure:
                 is_operation = self._is_operation_active()

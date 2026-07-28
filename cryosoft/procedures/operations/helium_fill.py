@@ -16,7 +16,7 @@
 #   - cryosoft.core.exceptions (CryoSoftConfigError)
 #   - cryosoft.core.gates (Gate)
 #   - cryosoft.core.operation (OperationBase)
-#   - cryosoft.core.plan (Command, PhasePlan, StepPlan, Target)
+#   - cryosoft.core.plan (Command, PhasePlan, StepPlan)
 #   - cryosoft.core.station (Station) — VI access only through this, never a
 #     direct virtual_instruments import (contract C6)
 # input: |
@@ -30,10 +30,12 @@
 #   magnet_vi_names() resolves the magnet list; level_vi (default
 #   "level_meter") must be a registered VI.
 # process: |
-#   initiate() ramps every magnet to 0 T and switches the level meter to
-#   FAST. initiation_gates() holds until every magnet's magnet_state() ==
-#   "standby" for fill_zero_field_window_s (from cached state — no extra
-#   hardware poll; see GLOSSARY.md's Magnet state).
+#   initiate() commands standby() (that VI owns what "standby" means
+#   physically — zero field, switch heater off where applicable) on
+#   whichever magnets aren't already in standby (cached magnet_state()), and
+#   switches the level meter to FAST. initiation_gates() holds until every
+#   magnet's magnet_state() == "standby" for fill_zero_field_window_s (from
+#   cached state — no extra hardware poll; see GLOSSARY.md's Magnet state).
 #   sample() reads the level, appends (unix_time, helium_pct) to a bounded
 #   in-memory series (decimated once it exceeds _MAX_CURVE_POINTS — see
 #   run_summary()'s docstring), and tracks the start level and a "stable
@@ -73,7 +75,7 @@ from typing import Any
 from cryosoft.core.exceptions import CryoSoftConfigError
 from cryosoft.core.gates import Gate
 from cryosoft.core.operation import NextDue, OperationBase, ReadinessCondition
-from cryosoft.core.plan import Command, PhasePlan, StepPlan, Target
+from cryosoft.core.plan import Command, PhasePlan, StepPlan
 from cryosoft.core.station import Station
 
 logger = logging.getLogger(__name__)
@@ -116,10 +118,12 @@ class HeliumFillOperation(OperationBase):
     """Force every magnet to zero field, then fill the helium reservoir.
 
     The first concrete operation: a servicing action, not a
-    measurement. ``initiate()`` ramps every magnet
-    (``Station.magnet_vi_names()``) to 0 T and switches the configured level
-    meter to FAST refresh; ``initiation_gates()`` holds the run until zero
-    field is confirmed and held; ``sample()``/``step()`` poll the helium
+    measurement. ``initiate()`` commands ``standby()`` on whichever magnets
+    (``Station.magnet_vi_names()``) aren't already in standby, leaving one
+    that already is untouched, and switches the configured level meter to
+    FAST refresh; ``initiation_gates()`` holds the run until every magnet
+    reports ``magnet_state() == "standby"`` and that holds; ``sample()``/
+    ``step()`` poll the helium
     level once per ``sample_period_s`` until it has settled at/above
     ``fill_target_pct`` (or ``max_fill_duration_s`` elapses); ``standby()``/
     ``abort()`` restore SLOW refresh so an aborted fill never leaves the
@@ -398,11 +402,21 @@ class HeliumFillOperation(OperationBase):
     # ------------------------------------------------------------------
 
     def initiate(self) -> PhasePlan:
-        """Ramp every magnet to zero field and switch the level meter to FAST.
+        """Standby whichever magnets aren't already, and switch the level meter to FAST.
+
+        Checks each magnet's cached ``magnet_state()`` first: a magnet
+        already in standby is left alone (no redundant command); only a
+        magnet not yet in standby gets commanded into its own ``standby()``.
+        That VI owns what "standby" means physically (ramp to zero, switch
+        heater off where applicable) — this operation only cares that it
+        ends up there, verified by ``initiation_gates()`` checking
+        ``magnet_state() == "standby"``, never by picking a field value
+        itself.
 
         Returns:
-            A ``PhasePlan`` with every magnet targeted at 0 T and the level
-            meter's ``set_refresh_rate(mode=FAST)`` command.
+            A ``PhasePlan`` with no system targets, commanding ``standby()``
+            on every magnet not already in standby, plus the level meter's
+            ``set_refresh_rate(mode=FAST)``.
         """
         self._start_time = time.time()
         self._start_level_pct = None
@@ -410,15 +424,24 @@ class HeliumFillOperation(OperationBase):
         self._stable_since = None
         self._reset_recording()
 
+        state = self._station.cached_state
+        magnets_to_standby = [
+            magnet
+            for magnet in self._magnets
+            if state.get(magnet, {}).get("magnet_state") != "standby"
+        ]
+
         logger.info(
-            "HeliumFillOperation.initiate(): %d magnet(s) to zero field, "
+            "HeliumFillOperation.initiate(): %d/%d magnet(s) need standby, "
             "level_vi=%s FAST",
+            len(magnets_to_standby),
             len(self._magnets),
             self._level_vi_name,
         )
         return PhasePlan(
-            targets={magnet: Target(0.0) for magnet in self._magnets},
+            targets={},
             commands=(
+                *(Command(magnet, "standby", {}) for magnet in magnets_to_standby),
                 Command(self._level_vi_name, "set_refresh_rate", {"mode": _REFRESH_FAST}),
             ),
             wait_s=0.0,

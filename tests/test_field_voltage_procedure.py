@@ -44,7 +44,8 @@ def test_field_voltage_sweep_full_orchestrator_loop(station, tmp_path, qtbot):
     """FieldSweep runs a piecewise + hysteresis field sweep against the
     simulated Mercury iPS-M / Keithley delta-mode setup, keeping the switch
     heater energised across all sweep points and correctly reporting field
-    values throughout (regression coverage for both fixed bugs)."""
+    values throughout (regression coverage for both fixed bugs), then parks
+    fully (zero field, heater off) via magnet_z's own standby() at finish."""
     segments = [
         SweepSegment(start=-0.1, end=-0.02, step=0.04),
         SweepSegment(start=-0.02, end=0.02, step=0.02),
@@ -78,10 +79,13 @@ def test_field_voltage_sweep_full_orchestrator_loop(station, tmp_path, qtbot):
     assert orch._state == OrchestratorState.IDLE
     assert procedure._index == expected_n_points
 
-    # Procedures run in normal mode: standby() ramps the field to 0 T with the
-    # switch heater left ON (persistent mode is a manual Monitor-window action).
-    assert station.magnet_z.switch_heater_state() == "ON"
-    assert station.magnet_z.is_persistent() is False
+    # The procedure ran under automatic heater management the whole way
+    # (never the manual persistent-mode toggle), so the switch heater stayed
+    # energised at every sweep point. At finish, standby() commands
+    # magnet_z's own standby() — a full park (zero field, heater off) —
+    # rather than setting a field target itself.
+    assert station.magnet_z.persistent_mode_enabled() is False
+    assert station.magnet_z.switch_heater_state() == "OFF"
     assert station.magnet_z.magnet_field_T() == pytest.approx(0.0, abs=1e-3)
 
     h5_files = list(tmp_path.glob("*.h5"))

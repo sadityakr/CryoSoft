@@ -252,13 +252,15 @@ def test_field_sweep_measure_saves_data(station, tmp_path, meas):
 
 
 @pytest.mark.parametrize("meas", FIELD_MEAS)
-def test_field_sweep_standby_parks_magnet(station, tmp_path, meas):
+def test_field_sweep_standby_commands_magnet_standby(station, tmp_path, meas):
     proc = _field_proc(station, tmp_path, meas)
     proc.initiate()
     plan = proc.standby()
-    assert plan.targets["magnet_z"].target == pytest.approx(0.0)
+    assert plan.targets == {}
     cmd = next(c for c in plan.commands if c.vi_name == meas["measurement_vi"])
     assert cmd.method == "standby"
+    magnet_cmd = next(c for c in plan.commands if c.vi_name == "magnet_z")
+    assert magnet_cmd.method == "standby"
     assert proc._data_manager is None
 
 

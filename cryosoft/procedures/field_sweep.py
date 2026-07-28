@@ -10,7 +10,7 @@
 # entry_point: Not run directly. Instantiated via GUI or tests.
 # dependencies:
 #   - cryosoft.core.procedure (SweepMeasureProcedure)
-#   - cryosoft.core.plan (Target)
+#   - cryosoft.core.plan (Command, PhasePlan, Target)
 #   - cryosoft.core.sweep_builder (SweepAxis)
 #   - Station must have: magnet_z (system VI), temperature_vti (system VI), and
 #     at least one measurement VI (vi_type == "measurement").
@@ -25,7 +25,8 @@
 #   target temperature, arms the selected measurement VI, and assembles the
 #   DataSchema. change_sweep_step() steps magnet_z through the fields. measure()
 #   reads the VI, tags on the field read-back, validates, and saves. standby()
-#   parks magnet_z at 0 T.
+#   commands magnet_z's own standby() (that VI owns what standby means
+#   physically) rather than setting a field target itself.
 # output: |
 #   initiate()/standby() return a PhasePlan, change_sweep_step() a StepPlan|None,
 #   abort() a tuple[Command, ...]. Side effect: an HDF5 file with /data/field_T[N],
@@ -41,7 +42,7 @@ from __future__ import annotations
 from typing import Any
 
 from cryosoft.core.exceptions import CryoSoftConfigError
-from cryosoft.core.plan import ParamSpec, Target
+from cryosoft.core.plan import Command, ParamSpec, PhasePlan, Target
 from cryosoft.core.procedure import SweepMeasureProcedure
 from cryosoft.core.sweep_builder import SweepAxis
 
@@ -61,7 +62,10 @@ class FieldSweep(SweepMeasureProcedure):
        to the target temperature, arm the selected measurement VI.
     2. ``measure()``: read the VI, tag on the field read-back, save.
     3. ``change_sweep_step()``: step ``magnet_z`` to the next field.
-    4. ``standby()``: park ``magnet_z`` at 0 T, disarm the VI.
+    4. ``standby()``: disarm the VI and put ``magnet_z`` into its own standby
+       (that VI's standard command owns what "standby" means physically —
+       ramp to zero, switch heater off where applicable — this procedure
+       does not set the field itself).
 
     Required VIs in Station:
         ``magnet_z`` (system), ``temperature_vti`` (system), and at least one
@@ -171,8 +175,25 @@ class FieldSweep(SweepMeasureProcedure):
         return {"magnet_z": Target(self._sweep[index])}
 
     def _standby_targets(self) -> dict[str, Target]:
-        """Park ``magnet_z`` at 0 T (switch heater stays on — see class docstring)."""
-        return {"magnet_z": Target(0.0)}
+        """No system targets — ``standby()`` below commands the magnet directly."""
+        return {}
+
+    def standby(self) -> PhasePlan:
+        """Disarm the measurement VI and put ``magnet_z`` into its own standby.
+
+        Returns:
+            The base ``SweepMeasureProcedure.standby()`` plan plus a
+            ``Command`` invoking ``magnet_z.standby()`` — the magnet VI's own
+            standard standby action, which owns what that means physically
+            (ramp to zero, switch heater off where applicable). This
+            procedure does not set the field itself.
+        """
+        plan = super().standby()
+        return PhasePlan(
+            targets=plan.targets,
+            commands=(*plan.commands, Command("magnet_z", "standby", {})),
+            wait_s=plan.wait_s,
+        )
 
     def _axis_readback(self) -> float:
         """Read the current field from ``magnet_z``."""

@@ -440,14 +440,15 @@ def test_measure_stores_snapshot(procedure, tmp_path):
 # ── standby() ─────────────────────────────────────────────────────────────────
 
 def test_standby_returns_correct_structure(procedure, tmp_path):
-    """standby() returns a PhasePlan parking the magnet and disarming the meas VI."""
+    """standby() returns a PhasePlan commanding magnet standby and disarming the meas VI."""
     procedure.initiate()
     plan = procedure.standby()
 
     assert isinstance(plan, PhasePlan)
-    assert "magnet_z" in plan.targets
-    assert plan.targets["magnet_z"].target == pytest.approx(0.0)
+    assert plan.targets == {}
     assert any(c.vi_name == "keithley_delta_mode" for c in plan.commands)
+    magnet_cmd = next(c for c in plan.commands if c.vi_name == "magnet_z")
+    assert magnet_cmd.method == "standby"
     assert plan.wait_s == pytest.approx(0.0)
 
 

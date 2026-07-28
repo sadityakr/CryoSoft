@@ -91,6 +91,40 @@ def _make_op(station, tmp_path=None, *, person: str = "Alex Tech", **overrides) 
     return HeliumFillOperation(station, person=person, **config)
 
 
+# ── initiate() plan shape ───────────────────────────────────────────────────
+
+
+def test_initiate_leaves_already_standby_magnets_alone(station):
+    """A magnet already in standby gets no command; the level meter still switches to FAST."""
+    station.get_state()  # populate cached_state — both magnets start at 0 A, standby
+    op = _make_op(station)
+    plan = op.initiate()
+
+    assert plan.targets == {}
+    magnet_names = set(station.magnet_vi_names())
+    assert not any(c.vi_name in magnet_names for c in plan.commands)
+    level_cmd = next(c for c in plan.commands if c.vi_name == "level_meter")
+    assert level_cmd.method == "set_refresh_rate"
+    assert level_cmd.kwargs == {"mode": _REFRESH_FAST}
+
+
+def test_initiate_standbys_only_non_standby_magnets_not_field_targets(station):
+    """A magnet not already in standby gets commanded into its own standby(), never a field Target."""
+    station.magnet_z._driver._current = 5.0
+    station.magnet_z._driver._setpoint = 5.0
+    station.get_state()  # populate cached_state — magnet_z now "holding", magnet_y "standby"
+    op = _make_op(station)
+    plan = op.initiate()
+
+    assert plan.targets == {}
+    magnet_names = set(station.magnet_vi_names())
+    magnet_commands = {c.vi_name: c.method for c in plan.commands if c.vi_name in magnet_names}
+    assert magnet_commands == {"magnet_z": "standby"}
+    level_cmd = next(c for c in plan.commands if c.vi_name == "level_meter")
+    assert level_cmd.method == "set_refresh_rate"
+    assert level_cmd.kwargs == {"mode": _REFRESH_FAST}
+
+
 # ── Full happy-path run ────────────────────────────────────────────────────
 
 
