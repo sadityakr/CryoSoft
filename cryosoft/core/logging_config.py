@@ -74,6 +74,16 @@ def _add_jsonl_handler(
     (``propagate=False``) and idempotency-guarded so repeated
     ``setup_logging()`` calls never duplicate handlers.
 
+    The idempotency guard asks whether *this* stream's handler is already
+    installed, not whether the logger has any handler at all. The weaker
+    question is a proxy that a foreign handler satisfies: anything that
+    attaches to one of these loggers first (a test harness capturing logs, an
+    embedding application, a debugger) would make this function conclude it
+    had already run and silently skip installing the writer, leaving the JSONL
+    file empty while the app appears healthy. These streams are the input to
+    the operational-status and trend-history readers, so that failure surfaces
+    only much later, as missing data.
+
     Args:
         name: Logger name, e.g. ``"cryosoft.status"``.
         path: Full path to the JSONL file this logger writes.
@@ -84,7 +94,11 @@ def _add_jsonl_handler(
     logger = logging.getLogger(name)
     logger.setLevel(logging.INFO)
     logger.propagate = False
-    if not logger.handlers:
+    already_installed = any(
+        isinstance(existing, logging.handlers.TimedRotatingFileHandler)
+        for existing in logger.handlers
+    )
+    if not already_installed:
         handler = logging.handlers.TimedRotatingFileHandler(
             path, when=when, backupCount=backup_count, encoding="utf-8", utc=True
         )

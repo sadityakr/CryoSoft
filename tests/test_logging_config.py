@@ -170,6 +170,28 @@ def _fresh_jsonl_loggers():
     _clear_jsonl_loggers()
 
 
+def _jsonl_handlers(name: str) -> list[logging.handlers.TimedRotatingFileHandler]:
+    """Return only the stream handlers ``setup_logging()`` installed on ``name``.
+
+    The full ``logger.handlers`` list is not CryoSoft's alone: pytest attaches
+    its own capture handlers to exactly these four loggers, precisely because
+    they set ``propagate=False`` and would otherwise be invisible to ``caplog``.
+    Asserting on that list pins the test runner's internals rather than the
+    behaviour under test, and breaks whenever the runner changes them.
+
+    Args:
+        name: Logger name, e.g. ``"cryosoft.status"``.
+
+    Returns:
+        The logger's timed-rotating file handlers, in attachment order.
+    """
+    return [
+        handler
+        for handler in logging.getLogger(name).handlers
+        if isinstance(handler, logging.handlers.TimedRotatingFileHandler)
+    ]
+
+
 def test_jsonl_handlers_are_timed_rotating_with_expected_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _fresh_jsonl_loggers: None
 ) -> None:
@@ -185,9 +207,9 @@ def test_jsonl_handlers_are_timed_rotating_with_expected_config(
 
     for name, (when, backup_count) in expected.items():
         logger = logging.getLogger(name)
-        assert len(logger.handlers) == 1
-        handler = logger.handlers[0]
-        assert isinstance(handler, logging.handlers.TimedRotatingFileHandler)
+        handlers = _jsonl_handlers(name)
+        assert len(handlers) == 1
+        handler = handlers[0]
         assert handler.utc is True
         assert handler.backupCount == backup_count
         assert handler.when.lower() == when.lower() or (
@@ -210,8 +232,9 @@ def test_jsonl_handlers_write_expected_filenames(
         "cryosoft.trend_hourly": "trend_history_hourly.jsonl",
     }
     for name, filename in expected_files.items():
-        handler = logging.getLogger(name).handlers[0]
-        assert Path(handler.baseFilename).name == filename
+        handlers = _jsonl_handlers(name)
+        assert len(handlers) == 1
+        assert Path(handlers[0].baseFilename).name == filename
 
 
 def test_setup_logging_twice_does_not_duplicate_jsonl_handlers(
@@ -222,4 +245,24 @@ def test_setup_logging_twice_does_not_duplicate_jsonl_handlers(
     logging_config.setup_logging(log_dir=log_dir)
 
     for name in _JSONL_LOGGER_NAMES:
-        assert len(logging.getLogger(name).handlers) == 1
+        assert len(_jsonl_handlers(name)) == 1
+
+
+def test_foreign_handler_does_not_suppress_the_jsonl_writer(
+    tmp_path: Path, _fresh_jsonl_loggers: None
+) -> None:
+    """A handler attached by something else must not disable CryoSoft's stream.
+
+    The idempotency guard asks whether this stream's own writer is installed,
+    so an unrelated handler no longer makes setup_logging() conclude it has
+    already run and skip the writer — which would leave status.jsonl empty
+    while the application looked healthy.
+    """
+    foreign = logging.NullHandler()
+    logging.getLogger("cryosoft.status").addHandler(foreign)
+
+    logging_config.setup_logging(log_dir=tmp_path / "logs")
+
+    assert len(_jsonl_handlers("cryosoft.status")) == 1
+    # The foreign handler is left alone, not evicted.
+    assert foreign in logging.getLogger("cryosoft.status").handlers
