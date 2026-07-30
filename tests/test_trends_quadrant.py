@@ -56,23 +56,30 @@ def station():
 # ── Successful rehydration ───────────────────────────────────────────────────
 
 def test_rehydrates_history_from_raw_tier(qtbot, station, tmp_path):
-    """Constructing with a raw-tier JSONL present replays its records into history."""
+    """Constructing with a raw-tier JSONL present replays its records into history.
+
+    The stored key is a pre-rename magnet channel, so this also pins the
+    rehydration-time key migration: an old name on disk lands in history under
+    the current name, and old trend files stay readable after a channel rename.
+    """
     now = time.time()
-    key = "magnet_z_get_field"
+    stored_key = "magnet_z_get_field"
+    current_key = "magnet_z_magnet_field_T"
     _write_jsonl(
         tmp_path / "trend_history_raw.jsonl",
         [
-            _raw_record(now - 20, {key: 1.0}),
-            _raw_record(now - 10, {key: 1.5}),
-            _raw_record(now, {key: 2.0}),
+            _raw_record(now - 20, {stored_key: 1.0}),
+            _raw_record(now - 10, {stored_key: 1.5}),
+            _raw_record(now, {stored_key: 2.0}),
         ],
     )
 
     quadrant = TrendsQuadrant(station, log_dir=tmp_path)
     qtbot.addWidget(quadrant)
 
-    assert key in quadrant.history.keys()
-    times, values = quadrant.history.series(key)
+    assert current_key in quadrant.history.keys()
+    assert stored_key not in quadrant.history.keys()
+    times, values = quadrant.history.series(current_key)
     assert values == [1.0, 1.5, 2.0]
     assert times == [now - 20, now - 10, now]
 

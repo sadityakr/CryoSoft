@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import logging
 import logging.handlers
+import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -31,6 +33,30 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("LOCALAPPDATA", raising=False)
 
 
+def _pretend_platform(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    """Make ``log_directory()`` take the ``name`` branch on any host OS.
+
+    Setting the real ``os.name`` attribute is a *global* change, and pathlib
+    reads it to pick a concrete flavour when a ``Path`` is constructed. A test
+    that patches it to ``"nt"`` therefore makes pathlib attempt a
+    ``WindowsPath`` on Linux (``NotImplementedError``), and one that patches it
+    to ``"posix"`` makes pathlib attempt a ``PosixPath`` on Windows — in both
+    cases the resolver blows up before the branch under test is reached.
+
+    Rebinding only this module's ``os`` reference leaves the real ``os.name``
+    intact for pathlib. The stub carries the two attributes ``log_directory()``
+    actually uses, and ``environ`` is the live mapping so ``monkeypatch.setenv``
+    keeps working through it.
+
+    Args:
+        monkeypatch: The active pytest monkeypatch fixture.
+        name: The ``os.name`` value to present, ``"nt"`` or ``"posix"``.
+    """
+    monkeypatch.setattr(
+        logging_config, "os", SimpleNamespace(name=name, environ=os.environ)
+    )
+
+
 def test_log_directory_honours_explicit_env_var(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -42,7 +68,7 @@ def test_log_directory_empty_env_var_is_treated_as_unset(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("CRYOSOFT_LOG_DIR", "")
-    monkeypatch.setattr(logging_config.os, "name", "nt")
+    _pretend_platform(monkeypatch, "nt")
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "AppData" / "Local"))
     result = logging_config.log_directory()
     assert result == tmp_path / "AppData" / "Local" / "CryoSoft" / "logs"
@@ -51,7 +77,7 @@ def test_log_directory_empty_env_var_is_treated_as_unset(
 def test_log_directory_windows_uses_localappdata(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(logging_config.os, "name", "nt")
+    _pretend_platform(monkeypatch, "nt")
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "AppData" / "Local"))
     result = logging_config.log_directory()
     assert result == tmp_path / "AppData" / "Local" / "CryoSoft" / "logs"
@@ -60,7 +86,7 @@ def test_log_directory_windows_uses_localappdata(
 def test_log_directory_windows_without_localappdata_falls_back_to_packaged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(logging_config.os, "name", "nt")
+    _pretend_platform(monkeypatch, "nt")
     monkeypatch.delenv("LOCALAPPDATA", raising=False)
     result = logging_config.log_directory()
     assert result == Path(logging_config.__file__).parent.parent / "logs"
@@ -69,16 +95,11 @@ def test_log_directory_windows_without_localappdata_falls_back_to_packaged(
 def test_log_directory_posix_uses_xdg_style_state_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Path.home() is stubbed to a plain, already-constructed Path object
-    # (built under the real, unpatched os.name) rather than letting
-    # log_directory() call the real Path.home(): on this Windows test
-    # machine, pathlib's home() dispatches on os.name at construction time
-    # and raises UnsupportedOperation if os.name has been monkeypatched to
-    # "posix". Dividing an existing Path with "/" does not re-dispatch on
-    # os.name, so this isolates the branch under test without that crash.
+    # Path.home() is stubbed so the expected value is deterministic rather
+    # than whatever the host's real home directory happens to be.
     fake_home = tmp_path / "home" / "fakeuser"
     monkeypatch.setattr(logging_config.Path, "home", staticmethod(lambda: fake_home))
-    monkeypatch.setattr(logging_config.os, "name", "posix")
+    _pretend_platform(monkeypatch, "posix")
     result = logging_config.log_directory()
     assert result == fake_home / ".local" / "state" / "cryosoft" / "logs"
 
