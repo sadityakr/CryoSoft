@@ -8,7 +8,12 @@ version = "0.1.0"
 description = "Instrument-agnostic cryostat operating system"
 requires-python = ">=3.11"
 dependencies = [
-    "PyQt6>=6.5",
+    # Pinned, not a floor. PyQt6 6.11 segfaults the GUI suite on Linux/Python
+    # 3.13 (SIGSEGV inside QtWidgets during teardown) and is the version the
+    # README warns about for the Anaconda DLL conflict on Windows. 6.7.1 is the
+    # version the setups actually run. Raise this deliberately, with a full
+    # `make check` on every target platform, never by letting CI float.
+    "PyQt6==6.7.1",
     "pyqtgraph>=0.13",
     "qtawesome>=1.3",
     "ruamel.yaml>=0.18",
