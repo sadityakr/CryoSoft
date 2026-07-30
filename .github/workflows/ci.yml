@@ -2,8 +2,9 @@
 #
 # All check logic lives in the Makefile (single source of truth). This file
 # only prepares a Python + headless-Qt environment and calls the make targets.
-# The planned GitLab migration reuses the same targets: see .gitlab-ci.yml,
-# which is already in the repo and kept in step with this file.
+# .gitlab-ci.yml is the same wrapper for GitLab and is kept in step with this
+# file: the Python version below must match the image tag there, so a check
+# never passes on one host and fails on the other for environment reasons.
 
 name: CI
 
@@ -22,7 +23,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.13"
           cache: pip
 
       - name: Install Qt system libraries (headless)

@@ -1,10 +1,12 @@
-# CryoSoft CI for GitLab — ready for the planned migration from GitHub.
+# CryoSoft CI for GitLab.
 #
-# Inert while the repo is hosted on GitHub. Mirrors .github/workflows/ci.yml:
-# both are thin wrappers that call the same Makefile targets, so checks added
-# to the Makefile apply to both CI systems without editing either file.
+# Mirrors .github/workflows/ci.yml: both are thin wrappers that call the same
+# Makefile targets, so checks added to the Makefile apply to both CI systems
+# without editing either file. The image tag below must match the
+# python-version there — a version split between the two hosts (or between CI
+# and a developer machine) hides failures that only one of them can see.
 
-image: python:3.11
+image: python:3.13
 
 variables:
   QT_QPA_PLATFORM: "offscreen"
