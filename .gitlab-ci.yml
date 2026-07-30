@@ -6,7 +6,7 @@
 # python-version there — a version split between the two hosts (or between CI
 # and a developer machine) hides failures that only one of them can see.
 
-image: python:3.13
+image: python:3.12
 
 variables:
   QT_QPA_PLATFORM: "offscreen"
