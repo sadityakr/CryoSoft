@@ -1,0 +1,2 @@
+Low helium still gives an warning "Acknowledge emergency for manual recovery". However, helium low is no longer an emergency. 
+Now the instruments state is handedy by condition and there is no way to override the safty state for any action. 
