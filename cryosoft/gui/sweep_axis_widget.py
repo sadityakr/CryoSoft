@@ -1,34 +1,3 @@
-# ---
-# description: |
-#   SweepAxisWidget: auto-generated sweep-shape editor for one Procedure's
-#   declared SweepAxis. Renders a mode selector (Linear / Segments / CSV)
-#   driving a QStackedWidget of the matching sub-form, plus a hysteresis
-#   checkbox. This is the one piece of GUI code needed to give every
-#   SweepAxis-declaring Procedure the full sweep_builder feature set (linear
-#   range, piecewise segments for a fine subfield, custom CSV, hysteresis) —
-#   a new Procedure never needs its own GUI code, only a sweep_axis
-#   declaration in core/procedure.py.
-# entry_point: Not run directly. Instantiated by ProcedureWindow.
-# dependencies:
-#   - PyQt6 >= 6.5
-#   - cryosoft.core.sweep_builder (SweepAxis)
-# input: |
-#   A SweepAxis instance at construction. No other coupling to a Procedure
-#   class or Station.
-# process: |
-#   The mode QComboBox switches the QStackedWidget page. The Segments page is
-#   a 2-column breakpoint table (Value, Step to next): row i's value and row
-#   i+1's value become one SweepSegment's start/end, and row i's step is that
-#   segment's step, so a contiguous piecewise sweep never needs an endpoint
-#   re-typed. get_params() reads whichever page is active (plus the
-#   always-visible hysteresis checkbox) and returns a dict of
-#   {axis.key}_-prefixed values matching sweep_builder.sweep_axis_param_specs();
-#   ProcedureWindow merges this directly into the collected parameter dict.
-# output: |
-#   get_params() -> dict[str, Any]; raises ValueError (with a user-facing
-#   message) if the active mode's own inputs are missing or unparseable.
-# ---
-
 """SweepAxisWidget — mode-selector sweep-shape editor for a SweepAxis."""
 
 from __future__ import annotations

@@ -1,15 +1,3 @@
-# ---
-# description: |
-#   Unit tests for cryosoft.core.plan — the typed vocabulary of frozen
-#   dataclasses (Target, Command, PhasePlan, StepPlan, ParamSpec, ParamGroup,
-#   DataSchema). Covers construction happy paths and defaults, frozen-ness,
-#   every eager validation rule (each asserting the error names the offending
-#   field), DataSchema's loop_shape / validate behaviours (measurement columns
-#   carry a real (n_loop1, n_loop2[, length]) axis), and defensive copying of
-#   dict fields.
-# last_updated: 2026-07-22
-# ---
-
 import dataclasses
 
 import pytest

@@ -1,26 +1,3 @@
-# ---
-# description: |
-#   NotificationBanner: a hidden-by-default inline strip that shows non-modal
-#   warning/error notifications at the top of a window. Replaces the modal
-#   QMessageBox storms that used to stack when the Orchestrator emitted
-#   error_occurred / action_blocked repeatedly. A repeated identical message
-#   updates a visible counter instead of opening another dialog.
-# entry_point: Not run directly. Instantiated by MonitorWindow and ProcedureWindow.
-# dependencies:
-#   - PyQt6 >= 6.5
-# input: |
-#   show_message(message, severity) calls from window signal handlers.
-#   severity is "warning" or "error".
-# process: |
-#   show_message() sets the message text, bumps a repeat counter when the same
-#   message arrives while the banner is visible, flips the QSS `severity`
-#   property (repolish so the property selector re-evaluates), and shows itself.
-#   The dismiss button hides the banner and resets its state.
-# output: |
-#   A QWidget strip embedded in a window layout; visible only while a
-#   notification is active.
-# ---
-
 """NotificationBanner — inline non-modal warning/error strip."""
 
 from __future__ import annotations

@@ -1,16 +1,3 @@
-# ---
-# description: |
-#   End-to-end test of the CryoSoft port of the old field_voltage_logic.py
-#   script: FieldSweep run through a full Orchestrator loop against
-#   configs/sim_real_cryostat — the simulated digital twin of
-#   a-sample-real-cryostat (Mercury iPS-M magnet + Keithley 6221/2182A delta
-#   mode + ILM 200 helium level). Exercises the switch-heater-aware
-#   persistent=False sweep ramp, a piecewise (fine-subfield) + hysteresis
-#   sweep built via core.sweep_builder, and verifies the HDF5 output.
-# entry_point: pytest tests/test_field_voltage_procedure.py -v
-# last_updated: 2026-07-12
-# ---
-
 import h5py
 import pytest
 

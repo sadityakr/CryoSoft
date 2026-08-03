@@ -1,23 +1,3 @@
-# ---
-# description: |
-#   Simulated driver for the Lakeshore 335 temperature controller.
-#   Exposes the same public API as Lakeshore335, including PID and manual
-#   output control modes. Pure Python simulation.
-# entry_point: Not run directly; imported by the Virtual Instruments layer.
-# dependencies: []
-# input: |
-#   Instantiated with a VISA resource string (ignored).
-# process: |
-#   Models temperature readings and manual/auto PID heating states. The
-#   heater range (OFF/LOW/MEDIUM/HIGH) defaults to OFF, matching the real
-#   instrument's power-up default, and gates heater output to 0% whenever
-#   it is OFF regardless of heater mode or setpoint.
-# output: |
-#   Returns float temperature, setpoint, heater output, heater range, and
-#   PID values.
-# last_updated: 2026-07-25
-# ---
-
 """Simulated Lakeshore 335 temperature controller driver."""
 
 from __future__ import annotations

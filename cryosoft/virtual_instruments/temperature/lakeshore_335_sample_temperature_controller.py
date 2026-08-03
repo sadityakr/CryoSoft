@@ -1,37 +1,3 @@
-# ---
-# description: |
-#   Lakeshore335SampleTemperatureControllerVI: extends
-#   SampleTemperatureControllerVI with calibration-curve selection over the
-#   Lakeshore 335's INCRV command, and with heater range selection over the
-#   RANGE command. Both are specific to the Lakeshore 335 driver (and its sim
-#   twin) — other sample-controller drivers (e.g. the Oxford ITC503) have no
-#   curve or heater-range concept, so both live in this driver-specific
-#   subclass rather than the shared base.
-# entry_point: Not run directly; instantiated by Station factory.
-# dependencies:
-#   - cryosoft.virtual_instruments.temperature.sample_temperature_controller
-#     (SampleTemperatureControllerVI)
-#   - cryosoft.core.decorators (monitored, control)
-#   - cryosoft.core.plan (ParamSpec)
-# input: |
-#   drivers = {"main": <Lakeshore335 or SimLakeshore335 instance>}.
-#   Same init_params as SampleTemperatureControllerVI.
-# process: |
-#   All temperature ramp logic is inherited unchanged from
-#   SampleTemperatureControllerVI. Adds get/set for the calibration curve
-#   assigned to sensor input A (the input every inherited @monitored method
-#   already reads), forwarded to driver.get_sensor_curve() /
-#   driver.set_sensor_curve(). Adds get/set for the heater range — the
-#   instrument's power-up default is Off, so the heater delivers no power
-#   until this is set to Low/Medium/High regardless of heater_mode or
-#   setpoint — forwarded to driver.get_heater_range() / set_heater_range().
-# output: |
-#   All SampleTemperatureControllerVI outputs plus curve (int, dimensionless)
-#   and heater_range (str) via @monitored; set_curve and set_heater_range
-#   available as @control, both rendered as front-panel drop-downs.
-# last_updated: 2026-07-25
-# ---
-
 """Lakeshore335SampleTemperatureControllerVI — calibration curve and heater range."""
 
 from __future__ import annotations

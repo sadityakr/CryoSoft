@@ -1,21 +1,3 @@
-# ---
-# description: |
-#   Simulated driver for the Oxford Instruments ILM 200 cryogen level meter.
-#   Models slowly drifting helium and nitrogen levels using real wall-clock time.
-#   No VISA dependency — pure Python simulation.
-# entry_point: Not run directly; imported by Virtual Instruments layer.
-# dependencies: []
-# input: |
-#   Instantiated with a VISA resource string (ignored). Exposes methods to
-#   read helium/nitrogen levels and control the refresh rate mode.
-# process: |
-#   Helium drifts down at a configurable rate (%/min). A _force_helium_level
-#   override is available for testing low-helium conditions.
-# output: |
-#   Returns float level percentages (0-100) and int refresh rate via public API.
-# last_updated: 2026-04-19
-# ---
-
 """Simulated Oxford ILM 200 Cryogen Level Meter driver."""
 
 import time

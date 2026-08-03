@@ -1,11 +1,3 @@
-# ---
-# description: |
-#   Unit tests for cryosoft.core.gates.Gate — the tick-driven wait primitive
-#   behind procedure initiation/reading gates. Covers the four constructor
-#   shapes (no-op, action-only, check-only, action+check) and validation.
-# last_updated: 2026-07-17
-# ---
-
 import pytest
 
 from cryosoft.core.gates import Gate

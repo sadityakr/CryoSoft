@@ -1,32 +1,3 @@
-# ---
-# description: |
-#   open_experiment_dialog: modal dialogs for switching between existing L6
-#   session records (experiments) — currently just OpenExperimentDialog, the
-#   picker MonitorWindow's User menu "Load Session…" action opens. Mirrors
-#   UserPickerWidget's list-plus-accept pattern from experiment_dialogs.py:
-#   every stored experiment is listed via ExperimentManager.store, open ones
-#   selectable, closed ones shown grayed out with a "(closed)" suffix and
-#   disabled (item flags, never a stylesheet). The caller reads back the
-#   chosen experiment_id after accept() and drives the actual switch itself
-#   (MonitorWindow._switch_experiment) — this module never calls
-#   ExperimentManager mutators, same separation experiment_dialogs.py uses.
-# entry_point: Not run directly. Opened by cryosoft.gui.monitor_window.
-# dependencies:
-#   - PyQt6 >= 6.5
-#   - cryosoft.session.manager (ExperimentManager)
-#   - cryosoft.session.models (EXPERIMENT_STATUS_OPEN)
-# input: |
-#   An ExperimentManager, read once at construction via its store's
-#   list_experiments()/load() for each experiment's title/user/status/
-#   created date.
-# process: |
-#   A QListWidget populated once at construction; closed experiments have
-#   Qt.ItemFlag.ItemIsEnabled cleared (renders grayed out through the normal
-#   disabled-item palette — no setStyleSheet) and cannot be selected/accepted.
-# output: |
-#   selected_experiment_id() returns the chosen id after exec() accepts.
-# ---
-
 """open_experiment_dialog — dialogs for picking an existing session (L6 experiment)."""
 
 from __future__ import annotations

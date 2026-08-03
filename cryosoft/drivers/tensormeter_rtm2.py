@@ -1,38 +1,3 @@
-# ---
-# description: |
-#   Real driver for the Tensormeter RTM2 (Tensor Instruments / HZDR
-#   Innovation), an all-in-one resistance-tensor analyzer that replaces a
-#   lock-in + SMU + DMM + switch matrix for van-der-Pauw / Hall / AC
-#   transport measurements. Unlike every other driver in this repo, RTM2
-#   has no VISA/GPIB interface: it is a proprietary big-endian binary TCP
-#   protocol (vendor doc: "Tensormeter RTM2 TCP Commands", Oct 2023) served
-#   directly by the instrument's own firmware on port 6340. This driver is
-#   a thin, typed wrapper over the vendor's official `rtm2` Python package
-#   (github.com/hzdrinno/rtm2-python, Apache-2.0), not a reimplementation
-#   of the wire protocol.
-# entry_point: Not run directly; imported by the Virtual Instruments layer.
-# dependencies:
-#   - rtm2 >= 1.2.3 (vendor's official RTM2 client library)
-# input: |
-#   Instantiated with "host" or "host:port" (port defaults to 6340, the
-#   documented default). set_analysis_mode()/set_switch_states() must be
-#   configured before read_new_data()/read_all_data() return meaningful
-#   Res A / Res B tensor columns — see the class docstring.
-# process: |
-#   Every setter round-trips through the RTM2's own echo: send the command,
-#   wait for the server's confirmation packet (which may report a
-#   range-coerced value, never assume the value sent is the value applied),
-#   and return the confirmed value. Every getter instead reads the
-#   locally-cached last-known value (the RTM2 protocol has no "query
-#   without side effect" — see _get_cached()), refreshing the cache with a
-#   `gass` (Get-All-Server-Settings) round trip on first use.
-# output: |
-#   Plain float/int/str/bool from setters/getters; read_new_data()/
-#   read_all_data() return list[dict[str, float]], one dict per data row,
-#   keyed by the vendor doc's documented column names (TCP Commands §3.1).
-# last_updated: 2026-07-23
-# ---
-
 """Real Tensormeter RTM2 resistance-tensor analyzer driver."""
 
 from __future__ import annotations

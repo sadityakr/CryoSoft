@@ -1,10 +1,3 @@
-# ---
-# description: |
-#   Complete test suite for Layer 1 Virtual Instruments.
-# entry_point: pytest tests/test_l1_virtual_instruments.py -v
-# last_updated: 2026-04-06
-# ---
-
 import pytest
 import time
 from cryosoft.core.exceptions import CryoSoftCommunicationError

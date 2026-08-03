@@ -1,29 +1,3 @@
-# ---
-# description: |
-#   Reader and summarizer for the runtime operational-status log
-#   (status.jsonl, in the log directory resolved by
-#   cryosoft.core.paths.log_directory(), written by the Orchestrator
-#   each tick). Turns the raw JSONL into a compact digest — current state,
-#   per-instrument ramp progress and trend, watchdog alerts — and a
-#   plain-English rendering with a triage note per fault code. Consumed by
-#   the `troubleshoot status` CLI and by the troubleshoot-runtime skill.
-# entry_point: Not run directly; used by cryosoft.troubleshoot.cli and agents.
-# dependencies:
-#   - json, pathlib (stdlib only)
-# input: |
-#   read_records() takes the path to status.jsonl and an optional window size.
-# process: |
-#   Parses the trailing records, folds them into a digest (latest record is
-#   authoritative; earlier ones give a per-VI gap trend), and renders text.
-# output: |
-#   A digest dict and/or a human-readable string. No hardware, no imports from
-#   cryosoft.core — it depends only on the log's JSON schema, so the troubleshoot
-#   package stays decoupled from the live app (contract C10). The digest's
-#   ``conditions`` list (the latest record's System-Condition standard
-#   registry, or ``[]`` for older logs written before that field existed) is
-#   carried through additively — see cryosoft.core.conditions.Condition.
-# ---
-
 """Read and explain the runtime operational-status log.
 
 This is the runtime sibling of ``troubleshoot.engine``'s setup-time checks: it

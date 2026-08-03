@@ -1,23 +1,3 @@
-# ---
-# description: |
-#   SwitchHeater: wall-clock state object for a persistent-magnet switch heater.
-#   Models the thermal settling times (warmup after energising, cooldown after
-#   de-energising) in SECONDS, independent of the Orchestrator tick rate, and
-#   answers "is it ready to use yet?". The physical on/off lives in the driver;
-#   this object tracks the on/off state it was told about plus the timestamp of
-#   the last transition, so an already-warm heater is not re-warmed.
-# entry_point: Not run directly; owned by SuperconductingMagnetPersistentVI.
-# dependencies:
-#   - time (wall-clock; injectable for tests)
-# input: |
-#   warmup_s / cooldown_s (seconds), optional clock callable.
-# process: |
-#   turn_on()/turn_off() stamp the transition time; is_ready()/is_cold() compare
-#   elapsed wall-clock time against warmup_s/cooldown_s.
-# output: |
-#   Boolean readiness (is_ready, is_cold) and seconds_until_ready() for display.
-# ---
-
 """SwitchHeater — wall-clock readiness state object for a switch heater."""
 
 from __future__ import annotations

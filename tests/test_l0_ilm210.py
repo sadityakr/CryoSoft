@@ -1,12 +1,3 @@
-# ---
-# description: |
-#   Unit tests for the SimOxfordILM210 cryogen level meter driver.
-#   Covers basic properties, levels, refresh rates, drift simulation,
-#   and simulated error injection.
-# entry_point: pytest tests/test_l0_ilm210.py -v
-# last_updated: 2026-07-16
-# ---
-
 """Unit tests for SimOxfordILM210 driver."""
 
 from __future__ import annotations

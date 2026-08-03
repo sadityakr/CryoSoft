@@ -1,11 +1,3 @@
-# ---
-# description: |
-#   Unit tests for Layer 3 (Orchestrator).
-#   Verifies state machine transitions, wait timers, procedures spanning multiple ticks,
-#   emergency abort, action blocking, and queue logic.
-# last_updated: 2026-07-12
-# ---
-
 import json
 import logging
 

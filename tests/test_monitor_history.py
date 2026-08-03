@@ -1,15 +1,3 @@
-# ---
-# description: |
-#   Unit tests for MonitorHistory, the Qt-free ring-buffer used by the
-#   Monitor window's trend plots. Covers flattening (matches
-#   Station.last_state_flat()'s convention), ring behavior (maxlen
-#   eviction), window filtering, and unknown/late-arriving keys. Also covers
-#   record_flat(), the replay entry point for disk-persisted trend history,
-#   including its interleaving with record() and shared filtering/eviction
-#   behaviour.
-# last_updated: 2026-07-25
-# ---
-
 from cryosoft.gui.monitor_history import MonitorHistory
 
 

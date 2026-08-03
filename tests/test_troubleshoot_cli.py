@@ -1,13 +1,3 @@
-# ---
-# description: |
-#   Behavior tests for the troubleshoot CLI: subcommand grammar, --json output,
-#   exit codes (0 all-OK / 1 any-fault), config resolution by name and path,
-#   the read/write permission split at the CLI surface, and the JSONL
-#   transcript. All in-process via cli.main(argv); the VISA bus and transcript
-#   directory are monkeypatched.
-# last_updated: 2026-07-12
-# ---
-
 """Troubleshoot CLI tests — the command grammar and exit codes are API for skills."""
 
 from __future__ import annotations

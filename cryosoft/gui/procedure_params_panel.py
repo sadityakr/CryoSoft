@@ -1,39 +1,3 @@
-# ---
-# description: |
-#   ProcedureParamsPanel: the parameter quadrant of ProcedureWindow — the
-#   procedure selector row (with Add to Queue / Run Now buttons), the
-#   filename-prefix field, and the auto-generated parameter form. Renders a
-#   procedure's ParamGroups (BaseProcedure.get_param_groups()) as side-by-side
-#   columns through cryosoft.gui.param_form, composes the Sweep column
-#   (SweepAxisWidget + flat sweep fields), the single composite Measurement
-#   column (method drop-down + selected VI's sub-form), and the Reading loop
-#   column (up to two generic loop slots); structural params trigger a keyed
-#   diff re-render that rebuilds only the group boxes that changed. Owns the
-#   per-procedure raw-text parameter cache that backs session persistence.
-#   Extracted from procedure_window.py.
-# entry_point: Not run directly. Hosted as ProcedureWindow's top-left quadrant.
-# dependencies:
-#   - PyQt6 >= 6.5
-#   - cryosoft.core.station (Station)
-#   - cryosoft.core.plan (ParamGroup, ParamSpec)
-#   - cryosoft.core.procedure (BaseProcedure)
-#   - cryosoft.gui.param_form (ParamSpec -> Qt widget mapping)
-#   - cryosoft.gui.sweep_axis_widget (SweepAxisWidget)
-# input: |
-#   Station instance and the discovered procedure classes.
-# process: |
-#   Selecting a procedure rebuilds the form (caching the outgoing procedure's
-#   typed values and re-applying the incoming one's); a structural parameter
-#   change re-derives the groups and swaps only the affected boxes. The
-#   ``structure_changed`` signal fires wherever the hosting window must
-#   refresh its plot axis selectors, including the reading-loop selectors.
-# output: |
-#   collect_values() returns validated parameter values + the file prefix;
-#   export/restore methods round-trip the parameter cache through a session.
-#   structure_changed also drives the hosting window's reading-loop plot
-#   selectors, since a loop slot's pick checkboxes are structural params.
-# ---
-
 """ProcedureParamsPanel — procedure selector, parameter form, and param cache."""
 
 from __future__ import annotations

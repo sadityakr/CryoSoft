@@ -1,10 +1,3 @@
-# ---
-# description: |
-#   Integration tests for the Station class and build_station factory using the
-#   simulated cryostat YAML configuration.
-# last_updated: 2026-07-12
-# ---
-
 import logging
 from pathlib import Path
 from typing import ClassVar

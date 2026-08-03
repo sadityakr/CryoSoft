@@ -1,33 +1,3 @@
-# ---
-# description: |
-#   SuperconductingMagnetVI: behavior-based Virtual Instrument for any
-#   superconducting magnet power supply without a persistent-mode switch heater.
-#   Works internally in amperes; user-facing units are tesla.
-#   Implements a status-driven ramp generator that waits for the driver to
-#   report HOLD before sending the next intermediate setpoint.
-# entry_point: Not run directly; instantiated by Station factory.
-# dependencies:
-#   - cryosoft.virtual_instruments.base (MagnetBase)
-#   - cryosoft.virtual_instruments.rampable (RampableVI)
-#   - cryosoft.core.decorators (monitored, control)
-#   - cryosoft.core.exceptions (CryoSoftSafetyError)
-# input: |
-#   drivers = {"main": <PSU driver instance>}
-#   init_params keys: amperes_per_tesla, default_ramp_rate (A/min),
-#   ramp_segments (list of {max_current_A: float, rate_A_per_min: float}
-#   sorted ascending), max_current (A), min_current (A).
-# process: |
-#   start_ramp converts tesla -> amperes, clamps to safety limits, then creates
-#   a status-driven generator. advance_ramp() drives the generator each tick.
-#   ramp_status() inspects generator exhaustion and hardware status.
-# output: |
-#   Logged psu_current (A), magnet_current (A), magnet_field_T (T), magnet_status
-#   (PSU status string) and magnet_state (logical state: standby/ramping/
-#   holding/quenched/clamped) via @monitored; set_field available as @control
-#   for manual GUI use.
-# last_updated: 2026-07-26
-# ---
-
 """SuperconductingMagnetVI — behavior-based VI for any SC magnet PSU (no switch heater)."""
 
 from __future__ import annotations

@@ -1,28 +1,3 @@
-# ---
-# description: |
-#   CryogenLevelMeterVI: behavior-based VI for any cryogen level meter.
-#   Standardizes the refresh rate to a three-mode contract: STANDBY (0),
-#   SLOW (1), FAST (2). Any real driver that maps its native modes to these
-#   three integers can back this VI. Implements a readings buffer for the
-#   helium_low() safety check to filter single-point dips.
-# entry_point: Not run directly; instantiated by Station factory.
-# dependencies:
-#   - cryosoft.virtual_instruments.base (LevelMeterBase)
-#   - cryosoft.core.decorators (monitored, control)
-# input: |
-#   drivers = {"main": <level meter driver instance>}
-#   init_params keys: helium_low_threshold (float, default 20.0),
-#   buffer_size (int, default 5).
-# process: |
-#   Each call to helium_level() appends to a circular buffer (deque).
-#   helium_low() returns True if the statistical mode of the buffer is below
-#   the threshold. Three-mode standard: 0=STANDBY, 1=SLOW, 2=FAST.
-# output: |
-#   Logged helium_level (%), nitrogen_level (%), get_refresh_rate (int)
-#   via @monitored; set_refresh_rate available as @control.
-# last_updated: 2026-04-19
-# ---
-
 """CryogenLevelMeterVI — behavior-based VI for any cryogen level meter."""
 
 from __future__ import annotations

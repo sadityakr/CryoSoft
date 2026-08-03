@@ -1,32 +1,3 @@
-# ---
-# description: |
-#   Real driver for the Keithley 6221 AC/DC current source.
-#   Implements DC source control and the full Keithley delta-mode SCPI sequence
-#   (configure, arm, start, acquire) ported from the working lab implementation
-#   in resources/old-drivers/Kiethley 6221/simple_delta_tk_logic.py.
-# entry_point: Not run directly; imported by Virtual Instruments layer.
-# dependencies:
-#   - pyvisa >= 1.13
-# input: |
-#   Instantiated with a VISA resource string (e.g. 'GPIB0::19::INSTR').
-#   configure_and_start_delta() must be called before acquire_delta_readings().
-#   DC set_current() can be used independently (e.g. during initiate/standby).
-# process: |
-#   Delta mode: forces the serial relay to known-good settings, verifies the
-#   2182A responds on it (:SOUR:DELT:NVPR?), enables the CALC1 stage that
-#   produces delta readings, programs 6221 + 2182A via serial relay, arms
-#   (:SOUR:DELT:ARM), initiates (:INIT:IMM), then polls :CALC1:DATA:FRES?
-#   for each reading.
-#   DC mode: direct :SOUR:CURR writes with OUTP ON/OFF.
-# output: |
-#   Returns float/bool state values and list[float] delta readings via public API.
-#   set_current() and stop_delta_mode() both reassert :SOUR:CURR:MODE FIX so
-#   the instrument recovers to plain DC mode regardless of what mode a prior
-#   measurement VI sharing this driver left it in (shared-instrument mode
-#   discipline).
-# last_updated: 2026-07-20
-# ---
-
 """Real Keithley 6221 AC/DC current source driver."""
 
 from __future__ import annotations

@@ -1,15 +1,3 @@
-# ---
-# description: |
-#   Behavior tests for the L6 Session Management layer (cryosoft/session/):
-#   model round-trips and envelope (de)serialisation, ExperimentStore /
-#   UserRoster disk behavior (atomicity, tolerance, lazy creation, active
-#   pointer), and the ExperimentManager lifecycle — experiment start/close,
-#   automatic run recording from real Orchestrator manifests, envelope
-#   installation, attendance, crash resume, and an end-to-end run whose
-#   RunRecord is cross-checked against the HDF5 file on disk.
-# last_updated: 2026-07-17
-# ---
-
 import json
 import shutil
 

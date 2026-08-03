@@ -1,34 +1,3 @@
-# ---
-# description: |
-#   app_settings: a one-function factory for the application's QSettings object,
-#   plus machine-level identity persisted through it — which config is active
-#   (config_active/set_config_active) and who is currently logged in
-#   (current_user_id/set_current_user_id). It exists purely as a test seam.
-#   Windows persist their geometry via QSettings("CryoSoft", "CryoSoft"),
-#   which on Windows is backed by the real registry
-#   (HKCU\Software\CryoSoft\CryoSoft). Routing every construction through this
-#   factory lets GUI tests monkeypatch it to point at a throwaway .ini file, so
-#   a pytest run never overwrites the user's real saved geometry.
-#   autosave_file_path(user_id) is the per-user form autosave (used only when no
-#   L6 experiment is open): with a logged-in user_id it resolves to that
-#   person's own file under sessions/, so switching users switches what's
-#   remembered. The fixed measurement root that L6 session/experiment folders
-#   live under is resolved by cryosoft.core.paths.measurement_root() instead
-#   (a machine-level, admin-set value, not GUI-editable through this module —
-#   see docs/plans/session-tier-and-terminology.md, "Root fixing").
-# entry_point: Not run directly. Called by MonitorWindow and ProcedureWindow.
-# dependencies:
-#   - PyQt6 >= 6.5
-# input: |
-#   None. get_settings() takes no arguments.
-# process: |
-#   get_settings() constructs and returns a QSettings scoped to the CryoSoft
-#   organisation/application.
-# output: |
-#   A QSettings instance. In production this is the native (registry) store;
-#   under test it is monkeypatched to an INI-format file.
-# ---
-
 """app_settings — QSettings factory used as a test seam.
 
 Dependency seam: a single indirection point (this factory) that tests

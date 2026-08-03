@@ -1,11 +1,3 @@
-# ---
-# description: |
-#   Regression tests for the CryoSoft diagnostic utilities used by .claude/skills.
-#   Verifies Oxford instrument discovery when generic *IDN? detection fails.
-# entry_point: pytest tests/test_diagnostic_utils.py -q
-# last_updated: 2026-07-16
-# ---
-
 from __future__ import annotations
 
 from pathlib import Path

@@ -1,13 +1,3 @@
-# ---
-# description: |
-#   Behavioural tests for SwitchMatrixVI (L1): route-table validation failures
-#   at construction, exclusive-mux select_route (verified via the sim driver's
-#   closed_channels()), settle-time honoured, get_state() fields (active_route /
-#   active_route_index), routes() order, open_all, and standby.
-# entry_point: pytest tests/test_l1_switch_vi.py -v
-# last_updated: 2026-07-13
-# ---
-
 """Tests for SwitchMatrixVI (L1)."""
 
 from __future__ import annotations

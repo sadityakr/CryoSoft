@@ -1,25 +1,3 @@
-# ---
-# description: |
-#   Shared QMainWindow geometry persistence helpers: restore a saved geometry
-#   from QSettings (rejecting one that landed off-screen), fall back to a
-#   centered fraction of the primary screen, and save geometry on close.
-#   Extracted from MonitorWindow/ProcedureWindow, which each carried an
-#   identical copy.
-# entry_point: Not run directly. Imported by the GUI windows.
-# dependencies:
-#   - PyQt6 >= 6.5
-#   - cryosoft.gui.app_settings (QSettings factory)
-# input: |
-#   A QMainWindow (or any QWidget window), a QSettings key string, and a
-#   screen-fraction float for the fallback size.
-# process: |
-#   restore_or_center() reads the saved geometry blob and applies it if it
-#   restores cleanly AND overlaps an attached screen; otherwise sizes the
-#   window to the given fraction of the primary screen and centers it.
-# output: |
-#   The window is moved/resized in place; save_geometry() writes the blob.
-# ---
-
 """Shared window-geometry persistence helpers for the GUI windows."""
 
 from __future__ import annotations

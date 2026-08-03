@@ -1,26 +1,3 @@
-# ---
-# description: |
-#   Simulated driver for the Oxford Instruments IPS 120-10 magnet power supply.
-#   Models current ramping behavior with configurable ramp rate and status
-#   transitions, plus physically-faithful switch-heater behavior: persistent
-#   mode is heater-derived (like the real Mercury iPS driver), the coil
-#   current freezes when the heater turns off, and energising the heater
-#   across a PSU/coil current mismatch QUENCHES the simulated magnet so a
-#   wrong ramp-command order fails in tests instead of on hardware.
-#   No VISA dependency — pure Python simulation using real wall-clock time.
-# entry_point: Not run directly; imported by Virtual Instruments layer.
-# dependencies: []
-# input: |
-#   Instantiated with a VISA resource string (ignored). Public methods control
-#   and query the simulated magnet current and status.
-# process: |
-#   Uses time.time() to advance the simulated current toward the setpoint at
-#   the configured ramp rate (A/min). Status transitions HOLD -> RAMPING -> HOLD.
-# output: |
-#   Returns float current/setpoint values and str status via public API.
-# last_updated: 2026-04-19
-# ---
-
 """Simulated Oxford IPS 120-10 Magnet Power Supply driver."""
 
 import time

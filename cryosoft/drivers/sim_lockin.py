@@ -1,30 +1,3 @@
-# ---
-# description: |
-#   Simulated driver for a generic phase-sensitive lock-in amplifier. Models
-#   an internal oscillator (reference source "INT") driving a nonlinear DUT,
-#   and a single demodulator that reports X/Y at whichever harmonic is
-#   currently selected — mirrors how a real single-demodulator lock-in
-#   (e.g. SRS SR830/860) must have its harmonic switched between reads to
-#   get both 1f and 2f. No specific real instrument's SCPI set is targeted
-#   yet; this is the base contract a real driver will be written against
-#   once a physical lock-in is connected and can be tested directly. No
-#   VISA dependency — pure Python simulation.
-# entry_point: Not run directly; imported by Virtual Instruments layer.
-# dependencies: []
-# input: |
-#   Instantiated with a VISA resource string (ignored). Public methods
-#   configure the internal oscillator, select the demodulated harmonic, and
-#   read back the X/Y components at that harmonic.
-# process: |
-#   X/Y at the fundamental (1f) scale linearly with the oscillator amplitude
-#   via a private response-ratio test hook; X/Y at the 2nd harmonic (2f)
-#   scale with the amplitude squared (models a nonlinear DUT response),
-#   both with small Gaussian noise.
-# output: |
-#   Returns float oscillator/demodulator settings and float X/Y readings (V).
-# last_updated: 2026-07-18
-# ---
-
 """Simulated phase-sensitive lock-in amplifier driver (base/internal-source only)."""
 
 import random

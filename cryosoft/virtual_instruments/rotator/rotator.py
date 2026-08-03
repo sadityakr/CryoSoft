@@ -1,30 +1,3 @@
-# ---
-# description: |
-#   RotatorVI: behavior-based Virtual Instrument for a motorized sample-rotation
-#   stage (uniaxial or 2D magnet sample orientation). Exposes exactly two
-#   controls/properties: sample-angle and rate-sample-angle. Implements a
-#   status-driven ramp generator that waits for the driver to report HOLD
-#   before sending the next setpoint, mirroring SuperconductingMagnetVI.
-# entry_point: Not run directly; instantiated by Station factory.
-# dependencies:
-#   - cryosoft.virtual_instruments.base (RotatorBase)
-#   - cryosoft.virtual_instruments.rampable (RampableVI)
-#   - cryosoft.core.decorators (monitored, control)
-# input: |
-#   drivers = {"main": <rotation stage driver instance>}
-#   init_params keys: default_rate_deg_per_min, min_angle_deg, max_angle_deg,
-#   max_rate_deg_per_min.
-# process: |
-#   start_ramp clamps to the setup's angle limit and creates a status-driven
-#   generator; advance_ramp() drives it each tick. ramp_status() inspects
-#   generator exhaustion and hardware status.
-# output: |
-#   Logged get_sample_angle (deg), get_rate_sample_angle (deg/min),
-#   rotator_status via @monitored; set_sample_angle / set_rate_sample_angle
-#   available as @control.
-# last_updated: 2026-07-18
-# ---
-
 """RotatorVI — behavior-based VI for a motorized sample-rotation stage."""
 
 from __future__ import annotations

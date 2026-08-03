@@ -1,27 +1,3 @@
-# ---
-# description: |
-#   Real driver for the Oxford Instruments Mercury iPS-M magnet power supply.
-#   Communicates via PyVISA (ASRL serial or TCPIP resource string) using the
-#   Oxford SCPI READ:/SET: hierarchy documented in MercuryiPS_driver.py.
-#   Exposes the same API as SimOxfordIPS120 for drop-in VI compatibility.
-# entry_point: Not run directly; imported by Virtual Instruments layer.
-# dependencies:
-#   - pyvisa >= 1.13
-# input: |
-#   Instantiated with a VISA resource string. Serial default: 'ASRL10::INSTR'.
-#   Ethernet alternative: 'TCPIP0::192.168.0.x::7020::SOCKET'.
-#   All SCPI commands target the GRPZ (Z-axis) power supply module.
-# process: |
-#   All state queries use READ:DEV:GRPZ:PSU:... and set commands use
-#   SET:DEV:GRPZ:PSU:...  set_current_setpoint() automatically issues
-#   ACTN:RTOS so the magnet starts ramping immediately, matching the
-#   auto-ramp behaviour of SimOxfordIPS120.set_current_setpoint().
-# output: |
-#   Returns float current/ramp-rate, str status ('HOLD'/'RAMPING'/'QUENCH'),
-#   str heater state ('ON'/'OFF'), and bool persistent-mode flag.
-# last_updated: 2026-04-19
-# ---
-
 """Real Oxford Mercury iPS-M magnet power supply driver."""
 
 from __future__ import annotations

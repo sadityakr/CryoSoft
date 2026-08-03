@@ -1,27 +1,3 @@
-# ---
-# description: |
-#   ConfigEditorWindow: an interactive editor for CryoSoft device/instrument
-#   configs. Lists shipped (read-only) and user configs, edits devices.yaml /
-#   monitor.yaml as text behind a hard validation gate (no invalid config can be
-#   saved), keeps a named version history per user config (browse + restore), and
-#   applies a config (which triggers a restart via an injected callback).
-# entry_point: Opened from MonitorWindow's Config menu ("Open Config Editor…").
-# dependencies:
-#   - PyQt6 >= 6.5
-#   - cryosoft.core.config_catalog (ConfigCatalog)
-#   - cryosoft.core.station (validate_config_dir)
-# input: |
-#   A ConfigCatalog, the active config path, and an apply_callback(path) that the
-#   host (MonitorWindow) uses to persist-and-restart.
-# process: |
-#   Editing a shipped config is disabled; "Duplicate to edit" forks it into a
-#   user copy. Save validates the editor text in a temp directory before writing
-#   a new version; Apply saves then calls apply_callback.
-# output: |
-#   New/updated user config files and version snapshots on disk; a restart
-#   request via apply_callback.
-# ---
-
 """ConfigEditorWindow — validated, versioned editing of instrument configs."""
 
 from __future__ import annotations

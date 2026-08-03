@@ -1,16 +1,3 @@
-# ---
-# description: |
-#   Behavior tests for cryosoft.core.tiered_trend_logger.TieredTrendLogger:
-#   raw-tier record shape ("t"/"s"/"v" nesting, "s" omission), the
-#   min_raw_interval_s throttle (raw writes skipped, aggregates still see
-#   every sample), bucket alignment including exact-boundary samples,
-#   min/max/mean/std/count arithmetic against hand-computed values, the
-#   std==0.0 regression guard for constant series and count==1, per-key
-#   count differing from bucket n, crash-mid-bucket producing no line,
-#   non-numeric/bool skipping, and independent 3-min/1-hour tier rollover.
-# last_updated: 2026-07-25
-# ---
-
 """Tests for TieredTrendLogger, the tiered trend-history write side."""
 
 from __future__ import annotations

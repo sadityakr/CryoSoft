@@ -1,26 +1,3 @@
-# ---
-# description: |
-#   Real driver for the Oxford Instruments ITC 503 temperature controller.
-#   Thin wrapper around pymeasure's ITC503 class.  Exposes the same API as
-#   SimOxfordITC503 so VTITemperatureControllerVI and SampleTemperatureControllerVI
-#   work without modification.
-# entry_point: Not run directly; imported by Virtual Instruments layer.
-# dependencies:
-#   - pymeasure >= 0.11
-#   - pyvisa >= 1.13
-# input: |
-#   Instantiated with a VISA resource string (e.g. 'GPIB0::24::INSTR').
-#   Sets control mode to Remote-Unlocked on init.
-# process: |
-#   Delegates all property access to pymeasure.instruments.oxfordinstruments.ITC503.
-#   get_needle_valve() / set_needle_valve() map to the ITC503 gas_flow property
-#   which controls the needle-valve / gas-flow analog output (0-99.9 %).
-# output: |
-#   Returns float temperature (K), setpoint (K), heater output (%), and
-#   needle-valve position (%) via public API.
-# last_updated: 2026-04-19
-# ---
-
 """Real Oxford ITC 503 temperature controller driver (pymeasure wrapper)."""
 
 from __future__ import annotations

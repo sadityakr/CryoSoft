@@ -1,32 +1,3 @@
-# ---
-# description: |
-#   Behavior tests for cryosoft.gui.operations_panel: panel presence gated on
-#   cryogenics/operations config, on-screen geometry when selected in
-#   MonitorWindow's bottom-right quadrant, generic OperationCard
-#   construction (helium fill + sample load + sample unload), the readiness
-#   checklist flipping on a snapshot change, the start/finish/abort buttons
-#   toggling on run_started/run_finished, the operator-confirmation checkbox
-#   calling confirm_operation(), the ready banner appearing only once a run
-#   is done and every condition holds, a cryogenics-less/operations-only
-#   panel building one card per declared operations: block, and the
-#   immediate-finish contract: Finish click -> instant disabled
-#   "Finishing…" state, the live operation_status label (only for the
-#   currently-running card), the unmet-postcondition warning badge on
-#   run_finished, and Abort (hidden while idle, shown while running,
-#   confirms via QMessageBox before calling abort_procedure()). Also
-#   pre_run_toggles: a persistent, always-visible/editable checkbox (unlike
-#   an operator confirmation) checked by default, read once at Start-click
-#   time and passed to the factory as an extra bool keyword — verified both
-#   ways (checked/unchecked) construct the operation with the matching
-#   get_params() value, and that an operation with no declared toggles
-#   (HeliumFillOperation) gets zero checkboxes. Most generic-card tests use
-#   SampleLoadOperation as a representative hold-phase, confirmation- and
-#   toggle-bearing operation — this file tests the CARD mechanics, not
-#   sample-load-specific behavior (see test_sample_access.py for that), so
-#   any one such operation exercises the same code paths.
-# last_updated: 2026-07-27
-# ---
-
 """Behavior tests for OperationsPanel / OperationCard / OperatorDialog."""
 
 from unittest.mock import MagicMock

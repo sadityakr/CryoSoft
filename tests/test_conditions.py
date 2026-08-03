@@ -1,14 +1,3 @@
-# ---
-# description: |
-#   Unit tests for the System-Condition standard's pure policy core
-#   (cryosoft.core.conditions): Condition construction/validation, the
-#   deterministic decide() verdict function, and the envelope_conditions()
-#   adapter. No sims, no Qt, no Station — pure value objects and pure
-#   functions only.
-# entry_point: pytest tests/test_conditions.py -v
-# last_updated: 2026-07-25
-# ---
-
 """Tests for the System-Condition standard's pure policy core."""
 
 from __future__ import annotations

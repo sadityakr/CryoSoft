@@ -1,22 +1,3 @@
-# ---
-# description: |
-#   Simulated driver for the Oxford Instruments ITC 503 temperature controller.
-#   Models exponential thermal settling toward a setpoint with a configurable
-#   time constant. No VISA dependency — pure Python simulation.
-# entry_point: Not run directly; imported by Virtual Instruments layer.
-# dependencies: []
-# input: |
-#   Instantiated with a VISA resource string (ignored). Public methods set/query
-#   the temperature setpoint and heater output in the simulation.
-# process: |
-#   Uses time.time() and an exponential decay formula to advance temperature:
-#   T(t) = Tsp + (T_old - Tsp) * exp(-dt / tau). Heater output is proportional
-#   to |Tsp - T|, capped at 100%.
-# output: |
-#   Returns float temperature, setpoint, and heater output values via public API.
-# last_updated: 2026-04-19
-# ---
-
 """Simulated Oxford ITC 503 Temperature Controller driver."""
 
 import math

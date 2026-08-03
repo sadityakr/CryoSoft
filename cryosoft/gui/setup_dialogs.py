@@ -1,27 +1,3 @@
-# ---
-# description: |
-#   Modal dialogs for the Setup tier (config identity, instrument metadata,
-#   user login) — as opposed to experiment_dialogs.py, which is the
-#   Experiment tier. LoginDialog picks (or creates, via the shared
-#   UserPickerWidget) who is using the app; InstrumentInfoDialog is a
-#   read-only view of each VI's devices.yaml metadata block. Neither writes
-#   anything to the roster itself except LoginDialog's inline "New user…"
-#   flow, exactly like StartExperimentDialog's.
-# entry_point: Not run directly. LoginDialog is opened from MonitorWindow's
-#   User menu; InstrumentInfoDialog from its Config menu.
-# dependencies:
-#   - PyQt6 >= 6.5
-#   - cryosoft.gui.experiment_dialogs (UserPickerWidget)
-#   - cryosoft.session.store (UserRoster)
-# input: |
-#   A UserRoster for LoginDialog; a {vi_name: {field: value}} mapping (from
-#   cryosoft.core.station.read_instrument_metadata) for InstrumentInfoDialog.
-# process: |
-#   Plain QDialog forms/read-only views.
-# output: |
-#   LoginDialog.selected_user_id(), read by the caller after exec() accepts.
-# ---
-
 """Modal dialogs for the Setup tier: user login and read-only instrument info."""
 
 from __future__ import annotations

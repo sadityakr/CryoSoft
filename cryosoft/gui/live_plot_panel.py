@@ -1,38 +1,3 @@
-# ---
-# description: |
-#   LivePlotPanel: a self-contained live-plot widget (QGroupBox) with X/Y-axis
-#   selectors, two optional reading-loop selectors (Loop 1 / Loop 2, one per
-#   loop slot), and a themed pyqtgraph PlotWidget. Extracted from ProcedureWindow, which previously
-#   duplicated Plot 1 / Plot 2 almost verbatim. Each panel owns its selectors and
-#   curve, repopulates its axis choices from a key list, and redraws itself from
-#   a datapoint history it is handed.
-# entry_point: Not run directly. Instantiated by ProcedureWindow (two panels).
-# dependencies:
-#   - PyQt6 >= 6.5
-#   - pyqtgraph >= 0.13
-# input: |
-#   Constructor objectName strings (preserved so findChild-by-name still works),
-#   a list of available axis keys via set_available_keys(), per-slot
-#   reading-loop label maps via set_available_loop_labels() (optional; hidden
-#   by default; keys are 0-based axis indices), and a datapoint history (list
-#   of enriched dicts) via redraw().
-# process: |
-#   set_available_keys() repopulates X/Y selectors, preserving still-valid
-#   selections. set_available_loop_labels() shows/hides/enables each Loop
-#   selector from its slot's {axis_index: display} label map (hidden if None,
-#   disabled if <2 entries, enabled if >=2; itemData is the axis index).
-#   redraw() reads X/Y series by indexing directly into each measurement
-#   column's (n_loop1, n_loop2) grid at the selected indices (0 when a slot
-#   is inactive); sweep-only columns (unix_time, system state, sweep axis)
-#   are plain scalars with no grid to index. Every plottable value is already
-#   a scalar by construction — computing it is the measurement method's job
-#   (see MeasurementInstrumentBase), never the plot panel's.
-#   Changing any selector redraws against the last datapoint list the panel
-#   was handed.
-# output: |
-#   A QGroupBox embedded in ProcedureWindow's bottom splitter, updating live.
-# ---
-
 """LivePlotPanel — reusable live X/Y plot panel for ProcedureWindow."""
 
 from __future__ import annotations

@@ -1,33 +1,3 @@
-# ---
-# description: |
-#   Real driver for the Keithley 705 scanner / matrix switch.
-#   The 705 is a PRE-SCPI instrument driven by Keithley's own DDC command
-#   language (single-letter commands terminated by 'X'). Exposes the same public
-#   API as SimKeithley705: get_idn / close_channels / open_channels / open_all /
-#   closed_channels.
-#
-#   Command strings VERIFIED against the manual (705-901-01F) and confirmed on
-#   hardware at bench commissioning 2026-07-20: close Cnnn, open Nnnn, open-all
-#   R, state readback G2, first/last U8, identity U4. REMOTE (REN) must be
-#   asserted or the instrument silently discards every command; __init__ does
-#   this and fails loudly if it cannot.
-# entry_point: Not run directly; imported by the Virtual Instruments layer.
-# dependencies:
-#   - pyvisa >= 1.13
-# input: |
-#   Instantiated with a VISA resource string (e.g. 'GPIB0::17::INSTR').
-#   Channel specs are 705 channel numbers as strings ("5" or "005"); the
-#   driver normalises them to the instrument's three-digit Cnnn form.
-# process: |
-#   Builds DDC command strings from the channel specs and writes them over VISA.
-#   Mirrors the sim's local closed-channel model so closed_channels() can report
-#   what the driver has closed without an extra hardware query.
-# output: |
-#   None from the mutators; a str from get_idn(); a sorted list[str] from
-#   closed_channels().
-# last_updated: 2026-07-13
-# ---
-
 """Real Keithley 705 scanner / matrix-switch driver (bench-verified command set)."""
 
 from __future__ import annotations

@@ -1,22 +1,3 @@
-# ---
-# description: |
-#   Simulated driver for the Keithley 2400 SourceMeter (SMU).
-#   Models a single-instrument source-measure unit that both sources current
-#   and measures voltage, used for DC resistance measurements without a
-#   separate current source and voltmeter.
-# entry_point: Not run directly; imported by Virtual Instruments layer.
-# dependencies: []
-# input: |
-#   Instantiated with a VISA resource string (ignored). Public methods
-#   set source current/compliance/range and read back measured voltage.
-# process: |
-#   Stores the sourced current. Returns voltage = _resistance * _current + noise.
-#   Noise is Gaussian with sigma 1e-8 V to match realistic nanovoltmeter noise.
-# output: |
-#   Returns float voltage/current values and str IDN via public API.
-# last_updated: 2026-04-19
-# ---
-
 """Simulated Keithley 2400 SourceMeter (SMU) driver."""
 
 from __future__ import annotations

@@ -1,17 +1,3 @@
-# ---
-# description: |
-#   Smoke tests for the CryoSoft GUI layer (Layer 6).
-#   Verifies that MonitorWindow and ProcedureWindow open without errors,
-#   that InstrumentPanel widgets are auto-generated for all registered VIs,
-#   that Orchestrator signals (state_changed, procedure_progress,
-#   measurement_ready) update the GUI correctly, and that ProcedureWindow is
-#   operation-blind (the hard status separation): its status log stays
-#   empty and its
-#   Pause/Resume/Abort no-op while an operation, rather than a procedure, is
-#   the active run.
-# last_updated: 2026-07-21
-# ---
-
 """GUI smoke tests — Layer 6.
 
 These tests use pytest-qt (qtbot fixture). They run against the sim_cryostat

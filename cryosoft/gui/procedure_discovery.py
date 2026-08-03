@@ -1,29 +1,3 @@
-# ---
-# description: |
-#   Procedure and operation auto-discovery for the GUI: imports every module
-#   in cryosoft.procedures (discover_procedures()) or
-#   cryosoft.procedures.operations (discover_operations()) and returns the
-#   concrete BaseProcedure / OperationBase subclasses at any depth (so a
-#   class under an intermediate base like SweepMeasureProcedure is found).
-#   Qt-free; extracted from procedure_window.py.
-# entry_point: Not run directly. discover_procedures() is called by
-#   ProcedureWindow at construction; discover_operations() by the Operations
-#   panel (gui/operations_panel.py) at panel init.
-# dependencies:
-#   - cryosoft.core.operation (OperationBase)
-#   - cryosoft.core.procedure (BaseProcedure)
-#   - cryosoft.procedures (the discovered package)
-#   - cryosoft.procedures.operations (the discovered subpackage)
-# input: |
-#   Nothing — each walks its package on disk.
-# process: |
-#   pkgutil-iterates the package's modules, importing each (logging, never
-#   raising, on a broken module), then collects every named BaseProcedure /
-#   OperationBase subclass via a transitive __subclasses__ walk.
-# output: |
-#   An ordered, deduplicated list of concrete procedure or operation classes.
-# ---
-
 """Procedure/operation auto-discovery for the GUI."""
 
 from __future__ import annotations

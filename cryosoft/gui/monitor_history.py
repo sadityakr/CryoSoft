@@ -1,31 +1,3 @@
-# ---
-# description: |
-#   MonitorHistory: a Qt-free, pure-Python ring-buffer that accumulates
-#   time-series history of instrument readings for the Monitor window's trend
-#   plots. Flattens nested Station state dicts the same way
-#   Station.last_state_flat() does, and keeps one bounded deque per flat key.
-# entry_point: Not run directly. Instantiated by MonitorWindow (future work);
-#   fed from Orchestrator.states_updated ({vi_name: {field_name: value}}).
-# dependencies:
-#   - Python standard library only (collections, time, logging).
-# input: |
-#   record() takes a nested state dict shaped like Station.get_state()'s
-#   output, plus an optional timestamp (defaults to time.time()). record_flat()
-#   takes an already-flattened {flat_key: value} dict (e.g. from
-#   Station.last_state_flat() or disk-persisted trend history), plus the same
-#   optional timestamp.
-# process: |
-#   record() flattens the state to {vi_name}_{field_name} numeric scalar
-#   keys, skipping bool values and any field name starting with "_", then
-#   appends (timestamp, value) to a per-key ring buffer (deque with maxlen).
-#   record_flat() applies the same numeric/bool/underscore filtering directly
-#   to the already-flat dict and appends through the same shared helper, so
-#   both entry points share identical append/eviction behaviour.
-# output: |
-#   series(key, window_s, now) returns parallel (times, values) lists for a
-#   flat key, optionally windowed to the last window_s seconds.
-# ---
-
 """MonitorHistory — ring-buffer time-series store for the Monitor window's trend plots.
 
 Qt-free by design: this module imports nothing from PyQt6, the Orchestrator,

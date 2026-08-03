@@ -1,19 +1,3 @@
-# ---
-# description: |
-#   End-to-end behavior tests for HeliumFillOperation
-#   (cryosoft/procedures/operations/helium_fill.py), driven by a
-#   real Orchestrator (ticked directly, not via the QTimer) against the
-#   sim_cryostat station: zero-field ramp + initiation gate, FAST/SLOW
-#   refresh, the bounded in-memory level curve + run_summary() hand-off in
-#   the generic "recording" shape (no HDF5 file), the completion condition
-#   (monkeypatching the sim
-#   ILM's private _force_helium_level, not a new sim-only public method),
-#   max-duration termination, abort mid-fill, the helium_low-tolerated-but-
-#   quench-not safety matrix, and an end-to-end run through a real
-#   CryogenicsRecorder writing the single unified "servicing" entry.
-# last_updated: 2026-07-23
-# ---
-
 from __future__ import annotations
 
 import json

@@ -1,27 +1,3 @@
-# ---
-# description: |
-#   Unit tests for TrendsQuadrant (cryosoft/gui/trends_quadrant.py), focused
-#   on startup rehydration: replaying the raw trend-history tier into
-#   MonitorHistory via record_flat() at construction. Fixtures write
-#   raw-tier JSONL files directly to tmp_path (never through the real
-#   TieredTrendLogger). Covers a successful replay, a missing log_dir, and a
-#   corrupt file — the latter two must leave a usable, empty history and
-#   never raise (the hard requirement that protects GUI startup).
-# entry_point: pytest tests/test_trends_quadrant.py
-# dependencies:
-#   - pytest, pytest-qt (qtbot fixture)
-#   - cryosoft.core.station.build_station (real sim_cryostat station)
-# input: |
-#   None external; each test writes its own raw-tier JSONL fixture (or none,
-#   or a corrupt one) to tmp_path and constructs TrendsQuadrant with
-#   log_dir=tmp_path.
-# process: |
-#   Construct TrendsQuadrant(station, log_dir=...) and assert on
-#   quadrant.history's keys/series afterwards.
-# output: |
-#   Standard pytest pass/fail output.
-# ---
-
 """Tests for TrendsQuadrant — startup rehydration from the raw trend-history tier."""
 
 from __future__ import annotations

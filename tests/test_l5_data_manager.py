@@ -1,13 +1,3 @@
-# ---
-# description: |
-#   Unit tests for Layer 5 (DataManager). Verifies HDF5 file creation,
-#   metadata storage, dataset pre-allocation (sweep_columns 1-D,
-#   measurement_scalars/measurement_arrays carrying a real (n_loop1, n_loop2)
-#   reading-loop axis), save_datapoint(), snapshot storage, close() with
-#   end_time and early-abort trimming.
-# last_updated: 2026-07-22
-# ---
-
 import json
 
 import h5py

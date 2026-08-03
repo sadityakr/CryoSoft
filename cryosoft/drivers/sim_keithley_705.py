@@ -1,26 +1,3 @@
-# ---
-# description: |
-#   Simulated driver for the Keithley 705 scanner / matrix switch.
-#   Models an EXCLUSIVE-MUX crosspoint switch as a set of closed channel-spec
-#   strings: close_channels() adds specs, open_channels() removes them, and
-#   open_all() clears the set. No VISA dependency — pure Python simulation.
-# entry_point: Not run directly; imported by the Virtual Instruments layer.
-# dependencies: []
-# input: |
-#   Instantiated with a VISA resource string (ignored). Channel specs are 705
-#   channel numbers as strings ("5" or "005"), normalised to three digits and
-#   range-checked against the installed channel count exactly as the real 705.
-# process: |
-#   Maintains self._closed, the set of currently-closed channel specs. The
-#   inspection helper closed_channels() (sorted list) lets tests assert exclusive
-#   selection without hardware. A _simulate_error flag raises on reads for
-#   error-injection tests.
-# output: |
-#   None from the mutators; a str from get_idn(); a sorted list[str] from the
-#   closed_channels() inspection helper.
-# last_updated: 2026-07-13
-# ---
-
 """Simulated Keithley 705 scanner / matrix-switch driver."""
 
 from __future__ import annotations

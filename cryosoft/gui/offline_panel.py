@@ -1,37 +1,3 @@
-# ---
-# description: |
-#   OfflineInstrumentPanel + OfflineFrontPanel: the GUI face of an instrument
-#   that is not currently CryoSoft's — either it failed to connect at startup
-#   (degraded build) or the operator released it (the connection-lifecycle
-#   standard, see virtual_instruments/base.py). Both land in the Station's ONE
-#   offline registry and render through this same card; only the wording
-#   differs, keyed off the Availability standard's tags
-#   (cryosoft.core.availability: OfflineInstrument.tags, a subset of
-#   "connect_failed"/"operator"), because the degraded behavior is
-#   deliberately identical. The card shows WHAT is offline and WHY in the
-#   instrument grid and carries the Connect button (the offline card's half of
-#   the ConnectionButton pair the live card shows as Disconnect); its detail
-#   window repeats it with the full reason and a diagnosis hint. Both flow
-#   through Orchestrator.connect_instrument(). On success MonitorWindow swaps
-#   the card for a live InstrumentPanel.
-# entry_point: Not run directly. Instantiated by MonitorWindow for each name
-#   in Station.offline_vi_names().
-# dependencies:
-#   - PyQt6 >= 6.5
-#   - cryosoft.core.station (OfflineInstrument)
-#   - cryosoft.core.orchestrator (Orchestrator)
-#   - cryosoft.gui.lifecycle_toggle (ConnectionButton)
-# input: |
-#   vi_name (str), the Station's OfflineInstrument record, Orchestrator.
-# process: |
-#   The card renders name + [OFFLINE]/[DISCONNECTED] + reason from the record,
-#   plus a Connect button. The lazily created detail window submits
-#   connect_instrument() and listens to action_failed / instrument_reconnected
-#   to report the verdict inline.
-# output: |
-#   A QGroupBox card for the instrument grid and its floating detail window.
-# ---
-
 """OfflineInstrumentPanel — grid card and detail window for an offline VI."""
 
 from __future__ import annotations

@@ -1,39 +1,3 @@
-# ---
-# description: |
-#   DCModeMeasurementVI: multi-driver Virtual Instrument pairing a Keithley
-#   6221 current source with a Keithley 2182A nanovoltmeter for DC
-#   resistance measurements. initiate_measurement() arms the current source,
-#   voltmeter range, and compliance. take_reading() collects the readings.
-#   read_now() is a bench-test-only control that triggers a manual read and
-#   caches it in the last_voltage_V / last_mean_voltage_V / last_n_valid
-#   monitored fields so the front panel can show what the Keithley returned.
-# entry_point: Not run directly; instantiated by Station factory.
-# dependencies:
-#   - cryosoft.virtual_instruments.base (MeasurementInstrumentBase)
-#   - cryosoft.core.decorators (control, monitored)
-#   - cryosoft.core.plan (ParamSpec)
-# input: |
-#   drivers = {"source": <K6221 driver>, "meter": <K2182A driver>}
-#   initiate_measurement() must be called before take_reading() or read_now().
-# process: |
-#   initiate_measurement() first forces the source to a known-idle state
-#   (set_current(0.0), which drives the real driver's :SOUR:SWE:ABORt) —
-#   never assumes a previous standby() left it idle (shared-instrument mode
-#   discipline) — then sets compliance and range and starts sourcing current.
-#   take_reading() collects n_readings voltage samples. If compliance_abort is
-#   enabled, it monitors source.is_in_compliance() before each reading and
-#   stops early if triggered, padding remaining spots with NaN. read_now()
-#   simply calls take_reading() and stores the result for display; it is the
-#   human-facing bench-test trigger, never called by a Procedure.
-#   standby() zeros the current source and resets the armed state.
-# output: |
-#   Mean/error/array triple per quantity: {"voltage_V": float, "voltage_V_error":
-#   float, "voltage_V_array": list[float](n_readings,), "current_A": float,
-#   "current_A_error": float, "current_A_array": list[float](n_readings,),
-#   "n_valid": int}
-# last_updated: 2026-07-22
-# ---
-
 """DCModeMeasurementVI — Keithley 6221 + 2182A DC-mode measurement VI."""
 
 from __future__ import annotations

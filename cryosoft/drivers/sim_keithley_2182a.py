@@ -1,23 +1,3 @@
-# ---
-# description: |
-#   Simulated driver for the Keithley 2182A nanovoltmeter.
-#   Returns voltage readings with configurable Gaussian noise. Can be paired
-#   with SimKeithley6221 for delta-mode simulation. No VISA dependency.
-# entry_point: Not run directly; imported by Virtual Instruments layer.
-# dependencies: []
-# input: |
-#   Instantiated with a VISA resource string (ignored). Public methods read
-#   voltage and configure the measurement range.
-# process: |
-#   Each get_voltage() call returns base_voltage + Gaussian noise sampled
-#   from N(0, noise_std). The base voltage and noise level are configurable
-#   via internal attributes for testing purposes.
-# output: |
-#   Returns float voltage readings with noise. get_range() / set_range()
-#   control the measurement range setting.
-# last_updated: 2026-04-06
-# ---
-
 """Simulated Keithley 2182A Nanovoltmeter driver."""
 
 import random

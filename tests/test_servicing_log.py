@@ -1,23 +1,3 @@
-# ---
-# description: |
-#   Behavior tests for the Servicing Log framework
-#   (cryosoft/session/servicing_log.py): LogKindSpec
-#   validation, ServicingLogStore's entry-revision model (add/revise/delete
-#   round-trips, tombstone hiding, write validation, tolerant loads,
-#   non-editable-kind refusal), HeliumRecordStore (decimation via the
-#   recorder, rotation), consumption_rate_pct_per_h (fit + fill-interval
-#   exclusion + sign convention), CryogenicsRecorder end-to-end against
-#   synthetic states_updated/run_started/run_finished payloads (no real
-#   Orchestrator) — as of Phase 2, ONE merged "servicing" entry per finished
-#   operation run (any kind, not just fills), He/LN2 levels stamped at start
-#   and finish, notes carrying abort/failure reason + unmet postconditions,
-#   and a recording sidecar when the operation hands one off; no more
-#   "cryogenics"/"operations" writes — the flat "servicing" log kind's schema
-#   and add/revise for both origins, and migrate_legacy_servicing_log over
-#   synthetic legacy cryogenics.jsonl/operations.jsonl files.
-# last_updated: 2026-07-23
-# ---
-
 import json
 import logging
 import time

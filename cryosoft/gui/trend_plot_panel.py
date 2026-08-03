@@ -1,36 +1,3 @@
-# ---
-# description: |
-#   TrendPlotPanel: a self-contained trend-plot widget (QGroupBox) showing one
-#   time-series variable vs wall-clock time, fed from a MonitorHistory ring
-#   buffer. Structural sibling of LivePlotPanel, but plots against real time
-#   (DateAxisItem) rather than another instrument axis, and is meant to be
-#   hosted in multiples by the Monitor window's future "Trends" section.
-# entry_point: Not run directly. Instantiated by MonitorWindow (future task),
-#   one per trend the user adds.
-# dependencies:
-#   - PyQt6 >= 6.5
-#   - pyqtgraph >= 0.13
-#   - qtawesome
-#   - cryosoft.core.trend_history / cryosoft.core.paths
-#     (disk-backed reads for windows beyond MonitorHistory's retention)
-# input: |
-#   A MonitorHistory instance (shared, read-only from this widget's
-#   perspective), a panel_id string, a series_index used to pick a pen
-#   colour from theme.PLOT_SERIES, and a log_dir for the tiered
-#   trend-history store. The host calls refresh() on each Orchestrator tick.
-# process: |
-#   refresh() repopulates the Y-variable combo from history.keys() (preserving
-#   the current selection), then redraws: windows up to 24 h fetch
-#   history.series(key, window_s=...) from RAM as before; longer windows
-#   ("7 d", "1 y") call trend_history.read_window(log_dir, ...), which picks
-#   the tier itself. Changing either combo triggers an immediate redraw
-#   against the last known history/store.
-# output: |
-#   A QGroupBox meant to be embedded in the Monitor window's Trends section,
-#   updating whenever refresh() is called. Emits remove_requested(panel_id)
-#   when the user clicks the remove button, so the host can drop this panel.
-# ---
-
 """TrendPlotPanel — reusable time-series trend plot panel for the Monitor window.
 
 Each panel owns one Y-variable selector, one time-window selector, and a

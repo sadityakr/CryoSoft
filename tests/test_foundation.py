@@ -1,11 +1,3 @@
-# ---
-# description: |
-#   Tests for the CryoSoft foundation layer: exceptions and decorators.
-#   All tests must pass before any other layer can be built.
-# entry_point: pytest tests/test_foundation.py -v
-# last_updated: 2026-04-06
-# ---
-
 """Tests for exceptions.py and decorators.py."""
 
 import pytest

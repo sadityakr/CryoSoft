@@ -1,28 +1,3 @@
-# ---
-# description: |
-#   ConfigMenuController: owns MonitorWindow's Config menu — the checkable
-#   list of shipped/user configs, the switch-and-restart flow, and the lazy
-#   config-editor window. Extracted from monitor_window.py so config
-#   management (a startup/restart concern) is separate from live monitoring.
-# entry_point: Not run directly. Created by MonitorWindow when a ConfigCatalog
-#   is provided.
-# dependencies:
-#   - PyQt6 >= 6.5
-#   - cryosoft.core.config_catalog (ConfigCatalog)
-#   - cryosoft.gui.app_settings (active-config persistence)
-#   - cryosoft.gui.config_editor (ConfigEditorWindow, lazily imported)
-# input: |
-#   The hosting window (dialog/menu parent), the QMenu to populate, the
-#   catalog, the active config path, a restart callback, and a save-session
-#   callable invoked before any restart.
-# process: |
-#   populate() rebuilds the menu as an exclusive QActionGroup; selecting a
-#   different config asks for confirmation, persists it as active, saves the
-#   session, and restarts via the injected callback.
-# output: |
-#   The active config identity in QSettings; an application restart request.
-# ---
-
 """ConfigMenuController — the Config menu, selection flow, and editor launcher."""
 
 from __future__ import annotations

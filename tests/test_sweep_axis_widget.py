@@ -1,13 +1,3 @@
-# ---
-# description: |
-#   Unit tests for cryosoft.gui.sweep_axis_widget.SweepAxisWidget: mode
-#   switching (Linear/Segments/CSV), get_params() per mode, and validation
-#   errors for the active mode's own inputs. Segments mode uses a 2-column
-#   breakpoint table (Value, Step to next): consecutive rows pair into
-#   SweepSegment start/end/step dicts.
-# entry_point: pytest tests/test_sweep_axis_widget.py -v
-# ---
-
 import pytest
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QTableWidgetItem

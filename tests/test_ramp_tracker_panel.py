@@ -1,19 +1,3 @@
-# ---
-# description: |
-#   Behavior tests for cryosoft.gui.ramp_tracker_panel: the RampTrackerPanel
-#   empty state, one generic RampRow per running ramp (rate, next setpoint,
-#   end setpoint, sub-phase and owner all rendered from a RampRecord with no
-#   per-instrument code), row reconciliation across ticks (added, updated in
-#   place, removed — never rebuilt), the Abort button confirming via
-#   QMessageBox before calling Orchestrator.stop_ramp(), and the button
-#   disabled with the refusal as its tooltip when a run owns the ramp. Plus
-#   the MonitorWindow integration: the Ramps sub-panel is the left half of
-#   the bottom-right quadrant, is on-screen inside its scroll viewport at a
-#   realistic window width, and receives ramps_updated through the window
-#   (never connected directly — the destruction-order rule).
-# last_updated: 2026-07-27
-# ---
-
 """Behavior tests for RampTrackerPanel / RampRow."""
 
 from __future__ import annotations

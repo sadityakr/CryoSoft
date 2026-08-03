@@ -1,11 +1,3 @@
-# ---
-# description: |
-#   Unit tests for cryosoft.gui.lifecycle_toggle.LifecycleToggleButton: initial
-#   state, click callback (opposite of current state, no optimistic flip), and
-#   set_initiated() driving both the button text/class and the glow dot.
-# entry_point: pytest tests/test_lifecycle_toggle.py -v
-# ---
-
 from cryosoft.gui.lifecycle_toggle import LifecycleToggleButton
 
 

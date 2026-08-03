@@ -1,26 +1,3 @@
-# ---
-# description: |
-#   RampableVI mixin for Virtual Instruments that support controlled ramping.
-#   Defines the abstract Ramp API (start_ramp, advance_ramp, ramp_status,
-#   stop_ramp) that the Orchestrator calls every tick while a ramp is active
-#   (stop_ramp on abort/ERROR/EMERGENCY: kills the generator AND holds the
-#   hardware), plus the optional, bus-free introspection hooks
-#   (ramp_value/ramp_setpoint/ramp_target/ramp_rate/ramp_phase) that
-#   Station.get_ramp_status() aggregates for the ramp tracker and the
-#   operational-status record.
-# entry_point: Not run directly; mixed into magnet, temperature, and rotator VIs.
-# dependencies:
-#   - abc
-# input: |
-#   Subclasses must implement all four abstract methods.
-# process: |
-#   start_ramp() initialises the ramp generator. advance_ramp() calls next()
-#   on the generator. ramp_status() returns one of RAMPING / TARGET_REACHED / IDLE.
-# output: |
-#   Status strings consumed by Station.check_ramps() and Orchestrator.
-# last_updated: 2026-07-27
-# ---
-
 """RampableVI mixin — abstract ramp API for system VIs."""
 
 from __future__ import annotations

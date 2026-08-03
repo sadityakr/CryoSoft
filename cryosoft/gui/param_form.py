@@ -1,34 +1,3 @@
-# ---
-# description: |
-#   param_form: the single place that maps procedure ParamSpec declarations to
-#   Qt input widgets for the ProcedureWindow parameter form. Given a ParamGroup
-#   (or a raw name->ParamSpec mapping) it builds a QGroupBox / QFormLayout of
-#   labelled, tooltipped input rows, and provides the inverse read helpers
-#   (collect the typed value, and the raw display-string round-trip used by the
-#   session cache). ProcedureWindow owns layout and the SweepAxisWidget; this
-#   module owns only the ParamSpec -> widget semantics.
-# entry_point: Not run directly. Imported by cryosoft.gui.procedure_window.
-# dependencies:
-#   - PyQt6 >= 6.5
-#   - cryosoft.core.plan (ParamSpec, ParamGroup)
-# input: |
-#   ParamSpec / ParamGroup value objects and, for the read helpers, the widgets
-#   this module previously built. No coupling to a Procedure class or Station.
-# process: |
-#   build_param_widget picks the widget from the ParamSpec: a non-empty
-#   ``choices`` dict -> QComboBox (labels shown, mapped value collected), a
-#   ``bool`` type -> QCheckBox, anything else -> a QLineEdit seeded with the
-#   default. build_group_box / build_form_layout lay those out as QFormLayout
-#   rows keyed by the canonical parameter name (+ unit) with the description /
-#   default / range in a hover tooltip. collect_value reverses the mapping;
-#   get_widget_raw / set_widget_raw give a uniform string form for caching.
-# output: |
-#   Qt widgets (QGroupBox / QFormLayout / individual inputs) plus a
-#   ``{param_name: QWidget}`` registry the caller reads back from. collect_value
-#   raises ValueError / TypeError if a text field cannot be parsed as its type.
-# last_updated: 2026-07-13
-# ---
-
 """param_form — the one ParamSpec -> Qt-widget mapping for the procedure form.
 
 This is the ONLY place that names Qt widget classes for procedure parameters.

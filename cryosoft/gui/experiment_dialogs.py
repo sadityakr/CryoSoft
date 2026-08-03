@@ -1,28 +1,3 @@
-# ---
-# description: |
-#   Modal dialogs for the experiment lifecycle: StartExperimentDialog (title,
-#   user, attendance — with an inline "New user" flow via AddUserDialog) and
-#   CloseExperimentDialog (closing findings text). Opened only by
-#   ExperimentInfoPanel's Start/Close Experiment button; every ExperimentManager
-#   mutation happens in the panel after a dialog accepts, never inside the
-#   dialogs themselves (the one exception is AddUserDialog's caller adding
-#   the new User to the roster, since the roster has no other writer).
-# entry_point: Not run directly. Opened by cryosoft.gui.session_info_panel.
-# dependencies:
-#   - PyQt6 >= 6.5
-#   - cryosoft.session.models (User)
-#   - cryosoft.session.store (UserRoster)
-# input: |
-#   A UserRoster (read for the user combo) and, for CloseExperimentDialog,
-#   the experiment's current findings text.
-# process: |
-#   Plain QDialog forms with a QDialogButtonBox(Ok|Cancel); Ok is disabled
-#   until the required fields are valid.
-# output: |
-#   result_values()/findings()/user() accessors, read by the caller after
-#   exec() returns Accepted.
-# ---
-
 """Modal dialogs for starting/closing an experiment and adding a roster user."""
 
 from __future__ import annotations

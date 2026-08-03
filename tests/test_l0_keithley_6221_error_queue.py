@@ -1,20 +1,3 @@
-# ---
-# description: |
-#   Unit tests for the real Keithley6221 driver's error-queue observability
-#   and the set_current() autorange fix:
-#   - set_current()/set_compliance() must log a queued SCPI error (e.g. -221
-#     "Settings conflict") instead of silently swallowing it.
-#   - set_current() must unconditionally re-assert :SOUR:CURR:RANG:AUTO ON
-#     before :SOUR:CURR, so a range delta mode left fixed (autorange off)
-#     earlier in the session can never reject a later DC-mode current.
-#   Constructs the driver with a mocked pyvisa instrument handle -- no real
-#   hardware -- since both behaviors are invisible to the SimKeithley6221
-#   twin (the sim does not model an instrument-side SCPI error queue or a
-#   fixed/auto current range).
-# entry_point: pytest tests/test_l0_keithley_6221_error_queue.py -v
-# last_updated: 2026-07-22
-# ---
-
 from unittest.mock import MagicMock
 
 from cryosoft.drivers.keithley_6221 import Keithley6221

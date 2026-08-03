@@ -1,9 +1,3 @@
-# ---
-# description: |
-#   Pytest configuration and shared fixtures for CryoSoft test suite.
-# last_updated: 2026-08-03
-# ---
-
 import pytest
 import logging
 

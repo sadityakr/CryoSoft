@@ -1,23 +1,3 @@
-# ---
-# description: |
-#   Real driver for the Keithley 2182A nanovoltmeter.
-#   Communicates via PyVISA (GPIB). In delta-mode sweeps the 2182A is
-#   triggered and read by the 6221 automatically; this driver is used for
-#   direct voltage reads (DC mode) and range configuration.
-# entry_point: Not run directly; imported by Virtual Instruments layer.
-# dependencies:
-#   - pyvisa >= 1.13
-# input: |
-#   Instantiated with a VISA resource string (e.g. 'GPIB0::7::INSTR').
-#   Call set_range() before get_voltage() to configure the measurement range.
-# process: |
-#   get_voltage() issues a READ? command which triggers a single measurement
-#   and returns the result. set_range() sends :SENS:VOLT:CHAN1:RANG.
-# output: |
-#   Returns float voltage readings and the current range setting.
-# last_updated: 2026-04-19
-# ---
-
 """Real Keithley 2182A nanovoltmeter driver."""
 
 from __future__ import annotations

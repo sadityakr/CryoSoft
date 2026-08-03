@@ -1,30 +1,3 @@
-# ---
-# description: |
-#   Qt-free diagnostic engine for the troubleshoot toolbox: VISA bus scanning,
-#   config preflight checks with a machine-readable fault taxonomy (FaultCode),
-#   and a driver bench (introspect / call / raw query) used by the troubleshoot
-#   CLI and by agents debugging a setup.
-# entry_point: Not run directly; used by the cryosoft.troubleshoot CLI.
-# dependencies:
-#   - ruamel.yaml >= 0.18 (via cryosoft.core.station helpers)
-#   - pyvisa >= 1.13 (needed only for real-bus scans; tests inject a fake)
-# input: |
-#   Config directories (devices.yaml), VISA addresses, driver aliases. A
-#   pyvisa ResourceManager (or a test fake) can be injected everywhere.
-# process: |
-#   scan_bus() lists VISA resources. probe_address() opens a bare resource and
-#   sends an identify query. check_config() validates a config, constructs each
-#   declared driver, calls get_idn(), and classifies every failure with a
-#   FaultCode. bench_l0() runs the same construct+idn step plus one extra
-#   passive getter per driver — the automated half of the commissioning
-#   skill's L0 rung. DriverBench wraps one driver for introspection and calls,
-#   with read-only methods separated from writing methods.
-# output: |
-#   ProbeResult / L0BenchResult / MethodInfo dataclasses (JSON-ready via
-#   as_dict()) and log records. The engine never writes files and every
-#   operation terminates on its own (bounded by VISA timeouts).
-# ---
-
 """Diagnostic engine: bus scan, config preflight, and driver bench.
 
 Design constraints (these are load-bearing for agent use):

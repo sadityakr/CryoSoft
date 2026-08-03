@@ -1,15 +1,3 @@
-# ---
-# description: |
-#   Behavior tests for cryosoft.main's session-tier startup wiring —
-#   specifically _resolve_active_session(), the small testable seam that
-#   picks (or bootstraps) the active SessionStore session before
-#   ExperimentStore/ExperimentManager are constructed. The rest of main()
-#   builds a full QApplication and real hardware-adjacent objects, so it is
-#   not unit-tested directly here (see docs/plans/session-tier-and-terminology.md,
-#   "Startup wiring (decided)").
-# last_updated: 2026-08-03
-# ---
-
 """Tests for cryosoft.main's session-tier startup wiring."""
 
 from __future__ import annotations

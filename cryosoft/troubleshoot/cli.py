@@ -1,29 +1,3 @@
-# ---
-# description: |
-#   One-shot CLI over the troubleshoot engine: scan / probe / check / bench-l0 /
-#   methods / idn / read / write / query / send, plus `status` (reads the
-#   running app's operational-status log). Built for agents first: every
-#   command terminates on its own, supports --json, returns exit code 0 (all
-#   OK) or 1 (any fault), and appends a JSONL transcript line to the resolved
-#   log directory (cryosoft.core.paths.log_directory(), overridable
-#   via CRYOSOFT_LOG_DIR).
-# entry_point: python -m cryosoft.troubleshoot <subcommand> ...
-# dependencies:
-#   - pyvisa (only for commands that touch a real bus)
-#   - PyQt6 (optional: only to read the saved active config from QSettings)
-# input: |
-#   A subcommand plus arguments (see --help). --config accepts a config
-#   directory path or a bare name resolved against the shipped and user config
-#   folders; when omitted, the machine's saved active config is used, falling
-#   back to the shipped sim_cryostat.
-# process: |
-#   Parses arguments, resolves the config, runs one engine operation, renders
-#   the outcome (table or --json), appends the transcript line, and exits.
-# output: |
-#   Structured results on stdout, log records on stderr and cryosoft.log, one
-#   JSONL line per invocation in cryosoft/logs/troubleshoot.jsonl.
-# ---
-
 """Troubleshoot CLI — one-shot diagnostic commands for agents and humans.
 
 Command grammar is API: the setup-supervisor skills and permission allowlists

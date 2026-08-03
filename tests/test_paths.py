@@ -1,14 +1,3 @@
-# ---
-# description: |
-#   Behavior tests for cryosoft.core.paths: log_directory()'s resolution
-#   precedence (CRYOSOFT_LOG_DIR env var, platform user-data location,
-#   packaged fallback) and its purity (resolves but never creates a
-#   directory); measurement_root()'s precedence (CRYOSOFT_MEASUREMENT_ROOT
-#   env var, then the App-config.yaml settings file, then RuntimeError) and
-#   its purity.
-# last_updated: 2026-08-03
-# ---
-
 """Tests for the CryoSoft installation-path resolver."""
 
 from __future__ import annotations

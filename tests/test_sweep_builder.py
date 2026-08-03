@@ -1,12 +1,3 @@
-# ---
-# description: |
-#   Unit tests for cryosoft.core.sweep_builder: piecewise segmented sweeps,
-#   custom CSV sweep loading, hysteresis (forward+backward) extension, and
-#   the SweepAxis / sweep_axis_param_specs / build_axis_sweep declarative
-#   sweep-shape framework used by BaseProcedure.
-# last_updated: 2026-07-13
-# ---
-
 import pytest
 
 from cryosoft.core.plan import ParamSpec

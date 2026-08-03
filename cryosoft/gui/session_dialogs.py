@@ -1,33 +1,3 @@
-# ---
-# description: |
-#   session_dialogs: modal dialog for switching the active Session — the L6
-#   tier above ExperimentManager (a named, resumable, per-user folder holding
-#   multiple experiments; see docs/plans/session-tier-and-terminology.md,
-#   "Filesystem layout"). ResumeSessionDialog is opened by MonitorWindow's
-#   User menu "Resume Session…" action. It lists SessionStore.list_sessions(),
-#   optionally filtered to the current user, plus an inline "New session"
-#   affordance (mirrors AddUserDialog's simplest create-new-named-thing
-#   pattern in cryosoft.gui.experiment_dialogs). The caller reads back the
-#   chosen session_id after accept() and drives the actual activation itself
-#   (SessionStore.set_active) — this module never calls store mutators beyond
-#   creating the new session the user asked for, the same separation
-#   open_experiment_dialog.py uses for experiments.
-# entry_point: Not run directly. Opened by cryosoft.gui.monitor_window.
-# dependencies:
-#   - PyQt6 >= 6.5
-#   - cryosoft.session.store (SessionStore)
-# input: |
-#   A SessionStore and the current user_id (or None), read once at
-#   construction via list_sessions(user_id=...).
-# process: |
-#   A QListWidget populated once at construction, newest-id-last
-#   (SessionStore.list_sessions() is sorted). The inline "New session…" name
-#   field plus Create button calls SessionStore.create_session(), appends and
-#   selects the new entry, and accepts the dialog.
-# output: |
-#   selected_session_id() returns the chosen id after exec() accepts.
-# ---
-
 """session_dialogs — dialog for picking/creating the active Session (L6 tier)."""
 
 from __future__ import annotations

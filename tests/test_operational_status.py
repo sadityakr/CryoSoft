@@ -1,14 +1,3 @@
-# ---
-# description: |
-#   Unit tests for the pure operational-status record builder
-#   (cryosoft.core.operational_status.build_operational_status). No Qt, no
-#   hardware — verifies the record schema, gap/closing/eta computation, JSON
-#   serializability, the unambiguous fault-code verdicts, and the carried-through
-#   System-Condition standard registry (the ``conditions`` field).
-# entry_point: pytest tests/test_operational_status.py -v
-# last_updated: 2026-07-26
-# ---
-
 """Tests for the operational-status record builder."""
 
 from __future__ import annotations

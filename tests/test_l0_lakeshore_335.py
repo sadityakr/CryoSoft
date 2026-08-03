@@ -1,13 +1,3 @@
-# ---
-# description: |
-#   Unit tests for the SimLakeshore335 temperature controller driver.
-#   Covers basic properties, setpoints, manual output limits, heater control
-#   modes, heater range (including the power-up-Off no-power regression),
-#   PID parameter clamping, autotune toggles, and temperature simulation.
-# entry_point: pytest tests/test_l0_lakeshore_335.py -v
-# last_updated: 2026-07-25
-# ---
-
 """Unit tests for SimLakeshore335 driver."""
 
 from __future__ import annotations

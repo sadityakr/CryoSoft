@@ -1,13 +1,3 @@
-# ---
-# description: |
-#   Unit tests for cryosoft.core.ramps: the RampRecord value object and the
-#   pure build_ramp_records() builder that turns one
-#   Station.get_ramp_status() snapshot into the running-ramp list the ramp
-#   tracker renders. Qt-free and hardware-free by construction — the module
-#   under test imports nothing from cryosoft.
-# last_updated: 2026-07-27
-# ---
-
 """Unit tests for the RampRecord value object and build_ramp_records()."""
 
 from __future__ import annotations

@@ -1,14 +1,3 @@
-# ---
-# description: |
-#   Behavior tests for cryosoft.core.logging_config: that setup_logging()
-#   honours an explicit log_dir argument (log_directory() resolution itself
-#   is tested in test_paths.py), and that the four JSONL streams (status,
-#   trend_raw, trend_3min, trend_hourly) are configured as
-#   TimedRotatingFileHandlers with the right when/backupCount/utc and are
-#   idempotent across repeated setup_logging() calls.
-# last_updated: 2026-08-03
-# ---
-
 """Tests for CryoSoft logging setup."""
 
 from __future__ import annotations

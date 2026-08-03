@@ -1,30 +1,3 @@
-# ---
-# description: |
-#   Typed records of the L6 Session Management layer: User (who measures),
-#   Session (the per-user, multi-experiment folder tier between the
-#   measurement root and an experiment), RunRecord (one procedure execution
-#   -> one HDF5 file), ExperimentRecord (a named group of runs on one sample,
-#   with its session envelope and ELN linkage), ElnLink (the experiment's ELN
-#   entry reference), and ServiceLogEntry (one revision of one servicing-log
-#   entry — see session/servicing_log.py). All follow the tolerant-parse
-#   standard of gui/form_autosave.py: to_dict()/from_dict() convert to/from
-#   plain JSON
-#   types, missing keys take defaults, unknown keys are ignored, and
-#   from_dict() never raises on junk input. Machine-checked by the
-#   session-model conformance tests.
-# entry_point: Not run directly. Used by store.py / manager.py /
-#   servicing_log.py and tests.
-# dependencies:
-#   - cryosoft.core.plan (ExperimentEnvelope / EnvelopeBound serialisation)
-# input: |
-#   from_dict(data) accepts anything; non-dict input yields a default instance.
-# process: |
-#   Plain dataclasses; envelope_to_dict()/envelope_from_dict() bridge the typed
-#   core.plan.ExperimentEnvelope and its JSON form stored on ExperimentRecord.
-# output: |
-#   JSON-serialisable dicts via to_dict(); typed records via from_dict().
-# ---
-
 """Typed records of the L6 Session Management layer.
 
 Every class here is a plain ``@dataclass`` with the tolerant-parse contract:

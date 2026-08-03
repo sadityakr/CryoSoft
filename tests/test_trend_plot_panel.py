@@ -1,29 +1,3 @@
-# ---
-# description: |
-#   Unit tests for TrendPlotPanel (cryosoft/gui/trend_plot_panel.py). Uses a
-#   real MonitorHistory filled with synthetic timestamped data (no mocks
-#   needed, since MonitorHistory is Qt-free stdlib-only). Verifies
-#   construction, refresh() population/redraw, time-window filtering,
-#   selection round-trips, and the remove-button signal. Also covers the
-#   "7 d"/"1 y" long windows, which read from disk-backed JSONL tier
-#   fixtures written directly to tmp_path (never through the real writer),
-#   the RAM/disk split at the 24h boundary, disk-read failure/empty
-#   tolerance, and the measurement-VI live-vs-disk asymmetry.
-# entry_point: pytest tests/test_trend_plot_panel.py
-# dependencies:
-#   - pytest, pytest-qt (qtbot fixture)
-# input: |
-#   None external; each test builds its own MonitorHistory and records
-#   synthetic points relative to time.time() so window filtering is
-#   deterministic without needing to pass an explicit `now`.
-# process: |
-#   Construct a TrendPlotPanel against a MonitorHistory, call refresh(), and
-#   assert on combo contents/objectNames and the curve's plotted data via
-#   curve.getData().
-# output: |
-#   Standard pytest pass/fail output.
-# ---
-
 """Tests for TrendPlotPanel — reusable time-series trend plot panel."""
 
 import json

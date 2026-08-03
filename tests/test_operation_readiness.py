@@ -1,19 +1,3 @@
-# ---
-# description: |
-#   Behavior tests for the readiness/next-due contract added to OperationBase
-#   in Phase 6: the ReadinessCondition/
-#   NextDue dataclasses, OperationBase's defaults, HeliumFillOperation's
-#   zero_field checklist row + next_due() prediction math, and the shared
-#   _SampleAccessOperationBase's three checklist rows (zero_field/
-#   vti_at_target/needle_valve_confirmed, the last via the confirmed()/
-#   confirm() flow) exercised through both concrete subclasses,
-#   SampleLoadOperation and SampleUnloadOperation, which share this behavior
-#   entirely (parametrized rather than duplicated). Qt-free — no
-#   Orchestrator ticking, just direct calls against synthetic state
-#   snapshots and context dicts, mirroring how OperationCard drives them.
-# last_updated: 2026-07-27
-# ---
-
 from __future__ import annotations
 
 import pytest

@@ -1,19 +1,3 @@
-# ---
-# description: |
-#   Central theme module for CryoSoft. Defines the light "lab" colour palette
-#   and produces the application-wide Qt Style Sheet (QSS) via build_stylesheet().
-# entry_point: imported by cryosoft/main.py and gui modules
-# dependencies:
-#   - PyQt6 >= 6.5 (no runtime import — pure string generation)
-# input: |
-#   None. All values are module-level constants.
-# process: |
-#   build_stylesheet() concatenates QSS rule blocks for every widget type
-#   used in the application and returns the full string for QApplication.setStyleSheet().
-# output: |
-#   A QSS string and module-level color/class constants used by widget code.
-# ---
-
 """CryoSoft application theme — light "lab" colour palette and global QSS."""
 
 from __future__ import annotations

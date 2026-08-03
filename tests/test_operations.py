@@ -1,18 +1,3 @@
-# ---
-# description: |
-#   Behavior tests for the operation substrate, and the
-#   immediate-finish/one-shot-postcondition contract: OperationBase driven by
-#   the real Orchestrator against a real simulated Station. Covers the
-#   helium_low-tolerated vs quench safety matrix, the EMERGENCY carve-out and
-#   its end-state, run_operation refusal while a procedure is active,
-#   operation-before-procedure queue priority, postcondition gates (one-shot
-#   evaluation — a never-true gate is recorded as unmet rather than blocking;
-#   an all-true set finishes with an empty postconditions_unmet),
-#   finish_operation()'s immediate STANDBY path, and capability-scope
-#   enforcement at command dispatch.
-# last_updated: 2026-07-21
-# ---
-
 import time
 
 import pytest

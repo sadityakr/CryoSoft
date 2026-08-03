@@ -1,18 +1,3 @@
-# ---
-# description: |
-#   Tests for the Availability standard. The first section covers the pure
-#   policy core (cryosoft.core.availability): the tag/state vocabularies,
-#   TAG_POLICY's coverage of the vocabulary, state_for()/decide_availability()'s
-#   precedence resolution, and Availability construction/validation — no
-#   sims, no Qt, no Station. The second section ("Tag policy — mechanism
-#   checks") ties each TAG_POLICY column to the REAL mechanism it claims to
-#   describe (a sim Station, and an Orchestrator for the two columns that
-#   are onset-diff/tick-driven), so a value that no longer matches reality
-#   fails here instead of silently drifting into decoration.
-# entry_point: pytest tests/test_availability.py -v
-# last_updated: 2026-07-27
-# ---
-
 """Tests for the Availability standard's policy core and its real mechanisms."""
 
 from __future__ import annotations

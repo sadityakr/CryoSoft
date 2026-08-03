@@ -1,21 +1,3 @@
-# ---
-# description: |
-#   cryosoft.session — the L6 Session Management layer. Manages complete
-#   experiments: who is measuring (User), which sample under which
-#   per-experiment safety envelope (ExperimentRecord + ExperimentEnvelope),
-#   and which runs were produced (RunRecord, recorded automatically from the
-#   Orchestrator's run manifests). Also hosts the Servicing Log framework
-#   (servicing_log.py): declared log kinds, revisioned per-kind storage, the
-#   hourly helium record, and the automatic CryogenicsRecorder writer. Sits
-#   between core and the GUI: imported by gui/main, imports
-#   Orchestrator/Station downward, guarded by import-linter contracts C11/C12.
-# entry_point: Not run directly. Constructed in cryosoft.main and injected into
-#   the GUI (like the ConfigCatalog).
-# dependencies:
-#   - cryosoft.core.orchestrator (run manifests, experiment envelope)
-#   - cryosoft.core.plan (ExperimentEnvelope / EnvelopeBound, ParamSpec)
-# ---
-
 """cryosoft.session — the L6 Session Management layer.
 
 See ``cryosoft/session/README.md`` for the layer standard, and ``GLOSSARY.md``

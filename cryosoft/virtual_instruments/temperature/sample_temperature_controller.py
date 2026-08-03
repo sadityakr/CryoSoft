@@ -1,31 +1,3 @@
-# ---
-# description: |
-#   SampleTemperatureControllerVI: behavior-based VI for any single-sensor,
-#   single-heating-loop temperature controller used on the sample stage.
-#   No needle valve. Implements a time-based ramp generator.
-# entry_point: Not run directly; instantiated by Station factory.
-# dependencies:
-#   - cryosoft.virtual_instruments.base (TemperatureControllerBase)
-#   - cryosoft.virtual_instruments.rampable (RampableVI)
-#   - cryosoft.core.decorators (monitored, control)
-# input: |
-#   drivers = {"main": <temperature controller driver instance>}
-#   init_params keys: default_ramp_rate (K/min), tolerance (K).
-# process: |
-#   _ramp_generator yields each tick, computing the next intermediate setpoint
-#   from time.monotonic(). ramp_status() checks generator exhaustion AND hardware
-#   temperature proximity to setpoint within tolerance. initiate()/standby()
-#   drive the heater mode/output lifecycle standard: initiate() sets AUTO,
-#   standby() sets MANUAL with zero output.
-# output: |
-#   Logged temperature (K), setpoint (K), heater_output (%), heater_mode
-#   ('AUTO'/'MANUAL') via @monitored; set_temperature and set_ramp_rate
-#   available as @control; set_heater_mode, set_heater_output, and set_pid
-#   (@control(panel=False)) in the front panel only. set_heater_output is
-#   refused (CryoSoftSafetyError) unless heater_mode is MANUAL.
-# last_updated: 2026-07-26
-# ---
-
 """SampleTemperatureControllerVI — behavior-based VI for sample-stage temperature control."""
 
 from __future__ import annotations

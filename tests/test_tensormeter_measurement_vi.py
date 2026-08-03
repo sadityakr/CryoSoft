@@ -1,17 +1,3 @@
-# ---
-# description: |
-#   Unit tests for TensormeterRTM2MeasurementVI (L1 Virtual Instruments layer).
-#   Covers both operating modes: the default internal mode (CryoSoft owns
-#   excitation/analysis/routing) and the externally configured mode (the
-#   externally configured standard on MeasurementInstrumentBase — a vendor
-#   tool owns excitation/analysis/routing, CryoSoft only arms the data path,
-#   triggers, reads, and saves). Exercises the detached-idle lifecycle,
-#   n_valid under-delivery accounting, and tensor_component column
-#   selection, against the sim driver.
-# entry_point: pytest tests/test_tensormeter_measurement_vi.py -v
-# last_updated: 2026-07-27
-# ---
-
 from __future__ import annotations
 
 import math

@@ -1,33 +1,3 @@
-# ---
-# description: |
-#   InstrumentFrontPanel: a per-VI child window showing the instrument's FULL
-#   capability surface — every @monitored value live and every @control method,
-#   including the ones the compact monitor card hides (panel=False defaults or
-#   a monitor.yaml panels: allowlist). Rendered entirely from decorator
-#   metadata by embedding an InstrumentPanel whose allowlist is "everything",
-#   so a new VI capability appears here the moment it is declared, with zero
-#   per-instrument GUI code. This is the GUI bench-test surface: uncommon
-#   actions (PID setting, auto-tune, heater power) live here, and every click
-#   still flows through Orchestrator.submit_vi_action() with control-limit
-#   validation intact.
-# entry_point: Not run directly. Lazily created by InstrumentPanel via its
-#   front-panel header icon.
-# dependencies:
-#   - PyQt6 >= 6.5
-#   - cryosoft.core.decorators (get_control_methods)
-#   - cryosoft.gui.instrument_panel (InstrumentPanel)
-# input: |
-#   vi_name (str), vi instance, Orchestrator instance, and the owning widget
-#   (used as Qt parent so the window closes with the application).
-# process: |
-#   Builds a titled window (Qt.WindowType.Window on a parented QWidget: a real
-#   top-level window that is still destroyed with its parent) containing a
-#   QScrollArea over one InstrumentPanel constructed with panel_controls set
-#   to every @control name — the allowlist override that shows the full set.
-# output: |
-#   A reusable child window; callers show()/raise_() it on each icon click.
-# ---
-
 """InstrumentFrontPanel — the full-capability window for one VI."""
 
 from __future__ import annotations

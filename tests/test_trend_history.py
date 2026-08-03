@@ -1,22 +1,3 @@
-# ---
-# description: |
-#   Behavior tests for cryosoft.core.trend_history, the read/query side of
-#   the tiered trend-history store. Fixtures write JSONL files directly to
-#   tmp_path (never drive the real loggers/TieredTrendLogger — this suite
-#   tests the reader in isolation). Covers: live+rotated file merging,
-#   corrupt/truncated/blank line tolerance, sync-conflict-copy filename
-#   exclusion, pick_tier boundaries, raw-tier summarize arithmetic,
-#   count-weighted mean recombination across unequal-count aggregate
-#   buckets (the regression guard for why per-bucket count exists), exact
-#   cross-bucket std recombination via the law of total variance against a
-#   hand-computed true combined population std (and against the smaller,
-#   wrong number a naive pooled-within-bucket estimate would give),
-#   persisted vs. not-persisted vs. empty-window distinctions, partial
-#   results when some retained files are missing, find_crossings direction
-#   handling, and missing-log-dir behavior.
-# last_updated: 2026-07-25
-# ---
-
 """Tests for cryosoft.core.trend_history."""
 
 from __future__ import annotations

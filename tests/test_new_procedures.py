@@ -1,26 +1,3 @@
-# ---
-# description: |
-#   Behavioral tests for the generic sweep procedures FieldSweep and
-#   TemperatureSweep (core.procedure.SweepMeasureProcedure), parametrized over
-#   the measurement VIs they can run (dc_measurement, keithley_delta_mode).
-#   Covers sweep construction, initiate PhasePlan content + command order,
-#   step/standby/abort plans, the missing-magnet refusal, the delta n_valid
-#   column, an end-to-end Orchestrator run, and the DataSchema negative case
-#   (a wrong-shaped reading degrades the Orchestrator to ERROR, unwritten).
-#   Also keeps the set_ramp_rate @control and Station rate-forwarding checks.
-#   The reading-loop section covers the two generic loop slots (the switch's
-#   route and the DC VI's current_A are the same loopable-parameter concept):
-#   the real (n_loop1, n_loop2) DataSchema/HDF5 axis every measurement column
-#   carries, static single-value slots, the HDF5 loop1_values/loop2_values
-#   metadata, command dispatch through the Station, slot composition and
-#   ordering, construction-time refusals, the auto-rendered Reading loop form
-#   group, the live-plot label maps (axis index -> display text), and
-#   end-to-end Orchestrator runs for both slot kinds.
-# entry_point: pytest tests/test_new_procedures.py -v
-# last_updated: 2026-07-22
-# ---
-
-
 import h5py
 import numpy as np
 import pytest

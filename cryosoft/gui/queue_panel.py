@@ -1,31 +1,3 @@
-# ---
-# description: |
-#   QueuePanel: ProcedureWindow's run-queue group box — the queue list with
-#   reorder/remove buttons and the Run Queue button, plus the queue's
-#   bookkeeping: per-item lifecycle status (pending/running/done/failed),
-#   keeping the Orchestrator's pending queue in sync with the GUI order, and
-#   session restore/export of queued procedures. Extracted from
-#   procedure_window.py; the GUI queue is the source of truth for what runs.
-# entry_point: Not run directly. Hosted in ProcedureWindow's queue quadrant.
-# dependencies:
-#   - PyQt6 >= 6.5
-#   - cryosoft.core.station (Station, to rebuild procedure instances)
-#   - cryosoft.core.orchestrator (Orchestrator)
-#   - cryosoft.gui.form_autosave (QueueItemState, status constants)
-# input: |
-#   QueueEntry objects built by ProcedureWindow from validated form values;
-#   persisted QueueItemStates on session restore.
-# process: |
-#   add_entry() appends and arms the Orchestrator; run_queue() marks the first
-#   pending entry running and starts the Orchestrator queue; the hosting
-#   window forwards procedure_finished / abort to notify_finished() /
-#   notify_aborted(), which finalise the running entry and promote the next.
-#   Reorders and removals rebuild the Orchestrator's pending queue in place.
-# output: |
-#   The live queue list; procedures queued/run on the Orchestrator;
-#   export_items() returns the persistable QueueItemStates.
-# ---
-
 """QueuePanel — the run queue list, its statuses, and Orchestrator sync."""
 
 from __future__ import annotations

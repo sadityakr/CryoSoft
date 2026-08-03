@@ -1,24 +1,3 @@
-# ---
-# description: |
-#   Real driver for the Oxford Instruments ILM 210 cryogen level meter.
-#   Pure PyVISA implementation. Communicates over RS-232 (ASRL) using the
-#   Oxford ISOBUS protocol (commands prefixed @N).
-#   Exposes the same API as SimOxfordILM210.
-# entry_point: Not run directly; imported by Virtual Instruments layer.
-# dependencies:
-#   - pyvisa >= 1.13
-# input: |
-#   Instantiated with a VISA resource string (e.g. 'ASRL11::INSTR').
-#   The ISOBUS instrument number is hardcoded to 1.
-#   Serial settings: 9600 baud, 8 data bits, 2 stop bits, no parity.
-# process: |
-#   All commands are prefixed with '@1' per the ISOBUS protocol. A 70 ms
-#   pause is inserted after every write before reading the response.
-# output: |
-#   Returns float helium/nitrogen levels (0-100 %) and int refresh-rate mode.
-# last_updated: 2026-07-16
-# ---
-
 """Real Oxford ILM 210 cryogen level meter driver (pure PyVISA)."""
 
 from __future__ import annotations

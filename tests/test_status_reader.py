@@ -1,15 +1,3 @@
-# ---
-# description: |
-#   Tests for the runtime status reader (cryosoft.troubleshoot.status_reader)
-#   and the `troubleshoot status` CLI subcommand: record parsing, digest/trend
-#   folding, plain-English rendering with per-code triage help, and CLI exit
-#   codes (0 only when a log exists and the verdict is OK). Also covers the
-#   System-Condition standard's ``conditions`` field: present, absent (old-log
-#   backward compatibility), and its "Active conditions" rendering.
-# entry_point: pytest tests/test_status_reader.py -v
-# last_updated: 2026-07-26
-# ---
-
 """Tests for the runtime status reader and `troubleshoot status`."""
 
 from __future__ import annotations

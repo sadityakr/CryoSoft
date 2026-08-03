@@ -1,11 +1,3 @@
-# ---
-# description: |
-#   Unit tests for all simulated drivers. Verifies the 3-rule contract,
-#   correct return types, and simulated physics behavior.
-# entry_point: pytest tests/test_l0_simulated.py -v
-# last_updated: 2026-04-06
-# ---
-
 """Test suite for simulated drivers (Layer 0b)."""
 
 import time

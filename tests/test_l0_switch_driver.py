@@ -1,12 +1,3 @@
-# ---
-# description: |
-#   Unit tests for the SimKeithley705 scanner / matrix-switch sim driver: the
-#   exclusive-mux state model (closed-channel set), open_all clearing, the
-#   closed_channels() inspection helper, get_idn, and error injection.
-# entry_point: pytest tests/test_l0_switch_driver.py -v
-# last_updated: 2026-07-13
-# ---
-
 """Tests for the SimKeithley705 scanner sim driver (L0)."""
 
 from __future__ import annotations

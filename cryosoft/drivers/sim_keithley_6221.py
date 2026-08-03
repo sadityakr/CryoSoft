@@ -1,29 +1,3 @@
-# ---
-# description: |
-#   Simulated driver for the Keithley 6221 AC/DC current source.
-#   Models source enable/disable, current output configuration, and delta-mode
-#   operation. No VISA dependency — pure Python simulation.
-# entry_point: Not run directly; imported by Virtual Instruments layer.
-# dependencies: []
-# input: |
-#   Instantiated with a VISA resource string (ignored). Public methods configure
-#   and control the simulated current source, including delta-mode setup.
-# process: |
-#   Stores source state and delta-mode configuration. When get_delta_readings()
-#   is called, generates simulated voltage readings sourced from a paired
-#   SimKeithley2182A meter if set, or returns zeros with noise otherwise.
-# output: |
-#   Returns bool source state, float current, and list[float] delta readings.
-#   A private _delta_return_count test hook forces a short acquire_delta_readings
-#   return to exercise the delta VI's NaN-padding + n_valid contract. A private
-#   _mode ("DC"/"DELTA") test hook mirrors the real instrument's SCPI function
-#   mode so tests can catch a measurement VI that assumes a starting mode
-#   instead of asserting its own (shared-instrument mode discipline). A
-#   private _meter_present test hook mirrors the real driver's NVPR-absent
-#   failure (2182A unreachable on the RS-232 relay).
-# last_updated: 2026-07-20
-# ---
-
 """Simulated Keithley 6221 AC/DC Current Source driver."""
 
 from typing import TYPE_CHECKING

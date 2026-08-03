@@ -1,17 +1,3 @@
-# ---
-# description: |
-#   Behaviour tests for the connection-lifecycle standard (see
-#   virtual_instruments/base.py's "Connection-lifecycle standard"): connect /
-#   disconnect own the bus session, initiate / standby own the instrument's
-#   state, and building the Station sends nothing but an identity query.
-#   Conformance covers the DECLARATIONS (every driver has close(), every VI's
-#   __init__ is silent); this file covers the BEHAVIOUR those declarations are
-#   supposed to produce, layer by layer: the driver's released session (L0),
-#   the VI's ping/disconnect hooks (L1), the Station's degrade-and-restore
-#   (L2), and the Orchestrator's gating and verdicts (L3).
-# last_updated: 2026-07-27
-# ---
-
 """Connection-lifecycle standard: connect/disconnect across L0-L3."""
 
 from __future__ import annotations

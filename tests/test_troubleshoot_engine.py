@@ -1,13 +1,3 @@
-# ---
-# description: |
-#   Behavior tests for the troubleshoot engine: bus scan, raw address probes,
-#   config preflight fault classification (every FaultCode reachable), and the
-#   DriverBench (introspection, read/write gating, arg coercion, raw I/O).
-#   All hardware is faked: a FakeResourceManager plays the VISA bus and the
-#   sim drivers play the instruments.
-# last_updated: 2026-07-12
-# ---
-
 """Troubleshoot engine tests — every FaultCode class is exercised without hardware."""
 
 from __future__ import annotations

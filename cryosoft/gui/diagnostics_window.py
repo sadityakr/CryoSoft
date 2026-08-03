@@ -1,31 +1,3 @@
-# ---
-# description: |
-#   DiagnosticsWindow: read-only live diagnostics window for connection and
-#   progress problems ("a device stopped communicating" / "this is taking
-#   way longer than expected"). Renders the Orchestrator's operational_status
-#   signal (the per-tick record cryosoft.core.operational_status assembles
-#   and cryosoft.core.watchdog annotates) as a verdict badge, a per-instrument
-#   status table, and an alerts feed, each paired with the same plain-English
-#   fault-code vocabulary the offline troubleshoot CLI uses. A Copy
-#   Diagnostics button puts a text summary on the clipboard for a support
-#   message.
-# entry_point: Not run directly. Opened via MonitorWindow's Diagnostics menu.
-# dependencies:
-#   - PyQt6 >= 6.5
-#   - cryosoft.core.orchestrator (Orchestrator)
-#   - cryosoft.core.operational_status (RunFaultCode)
-# input: |
-#   An Orchestrator instance. Seeds from get_operational_status() at
-#   construction, then updates live from the operational_status signal.
-# process: |
-#   Purely reactive to already-emitted Orchestrator data; makes no hardware
-#   calls and reads no files, so it stays reliable even mid-incident, unlike
-#   a competing bus scan against instruments the running app already holds
-#   open.
-# output: |
-#   A QMainWindow. Nothing here can change Orchestrator or hardware state.
-# ---
-
 """DiagnosticsWindow — live connection/progress diagnostics (read-only)."""
 
 from __future__ import annotations

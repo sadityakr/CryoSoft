@@ -1,39 +1,3 @@
-# ---
-# description: |
-#   The two per-instrument lifecycle controls every card carries, side by side
-#   in its header — the two axes of the connection-lifecycle standard (see
-#   virtual_instruments/base.py):
-#     * LifecycleToggleButton — one state-dependent Initiate/Standby button
-#       (+ status glow dot), the OPERATING axis: what the instrument is doing.
-#     * ConnectionButton — a one-way Connect or Disconnect button, the
-#       CONNECTION axis: who owns the bus session. It is one-way by design,
-#       not a toggle: a live card can only offer Disconnect and an offline
-#       card only Connect, because the card itself is swapped when the state
-#       flips (MonitorWindow._on_instrument_disconnected / _reconnected).
-#   Shared by every InstrumentPanel card (system, measurement, and switch
-#   alike) and by OfflineInstrumentPanel, so all places render identically.
-# entry_point: Not run directly. Instantiated by InstrumentPanel /
-#   OfflineInstrumentPanel / MonitorWindow.
-# dependencies:
-#   - PyQt6 >= 6.5
-#   - qtawesome
-# input: |
-#   LifecycleToggleButton: a callback invoked with "initiate" or "standby".
-#   ConnectionButton: a no-argument callback, plus the direction to render.
-# process: |
-#   The lifecycle button starts in the standby ("Initiate", red dot) state.
-#   Clicking it only submits the opposite action via the callback — it does
-#   NOT flip state optimistically. set_initiated() is the only thing that
-#   changes the displayed state, and callers wire it to
-#   Orchestrator.action_succeeded so the glow reflects confirmed instrument
-#   state, not a hopeful click. ConnectionButton likewise only submits; the
-#   Orchestrator's instrument_connected/disconnected signals drive the card
-#   swap that changes what is displayed.
-# output: |
-#   LifecycleToggleButton: a QWidget (dot + button); set_initiated(bool)
-#   updates it, is_initiated() reads it back. ConnectionButton: a QPushButton.
-# ---
-
 """Per-instrument lifecycle controls: Initiate/Standby and Connect/Disconnect."""
 
 from __future__ import annotations

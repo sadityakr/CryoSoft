@@ -1,13 +1,3 @@
-# ---
-# description: |
-#   Unit tests for the runtime watchdog (cryosoft.core.watchdog). Drives scripted
-#   sequences of ticks through build_operational_status + apply_watchdog and
-#   asserts exactly when RAMP_STALLED / STALLED_RUN fire and when they must stay
-#   quiet (converging ramp, switch-heater warmup phase, long RAMPING state).
-# entry_point: pytest tests/test_watchdog.py -v
-# last_updated: 2026-07-12
-# ---
-
 """Tests for the deterministic runtime watchdog."""
 
 from __future__ import annotations

@@ -1,34 +1,3 @@
-# ---
-# description: |
-#   TrendsQuadrant: MonitorWindow's top-right quadrant — 1-4 TrendPlotPanels
-#   auto-arranged into a ceil(sqrt(N)) grid, backed by a shared MonitorHistory
-#   ring buffer that this quadrant owns and records into on every monitor
-#   tick. Handles the Add button (cap 4), per-panel remove (floor 1),
-#   opportunistic temperature/level default-key selection, and persistence of
-#   the panel list (selected key + time window) to QSettings.
-#   Extracted from monitor_window.py.
-# entry_point: Not run directly. Hosted as MonitorWindow's top-right quadrant.
-# dependencies:
-#   - PyQt6 >= 6.5
-#   - cryosoft.core.station (Station, for VI-name-aware default-key picking)
-#   - cryosoft.core.trend_history / cryosoft.core.paths
-#     (startup rehydration of MonitorHistory from the disk-backed raw tier)
-#   - cryosoft.gui.monitor_history (MonitorHistory)
-#   - cryosoft.gui.trend_plot_panel (TrendPlotPanel)
-# input: |
-#   Per-tick state snapshots via on_states_updated(); QSettings blobs via
-#   restore_settings(); at construction, the raw trend-history tier on disk
-#   (log_dir, defaulting to cryosoft.core.paths.log_directory()).
-# process: |
-#   At construction, replays the raw tier (bounded to MonitorHistory's
-#   retention) into MonitorHistory via record_flat(), non-fatally. Panels
-#   are registered in an insertion-ordered dict; the grid is rebuilt from
-#   scratch on every add/remove (cheap at N<=4). Restored/default key
-#   selections are held pending until MonitorHistory has data for them.
-# output: |
-#   Live trend plots; save_settings() persists the panel list.
-# ---
-
 """TrendsQuadrant — the Trends panel grid and its MonitorHistory."""
 
 from __future__ import annotations

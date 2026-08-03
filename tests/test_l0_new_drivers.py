@@ -1,12 +1,3 @@
-# ---
-# description: |
-#   Unit tests for new simulated driver capabilities added in the
-#   behavior-based VI refactor: IPS120 switch heater/persistent mode,
-#   ITC503 needle valve, ILM200 3-mode, and the new Keithley 2400 SMU.
-# entry_point: pytest tests/test_l0_new_drivers.py -v
-# last_updated: 2026-04-19
-# ---
-
 """Tests for extended and new simulated drivers (Stage 1 of VI refactor)."""
 
 import pytest

@@ -1,37 +1,3 @@
-# ---
-# description: |
-#   VTITemperatureControllerVI: behavior-based VI for a single-sensor,
-#   single-heating-loop temperature controller that also controls a needle valve
-#   (VTI — variable temperature insert). Extends SampleTemperatureControllerVI
-#   with needle valve @monitored and @control methods.
-# entry_point: Not run directly; instantiated by Station factory.
-# dependencies:
-#   - cryosoft.virtual_instruments.sample_temperature_controller (SampleTemperatureControllerVI)
-#   - cryosoft.core.decorators (monitored, control)
-# input: |
-#   drivers = {"main": <temperature controller driver with needle valve support>}
-#   Same init_params as SampleTemperatureControllerVI.
-#   On the Oxford ITC503 the needle valve is driven by an auxiliary analog
-#   output on the same controller, so a single driver entry is sufficient.
-# process: |
-#   All temperature ramp logic is inherited unchanged from
-#   SampleTemperatureControllerVI. Adds get/set for the needle valve position
-#   (0–100% open) and its own AUTO/MANUAL control mode, forwarded to
-#   driver.get/set_needle_valve() and get/set_needle_valve_mode().
-#   set_needle_valve() is refused while mode is AUTO (the instrument's own
-#   gas-flow loop ignores explicit position commands in that mode — the
-#   reported real-hardware symptom this fixes). standby() extends the
-#   inherited heater lifecycle (MANUAL, zero output) by switching needle
-#   valve mode to MANUAL and then closing it; initiate() is inherited
-#   unchanged (heater AUTO).
-# output: |
-#   All SampleTemperatureControllerVI outputs plus needle_valve (%) and
-#   needle_valve_mode (str) via @monitored; set_needle_valve available as
-#   @control (refused unless mode is MANUAL); set_needle_valve_mode
-#   (@control(panel=False), AUTO/MANUAL dropdown).
-# last_updated: 2026-07-26
-# ---
-
 """VTITemperatureControllerVI — extends SampleTemperatureControllerVI with needle valve."""
 
 from __future__ import annotations

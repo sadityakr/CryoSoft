@@ -1,27 +1,3 @@
-# ---
-# description: |
-#   Real driver for the Lakeshore 335 temperature controller.
-#   Pure PyVISA implementation communicating over GPIB. Exposes the same
-#   public API as SimOxfordITC503 (minus needle-valve) so SampleTemperatureControllerVI
-#   works without modification.
-# entry_point: Not run directly; imported by Virtual Instruments layer.
-# dependencies:
-#   - pyvisa >= 1.13
-# input: |
-#   Instantiated with a VISA resource string (e.g. 'GPIB0::12::INSTR').
-#   Reads temperature from input channel A; controls setpoint and heater on output 1.
-# process: |
-#   All commands are standard Lakeshore SCPI. get_temperature() queries KRDG? A.
-#   get/set_setpoint() use SETP? 1 / SETP 1,<val>. get_heater_output() uses HTR? 1.
-#   get/set_heater_range() use RANGE? 1 / RANGE 1,<n> — the power-up default is
-#   Off, which is why a fresh instrument or one whose range was reset delivers
-#   no heater power regardless of heater mode or setpoint until commanded on.
-# output: |
-#   Returns float temperature (K), setpoint (K), heater output (%), and
-#   heater range via public API.
-# last_updated: 2026-07-25
-# ---
-
 """Real Lakeshore 335 temperature controller driver (pure PyVISA)."""
 
 from __future__ import annotations

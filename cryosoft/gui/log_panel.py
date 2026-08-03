@@ -1,24 +1,3 @@
-# ---
-# description: |
-#   LogPanel: the read-only real-time log view (objectName ``log_panel``) plus
-#   QtLogHandler, the logging.Handler that appends coloured HTML lines to it.
-#   Extracted from monitor_window.py so the log concern (widget + handler +
-#   attach/detach lifecycle) lives in one module.
-# entry_point: Not run directly. Hosted by MonitorWindow's bottom-right quadrant.
-# dependencies:
-#   - PyQt6 >= 6.5
-#   - cryosoft.gui.theme (LOG_* colours)
-# input: |
-#   Python logging records from the shared "cryosoft" logger.
-# process: |
-#   attach() adds the handler to the "cryosoft" logger (guarding against a
-#   duplicate); detach() removes it so nothing writes to a destroyed widget.
-#   The handler drops per-method VI polling noise below WARNING and trims the
-#   document to a line cap so a long run cannot grow memory without bound.
-# output: |
-#   Coloured, timestamped log lines in the panel.
-# ---
-
 """LogPanel — real-time log widget and its Qt logging handler."""
 
 from __future__ import annotations

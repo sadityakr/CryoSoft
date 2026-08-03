@@ -1,32 +1,3 @@
-# ---
-# description: |
-#   Simulated driver for the Tensormeter RTM2 resistance-tensor analyzer.
-#   Models source/protection/range setpoints, switch-matrix state, and the
-#   onboard Analysis Mode engine's tensor output (Res A / Res B) via a
-#   configurable "true" sheet resistance and Hall resistance plus Gaussian
-#   noise. No `rtm2` package dependency — pure Python, fully independent
-#   of the real driver module (deliberately does not import
-#   cryosoft.drivers.tensormeter_rtm2, so it constructs even if the vendor
-#   package is not installed).
-# entry_point: Not run directly; imported by the Virtual Instruments layer.
-# dependencies: []
-# input: |
-#   Instantiated with a resource string (ignored). Public methods mirror
-#   TensormeterRTM2 exactly (conformance-checked API parity).
-# process: |
-#   Stores every setter value; read_new_data()/read_all_data() synthesize
-#   data rows from the stored source current and the configurable
-#   _true_sheet_resistance_ohm / _true_hall_resistance_ohm test hooks (plus
-#   _noise_ohm Gaussian noise) into res_a_dc_ohm / res_b_dc_ohm — good
-#   enough to exercise a measurement VI's control flow and averaging logic,
-#   without claiming to model the real lock-in/demodulation physics.
-# output: |
-#   Plain float/int/str/None from setters/getters; read_new_data()/
-#   read_all_data() return list[dict[str, float]] with the same column
-#   names as the real driver's fixed layout (vendor doc §3.1).
-# last_updated: 2026-07-23
-# ---
-
 """Simulated Tensormeter RTM2 resistance-tensor analyzer driver."""
 
 from __future__ import annotations

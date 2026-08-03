@@ -1,39 +1,3 @@
-# ---
-# description: |
-#   ExperimentManager — the L6 façade and the single writer of experiment
-#   state. Owns the experiment lifecycle (start/close, findings, attendance),
-#   records every run automatically from the Orchestrator's
-#   run_started/run_finished manifests, installs the experiment's envelope on
-#   the Orchestrator, and supplies experiment_context() — a two-tier {setup,
-#   experiment} dict — for stamping HDF5 files. The Setup tier (config
-#   identity + each VI's optional devices.yaml metadata block) is read once
-#   at construction via read_instrument_metadata() and is present even with
-#   no experiment open. Qt-widget-free: a QObject with signals, no gui
-#   imports (contract C11).
-# entry_point: Not run directly. Constructed in cryosoft.main after the
-#   Orchestrator; injected into the GUI like the ConfigCatalog.
-# dependencies:
-#   - cryosoft.core.orchestrator (run manifests, set_experiment_envelope)
-#   - cryosoft.core.station (settings snapshots, read_instrument_metadata)
-#   - cryosoft.session.store / cryosoft.session.models
-# input: |
-#   Orchestrator signals (run manifests) and GUI lifecycle calls
-#   (start_experiment/close_experiment/set_findings/set_attended/set_queue/
-#   switch_experiment).
-# process: |
-#   On construction, resumes the store's active experiment (marking runs left
-#   "running" by a crash as failed). Each run_started manifest opens a
-#   RunRecord (data_file relativized against the session folder) with a
-#   station settings snapshot; run_finished completes it. Every mutation
-#   saves the record and re-emits it on experiment_changed; a save that
-#   fails/recovers is surfaced once via store_health_changed. switch_experiment
-#   swaps the live experiment without closing the outgoing one.
-# output: |
-#   Persisted experiment records (via ExperimentStore) and the
-#   experiment_changed / run_recorded / store_health_changed signals the GUI
-#   renders.
-# ---
-
 """ExperimentManager — the L6 façade and single writer of experiment state."""
 
 from __future__ import annotations

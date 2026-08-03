@@ -1,23 +1,3 @@
-# ---
-# description: |
-#   Simulated driver for a generic motorized sample-rotation stage. Models
-#   angular position moving toward a setpoint at a configurable rate, mirroring
-#   SimOxfordIPS120's current-ramp simulation but for degrees instead of amps
-#   and with no quench/switch-heater physics (a rotation stage has neither).
-#   No VISA dependency — pure Python simulation using real wall-clock time.
-# entry_point: Not run directly; imported by Virtual Instruments layer.
-# dependencies: []
-# input: |
-#   Instantiated with a VISA resource string (ignored). Public methods control
-#   and query the simulated sample angle and status.
-# process: |
-#   Uses time.time() to advance the simulated position toward the setpoint at
-#   the configured rate (deg/min). Status transitions HOLD -> MOVING -> HOLD.
-# output: |
-#   Returns float position/setpoint values and str status via public API.
-# last_updated: 2026-07-18
-# ---
-
 """Simulated motorized sample-rotation stage driver."""
 
 import time
