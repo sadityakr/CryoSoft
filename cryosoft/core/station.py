@@ -1960,6 +1960,14 @@ _CRYOGENICS_DEFAULTS: dict[str, float | str] = {
     "history_sample_s": 3600.0,
 }
 
+# Defaults applied by read_safety_config() for every key the config omits —
+# unlike _CRYOGENICS_DEFAULTS, these apply even when the whole ``safety:``
+# block is absent (Orchestrator.acknowledge()'s override window is not an
+# opt-in feature the way cryogenics is; every setup gets a timeout).
+_SAFETY_DEFAULTS: dict[str, float] = {
+    "manual_override_timeout_s": 300.0,
+}
+
 
 def _load_devices_yaml(config_path: str) -> dict[str, Any] | None:
     """Parse ``devices.yaml`` under *config_path*, GUI-safe.
@@ -2087,6 +2095,39 @@ def read_cryogenics_config(config_path: str) -> dict[str, Any]:
     if not isinstance(block, dict) or not block:
         return {}
     merged = dict(_CRYOGENICS_DEFAULTS)
+    merged.update(block)
+    return merged
+
+
+def read_safety_config(config_path: str) -> dict[str, float]:
+    """Read the optional ``safety:`` block, GUI-safe, always defaulted.
+
+    Unlike ``read_cryogenics_config()``, an absent ``safety:`` block does
+    NOT mean "feature disabled" — ``Orchestrator.acknowledge()``'s override
+    window applies to every setup, so this always returns
+    ``_SAFETY_DEFAULTS`` merged with whatever the config overrides, never
+    ``{}``.
+
+    Expected shape::
+
+        safety:
+          manual_override_timeout_s: 300.0
+
+    Args:
+        config_path: Path to the config directory containing ``devices.yaml``.
+
+    Returns:
+        ``_SAFETY_DEFAULTS`` with any declared overrides merged in. Falls
+        back to the defaults untouched if the config directory/file/YAML is
+        unreadable or the block is absent/malformed — never raises.
+    """
+    merged = dict(_SAFETY_DEFAULTS)
+    devices_config = _load_devices_yaml(config_path)
+    if devices_config is None:
+        return merged
+    block = devices_config.get("safety")
+    if not isinstance(block, dict):
+        return merged
     merged.update(block)
     return merged
 

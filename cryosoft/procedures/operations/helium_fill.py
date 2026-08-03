@@ -171,9 +171,9 @@ class HeliumFillOperation(OperationBase):
                 ``fill_target_pct``, ``fill_zero_field_window_s``,
                 ``fill_complete_window_s``,
                 ``max_fill_duration_s``, ``sample_period_s``,
-                ``helium_warning_pct`` (read by ``next_due()`` — the same
-                key the recorder's advisory warning uses) — each with a
-                sane default so this constructs from a
+                ``helium_warning_pct`` (read by ``next_due()`` for its
+                trend-estimate threshold) — each with a sane default so
+                this constructs from a
                 sim station alone. Unrecognised keys (including the retired
                 ``data_directory``, kept accepted-but-ignored for any caller
                 still passing it) are silently ignored, so
@@ -200,12 +200,10 @@ class HeliumFillOperation(OperationBase):
             config.get("max_fill_duration_s", 3600.0)
         )
         self._sample_period_s: float = float(config.get("sample_period_s", 10.0))
-        # next_due()'s prediction threshold — the same
-        # helium_warning_pct key the recorder's advisory cryo_warning signal
-        # already reads (see cryosoft.session.servicing_log.CryogenicsRecorder
-        # and Station._CRYOGENICS_DEFAULTS), so **cryogenics_config passed
-        # verbatim wires the panel's prediction to the same threshold the
-        # operator already sees the low-helium warning at.
+        # next_due()'s prediction threshold — the same helium_warning_pct
+        # key Station._CRYOGENICS_DEFAULTS declares, so **cryogenics_config
+        # passed verbatim wires the panel's trend-estimate to the same
+        # threshold used elsewhere in the config.
         self._warning_pct: float = float(
             config.get("helium_warning_pct", _DEFAULT_WARNING_PCT)
         )
@@ -358,11 +356,16 @@ class HeliumFillOperation(OperationBase):
 
         Returns:
             ``NextDue(due_unix, text)`` with ``hours = (level -
-            helium_warning_pct) / rate``; ``NextDue(None, ...)`` variants
-            when the level or rate is unavailable ("consumption unknown"),
-            the rate is not positive ("level not falling" — the level is
-            flat or rising), or the level is already at/below the warning
-            threshold ("Fill overdue …").
+            helium_warning_pct) / rate``, worded as a trend estimate (a
+            lagging least-squares fit over a trailing window — see
+            ``consumption_rate_pct_per_h()`` — not a real-time forecast, so
+            it doesn't account for the current VTI temperature, switch-
+            heater state, or whether a measurement is running).
+            ``NextDue(None, ...)`` variants when the level or rate is
+            unavailable ("consumption unknown"), the rate is not positive
+            ("level not falling" — the level is flat or rising), or the
+            level is already at/below the warning threshold ("Fill
+            overdue …").
         """
         level: float | None = None
         state = context.get("state")
@@ -382,7 +385,9 @@ class HeliumFillOperation(OperationBase):
         if rate <= 0:
             return NextDue(None, "Fill due: level not falling")
         if level <= self._warning_pct:
-            return NextDue(None, "Fill overdue (level below warning threshold)")
+            return NextDue(
+                None, "Fill overdue (trend estimate; level below warning threshold)"
+            )
 
         hours = (level - self._warning_pct) / rate
         now_unix = context.get("now_unix")
@@ -393,7 +398,8 @@ class HeliumFillOperation(OperationBase):
         )
         text = (
             f"Fill due in ~{_humanize_duration_hours(hours)} "
-            f"(level {level:.1f} %, warning at {self._warning_pct:.1f} %)"
+            f"(trend estimate; level {level:.1f} %, warning at "
+            f"{self._warning_pct:.1f} %)"
         )
         return NextDue(due_unix, text)
 

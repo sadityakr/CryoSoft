@@ -772,6 +772,259 @@ def test_helium_low_holds_magnets_without_emergency(orchestrator, station, qtbot
         orchestrator.submit_vi_action("magnet_z", "initiate")
 
 
+def test_acknowledge_unlocks_helium_low_hold_without_emergency(orchestrator, station, qtbot):
+    """acknowledge() unlocks a plain hold-severity condition, no EMERGENCY involved.
+
+    Mirrors test_helium_low_holds_magnets_without_emergency but exercises
+    the new override: before acknowledge(), magnet_z is refused exactly
+    like today; after, manual control is admitted and the state never
+    leaves IDLE — acknowledge() never fakes a state transition for a
+    condition that is honestly still active (GLOSSARY.md's **Hold
+    acknowledge**).
+    """
+    station.level_meter._driver._force_helium_level = 5.0
+
+    def magnet_held():
+        return "magnet_z" in orchestrator._held_vis()
+
+    qtbot.waitUntil(magnet_held, timeout=2000)
+
+    with qtbot.waitSignal(orchestrator.action_blocked, timeout=500):
+        orchestrator.submit_vi_action("magnet_z", "standby")
+
+    orchestrator.acknowledge()
+    assert orchestrator._state == OrchestratorState.IDLE
+    assert orchestrator.override_active("magnet_z") is True
+
+    with qtbot.waitSignal(orchestrator.action_succeeded, timeout=500):
+        orchestrator.submit_vi_action("magnet_z", "standby")
+
+    station.level_meter._driver._force_helium_level = None
+
+
+def test_acknowledge_hold_override_works_while_paused(orchestrator, station, qtbot):
+    """The hold override reaches through claim-protection while PAUSED.
+
+    A magnet held by helium_low AND claimed by a paused procedure is
+    refused by rule 0b before claim-protection (rule 4) is ever reached —
+    acknowledging admits the action directly, with no PAUSED-specific code
+    anywhere in _manual_action_admissible(). This is the deliberate,
+    accepted trade-off documented as the Known gap for resume_procedure()
+    (GLOSSARY.md's **Hold acknowledge**): the override reaches through
+    claim-protection on purpose, so filling helium mid-pause is possible.
+    """
+    procedure = MockProcedure(station)
+    orchestrator.run_procedure(procedure)
+    orchestrator.pause_procedure()
+    assert orchestrator._state == OrchestratorState.PAUSED
+
+    station.level_meter._driver._force_helium_level = 5.0
+
+    def magnet_held():
+        return "magnet_z" in orchestrator._held_vis()
+
+    qtbot.waitUntil(magnet_held, timeout=2000)
+
+    with qtbot.waitSignal(orchestrator.action_blocked, timeout=500):
+        orchestrator.submit_vi_action("magnet_z", "standby")
+
+    orchestrator.acknowledge()
+    with qtbot.waitSignal(orchestrator.action_succeeded, timeout=500):
+        orchestrator.submit_vi_action("magnet_z", "standby")
+    assert orchestrator._state == OrchestratorState.PAUSED
+
+    station.level_meter._driver._force_helium_level = None
+
+
+def test_hold_override_does_not_leak_into_new_emergency(orchestrator, station, qtbot):
+    """Regression: an acknowledged hold must not bypass a LATER EMERGENCY.
+
+    Without the EMERGENCY/ERROR guard in _manual_action_admissible()'s
+    rule 0b, an operator acknowledging helium_low on magnet_z while IDLE
+    would leave magnet_z unlocked straight through a subsequent quench on
+    the SAME VI — breaking the invariant that critical severity refuses
+    every VI, held or not
+    (test_quench_emergency_blocks_all_manual_control). The still-live hold
+    override must NOT admit action once EMERGENCY is entered; only a fresh
+    acknowledge() (now delegating to _acknowledge_emergency()) can unlock
+    it from there.
+    """
+    station.level_meter._driver._force_helium_level = 5.0
+
+    def magnet_held():
+        return "magnet_z" in orchestrator._held_vis()
+
+    qtbot.waitUntil(magnet_held, timeout=2000)
+    orchestrator.acknowledge()
+    assert orchestrator.override_active("magnet_z") is True
+    with qtbot.waitSignal(orchestrator.action_succeeded, timeout=500):
+        orchestrator.submit_vi_action("magnet_z", "standby")
+
+    station.magnet_z._driver._simulate_quench = True
+    qtbot.waitUntil(
+        lambda: orchestrator._state == OrchestratorState.EMERGENCY, timeout=2000
+    )
+
+    with qtbot.waitSignal(orchestrator.action_blocked, timeout=500):
+        orchestrator.submit_vi_action("magnet_z", "initiate")
+
+    orchestrator.acknowledge()
+    assert orchestrator._state == OrchestratorState.EMERGENCY
+    with qtbot.waitSignal(orchestrator.action_succeeded, timeout=500):
+        orchestrator.submit_vi_action("magnet_z", "initiate")
+
+    station.magnet_z._driver._simulate_quench = False
+    station.level_meter._driver._force_helium_level = None
+
+
+def test_hold_override_refused_during_error(orchestrator, station, qtbot, monkeypatch):
+    """The hold override never admits action while the Orchestrator is in ERROR.
+
+    ERROR means unknown blast radius (an unhandled tick-boundary
+    exception), not a known, scoped condition a human can safely act
+    around — the deliberate ERROR exclusion alongside EMERGENCY in rule
+    0b's state guard. A hold acknowledged BEFORE the ERROR entry (still
+    unexpired) must not leak through it, mirroring
+    test_hold_override_does_not_leak_into_new_emergency for ERROR instead
+    of EMERGENCY.
+    """
+    station.level_meter._driver._force_helium_level = 5.0
+
+    def magnet_held():
+        return "magnet_z" in orchestrator._held_vis()
+
+    qtbot.waitUntil(magnet_held, timeout=2000)
+    orchestrator.acknowledge()
+    assert orchestrator.override_active("magnet_z") is True
+
+    def boom():
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(orchestrator, "_tick_body", boom)
+    with qtbot.waitSignal(orchestrator.error_occurred, timeout=1000):
+        orchestrator._tick()
+    assert orchestrator._state == OrchestratorState.ERROR
+
+    admitted, reason = orchestrator._manual_action_admissible("magnet_z")
+    assert admitted is False
+    assert "safety hold" in reason
+
+    station.level_meter._driver._force_helium_level = None
+
+
+def test_hold_override_expires_after_timeout(station, qtbot):
+    """The hold override reverts to refusal once manual_override_timeout_s elapses.
+
+    No state change accompanies the expiry — it is purely the timestamp
+    comparison in _manual_action_admissible() lapsing on its own, not a
+    tick-driven "re-lock" event. A fresh acknowledge() restores access.
+    """
+    orch = Orchestrator(station, tick_interval_ms=10, manual_override_timeout_s=0.2)
+    orch.start_monitoring()
+    try:
+        station.level_meter._driver._force_helium_level = 5.0
+
+        def magnet_held():
+            return "magnet_z" in orch._held_vis()
+
+        qtbot.waitUntil(magnet_held, timeout=2000)
+        orch.acknowledge()
+        assert orch.override_active("magnet_z") is True
+
+        qtbot.wait(300)  # past the 0.2s window
+        assert orch.override_active("magnet_z") is False
+        admitted, reason = orch._manual_action_admissible("magnet_z")
+        assert admitted is False
+        assert orch._state == OrchestratorState.IDLE  # no state change
+
+        orch.acknowledge()
+        assert orch.override_active("magnet_z") is True
+    finally:
+        station.level_meter._driver._force_helium_level = None
+        orch.shutdown()
+
+
+def test_hold_override_survives_flapping_within_window(station, qtbot):
+    """The cooldown survives the SAME flag clearing and re-tripping (flapping).
+
+    User-confirmed design: pruning is expiry-only, never merely because the
+    condition disappeared from verdict.held_vis, so a flag hovering right
+    at its threshold (helium_low is exactly this in practice) does not
+    force a fresh acknowledge on every re-trip within the same window.
+    """
+    orch = Orchestrator(station, tick_interval_ms=10, manual_override_timeout_s=5.0)
+    orch.start_monitoring()
+    try:
+        station.level_meter._driver._force_helium_level = 5.0
+
+        def magnet_held():
+            return "magnet_z" in orch._held_vis()
+
+        qtbot.waitUntil(magnet_held, timeout=2000)
+        orch.acknowledge()
+        assert orch.override_active("magnet_z") is True
+
+        # Condition clears...
+        station.level_meter._driver._force_helium_level = None
+
+        def hold_cleared():
+            return "magnet_z" not in orch._held_vis()
+
+        qtbot.waitUntil(hold_cleared, timeout=2000)
+        # override_active("magnet_z") is correctly False here — nothing is
+        # held, so there is nothing to admit against. The invariant under
+        # test is that the underlying _hold_override_until entry (keyed by
+        # Condition.key, e.g. "safety:helium_low") was NOT pruned just
+        # because the condition cleared — checked directly since
+        # override_active() has no VI to resolve a key through while
+        # unheld. It only matters once the flag re-trips, below.
+        assert orch._hold_override_until
+
+        # ...and re-trips (same key) before the 5s window elapses, with no
+        # second acknowledge() call.
+        station.level_meter._driver._force_helium_level = 5.0
+        qtbot.waitUntil(magnet_held, timeout=2000)
+        assert orch.override_active("magnet_z") is True
+        with qtbot.waitSignal(orch.action_succeeded, timeout=500):
+            orch.submit_vi_action("magnet_z", "standby")
+    finally:
+        station.level_meter._driver._force_helium_level = None
+        orch.shutdown()
+
+
+def test_emergency_override_expires_after_timeout(station, qtbot):
+    """The EMERGENCY override also expires, reverting to refusal in-state.
+
+    State stays EMERGENCY throughout (the condition is still active) —
+    only manual-control admission lapses. Re-acknowledging renews it.
+    """
+    orch = Orchestrator(station, tick_interval_ms=10, manual_override_timeout_s=0.2)
+    orch.start_monitoring()
+    try:
+        station.magnet_z._driver._simulate_quench = True
+        qtbot.waitUntil(
+            lambda: orch._state == OrchestratorState.EMERGENCY, timeout=2000
+        )
+        orch.acknowledge()
+        assert orch.override_active() is True
+        with qtbot.waitSignal(orch.action_succeeded, timeout=500):
+            orch.submit_vi_action("dc_measurement", "initiate")
+
+        qtbot.wait(300)  # past the 0.2s window
+        assert orch.override_active() is False
+        with qtbot.waitSignal(orch.action_blocked, timeout=500):
+            orch.submit_vi_action("dc_measurement", "initiate")
+        assert orch._state == OrchestratorState.EMERGENCY  # no state change
+
+        orch.acknowledge()
+        assert orch.override_active() is True
+        with qtbot.waitSignal(orch.action_succeeded, timeout=500):
+            orch.submit_vi_action("dc_measurement", "initiate")
+    finally:
+        station.magnet_z._driver._simulate_quench = False
+        orch.shutdown()
+
+
 def test_emergency_acknowledge_unlocks_manual_front_panel(orchestrator, station, qtbot):
     """Acknowledging an unresolved EMERGENCY unlocks manual control station-wide.
 
@@ -800,9 +1053,9 @@ def test_emergency_acknowledge_unlocks_manual_front_panel(orchestrator, station,
     assert orchestrator._state == OrchestratorState.EMERGENCY
 
     # Condition is still active, so acknowledging cannot reach IDLE...
-    orchestrator.acknowledge_emergency()
+    orchestrator.acknowledge()
     assert orchestrator._state == OrchestratorState.EMERGENCY
-    assert orchestrator._emergency_manual_override is True
+    assert orchestrator.override_active() is True
 
     # ...but the front panel is now unlocked, for every VI.
     with qtbot.waitSignal(orchestrator.action_succeeded, timeout=500) as blocker:
@@ -825,9 +1078,9 @@ def test_emergency_acknowledge_unlocks_manual_front_panel(orchestrator, station,
     qtbot.waitUntil(
         lambda: not orchestrator._station.check_safety().get("quench"), timeout=2000
     )
-    orchestrator.acknowledge_emergency()
+    orchestrator.acknowledge()
     assert orchestrator._state == OrchestratorState.IDLE
-    assert orchestrator._emergency_manual_override is False
+    assert orchestrator.override_active() is False
 
 
 def test_emergency_shutdown_runs_once_not_every_tick(orchestrator, station, qtbot):
@@ -883,7 +1136,7 @@ def test_quench_emergency_blocks_all_manual_control(orchestrator, station, qtbot
     "unconcerned VI stays usable" behavior — dc_measurement (a plain
     measurement VI with no safety_concerns() at all) and temperature_vti
     (unaffected by quench under either the old or new safety_concerns())
-    are refused exactly like magnet_z, until acknowledge_emergency()
+    are refused exactly like magnet_z, until acknowledge()
     unlocks the manual override.
     """
     station.magnet_z._driver._simulate_quench = True
@@ -898,9 +1151,9 @@ def test_quench_emergency_blocks_all_manual_control(orchestrator, station, qtbot
     with qtbot.waitSignal(orchestrator.action_blocked, timeout=500):
         orchestrator.submit_vi_action("dc_measurement", "initiate")
 
-    orchestrator.acknowledge_emergency()
+    orchestrator.acknowledge()
     assert orchestrator._state == OrchestratorState.EMERGENCY
-    assert orchestrator._emergency_manual_override is True
+    assert orchestrator.override_active() is True
 
     with qtbot.waitSignal(orchestrator.action_succeeded, timeout=500):
         orchestrator.submit_vi_action("dc_measurement", "initiate")
@@ -1343,12 +1596,12 @@ def test_envelope_state_violation_enters_emergency(orchestrator, station, qtbot)
     assert any("session envelope" in e and "temperature_sample" in e for e in errors)
 
     # Acknowledgement is refused while the violation persists...
-    orchestrator.acknowledge_emergency()
+    orchestrator._acknowledge_emergency()
     assert orchestrator._state == OrchestratorState.EMERGENCY
 
     # ...and succeeds once the envelope is cleared (the "sample removed" case).
     orchestrator.set_experiment_envelope(None)
-    orchestrator.acknowledge_emergency()
+    orchestrator._acknowledge_emergency()
     assert orchestrator._state == OrchestratorState.IDLE
 
 
@@ -1538,7 +1791,7 @@ def test_not_responding_refuses_control_via_tag_policy(orchestrator, station, qt
 
 
 def test_not_responding_never_bypassed_by_emergency_override(orchestrator, station, qtbot):
-    """The comm-vs-safety ``acknowledge_emergency()`` asymmetry still holds.
+    """The comm-vs-safety ``acknowledge()`` asymmetry still holds.
 
     ``TAG_POLICY["not_responding"]`` carries no override column at all, so
     unlike a safety hold (rule 0b), acknowledging an EMERGENCY can never
@@ -1558,8 +1811,8 @@ def test_not_responding_never_bypassed_by_emergency_override(orchestrator, stati
     qtbot.waitUntil(
         lambda: orchestrator._state == OrchestratorState.EMERGENCY, timeout=2000
     )
-    orchestrator.acknowledge_emergency()
-    assert orchestrator._emergency_manual_override is True
+    orchestrator.acknowledge()
+    assert orchestrator.override_active() is True
 
     # The override unlocks a VI with no fault of its own...
     with qtbot.waitSignal(orchestrator.action_succeeded, timeout=500):
@@ -1574,7 +1827,7 @@ def test_not_responding_never_bypassed_by_emergency_override(orchestrator, stati
     qtbot.waitUntil(
         lambda: not orchestrator._station.check_safety().get("quench"), timeout=2000
     )
-    orchestrator.acknowledge_emergency()
+    orchestrator.acknowledge()
     assert orchestrator._state == OrchestratorState.IDLE
 
     station.temperature_vti._driver._simulate_error = False

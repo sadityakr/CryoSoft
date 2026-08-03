@@ -184,7 +184,9 @@ def test_next_due_level_at_or_below_warning_is_overdue(station):
     op = HeliumFillOperation(station, helium_warning_pct=30.0)
     for level in (30.0, 10.0):
         due = op.next_due(_ctx(level=level, rate=1.0))
-        assert due == NextDue(None, "Fill overdue (level below warning threshold)")
+        assert due == NextDue(
+            None, "Fill overdue (trend estimate; level below warning threshold)"
+        )
 
 
 def test_next_due_reads_the_configured_level_vi(station):

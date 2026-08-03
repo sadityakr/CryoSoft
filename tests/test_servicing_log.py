@@ -513,9 +513,7 @@ def recorder(helium_store, servicing_store, qtbot):
         helium_store,
         servicing_store,
         level_vi_name=LEVEL_VI,
-        warning_pct=35.0,
         history_sample_s=3600.0,
-        warning_clear_margin_pct=3.0,
     )
 
 
@@ -544,27 +542,6 @@ def test_recorder_decimates_helium_record(recorder, helium_store, monkeypatch):
     fake_time[0] += 3600.0  # cadence elapsed
     recorder.on_states_updated(_state(47.0))
     assert len(helium_store.samples()) == 2
-
-
-def test_recorder_warning_hysteresis(recorder):
-    warnings = []
-    recorder.cryo_warning.connect(warnings.append)
-
-    recorder.on_states_updated(_state(50.0))  # above threshold, no warning
-    assert not warnings
-
-    recorder.on_states_updated(_state(30.0))  # below 35% -> warns once
-    assert len(warnings) == 1
-
-    recorder.on_states_updated(_state(29.0))  # still below -> no repeat
-    assert len(warnings) == 1
-
-    recorder.on_states_updated(_state(37.0))  # below clear margin (35+3=38) -> still armed low
-    assert len(warnings) == 1
-
-    recorder.on_states_updated(_state(39.0))  # above margin -> re-armed
-    recorder.on_states_updated(_state(30.0))  # drops again -> warns a second time
-    assert len(warnings) == 2
 
 
 def test_recorder_ignores_malformed_state(recorder, helium_store):

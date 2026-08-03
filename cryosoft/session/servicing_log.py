@@ -28,7 +28,7 @@
 # dependencies:
 #   - cryosoft.core.plan (ParamSpec)
 #   - cryosoft.session.models (ServiceLogEntry)
-#   - PyQt6.QtCore (QObject, pyqtSignal)
+#   - PyQt6.QtCore (QObject)
 # input: |
 #   ServicingLogStore/HeliumRecordStore: plain values passed by callers (the
 #   GUI's add/edit dialogs, CryogenicsRecorder). CryogenicsRecorder: the
@@ -69,8 +69,7 @@
 #   neither legacy file is present — safe to call unconditionally.
 # output: |
 #   Append-only JSONL files under <root>/<config_name>/{<kind>.jsonl,
-#   helium_record.jsonl}; the cryo_warning(str) Qt signal for GUI banners;
-#   CryogenicsRecorder additionally writes
+#   helium_record.jsonl}; CryogenicsRecorder additionally writes
 #   <root>/<config_name>/recordings/<run_id>.json sidecars for a run whose
 #   operation hands one off; migrate_legacy_servicing_log likewise writes
 #   <root>/<config_name>/recordings/<id>.json sidecars and renames the legacy
@@ -98,7 +97,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtCore import QObject
 
 from cryosoft.core.plan import ParamSpec
 from cryosoft.session.models import ServiceLogEntry
@@ -1319,15 +1318,7 @@ class CryogenicsRecorder(QObject):
     see the step standard in ``core/operation.py``) — neither is
     fill-specific, and either alone is enough to write the sidecar.
 
-    Signals:
-        cryo_warning (str): Emitted once when the helium level drops below
-            ``warning_pct`` (hysteresis: re-armed only once the level rises
-            back above ``warning_pct + warning_clear_margin_pct``). This is
-            advisory only — it never trips ``evaluate_safety()`` — so it is
-            not written to any servicing log.
     """
-
-    cryo_warning = pyqtSignal(str)
 
     def __init__(
         self,
@@ -1335,9 +1326,7 @@ class CryogenicsRecorder(QObject):
         servicing_store: ServicingLogStore,
         *,
         level_vi_name: str,
-        warning_pct: float,
         history_sample_s: float = 3600.0,
-        warning_clear_margin_pct: float = 3.0,
     ) -> None:
         """Configure the recorder against its two stores.
 
@@ -1348,26 +1337,19 @@ class CryogenicsRecorder(QObject):
             level_vi_name: Key into the ``states_updated`` state dict naming
                 the level-meter VI (``state[level_vi_name]`` carries
                 ``helium_level``/``nitrogen_level``).
-            warning_pct: Advisory helium threshold (%); crossing it below
-                emits ``cryo_warning``.
             history_sample_s: Minimum seconds between helium-record appends
                 (default 3600 s — hourly, per).
-            warning_clear_margin_pct: Hysteresis margin (%) added to
-                ``warning_pct`` before the warning re-arms.
         """
         super().__init__()
         self._helium_store = helium_store
         self._servicing_store = servicing_store
         self._level_vi_name = level_vi_name
-        self._warning_pct = float(warning_pct)
         self._history_sample_s = float(history_sample_s)
-        self._warning_clear_margin_pct = float(warning_clear_margin_pct)
 
         self._last_helium_pct: float | None = None
         self._last_nitrogen_pct: float | None = None
         self._last_reading_utc: str = ""
         self._last_append_monotonic: float | None = None
-        self._warning_active = False
 
         # Levels + time captured at any operation run's start, consumed on
         # finish ("Levels are stamped for every kind, not just
@@ -1416,23 +1398,6 @@ class CryogenicsRecorder(QObject):
         ):
             self._helium_store.append(self._last_reading_utc, helium, nitrogen)
             self._last_append_monotonic = now_mono
-
-        self._check_warning(helium)
-
-    def _check_warning(self, helium_pct: float) -> None:
-        """Emit ``cryo_warning`` once per low-helium episode (hysteresis)."""
-        if not self._warning_active and helium_pct < self._warning_pct:
-            self._warning_active = True
-            message = (
-                f"Helium level {helium_pct:.1f}% is below the warning threshold "
-                f"{self._warning_pct:.1f}%"
-            )
-            logger.warning(message)
-            self.cryo_warning.emit(message)
-        elif self._warning_active and helium_pct >= (
-            self._warning_pct + self._warning_clear_margin_pct
-        ):
-            self._warning_active = False
 
     def on_run_started(self, manifest: dict[str, Any]) -> None:
         """Remember the He/LN2 levels and time at the start of ANY operation run.

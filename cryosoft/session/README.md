@@ -103,7 +103,7 @@ GUI imports session).
   `/metadata/experiment_info`.
 - Signals for the GUI: `experiment_changed(dict)`, `run_recorded(dict)`,
   `store_health_changed(dict)` (`{"ok": bool, "detail": str}` — a save
-  failure/recovery, emitted once per transition), `CryogenicsRecorder.cryo_warning(str)`.
+  failure/recovery, emitted once per transition).
 - Servicing-log storage: `<store root>/<config_name>/<kind>.jsonl` (one file
   per declared log kind) and `<store root>/<config_name>/helium_record.jsonl`.
 

@@ -70,6 +70,7 @@ from cryosoft.core.station import (
     read_cryogenics_config,
     read_operations_config,
     read_panels_config,
+    read_safety_config,
     read_servicing_logs_config,
 )
 from cryosoft.gui import app_settings
@@ -186,7 +187,12 @@ def main() -> None:
             station.get_offline_info(offline_name).reason,
         )
 
-    orchestrator = Orchestrator(station, tick_interval_ms=3000)
+    safety_config = read_safety_config(used_path)
+    orchestrator = Orchestrator(
+        station,
+        tick_interval_ms=3000,
+        manual_override_timeout_s=safety_config["manual_override_timeout_s"],
+    )
 
     # Session layer (L6 + the Session tier above it). measurement_root() is
     # the fixed, machine-level, admin-set root (never derived from the Data
@@ -252,7 +258,6 @@ def main() -> None:
             helium_store,
             servicing_store,
             level_vi_name=cryogenics_config["level_vi"],
-            warning_pct=float(cryogenics_config["helium_warning_pct"]),
             history_sample_s=float(cryogenics_config["history_sample_s"]),
         )
         orchestrator.states_updated.connect(cryogenics_recorder.on_states_updated)
