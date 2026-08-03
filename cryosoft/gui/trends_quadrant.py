@@ -11,14 +11,14 @@
 # dependencies:
 #   - PyQt6 >= 6.5
 #   - cryosoft.core.station (Station, for VI-name-aware default-key picking)
-#   - cryosoft.core.trend_history / cryosoft.core.logging_config
+#   - cryosoft.core.trend_history / cryosoft.core.paths
 #     (startup rehydration of MonitorHistory from the disk-backed raw tier)
 #   - cryosoft.gui.monitor_history (MonitorHistory)
 #   - cryosoft.gui.trend_plot_panel (TrendPlotPanel)
 # input: |
 #   Per-tick state snapshots via on_states_updated(); QSettings blobs via
 #   restore_settings(); at construction, the raw trend-history tier on disk
-#   (log_dir, defaulting to logging_config.log_directory()).
+#   (log_dir, defaulting to cryosoft.core.paths.log_directory()).
 # process: |
 #   At construction, replays the raw tier (bounded to MonitorHistory's
 #   retention) into MonitorHistory via record_flat(), non-fatally. Panels
@@ -50,7 +50,7 @@ from PyQt6.QtWidgets import (
 )
 
 from cryosoft.core import trend_history
-from cryosoft.core.logging_config import log_directory
+from cryosoft.core.paths import log_directory
 from cryosoft.core.station import Station
 from cryosoft.gui import app_settings  # import the module (not the function) so tests can monkeypatch the factory
 from cryosoft.gui.monitor_history import MonitorHistory
@@ -85,7 +85,7 @@ class TrendsQuadrant(QWidget):
             default-trend-key picking).
         parent: Optional Qt parent widget.
         log_dir: Directory containing the tiered trend-history JSONL store,
-            as resolved by ``cryosoft.core.logging_config.log_directory()``.
+            as resolved by ``cryosoft.core.paths.log_directory()``.
             ``None`` (the default) resolves it via that function; tests pass
             an explicit ``tmp_path`` instead. Used both for startup
             rehydration (this class) and passed down to each

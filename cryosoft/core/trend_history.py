@@ -14,7 +14,7 @@
 #   - Python standard library only (json, math, re, time, pathlib,
 #     dataclasses).
 # input: |
-#   A log directory (as resolved by cryosoft.core.logging_config.
+#   A log directory (as resolved by cryosoft.core.paths.
 #   log_directory()) containing trend_history_{raw,3min,hourly}.jsonl and
 #   their TimedRotatingFileHandler-rotated siblings
 #   (trend_history_raw.jsonl.2026-07-25).
@@ -240,7 +240,7 @@ def read_tier(
 
     Args:
         log_dir: Directory containing the tier's JSONL files (as resolved
-            by ``cryosoft.core.logging_config.log_directory()``).
+            by ``cryosoft.core.paths.log_directory()``).
         tier: One of ``"raw"``, ``"3min"``, ``"hourly"`` (a key of
             ``TIERS``).
         window_s: Trailing window length in seconds.

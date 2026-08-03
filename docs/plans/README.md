@@ -57,6 +57,7 @@ Three tiers:
 | Document | Status | What it covers |
 |---|---|---|
 | [`agentic-instrumentation-framework.md`](agentic-instrumentation-framework.md) | **Proposal, current roadmap** | The unified vision. Defines the nine modules an agentic instrumentation system needs (capability manifest, state observation, result access, action verdicts, authority, safe state, cheap evaluation, audit, client surface), scores CryoSoft against them from a full code survey, and sequences seven phases. Supersedes both agent-facing roadmaps in `archive/`. |
+| [`config-directory-migration.md`](config-directory-migration.md) | **Proposal, not started** | Moves real per-site configs (`12t-cryo/`, possibly `a-sample-real-cryostat/`) out of the git-tracked shipped tier into the already-existing user-config directory; consolidates the duplicated `app_settings.py`/`cli.py` path logic into `cryosoft/core/paths.py`; moves incident reports and `connection_status.json` to a new `data_directory()`. Companion to the `log_directory()` split already landed this session. |
 
 ## Deferred
 

@@ -75,12 +75,13 @@ ignore_missing_imports = true
 root_package = "cryosoft"
 
 [[tool.importlinter.contracts]]
-name = "C1: foundation modules (exceptions/decorators/logging) import nothing from cryosoft"
+name = "C1: foundation modules (exceptions/decorators/logging/paths) import nothing from cryosoft"
 type = "forbidden"
 source_modules = [
     "cryosoft.core.exceptions",
     "cryosoft.core.decorators",
     "cryosoft.core.logging_config",
+    "cryosoft.core.paths",
 ]
 forbidden_modules = [
     "cryosoft.drivers",

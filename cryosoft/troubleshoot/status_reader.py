@@ -2,7 +2,7 @@
 # description: |
 #   Reader and summarizer for the runtime operational-status log
 #   (status.jsonl, in the log directory resolved by
-#   cryosoft.core.logging_config.log_directory(), written by the Orchestrator
+#   cryosoft.core.paths.log_directory(), written by the Orchestrator
 #   each tick). Turns the raw JSONL into a compact digest — current state,
 #   per-instrument ramp progress and trend, watchdog alerts — and a
 #   plain-English rendering with a triage note per fault code. Consumed by
@@ -135,7 +135,7 @@ def render_text(digest: dict) -> str:
         return (
             "No operational-status log found (is the app running? status.jsonl "
             "is expected in the resolved log directory — see "
-            "cryosoft.core.logging_config.log_directory(), overridable via "
+            "cryosoft.core.paths.log_directory(), overridable via "
             "CRYOSOFT_LOG_DIR)."
         )
 

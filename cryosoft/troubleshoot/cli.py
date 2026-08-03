@@ -5,7 +5,7 @@
 #   running app's operational-status log). Built for agents first: every
 #   command terminates on its own, supports --json, returns exit code 0 (all
 #   OK) or 1 (any fault), and appends a JSONL transcript line to the resolved
-#   log directory (cryosoft.core.logging_config.log_directory(), overridable
+#   log directory (cryosoft.core.paths.log_directory(), overridable
 #   via CRYOSOFT_LOG_DIR).
 # entry_point: python -m cryosoft.troubleshoot <subcommand> ...
 # dependencies:
@@ -51,7 +51,8 @@ from pathlib import Path
 from typing import Any
 
 import cryosoft
-from cryosoft.core.logging_config import log_directory, setup_logging
+from cryosoft.core.logging_config import setup_logging
+from cryosoft.core.paths import log_directory
 from cryosoft.troubleshoot import engine, status_reader
 from cryosoft.troubleshoot.engine import (
     DriverBench,
@@ -81,7 +82,7 @@ _rm_factory = engine.open_resource_manager
 def _transcript_dir() -> Path:
     """Directory for the JSONL invocation transcript.
 
-    Delegates to ``cryosoft.core.logging_config.log_directory()`` (see its
+    Delegates to ``cryosoft.core.paths.log_directory()`` (see its
     docstring for the resolution precedence, overridable via
     ``CRYOSOFT_LOG_DIR``).
     """
@@ -450,7 +451,7 @@ def _cmd_status(args: argparse.Namespace) -> tuple[bool, dict[str, Any]]:
     """Summarize the running app's operational-status log (works while it runs).
 
     Reads status.jsonl from the resolved log directory (see
-    ``cryosoft.core.logging_config.log_directory()``; written by the
+    ``cryosoft.core.paths.log_directory()``; written by the
     Orchestrator each tick) and reports the current state, per-instrument
     ramp progress and trend, and any watchdog alerts. Exit 0 only when a log
     exists and its verdict is OK, so an agent can gate on the exit code.
@@ -518,7 +519,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--log",
         help="path to status.jsonl (default: status.jsonl in the resolved "
-        "log directory — see cryosoft.core.logging_config.log_directory(), "
+        "log directory — see cryosoft.core.paths.log_directory(), "
         "overridable via CRYOSOFT_LOG_DIR)",
     )
     p.add_argument("--last", type=int, default=5,

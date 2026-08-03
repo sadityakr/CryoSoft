@@ -11,7 +11,7 @@
 #   - PyQt6 >= 6.5
 #   - pyqtgraph >= 0.13
 #   - qtawesome
-#   - cryosoft.core.trend_history / cryosoft.core.logging_config
+#   - cryosoft.core.trend_history / cryosoft.core.paths
 #     (disk-backed reads for windows beyond MonitorHistory's retention)
 # input: |
 #   A MonitorHistory instance (shared, read-only from this widget's
@@ -58,7 +58,7 @@ from PyQt6.QtWidgets import (
 )
 
 from cryosoft.core import trend_history
-from cryosoft.core.logging_config import log_directory
+from cryosoft.core.paths import log_directory
 from cryosoft.gui.monitor_history import MonitorHistory
 from cryosoft.gui.theme import PLOT_SERIES, TEXT_PRIMARY
 
@@ -118,7 +118,7 @@ class TrendPlotPanel(QGroupBox):
         log_dir: Directory containing the tiered trend-history JSONL store,
             used only for windows longer than the in-RAM ``MonitorHistory``
             can serve (``"7 d"``, ``"1 y"``). ``None`` (the default) resolves
-            it via ``cryosoft.core.logging_config.log_directory()``; tests
+            it via ``cryosoft.core.paths.log_directory()``; tests
             pass an explicit ``tmp_path`` instead.
     """
 

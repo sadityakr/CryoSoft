@@ -33,7 +33,7 @@ a diagnosis is *derived*, not guessed.
    expected, what happened instead, when it started, what changed recently
    (check `LOGBOOK.md` and recent commits).
 2. **Gather passive evidence first** (no instrument I/O): find the log
-   directory — `cryosoft.core.logging_config.log_directory()` resolves it
+   directory — `cryosoft.core.paths.log_directory()` resolves it
    (default `%LOCALAPPDATA%\CryoSoft\logs` on Windows, overridable via the
    `CRYOSOFT_LOG_DIR` env var; check that env var first if set) — then tail
    `cryosoft.log` in that directory around the failure time; check

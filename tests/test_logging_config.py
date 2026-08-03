@@ -1,25 +1,21 @@
 # ---
 # description: |
-#   Behavior tests for cryosoft.core.logging_config: log_directory()'s
-#   resolution precedence (CRYOSOFT_LOG_DIR env var, platform user-data
-#   location, packaged fallback), its purity (resolves but never creates a
-#   directory), that setup_logging() still honours an explicit log_dir
-#   argument, and that the four JSONL streams (status, trend_raw,
-#   trend_3min, trend_hourly) are configured as TimedRotatingFileHandlers
-#   with the right when/backupCount/utc and are idempotent across repeated
-#   setup_logging() calls.
-# last_updated: 2026-07-25
+#   Behavior tests for cryosoft.core.logging_config: that setup_logging()
+#   honours an explicit log_dir argument (log_directory() resolution itself
+#   is tested in test_paths.py), and that the four JSONL streams (status,
+#   trend_raw, trend_3min, trend_hourly) are configured as
+#   TimedRotatingFileHandlers with the right when/backupCount/utc and are
+#   idempotent across repeated setup_logging() calls.
+# last_updated: 2026-08-03
 # ---
 
-"""Tests for the CryoSoft log-directory resolver and logging setup."""
+"""Tests for CryoSoft logging setup."""
 
 from __future__ import annotations
 
 import logging
 import logging.handlers
-import os
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -31,87 +27,6 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every test starts with a clean slate for the resolver's env inputs."""
     monkeypatch.delenv("CRYOSOFT_LOG_DIR", raising=False)
     monkeypatch.delenv("LOCALAPPDATA", raising=False)
-
-
-def _pretend_platform(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
-    """Make ``log_directory()`` take the ``name`` branch on any host OS.
-
-    Setting the real ``os.name`` attribute is a *global* change, and pathlib
-    reads it to pick a concrete flavour when a ``Path`` is constructed. A test
-    that patches it to ``"nt"`` therefore makes pathlib attempt a
-    ``WindowsPath`` on Linux (``NotImplementedError``), and one that patches it
-    to ``"posix"`` makes pathlib attempt a ``PosixPath`` on Windows — in both
-    cases the resolver blows up before the branch under test is reached.
-
-    Rebinding only this module's ``os`` reference leaves the real ``os.name``
-    intact for pathlib. The stub carries the two attributes ``log_directory()``
-    actually uses, and ``environ`` is the live mapping so ``monkeypatch.setenv``
-    keeps working through it.
-
-    Args:
-        monkeypatch: The active pytest monkeypatch fixture.
-        name: The ``os.name`` value to present, ``"nt"`` or ``"posix"``.
-    """
-    monkeypatch.setattr(
-        logging_config, "os", SimpleNamespace(name=name, environ=os.environ)
-    )
-
-
-def test_log_directory_honours_explicit_env_var(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("CRYOSOFT_LOG_DIR", str(tmp_path / "custom_logs"))
-    assert logging_config.log_directory() == tmp_path / "custom_logs"
-
-
-def test_log_directory_empty_env_var_is_treated_as_unset(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("CRYOSOFT_LOG_DIR", "")
-    _pretend_platform(monkeypatch, "nt")
-    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "AppData" / "Local"))
-    result = logging_config.log_directory()
-    assert result == tmp_path / "AppData" / "Local" / "CryoSoft" / "logs"
-
-
-def test_log_directory_windows_uses_localappdata(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _pretend_platform(monkeypatch, "nt")
-    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "AppData" / "Local"))
-    result = logging_config.log_directory()
-    assert result == tmp_path / "AppData" / "Local" / "CryoSoft" / "logs"
-
-
-def test_log_directory_windows_without_localappdata_falls_back_to_packaged(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _pretend_platform(monkeypatch, "nt")
-    monkeypatch.delenv("LOCALAPPDATA", raising=False)
-    result = logging_config.log_directory()
-    assert result == Path(logging_config.__file__).parent.parent / "logs"
-
-
-def test_log_directory_posix_uses_xdg_style_state_dir(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # Path.home() is stubbed so the expected value is deterministic rather
-    # than whatever the host's real home directory happens to be.
-    fake_home = tmp_path / "home" / "fakeuser"
-    monkeypatch.setattr(logging_config.Path, "home", staticmethod(lambda: fake_home))
-    _pretend_platform(monkeypatch, "posix")
-    result = logging_config.log_directory()
-    assert result == fake_home / ".local" / "state" / "cryosoft" / "logs"
-
-
-def test_log_directory_creates_nothing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    fresh = tmp_path / "does_not_exist_yet" / "logs"
-    monkeypatch.setenv("CRYOSOFT_LOG_DIR", str(fresh))
-    result = logging_config.log_directory()
-    assert result == fresh
-    assert not result.exists()
 
 
 _JSONL_LOGGER_NAMES = (

@@ -1842,7 +1842,7 @@ class Orchestrator(QObject):
 
             # Operational-status record (runtime troubleshooting signal): assembled
             # from this tick's snapshot, emitted, and appended to the resolved
-            # log directory's status.jsonl (see logging_config.log_directory()).
+            # log directory's status.jsonl (see cryosoft.core.paths.log_directory()).
             self._update_operational_status(state)
 
             # Tiered trend-history sample: non-fatal, mirrors the
