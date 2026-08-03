@@ -18,8 +18,14 @@ cache:
 
 checks:
   script:
+    # libgl1-mesa-dri/libglx-mesa0: pyqtgraph's GraphicsView paints through an
+    # OpenGL viewport even under QT_QPA_PLATFORM=offscreen, so Qt needs
+    # Mesa's software rasterizer (llvmpipe) to actually render — without it
+    # the GUI suite segfaults on this Debian-based image (GitHub's Ubuntu
+    # runner ships it preinstalled, which is why this was invisible there).
     - apt-get update && apt-get install -y --no-install-recommends
       make libegl1 libgl1 libglib2.0-0 libfontconfig1 libxkbcommon0 libdbus-1-3
+      libgl1-mesa-dri libglx-mesa0
     - make install
     - make lint
     - make contracts
