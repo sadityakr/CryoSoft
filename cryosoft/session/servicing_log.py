@@ -54,8 +54,10 @@
 #   _normalize_entry_kind, so both agree on stable keys), appends abort/
 #   failure reason and postconditions_unmet into "notes", and writes a
 #   recordings/<run_id>.json sidecar (_write_recording_sidecar) whenever the
-#   manifest's "summary" carries a well-formed generic recording — fully
-#   tolerant of a missing/malformed "summary" key.
+#   manifest's "summary" carries a well-formed generic recording and/or the
+#   step timeline of a stepped operation ("steps") — either alone is enough,
+#   since a stepped run that finished before it sampled still has a timeline
+#   worth keeping. Fully tolerant of a missing/malformed "summary" key.
 #   migrate_legacy_servicing_log reads the two legacy kinds through the
 #   existing tolerant reader, matches a fill's operations line to its
 #   cryogenics entry by an exact (started_utc, finished_utc) == (start_utc,
@@ -1312,8 +1314,10 @@ class CryogenicsRecorder(QObject):
     uses (``_normalize_entry_kind``) so both paths agree on stable keys like
     ``"helium_fill"``/``"sample_load"``/``"sample_unload"``. A recording sidecar is written
     whenever the manifest's ``summary`` carries a well-formed generic
-    ``"recording"`` series (``{"unix_time": [...], "channels": {...}}}``) —
-    not fill-specific.
+    ``"recording"`` series (``{"unix_time": [...], "channels": {...}}}``)
+    and/or a ``"steps"`` timeline (a stepped operation's per-step outcomes —
+    see the step standard in ``core/operation.py``) — neither is
+    fill-specific, and either alone is enough to write the sidecar.
 
     Signals:
         cryo_warning (str): Emitted once when the helium level drops below
@@ -1508,15 +1512,29 @@ class CryogenicsRecorder(QObject):
         self._run_start_utc = ""
 
     def _write_recording_sidecar(self, manifest: dict[str, Any], run_id: str) -> str:
-        """Write ``recordings/<run_id>.json`` if the manifest carries a recording.
+        """Write ``recordings/<run_id>.json`` if the manifest carries a recording or steps.
 
-        Reads ``manifest["summary"]["recording"]`` (the Orchestrator's
-        duck-typed ``run_summary()`` hand-off) — the generic shape every
-        operation may hand off: ``{"unix_time": [...], "channels":
-        {"<vi>.<value>": [...], ...}}``. Tolerant of every malformed shape
-        (missing ``summary``, non-dict recording, non-list series, non-dict
-        channels): this is a best-effort observer, never a reason to lose
-        the rest of the ``servicing`` entry.
+        Reads ``manifest["summary"]`` (the Orchestrator's duck-typed
+        ``run_summary()`` hand-off) and keeps two generic shapes any
+        operation may hand off:
+
+        * ``"recording"`` — ``{"unix_time": [...], "channels":
+          {"<vi>.<value>": [...], ...}}``, the continuous series.
+        * ``"steps"`` — the step timeline of a stepped operation (see the
+          step standard in ``core/operation.py``): one entry per declared
+          step with its status, time, and the station conditions at that
+          instant. This is where a *skipped* step is preserved in full;
+          the log entry's ``notes`` only names the unmet gate.
+
+        Either alone is enough to write a sidecar. A stepped run that
+        finished before it ever sampled still has a timeline worth keeping,
+        and dropping it because the series happened to be empty would lose
+        exactly the record the operation exists to produce.
+
+        Tolerant of every malformed shape (missing ``summary``, non-dict
+        recording, non-list series, non-dict channels): this is a
+        best-effort observer, never a reason to lose the rest of the
+        ``servicing`` entry.
 
         Args:
             manifest: The Orchestrator's ``run_finished`` manifest.
@@ -1524,31 +1542,41 @@ class CryogenicsRecorder(QObject):
 
         Returns:
             The sidecar's filename (``"<run_id>.json"``), or ``""`` if there
-            was nothing to write (no/malformed recording, or no ``run_id``).
+            was nothing to write (no/malformed recording AND no steps, or no
+            ``run_id``).
         """
         summary = manifest.get("summary")
         if not isinstance(summary, dict):
             return ""
-        recording = summary.get("recording")
-        if not isinstance(recording, dict):
-            return ""
-        unix_time = recording.get("unix_time")
-        channels = recording.get("channels")
-        if not isinstance(unix_time, list) or not isinstance(channels, dict):
-            return ""
-        if not all(isinstance(series, list) for series in channels.values()):
-            return ""
         if not run_id:
+            return ""
+
+        payload: dict[str, Any] = {}
+
+        recording = summary.get("recording")
+        if isinstance(recording, dict):
+            unix_time = recording.get("unix_time")
+            channels = recording.get("channels")
+            if (
+                isinstance(unix_time, list)
+                and isinstance(channels, dict)
+                and all(isinstance(series, list) for series in channels.values())
+            ):
+                payload["unix_time"] = unix_time
+                payload["channels"] = channels
+
+        steps = summary.get("steps")
+        if isinstance(steps, list) and steps:
+            payload["steps"] = steps
+
+        if not payload:
             return ""
 
         filename = f"{run_id}.json"
         sidecar_path = self._servicing_store.recordings_path(filename)
         try:
             sidecar_path.parent.mkdir(parents=True, exist_ok=True)
-            sidecar_path.write_text(
-                json.dumps({"unix_time": unix_time, "channels": channels}),
-                encoding="utf-8",
-            )
+            sidecar_path.write_text(json.dumps(payload), encoding="utf-8")
         except (OSError, TypeError, ValueError):
             logger.warning(
                 "CryogenicsRecorder: could not write recording sidecar %s", sidecar_path

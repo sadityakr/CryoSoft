@@ -207,44 +207,101 @@ other run.
    `tests/test_operations.py`'s fixtures).
 6. Add the file to the Files map below with its owning test file.
 
-## Operator confirmations
+## Stepped operations (the step standard)
 
-Some postconditions cannot be machine-verified because no capability exists
-for them yet (plan §8.2's "needle-valve reality check": no needle-valve/
-gas-flow capability exists anywhere in the stack today). Rather than skip
-the postcondition or hardcode a GUI checkbox, an operation **declares** it:
+Some operations are not a single wait but a *named sequence* the operator
+walks through. A sample change is the case that drove this: warm the VTI,
+close the needle valve, open the sample access valve, move the rod, close
+the valve, flush. The software performs almost none of it, but it has to
+record exactly when each part happened, since that record is the main thing
+the operation exists to produce.
 
-- A class-level `operator_confirmations: dict[str, str]` maps a stable key
-  (e.g. `"needle_valve"`) to a human-readable checkbox label (e.g.
-  `"Needle valve closed"`).
-- Instance methods `confirm(key)` (raises `ValueError` on an undeclared key)
-  and `confirmed(key) -> bool` set and read the per-run flag.
-- `postcondition_gates()` includes a gate that reads `confirmed(key)` —
-  unconfirmed at the one-shot evaluation, the gate is simply named in
-  `postconditions_unmet` rather than blocking `done`.
-- `Orchestrator.confirm_operation(key)` (mirroring `finish_operation()`,
-  same duck-typed-active-operation / `action_blocked` pattern) is the single
-  entry point a caller uses to set it.
-- The GUI (Phase 5, `docs/plans/archive/cryogenics-logbook.md` §10) renders one
-  checkbox per declared `operator_confirmations` entry and forwards a click
-  through `Orchestrator.confirm_operation(key)`. An unconfirmed key still
-  fails its postcondition gate at the one-shot evaluation, so it surfaces in
-  the run's single `servicing` log entry via `postconditions_unmet`
-  (`CryogenicsRecorder` folds it into `notes`, e.g. `"unmet:
-  needle_valve_confirmed"`); a confirmed key leaves the gate passing and no
-  trace in `notes` (the legacy `operations` stream's per-run `verified`
-  column is gone with that kind).
+An operation opts in by overriding `steps()` to return a non-empty ordered
+tuple of `OperationStep` (`core/operation.py`). Everything else follows with
+no per-operation GUI code, exactly like the readiness-condition standard:
 
-A future machine-verifiable capability (e.g. an ITC503 `close_needle_valve()`
-VI method) replaces the confirmation with a real `Gate` and drops the
-`operator_confirmations` declaration entirely — the postcondition contract
-already supports both, which is why this is declared, not hardcoded.
+- **`OperationStep`** declares `key` (stable, snake_case, unique — it is how
+  the GUI addresses the step), `label`, `kind`, `skippable`, and two optional
+  pure-read callables over the state snapshot: `detail(state)` for a live
+  line under the label, `skip_warning(state)` for the text shown when the
+  operator asks to skip.
+- **Two kinds.** `auto_ramp` is carried out by the system (a ramp the
+  operation dispatched) and completes on its own — `sample()` records it done
+  the first tick the reading lands. `operator_ack` is a physical act the
+  software can neither perform nor verify, and completes only when the
+  operator confirms it.
+- **`current_step()`** is the first step with no recorded outcome. That one
+  rule is what makes the sequence sequential: the GUI offers a Confirm/Skip
+  action for that step alone, and it advances the instant an outcome is
+  recorded. No stage counter, no explicit advance call.
+- **`confirm_step(key)` / `skip_step(key)`** stamp a `StepRecord` — status,
+  unix time, and `step_conditions_snapshot()`, a flat cached-state snapshot.
+  That snapshot is where the *non-numeric* monitored values live (a needle
+  valve's AUTO/MANUAL mode, a magnet's state), which the numeric recording
+  cannot hold, and which are exactly what you want to know at the moment a
+  step was attested. Recording an already-recorded step is a no-op, so a
+  double-click cannot rewrite when something happened.
+- **`steps_summary()`** returns the whole timeline, pending steps included,
+  for `run_summary()` and thence the servicing log.
+- **Reset** with `_reset_steps()` in `initiate()`, beside
+  `_reset_recording()`.
+
+Both are reached from the GUI through the Orchestrator, never directly:
+`Orchestrator.confirm_operation(key)` and
+`Orchestrator.skip_operation_step(key)`, each duck-typed with the same
+active-operation / `action_blocked` guard as `finish_operation()`.
+
+### Skipping is always allowed
+
+Every step of a sample change is skippable, including the warm-up. This is
+deliberate. A sample sometimes has to be changed at base temperature, and an
+operation that refuses to run then does not prevent the sample change — it
+only means the sample change happens with no record of it at all. So a skip
+always succeeds; the guard is the warning, not a refusal.
+
+A skip is an **override, not a failure**. The GUI warns once, quoting the
+live conditions, and on acceptance the step is recorded `skipped` and its
+postcondition gate reports unmet — which puts it in the run manifest's
+`postconditions_unmet` and, from there, the servicing-log `notes`
+(`CryogenicsRecorder` folds it in, e.g. `"unmet: step_warm_vti"`). That is
+the existing mechanism for an unverified postcondition, reused rather than
+duplicated. The panel gives a skipped step its own amber icon state,
+distinct from both met and unmet, because painting a deliberate recorded
+decision red would read as a fault.
+
+### Skipping an `auto_ramp` step needs the Orchestrator
+
+An `auto_ramp` step is a ramp the operation dispatched, and while that ramp
+runs the Orchestrator is in RAMPING, where the operation's `step()` is never
+called. So the operation cannot retarget or stop its own ramp, and
+`Orchestrator.stop_ramp()` deliberately refuses a VI claimed by an active
+run. The operation therefore raises `skip_ramp_requested` and the
+Orchestrator's RAMPING branch honours it on the tick, calling
+`Station.stop_ramps()` — the same hold-in-place `pause_procedure()` uses —
+which leaves the instrument clamped wherever it had reached. Doing it on the
+tick rather than in the GUI call keeps every hardware write on the single
+writer.
+
+Only VIs in `_active_system_vis` are stopped, which is built from the run's
+plan *targets*. For a sample-access operation that is the VTI alone; the
+magnets, dispatched as commands, keep ramping down to zero field. That is
+both safe and wanted — skipping the warm-up is not a reason to leave a magnet
+energised while the cryostat is opened.
+
+### Conformance
+
+`tests/test_conformance.py::test_operation_steps_contract` checks every
+discovered operation automatically: unique non-empty keys, a label per step,
+a `kind` in `STEP_KINDS`, every step reachable in order via `current_step()`,
+and a JSON-serialisable `steps_summary()`. An operation that declares no
+steps passes trivially. This is what makes the pattern a standard the next
+operation inherits rather than a shape someone has to remember to copy.
 
 ## Pre-run toggles
 
-A sibling declaration to operator confirmations, for the opposite timing:
-some behavior should be *skippable per run*, decided *before* the run
-starts, rather than confirmed after. `SampleLoadOperation`/
+A sibling declaration to the step standard, for the opposite timing: some
+behavior should be *skippable per run*, decided *before* the run starts,
+rather than confirmed or skipped during it. `SampleLoadOperation`/
 `SampleUnloadOperation` (via `SampleAccessOperationBase`) use this for
 `disarm_measurement_vis` — an operator may want to run one of these while a
 measurement VI is already armed for something unrelated, so `initiate()`'s
@@ -256,8 +313,8 @@ measurement VI is already armed for something unrelated, so `initiate()`'s
   key must be a `**config` keyword the constructor already understands (a
   toggle is just a per-run override of a config default, nothing more).
 - The GUI renders one checkbox per declared entry, **persistent** on the
-  card (visible and editable whether or not a run is active — unlike
-  `operator_confirmations`, which shows only while running), checked by
+  card (visible and editable whether or not a run is active — unlike the
+  current-step action row, which shows only while running), checked by
   default. Its state at the instant Start is clicked is passed to the
   panel's factory closure as an extra `bool` keyword matching the declared
   key, which merges it into the constructed instance's `**config` — an
@@ -276,6 +333,6 @@ measurement VI is already armed for something unrelated, so `initiate()`'s
 |------|----------------|-----------------|-------|
 | `__init__.py` | Package marker | (none) | none |
 | `helium_fill.py` | Ramps every magnet (`Station.magnet_vi_names()`) to zero field, switches the level meter to FAST refresh, samples the helium level once per `sample_period_s` into the shared `OperationBase` recorder (no HDF5 file — plan operation-concurrency-and-error-scoping.md §4), and finishes once the level holds at/above `fill_target_pct` for `fill_complete_window_s` (or `max_fill_duration_s` elapses); restores SLOW refresh on standby/abort and verifies it via `postcondition_gates()`. Tolerates `helium_low` (its whole purpose). `readiness_conditions()` exposes one aggregate `zero_field` row; `next_due()` predicts time-to-`helium_warning_pct` from the panel-supplied consumption rate (plan §12). `run_summary()` hands the recorded level curve, in the generic `"recording"` shape (docs/plans/archive/unified-servicing-log-and-run-recording.md §3), plus start/end level to the run manifest. `claimed_vi_names()` returns the configured level meter AND every magnet (it holds zero field as an invariant for the whole fill) — the VTI and everything else stays manually controllable during a fill. Not a **Hold phase** operation (`hold_for_operator` stays the default `False`) — its own completion condition ends the run, not the operator. | `HeliumFillOperation` | `tests/test_helium_fill.py`, `tests/test_operation_readiness.py`, `tests/test_operations.py` |
-| `sample_access_base.py` | Shared base for the sample-access pair: "verify the cryostat is safe to open" — commands every magnet (`Station.magnet_vi_names()`) to `standby()`, ramps the configured VTI VI to `target_temperature_K` (default 290 K), and sends `standby` to every measurement VI (`Station.measurement_vi_names()`). No switch-VI dispatch (dropped when this operation split from the original `SampleChangeOperation`). The reference **Hold phase** logic (`hold_for_operator = True`, plan §1): once the ramps land, `step()` never returns `None` on its own — the run holds while `sample()` records the VTI temperature and every magnet's field once per `sample_period_s` (default 10 s) into the shared recorder — until the operator clicks Finish or Abort; `run_summary()` hands the series off as `{"recording": {...}}`. No data file. `postcondition_gates()`, evaluated once as the run ends (Finish only), verifies `zero_field` (every magnet's `magnet_state() == "standby"`, which already covers the switch heater being off wherever a magnet has one — no separate heater gate), `vti_at_target`, and — for the only supported `needle_valve: manual` mode — an **operator confirmation** (`needle_valve_confirmed`). `tolerated_safety_flags` is empty. `readiness_conditions()` mirrors the same three checks as live checklist rows, shown mid-run by the Operations panel's ready banner because of `hold_for_operator`. `claimed_vi_names()` returns exactly the magnets, VTI, and measurement VIs it commands in `initiate()` — unless the **pre-run toggle** `disarm_measurement_vis` (default `True`, GUI checkbox "Disarm measurement instruments") is unchecked for this run, in which case measurement VIs are neither commanded in `initiate()` nor claimed, so a measurement instrument already armed for something else is left alone and stays manually usable for the whole run. Concrete subclasses set only `name`/`description`/`ready_message`/`config_key`. | `_SampleAccessOperationBase` | `tests/test_sample_access.py`, `tests/test_operation_readiness.py` |
-| `sample_load.py` | Identity declaration for the "load a sample" half of the pair: `name = "Sample Load"`, `config_key = "sample_load"`. All behavior inherited from `sample_access_base.py`. | `SampleLoadOperation` | `tests/test_sample_access.py` |
-| `sample_unload.py` | Identity declaration for the "unload a sample" half of the pair: `name = "Sample Unload"`, `config_key = "sample_unload"`. All behavior inherited from `sample_access_base.py`. | `SampleUnloadOperation` | `tests/test_sample_access.py` |
+| `sample_access_base.py` | Shared base for the sample-access pair: "verify the cryostat is safe to open" — commands every magnet (`Station.magnet_vi_names()`) to `standby()`, ramps the configured VTI VI to `target_temperature_K` (default 290 K), and sends `standby` to every measurement VI (`Station.measurement_vi_names()`). No switch-VI dispatch (dropped when this operation split from the original `SampleChangeOperation`). The reference **Hold phase** logic AND the reference **stepped operation** (`hold_for_operator = True`): once the ramps land, `step()` never returns `None` on its own — the run holds while the operator walks the declared six-step sequence (warm VTI, close needle valve, open access valve, move rod, close access valve, flush; only the rod step's label differs between load and unload) and `sample()` records *every numeric monitored channel on the station* once per `sample_period_s` (default 10 s) into the shared recorder, read from `cached_state` rather than live VI calls so a station-wide trace adds no bus traffic to the tick path — until the operator clicks Finish or Abort; `run_summary()` hands the series and the step timeline off as `{"recording": {...}, "steps": [...]}`. No data file. Every step is skippable; skipping the warm-up sets `skip_ramp_requested`, which the Orchestrator honours by stopping the VTI ramp in place. `postcondition_gates()`, evaluated once as the run ends (Finish only), verifies `zero_field` (every magnet's `magnet_state() == "standby"`, which already covers the switch heater being off wherever a magnet has one — no separate heater gate), `vti_at_target`, and one `step_<key>` gate per declared step. `needle_valve: manual` stays the only wired mode not for lack of stack capability — `VTITemperatureControllerVI.set_needle_valve()`/`set_needle_valve_mode()` exist, and its `standby()` closes the valve — but because the 12 T cryostat's needle valve has no motor, so commanding the channel would move nothing. `tolerated_safety_flags` is empty. `readiness_conditions()` returns the `zero_field` row followed by one live row per step, shown mid-run by the Operations panel because of `hold_for_operator`. `claimed_vi_names()` returns exactly the magnets, VTI, and measurement VIs it commands in `initiate()` — unless the **pre-run toggle** `disarm_measurement_vis` (default `True`, GUI checkbox "Disarm measurement instruments") is unchecked for this run, in which case measurement VIs are neither commanded in `initiate()` nor claimed, so a measurement instrument already armed for something else is left alone and stays manually usable for the whole run. Concrete subclasses set only `name`/`description`/`ready_message`/`config_key`/`rod_step_label`. | `_SampleAccessOperationBase` | `tests/test_sample_access.py`, `tests/test_operation_readiness.py` |
+| `sample_load.py` | Identity declaration for the "load a sample" half of the pair: `name = "Sample Load"`, `config_key = "sample_load"`, `rod_step_label = "Insert the sample rod"`. All behavior inherited from `sample_access_base.py`. | `SampleLoadOperation` | `tests/test_sample_access.py` |
+| `sample_unload.py` | Identity declaration for the "unload a sample" half of the pair: `name = "Sample Unload"`, `config_key = "sample_unload"`, `rod_step_label = "Withdraw the sample rod"`. All behavior inherited from `sample_access_base.py`. | `SampleUnloadOperation` | `tests/test_sample_access.py` |

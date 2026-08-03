@@ -64,21 +64,28 @@
 #   <name>" and calls orchestrator.finish_operation() (immediately going to
 #   a disabled "Finishing <name>…" state until run_finished arrives — which
 #   also surfaces any postconditions_unmet as a warning badge on the card);
-#   a declared operator_confirmations checkbox calls
-#   orchestrator.confirm_operation(key) and disables itself. The Abort
-#   button appears alongside Finish once running, disabled (not hidden) for
-#   the brief "Finishing…" window so a graceful Finish already under way is
-#   never raced by a second, harder stop. A declared pre_run_toggles
-#   checkbox (e.g. SampleLoadOperation's/SampleUnloadOperation's "Disarm
-#   measurement instruments") is persistent — visible and editable whether
-#   or not a run is active, disabled only while one is, unlike
-#   operator_confirmations — and is read once, at the instant Start is
-#   clicked, passed to the factory as an extra bool keyword matching its
-#   declared key.
+#   an operation that declares steps() (the step standard — sample load and
+#   unload) renders one checklist row per step plus a current-step action
+#   row: the step's label, a Confirm button calling
+#   orchestrator.confirm_operation(key), and a Skip button that warns first
+#   (quoting the live conditions from the latest state snapshot) and then
+#   calls orchestrator.skip_operation_step(key). Only the current step is
+#   actionable, so the sequence cannot be done out of order. A skipped step
+#   gets its own amber icon state, distinct from both met and unmet: it is a
+#   deliberate, recorded override, and painting it red would read as a
+#   fault. The Abort button appears alongside Finish once running, disabled
+#   (not hidden) for the brief "Finishing…" window so a graceful Finish
+#   already under way is never raced by a second, harder stop. A declared
+#   pre_run_toggles checkbox (e.g. SampleLoadOperation's/
+#   SampleUnloadOperation's "Disarm measurement instruments") is persistent
+#   — visible and editable whether or not a run is active, disabled only
+#   while one is, unlike the step row — and is read once, at the instant
+#   Start is clicked, passed to the factory as an extra bool keyword
+#   matching its declared key.
 # output: |
 #   A QWidget hosted (scrolled) in MonitorWindow's bottom-right quadrant.
 #   Side effect: submits an operation to the Orchestrator.
-# last_updated: 2026-07-27
+# last_updated: 2026-08-03
 # ---
 
 """OperationsPanel — a single column of generic operation cards."""
@@ -111,11 +118,13 @@ from PyQt6.QtWidgets import (
 from cryosoft.core.orchestrator import Orchestrator
 from cryosoft.core.station import Station
 from cryosoft.gui.procedure_discovery import discover_operations
+from cryosoft.core.operation import STEP_STATUS_SKIPPED
 from cryosoft.gui.theme import (
     BTN_CLASS_DANGER,
     BTN_CLASS_PRIMARY,
     STATUS_ERROR,
     STATUS_OK,
+    STATUS_WARN,
     TEXT_ON_ACCENT,
     TEXT_PRIMARY,
 )
@@ -281,6 +290,9 @@ class OperationCard(QGroupBox):
         self._pending_instance: OperationBase | None = None
         self._conditions = display_instance.readiness_conditions()
         self._condition_rows: dict[str, tuple[QLabel, QLabel]] = {}
+        #: Latest state snapshot, kept so the Skip warning can quote live
+        #: values at the instant of the click. Empty until the first tick.
+        self._last_state: dict[str, Any] = {}
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(6, 6, 6, 6)
@@ -337,26 +349,69 @@ class OperationCard(QGroupBox):
             details_layout.addLayout(detail_row)
             self._condition_rows[condition.key] = (icon_label, detail_label)
 
-        self._confirmations: dict[str, str] = dict(
-            getattr(display_instance, "operator_confirmations", {}) or {}
+        # Current-step action row (stepped operations only — see the step
+        # standard in OperationBase). A stepped operation is walked through
+        # one step at a time, so the card shows exactly one action at a
+        # time: the label of whichever step is current, a Confirm button,
+        # and a Skip button. Showing all steps as independent checkboxes
+        # would lose the ordering, which for a sample change is the
+        # safety-relevant part — closing the needle valve before opening the
+        # cryostat is not optional sequencing.
+        #
+        # ``_step_source`` is the instance the row reads its state from. It
+        # starts as the display instance and is re-bound to the running one
+        # at run_started, for the same reason ``_conditions`` is: the
+        # Orchestrator records outcomes on the RUNNING instance, and a row
+        # bound to the display instance would never advance.
+        self._steps: tuple[Any, ...] = tuple(
+            getattr(display_instance, "steps", lambda: ())() or ()
         )
-        self._confirm_checkboxes: dict[str, QCheckBox] = {}
-        self._confirmations_row: QWidget | None = None
-        if self._confirmations:
-            self._confirmations_row = QWidget()
-            confirm_layout = QHBoxLayout(self._confirmations_row)
-            confirm_layout.setContentsMargins(0, 0, 0, 0)
-            for key, label in self._confirmations.items():
-                checkbox = QCheckBox(label)
-                checkbox.setObjectName(f"{self._slug}_confirm_{key}_checkbox")
-                checkbox.toggled.connect(
-                    lambda checked, k=key, box=checkbox: self._on_confirm_toggled(k, checked, box)
-                )
-                confirm_layout.addWidget(checkbox)
-                self._confirm_checkboxes[key] = checkbox
-            confirm_layout.addStretch()
-            self._confirmations_row.hide()
-            details_layout.addWidget(self._confirmations_row)
+        self._step_source: OperationBase = display_instance
+        self._step_row: QWidget | None = None
+        if self._steps:
+            self._step_row = QWidget()
+            self._step_row.setObjectName(f"{self._slug}_step_row")
+            # Label above the buttons, not beside them: the card lives in a
+            # narrow quadrant column, and a side-by-side row leaves the
+            # label a ~190 px slot that wraps a step name into three ragged
+            # lines. This is the same stacked shape the checklist rows above
+            # already use, and for the same reason.
+            step_layout = QVBoxLayout(self._step_row)
+            step_layout.setContentsMargins(0, 4, 0, 0)
+            step_layout.setSpacing(2)
+
+            self._step_label = QLabel("")
+            self._step_label.setObjectName(f"{self._slug}_step_label")
+            self._step_label.setWordWrap(True)
+            step_layout.addWidget(self._step_label)
+
+            step_buttons = QHBoxLayout()
+            step_buttons.setContentsMargins(0, 0, 0, 0)
+
+            self._step_confirm_btn = QPushButton("Confirm")
+            self._step_confirm_btn.setObjectName(f"{self._slug}_step_confirm_btn")
+            self._step_confirm_btn.setProperty("class", BTN_CLASS_PRIMARY)
+            self._step_confirm_btn.setIcon(qta.icon("fa5s.check", color=TEXT_ON_ACCENT))
+            self._step_confirm_btn.setToolTip(
+                "Record this step as done, and move to the next one."
+            )
+            self._step_confirm_btn.clicked.connect(self._on_step_confirm_clicked)
+            step_buttons.addWidget(self._step_confirm_btn)
+
+            self._step_skip_btn = QPushButton("Skip")
+            self._step_skip_btn.setObjectName(f"{self._slug}_step_skip_btn")
+            self._step_skip_btn.setIcon(qta.icon("fa5s.forward", color=TEXT_PRIMARY))
+            self._step_skip_btn.setToolTip(
+                "Skip this step. You will be warned first, and the skip is "
+                "recorded on this run."
+            )
+            self._step_skip_btn.clicked.connect(self._on_step_skip_clicked)
+            step_buttons.addWidget(self._step_skip_btn)
+            step_buttons.addStretch()
+            step_layout.addLayout(step_buttons)
+
+            self._step_row.hide()
+            details_layout.addWidget(self._step_row)
 
         # Pre-run option toggles (e.g. SampleLoadOperation's/
         # SampleUnloadOperation's "Disarm measurement instruments"): unlike
@@ -463,6 +518,12 @@ class OperationCard(QGroupBox):
             context: The panel-assembled ``next_due()`` context (``"state"``,
                 ``"now_unix"``, ``"consumption_rate_pct_per_h"``).
         """
+        # Kept for the Skip warning, which must name the conditions the
+        # operator is overriding at the moment they click, not at the moment
+        # the card was built.
+        self._last_state = state
+
+        skipped = self._skipped_step_keys()
         all_holding = True
         for condition in self._conditions:
             holds = bool(condition.check(state))
@@ -471,15 +532,20 @@ class OperationCard(QGroupBox):
             if row is None:
                 continue
             icon_label, detail_label = row
-            icon_label.setPixmap(
-                qta.icon(
-                    "fa5s.check-circle" if holds else "fa5s.times-circle",
-                    color=STATUS_OK if holds else STATUS_ERROR,
-                ).pixmap(16, 16)
-            )
+            # Three states, not two: a skipped step is neither met nor
+            # failed. Showing it red would read as "something went wrong"
+            # when in fact the operator made a deliberate, recorded call.
+            if condition.key in skipped:
+                icon_name, icon_color = "fa5s.forward", STATUS_WARN
+            elif holds:
+                icon_name, icon_color = "fa5s.check-circle", STATUS_OK
+            else:
+                icon_name, icon_color = "fa5s.times-circle", STATUS_ERROR
+            icon_label.setPixmap(qta.icon(icon_name, color=icon_color).pixmap(16, 16))
             if condition.detail is not None:
                 detail_label.setText(condition.detail(state))
         self._last_all_holding = all_holding
+        self._sync_step_row()
 
         next_due = self._display_instance.next_due(context)
         if next_due is None:
@@ -567,12 +633,15 @@ class OperationCard(QGroupBox):
             # banner. Condition keys are class-declared, so the row lookup
             # in on_states_updated stays valid across the swap.
             self._conditions = self._pending_instance.readiness_conditions()
+            # Same reason, for the step row: the Orchestrator records step
+            # outcomes on the running instance, so a row still reading the
+            # display instance would never leave step one.
+            self._step_source = self._pending_instance
             self._pending_instance = None
-        self._reset_confirmations()
         self._sync_button()
         self._sync_abort_button()
         self._sync_option_checkboxes()
-        self._sync_confirmations_row()
+        self._sync_step_row()
         self._sync_ready_banner()
 
     def _on_run_finished(self, manifest: dict[str, Any]) -> None:
@@ -594,14 +663,87 @@ class OperationCard(QGroupBox):
         self._sync_button()
         self._sync_abort_button()
         self._sync_option_checkboxes()
-        self._sync_confirmations_row()
+        self._sync_step_row()
         self._sync_ready_banner()
 
-    def _on_confirm_toggled(self, key: str, checked: bool, checkbox: QCheckBox) -> None:
-        if not checked:
+    def _skipped_step_keys(self) -> set[str]:
+        """Return the keys of steps recorded as skipped on the bound instance.
+
+        Returns:
+            An empty set for an operation with no steps, or one whose bound
+            instance predates the step standard.
+        """
+        if not self._steps:
+            return set()
+        step_records = getattr(self._step_source, "step_records", None)
+        if not callable(step_records):
+            return set()
+        return {
+            key
+            for key, record in step_records().items()
+            if getattr(record, "status", "") == STEP_STATUS_SKIPPED
+        }
+
+    def _current_step(self) -> Any | None:
+        """Return the step the card should be offering, or None.
+
+        Returns:
+            The bound instance's ``current_step()``, or ``None`` if this
+            operation declares no steps or every step has an outcome.
+        """
+        if not self._steps:
+            return None
+        current_step = getattr(self._step_source, "current_step", None)
+        return current_step() if callable(current_step) else None
+
+    def _on_step_confirm_clicked(self) -> None:
+        step = self._current_step()
+        if step is None:
             return
-        self._orchestrator.confirm_operation(key)
-        checkbox.setEnabled(False)  # confirmations are one-way
+        self._orchestrator.confirm_operation(step.key)
+        self._sync_step_row()
+
+    def _on_step_skip_clicked(self) -> None:
+        """Warn with the live conditions, then record the skip if confirmed.
+
+        The warning is the whole guard. Skipping is always permitted — a
+        sample change that has to happen at base temperature must not be
+        blocked — so the operator gets one explicit confirmation naming what
+        they are overriding, and the run records it.
+        """
+        step = self._current_step()
+        if step is None:
+            return
+        warning = (
+            step.skip_warning(self._last_state)
+            if step.skip_warning is not None
+            else "This step will be recorded as skipped on this run."
+        )
+        answer = QMessageBox.question(
+            self,
+            f"Skip: {step.label}",
+            f"{warning}\n\nSkip this step?",
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._orchestrator.skip_operation_step(step.key)
+            self._sync_step_row()
+
+    def _sync_step_row(self) -> None:
+        """Show the current step's action row, or hide it when there is nothing to act on.
+
+        Visible only while this card's run is active: the steps are things
+        the operator does to a cryostat the operation has put in a known
+        state, so offering them before Start would be meaningless.
+        """
+        if self._step_row is None:
+            return
+        step = self._current_step()
+        if not self._running or step is None:
+            self._step_row.hide()
+            return
+        self._step_label.setText(f"Now: {step.label}")
+        self._step_skip_btn.setVisible(bool(step.skippable))
+        self._step_row.show()
 
     def _on_abort_clicked(self) -> None:
         answer = QMessageBox.question(
@@ -612,14 +754,6 @@ class OperationCard(QGroupBox):
         )
         if answer == QMessageBox.StandardButton.Yes:
             self._orchestrator.abort_procedure()
-
-    def _reset_confirmations(self) -> None:
-        """Clear every confirmation checkbox for a fresh run."""
-        for checkbox in self._confirm_checkboxes.values():
-            checkbox.blockSignals(True)
-            checkbox.setChecked(False)
-            checkbox.setEnabled(True)
-            checkbox.blockSignals(False)
 
     def _sync_button(self) -> None:
         if self._finishing:
@@ -671,7 +805,7 @@ class OperationCard(QGroupBox):
     def _sync_option_checkboxes(self) -> None:
         """Disable (never hide) every pre-run toggle while a run is active.
 
-        Unlike ``_sync_confirmations_row()``, visibility never changes here
+        Unlike the current-step action row, visibility never changes here
         — a pre-run toggle answers "what should the NEXT run do", so it
         stays on the card at all times; it is only disabled while a run
         already reflects a decision already baked into the running
@@ -691,11 +825,6 @@ class OperationCard(QGroupBox):
     def _on_toggle_clicked(self) -> None:
         self._collapsed = not self._collapsed
         self._sync_details_visibility()
-
-    def _sync_confirmations_row(self) -> None:
-        if self._confirmations_row is None:
-            return
-        self._confirmations_row.setVisible(self._running and bool(self._confirmations))
 
     def _sync_ready_banner(self) -> None:
         """Show the ready banner once every readiness condition holds.

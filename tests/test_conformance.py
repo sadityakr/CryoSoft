@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import json
 import math
 import pkgutil
 import typing
@@ -64,7 +65,12 @@ from cryosoft.core.decorators import (
     get_control_specs,
 )
 from cryosoft.core.exceptions import CryoSoftCommunicationError, CryoSoftSafetyError
-from cryosoft.core.operation import OperationBase, ReadinessCondition
+from cryosoft.core.operation import (
+    STEP_KINDS,
+    OperationBase,
+    OperationStep,
+    ReadinessCondition,
+)
 from cryosoft.core.plan import ParamSpec
 from cryosoft.core.procedure import BaseProcedure
 from cryosoft.core.station import Station, _import_class, build_station
@@ -1480,6 +1486,63 @@ def test_operation_readiness_conditions_returns_tuple_of_readiness_condition(op_
             f"{op_cls.__name__}.readiness_conditions() must contain only "
             f"ReadinessCondition instances, got {condition!r}"
         )
+
+
+@pytest.mark.parametrize("op_cls", _all_operation_classes(), ids=lambda c: c.__name__)
+def test_operation_steps_contract(op_cls: type) -> None:
+    """A stepped operation's declared sequence must be well-formed.
+
+    This is what makes the step standard (see ``OperationBase``'s class
+    docstring) binding rather than a convention the next operation might
+    follow differently. An operation that declares no steps is unaffected —
+    the empty default is valid and skips every assertion below.
+
+    The GUI renders steps and routes their keys back through
+    ``Orchestrator.confirm_operation()`` / ``skip_operation_step()`` with
+    zero per-operation code, so a duplicate key or an unknown kind would
+    silently break the card rather than fail loudly here.
+    """
+    station = build_station("cryosoft/configs/sim_cryostat")
+    op = op_cls(station)
+    steps = op.steps()
+    assert isinstance(steps, tuple), (
+        f"{op_cls.__name__}.steps() must return a tuple, got {type(steps)!r}"
+    )
+    if not steps:
+        return
+
+    keys = [step.key for step in steps]
+    for step in steps:
+        assert isinstance(step, OperationStep), (
+            f"{op_cls.__name__}.steps() must contain only OperationStep "
+            f"instances, got {step!r}"
+        )
+        assert step.key, f"{op_cls.__name__}: every step needs a non-empty key"
+        assert step.label, (
+            f"{op_cls.__name__}: step {step.key!r} needs a human-readable label"
+        )
+        assert step.kind in STEP_KINDS, (
+            f"{op_cls.__name__}: step {step.key!r} declares kind "
+            f"{step.kind!r}; valid kinds are {sorted(STEP_KINDS)}"
+        )
+    assert len(keys) == len(set(keys)), (
+        f"{op_cls.__name__}.steps() has duplicate keys: {keys} — keys are "
+        f"how the GUI addresses a step, so they must be unique"
+    )
+
+    # current_step() starts at the first declared step and advances only as
+    # outcomes are recorded; every step must be reachable this way.
+    assert op.current_step() is not None
+    assert op.current_step().key == keys[0]
+    for key in keys:
+        assert op.current_step().key == key
+        op.confirm_step(key)
+    assert op.current_step() is None, (
+        f"{op_cls.__name__}: every declared step must be reachable in order"
+    )
+
+    # The timeline round-trips through the run manifest into a JSON sidecar.
+    json.dumps(op.steps_summary())
 
 
 @pytest.mark.parametrize("op_cls", _all_operation_classes(), ids=lambda c: c.__name__)

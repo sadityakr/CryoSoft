@@ -507,13 +507,19 @@ def test_abort_button_does_nothing_when_confirmation_declined(
     mock_orch.abort_procedure.assert_not_called()
 
 
-# ── Operator confirmations ────────────────────────────────────────────────────
+# ── The current-step action row (stepped operations) ─────────────────────────
 
 
-def test_confirmation_checkbox_calls_confirm_operation(
+def _confirm_every_step(operation) -> None:
+    """Confirm every declared step, so all readiness rows hold."""
+    for step in operation.steps():
+        operation.confirm(step.key)
+
+
+def test_step_row_hidden_until_running_then_shows_the_first_step(
     station, operations_config, qtbot
 ):
-    """Checking a declared confirmation checkbox calls confirm_operation(key) and disables itself."""
+    """The action row is a mid-run control: the steps are things done to a running cryostat."""
     mock_orch = MagicMock(spec=Orchestrator)
     panel = OperationsPanel(
         station,
@@ -528,21 +534,168 @@ def test_confirmation_checkbox_calls_confirm_operation(
     card = panel._cards[0]
     assert card._display_instance.name == SampleLoadOperation.name
 
-    assert card._confirmations_row.isHidden()
+    assert card._step_row.isHidden()
+
+    running = card._factory("tester")
+    card._pending_instance = running
     card._on_run_started({"procedure": SampleLoadOperation.name})
-    assert not card._confirmations_row.isHidden()
 
-    checkbox = card._confirm_checkboxes["needle_valve"]
-    assert checkbox.isEnabled()
-    checkbox.setChecked(True)
+    assert not card._step_row.isHidden()
+    assert card._step_label.text() == "Now: Warm the VTI to 290 K"
 
-    mock_orch.confirm_operation.assert_called_once_with("needle_valve")
-    assert not checkbox.isEnabled()
+
+def test_step_confirm_button_calls_confirm_operation_and_advances(
+    station, operations_config, qtbot
+):
+    """Confirming the current step advances the row to the next one."""
+    mock_orch = MagicMock(spec=Orchestrator)
+    panel = OperationsPanel(
+        station,
+        mock_orch,
+        None,
+        operations_config,
+        None,
+        None,
+        get_data_dir=lambda: "/tmp",
+    )
+    qtbot.addWidget(panel)
+    card = panel._cards[0]
+    running = card._factory("tester")
+    card._pending_instance = running
+    card._on_run_started({"procedure": SampleLoadOperation.name})
+
+    card._step_confirm_btn.click()
+    mock_orch.confirm_operation.assert_called_once_with("warm_vti")
+
+    # The mock Orchestrator does not touch the operation, so mimic what the
+    # real one does, then re-sync: the row must follow the operation's own
+    # record, not the click.
+    running.confirm("warm_vti")
+    card._sync_step_row()
+    assert card._step_label.text() == "Now: Close the needle valve"
+
+
+def test_step_skip_button_warns_first_and_only_skips_when_accepted(
+    station, operations_config, qtbot, monkeypatch
+):
+    """Skipping is always allowed, but never silent — the warning names the live conditions."""
+    mock_orch = MagicMock(spec=Orchestrator)
+    panel = OperationsPanel(
+        station,
+        mock_orch,
+        None,
+        operations_config,
+        None,
+        None,
+        get_data_dir=lambda: "/tmp",
+    )
+    qtbot.addWidget(panel)
+    card = panel._cards[0]
+    running = card._factory("tester")
+    card._pending_instance = running
+    card._on_run_started({"procedure": SampleLoadOperation.name})
+
+    cold_state = {
+        "magnet_z": {"magnet_state": "standby"},
+        "magnet_y": {"magnet_state": "standby"},
+        "temperature_vti": {"temperature": 4.2},
+    }
+    ctx = {"state": cold_state, "now_unix": 0.0, "consumption_rate_pct_per_h": None}
+    card.on_states_updated(cold_state, ctx)
+
+    asked: list[str] = []
+
+    def _decline(_parent, _title, text, *args, **kwargs):
+        asked.append(text)
+        return QMessageBox.StandardButton.No
+
+    monkeypatch.setattr(QMessageBox, "question", _decline)
+    card._step_skip_btn.click()
+
+    # Declining must not skip anything.
+    mock_orch.skip_operation_step.assert_not_called()
+    assert asked, "the operator must be warned before a skip"
+    assert "4.2 K" in asked[0], "the warning must quote the live temperature"
+    assert "290 K" in asked[0]
+
+    def _accept(_parent, _title, text, *args, **kwargs):
+        asked.append(text)
+        return QMessageBox.StandardButton.Yes
+
+    monkeypatch.setattr(QMessageBox, "question", _accept)
+    card._step_skip_btn.click()
+    mock_orch.skip_operation_step.assert_called_once_with("warm_vti")
+
+
+def test_skipped_step_row_shows_the_skip_icon_not_the_failure_icon(
+    station, operations_config, qtbot
+):
+    """A deliberate, recorded override must not be painted as an error."""
+    mock_orch = MagicMock(spec=Orchestrator)
+    panel = OperationsPanel(
+        station,
+        mock_orch,
+        None,
+        operations_config,
+        None,
+        None,
+        get_data_dir=lambda: "/tmp",
+    )
+    qtbot.addWidget(panel)
+    card = panel._cards[0]
+    running = card._factory("tester")
+    card._pending_instance = running
+    card._on_run_started({"procedure": SampleLoadOperation.name})
+
+    running.skip_step("warm_vti")
+    state = {
+        "magnet_z": {"magnet_state": "standby"},
+        "magnet_y": {"magnet_state": "standby"},
+        "temperature_vti": {"temperature": 4.2},
+    }
+    card.on_states_updated(
+        state, {"state": state, "now_unix": 0.0, "consumption_rate_pct_per_h": None}
+    )
+
+    assert card._skipped_step_keys() == {"warm_vti"}
+    _icon, detail_label = card._condition_rows["warm_vti"]
+    assert detail_label.text() == "skipped by operator"
+    # The row is not "met": the ready banner must not appear off a skip.
+    assert card._ready_banner.isHidden()
+    assert card._step_label.text() == "Now: Close the needle valve"
+
+
+def test_step_row_hides_once_every_step_has_an_outcome(
+    station, operations_config, qtbot
+):
+    mock_orch = MagicMock(spec=Orchestrator)
+    panel = OperationsPanel(
+        station,
+        mock_orch,
+        None,
+        operations_config,
+        None,
+        None,
+        get_data_dir=lambda: "/tmp",
+    )
+    qtbot.addWidget(panel)
+    card = panel._cards[0]
+    running = card._factory("tester")
+    card._pending_instance = running
+    card._on_run_started({"procedure": SampleLoadOperation.name})
+    assert not card._step_row.isHidden()
+
+    _confirm_every_step(running)
+    card._sync_step_row()
+
+    assert running.current_step() is None
+    assert card._step_row.isHidden(), "nothing left to act on"
 
 
 # ── Pre-run toggles (disarm_measurement_vis) ─────────────────────────────────
-# Distinct from operator confirmations above: persistent (visible/editable
-# regardless of run state), read once at Start-click time rather than
+# Distinct from the current-step action row above: persistent
+# (visible/editable regardless of run state), read once at Start-click time
+# rather than
 # confirmed against a running instance.
 
 
@@ -691,7 +844,7 @@ def test_ready_banner_appears_only_after_done_and_all_green(
 
     # What Orchestrator.confirm_operation("needle_valve") does to the ACTIVE
     # operation — note: the running instance, not card._display_instance.
-    running.confirm("needle_valve")
+    _confirm_every_step(running)
     card.on_states_updated(all_green_state, ctx)
     assert not card._ready_banner.isHidden()
     assert card._ready_banner.text() == f"✓ {SampleLoadOperation.ready_message}"
@@ -717,7 +870,7 @@ def test_ready_banner_clears_when_new_run_starts(station, operations_config, qtb
     )
     qtbot.addWidget(panel)
     card = panel._cards[0]
-    card._display_instance.confirm("needle_valve")
+    _confirm_every_step(card._display_instance)
 
     all_green_state = {
         "magnet_z": {"magnet_state": "standby"},
@@ -762,7 +915,7 @@ def test_ready_banner_shows_mid_run_for_hold_phase_operation_once_conditions_hol
     card._on_run_started({"procedure": SampleLoadOperation.name})
     assert card._ready_banner.isHidden()  # no state snapshot evaluated for THIS run yet
 
-    running.confirm("needle_valve")
+    _confirm_every_step(running)
     all_green_state = {
         "magnet_z": {"magnet_state": "standby"},
         "magnet_y": {"magnet_state": "standby"},

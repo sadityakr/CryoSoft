@@ -44,7 +44,9 @@ start/end levels stamped for every run kind (cached at `on_run_started`,
 re-read at finish from the last `states_updated` sample), abort/failure
 reason plus `postconditions_unmet` folded into `notes`, and a recording
 sidecar written whenever the operation's `run_summary()` hands off a
-well-formed generic `"recording"` series — and calls
+well-formed generic `"recording"` series and/or a `"steps"` timeline (a
+stepped operation's per-step outcomes, times, and conditions — either
+alone is enough to write the sidecar) — and calls
 `ServicingLogStore.migrate_legacy()` once from `cryosoft.main` at startup.
 The legacy kinds stay declared (readable, `cryogenics` still manually
 editable) so a not-yet-migrated setup's history keeps working, but the

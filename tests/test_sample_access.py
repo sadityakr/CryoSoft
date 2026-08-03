@@ -729,7 +729,9 @@ def test_cryogenics_recorder_records_one_servicing_entry(op_cls, orchestrator, s
     finished: list[dict] = []
     orchestrator.run_finished.connect(finished.append)
     orchestrator.run_operation(op)
-    orchestrator.confirm_operation("needle_valve")
+    orchestrator.confirm_operation("close_needle_valve")
+    orchestrator.confirm_operation("open_access_valve")
+    orchestrator.skip_operation_step("flush")
 
     # The hold phase: several ticks pass with the run still active before
     # Finish is clicked, so sample() has a chance to record.
@@ -747,16 +749,32 @@ def test_cryogenics_recorder_records_one_servicing_entry(op_cls, orchestrator, s
     assert entry.source == "operation"
     assert entry.values["entry_kind"] == op_cls.config_key
     assert entry.values["person"] == "Dr. Change"
-    # needle_valve was confirmed -> its postcondition gate passes -> no
-    # "unmet: ..." trace in notes (see GLOSSARY.md's Operator confirmation).
-    assert "needle_valve_confirmed" not in entry.values["notes"]
-    # The recorded VTI/magnet-field series was written as a sidecar,
-    # referenced from this entry.
+    # A confirmed step's gate passes -> no "unmet: ..." trace in notes.
+    notes = entry.values["notes"]
+    assert "step_close_needle_valve" not in notes
+    # A SKIPPED step is the opposite: the override must be visible in the
+    # log entry a human reads, not only in the sidecar.
+    assert "step_flush" in notes
+    # The recorded station-wide series was written as a sidecar, referenced
+    # from this entry.
     assert entry.values["recording"]
     sidecar_path = servicing_store.recordings_path(entry.values["recording"])
     assert sidecar_path.exists()
     sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
     assert "temperature_vti.temperature" in sidecar["channels"]
+    assert "level_meter.helium_level" in sidecar["channels"]
+
+    # The step timeline rides along in the same sidecar — this is the whole
+    # point of the operation: when each part of the sample change happened.
+    steps = {row["key"]: row for row in sidecar["steps"]}
+    assert [row["key"] for row in sidecar["steps"]] == _EXPECTED_STEP_KEYS
+    assert steps["close_needle_valve"]["status"] == STEP_STATUS_DONE
+    assert steps["close_needle_valve"]["unix_time"] > 0
+    assert steps["flush"]["status"] == STEP_STATUS_SKIPPED
+    assert steps["move_rod"]["status"] == "pending"
+    # Non-numeric conditions, which the numeric series cannot hold, are
+    # preserved on the step record instead.
+    assert steps["close_needle_valve"]["conditions"]["temperature_vti.needle_valve_mode"]
 
     # Neither legacy kind is written by the recorder anymore (Phase 2).
     assert servicing_store.entries("operations") == []
