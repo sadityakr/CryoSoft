@@ -463,7 +463,6 @@ def test_cryogenics_recorder_records_the_finished_fill(orchestrator, station, tm
         helium_store,
         servicing_store,
         level_vi_name="level_meter",
-        warning_pct=35.0,
     )
     orchestrator.states_updated.connect(recorder.on_states_updated)
     orchestrator.run_started.connect(recorder.on_run_started)

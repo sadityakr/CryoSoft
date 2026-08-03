@@ -23,9 +23,9 @@
 #   (loads a newly opened/switched session's own gui_state.json over the
 #   in-memory SessionState, skipping a brand-new experiment that has none
 #   yet) and store_health_changed (a save failure/recovery banner + status
-#   note). Also the single home of the ACKNOWLEDGE EMERGENCY button (moved
-#   off ProcedureWindow) and of the per-VI runtime-fault banner, driven by
-#   Orchestrator.error_event.
+#   note). Also the single home of the ACKNOWLEDGE button (unified for
+#   EMERGENCY and hold-severity conditions; moved off ProcedureWindow) and
+#   of the per-VI runtime-fault banner, driven by Orchestrator.error_event.
 # entry_point: Not run directly. Instantiated in main.py.
 # dependencies:
 #   - PyQt6 >= 6.5
@@ -63,6 +63,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import TYPE_CHECKING, Any
 
 import qtawesome as qta
@@ -217,8 +218,7 @@ class MonitorWindow(QMainWindow):
         servicing_store: The active setup's ServicingLogStore, or None.
         servicing_log_kinds: The declared, editable log-kind keys this setup
             keeps (``Station.read_servicing_logs_config()``), or None/empty.
-        cryogenics_recorder: The active CryogenicsRecorder, or None — only
-            used to connect its ``cryo_warning`` signal to the banner.
+        cryogenics_recorder: The active CryogenicsRecorder, or None.
         panels_config: The active config's ``panels:`` block
             (``Station.read_panels_config()``): per-VI allowlists of the
             controls shown on the compact instrument cards. None/empty means
@@ -346,10 +346,12 @@ class MonitorWindow(QMainWindow):
         self._build_menu()
         self._connect_signals()
         self._restore_monitor_state()
-        # Sync state-dependent widgets (the Acknowledge-Emergency button)
-        # against whatever state the Orchestrator is already in:
+        # Sync state-dependent widgets (the ACKNOWLEDGE button and its
+        # countdown) against whatever state the Orchestrator is already in:
         # state_changed only reports FUTURE transitions, and an EMERGENCY
-        # may already be active by the time this window is constructed.
+        # (or a pre-existing hold — _refresh_ack_controls() checks
+        # held_vi_names() live, independent of the state passed in) may
+        # already be active by the time this window is constructed.
         self._on_state_changed(self._orchestrator.state)
 
         # Attach the log handler after the UI exists (LogPanel guards against
@@ -522,14 +524,23 @@ class MonitorWindow(QMainWindow):
         self._banner = NotificationBanner()
         root.addWidget(self._banner)
 
-        # ── Emergency acknowledge (single home; moved off
-        # ProcedureWindow) ──────────────────────────────────────────────
+        # ── Acknowledge (single home; moved off ProcedureWindow) ────────
+        # Unified control for both EMERGENCY and a plain hold-severity
+        # condition (e.g. helium_low) — see Orchestrator.acknowledge() and
+        # GLOSSARY.md's **Hold acknowledge**. Right-aligned in the top bar,
+        # next to the countdown that reports how long the override it
+        # grants stays unlocked.
+        self._in_emergency = False
         ack_row = QHBoxLayout()
         ack_row.addStretch()
+        self._ack_countdown_label = QLabel("")
+        self._ack_countdown_label.setObjectName("ack_countdown_label")
+        self._ack_countdown_label.setVisible(False)
+        ack_row.addWidget(self._ack_countdown_label)
         self._ack_btn = QPushButton("ACKNOWLEDGE EMERGENCY")
         self._ack_btn.setObjectName("ack_emergency_btn")
         self._ack_btn.setVisible(False)
-        self._ack_btn.clicked.connect(self._orchestrator.acknowledge_emergency)
+        self._ack_btn.clicked.connect(self._on_ack_clicked)
         ack_row.addWidget(self._ack_btn)
         root.addLayout(ack_row)
 
@@ -1279,8 +1290,6 @@ class MonitorWindow(QMainWindow):
         # run_finished fires only at run boundaries (not every tick), so
         # there is no teardown-race concern connecting it here directly.
         self._orchestrator.run_finished.connect(self._on_run_finished_for_logs)
-        if self._cryogenics_recorder is not None:
-            self._cryogenics_recorder.cryo_warning.connect(self._on_cryo_warning)
         if self._session_manager is not None:
             self._session_manager.experiment_changed.connect(
                 self._on_session_experiment_changed
@@ -1402,7 +1411,16 @@ class MonitorWindow(QMainWindow):
         """Forward this tick's running-ramp records to the Ramps sub-panel.
 
         Routed through the window for the same teardown-race reason as
-        ``_on_states_updated`` — ``ramps_updated`` fires every tick.
+        ``_on_states_updated`` — ``ramps_updated`` fires every tick, and
+        LAST (``_publish_ramps()`` is the final step of ``_tick_body()``),
+        after that tick's ``update_conditions()``/``decide()`` and any state
+        transition it triggered. This is deliberately where
+        ``_refresh_ack_controls()`` is called rather than from
+        ``_on_states_updated`` (which fires FIRST, before conditions are
+        recomputed): the hold-visibility path has no state transition to
+        piggyback on — a hold-only condition never changes ``_state`` — so
+        it must be driven by a signal that fires after the tick's condition
+        computation, or it always shows the PREVIOUS tick's held-VI set.
 
         Args:
             records: ``list[cryosoft.core.ramps.RampRecord]`` from the
@@ -1411,6 +1429,7 @@ class MonitorWindow(QMainWindow):
         """
         if self._ramp_tracker is not None:
             self._ramp_tracker.on_ramps_updated(records)
+        self._refresh_ack_controls()
 
     def _on_run_finished_for_logs(self, _manifest: dict) -> None:
         """Refresh the Logs page's tables after any run finishes.
@@ -1421,10 +1440,6 @@ class MonitorWindow(QMainWindow):
         reads); cheap to call even when nothing changed.
         """
         self._servicing_log_page.refresh()
-
-    def _on_cryo_warning(self, message: str) -> None:
-        """Surface the recorder's low-helium advisory via the existing banner."""
-        self._banner.show_message(message, BANNER_SEVERITY_WARNING)
 
     def _on_state_changed(self, state_name: str) -> None:
         """Update the status bar label and colour level when state changes.
@@ -1439,7 +1454,8 @@ class MonitorWindow(QMainWindow):
         self._state_label.setText(f"State: {state_name}")
         logger.debug("MonitorWindow: orchestrator state → %s", state_name)
 
-        self._ack_btn.setVisible(state_name == OrchestratorState.EMERGENCY.value)
+        self._in_emergency = state_name == OrchestratorState.EMERGENCY.value
+        self._refresh_ack_controls()
 
         if state_name in _ERROR_STATES:
             level = "error"
@@ -1457,6 +1473,45 @@ class MonitorWindow(QMainWindow):
             for widget in (self._status_bar, self._state_label):
                 widget.style().unpolish(widget)
                 widget.style().polish(widget)
+
+    def _on_ack_clicked(self) -> None:
+        """Acknowledge, then refresh immediately rather than waiting for the
+        next tick's ``ramps_updated`` — otherwise the countdown label stays
+        blank for up to one tick interval after the click, which reads as
+        the click not having registered.
+        """
+        self._orchestrator.acknowledge()
+        self._refresh_ack_controls()
+
+    def _refresh_ack_controls(self) -> None:
+        """Sync the ACKNOWLEDGE button and its "Acknowledged (mm:ss)" countdown.
+
+        Called on every ``state_changed`` AND every tick's ``ramps_updated``
+        (not just state transitions) — a hold-severity condition can appear
+        or clear mid-IDLE with no state transition at all, so the button
+        must not wait for one to show up or disappear; ``ramps_updated``,
+        not ``states_updated``, is the tick-driven trigger deliberately,
+        since it fires AFTER that tick's condition computation (see
+        ``_on_ramps_updated()``'s docstring) — using ``states_updated``
+        would show the previous tick's held-VI set. The countdown is a
+        plain top-bar label rather than a popup: it never steals focus, and
+        it reports the SAME override window every subsequent action either
+        succeeds or is refused against (Orchestrator.acknowledge()), so a
+        refusal after it reads 00:00 is never a silent surprise.
+        """
+        held = self._orchestrator.held_vi_names()
+        self._ack_btn.setVisible(self._in_emergency or bool(held))
+        self._ack_btn.setText(
+            "ACKNOWLEDGE EMERGENCY" if self._in_emergency else "ACKNOWLEDGE & UNLOCK"
+        )
+        expires_at = self._orchestrator.manual_override_expires_at()
+        if expires_at is None:
+            self._ack_countdown_label.setVisible(False)
+            return
+        remaining = max(0.0, expires_at - time.time())
+        minutes, seconds = divmod(int(remaining), 60)
+        self._ack_countdown_label.setText(f"Acknowledged ({minutes:02d}:{seconds:02d})")
+        self._ack_countdown_label.setVisible(True)
 
     def _on_error(self, message: str) -> None:
         """Show a non-modal error banner when ERROR or EMERGENCY is entered.

@@ -719,7 +719,6 @@ def test_cryogenics_recorder_records_one_servicing_entry(op_cls, orchestrator, s
         helium_store,
         servicing_store,
         level_vi_name="level_meter",
-        warning_pct=35.0,
     )
     orchestrator.states_updated.connect(recorder.on_states_updated)
     orchestrator.run_started.connect(recorder.on_run_started)

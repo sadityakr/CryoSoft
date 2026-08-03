@@ -58,8 +58,8 @@
 #   blocking), and the run ends right there, without waiting for any ramp to
 #   complete (a still-moving ramp continues under the ordinary manual-ramp
 #   handling). abort/pause/ERROR hold hardware via Station.stop_ramps();
-#   resume re-dispatches the last targets. acknowledge_emergency() is refused
-#   while the safety condition persists (its own check, NOT tolerance-aware —
+#   resume re-dispatches the last targets. acknowledge()'s return-to-IDLE is
+#   refused while the safety condition persists (its own check, NOT tolerance-aware —
 #   unchanged); recover_from_error() exits ERROR. A finishing operation
 #   returns to EMERGENCY instead of IDLE when it was started via the
 #   carve-out or a safety flag is still tripped.
@@ -248,7 +248,12 @@ class Orchestrator(QObject):
     operation_status = pyqtSignal(str)  # concise, human-readable OPERATION milestone line
     operation_progress = pyqtSignal(float)  # 0.0-1.0 progress of the current OPERATION run
 
-    def __init__(self, station: Station, tick_interval_ms: int = 3000) -> None:
+    def __init__(
+        self,
+        station: Station,
+        tick_interval_ms: int = 3000,
+        manual_override_timeout_s: float = 300.0,
+    ) -> None:
         super().__init__()
         self._station = station
         self._state = OrchestratorState.IDLE
@@ -280,14 +285,28 @@ class Orchestrator(QObject):
         # appropriate. Meaningless (and unread) for a plain procedure.
         self._operation_started_from_emergency: bool = False
 
-        # Set by acknowledge_emergency() when the operator acknowledges an
-        # EMERGENCY whose safety condition is still active: unlocks
-        # submit_vi_action() for manual front-panel recovery (e.g. cycling a
-        # switch heater by hand) without leaving EMERGENCY. Procedures and
-        # operations stay refused regardless — their gates check self._state,
-        # not this flag. Reset on every fresh EMERGENCY entry and on the
-        # eventual return to IDLE, so a new emergency always starts locked.
-        self._emergency_manual_override: bool = False
+        # The single acknowledge()-driven override, time-boxed rather than a
+        # standing bypass (GLOSSARY.md's **Hold acknowledge**). Both windows
+        # are read by _manual_action_admissible() and reset by acknowledge();
+        # _emergency_override_until additionally resets to None on every
+        # fresh EMERGENCY entry (_enter_emergency()) and on the eventual
+        # return to IDLE (_acknowledge_emergency()), so a new emergency
+        # always starts locked.
+        #
+        # _emergency_override_until: set by acknowledge() while in EMERGENCY
+        # and its condition is still active: unlocks submit_vi_action() for
+        # manual front-panel recovery (e.g. cycling a switch heater by hand)
+        # without leaving EMERGENCY. Procedures and operations stay refused
+        # regardless — their gates check self._state, not this window.
+        self._emergency_override_until: float | None = None
+        # _hold_override_until: condition.key -> expiry unix timestamp, one
+        # entry per currently-acknowledged hold-severity condition (e.g.
+        # "safety:helium_low"). Pruned by expiry only (never merely because
+        # the condition cleared) — see _tick_body()'s pruning step — so a
+        # flapping flag doesn't force a fresh acknowledge on every re-trip
+        # within the same window.
+        self._hold_override_until: dict[str, float] = {}
+        self._manual_override_timeout_s = float(manual_override_timeout_s)
 
         # Scanner (switch VI) availability: an on/off flag procedures check
         # via Station.scanner_enabled() rather than assuming the first switch
@@ -754,7 +773,7 @@ class Orchestrator(QObject):
         Closes the data file (partial data preserved), sends the procedure's
         measurement safe-off commands, stops all active ramps with a hardware
         hold, and returns to IDLE. Ignored during EMERGENCY — the emergency
-        flow owns cleanup there and is exited via acknowledge_emergency().
+        flow owns cleanup there and is exited via acknowledge().
         """
         if self._state == OrchestratorState.EMERGENCY:
             logger.info("abort_procedure ignored during EMERGENCY")
@@ -971,8 +990,46 @@ class Orchestrator(QObject):
         if self._state == OrchestratorState.ERROR:
             self._change_state(OrchestratorState.IDLE)
 
-    def acknowledge_emergency(self) -> None:
+    def acknowledge(self) -> None:
+        """Single GUI entry point: acknowledge EMERGENCY, or unlock held VIs.
+
+        Grants manual control for ``self._manual_override_timeout_s`` seconds
+        from this call, then automatically re-locks — never a standing
+        bypass (GLOSSARY.md's **Hold acknowledge**). While in EMERGENCY,
+        also runs ``_acknowledge_emergency()``'s existing two-stage
+        state-recovery logic (return to IDLE once the triggering condition
+        has cleared); the state itself is untouched otherwise — a hold-only
+        acknowledge never fakes IDLE while a hold is still genuinely active,
+        it only grants temporary manual access on top of whatever state is
+        honestly still true. Re-acknowledging while already unlocked simply
+        extends the window from this call; it does not stack, and (for the
+        hold case) survives the condition flapping within the window — see
+        ``_tick_body()``'s pruning step.
+
+        No-op if nothing is held and the station isn't in EMERGENCY.
+        """
+        now = time.time()
+        if self._state == OrchestratorState.EMERGENCY:
+            self._emergency_override_until = now + self._manual_override_timeout_s
+            self._acknowledge_emergency()
+            return
+        held = self._held_vis()
+        if not held:
+            return
+        until = now + self._manual_override_timeout_s
+        for condition in held.values():
+            self._hold_override_until[condition.key] = until
+        self._emit_status(
+            "Holds acknowledged — manual control unlocked for "
+            f"{self._manual_override_timeout_s:.0f}s: {', '.join(sorted(held))}"
+        )
+
+    def _acknowledge_emergency(self) -> None:
         """Acknowledge an EMERGENCY: unlock manual control, or return to IDLE.
+
+        Implementation detail of ``acknowledge()`` — not called directly
+        except by tests exercising EMERGENCY-only two-stage semantics in
+        isolation.
 
         If the condition that triggered EMERGENCY (a critical safety flag —
         ``Station.active_critical_conditions()``, the System-Condition
@@ -992,8 +1049,8 @@ class Orchestrator(QObject):
         Condition standard applies in every state, not only EMERGENCY).
 
         Once the condition has cleared, acknowledging again (the same
-        button) returns to IDLE and relocks the override for the next
-        emergency.
+        button, via ``acknowledge()``) returns to IDLE and relocks the
+        override for the next emergency.
         """
         if self._state != OrchestratorState.EMERGENCY:
             return
@@ -1004,20 +1061,43 @@ class Orchestrator(QObject):
         if self._session_envelope is not None:
             active.extend(self._session_envelope.check_state(self._station.cached_state))
         if active:
-            if not self._emergency_manual_override:
-                self._emergency_manual_override = True
-                self._emit_status(
-                    "Emergency acknowledged — front-panel manual control "
-                    f"unlocked. Condition still active: {', '.join(active)}"
-                )
-            else:
-                self._error(
-                    "Cannot return to IDLE: condition still active "
-                    f"({', '.join(active)})"
-                )
+            self._emit_status(
+                "Emergency acknowledged — front-panel manual control "
+                f"unlocked. Condition still active: {', '.join(active)}"
+            )
             return
-        self._emergency_manual_override = False
+        self._emergency_override_until = None
         self._change_state(OrchestratorState.IDLE)
+
+    def held_vi_names(self) -> frozenset[str]:
+        """Every VI currently under a hold-severity safety condition."""
+        return frozenset(self._held_vis())
+
+    def override_active(self, vi_name: str | None = None) -> bool:
+        """True if a manual override currently admits action on *vi_name*.
+
+        With ``vi_name=None``, True if the EMERGENCY override is currently
+        unlocked. Tests and GUI code should assert/poll through this (or
+        ``manual_override_expires_at()``) rather than reading
+        ``_emergency_override_until``/``_hold_override_until`` directly.
+        """
+        now = time.time()
+        if vi_name is None:
+            return (
+                self._emergency_override_until is not None
+                and now < self._emergency_override_until
+            )
+        held = self._held_vis().get(vi_name)
+        if held is None:
+            return False
+        return now < self._hold_override_until.get(held.key, 0.0)
+
+    def manual_override_expires_at(self) -> float | None:
+        """Soonest-expiring active override (EMERGENCY or hold), or ``None``."""
+        candidates = list(self._hold_override_until.values())
+        if self._emergency_override_until is not None:
+            candidates.append(self._emergency_override_until)
+        return min(candidates) if candidates else None
 
     def active_run_kind(self) -> str | None:
         """Return the active run's kind, or ``None`` if no run is active.
@@ -1113,20 +1193,29 @@ class Orchestrator(QObject):
             System-Condition standard: its ``safety_concerns()`` names a
             currently-tripped, non-tolerated flag — see ``Station.
             update_conditions()``) is refused next, ALSO regardless of
-            state, UNLESS ``acknowledge_emergency()`` has unlocked the
-            manual override — the operator's way to intervene on the held
-            instrument itself (e.g. cycling a switch heater by hand after a
-            quench). A VI with no hold is entirely unaffected by this rule,
-            whatever flags are tripped elsewhere.
+            state, UNLESS ``acknowledge()`` has unlocked it — either via the
+            per-condition hold override (``_hold_override_until``) or the
+            EMERGENCY override (``_emergency_override_until``, which admits
+            every held VI once unlocked, not just the one that triggered
+            EMERGENCY). Either override, once unlocked, ADMITS IMMEDIATELY
+            here — this is what lets it also reach through claim-protection
+            (rule 4) for a VI a paused procedure still claims, deliberately
+            (GLOSSARY.md's **Hold acknowledge**; the known gap this creates
+            for ``resume_procedure()`` is documented there). The hold
+            override never admits while the station is in EMERGENCY or
+            ERROR — those require their own (EMERGENCY) or no (ERROR)
+            override; see the code comment below for why. A VI with no hold
+            is entirely unaffected by this rule, whatever flags are tripped
+            elsewhere.
         1. IDLE, or a manual ramp (RAMPING with no active run): always
            admitted.
-        2. EMERGENCY: refused for EVERY VI, held or not, UNLESS the manual
-           override is unlocked — critical severity is station-wide scope
-           by construction (the System-Condition standard): there is no
-           "unconcerned VI" to admit once the whole station is in
-           EMERGENCY. This is the inversion of the pre-System-Condition
-           behavior, where a VI unconcerned with the tripped flag stayed
-           operable.
+        2. EMERGENCY: refused for EVERY VI, held or not, UNLESS the
+           EMERGENCY override is unlocked — critical severity is
+           station-wide scope by construction (the System-Condition
+           standard): there is no "unconcerned VI" to admit once the whole
+           station is in EMERGENCY. This is the inversion of the
+           pre-System-Condition behavior, where a VI unconcerned with the
+           tripped flag stayed operable.
         3. ERROR: always refused, naming the state.
         4. Otherwise a run is active. Admitted iff the active run's
            ``claimed_vi_names()`` is not "claim everything" (``None``) AND
@@ -1142,6 +1231,10 @@ class Orchestrator(QObject):
             with a human-readable reason naming why (and, for a claim
             refusal, the owning run).
         """
+        now = time.time()
+        emergency_unlocked = (
+            self._emergency_override_until is not None and now < self._emergency_override_until
+        )
         held = self._held_vis().get(vi_name)
         if held is not None:
             not_responding = "not_responding" in self._station.availability(vi_name).tags
@@ -1151,11 +1244,18 @@ class Orchestrator(QObject):
                         f"Cannot control {vi_name}: instrument fault ({held.kind}) — "
                         f"{held.message}. Retry the instrument or wait for it to recover."
                     )
-            elif not self._emergency_manual_override:
+            else:
+                hold_unlocked = now < self._hold_override_until.get(held.key, 0.0)
+                if emergency_unlocked:
+                    return True, ""
+                if hold_unlocked and self._state not in (
+                    OrchestratorState.EMERGENCY, OrchestratorState.ERROR
+                ):
+                    return True, ""
                 return False, (
                     f"Cannot control {vi_name}: safety hold active "
-                    f"({held.kind}). Resolve the condition, "
-                    "or acknowledge the emergency for manual recovery."
+                    f"({held.kind}). Resolve the condition, or acknowledge to "
+                    "unlock manual control."
                 )
         if self._state == OrchestratorState.IDLE:
             return True, ""
@@ -1165,7 +1265,7 @@ class Orchestrator(QObject):
         if manual_ramping:
             return True, ""
         if self._state == OrchestratorState.EMERGENCY:
-            if self._emergency_manual_override:
+            if emergency_unlocked:
                 return True, ""
             return False, (
                 f"Cannot control {vi_name}: EMERGENCY — acknowledge the "
@@ -1946,6 +2046,22 @@ class Orchestrator(QObject):
             # failure, stale-claimed run failure) into one policy call.
             verdict = decide(conditions, watched_vis=watched_vis, run_active=run_active)
 
+            # Prune expired hold-override entries — by expiry only, never
+            # because the condition disappeared from verdict.held_vis (that
+            # would force a fresh acknowledge on every flap of the same
+            # flag, defeating the point of the cooldown; see acknowledge()
+            # and GLOSSARY.md's **Hold acknowledge**). _emergency_override_
+            # until needs no equivalent tick-driven pruning: it is read live
+            # via a timestamp comparison in _manual_action_admissible(), and
+            # _enter_emergency() already resets it unconditionally on every
+            # fresh EMERGENCY entry.
+            if self._hold_override_until:
+                now = time.time()
+                self._hold_override_until = {
+                    key: until for key, until in self._hold_override_until.items()
+                    if now < until
+                }
+
             if verdict.emergency and self._state != OrchestratorState.EMERGENCY:
                 safety_conditions = [c for c in verdict.emergency if c.origin == "safety"]
                 envelope_conds = [c for c in verdict.emergency if c.origin == "envelope"]
@@ -2148,7 +2264,7 @@ class Orchestrator(QObject):
             pass # Awaiting user interaction (recover_from_error)
         elif self._state == OrchestratorState.EMERGENCY:
             # Shutdown already ran once on entry (_enter_emergency).
-            # Monitoring continues; awaiting acknowledge_emergency().
+            # Monitoring continues; awaiting acknowledge().
             pass
 
         # 5. Ramp tracker — last, so the run/claim context the records carry
@@ -2457,7 +2573,14 @@ class Orchestrator(QObject):
             kind="safety",
             severity="emergency",
         )
-        self._emergency_manual_override = False
+        # Defense in depth alongside _manual_action_admissible()'s own
+        # EMERGENCY/ERROR guard on the hold override: a fresh EMERGENCY
+        # starts with a clean slate for BOTH override kinds, so a hold
+        # acknowledged moments earlier (e.g. a helium_low ack still live on
+        # magnet_z) cannot be mistaken for an EMERGENCY acknowledge once a
+        # quench trips this same tick.
+        self._emergency_override_until = None
+        self._hold_override_until = {}
         try:
             self._abort_active_procedure()
         except Exception:
