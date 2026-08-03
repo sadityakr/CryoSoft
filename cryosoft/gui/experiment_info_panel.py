@@ -13,14 +13,16 @@
 #   record-keeping. It is the single owner of session-level sample metadata
 #   in the GUI, read by ProcedureWindow through MonitorWindow's
 #   get_sample_info/get_data_dir callables. Data Dir is derived-but-editable:
-#   opening/switching a session forces the field to that session's own
+#   opening/switching an experiment forces the field to that experiment's own
 #   data/ folder (remembering whatever it held before, to restore on
-#   close), and a plain status note (no stylesheet) appears whenever the
-#   field points outside the open session's folder.
+#   close). Containment is hard, not advisory: a path outside the open
+#   experiment's folder is rejected where a run actually starts
+#   (MonitorWindow's enforced accessor), not merely flagged — the plain
+#   status note here (no stylesheet) is live typing feedback only.
 # entry_point: Not run directly. Hosted as MonitorWindow's bottom-left quadrant.
 # dependencies:
 #   - PyQt6 >= 6.5
-#   - cryosoft.gui.app_settings (sessions_root default fallback)
+#   - cryosoft.core.paths (measurement_root default fallback)
 #   - cryosoft.gui.form_autosave (FormAutosaveState)
 #   - cryosoft.gui.theme (button classes)
 #   - cryosoft.gui.experiment_dialogs (Start/Close experiment dialogs)
@@ -67,7 +69,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from cryosoft.gui import app_settings
+from cryosoft.core.paths import measurement_root
 from cryosoft.gui.experiment_dialogs import CloseExperimentDialog, StartExperimentDialog
 from cryosoft.gui.form_autosave import FormAutosaveState
 from cryosoft.gui.theme import TEXT_PRIMARY
@@ -305,7 +307,7 @@ class ExperimentInfoPanel(QWidget):
         # Starts empty ("no explicit choice yet"); apply_session() (called
         # right after construction by MonitorWindow) and/or the ExperimentManager
         # experiment_changed handler above fill in the right value — the
-        # session's own folder when one is open, else the sessions_root()
+        # experiment's own folder when one is open, else the measurement_root()
         # default (see _default_data_dir_text()).
         self._data_dir_input = QLineEdit()
         self._data_dir_input.setObjectName("data_dir_input")
@@ -330,26 +332,48 @@ class ExperimentInfoPanel(QWidget):
     def _on_browse_dir(self) -> None:
         """Open a directory browser and fill the data-dir field.
 
-        Opens at the open session's own data folder (rule 3) when one is
-        active, else at whatever the field currently holds.
+        Opens at the open experiment's own data folder (rule 3) when one is
+        active, else at whatever the field currently holds. A selection
+        outside the open experiment's folder is rejected outright (hard
+        containment — see ``is_data_dir_contained()``); the field is left
+        unchanged and a warning is shown instead of accepting it.
         """
         start_dir = self._data_dir_input.text()
+        experiment_folder = self._current_experiment_folder()
         if self._session_manager is not None:
             current_dir = self._session_manager.current_data_dir()
             if current_dir is not None:
                 start_dir = str(current_dir)
         selected = QFileDialog.getExistingDirectory(self, "Select Data Directory", start_dir)
-        if selected:
-            self._data_dir_input.setText(selected)
+        if not selected:
+            return
+        if experiment_folder is not None:
+            try:
+                outside = not Path(selected).resolve().is_relative_to(
+                    experiment_folder.resolve()
+                )
+            except (OSError, ValueError):
+                outside = True
+            if outside:
+                QMessageBox.warning(
+                    self,
+                    "Outside experiment folder",
+                    "The data directory must stay inside the open experiment's "
+                    f"folder:\n{experiment_folder}",
+                )
+                return
+        self._data_dir_input.setText(selected)
 
     def _update_data_dir_note(self) -> None:
         """Show/hide the "saving outside the current session folder" note.
 
-        Only meaningful while a session is open: compares the field's
-        current path against the session folder
+        Only meaningful while an experiment is open: compares the field's
+        current path against the experiment folder
         (``current_data_dir().parent``, since ``current_data_dir()`` is that
-        folder's ``data/`` sub-directory). No session open, or an empty
-        field, both hide the note.
+        folder's ``data/`` sub-directory). No experiment open, or an empty
+        field, both hide the note. This is live typing feedback only — hard
+        enforcement happens at ``is_data_dir_contained()``, read by the
+        caller that actually starts a run.
         """
         session_folder = self._current_experiment_folder()
         text = self._data_dir_input.text().strip()
@@ -389,30 +413,56 @@ class ExperimentInfoPanel(QWidget):
         """Return the configured data directory path.
 
         Returns:
-            Absolute path string; falls back to the open session's own data
-            folder, or (no session open) ``app_settings.sessions_root()``, if
+            Absolute path string; falls back to the open experiment's own
+            data folder, or (no experiment open) ``measurement_root()``, if
             the field is empty.
         """
         return self._data_dir_input.text().strip() or self._default_data_dir_text()
 
     def _default_data_dir_text(self) -> str:
-        """Return the fallback Data Dir text for an empty field/session state.
+        """Return the fallback Data Dir text for an empty field/experiment state.
 
-        The open session's own data folder when one is active (mirrors the
+        The open experiment's own data folder when one is active (mirrors the
         experiment_changed-driven forcing above), else
-        ``app_settings.sessions_root()`` — the same substitution
+        ``cryosoft.core.paths.measurement_root()`` — the same substitution
         ``form_autosave``'s now-empty ``_DEFAULT_DATA_DIR`` relies on the GUI
         to make (form_autosave itself stays Qt-free and cannot resolve a
         platform Documents directory).
         """
-        session_folder_data_dir = (
+        experiment_data_dir = (
             self._session_manager.current_data_dir()
             if self._session_manager is not None
             else None
         )
-        if session_folder_data_dir is not None:
-            return str(session_folder_data_dir)
-        return str(app_settings.sessions_root())
+        if experiment_data_dir is not None:
+            return str(experiment_data_dir)
+        return str(measurement_root())
+
+    def is_data_dir_contained(self) -> bool:
+        """Return whether the current Data Dir is inside the open experiment's folder.
+
+        Always ``True`` when no experiment is open (nothing to contain
+        against) or the field is empty (falls back to the experiment's own
+        folder via ``_default_data_dir_text()``). Mirrors the
+        ``is_relative_to()`` check ``_update_data_dir_note()`` uses for the
+        live typing note, but this is the read a caller starting a run must
+        enforce against — a path outside the open experiment's folder is
+        rejected there, not merely flagged (see ``MonitorWindow``'s enforced
+        Data Dir accessor).
+
+        Returns:
+            ``True`` when the field is empty, no experiment is open, or the
+            resolved path is inside the open experiment's folder; ``False``
+            otherwise (including when the path cannot be resolved).
+        """
+        experiment_folder = self._current_experiment_folder()
+        text = self._data_dir_input.text().strip()
+        if experiment_folder is None or not text:
+            return True
+        try:
+            return Path(text).resolve().is_relative_to(experiment_folder.resolve())
+        except (OSError, ValueError):
+            return False
 
     def apply_session(self, state: FormAutosaveState) -> None:
         """Populate the fields from a loaded session.

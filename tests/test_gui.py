@@ -103,6 +103,9 @@ def isolated_settings(tmp_path, monkeypatch):
         return (tmp_path / "sessions" / f"{user_id}.json") if user_id else session_path
 
     monkeypatch.setattr(app_settings, "autosave_file_path", _fake_autosave_file_path)
+    # The fixed measurement root (ExperimentInfoPanel's fallback whenever no
+    # experiment is open) is isolated globally by conftest.py's
+    # isolated_measurement_root fixture, autouse across the whole suite.
     return ini_path
 
 
@@ -1429,7 +1432,7 @@ def test_switch_user_saves_outgoing_and_loads_incoming_session(
     assert win._session_info._sample_name_input.text() == "SampleB"
 
 
-# ── L6 session switching (Load Session…, Sessions Folder…) ────────────────────
+# ── L6 session switching (Load Session…, Resume Session…) ─────────────────────
 
 def test_load_session_dialog_lists_open_and_closed(station, orchestrator, qtbot, tmp_path):
     """Open experiments are selectable; closed ones are grayed out and disabled."""
@@ -1465,6 +1468,73 @@ def test_load_session_dialog_lists_open_and_closed(station, orchestrator, qtbot,
     dialog._list.setCurrentItem(open_item)
     dialog.accept()
     assert dialog.selected_experiment_id() == open_item.data(Qt.ItemDataRole.UserRole)
+
+
+def test_resume_session_dialog_lists_only_owner_sessions(qtbot, tmp_path):
+    """list_sessions(user_id=...) filters the dialog to one user's own sessions."""
+    from cryosoft.gui.session_dialogs import ResumeSessionDialog
+    from cryosoft.session.store import SessionStore
+
+    store = SessionStore(tmp_path / "sessions")
+    mine = store.create_session(name="My Cooldown", user_id="jdoe")
+    store.create_session(name="Someone Else's", user_id="asmith")
+
+    dialog = ResumeSessionDialog(store, "jdoe")
+    qtbot.addWidget(dialog)
+
+    assert dialog._list.count() == 1
+    item = dialog._list.item(0)
+    assert item.data(Qt.ItemDataRole.UserRole) == mine.session_id
+
+
+def test_resume_session_dialog_select_and_accept(qtbot, tmp_path):
+    """Selecting a listed session and accepting exposes it via selected_session_id()."""
+    from cryosoft.gui.session_dialogs import ResumeSessionDialog
+    from cryosoft.session.store import SessionStore
+
+    store = SessionStore(tmp_path / "sessions")
+    session = store.create_session(name="My Cooldown", user_id="jdoe")
+
+    dialog = ResumeSessionDialog(store, "jdoe")
+    qtbot.addWidget(dialog)
+
+    dialog._list.setCurrentItem(dialog._list.item(0))
+    dialog.accept()
+    assert dialog.selected_session_id() == session.session_id
+
+
+def test_resume_session_dialog_create_new_session(qtbot, tmp_path):
+    """The inline "New session…" name field + Create button creates and selects one."""
+    from cryosoft.gui.session_dialogs import ResumeSessionDialog
+    from cryosoft.session.store import SessionStore
+
+    store = SessionStore(tmp_path / "sessions")
+    dialog = ResumeSessionDialog(store, "jdoe")
+    qtbot.addWidget(dialog)
+
+    assert dialog._list.count() == 0
+    assert not dialog._create_btn.isEnabled()
+
+    dialog._new_name_input.setText("Fresh Cooldown")
+    assert dialog._create_btn.isEnabled()
+    dialog._create_btn.click()
+
+    assert store.list_sessions(user_id="jdoe")
+    created_id = store.list_sessions(user_id="jdoe")[0]
+    assert dialog.selected_session_id() == created_id
+    assert dialog.result() == QDialog.DialogCode.Accepted
+
+
+def test_resume_session_dialog_no_selection_returns_none(qtbot, tmp_path):
+    """selected_session_id() is None when nothing was ever selected."""
+    from cryosoft.gui.session_dialogs import ResumeSessionDialog
+    from cryosoft.session.store import SessionStore
+
+    store = SessionStore(tmp_path / "sessions")
+    dialog = ResumeSessionDialog(store, "jdoe")
+    qtbot.addWidget(dialog)
+
+    assert dialog.selected_session_id() is None
 
 
 def test_switch_session_saves_outgoing_and_loads_incoming(
@@ -1555,22 +1625,47 @@ def test_open_load_session_dialog_without_session_manager_shows_message(monitor_
     assert shown
 
 
-def test_open_sessions_folder_dialog_without_session_manager_shows_message(monitor_win, monkeypatch):
-    """No ExperimentManager wired: Sessions Folder informs rather than crashing."""
+def test_open_resume_session_dialog_without_session_store_shows_message(monitor_win, monkeypatch):
+    """No SessionStore wired: Resume Session informs rather than crashing."""
     shown = []
     monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: shown.append(a))
-    monitor_win._open_sessions_folder_dialog()
+    monitor_win._open_resume_session_dialog()
     assert shown
 
 
-def test_open_sessions_folder_dialog_sets_root_and_notes_status(
-    monitor_win_session, monkeypatch, tmp_path
+def test_open_resume_session_dialog_sets_active_and_notes_status(
+    station, orchestrator, session_manager, qtbot, tmp_path, monkeypatch
 ):
-    """Picking a folder persists it via set_sessions_root and notes the status bar."""
-    chosen = tmp_path / "new_sessions_root"
-    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *a, **k: str(chosen))
-    monitor_win_session._open_sessions_folder_dialog()
-    assert _app_settings.sessions_root() == chosen
+    """Picking a session persists it via SessionStore.set_active and notes the status bar."""
+    from cryosoft.gui import monitor_window as mw
+    from cryosoft.session.store import SessionStore
+
+    store = SessionStore(tmp_path / "sessions")
+    created = store.create_session(name="Cooldown 3", user_id="jdoe")
+
+    win = MonitorWindow(
+        station, orchestrator, session_manager=session_manager, session_store=store
+    )
+    qtbot.addWidget(win)
+    win.show()
+
+    class _FakeResumeSessionDialog:
+        DialogCode = QDialog.DialogCode
+
+        def __init__(self, *a, **k):
+            pass
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+        def selected_session_id(self):
+            return created.session_id
+
+    monkeypatch.setattr(mw, "ResumeSessionDialog", _FakeResumeSessionDialog)
+    win._open_resume_session_dialog()
+
+    assert store.get_active() == created.session_id
+    assert "next launch" in win._status_bar.currentMessage()
 
 
 # ── Data Dir: derived-but-editable from the open session ───────────────────────
@@ -1608,6 +1703,88 @@ def test_data_dir_note_hidden_inside_session_visible_outside(
 
     panel._data_dir_input.setText(str(session_manager.current_data_dir()))
     assert not panel._data_dir_note.isVisible()
+
+
+# ── Data Dir hard containment (Enforcement) ─────────────────────────────────────
+
+def test_is_data_dir_contained_true_without_open_experiment(monitor_win):
+    """No experiment open: any path is considered contained (nothing to enforce)."""
+    panel = monitor_win._session_info
+    panel._data_dir_input.setText("D:/anywhere")
+    assert panel.is_data_dir_contained()
+
+
+def test_is_data_dir_contained_false_outside_open_experiment(
+    monitor_win_session, session_manager, monkeypatch, tmp_path
+):
+    """An open experiment plus a Data Dir outside its folder is not contained."""
+    _stub_start_dialog(monkeypatch, "Hall bar A3", "jdoe")
+    panel = monitor_win_session._session_info
+    panel._start_close_btn.click()
+
+    panel._data_dir_input.setText(str(tmp_path / "elsewhere"))
+    assert not panel.is_data_dir_contained()
+
+    panel._data_dir_input.setText(str(session_manager.current_data_dir()))
+    assert panel.is_data_dir_contained()
+
+
+def test_browse_dir_rejects_selection_outside_open_experiment(
+    monitor_win_session, session_manager, monkeypatch, tmp_path
+):
+    """_on_browse_dir() refuses a selection outside the open experiment's folder."""
+    _stub_start_dialog(monkeypatch, "Hall bar A3", "jdoe")
+    panel = monitor_win_session._session_info
+    panel._start_close_btn.click()
+    original_text = panel._data_dir_input.text()
+
+    outside_dir = tmp_path / "elsewhere"
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *a, **k: str(outside_dir))
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a))
+
+    panel._on_browse_dir()
+
+    assert warned
+    assert panel._data_dir_input.text() == original_text
+
+
+def test_browse_dir_accepts_selection_inside_open_experiment(
+    monitor_win_session, session_manager, monkeypatch
+):
+    """_on_browse_dir() accepts a selection inside the open experiment's folder."""
+    _stub_start_dialog(monkeypatch, "Hall bar A3", "jdoe")
+    panel = monitor_win_session._session_info
+    panel._start_close_btn.click()
+
+    inside_dir = session_manager.current_data_dir()
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *a, **k: str(inside_dir))
+
+    panel._on_browse_dir()
+
+    assert panel._data_dir_input.text() == str(inside_dir)
+
+
+def test_get_data_dir_for_run_rejects_outside_path_with_warning(
+    monitor_win_session, session_manager, monkeypatch, tmp_path
+):
+    """MonitorWindow.get_data_dir_for_run() refuses a run when Data Dir is outside."""
+    _stub_start_dialog(monkeypatch, "Hall bar A3", "jdoe")
+    win = monitor_win_session
+    win._session_info._start_close_btn.click()
+    win._session_info._data_dir_input.setText(str(tmp_path / "elsewhere"))
+
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a))
+
+    assert win.get_data_dir_for_run() is None
+    assert warned
+
+
+def test_get_data_dir_for_run_returns_path_when_no_experiment_open(monitor_win):
+    """No experiment open: get_data_dir_for_run() behaves like get_data_dir()."""
+    monitor_win._session_info._data_dir_input.setText("D:/anywhere")
+    assert monitor_win.get_data_dir_for_run() == "D:/anywhere"
 
 
 # ── store_health_changed → banner ───────────────────────────────────────────────
@@ -2451,39 +2628,15 @@ def test_monitor_saves_session_on_close(monitor_win, tmp_path):
 
 def test_new_session_clears_fields(monitor_win, monkeypatch):
     """New Session (confirmed) resets the Sample Info fields to defaults."""
+    from cryosoft.core.paths import measurement_root
+
     monitor_win._session_info._sample_name_input.setText("ToClear")
     monkeypatch.setattr(
         QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes
     )
     monitor_win._on_new_session()
     assert monitor_win._session_info._sample_name_input.text() == ""
-    assert monitor_win._session_info._data_dir_input.text() == str(_app_settings.sessions_root())
-
-
-# ── app_settings.sessions_root() / set_sessions_root() ─────────────────────────
-
-def test_sessions_root_defaults_to_documents_cryodata(isolated_settings):
-    """With the key unset, sessions_root() resolves <Documents>/CryoData at call time."""
-    from PyQt6.QtCore import QStandardPaths
-
-    expected_base = QStandardPaths.writableLocation(
-        QStandardPaths.StandardLocation.DocumentsLocation
-    )
-    assert _app_settings.sessions_root() == Path(expected_base) / "CryoData"
-
-
-def test_sessions_root_round_trips_with_set_sessions_root(isolated_settings, tmp_path):
-    """set_sessions_root() persists the value; sessions_root() reads it back."""
-    custom = tmp_path / "custom_sessions"
-    _app_settings.set_sessions_root(custom)
-    assert _app_settings.sessions_root() == custom
-
-
-def test_sessions_root_read_does_not_persist_the_default(isolated_settings):
-    """Merely reading the unset default must not write it into QSettings."""
-    _app_settings.sessions_root()
-    settings = QSettings(str(isolated_settings), QSettings.Format.IniFormat)
-    assert settings.value("Sessions/root") is None
+    assert monitor_win._session_info._data_dir_input.text() == str(measurement_root())
 
 
 def test_procedure_window_restores_selection_and_params(station, orchestrator, qtbot):

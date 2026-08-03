@@ -119,7 +119,12 @@ class ProcedureWindow(QMainWindow):
         station: The active Station instance.
         orchestrator: The active Orchestrator instance.
         get_sample_info: Callable returning ``{sample_name, sample_id, comments}``.
-        get_data_dir: Callable returning the data directory path string.
+        get_data_dir: Callable returning the data directory path string, or
+            ``None`` when the caller rejected it (e.g. MonitorWindow's hard
+            containment check against the open experiment's folder — see
+            ``docs/plans/session-tier-and-terminology.md``, "Enforcement");
+            a warning is expected to already have been shown to the operator
+            in that case, so ``_collect_params`` just aborts quietly.
         parent: Optional Qt parent widget.
         initial_session: Persisted form-autosave content to restore, if any.
         get_experiment_info: Callable returning the session layer's experiment
@@ -133,7 +138,7 @@ class ProcedureWindow(QMainWindow):
         station: Station,
         orchestrator: Orchestrator,
         get_sample_info: Callable[[], dict[str, str]],
-        get_data_dir: Callable[[], str],
+        get_data_dir: Callable[[], str | None],
         parent: QWidget | None = None,
         initial_session: FormAutosaveState | None = None,
         get_experiment_info: Callable[[], dict[str, str]] | None = None,
@@ -401,13 +406,17 @@ class ProcedureWindow(QMainWindow):
 
         Returns:
             ``(param_values, sample_info, data_dir, file_prefix)`` on success,
-            or ``None`` if a field cannot be parsed.
+            or ``None`` if a field cannot be parsed, or the data directory
+            was rejected (hard containment — a warning has already been
+            shown by ``get_data_dir``'s caller in that case).
         """
         param_values = self._params_panel.collect_values()
         if param_values is None:
             return None
         sample_info = self._get_sample_info()
         data_dir = self._get_data_dir()
+        if data_dir is None:
+            return None
         file_prefix = self._params_panel.file_prefix()
         return param_values, sample_info, data_dir, file_prefix
 

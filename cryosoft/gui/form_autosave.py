@@ -58,10 +58,10 @@ logger = logging.getLogger(__name__)
 _SCHEMA_VERSION = 1
 # "" means "no explicit choice" — this module is deliberately Qt-free (stdlib
 # only) so it cannot resolve a platform Documents directory itself. The GUI
-# substitutes app_settings.sessions_root()'s default (or, when a session is
-# open, the session's own data folder) wherever it displays or uses an empty
-# data_dir. Existing autosave files already carry their data_dir explicitly
-# and are unaffected by this default changing.
+# substitutes cryosoft.core.paths.measurement_root() (or, when an experiment is
+# open, the experiment's own data folder) wherever it displays or uses an
+# empty data_dir. Existing autosave files already carry their data_dir
+# explicitly and are unaffected by this default changing.
 _DEFAULT_DATA_DIR = ""
 
 # Queue-item lifecycle states (a queued procedure moves pending -> running ->

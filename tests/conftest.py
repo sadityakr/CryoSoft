@@ -1,7 +1,7 @@
 # ---
 # description: |
 #   Pytest configuration and shared fixtures for CryoSoft test suite.
-# last_updated: 2026-04-06
+# last_updated: 2026-08-03
 # ---
 
 import pytest
@@ -11,3 +11,18 @@ import logging
 def configure_logging():
     """Ensure logging is configured for all tests."""
     logging.basicConfig(level=logging.DEBUG)
+
+
+@pytest.fixture(autouse=True)
+def isolated_measurement_root(tmp_path, monkeypatch):
+    """Point cryosoft.core.paths.measurement_root() at a throwaway directory.
+
+    ExperimentInfoPanel falls back to measurement_root() whenever no
+    experiment is open and the Data Dir field is empty — including at
+    MonitorWindow construction (apply_session()) — so this must be isolated
+    globally, the same way the per-file isolated_settings fixtures isolate
+    QSettings, or a pytest run would either raise (no
+    CRYOSOFT_MEASUREMENT_ROOT/App-config.yaml configured on the test
+    machine) or read the real machine-level settings file.
+    """
+    monkeypatch.setenv("CRYOSOFT_MEASUREMENT_ROOT", str(tmp_path / "measurement_root"))

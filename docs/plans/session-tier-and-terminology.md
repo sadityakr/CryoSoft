@@ -117,6 +117,44 @@ session's folder is rejected (mirrors `_update_data_dir_note()`'s existing
 This removes today's "save straight to a network drive" escape hatch —
 confirmed acceptable.
 
+## Startup wiring (decided)
+
+`ExperimentManager` (formerly `SessionManager`) keeps its today-shape
+invariant: it is always constructed with a real, already-resolved
+`ExperimentStore` — no live rebind-on-session-switch machinery is added.
+Concretely, in `main.py`:
+
+1. Resolve `measurement_root()` and construct one `SessionStore(root)`.
+2. Read `SessionStore.get_active()`. If unset or the record fails to load
+   (first-ever launch, or a corrupt pointer), auto-create a bootstrap
+   session (`SessionStore.create_session(name=current_user_id() or
+   "default", user_id=current_user_id() or "")`) and set it active — the
+   app must never fail to start for lack of an explicit session choice.
+3. Construct `ExperimentStore(measurement_root() / "sessions" /
+   active_session_id)` and pass it to `ExperimentManager` exactly as today.
+
+**Switching sessions is deferred-until-restart**, the same precedent this
+codebase already uses for the sessions-root relocate action
+(`_open_sessions_folder_dialog`'s "applies fully on next launch" message):
+a new **Resume Session…** menu action (replacing "Sessions Folder…", not
+"Open Experiment…") lets the user pick or create a session via
+`SessionStore`, calls `set_active()`, and tells them the switch takes
+effect on next launch. This avoids adding live-rebind support to
+`ExperimentManager`, which stays exactly as shaped by the terminology
+rename.
+
+**`UserRoster` relocates** from `%APPDATA%/CryoSoft/users.json` (today, via
+`app_settings.autosave_file_path().parent`) to `measurement_root() /
+"users.json"` — matching the **Filesystem layout** diagram above, which
+already places `users.json` directly under `<measurement_root>/`. This is
+a deliberate part of this plan, not a pre-existing given "unchanged" only
+in the sense that its *shape* (one JSON file, `UserRoster`) doesn't
+change, only its *root* — consistent with the same "belongs to the
+physical installation, not the OS profile" principle behind fixing
+`measurement_root()` itself. No migration: a fresh `users.json` starts
+empty at the new location; the existing `%APPDATA%` copy is left in place,
+unread.
+
 ## Root fixing
 
 `measurement_root()` moves into `cryosoft/core/paths.py`, following the
