@@ -3,7 +3,9 @@
 #   Behavior tests for cryosoft.core.paths: log_directory()'s resolution
 #   precedence (CRYOSOFT_LOG_DIR env var, platform user-data location,
 #   packaged fallback) and its purity (resolves but never creates a
-#   directory).
+#   directory); measurement_root()'s precedence (CRYOSOFT_MEASUREMENT_ROOT
+#   env var, then the App-config.yaml settings file, then RuntimeError) and
+#   its purity.
 # last_updated: 2026-08-03
 # ---
 
@@ -25,6 +27,7 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every test starts with a clean slate for the resolver's env inputs."""
     monkeypatch.delenv("CRYOSOFT_LOG_DIR", raising=False)
     monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    monkeypatch.delenv("CRYOSOFT_MEASUREMENT_ROOT", raising=False)
 
 
 def _pretend_platform(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
@@ -102,5 +105,103 @@ def test_log_directory_creates_nothing(
     fresh = tmp_path / "does_not_exist_yet" / "logs"
     monkeypatch.setenv("CRYOSOFT_LOG_DIR", str(fresh))
     result = paths.log_directory()
+    assert result == fresh
+    assert not result.exists()
+
+
+def test_measurement_root_honours_explicit_env_var(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CRYOSOFT_MEASUREMENT_ROOT", str(tmp_path / "measurements"))
+    # Point the settings file at a nonexistent path so a stray real
+    # App-config.yaml on the host machine can never leak into this test.
+    monkeypatch.setattr(
+        paths, "_app_config_path", lambda: tmp_path / "does_not_exist.yaml"
+    )
+    assert paths.measurement_root() == tmp_path / "measurements"
+
+
+def test_measurement_root_env_var_wins_over_settings_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CRYOSOFT_MEASUREMENT_ROOT", str(tmp_path / "from_env"))
+    monkeypatch.setattr(
+        paths, "_read_measurement_root_setting", lambda config_path: str(tmp_path / "from_file")
+    )
+    assert paths.measurement_root() == tmp_path / "from_env"
+
+
+def test_measurement_root_falls_back_to_settings_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = tmp_path / "App-config.yaml"
+    monkeypatch.setattr(paths, "_app_config_path", lambda: config_path)
+    monkeypatch.setattr(
+        paths,
+        "_read_measurement_root_setting",
+        lambda cp: str(tmp_path / "measurements") if cp == config_path else None,
+    )
+    assert paths.measurement_root() == tmp_path / "measurements"
+
+
+def test_measurement_root_missing_settings_file_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = tmp_path / "does_not_exist" / "App-config.yaml"
+    monkeypatch.setattr(paths, "_app_config_path", lambda: config_path)
+    with pytest.raises(RuntimeError) as excinfo:
+        paths.measurement_root()
+    assert "CRYOSOFT_MEASUREMENT_ROOT" in str(excinfo.value)
+    assert str(config_path) in str(excinfo.value)
+
+
+def test_measurement_root_blank_setting_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = tmp_path / "App-config.yaml"
+    config_path.write_text("measurement_root:\n", encoding="utf-8")
+    monkeypatch.setattr(paths, "_app_config_path", lambda: config_path)
+    with pytest.raises(RuntimeError):
+        paths.measurement_root()
+
+
+def test_measurement_root_missing_key_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = tmp_path / "App-config.yaml"
+    config_path.write_text("some_other_key: value\n", encoding="utf-8")
+    monkeypatch.setattr(paths, "_app_config_path", lambda: config_path)
+    with pytest.raises(RuntimeError):
+        paths.measurement_root()
+
+
+def test_read_measurement_root_setting_parses_quoted_value(tmp_path: Path) -> None:
+    config_path = tmp_path / "App-config.yaml"
+    config_path.write_text('measurement_root: "D:\\Measurements"\n', encoding="utf-8")
+    assert paths._read_measurement_root_setting(config_path) == "D:\\Measurements"
+
+
+def test_read_measurement_root_setting_ignores_comments_and_other_keys(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "App-config.yaml"
+    config_path.write_text(
+        "# machine settings\nsome_key: 1\nmeasurement_root: /data/cryosoft\n",
+        encoding="utf-8",
+    )
+    assert (
+        paths._read_measurement_root_setting(config_path) == "/data/cryosoft"
+    )
+
+
+def test_measurement_root_creates_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fresh = tmp_path / "does_not_exist_yet" / "measurements"
+    monkeypatch.setenv("CRYOSOFT_MEASUREMENT_ROOT", str(fresh))
+    monkeypatch.setattr(
+        paths, "_app_config_path", lambda: tmp_path / "does_not_exist.yaml"
+    )
+    result = paths.measurement_root()
     assert result == fresh
     assert not result.exists()

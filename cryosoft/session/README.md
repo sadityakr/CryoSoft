@@ -68,7 +68,7 @@ GUI imports session).
 - Orchestrator signals: `run_started` / `run_finished` manifests (run id,
   procedure, kind, params, data file path, timestamps, terminal status), and
   `states_updated` (full station state, polled into `CryogenicsRecorder`).
-- GUI lifecycle calls on the `SessionManager`: `start_experiment`,
+- GUI lifecycle calls on the `ExperimentManager`: `start_experiment`,
   `close_experiment`, `set_findings`, `set_attended`, `set_queue`,
   `switch_experiment`.
 - The active config identity (from `main.py`) and the station's cached state
@@ -82,15 +82,21 @@ GUI imports session).
 
 ## Exit (what goes out)
 
-- Persisted records: `<sessions_root>/<experiment_id>/experiment.json` (+ the
-  `active.json` resume pointer), and the setup-local `users.json` roster next
-  to the app settings. `sessions_root` is `cryosoft.gui.app_settings.
-  sessions_root()` — a dedicated, app-settings-backed location (default
-  `<Documents>/CryoData`), decoupled from any GUI form field. Each experiment
+- Persisted records: one `Session` tier above the experiment tier —
+  `<measurement_root>/sessions/<session_id>/session.json` (+ its own
+  `active.json` resume pointer, tracking the active *session*) via
+  `SessionStore` — and, one level deeper inside each session folder, the
+  experiment tier unchanged in shape:
+  `<measurement_root>/sessions/<session_id>/<experiment_id>/experiment.json`
+  (+ `ExperimentStore`'s own `active.json`, tracking that session's active
+  *experiment* — a distinct file from `SessionStore`'s). `measurement_root` is
+  `cryosoft.core.paths.measurement_root()` — a fixed, machine-level, admin-set
+  location (see that module's docstring), decoupled from any GUI form field.
+  `users.json` lives directly under `measurement_root`. Each experiment
   folder also holds `gui_state.json` (GUI-authored, opaque to this layer) and
   a `data/` folder where the experiment's HDF5 files live (sub-folders
   allowed, e.g. `data/heating_runs/`) — see **Format rules** below.
-- `Orchestrator.set_session_envelope()` — the experiment's sample bounds,
+- `Orchestrator.set_experiment_envelope()` — the experiment's sample bounds,
   enforced in the Orchestrator for every writer.
 - `experiment_context()` — the dict the GUI passes as `experiment_info` when
   constructing procedures, stamped into every HDF5 file's
@@ -112,7 +118,7 @@ file-format change, not a routine edit.
   disk (an old file) is treated as version `1`. On load, a value *greater*
   than the running app's `SCHEMA_VERSION` logs a WARNING; the record still
   loads (tolerant-parse — one bad field must never brick the app), but it is
-  never written back: `SessionManager.switch_experiment()` refuses to make
+  never written back: `ExperimentManager.switch_experiment()` refuses to make
   such a record the live experiment, and `_save_current()` refuses to
   overwrite one even if it somehow became `self._experiment` (belt and
   suspenders). This is what makes "a newer app wrote this" and "an older app
@@ -121,7 +127,7 @@ file-format change, not a routine edit.
   the experiment's session folder whenever the file lives under it (normally
   inside `data/`, sub-folders included, e.g. `data/heating_runs/xyz.h5`) —
   `ExperimentStore.relativize_data_file()` does this before
-  `SessionManager` records a `run_started` manifest. A file saved
+  `ExperimentManager` records a `run_started` manifest. A file saved
   deliberately outside the session folder is stored as an absolute path,
   unchanged.
 - **Resolution order** (`ExperimentStore.resolve_data_file()`, the read
@@ -133,14 +139,14 @@ file-format change, not a routine edit.
   "copy or move the experiment folder elsewhere and it still opens" true.
 - **`queue`** on `ExperimentRecord` is GUI-authored, opaque JSON — a list of
   dicts whose shape only `gui.form_autosave.QueueItemState` (planned) knows.
-  The session layer stores and round-trips it via `SessionManager.set_queue()`
+  The session layer stores and round-trips it via `ExperimentManager.set_queue()`
   but never inspects or interprets its contents (contract C11: this package
   never imports `cryosoft.gui`).
 
 ## Interface contract
 
 - **Single writer.** All experiment-record mutations go through
-  `SessionManager` — the GUI (and the future Agent Gateway) call its methods
+  `ExperimentManager` — the GUI (and the future Agent Gateway) call its methods
   and render its signals, never editing records or files directly. Exactly
   the Orchestrator's single-writer principle, one level up.
 - **Tolerant-parse models.** Every record in `models.py` is a plain
@@ -151,7 +157,7 @@ file-format change, not a routine edit.
 - **Disk discipline** (`store.py`): atomic writes (`.tmp` + `os.replace`),
   tolerant loads, and lazy directory creation — nothing is created on disk
   until something is saved.
-- **Qt-widget-free.** `SessionManager`/`CryogenicsRecorder` are `QObject`s
+- **Qt-widget-free.** `ExperimentManager`/`CryogenicsRecorder` are `QObject`s
   (signals only); the package never imports Qt widgets or `cryosoft.gui`
   (contract C11).
 - **Entry-revision model** (`servicing_log.py`): `ServicingLogStore` is
@@ -206,7 +212,7 @@ file-format change, not a routine edit.
 
 | File | Responsibility | Key public API | Owning test |
 |------|----------------|----------------|-------------|
-| `models.py` | Tolerant-parse records: users, runs, experiments (incl. `queue` and `schema_version`), ELN links, servicing-log entries; envelope (de)serialisation. | `SCHEMA_VERSION`, `User`, `RunRecord`, `ExperimentRecord`, `ElnLink`, `ServiceLogEntry`, `envelope_to_dict`, `envelope_from_dict` | `tests/test_session_layer.py` / `tests/test_servicing_log.py` + conformance |
-| `store.py` | Disk persistence: per-experiment folders (`experiment.json`, `gui_state.json`, `data/`) + active pointer; user roster; bundle-relative data-path (de)resolution. | `ExperimentStore` (`list_experiments`, `load`, `save`, `get_active`, `set_active`, `make_experiment_id`, `data_dir`, `gui_state_path`, `relativize_data_file`, `resolve_data_file`), `UserRoster` (`list_users`, `get`, `add`) | `tests/test_session_layer.py` |
-| `manager.py` | The L6 façade: experiment lifecycle (incl. switching between open experiments and the run queue), automatic run recording from manifests, envelope installation, HDF5 context, save-health surfacing. | `SessionManager` (`start_experiment`, `close_experiment`, `set_findings`, `set_attended`, `set_queue`, `switch_experiment`, `current_data_dir`, `current_gui_state_path`, `experiment_context`, `current_experiment`; signals `experiment_changed`, `run_recorded`, `store_health_changed`) | `tests/test_session_layer.py` |
+| `models.py` | Tolerant-parse records: users, sessions (the L6 tier above an experiment), runs, experiments (incl. `queue` and `schema_version`), ELN links, servicing-log entries; envelope (de)serialisation. | `SCHEMA_VERSION`, `User`, `Session`, `RunRecord`, `ExperimentRecord`, `ElnLink`, `ServiceLogEntry`, `envelope_to_dict`, `envelope_from_dict` | `tests/test_session_layer.py` / `tests/test_servicing_log.py` + conformance |
+| `store.py` | Disk persistence: per-session folders (`session.json` + active pointer) via `SessionStore`, one level above per-experiment folders (`experiment.json`, `gui_state.json`, `data/`) + their own active pointer via `ExperimentStore`; user roster; bundle-relative data-path (de)resolution. | `SessionStore` (`list_sessions`, `create_session`, `load`, `save`, `get_active`, `set_active`, `make_session_id`), `ExperimentStore` (`list_experiments`, `load`, `save`, `get_active`, `set_active`, `make_experiment_id`, `data_dir`, `gui_state_path`, `relativize_data_file`, `resolve_data_file`), `UserRoster` (`list_users`, `get`, `add`) | `tests/test_session_layer.py` |
+| `manager.py` | The L6 façade: experiment lifecycle (incl. switching between open experiments and the run queue), automatic run recording from manifests, envelope installation, HDF5 context, save-health surfacing. | `ExperimentManager` (`start_experiment`, `close_experiment`, `set_findings`, `set_attended`, `set_queue`, `switch_experiment`, `current_data_dir`, `current_gui_state_path`, `experiment_context`, `current_experiment`; signals `experiment_changed`, `run_recorded`, `store_health_changed`) | `tests/test_session_layer.py` |
 | `servicing_log.py` | The Servicing Log framework: declared log kinds (incl. the unifying flat `servicing` kind, the only one the recorder writes as of Phase 2), revisioned per-kind storage, the hourly helium record, consumption fit, the automatic recorder, and legacy-log migration. | `LogKindSpec`, `DECLARED_LOG_KINDS`, `ServicingLogStore` (`add_entry`, `revise_entry`, `delete_entry`, `append_machine_entry`, `entries`, `revisions`, `recordings_path`, `migrate_legacy`), `HeliumRecordStore` (`append`, `samples`), `consumption_rate_pct_per_h`, `CryogenicsRecorder` (`on_states_updated`, `on_run_started`, `on_run_finished`; signal `cryo_warning`), `migrate_legacy_servicing_log` | `tests/test_servicing_log.py` + conformance |

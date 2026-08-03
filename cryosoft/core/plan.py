@@ -46,7 +46,7 @@ __all__ = [
     "ParamGroup",
     "DataSchema",
     "EnvelopeBound",
-    "SessionEnvelope",
+    "ExperimentEnvelope",
 ]
 
 # Scalar Python types accepted for GUI-facing parameters and their HDF5 dtypes.
@@ -881,7 +881,7 @@ class EnvelopeBound:
 
 
 @dataclass(frozen=True)
-class SessionEnvelope:
+class ExperimentEnvelope:
     """Per-experiment safety bounds, narrower than the config limits.
 
     The typed currency between the session layer (which owns the experiment
@@ -897,7 +897,7 @@ class SessionEnvelope:
     Attributes:
         bounds: Mapping of system VI name to its ``EnvelopeBound``.
             Defensively copied; must be non-empty (pass ``None`` to
-            ``Orchestrator.set_session_envelope()`` for "no envelope" rather
+            ``Orchestrator.set_experiment_envelope()`` for "no envelope" rather
             than an empty one).
     """
 
@@ -913,21 +913,21 @@ class SessionEnvelope:
         """
         if not isinstance(self.bounds, Mapping):
             raise TypeError(
-                f"SessionEnvelope.bounds must be a mapping, got {self.bounds!r}"
+                f"ExperimentEnvelope.bounds must be a mapping, got {self.bounds!r}"
             )
         if not self.bounds:
             raise ValueError(
-                "SessionEnvelope.bounds must be non-empty (use None for no envelope)"
+                "ExperimentEnvelope.bounds must be non-empty (use None for no envelope)"
             )
         copied: dict[str, EnvelopeBound] = {}
         for vi_name, bound in self.bounds.items():
             if not isinstance(vi_name, str) or not vi_name:
                 raise ValueError(
-                    f"SessionEnvelope VI name must be a non-empty str, got {vi_name!r}"
+                    f"ExperimentEnvelope VI name must be a non-empty str, got {vi_name!r}"
                 )
             if not isinstance(bound, EnvelopeBound):
                 raise TypeError(
-                    f"SessionEnvelope bound for {vi_name!r} must be an "
+                    f"ExperimentEnvelope bound for {vi_name!r} must be an "
                     f"EnvelopeBound, got {bound!r}"
                 )
             copied[vi_name] = bound

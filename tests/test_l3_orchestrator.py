@@ -1281,16 +1281,16 @@ def test_failed_setup_emits_no_manifests(orchestrator, station, qtbot):
 # ── Session envelope enforcement ─────────────────────────────────────────────
 
 def _envelope(**bounds):
-    from cryosoft.core.plan import SessionEnvelope
+    from cryosoft.core.plan import ExperimentEnvelope
 
-    return SessionEnvelope(bounds=dict(bounds))
+    return ExperimentEnvelope(bounds=dict(bounds))
 
 
 def test_envelope_rejects_out_of_bounds_target(orchestrator, station, qtbot):
     """A procedure target outside the envelope is rejected before dispatch."""
     from cryosoft.core.plan import EnvelopeBound
 
-    orchestrator.set_session_envelope(
+    orchestrator.set_experiment_envelope(
         _envelope(magnet_z=EnvelopeBound(min_value=-0.5, max_value=0.5))
     )
     errors: list[str] = []
@@ -1312,7 +1312,7 @@ def test_envelope_allows_within_bounds_and_clears(orchestrator, station, qtbot):
     from cryosoft.core.plan import EnvelopeBound
 
     _fast_magnet(station)
-    orchestrator.set_session_envelope(
+    orchestrator.set_experiment_envelope(
         _envelope(magnet_z=EnvelopeBound(min_value=-5.0, max_value=5.0))
     )
     orchestrator.run_procedure(MockProcedure(station))
@@ -1320,7 +1320,7 @@ def test_envelope_allows_within_bounds_and_clears(orchestrator, station, qtbot):
         pass
     assert orchestrator._state == OrchestratorState.IDLE
 
-    orchestrator.set_session_envelope(None)
+    orchestrator.set_experiment_envelope(None)
     assert orchestrator._session_envelope is None
 
 
@@ -1330,7 +1330,7 @@ def test_envelope_state_violation_enters_emergency(orchestrator, station, qtbot)
 
     # Sim sample thermometer sits at 300 K; a 400 K session minimum is an
     # immediate violation on the next tick.
-    orchestrator.set_session_envelope(
+    orchestrator.set_experiment_envelope(
         _envelope(
             temperature_sample=EnvelopeBound(min_value=400.0, state_key="temperature")
         )
@@ -1347,7 +1347,7 @@ def test_envelope_state_violation_enters_emergency(orchestrator, station, qtbot)
     assert orchestrator._state == OrchestratorState.EMERGENCY
 
     # ...and succeeds once the envelope is cleared (the "sample removed" case).
-    orchestrator.set_session_envelope(None)
+    orchestrator.set_experiment_envelope(None)
     orchestrator.acknowledge_emergency()
     assert orchestrator._state == OrchestratorState.IDLE
 

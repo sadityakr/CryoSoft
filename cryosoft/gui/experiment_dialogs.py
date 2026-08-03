@@ -3,7 +3,7 @@
 #   Modal dialogs for the experiment lifecycle: StartExperimentDialog (title,
 #   user, attendance — with an inline "New user" flow via AddUserDialog) and
 #   CloseExperimentDialog (closing findings text). Opened only by
-#   SessionInfoPanel's Start/Close Experiment button; every SessionManager
+#   ExperimentInfoPanel's Start/Close Experiment button; every ExperimentManager
 #   mutation happens in the panel after a dialog accepts, never inside the
 #   dialogs themselves (the one exception is AddUserDialog's caller adding
 #   the new User to the roster, since the roster has no other writer).

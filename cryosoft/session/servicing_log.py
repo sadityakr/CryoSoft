@@ -21,7 +21,7 @@
 #   `cryosoft.main` at startup (idempotent no-op once `servicing.jsonl`
 #   exists).
 # entry_point: Not run directly. Stores are constructed in cryosoft.main
-#   beside the SessionManager, which also calls
+#   beside the ExperimentManager, which also calls
 #   ServicingLogStore.migrate_legacy() once; CryogenicsRecorder is connected
 #   to Orchestrator signals there. Exercised directly by tests against a
 #   mocked Orchestrator / synthetic legacy files.
@@ -47,7 +47,7 @@
 #   file exceeds ~2 MB — the machine record may rotate; servicing logs never
 #   do. consumption_rate_pct_per_h() is a pure least-squares fit, no I/O.
 #   CryogenicsRecorder never raises out of a slot (broad try/except + log),
-#   exactly like SessionManager's manifest handlers: on_run_started caches the
+#   exactly like ExperimentManager's manifest handlers: on_run_started caches the
 #   last-seen He/LN2 levels for any operation-kind run; on_run_finished
 #   derives entry_kind from the manifest's "procedure" name (the same
 #   lowercase/underscore normalisation the legacy migration uses,
@@ -1297,7 +1297,7 @@ class CryogenicsRecorder(QObject):
     Driven purely by existing Orchestrator signals — this class never touches
     hardware or the Station, and never raises out of a slot (every public
     method guards its body with a broad try/except + log, exactly like
-    ``SessionManager``'s manifest handlers): a malformed ``states_updated``
+    ``ExperimentManager``'s manifest handlers): a malformed ``states_updated``
     payload or run manifest must not crash a running measurement.
 
     The public methods are plain, directly callable methods (not

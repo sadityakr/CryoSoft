@@ -3,7 +3,7 @@
 #   Behavior tests for the L6 Session Management layer (cryosoft/session/):
 #   model round-trips and envelope (de)serialisation, ExperimentStore /
 #   UserRoster disk behavior (atomicity, tolerance, lazy creation, active
-#   pointer), and the SessionManager lifecycle — experiment start/close,
+#   pointer), and the ExperimentManager lifecycle — experiment start/close,
 #   automatic run recording from real Orchestrator manifests, envelope
 #   installation, attendance, crash resume, and an end-to-end run whose
 #   RunRecord is cross-checked against the HDF5 file on disk.
@@ -17,10 +17,10 @@ import h5py
 import pytest
 
 from cryosoft.core.orchestrator import Orchestrator
-from cryosoft.core.plan import EnvelopeBound, SessionEnvelope
+from cryosoft.core.plan import EnvelopeBound, ExperimentEnvelope
 from cryosoft.core.station import build_station
 from cryosoft.procedures.field_sweep import FieldSweep
-from cryosoft.session.manager import SessionManager
+from cryosoft.session.manager import ExperimentManager
 from cryosoft.session.models import (
     EXPERIMENT_STATUS_CLOSED,
     EXPERIMENT_STATUS_OPEN,
@@ -31,11 +31,12 @@ from cryosoft.session.models import (
     ElnLink,
     ExperimentRecord,
     RunRecord,
+    Session,
     User,
     envelope_from_dict,
     envelope_to_dict,
 )
-from cryosoft.session.store import ExperimentStore, UserRoster
+from cryosoft.session.store import ExperimentStore, SessionStore, UserRoster
 
 CONFIG_PATH = "cryosoft/configs/sim_cryostat"
 
@@ -78,7 +79,7 @@ def roster(tmp_path):
 
 @pytest.fixture
 def manager(store, roster, orchestrator, station):
-    return SessionManager(
+    return ExperimentManager(
         store=store,
         roster=roster,
         orchestrator=orchestrator,
@@ -144,7 +145,7 @@ def test_experiment_record_untrusted_status_degrades_to_closed():
 
 def test_envelope_round_trip_and_junk_tolerance():
     """envelope_to_dict()/envelope_from_dict() round-trip; junk drops to None."""
-    envelope = SessionEnvelope(
+    envelope = ExperimentEnvelope(
         bounds={
             "magnet_z": EnvelopeBound(min_value=-2.0, max_value=2.0),
             "temperature_sample": EnvelopeBound(min_value=4.0, state_key="temperature"),
@@ -287,6 +288,120 @@ def test_resolve_data_file_dangling_absolute_no_match_returns_unchanged(store):
     assert resolved == missing
 
 
+# ── SessionStore ─────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def session_store(tmp_path):
+    return SessionStore(tmp_path / "sessions")
+
+
+def test_session_round_trips_with_content():
+    """A populated Session survives to_dict()/from_dict() unchanged."""
+    session = Session(
+        session_id="20260717_lab_a",
+        user_id="jdoe",
+        name="Lab A",
+        default_experiment_dir="C:/data/lab_a",
+        last_open_experiment_id="20260717_test",
+        created_utc="2026-07-17T12:00:00+00:00",
+        last_opened_utc="2026-07-18T09:00:00+00:00",
+    )
+    assert session.schema_version == SCHEMA_VERSION
+    payload = session.to_dict()
+    assert payload["schema_version"] == SCHEMA_VERSION
+    assert Session.from_dict(payload) == session
+
+
+def test_session_from_dict_tolerates_junk():
+    """Bad/missing input yields sane defaults, never raises."""
+    assert Session.from_dict("not-a-dict") == Session()
+    assert Session.from_dict(None) == Session()
+    partial = Session.from_dict({"session_id": "x"})
+    assert partial.session_id == "x"
+    assert partial.user_id == ""
+    assert partial.default_experiment_dir == ""
+    assert partial.last_open_experiment_id == ""
+
+
+def test_session_schema_version_absent_defaults_to_one():
+    session = Session.from_dict({"session_id": "x"})
+    assert session.schema_version == 1
+
+
+def test_session_schema_version_tolerates_future_value():
+    session = Session.from_dict({"session_id": "x", "schema_version": 999})
+    assert session.schema_version == 999
+
+
+def test_session_store_creates_nothing_until_save(tmp_path):
+    """Construction and reads must not create directories (lazy creation)."""
+    root = tmp_path / "sessions"
+    session_store = SessionStore(root)
+    assert session_store.list_sessions() == []
+    assert session_store.get_active() is None
+    assert session_store.load("nope") is None
+    assert not root.exists()
+
+
+def test_session_store_save_load_and_active_pointer(session_store):
+    session = Session(session_id="20260717_lab_a", user_id="jdoe", name="Lab A")
+    session_store.save(session)
+    session_store.set_active("20260717_lab_a")
+    assert session_store.list_sessions() == ["20260717_lab_a"]
+    assert session_store.load("20260717_lab_a") == session
+    assert session_store.get_active() == "20260717_lab_a"
+    session_store.set_active(None)
+    assert session_store.get_active() is None
+    # No stray .tmp files after atomic writes.
+    assert not list(session_store.root.rglob("*.tmp"))
+
+
+def test_session_store_save_requires_session_id(session_store):
+    with pytest.raises(ValueError):
+        session_store.save(Session())
+
+
+def test_session_store_make_session_id_slug_and_collisions(session_store):
+    created = "2026-07-17T12:00:00+00:00"
+    first = session_store.make_session_id("Lab A — Cryostat 1!", created)
+    assert first == "20260717_lab_a_cryostat_1"
+    session_store.save(Session(session_id=first))
+    assert session_store.make_session_id("Lab A — Cryostat 1!", created) == f"{first}_2"
+
+
+def test_session_store_create_session_builds_saves_and_returns(session_store):
+    session = session_store.create_session("Lab A", "jdoe")
+    assert session.user_id == "jdoe"
+    assert session.name == "Lab A"
+    assert session.session_id
+    assert session.created_utc == session.last_opened_utc
+    assert session_store.load(session.session_id) == session
+
+
+def test_session_store_list_sessions_filters_by_user_id(session_store):
+    session_store.create_session("Lab A", "jdoe")
+    session_store.create_session("Lab B", "asmith")
+    second_for_jdoe = session_store.create_session("Lab C", "jdoe")
+
+    assert len(session_store.list_sessions()) == 3
+    jdoe_sessions = session_store.list_sessions(user_id="jdoe")
+    assert set(jdoe_sessions) == {
+        s
+        for s in session_store.list_sessions()
+        if session_store.load(s).user_id == "jdoe"
+    }
+    assert second_for_jdoe.session_id in jdoe_sessions
+    assert session_store.list_sessions(user_id="nobody") == []
+
+
+def test_session_store_load_tolerates_corrupt_file(session_store):
+    path = session_store.root / "bad" / "session.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("{not json", encoding="utf-8")
+    assert session_store.load("bad") is None
+    assert "bad" in session_store.list_sessions()  # listed (folder exists) but unloadable
+
+
 def test_roster_add_get_replace(tmp_path):
     roster = UserRoster(tmp_path / "users.json")
     assert roster.list_users() == []
@@ -299,7 +414,7 @@ def test_roster_add_get_replace(tmp_path):
     assert roster.get("nobody") is None
 
 
-# ── SessionManager lifecycle ─────────────────────────────────────────────────
+# ── ExperimentManager lifecycle ─────────────────────────────────────────────────
 
 def test_experiment_context_setup_tier_present_with_no_experiment_open(manager):
     """The setup tier is available even before any experiment is ever started."""
@@ -311,7 +426,7 @@ def test_experiment_context_includes_instrument_metadata_from_config(
     store, roster, orchestrator, station
 ):
     """config_path wires read_instrument_metadata() into the setup tier."""
-    manager = SessionManager(
+    manager = ExperimentManager(
         store=store,
         roster=roster,
         orchestrator=orchestrator,
@@ -326,7 +441,7 @@ def test_experiment_context_includes_instrument_metadata_from_config(
 
 def test_experiment_context_tolerates_missing_config_path(store, roster, orchestrator, station):
     """A bad/absent config_path degrades to no instrument metadata, never raises."""
-    manager = SessionManager(
+    manager = ExperimentManager(
         store=store,
         roster=roster,
         orchestrator=orchestrator,
@@ -337,7 +452,7 @@ def test_experiment_context_tolerates_missing_config_path(store, roster, orchest
 
 
 def test_start_experiment_persists_and_installs_envelope(manager, orchestrator, store):
-    envelope = SessionEnvelope(
+    envelope = ExperimentEnvelope(
         bounds={"magnet_z": EnvelopeBound(min_value=-2.0, max_value=2.0)}
     )
     changed: list[dict] = []
@@ -369,7 +484,7 @@ def test_start_experiment_rejects_unknown_user_and_double_open(manager):
 
 
 def test_close_experiment_clears_envelope_and_context(manager, orchestrator, store):
-    envelope = SessionEnvelope(bounds={"magnet_z": EnvelopeBound(max_value=2.0)})
+    envelope = ExperimentEnvelope(bounds={"magnet_z": EnvelopeBound(max_value=2.0)})
     record = manager.start_experiment("X", "jdoe", SAMPLE_INFO, envelope=envelope)
     manager.close_experiment()
 
@@ -440,14 +555,14 @@ def test_resume_marks_stale_running_runs_failed(
         "X",
         "jdoe",
         SAMPLE_INFO,
-        envelope=SessionEnvelope(bounds={"magnet_z": EnvelopeBound(max_value=2.0)}),
+        envelope=ExperimentEnvelope(bounds={"magnet_z": EnvelopeBound(max_value=2.0)}),
     )
     # Simulate the app dying mid-run: a run stuck in "running" on disk.
     record.runs.append(RunRecord(run_id="r1", status=RUN_STATUS_RUNNING))
     store.save(record)
 
     fresh_orchestrator = Orchestrator(station, tick_interval_ms=10)
-    resumed = SessionManager(
+    resumed = ExperimentManager(
         store=store,
         roster=roster,
         orchestrator=fresh_orchestrator,
@@ -468,7 +583,7 @@ def test_resume_marks_stale_running_runs_failed(
 
 def test_resume_with_missing_record_clears_pointer(store, roster, orchestrator, station):
     store.set_active("ghost")
-    manager = SessionManager(
+    manager = ExperimentManager(
         store=store,
         roster=roster,
         orchestrator=orchestrator,
@@ -503,8 +618,8 @@ def test_current_data_dir_and_gui_state_path(manager, store):
 # ── switch_experiment ─────────────────────────────────────────────────────────
 
 def test_switch_experiment_happy_path(manager, store, orchestrator):
-    envelope_a = SessionEnvelope(bounds={"magnet_z": EnvelopeBound(max_value=1.0)})
-    envelope_b = SessionEnvelope(bounds={"magnet_z": EnvelopeBound(max_value=2.0)})
+    envelope_a = ExperimentEnvelope(bounds={"magnet_z": EnvelopeBound(max_value=1.0)})
+    envelope_b = ExperimentEnvelope(bounds={"magnet_z": EnvelopeBound(max_value=2.0)})
     first = manager.start_experiment("First", "jdoe", SAMPLE_INFO, envelope=envelope_a)
 
     # A second, independently-open experiment exists in the store (as if
@@ -619,7 +734,7 @@ def test_end_to_end_run_recorded_and_stamped(
         "SOT switching vs T",
         "jdoe",
         SAMPLE_INFO,
-        envelope=SessionEnvelope(
+        envelope=ExperimentEnvelope(
             bounds={"magnet_z": EnvelopeBound(min_value=-2.0, max_value=2.0)}
         ),
     )

@@ -1858,7 +1858,7 @@ def _session_model_classes() -> list[type]:
         and isinstance(obj, type)
         and dataclasses.is_dataclass(obj)
         # Only models defined here — not the eager-validating core.plan types
-        # (SessionEnvelope/EnvelopeBound) the module re-imports.
+        # (ExperimentEnvelope/EnvelopeBound) the module re-imports.
         and obj.__module__ == models.__name__
     ]
 

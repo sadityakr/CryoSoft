@@ -13,7 +13,7 @@
 #   collections.abc)
 # input: |
 #   Condition instances from the three producers (a VI's evaluate_safety(),
-#   the Station's comm-fault detection, SessionEnvelope.check_state()), plus
+#   the Station's comm-fault detection, ExperimentEnvelope.check_state()), plus
 #   the set of VI names the active run watches and whether a run is active.
 # process: |
 #   decide() partitions conditions by severity: critical conditions become
@@ -36,7 +36,7 @@ CryoSoft has exactly three producers of "something is wrong":
   `GLOSSARY.md`).
 - ``"comm"`` — the Station's poller marking a VI stale or disconnected (see
   `GLOSSARY.md`'s **Instrument fault**).
-- ``"envelope"`` — ``SessionEnvelope.check_state()`` protecting the sample
+- ``"envelope"`` — ``ExperimentEnvelope.check_state()`` protecting the sample
   under experiment-scoped bounds narrower than the config limits (see
   `GLOSSARY.md`'s **Session envelope**).
 
@@ -238,7 +238,7 @@ def decide(
 def envelope_conditions(violations: list[str], now: float) -> list[Condition]:
     """Build one critical `Condition` per envelope violation.
 
-    The envelope origin's producer (`SessionEnvelope.check_state()`, see
+    The envelope origin's producer (`ExperimentEnvelope.check_state()`, see
     `GLOSSARY.md`'s **Session envelope**) reports violations as plain
     description strings rather than typed objects; this is the adapter that
     lifts them into the `Condition` currency the rest of the standard uses.

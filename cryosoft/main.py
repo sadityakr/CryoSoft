@@ -19,22 +19,32 @@
 # process: |
 #   Initialises logging, creates QApplication, builds the ConfigCatalog, resolves
 #   the Station via build_station_with_fallback(), persists the config that
-#   actually loaded, constructs the session layer (ExperimentStore rooted at
-#   app_settings.sessions_root() + UserRoster + SessionManager wired to the
-#   Orchestrator — sessions_root() is a dedicated, app-settings-backed
-#   location, decoupled from the Data Directory form field), then — only when
+#   actually loaded, then wires the session layer in three steps (see
+#   "Startup wiring (decided)" in docs/plans/session-tier-and-terminology.md):
+#   (1) resolve measurement_root() and construct one SessionStore(root); (2)
+#   read SessionStore.get_active(), auto-creating and activating a bootstrap
+#   session when unset or unloadable, so the app never fails to start for
+#   lack of an explicit session choice; (3) construct ExperimentStore rooted
+#   at that session's own folder (measurement_root()/"sessions"/session_id)
+#   and pass it, plus UserRoster (rooted at measurement_root()/"users.json")
+#   and the Orchestrator, to ExperimentManager exactly as before. Switching
+#   sessions (the User menu's Resume Session… action) only updates
+#   SessionStore's active pointer — it takes effect on the next launch;
+#   ExperimentManager keeps the ExperimentStore it was constructed with for
+#   the lifetime of this process. Then — only when
 #   the active config declares a cryogenics: block AND the station has the
 #   level VI it names — builds a
-#   HeliumRecordStore/ServicingLogStore rooted at sessions_root()/"servicing"
-#   (a sibling of the experiment folders, never inside one), constructs a
+#   HeliumRecordStore/ServicingLogStore rooted at measurement_root()/"servicing"
+#   (a sibling of "sessions/", flat at the measurement root, never inside a
+#   session or experiment folder), constructs a
 #   CryogenicsRecorder, and connects it to the Orchestrator's
 #   states_updated/run_started/run_finished signals. Reads the operations:
 #   config block (read_operations_config(), GUI-safe, {} when undeclared)
 #   unconditionally. Opens the Monitor (passing the catalog, session manager,
-#   a restart callback, any fallback warning, the operations: config, and —
-#   when cryogenics is active — the same store instances, config, and
-#   recorder, so the Monitor window's Operations panel and Logs page share
-#   the recorder's data), and enters the Qt event loop.
+#   the SessionStore, a restart callback, any fallback warning, the
+#   operations: config, and — when cryogenics is active — the same store
+#   instances, config, and recorder, so the Monitor window's Operations panel
+#   and Logs page share the recorder's data), and enters the Qt event loop.
 # output: |
 #   The running CryoSoft desktop application. Exits when all windows are closed.
 # ---
@@ -54,6 +64,7 @@ from PyQt6.QtWidgets import QApplication
 from cryosoft.core.config_catalog import ConfigCatalog
 from cryosoft.core.logging_config import setup_logging
 from cryosoft.core.orchestrator import Orchestrator
+from cryosoft.core.paths import measurement_root
 from cryosoft.core.station import (
     build_station_with_fallback,
     read_cryogenics_config,
@@ -64,13 +75,13 @@ from cryosoft.core.station import (
 from cryosoft.gui import app_settings
 from cryosoft.gui.monitor_window import MonitorWindow
 from cryosoft.gui.theme import PLOT_AXIS, PLOT_BG, build_stylesheet
-from cryosoft.session.manager import SessionManager
+from cryosoft.session.manager import ExperimentManager
 from cryosoft.session.servicing_log import (
     CryogenicsRecorder,
     HeliumRecordStore,
     ServicingLogStore,
 )
-from cryosoft.session.store import ExperimentStore, UserRoster
+from cryosoft.session.store import ExperimentStore, SessionStore, UserRoster
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +119,31 @@ def _startup_candidates() -> list[str]:
             seen.add(path)
             ordered.append(path)
     return ordered
+
+
+def _resolve_active_session(store: SessionStore) -> str:
+    """Return the active session id, auto-creating a bootstrap session if needed.
+
+    The app must never fail to start for lack of an explicit session choice
+    (see ``docs/plans/session-tier-and-terminology.md``, "Startup wiring
+    (decided)"): when the store's active pointer is unset, or points at a
+    session record that fails to load (first-ever launch, or a corrupt
+    pointer), a bootstrap session is created and activated on the spot.
+
+    Args:
+        store: The ``SessionStore`` rooted at ``measurement_root() / "sessions"``.
+
+    Returns:
+        The active session's id — either the one already pointed to, or a
+        freshly created bootstrap session's.
+    """
+    active_id = store.get_active()
+    if active_id is not None and store.load(active_id) is not None:
+        return active_id
+    user_id = app_settings.current_user_id() or ""
+    session = store.create_session(name=user_id or "default", user_id=user_id)
+    store.set_active(session.session_id)
+    return session.session_id
 
 
 def _restart_application() -> None:
@@ -152,14 +188,27 @@ def main() -> None:
 
     orchestrator = Orchestrator(station, tick_interval_ms=3000)
 
-    # Session layer (L6). Experiment records live under the dedicated,
-    # app-settings-backed sessions_root() — a deliberate machine-level
-    # setting, never derived from the Data Directory form field (which is
-    # itself now *derived from* the open session). The user roster stays
-    # setup-local, next to the app-settings files.
-    session_manager = SessionManager(
-        store=ExperimentStore(app_settings.sessions_root()),
-        roster=UserRoster(app_settings.session_file_path().parent / "users.json"),
+    # Session layer (L6 + the Session tier above it). measurement_root() is
+    # the fixed, machine-level, admin-set root (never derived from the Data
+    # Directory form field, which is itself now *derived from* the open
+    # experiment — see cryosoft.core.paths.measurement_root()). SessionStore
+    # owns the Session tier: sessions/<session_id>/ folders one level above
+    # experiments. _resolve_active_session() auto-creates a bootstrap session
+    # on first-ever launch (or a corrupt pointer) so the app never refuses to
+    # start for lack of an explicit session choice. ExperimentStore is then
+    # rooted one level deeper, inside that one active session's own folder —
+    # switching sessions (User menu, Resume Session…) only updates
+    # SessionStore's active pointer and takes effect on the next launch;
+    # ExperimentManager keeps this ExperimentStore for the process lifetime
+    # (see "Startup wiring (decided)" in
+    # docs/plans/session-tier-and-terminology.md). The user roster relocates
+    # to measurement_root()/"users.json", alongside "sessions/" and
+    # "servicing/".
+    session_store = SessionStore(measurement_root() / "sessions")
+    active_session_id = _resolve_active_session(session_store)
+    session_manager = ExperimentManager(
+        store=ExperimentStore(measurement_root() / "sessions" / active_session_id),
+        roster=UserRoster(measurement_root() / "users.json"),
         orchestrator=orchestrator,
         station=station,
         config_name=used_entry.name if used_entry is not None else Path(used_path).name,
@@ -170,10 +219,11 @@ def main() -> None:
     # config-gated like every optional feature — a setup without a
     # cryogenics: block (or without the level VI it names) carries zero
     # footprint and this whole block is a no-op. Stores are rooted at
-    # sessions_root()/"servicing" — a Setup-tier location sibling to (never
-    # inside) any one experiment folder, since these records describe the rig
-    # across all sessions and must not keep depending on the Data Directory
-    # form field now that it is derived from whichever session is open. The
+    # measurement_root()/"servicing" — a Setup-tier location sibling to
+    # "sessions/" (flat, never inside a session or experiment folder), since
+    # these records describe the rig across all sessions and must not keep
+    # depending on the Data Directory form field now that it is derived from
+    # whichever experiment is open. The
     # same store instances feed both the automatic recorder and the Monitor
     # window's Cryogenics panel / Logs page, so both always see the same data.
     cryogenics_config = read_cryogenics_config(used_path)
@@ -186,7 +236,7 @@ def main() -> None:
     servicing_store: ServicingLogStore | None = None
     servicing_log_kinds: list[str] = []
     if cryogenics_config and station.has_vi(cryogenics_config["level_vi"]):
-        servicing_root = app_settings.sessions_root() / "servicing"
+        servicing_root = measurement_root() / "servicing"
         config_identity = (
             used_entry.name if used_entry is not None else Path(used_path).name
         )
@@ -222,6 +272,7 @@ def main() -> None:
         restart_callback=_restart_application,
         startup_warning="; ".join(warnings) if warnings else None,
         session_manager=session_manager,
+        session_store=session_store,
         cryogenics_config=cryogenics_config or None,
         operations_config=operations_config or None,
         helium_store=helium_store,

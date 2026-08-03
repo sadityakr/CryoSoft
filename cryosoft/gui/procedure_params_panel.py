@@ -63,7 +63,7 @@ from cryosoft.core.plan import ParamGroup, ParamSpec
 from cryosoft.core.procedure import BaseProcedure
 from cryosoft.core.station import Station
 from cryosoft.gui import param_form
-from cryosoft.gui.form_autosave import SessionState
+from cryosoft.gui.form_autosave import FormAutosaveState
 from cryosoft.gui.sweep_axis_widget import SweepAxisWidget
 from cryosoft.gui.theme import (
     BTN_CLASS_PRIMARY,
@@ -753,7 +753,7 @@ class ProcedureParamsPanel(QWidget):
                     self._proc_selector.setCurrentIndex(i)  # fires _on_procedure_selected
                 return
 
-    def restore_session(self, session_state: SessionState) -> None:
+    def restore_session(self, session_state: FormAutosaveState) -> None:
         """Apply a loaded session's parameter cache and procedure selection."""
         self._procedure_params = {
             name: dict(values)
@@ -767,7 +767,7 @@ class ProcedureParamsPanel(QWidget):
         else:
             self._on_procedure_selected(self._proc_selector.currentIndex())
 
-    def export_session_state(self, state: SessionState) -> None:
+    def export_session_state(self, state: FormAutosaveState) -> None:
         """Write this panel's selection and parameter cache into ``state``."""
         self.cache_current_params()
         state.selected_procedure = self._current_procedure_name
