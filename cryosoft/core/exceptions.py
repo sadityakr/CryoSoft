@@ -1,11 +1,3 @@
-# ---
-# description: |
-#   All CryoSoft exception classes. Every exception in the system inherits
-#   from CryoSoftError. Layers catch specific subtypes and let the rest
-#   propagate upward.
-# last_updated: 2026-04-06
-# ---
-
 """CryoSoft exception hierarchy.
 
 Exception tree:

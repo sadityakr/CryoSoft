@@ -1,33 +1,3 @@
-# ---
-# description: |
-#   Implements the DataManager class, which handles HDF5 file creation,
-#   metadata storage, pre-allocated dataset management, and per-point data
-#   saving for CryoSoft measurement procedures.
-# entry_point: imported by cryosoft.core; not run directly
-# dependencies:
-#   - h5py >= 3.9
-#   - numpy >= 1.24
-# input: |
-#   Constructor receives procedure name, an optional user filename prefix,
-#   parameter dicts (procedure_params, sample_info, instrument_state,
-#   system_targets, measurement_commands, data_config, and the optional
-#   session-layer experiment_info), target data directory, and n_sweep_points
-#   (int). data_config defines sweep_columns (1-D, never looped),
-#   measurement_scalars (shape (N, n_loop1, n_loop2)), measurement_arrays
-#   (shape (N, n_loop1, n_loop2, length)), and loop_shape ([n_loop1, n_loop2]).
-# process: |
-#   Creates an HDF5 file at {data_directory}/{stem}_{YYYYMMDD_HHMMSS}.h5,
-#   where stem is file_prefix if given, else procedure_name; writes all
-#   metadata as JSON-encoded attributes, pre-allocates resizable datasets,
-#   and exposes save_datapoint() and close() for the procedure loop.
-# output: |
-#   A single HDF5 file written to disk.  Datasets are trimmed to the number of
-#   actually-saved points when close() is called after an early abort.  A
-#   measurement block's own dataset carries "axes" and (when declared)
-#   "channel_names" attributes describing its own dimensions, so the file is
-#   self-describing without parsing the metadata group's data_config JSON.
-# ---
-
 from __future__ import annotations
 
 import json

@@ -1,37 +1,3 @@
-# ---
-# description: |
-#   Reusable sweep-array construction library shared by measurement Procedures.
-#   Three composable building blocks: a piecewise/segmented sweep (different
-#   step size per sub-range, e.g. coarse outside a region of interest and fine
-#   inside it), a custom sweep loaded from a single-column CSV file, and a
-#   hysteresis wrapper that turns a one-directional sweep into a forward+
-#   backward loop. ``SweepAxis`` + ``build_axis_sweep()`` sit on top of these
-#   three: a Procedure declares one ``SweepAxis`` class attribute and gets a
-#   working ``_build_sweep_array()`` (linear / segments / CSV, all with
-#   optional hysteresis) with no override at all — see core/procedure.py.
-#   This module never touches a Station, VI, or the GUI.
-# entry_point: Not run directly; imported by Procedure subclasses.
-# dependencies:
-#   - cryosoft.core.plan (ParamSpec — the typed sweep-axis parameter declarations)
-# input: |
-#   build_piecewise_sweep() takes a list of SweepSegment(start, end, step).
-#   load_custom_sweep_csv() takes a path to a single-column CSV of numbers.
-#   apply_hysteresis() takes any sweep array (list[float]).
-#   build_axis_sweep() takes a SweepAxis and a procedure's self._params dict.
-# process: |
-#   Segments are validated for contiguity (each segment's start must equal the
-#   previous segment's end) and stitched together without duplicating shared
-#   boundary points. Each segment's actual step size is the requested step
-#   rounded to evenly divide the segment, so both endpoints are hit exactly.
-#   build_axis_sweep() reads "{axis.key}_mode" from params ("linear" default,
-#   "segments", or "csv") and dispatches to the matching builder, then applies
-#   hysteresis if "{axis.key}_hysteresis" is truthy.
-# output: |
-#   All functions return a plain list[float] sweep array, suitable to assign
-#   directly to a Procedure's self._sweep.
-# last_updated: 2026-07-13
-# ---
-
 """sweep_builder — piecewise, CSV-custom, and hysteresis sweep construction."""
 
 from __future__ import annotations

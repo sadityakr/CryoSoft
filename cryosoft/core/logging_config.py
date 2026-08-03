@@ -1,14 +1,3 @@
-# ---
-# description: |
-#   Logging configuration for CryoSoft. Resolves the log directory via
-#   cryosoft.core.paths.log_directory() and sets up a rotating file handler
-#   that writes to <log_dir>/cryosoft.log, a console handler for
-#   development, plus four time-rotated JSONL streams: cryosoft.status
-#   (operational status) and the three tiered trend-history streams
-#   (raw / 3-min / hourly).
-# last_updated: 2026-08-03
-# ---
-
 """CryoSoft logging setup.
 
 Call setup_logging() once at application startup. All modules use

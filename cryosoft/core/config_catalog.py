@@ -1,27 +1,3 @@
-# ---
-# description: |
-#   config_catalog: discovery and versioning of CryoSoft config directories.
-#   It lists the shipped (read-only, git-tracked) configs and the user's editable
-#   copies, forks a shipped config into an editable user copy (copy-on-edit), and
-#   keeps a named/timestamped version history for each user config so a bad edit
-#   is always one restore away. Qt-free (stdlib only): the *locations* (shipped
-#   dir, user dir) are injected by the caller, which resolves the user dir via
-#   QStandardPaths.
-# entry_point: Not run directly. Used by the entry point (main.py) and the GUI
-#   config menu / editor.
-# dependencies: []  # standard library only
-# input: |
-#   A shipped-config directory (cryosoft/configs) and a writable user-config
-#   directory (e.g. %APPDATA%/CryoSoft/configs), both passed to the constructor.
-# process: |
-#   Enumerates immediate sub-directories that contain a devices.yaml. User
-#   configs additionally carry a hidden .versions/ tree of prior snapshots, each
-#   with a meta.json (label + timestamp).
-# output: |
-#   ConfigEntry / ConfigVersion records, plus side effects on the user-config
-#   directory (fork, save_version, restore_version).
-# ---
-
 """config_catalog — discover and version CryoSoft config directories.
 
 Two tiers, mirroring the session-state design: the shipped configs under

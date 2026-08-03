@@ -1,33 +1,3 @@
-# ---
-# description: |
-#   Operational-status record builder: the runtime "why is the run stuck /
-#   taking so long?" signal. A pure function that assembles one machine-readable
-#   status record per Orchestrator tick from the already-polled station state
-#   and Station.get_ramp_status(). No hardware, no Qt, no I/O — the Orchestrator
-#   owns emission and logging; this module owns the data shape and the codes.
-#   The heuristic stall verdict is applied on top by cryosoft.core.watchdog.
-#   The record also carries the tick's System-Condition standard registry
-#   (cryosoft.core.conditions.Condition) as a JSON-ready list, additively —
-#   old logs without the field remain valid.
-# entry_point: Not run directly; called by the Orchestrator each tick.
-# dependencies:
-#   - dataclasses, enum (stdlib only)
-#   - cryosoft.core.conditions (the Condition value object)
-# input: |
-#   build_operational_status() takes the orchestrator state name, elapsed time
-#   in that state, the station state snapshot, the ramp-status aggregate, the
-#   previous tick's per-VI gaps (for the closing-rate fact), and this tick's
-#   Condition sequence.
-# process: |
-#   For each system VI it computes gap-to-target, gap closing since last tick,
-#   and an ETA, and assigns an unambiguous RunFaultCode (stale / disconnected /
-#   quench / ok). Heuristic stall detection is done by the watchdog, not here.
-#   Conditions are carried through as-is, sorted by key, into a JSON-safe list.
-# output: |
-#   A JSON-ready dict record (the schema the troubleshoot layer reads from
-#   logs/status.jsonl) plus the new per-VI gap map for the next tick.
-# ---
-
 """Operational-status record — the runtime troubleshooting signal.
 
 Sibling to the offline ``cryosoft.troubleshoot`` engine: that classifies

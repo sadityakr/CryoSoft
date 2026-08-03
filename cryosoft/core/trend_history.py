@@ -1,38 +1,3 @@
-# ---
-# description: |
-#   trend_history: the read/query side of the tiered trend-history store.
-#   Parses the raw / 3-min / hourly JSONL streams written by
-#   TieredTrendLogger (tiered_trend_logger.py) and exposes both a low-level
-#   raw-row primitive and an aggregate/query surface aimed at a second,
-#   non-human consumer (an LLM agent asking "was the sample temperature
-#   stable overnight" rather than wanting 28,800 raw rows). See
-#   GLOSSARY.md "Trend history"/"Trend tier" for the store's shape.
-# entry_point: Not run directly. Called by the GUI trend panel
-#   (read_window) and by future agent-facing tooling (summarize,
-#   find_crossings).
-# dependencies:
-#   - Python standard library only (json, math, re, time, pathlib,
-#     dataclasses).
-# input: |
-#   A log directory (as resolved by cryosoft.core.paths.
-#   log_directory()) containing trend_history_{raw,3min,hourly}.jsonl and
-#   their TimedRotatingFileHandler-rotated siblings
-#   (trend_history_raw.jsonl.2026-07-25).
-# process: |
-#   read_tier() globs the live file plus its dated rotated siblings for one
-#   tier, strictly excluding sync-conflict-copy filenames, parses each line
-#   as JSON (skipping corrupt/truncated/blank lines), and filters to a
-#   [now - window_s, now] range, oldest-first. read_window/summarize/
-#   find_crossings build on top of read_tier: pick_tier() maps a requested
-#   window to the appropriate tier, summarize() recombines aggregate-tier
-#   buckets into an exact count-weighted mean and an exact std via the law
-#   of total variance (documented on KeySummary).
-# output: |
-#   Plottable (t, value) series for the GUI, and agent-facing KeySummary /
-#   crossing-timestamp results that distinguish "no data in this window"
-#   from "this key is never persisted" via the persisted flag.
-# ---
-
 """trend_history — query surface over the tiered trend-history JSONL store.
 
 Qt-free by design, like ``tiered_trend_logger.py``: this module imports

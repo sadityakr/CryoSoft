@@ -1,32 +1,3 @@
-# ---
-# description: |
-#   Generic, tick-driven wait primitive procedures use to declare "before a
-#   measurement counts, this must be satisfied" — the framework generalization
-#   of the flat wait_s dwell timer. A Gate is polled once per Orchestrator
-#   tick via step(), the same non-blocking idiom already used by
-#   RampableVI.advance_ramp()/ramp_status().
-# entry_point: Not run directly. Built by BaseProcedure.initiation_gates() /
-#   reading_gates() implementations, stepped by the Orchestrator.
-# dependencies: none (stdlib only)
-# input: |
-#   Constructor arguments: a name, an optional one-shot action callable, an
-#   optional boolean check callable, and a stability window in seconds.
-# process: |
-#   step() runs the action exactly once on its first call. If a check is
-#   given, step() then polls check() each call; any False resets the
-#   stability clock. step() returns True once check() has held True
-#   continuously for window_s seconds (or immediately, if no check was
-#   given). check_once() is the one-shot alternative: it runs the action
-#   once (if not already run) and returns a single check() reading,
-#   ignoring window_s entirely — used by the Orchestrator's operation-finish
-#   one-shot postcondition evaluation, never combined with step() on the
-#   same instance.
-# output: |
-#   step() -> bool, True exactly once the gate is satisfied and forever
-#   after. check_once() -> bool, a single point-in-time read.
-# last_updated: 2026-07-21
-# ---
-
 """Gate: the tick-driven wait primitive behind procedure initiation/reading gates."""
 
 from __future__ import annotations

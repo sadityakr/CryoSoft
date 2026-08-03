@@ -1,35 +1,3 @@
-# ---
-# description: |
-#   The Availability standard's pure policy core: every reason a Virtual
-#   Instrument cannot be used right now — never connected, deliberately
-#   released, not answering, or session-detached — is one of a closed set
-#   of tags, and the tags a VI currently carries determine one of four
-#   mutually exclusive states plus a declared policy (enumerable?
-#   controllable? does it fail a claimed run? does it raise an ErrorEvent?
-#   what recovers it?). This module holds the tag vocabulary, the state
-#   vocabulary, the `TagPolicy`/`Availability` value objects, and the
-#   deterministic `state_for()` / `decide_availability()` functions that
-#   turn a set of tags into state and policy.
-# entry_point: Not run directly; called by the Station, which assembles the
-#   tags for each VI from its own registries (see core/station.py), and by
-#   the Orchestrator, which re-exports the Station's accessors for the GUI.
-# dependencies: none (Python standard library only: dataclasses)
-# input: |
-#   A `frozenset[str]` of availability tags for one VI, drawn from
-#   `AVAILABILITY_TAGS`.
-# process: |
-#   `state_for()` maps an empty tag set to "live" and a non-empty one to the
-#   state of its highest-precedence tag (see `TAG_PRECEDENCE`).
-#   `decide_availability()` does the same lookup but returns the winning
-#   `TagPolicy` row instead of just the state. Neither function has any
-#   notion of a VI, a Station, or a Condition — they are pure lookups over
-#   the tags they are given.
-# output: |
-#   `state_for()` returns one of `AVAILABILITY_STATES`. `decide_availability()`
-#   returns the winning `TagPolicy`, or `None` for an empty tag set (nothing
-#   to decide — the VI is live and unconstrained).
-# ---
-
 """The Availability standard: one state, one tag vocabulary, one policy table.
 
 CryoSoft has exactly four reasons a Virtual Instrument cannot be used the

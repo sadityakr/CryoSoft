@@ -1,24 +1,3 @@
-# ---
-# description: |
-#   ErrorEvent: the structured payload carried by Orchestrator.error_event.
-#   Replaces the string-only error_occurred payload with a typed record
-#   naming which VI (if any) an error concerns, at what blast-radius tier
-#   ("kind"), and how severe it is. A tiny, dependency-free module (no
-#   Station/Orchestrator imports) so both core.orchestrator (the emitter)
-#   and cryosoft.gui (the
-#   consumer) can import it without crossing any layer contract.
-# entry_point: Not run directly.
-# dependencies: []
-# input: |
-#   Constructed by the Orchestrator at the point an error/fault/emergency is
-#   detected.
-# process: |
-#   Plain frozen dataclass — no behavior.
-# output: |
-#   One ErrorEvent instance per Orchestrator.error_event emission.
-# last_updated: 2026-07-21
-# ---
-
 """ErrorEvent — structured error/fault payload (core, dependency-free)."""
 
 from __future__ import annotations

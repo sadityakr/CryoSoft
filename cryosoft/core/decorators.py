@@ -1,14 +1,3 @@
-# ---
-# description: |
-#   @monitored and @control decorators for CryoSoft Virtual Instruments.
-#   These are marker decorators: they tag methods with metadata attributes
-#   so that BaseVirtualInstrument.__init_subclass__ can discover them,
-#   and the GUI can auto-generate panels. @control also carries a capability
-#   scope ("measurement" or "operation") enforced at dispatch by
-#   Station.send_measurement_commands().
-# last_updated: 2026-07-20
-# ---
-
 """Decorators for Virtual Instrument methods.
 
 Usage:

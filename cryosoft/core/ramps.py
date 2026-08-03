@@ -1,31 +1,3 @@
-# ---
-# description: |
-#   RampRecord: the structured payload carried by Orchestrator.ramps_updated
-#   and returned by Orchestrator.active_ramps() — one entry per system VI
-#   that is ramping right now, naming its rate, its NEXT setpoint, its END
-#   setpoint, which run (if any) owns it, and whether the operator may stop
-#   it. Plus build_ramp_records(), the pure function that turns one
-#   Station.get_ramp_status() snapshot into that list. A tiny,
-#   dependency-free module (no Station/Orchestrator imports) so both
-#   core.orchestrator (the emitter) and cryosoft.gui (the consumer) can
-#   import it without crossing any layer contract — the same shape as
-#   core.events.
-# entry_point: Not run directly.
-# dependencies: []
-# input: |
-#   One Station.get_ramp_status() snapshot, plus three callables/values the
-#   Orchestrator supplies: the Station's setpoint metadata lookup, the
-#   Orchestrator's manual-action admission predicate, and the active run's
-#   label + claims.
-# process: |
-#   Pure filtering and assembly — no hardware access, no I/O, no Qt. Only
-#   VIs whose ramp_status() is RAMPING become records; everything else
-#   (IDLE, TARGET_REACHED) is not a running ramp and is dropped.
-# output: |
-#   A list of RampRecord, ordered by VI name.
-# last_updated: 2026-07-27
-# ---
-
 """RampRecord — structured running-ramp payload (core, dependency-free)."""
 
 from __future__ import annotations

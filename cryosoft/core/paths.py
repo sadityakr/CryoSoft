@@ -1,30 +1,3 @@
-# ---
-# description: |
-#   Resolves the machine-local, per-installation directories and settings
-#   CryoSoft reads outside of source control: the log directory
-#   (log_directory()) and the fixed measurement root (measurement_root()).
-#   This module is the place any further such value belongs, so path
-#   resolution stays in one stdlib-only spot rather than being duplicated
-#   per caller.
-# entry_point: Not run directly. Imported by logging_config (which re-exports
-#   log_directory for its existing callers), the troubleshoot CLI and status
-#   reader, the GUI trend modules, and the session layer (measurement_root).
-# dependencies: stdlib only (contract C1 — see the module docstring).
-# input: |
-#   Environment and a machine-level settings file: CRYOSOFT_LOG_DIR overrides
-#   the log directory outright; LOCALAPPDATA selects the per-user location on
-#   Windows; CRYOSOFT_MEASUREMENT_ROOT overrides the measurement root
-#   outright; failing that, App-config.yaml under ProgramData (Windows) or
-#   /etc/cryosoft (POSIX) supplies measurement_root.
-# process: |
-#   Pure resolution — each function picks a path by documented precedence and
-#   returns it. Nothing here creates a directory or touches the filesystem;
-#   the caller that writes owns the mkdir.
-# output: |
-#   pathlib.Path values, not guaranteed to exist.
-# last_updated: 2026-08-03
-# ---
-
 """CryoSoft installation-path resolution.
 
 Machine-local directories — where logs go on *this* installation — are a

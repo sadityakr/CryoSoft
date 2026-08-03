@@ -1,29 +1,3 @@
-# ---
-# description: |
-#   Runtime watchdog: deterministic stall detection layered on top of an
-#   operational-status record. Pure rules (compare + count), no AI. Detects a
-#   ramp that has stopped closing its gap for several consecutive ticks
-#   (RAMP_STALLED) and a run wedged in a transient state far too long
-#   (STALLED_RUN), and writes plain-English alerts into the record.
-# entry_point: Not run directly; called by the Orchestrator after each record.
-# dependencies:
-#   - dataclasses (stdlib)
-#   - cryosoft.core.operational_status (RunFaultCode, worst_code)
-# input: |
-#   apply_watchdog() takes the record from build_operational_status(), the
-#   WatchdogState carried across ticks (per-VI non-closing tick counts), and an
-#   optional WatchdogConfig of thresholds.
-# process: |
-#   Per system VI actually ramping (and not in a persistent-magnet no-motion
-#   phase), counts consecutive ticks whose gap did not shrink by more than a
-#   noise floor; flags RAMP_STALLED once that count crosses stall_ticks. Also
-#   flags a transient orchestrator state that has lasted beyond transient_max_s.
-# output: |
-#   The same record with per-VI codes upgraded, an "alerts" list of
-#   human-readable strings, and the overall verdict recomputed; plus the new
-#   WatchdogState for the next tick.
-# ---
-
 """Runtime watchdog — deterministic ramp/run stall detection.
 
 The record from ``build_operational_status`` carries the *facts* (gap, closing,

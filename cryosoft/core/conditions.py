@@ -1,32 +1,3 @@
-# ---
-# description: |
-#   The System-Condition standard's pure policy core: every "something is
-#   wrong" signal in CryoSoft is a Condition (origin x severity), and scope
-#   follows from severity alone. This module holds the Condition/Verdict
-#   value objects and the deterministic decide() function that turns a set
-#   of conditions into an enforcement verdict, plus the envelope_conditions()
-#   builder for the one origin (envelope) whose producer emits plain strings
-#   rather than typed objects.
-# entry_point: Not run directly; called by the Station/Orchestrator producers
-#   and consumers that implement the System-Condition standard.
-# dependencies: none (Python standard library only: dataclasses, typing,
-#   collections.abc)
-# input: |
-#   Condition instances from the three producers (a VI's evaluate_safety(),
-#   the Station's comm-fault detection, ExperimentEnvelope.check_state()), plus
-#   the set of VI names the active run watches and whether a run is active.
-# process: |
-#   decide() partitions conditions by severity: critical conditions become
-#   the emergency set; hold conditions expand to a vi_name -> Condition map,
-#   first condition (by sorted key) winning a given VI; run_failure looks up
-#   the alphabetically-first watched VI that landed in that map. advisory
-#   conditions are recorded nowhere further up.
-# output: |
-#   A Verdict: held_vis, emergency, run_failure. Pure data — the caller
-#   (Orchestrator) is responsible for acting on it (standby, EMERGENCY entry,
-#   failing a run).
-# ---
-
 """The System-Condition standard: origin x severity, scope follows severity.
 
 CryoSoft has exactly three producers of "something is wrong":

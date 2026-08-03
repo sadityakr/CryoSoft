@@ -1,28 +1,3 @@
-# ---
-# description: |
-#   TieredTrendLogger: live incremental downsampling of Station state into
-#   three JSONL log tiers (raw, 3-min, hourly) via the loggers set up in
-#   logging_config.py. Qt-free, orchestrator-agnostic write side of the
-#   tiered trend-history store — see GLOSSARY.md "Trend history"/"Trend tier".
-# entry_point: Not run directly. Orchestrator.tick() calls record() once per
-#   tick, next to _update_operational_status().
-# dependencies:
-#   - Python standard library only (logging, math, time).
-# input: |
-#   record(flat, timestamp, orch_state) takes an already-flattened reading
-#   dict as produced by Station.last_state_flat() ({flat_key: value}), the
-#   sample's Unix timestamp, and an optional Orchestrator state name.
-# process: |
-#   Every call writes one throttled raw-tier JSONL line and updates two
-#   independent bucket accumulators (3-min, 1-hour), flushing a bucket's
-#   min/max/mean/std/count to its own JSONL logger whenever a sample lands in
-#   the next bucket.
-# output: |
-#   Nothing returned; side effect is JSONL lines through the injected
-#   loggers (cryosoft.trend_raw / cryosoft.trend_3min / cryosoft.trend_hourly
-#   by default).
-# ---
-
 """TieredTrendLogger — live cascading-downsample writer for trend history.
 
 Qt-free by design: this module imports nothing from PyQt6, the Orchestrator,

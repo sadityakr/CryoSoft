@@ -1,31 +1,3 @@
-# ---
-# description: |
-#   Typed vocabulary of frozen dataclasses shared by every CryoSoft layer.
-#   Replaces the untyped nested dicts and anonymous tuples that drivers,
-#   virtual instruments, the orchestrator, procedures and the data manager
-#   currently exchange. Each class validates eagerly at construction so a
-#   malformed plan fails at the boundary — with the guilty module in the
-#   traceback — instead of deep inside the tick loop or the HDF5 writer.
-# entry_point: Not run directly. Imported wherever a plan is built or consumed.
-# dependencies:
-#   - cryosoft.core.exceptions (DataSchemaError)
-# input: |
-#   Constructor arguments only. Procedures build Target / Command / PhasePlan /
-#   StepPlan objects; the GUI reads ParamSpec / ParamGroup; the data
-#   manager builds and checks DataSchema objects.
-# process: |
-#   Every dataclass is frozen and validates in __post_init__, raising ValueError
-#   (bad value) or TypeError (wrong type) with a message naming the offending
-#   field. Dict fields are defensively copied so later caller mutations cannot
-#   leak into an already-constructed, notionally immutable plan.
-# output: |
-#   Immutable value objects. DataSchema additionally offers multiplexed() (derive
-#   a per-suffix schema, used once per reading-loop level with its index
-#   labels) and validate() (check one datapoint, raising DataSchemaError listing every
-#   problem at once).
-# last_updated: 2026-07-17
-# ---
-
 """Typed vocabulary of frozen dataclasses shared across all CryoSoft layers."""
 
 from __future__ import annotations
