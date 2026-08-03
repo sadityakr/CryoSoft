@@ -32,12 +32,13 @@ class SampleLoadOperation(_SampleAccessOperationBase):
 
     All behavior is inherited from ``_SampleAccessOperationBase`` — see its
     docstring. This class exists to give the "load" half of the sample-access
-    pair its own display name, config key, and servicing-log ``entry_kind``
-    (derived from ``name`` by ``CryogenicsRecorder``), distinct from
-    ``SampleUnloadOperation``'s.
+    pair its own display name, config key, servicing-log ``entry_kind``
+    (derived from ``name`` by ``CryogenicsRecorder``), and rod-step
+    wording, distinct from ``SampleUnloadOperation``'s.
     """
 
     name = "Sample Load"
     description = "Bring the cryostat to a safe state to load a sample"
     ready_message = "Ready — sample can be loaded"
     config_key = "sample_load"
+    rod_step_label = "Insert the sample rod"

@@ -16,29 +16,37 @@
 #   toggle (disarm_measurement_vis, default True) — disarms every
 #   measurement VI via standby() too, so a measurement instrument already
 #   armed for something else can be left alone and the operation still
-#   runs. No HDF5 dataset — instead, once every sample_period_s the
-#   run records the VTI temperature and every magnet's field into
+#   runs. No HDF5 dataset — instead, once every sample_period_s the run
+#   records EVERY numeric monitored channel on the station into
 #   OperationBase's shared recorder, so the run's servicing-log entry
-#   carries the actual conditions spanning the whole hold, not just the
-#   moment the ramps finished. The run then stays open (step() never returns
-#   None on its own) until the operator clicks Finish or Abort — that is
-#   when the physical sample load/unload happens. Completion is gated on
-#   verified postconditions only: every magnet in standby (magnet_state() ==
-#   "standby" — for a persistent-capable magnet this already implies the
-#   switch heater is off, so no separate heater check is needed), the VTI
-#   within tolerance held, and — for a manual needle valve, the only
-#   supported mode today — an explicit operator confirmation.
+#   carries what the whole system was doing across the hold, and a newly
+#   configured instrument (a pressure gauge, say) is included with no change
+#   here. The run stays open (step() never returns None on its own) while
+#   the operator walks through the declared step sequence — warm the VTI,
+#   close the needle valve, open the sample access valve, move the rod,
+#   close the valve, flush — confirming each in turn, until Finish or Abort.
+#   Every step is skippable: a sample change sometimes has to happen at base
+#   temperature, and refusing to run then would only mean it happens with no
+#   record at all. A skip is warned about, recorded with the conditions at
+#   that instant, and reported as an unmet postcondition; skipping the
+#   warm-up also stops the VTI ramp, which the Orchestrator does on this
+#   operation's behalf. Completion is gated on verified postconditions only:
+#   every magnet in standby (magnet_state() == "standby" — for a
+#   persistent-capable magnet this already implies the switch heater is off,
+#   so no separate heater check is needed), the VTI within tolerance, and
+#   one gate per declared step.
 # entry_point: Not run directly. Subclassed by SampleLoadOperation /
 #   SampleUnloadOperation, constructed by the GUI's Operations panel or a
 #   test, submitted via Orchestrator.run_operation()/queue_operation(); the
-#   needle-valve confirmation flows through
-#   Orchestrator.confirm_operation("needle_valve"); the hold phase ends via
-#   Orchestrator.finish_operation() (the card's Finish click) or
+#   step confirmations flow through Orchestrator.confirm_operation(key) and
+#   skips through Orchestrator.skip_operation_step(key); the hold phase ends
+#   via Orchestrator.finish_operation() (the card's Finish click) or
 #   Orchestrator.abort_procedure() (the card's Abort click).
 # dependencies:
+#   - cryosoft.core.decorators (get_monitored_methods)
 #   - cryosoft.core.exceptions (CryoSoftConfigError)
 #   - cryosoft.core.gates (Gate)
-#   - cryosoft.core.operation (OperationBase)
+#   - cryosoft.core.operation (OperationBase, OperationStep, step constants)
 #   - cryosoft.core.plan (Command, PhasePlan, StepPlan, Target)
 #   - cryosoft.core.station (Station) — VI access only through this, never a
 #     direct virtual_instruments import (contract C6)
@@ -100,7 +108,7 @@
 #   _active_system_vis to include any system VI named in plan.commands) was
 #   proposed and declined; revisit if a future operation needs the same
 #   pattern.
-# last_updated: 2026-07-27
+# last_updated: 2026-08-03
 # ---
 
 """_SampleAccessOperationBase — shared logic for Sample Load / Sample Unload."""
@@ -111,20 +119,49 @@ import logging
 import time
 from typing import Any
 
+from cryosoft.core.decorators import get_monitored_methods
 from cryosoft.core.exceptions import CryoSoftConfigError
 from cryosoft.core.gates import Gate
-from cryosoft.core.operation import OperationBase, ReadinessCondition
+from cryosoft.core.operation import (
+    STEP_KIND_AUTO_RAMP,
+    STEP_KIND_OPERATOR_ACK,
+    STEP_STATUS_DONE,
+    STEP_STATUS_SKIPPED,
+    OperationBase,
+    OperationStep,
+    ReadinessCondition,
+)
 from cryosoft.core.plan import Command, PhasePlan, StepPlan, Target
 from cryosoft.core.station import Station
 
 logger = logging.getLogger(__name__)
 
-# The only needle-valve mode implemented today: a manual valve
-# becomes an operator confirmation. A VI-capability reference (an ITC503
-# close_needle_valve()-style machine-verified close) is explicitly future
-# work — any other value is rejected at construction with a clear message
-# rather than silently dropping the postcondition.
+# The only needle-valve mode implemented today: a manual valve becomes an
+# operator confirmation step.
+#
+# This is a property of the setup, not a gap in the stack. The VTI
+# temperature controller VI has exposed set_needle_valve() and
+# set_needle_valve_mode() as @control methods for a while, and its standby()
+# already closes the valve — so an "auto" mode that commands MANUAL then 0 %
+# and gates on the position readback is implementable today with no new
+# driver or VI work. It is not wired up because the 12 T cryostat this runs
+# on has no motor on its needle valve: the controller channel exists, but
+# commanding it moves nothing. On that setup the operator's confirmation is
+# the only honest verification there is, and pretending otherwise would be
+# worse than asking. A setup with a motorised valve should add
+# needle_valve: "auto" here — the step and gate machinery below already
+# supports a machine-checked step, which is why steps and gates are
+# declared rather than hardcoded.
 _NEEDLE_VALVE_MANUAL = "manual"
+
+# Step keys. Declared as constants because the GUI, the postcondition gates,
+# and the servicing-log notes all key off them.
+_STEP_WARM_VTI = "warm_vti"
+_STEP_CLOSE_NEEDLE_VALVE = "close_needle_valve"
+_STEP_OPEN_ACCESS_VALVE = "open_access_valve"
+_STEP_MOVE_ROD = "move_rod"
+_STEP_CLOSE_ACCESS_VALVE = "close_access_valve"
+_STEP_FLUSH = "flush"
 
 
 class _SampleAccessOperationBase(OperationBase):
@@ -166,40 +203,62 @@ class _SampleAccessOperationBase(OperationBase):
     running under an active safety condition — unlike the helium fill,
     nothing about opening the cryostat *fixes* a tripped flag.
 
-    Operator confirmations (the "needle-valve reality check")
+    The step sequence
     -------------------------------------------------------------------
-    No needle-valve/gas-flow capability exists anywhere in the stack today,
-    so with a manual valve (``needle_valve == "manual"``, the only supported
-    value) the valve-closed postcondition cannot be machine-verified. The
-    class-level ``operator_confirmations`` dict declares one key
-    (``"needle_valve"``) mapped to its human-readable checkbox label; the
-    instance methods ``confirm(key)`` / ``confirmed(key)`` set and read the
-    flag. The GUI renders one checkbox per declared confirmation and
-    forwards a click through ``Orchestrator.confirm_operation(key)``
-    (mirroring ``finish_operation()``); ``postcondition_gates()`` blocks the
-    ``needle_valve_confirmed`` gate until ``confirmed("needle_valve")`` is
-    True. A future VI-capability needle valve would instead add a
-    machine-checked gate and skip the confirmation declaration entirely —
-    the postcondition contract already supports both, which is why gates
-    and confirmations are declared, not hardcoded.
+    A sample change is a sequence, not one undifferentiated wait, and the
+    main thing this operation exists to produce is a record of *when* each
+    part of it happened. ``steps()`` declares that sequence (see the step
+    standard in ``OperationBase``'s class docstring):
 
-    Readiness (Operations panel): ``readiness_conditions()``
-    mirrors the three ``postcondition_gates()`` checks as live checklist
-    rows -- ``zero_field`` (every magnet's ``magnet_state() == "standby"``,
-    which already implies the switch heater is off wherever one exists —
-    see GLOSSARY.md's **Magnet state**), ``vti_at_target``,
-    ``needle_valve_confirmed``. No ``next_due()`` override -- neither
-    operation has a schedule.
+    1. ``warm_vti`` (``auto_ramp``) — the VTI ramp to
+       ``target_temperature_K``, the one part the software performs. It
+       completes on its own, recorded by ``sample()`` the first tick the
+       reading is within tolerance.
+    2. ``close_needle_valve`` (``operator_ack``) — declared only while
+       ``needle_valve == "manual"``; see the module-level note on why that
+       is the only mode wired up.
+    3. ``open_access_valve`` (``operator_ack``) — the sample-space valve
+       opened to pass the rod, distinct from the needle valve.
+    4. ``move_rod`` (``operator_ack``) — the only step whose label differs
+       between the two concrete classes, via ``rod_step_label``.
+    5. ``close_access_valve`` (``operator_ack``).
+    6. ``flush`` (``operator_ack``).
+
+    Every step is skippable, including the warm-up. This is deliberate and
+    is the main behavioural change from the operation's first design: a
+    sample sometimes has to be changed at base temperature, and an
+    operation that refuses to run then does not prevent the sample change,
+    it only means the sample change happens with no record of it at all.
+    So a skip always succeeds, always after a warning naming the live
+    conditions, and is recorded as an override — the skipped step's
+    postcondition gate reports unmet, which the run manifest and the
+    servicing-log notes both carry.
+
+    Skipping the warm-up additionally has to stop the ramp it started, or
+    the VTI would go on climbing to 290 K while the operator works at 4 K.
+    The operation cannot do that itself — while the ramp runs the
+    Orchestrator is in RAMPING, where ``step()`` is never called — so
+    ``skip_step()`` sets ``skip_ramp_requested`` and
+    ``Orchestrator.skip_operation_step()`` stops the ramp in place, leaving
+    the VTI clamped at whatever temperature it had reached.
+
+    Readiness (Operations panel): ``readiness_conditions()`` returns
+    ``zero_field`` (every magnet's ``magnet_state() == "standby"``, which
+    already implies the switch heater is off wherever one exists — see
+    GLOSSARY.md's **Magnet state**) followed by one live row per declared
+    step, so the panel's checklist *is* the sequence. No ``next_due()``
+    override -- neither operation has a schedule.
     """
 
     #: Hold-phase operation: the ready banner may show mid-run, not only after
     #: Finish — see ``OperationBase.hold_for_operator``'s docstring.
     hold_for_operator = True
 
-    #: Declared operator confirmations: {key: human-readable checkbox label}.
-    #: Only "needle_valve" exists today because "manual" is the only
-    #: supported needle_valve mode (see module docstring / class docstring).
-    operator_confirmations: dict[str, str] = {"needle_valve": "Needle valve closed"}
+    #: Label for the rod step — the ONLY thing that differs between the two
+    #: concrete classes' sequences. Set by ``SampleLoadOperation`` /
+    #: ``SampleUnloadOperation``; the fallback here is deliberately neutral
+    #: so the base class is still usable in a test on its own.
+    rod_step_label: str = "Move the sample rod"
 
     #: Declared pre-run toggles: {config key: human-readable checkbox label}.
     #: Unlike operator_confirmations (shown only while running, one-way,
@@ -281,47 +340,194 @@ class _SampleAccessOperationBase(OperationBase):
         self._magnets: list[str] = station.magnet_vi_names()
         self._measurement_vis: list[str] = station.measurement_vi_names()
 
-        #: Operator-confirmation flags, keyed by ``operator_confirmations``
-        #: key. Set via ``confirm()``, read via ``confirmed()``.
-        self._confirmations: dict[str, bool] = {}
+        #: Read by ``Orchestrator.skip_operation_step()``: set when the
+        #: operator skips an ``auto_ramp`` step, meaning "stop the ramp this
+        #: operation started and clamp where you are". The Orchestrator
+        #: clears it once it has acted. Public because it is a cross-layer
+        #: signal, not internal state.
+        self.skip_ramp_requested: bool = False
+
+        #: Frozen at ``initiate()``: every ``<vi>.<monitored>`` channel that
+        #: yields a numeric reading, so the recording spans the whole
+        #: station. Empty until then.
+        self._recording_channels_frozen: list[str] = []
 
     # ------------------------------------------------------------------
-    # Operator confirmations
+    # Steps — the declared sequence (see the step standard in
+    # OperationBase's class docstring)
+    # ------------------------------------------------------------------
+
+    def steps(self) -> tuple[OperationStep, ...]:
+        """Return the ordered sample-access sequence.
+
+        Returns:
+            Six steps for the usual manual-needle-valve setup, five if a
+            future ``needle_valve`` mode makes that step machine-verified
+            and it drops out. Only ``move_rod``'s label differs between the
+            load and unload subclasses (``rod_step_label``).
+        """
+
+        def _vti_temperature(state: dict[str, Any]) -> float | None:
+            """Return the VTI reading from a state snapshot, or None if unusable."""
+            value = state.get(self._vti_vi_name, {}).get("temperature")
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return None
+            return float(value)
+
+        def _warm_detail(state: dict[str, Any]) -> str:
+            temperature = _vti_temperature(state)
+            if temperature is None:
+                return "reading unavailable"
+            return f"currently {temperature:.1f} K"
+
+        def _warm_skip_warning(state: dict[str, Any]) -> str:
+            temperature = _vti_temperature(state)
+            where = (
+                "The VTI reading is unavailable"
+                if temperature is None
+                else f"The VTI is at {temperature:.1f} K"
+            )
+            return (
+                f"{where}, not the {self._target_temperature_K:.0f} K this "
+                f"step ramps to. Skipping stops the ramp and leaves the VTI "
+                f"clamped where it is. Opening the cryostat below room "
+                f"temperature will condense air and moisture in the sample "
+                f"space. The skip will be recorded on this run."
+            )
+
+        steps: list[OperationStep] = [
+            OperationStep(
+                key=_STEP_WARM_VTI,
+                label=f"Warm the VTI to {self._target_temperature_K:.0f} K",
+                kind=STEP_KIND_AUTO_RAMP,
+                detail=_warm_detail,
+                skip_warning=_warm_skip_warning,
+            )
+        ]
+        if self._needle_valve == _NEEDLE_VALVE_MANUAL:
+            steps.append(
+                OperationStep(
+                    key=_STEP_CLOSE_NEEDLE_VALVE,
+                    label="Close the needle valve",
+                    kind=STEP_KIND_OPERATOR_ACK,
+                    skip_warning=lambda _state: (
+                        "Leaving the needle valve open keeps bath helium "
+                        "flowing into the VTI while the cryostat is open, "
+                        "wasting helium and icing the sample space."
+                    ),
+                )
+            )
+        steps.extend(
+            [
+                OperationStep(
+                    key=_STEP_OPEN_ACCESS_VALVE,
+                    label="Open the sample access valve",
+                    kind=STEP_KIND_OPERATOR_ACK,
+                ),
+                OperationStep(
+                    key=_STEP_MOVE_ROD,
+                    label=self.rod_step_label,
+                    kind=STEP_KIND_OPERATOR_ACK,
+                ),
+                OperationStep(
+                    key=_STEP_CLOSE_ACCESS_VALVE,
+                    label="Close the sample access valve",
+                    kind=STEP_KIND_OPERATOR_ACK,
+                ),
+                OperationStep(
+                    key=_STEP_FLUSH,
+                    label="Flush the sample space",
+                    kind=STEP_KIND_OPERATOR_ACK,
+                ),
+            ]
+        )
+        return tuple(steps)
+
+    def step_conditions_snapshot(self) -> dict[str, Any]:
+        """Return a flat snapshot of the station's cached state for a step record.
+
+        This is where the *non-numeric* monitored values land — the needle
+        valve's AUTO/MANUAL mode, each magnet's state — which the numeric
+        recording cannot hold. Cached read only: this runs inside a GUI
+        callback, not the tick loop, so it must never touch the bus.
+
+        Returns:
+            ``{"<vi>.<field>": value}`` over every VI in the cached state,
+            keeping strings and numbers alike, dropping the ``_stale`` /
+            ``_disconnected`` bookkeeping keys the Station adds.
+        """
+        snapshot: dict[str, Any] = {}
+        for vi_name, fields in self._station.cached_state.items():
+            if not isinstance(fields, dict):
+                continue
+            for field, value in fields.items():
+                if field.startswith("_"):
+                    continue
+                if isinstance(value, (int, float, str, bool)):
+                    snapshot[f"{vi_name}.{field}"] = value
+        return snapshot
+
+    def skip_step(self, key: str) -> None:
+        """Record a skipped step, and flag a ramp stop when it was the warm-up.
+
+        Extends the base implementation with the one thing an ``auto_ramp``
+        step needs that an ``operator_ack`` step does not: the ramp it
+        started must actually stop, which only the Orchestrator can do (see
+        the class docstring).
+
+        Args:
+            key: One of ``steps()``' keys.
+
+        Raises:
+            ValueError: If ``key`` is not a declared step.
+        """
+        already_recorded = key in self.step_records()
+        super().skip_step(key)
+        if already_recorded:
+            return
+        if self._step_by_key(key).kind == STEP_KIND_AUTO_RAMP:
+            self.skip_ramp_requested = True
+            logger.warning(
+                "%s: operator skipped %r — requesting the %s ramp be "
+                "stopped and clamped where it is.",
+                type(self).__name__,
+                key,
+                self._vti_vi_name,
+            )
+
+    # ------------------------------------------------------------------
+    # Operator confirmations — the Orchestrator-facing names
     # ------------------------------------------------------------------
 
     def confirm(self, key: str) -> None:
-        """Record an operator confirmation for a declared checkbox.
+        """Record an operator confirmation for a declared step.
 
-        Called by ``Orchestrator.confirm_operation(key)`` (a GUI checkbox
-        click) — never sets hardware, purely a human attestation consumed
-        by ``postcondition_gates()``.
+        The name the Orchestrator calls duck-typed from
+        ``confirm_operation(key)``; delegates to the step standard's
+        ``confirm_step()``. Never sets hardware — purely a human attestation
+        about a physical action, consumed by ``postcondition_gates()``.
 
         Args:
-            key: One of ``operator_confirmations``' keys.
+            key: One of ``steps()``' keys.
 
         Raises:
-            ValueError: If ``key`` is not a declared confirmation.
+            ValueError: If ``key`` is not a declared step.
         """
-        if key not in self.operator_confirmations:
-            raise ValueError(
-                f"{type(self).__name__}.confirm: unknown confirmation key "
-                f"{key!r}; declared keys are "
-                f"{sorted(self.operator_confirmations)}"
-            )
-        self._confirmations[key] = True
-        logger.info("%s: operator confirmed %r", type(self).__name__, key)
+        self.confirm_step(key)
 
     def confirmed(self, key: str) -> bool:
-        """Return whether ``key`` has been confirmed (default: not yet).
+        """Return whether ``key`` has been confirmed *done* (not skipped).
 
         Args:
-            key: One of ``operator_confirmations``' keys.
+            key: One of ``steps()``' keys.
 
         Returns:
-            True once ``confirm(key)`` has been called; False otherwise
-            (including for an unknown key — this is a read, never raises).
+            True once the step has been recorded ``done``; False otherwise —
+            including when it was skipped, and for an unknown key (this is a
+            read, it never raises).
         """
-        return self._confirmations.get(key, False)
+        record = self.step_records().get(key)
+        return record is not None and record.status == STEP_STATUS_DONE
 
     # ------------------------------------------------------------------
     # OperationBase lifecycle
@@ -370,20 +576,24 @@ class _SampleAccessOperationBase(OperationBase):
         }
 
     def run_summary(self) -> dict[str, Any]:
-        """Return the recorded VTI-temperature/magnet-field series, for the run manifest.
+        """Return the station-wide recording and the step timeline, for the run manifest.
 
         Called once by the Orchestrator on ``run_finished``; ``CryogenicsRecorder``
         reads this back off ``manifest["summary"]`` and writes it as this
         run's ``recordings/<run_id>.json`` sidecar, referenced from the run's
-        single ``servicing`` log entry.
+        single ``servicing`` log entry. The step timeline rides along inside
+        the same summary rather than through a second channel, so no
+        session-layer change is needed to persist it.
 
         Returns:
-            ``{"recording": {"unix_time": [...], "channels": {"<vi>.<value>":
-            [...], ...}}}`` — ``OperationBase._recording_dict()`` verbatim
-            (empty series if the hold phase never sampled, e.g. the run
-            finished before ``sample()`` was ever called).
+            ``{"recording": {"unix_time": [...], "channels": {...}},
+            "steps": [...]}`` — ``OperationBase._recording_dict()`` and
+            ``steps_summary()`` verbatim. The series is empty if the hold
+            phase never sampled (e.g. the run finished before ``sample()``
+            was ever called); every declared step always appears in
+            ``steps``, pending ones included.
         """
-        return {"recording": self._recording_dict()}
+        return {"recording": self._recording_dict(), "steps": self.steps_summary()}
 
     # ------------------------------------------------------------------
     # Operations panel: readiness — no next_due() override, neither
@@ -392,19 +602,21 @@ class _SampleAccessOperationBase(OperationBase):
     # ------------------------------------------------------------------
 
     def readiness_conditions(self) -> tuple[ReadinessCondition, ...]:
-        """Return the three postcondition checks as live checklist rows.
+        """Return the magnet check plus one live row per declared step.
 
         Every ``check``/``detail`` closure reads only the state snapshot
         passed to it (never ``self._station.cached_state`` directly), per
-        the readiness-condition contract. ``zero_field`` depends solely on
-        ``magnet_state() == "standby"`` (GLOSSARY.md's **Magnet state**),
-        which already implies the switch heater is off wherever a magnet has
-        one — there is no separate heater check.
+        the readiness-condition contract — with one deliberate exception:
+        the per-step rows read ``step_records()``, which is the operation's
+        own in-memory outcome log, not hardware. ``zero_field`` depends
+        solely on ``magnet_state() == "standby"`` (GLOSSARY.md's **Magnet
+        state**), which already implies the switch heater is off wherever a
+        magnet has one — there is no separate heater check.
 
         Returns:
-            ``(zero_field, vti_at_target, needle_valve_confirmed)`` — the
-            last one included only while ``needle_valve == "manual"`` (the
-            only supported mode today, so effectively always).
+            ``zero_field`` first, then one row per ``steps()`` entry in
+            sequence order, so the panel's checklist reads as the procedure
+            the operator is working through.
         """
 
         def _magnet_not_standby(state: dict[str, Any]) -> tuple[str | None, str | None]:
@@ -431,43 +643,38 @@ class _SampleAccessOperationBase(OperationBase):
                 return f"{name} state unavailable"
             return f"{name} {magnet_state}"
 
-        def _vti_holds(state: dict[str, Any]) -> bool:
-            temperature = state.get(self._vti_vi_name, {}).get("temperature")
-            if isinstance(temperature, bool) or not isinstance(temperature, (int, float)):
-                return False
-            return abs(float(temperature) - self._target_temperature_K) <= (
-                self._temperature_tolerance_K
-            )
-
-        def _vti_detail(state: dict[str, Any]) -> str:
-            temperature = state.get(self._vti_vi_name, {}).get("temperature")
-            if isinstance(temperature, bool) or not isinstance(temperature, (int, float)):
-                return "reading unavailable"
-            return f"currently {float(temperature):.1f} K"
-
         conditions = [
             ReadinessCondition(
                 key="zero_field",
                 label="All magnets at zero field",
                 check=_zero_field_holds,
                 detail=_zero_field_detail,
-            ),
-            ReadinessCondition(
-                key="vti_at_target",
-                label=f"VTI at {self._target_temperature_K:.0f} K",
-                check=_vti_holds,
-                detail=_vti_detail,
-            ),
-        ]
-        if self._needle_valve == _NEEDLE_VALVE_MANUAL:
-            conditions.append(
-                ReadinessCondition(
-                    key="needle_valve_confirmed",
-                    label="Needle valve closed",
-                    check=lambda _state: self.confirmed("needle_valve"),
-                    detail=None,
-                )
             )
+        ]
+
+        def _step_row(step: OperationStep) -> ReadinessCondition:
+            """Build the live checklist row for one declared step."""
+
+            def _holds(_state: dict[str, Any], key: str = step.key) -> bool:
+                record = self.step_records().get(key)
+                return record is not None and record.status == STEP_STATUS_DONE
+
+            def _detail(state: dict[str, Any], step: OperationStep = step) -> str:
+                record = self.step_records().get(step.key)
+                if record is not None and record.status == STEP_STATUS_SKIPPED:
+                    return "skipped by operator"
+                if record is not None:
+                    return "done"
+                return step.detail(state) if step.detail else "pending"
+
+            return ReadinessCondition(
+                key=step.key,
+                label=step.label,
+                check=_holds,
+                detail=_detail,
+            )
+
+        conditions.extend(_step_row(step) for step in self.steps())
         return tuple(conditions)
 
     def initiate(self) -> PhasePlan:
@@ -486,6 +693,9 @@ class _SampleAccessOperationBase(OperationBase):
             unrelated test the operator does not want this run to disturb).
         """
         self._reset_recording()
+        self._reset_steps()
+        self.skip_ramp_requested = False
+        self._recording_channels_frozen = self._discover_recording_channels()
         targets: dict[str, Target] = {
             self._vti_vi_name: Target(self._target_temperature_K)
         }
@@ -514,27 +724,123 @@ class _SampleAccessOperationBase(OperationBase):
     # parking begins, unlike the helium fill's zero-field-before-sampling
     # gate.
 
+    def _discover_recording_channels(self) -> list[str]:
+        """Return every ``<vi>.<monitored>`` channel that currently reads numeric.
+
+        The recording is deliberately station-wide: the question a sample
+        change's log entry has to answer is "what was the whole system doing
+        while the cryostat was open", which is not answerable from the VTI
+        and the magnets alone. Rather than curate a list that would go stale
+        the moment a config gains an instrument, every ``@monitored`` method
+        on every registered VI is a candidate, so a newly configured
+        instrument — a pressure gauge, say — appears in the record with no
+        change here.
+
+        Channels whose current reading is not numeric are excluded, because
+        ``_record_sample()`` holds floats only and requires a channel set
+        that never changes mid-run. Their values are captured per step
+        instead (``step_conditions_snapshot()``).
+
+        Whether a channel reads numerically can only be answered from an
+        actual reading, so this needs a populated state. It normally is —
+        the Orchestrator has been polling since monitoring started — but a
+        station built and run in one go (a test, a headless script) has an
+        empty cache at ``initiate()``, which would silently freeze an empty
+        channel set and record nothing at all. One explicit poll in that
+        case, at run start only, is worth far more than a silently empty
+        recording.
+
+        Returns:
+            Sorted ``"<vi>.<method>"`` channel names. Sorted, not
+            registration-ordered, so the recorded channel set is stable
+            across runs regardless of VI registration order.
+        """
+        state = self._station.cached_state
+        if not state:
+            state = self._station.get_state()
+        channels: list[str] = []
+        for vi_name in self._station.get_vi_names():
+            try:
+                vi = self._station.get_vi(vi_name)
+            except KeyError:  # pragma: no cover - registry consistency
+                continue
+            fields = state.get(vi_name, {})
+            for method_name in get_monitored_methods(vi):
+                value = fields.get(method_name)
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    continue
+                channels.append(f"{vi_name}.{method_name}")
+        return sorted(channels)
+
     def sample(self) -> None:
-        """Record the VTI temperature and every magnet's field (the hold-phase recording).
+        """Record every numeric monitored channel on the station (the hold-phase recording).
 
         Called once per tick (``measure()`` adapter), throttled to
         ``sample_period_s`` by ``step()``'s ``wait_s`` — mirrors
-        ``HeliumFillOperation.sample()``'s cadence exactly. Reads live VI
-        values through the Station (never ``cached_state`` directly — this
-        is a genuine per-tick reading, like any other ``sample()``), so the
-        recording spans the whole hold, from the ramps landing to Finish.
+        ``HeliumFillOperation.sample()``'s cadence exactly.
+
+        Reads ``cached_state`` rather than calling each VI live. Every other
+        ``sample()`` in the codebase takes a genuine per-tick reading, and
+        this one used to as well, but that does not scale to a station-wide
+        recording: a live read of every monitored method on every instrument
+        would put dozens of extra GPIB transactions in the tick path, which
+        the single-threaded cooperative design does not allow. The
+        Orchestrator has already polled every VI into ``cached_state`` this
+        same tick, so this is the same data at no additional bus cost.
+
+        Also completes the ``warm_vti`` step the first tick the VTI reads
+        within tolerance — that step is the one part of the sequence the
+        system performs, so the system, not the operator, records it done.
         """
         now = time.time()
-        values: dict[str, float] = {
-            f"{self._vti_vi_name}.temperature": float(
-                self._station.get_vi(self._vti_vi_name).temperature()
-            )
-        }
-        for magnet in self._magnets:
-            values[f"{magnet}.magnet_field_T"] = float(
-                self._station.get_vi(magnet).magnet_field_T()
-            )
+        state = self._station.cached_state
+        values: dict[str, float] = {}
+        for channel in self._recording_channels_frozen:
+            vi_name, _, field = channel.partition(".")
+            value = state.get(vi_name, {}).get(field)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                # A channel that has stopped reading numerically (a
+                # disconnected instrument) must still occupy its slot:
+                # _record_sample() rejects a changed channel set, and a
+                # gap is more honest than dropping the whole sample.
+                values[channel] = float("nan")
+                continue
+            values[channel] = float(value)
         self._record_sample(now, values)
+
+        if self._vti_at_target(state):
+            self._record_step_if_pending(_STEP_WARM_VTI, STEP_STATUS_DONE)
+
+    def _record_step_if_pending(self, key: str, status: str) -> None:
+        """Stamp a step outcome only if that step is declared and still pending.
+
+        Args:
+            key: A step key that may or may not be declared by this
+                instance's ``steps()``.
+            status: The outcome to record.
+        """
+        if key in self.step_records():
+            return
+        if not any(step.key == key for step in self.steps()):
+            return
+        self._record_step(key, status)
+
+    def _vti_at_target(self, state: dict[str, Any]) -> bool:
+        """Return whether the VTI reading in ``state`` is within tolerance of target.
+
+        Args:
+            state: A ``{vi_name: {field: value}}`` snapshot.
+
+        Returns:
+            True when the reading exists, is numeric, and is within
+            ``temperature_tolerance_K`` of ``target_temperature_K``.
+        """
+        temperature = state.get(self._vti_vi_name, {}).get("temperature")
+        if isinstance(temperature, bool) or not isinstance(temperature, (int, float)):
+            return False
+        return abs(float(temperature) - self._target_temperature_K) <= (
+            self._temperature_tolerance_K
+        )
 
     def step(self) -> StepPlan | None:
         """Keep the run open — the hold phase.
@@ -576,9 +882,14 @@ class _SampleAccessOperationBase(OperationBase):
             ``zero_field`` (always — every magnet's ``magnet_state() ==
             "standby"``, which already implies the switch heater is off
             wherever a magnet has one, so there is no separate heater gate);
-            ``vti_at_target`` (always); and ``needle_valve_confirmed`` (only
-            when ``needle_valve == "manual"`` — the only supported mode
-            today, so effectively always).
+            ``vti_at_target`` (always); and one ``step_<key>`` gate per
+            declared step, met only when that step was recorded ``done``.
+            ``vti_at_target`` and ``step_warm_vti`` are deliberately both
+            present and are not the same assertion: the first is a live
+            reading now, the second is whether the warm-up was ever
+            completed rather than skipped. A run that warmed up and then
+            drifted fails the first only; a run that skipped the warm-up
+            fails both.
         """
         gates: list[Gate] = []
 
@@ -594,28 +905,25 @@ class _SampleAccessOperationBase(OperationBase):
             Gate("zero_field", check=_all_magnets_standby, window_s=10.0)
         )
 
-        def _vti_at_target() -> bool:
-            state = self._station.cached_state
-            temperature = state.get(self._vti_vi_name, {}).get("temperature")
-            if isinstance(temperature, bool) or not isinstance(temperature, (int, float)):
-                return False
-            return abs(float(temperature) - self._target_temperature_K) <= (
-                self._temperature_tolerance_K
-            )
-
         gates.append(
             Gate(
                 "vti_at_target",
-                check=_vti_at_target,
+                check=lambda: self._vti_at_target(self._station.cached_state),
                 window_s=self._temperature_window_s,
             )
         )
 
-        if self._needle_valve == _NEEDLE_VALVE_MANUAL:
+        # One gate per declared step, so a skipped step is reported exactly
+        # like any other unverified postcondition — named in the manifest's
+        # postconditions_unmet list and carried into the servicing-log
+        # notes, without ever blocking the run from completing. This is why
+        # skipping is safe to offer on every step: the override is recorded,
+        # not silently swallowed.
+        for step in self.steps():
             gates.append(
                 Gate(
-                    "needle_valve_confirmed",
-                    check=lambda: self.confirmed("needle_valve"),
+                    f"step_{step.key}",
+                    check=lambda key=step.key: self.confirmed(key),
                     window_s=0.0,
                 )
             )

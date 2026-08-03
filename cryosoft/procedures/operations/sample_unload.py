@@ -4,7 +4,8 @@
 #   pair (see sample_access_base.py's _SampleAccessOperationBase, which
 #   implements everything). Declares only this operation's identity — name,
 #   description, ready_message, config_key — so the Operations panel's
-#   generic config-block discovery and card-building can find it.
+#   generic config-block discovery and card-building can find it, plus the
+#   one step label that differs between load and unload (rod_step_label).
 # entry_point: Not run directly. Constructed by the GUI's Operations panel
 #   or a test, submitted via Orchestrator.run_operation()/queue_operation().
 # dependencies:
@@ -32,12 +33,14 @@ class SampleUnloadOperation(_SampleAccessOperationBase):
 
     All behavior is inherited from ``_SampleAccessOperationBase`` — see its
     docstring. This class exists to give the "unload" half of the
-    sample-access pair its own display name, config key, and
+    sample-access pair its own display name, config key,
     servicing-log ``entry_kind`` (derived from ``name`` by
-    ``CryogenicsRecorder``), distinct from ``SampleLoadOperation``'s.
+    ``CryogenicsRecorder``), and rod-step wording, distinct from
+    ``SampleLoadOperation``'s.
     """
 
     name = "Sample Unload"
     description = "Bring the cryostat to a safe state to unload the sample"
     ready_message = "Ready — sample can be unloaded"
     config_key = "sample_unload"
+    rod_step_label = "Withdraw the sample rod"

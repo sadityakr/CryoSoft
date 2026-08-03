@@ -28,7 +28,13 @@
 #   step() stays open-ended (never returns None on its own) until the
 #   operator clicks Finish; the Operations panel reads it to show the ready
 #   banner mid-run, once every readiness condition holds, instead of only
-#   after the run ends.
+#   after the run ends. Also declares the step standard for operations whose
+#   hold phase is a named sequence rather than one undifferentiated wait
+#   (a sample change): OperationStep/StepRecord plus steps()/current_step()/
+#   confirm_step()/skip_step()/steps_summary(), rendered generically by the
+#   Operations panel. Every step is skippable as a recorded override, never
+#   a failure; skipping an auto_ramp step needs the Orchestrator to stop the
+#   ramp in place, since step() is not called while the state is RAMPING.
 # entry_point: Not run directly. Subclassed by concrete operations
 #   (``cryosoft.procedures.operations.*``).
 # dependencies:
@@ -37,7 +43,7 @@
 # input: |
 #   Concrete subclasses implement initiate()/step()/standby() (and optionally
 #   sample()/abort()/initiation_gates()/postcondition_gates()/
-#   readiness_conditions()/next_due()/run_summary()); the Orchestrator drives
+#   readiness_conditions()/next_due()/run_summary()/steps()); the Orchestrator drives
 #   the lifecycle exactly like a BaseProcedure, submitted via
 #   Orchestrator.run_operation() / queue_operation(); the GUI's Operations
 #   panel drives readiness_conditions()/next_due() against per-tick state
@@ -61,13 +67,15 @@
 #   consumed by the Orchestrator (merged into the run manifest) and, from
 #   there, the session layer (e.g. CryogenicsRecorder), which reads a
 #   "recording" key in the _recording_dict() shape as this run's sidecar.
-# last_updated: 2026-07-23
+# last_updated: 2026-08-03
 # ---
 
 """OperationBase — the L4 contract for cryostat-servicing operations."""
 
 from __future__ import annotations
 
+import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, final
@@ -75,7 +83,37 @@ from typing import Any, final
 from cryosoft.core.gates import Gate
 from cryosoft.core.plan import Command, PhasePlan, StepPlan
 
-__all__ = ["NextDue", "OperationBase", "ReadinessCondition"]
+logger = logging.getLogger(__name__)
+
+__all__ = [
+    "STEP_KINDS",
+    "STEP_KIND_AUTO_RAMP",
+    "STEP_KIND_OPERATOR_ACK",
+    "STEP_STATUS_DONE",
+    "STEP_STATUS_SKIPPED",
+    "NextDue",
+    "OperationBase",
+    "OperationStep",
+    "ReadinessCondition",
+    "StepRecord",
+]
+
+#: The two step kinds an operation may declare. ``"auto_ramp"`` is carried
+#: out by the system (a ramp dispatched in a plan); ``"operator_ack"`` is a
+#: purely physical action the software cannot perform or verify, completed
+#: by the operator ticking it off. Skipping the two differs: skipping an
+#: ``"auto_ramp"`` step must also stop the ramp it started, which only the
+#: Orchestrator can do (see ``Orchestrator.skip_operation_step()``).
+STEP_KIND_AUTO_RAMP = "auto_ramp"
+STEP_KIND_OPERATOR_ACK = "operator_ack"
+STEP_KINDS = frozenset({STEP_KIND_AUTO_RAMP, STEP_KIND_OPERATOR_ACK})
+
+#: The two terminal states of a declared step, recorded in ``StepRecord``.
+#: There is deliberately no "failed" status: a step the operator could not
+#: complete is *skipped*, which is an override the run records rather than
+#: an error that ends it.
+STEP_STATUS_DONE = "done"
+STEP_STATUS_SKIPPED = "skipped"
 
 
 @dataclass(frozen=True)
@@ -108,6 +146,83 @@ class ReadinessCondition:
     label: str
     check: Callable[[dict[str, Any]], bool]
     detail: Callable[[dict[str, Any]], str] | None = None
+
+
+@dataclass(frozen=True)
+class OperationStep:
+    """One declared step of a stepped operation, walked through in order.
+
+    A *stepped* operation is one whose hold phase is a named sequence the
+    operator advances through one step at a time, rather than a single
+    undifferentiated wait. It declares the sequence via
+    ``OperationBase.steps()``; the GUI renders one row per step, shows a
+    Confirm/Skip action for the current one, and the operation records when
+    each was completed or skipped.
+
+    Why the type lives in ``core`` and not beside the operation that uses
+    it: the GUI must render steps without importing anything from the
+    procedures layer (layer contract C6 — the GUI talks to the Orchestrator
+    and the core currency types, never to L4 directly).
+
+    Attributes:
+        key: Stable identifier, snake_case (e.g. ``"close_needle_valve"``).
+            Used as a widget-name suffix and as the key the GUI passes back
+            through ``Orchestrator.confirm_operation()`` /
+            ``skip_operation_step()``; must be unique within one operation's
+            ``steps()`` tuple.
+        label: Human-readable step label, e.g. ``"Close the needle valve"``.
+        kind: One of ``STEP_KINDS``. ``"auto_ramp"`` steps are carried out
+            by the system and complete on their own; ``"operator_ack"``
+            steps complete only when the operator confirms them.
+        skippable: Whether the GUI offers a Skip action for this step. A
+            skipped step is recorded as an override, never as a failure.
+        detail: Optional ``state_snapshot -> str`` giving live context next
+            to the label (e.g. the current temperature). Same pure-read
+            contract as ``ReadinessCondition.detail``: cached state only,
+            never touches hardware.
+        skip_warning: Optional ``state_snapshot -> str`` producing the
+            warning text shown when the operator asks to skip this step,
+            e.g. naming the temperature the cryostat is about to be opened
+            at. ``None`` means a generic warning.
+    """
+
+    key: str
+    label: str
+    kind: str
+    skippable: bool = True
+    detail: Callable[[dict[str, Any]], str] | None = None
+    skip_warning: Callable[[dict[str, Any]], str] | None = None
+
+
+@dataclass(frozen=True)
+class StepRecord:
+    """The recorded outcome of one declared step: what happened, and when.
+
+    Stamped by the operation the moment the operator confirms or skips a
+    step, and handed to the session layer through ``run_summary()`` so the
+    servicing-log entry carries the actual timeline of a sample change
+    rather than only its start and end.
+
+    ``conditions`` is where the non-numeric monitored values live. The
+    continuous recording (``OperationBase._record_sample()``) can only hold
+    floats, so string-valued readings — a needle valve's AUTO/MANUAL mode, a
+    magnet's state — are captured here instead, which is also where they are
+    most useful: what the valve mode actually was at the instant the
+    operator attested the valve was closed.
+
+    Attributes:
+        key: The ``OperationStep.key`` this record belongs to.
+        status: ``STEP_STATUS_DONE`` or ``STEP_STATUS_SKIPPED``.
+        unix_time: When the step was confirmed or skipped.
+        conditions: Flat ``{"<vi>.<field>": value}`` snapshot of the
+            station's cached state at that instant, values kept as-is
+            (floats and strings both). JSON-plain.
+    """
+
+    key: str
+    status: str
+    unix_time: float
+    conditions: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -166,6 +281,54 @@ class OperationBase:
     they are marked ``@typing.final`` for exactly this reason. This is what
     lets ``Orchestrator.run_operation()`` reuse the existing setup/dispatch
     path with essentially no new state-machine branching (§4.2).
+
+    Stepped operations (the step standard)
+    -------------------------------------------------------------
+    Some operations are not a single wait but a *named sequence* the
+    operator walks through: a sample change is warm up, close the needle
+    valve, open the sample access valve, move the rod, close the valve,
+    flush. The software performs almost none of it, but it must record
+    exactly when each part happened, and it must let the operator override
+    any of it — a sample change has to be possible at base temperature,
+    with a warning, not be blocked by a temperature the operation would
+    prefer.
+
+    An operation opts in by overriding ``steps()`` to return a non-empty
+    ordered tuple of ``OperationStep``. Everything else follows with no
+    per-operation GUI code, mirroring the readiness-condition standard
+    below:
+
+    * ``current_step()`` is the first step with no recorded outcome. That
+      single rule is what makes the sequence sequential — the GUI shows a
+      Confirm/Skip action for that step only, and it advances the moment an
+      outcome is recorded.
+    * ``confirm_step(key)`` / ``skip_step(key)`` stamp a ``StepRecord``
+      (status, unix time, and a snapshot of the station conditions via
+      ``step_conditions_snapshot()``). They reach here from the GUI through
+      ``Orchestrator.confirm_operation()`` and
+      ``Orchestrator.skip_operation_step()`` — an operation is never called
+      into directly from the GUI.
+    * ``steps_summary()`` returns the whole timeline, pending steps
+      included, for ``run_summary()`` and thence the servicing log.
+    * ``_reset_steps()`` clears the timeline; call it from ``initiate()``
+      alongside ``_reset_recording()``.
+
+    A skip is an override, not a failure. The run always continues; the
+    skipped step is expected to be surfaced by ``postcondition_gates()`` as
+    unmet, which lands it in the run manifest's ``postconditions_unmet``
+    list without ever blocking completion. This is the same mechanism that
+    already reports an unverified postcondition, reused rather than
+    duplicated.
+
+    One kind of step needs the Orchestrator's help to skip.
+    ``STEP_KIND_AUTO_RAMP`` steps are carried out by a ramp the operation
+    dispatched, and while that ramp runs the Orchestrator is in RAMPING,
+    where ``step()`` is never called — so the operation cannot stop its own
+    ramp. ``Orchestrator.skip_operation_step()`` handles that case by
+    stopping the ramp in place (the same hold-in-place used by
+    ``pause_procedure()``), which leaves the instrument clamped wherever it
+    had reached. ``STEP_KIND_OPERATOR_ACK`` steps need none of this: they
+    are physical actions with no hardware counterpart at all.
 
     Readiness / next-due contract (Operations panel)
     -------------------------------------------------------------
@@ -343,6 +506,7 @@ class OperationBase:
         #: read-only — set it via ``request_finish()``, never directly.
         self.finish_requested: bool = False
         self._reset_recording()
+        self._reset_steps()
 
     # ------------------------------------------------------------------
     # Override in subclass
@@ -499,6 +663,209 @@ class OperationBase:
             ``()`` by default (no checklist rows).
         """
         return ()
+
+    # ------------------------------------------------------------------
+    # Stepped-operation contract (opt-in) — see the class docstring's
+    # "Stepped operations" section for the standard this implements.
+    # ------------------------------------------------------------------
+
+    def steps(self) -> tuple[OperationStep, ...]:
+        """Return this operation's ordered step sequence.
+
+        Overriding this (returning a non-empty tuple) makes the operation a
+        *stepped* operation: the GUI renders one row per step, offers a
+        Confirm/Skip action on whichever step is current, and the operation
+        records each outcome. An operation that returns ``()`` — the default
+        — is an ordinary single-hold operation and the step UI never
+        appears, so this is fully backward compatible.
+
+        A method rather than a class attribute so a subclass can vary the
+        sequence with its config or identity (e.g. the same base class
+        labelling one step "Withdraw the sample rod" for an unload and
+        "Insert the sample rod" for a load).
+
+        Returns:
+            ``()`` by default. Otherwise an ordered tuple whose ``key``s are
+            unique and whose ``kind``s are in ``STEP_KINDS`` — both enforced
+            by the conformance suite.
+        """
+        return ()
+
+    def current_step(self) -> OperationStep | None:
+        """Return the first step with no recorded outcome, or ``None`` if all are done.
+
+        This is what makes the sequence sequential: exactly one step is
+        "current" at a time, and it advances the instant that step is
+        confirmed or skipped. Reading it is the GUI's way of knowing which
+        action row to show.
+
+        Returns:
+            The first step of ``steps()`` absent from ``step_records()``, or
+            ``None`` once every step has an outcome (or the operation
+            declares no steps at all).
+        """
+        for step in self.steps():
+            if step.key not in self._step_records:
+                return step
+        return None
+
+    def step_records(self) -> dict[str, StepRecord]:
+        """Return the recorded step outcomes so far, keyed by step key.
+
+        Returns:
+            A shallow copy, so a caller cannot mutate the operation's own
+            record. Empty until the first step is confirmed or skipped.
+        """
+        return dict(self._step_records)
+
+    def step_conditions_snapshot(self) -> dict[str, Any]:
+        """Return the flat state snapshot to stamp onto a step outcome.
+
+        Called by ``confirm_step()``/``skip_step()`` at the moment of the
+        operator's click. The base implementation returns ``{}``; a subclass
+        with a Station overrides it to flatten ``station.cached_state`` — it
+        must be a cached read, never a hardware poll, since it runs inside a
+        GUI callback rather than the tick loop.
+
+        Returns:
+            ``{}`` by default. JSON-plain ``{"<vi>.<field>": value}``
+            otherwise, string values included (that is the point — see
+            ``StepRecord.conditions``).
+        """
+        return {}
+
+    def confirm_step(self, key: str) -> None:
+        """Record that a declared step was completed by the operator.
+
+        Reached from the GUI through ``Orchestrator.confirm_operation(key)``.
+        Never touches hardware: this is a human attestation about a physical
+        action the software cannot perform or verify.
+
+        Recording an already-recorded step is a no-op rather than an error,
+        so a double-click cannot rewrite the timestamp of something that
+        already happened.
+
+        Args:
+            key: One of ``steps()``' keys.
+
+        Raises:
+            ValueError: If ``key`` is not a declared step.
+        """
+        self._record_step(key, STEP_STATUS_DONE)
+
+    def skip_step(self, key: str) -> None:
+        """Record that a declared step was deliberately skipped.
+
+        Reached from the GUI through
+        ``Orchestrator.skip_operation_step(key)``, after the operator
+        confirmed the warning. A skip is an *override*, not a failure: the
+        run continues, and the skipped step is reported through
+        ``postcondition_gates()`` as unmet so it lands in the run manifest's
+        ``postconditions_unmet`` list and, from there, the servicing log.
+
+        Args:
+            key: One of ``steps()``' keys.
+
+        Raises:
+            ValueError: If ``key`` is not a declared step, or the step
+                declares ``skippable=False``.
+        """
+        step = self._step_by_key(key)
+        if not step.skippable:
+            raise ValueError(
+                f"{type(self).__name__}.skip_step: step {key!r} is not "
+                f"skippable."
+            )
+        self._record_step(key, STEP_STATUS_SKIPPED)
+
+    def _step_by_key(self, key: str) -> OperationStep:
+        """Return the declared step named ``key``.
+
+        Args:
+            key: A step key.
+
+        Returns:
+            The matching ``OperationStep``.
+
+        Raises:
+            ValueError: If no declared step has that key.
+        """
+        for step in self.steps():
+            if step.key == key:
+                return step
+        raise ValueError(
+            f"{type(self).__name__}: unknown step key {key!r}; declared "
+            f"steps are {[s.key for s in self.steps()]}"
+        )
+
+    def _record_step(self, key: str, status: str) -> None:
+        """Stamp a step outcome with the current time and station conditions.
+
+        Args:
+            key: A declared step key.
+            status: ``STEP_STATUS_DONE`` or ``STEP_STATUS_SKIPPED``.
+
+        Raises:
+            ValueError: If ``key`` is not a declared step.
+        """
+        step = self._step_by_key(key)
+        if key in self._step_records:
+            logger.debug(
+                "%s: step %r already recorded as %s; ignoring",
+                type(self).__name__,
+                key,
+                self._step_records[key].status,
+            )
+            return
+        self._step_records[key] = StepRecord(
+            key=key,
+            status=status,
+            unix_time=time.time(),
+            conditions=self.step_conditions_snapshot(),
+        )
+        logger.info(
+            "%s: step %r (%s) recorded as %s",
+            type(self).__name__,
+            key,
+            step.label,
+            status,
+        )
+
+    def steps_summary(self) -> list[dict[str, Any]]:
+        """Return the step timeline in the JSON-plain shape for ``run_summary()``.
+
+        Every declared step appears, in declaration order, including ones
+        never reached — those carry ``status: "pending"`` — so the record
+        shows the whole intended sequence rather than only the parts that
+        happened.
+
+        Returns:
+            A list of ``{"key", "label", "kind", "status", "unix_time",
+            "conditions"}`` dicts. ``unix_time`` is ``None`` and
+            ``conditions`` ``{}`` for a pending step.
+        """
+        summary: list[dict[str, Any]] = []
+        for step in self.steps():
+            record = self._step_records.get(step.key)
+            summary.append(
+                {
+                    "key": step.key,
+                    "label": step.label,
+                    "kind": step.kind,
+                    "status": record.status if record else "pending",
+                    "unix_time": record.unix_time if record else None,
+                    "conditions": dict(record.conditions) if record else {},
+                }
+            )
+        return summary
+
+    def _reset_steps(self) -> None:
+        """Clear every recorded step outcome, for a fresh run.
+
+        Call from ``initiate()`` alongside ``_reset_recording()`` so a
+        re-used instance does not inherit the previous run's timeline.
+        """
+        self._step_records: dict[str, StepRecord] = {}
 
     def next_due(self, context: dict[str, Any]) -> NextDue | None:
         """Predict when this operation will next be needed.

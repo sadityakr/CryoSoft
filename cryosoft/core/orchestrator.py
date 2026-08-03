@@ -880,6 +880,87 @@ class Orchestrator(QObject):
                 return
         self._emit_status(f"Confirmed: {key}")
 
+    def skip_operation_step(self, key: str) -> None:
+        """Record that the operator deliberately skipped a step of the active operation.
+
+        The counterpart to ``confirm_operation()``: calls ``skip_step(key)``
+        on the active operation (duck-typed, so an operation that declares
+        no steps is simply ignored), which records the skip as an override
+        rather than a failure. The GUI is responsible for warning the
+        operator first; by the time this is called the decision has been
+        made, and it always succeeds for a declared, skippable step.
+
+        Skipping a step the *system* was carrying out has a second half that
+        only the Orchestrator can do. An ``auto_ramp`` step is a ramp this
+        operation dispatched, and while that ramp runs the state is RAMPING,
+        where the operation's ``step()`` is never called — so the operation
+        cannot retarget or stop its own ramp, and ``stop_ramp()`` refuses a
+        VI claimed by an active run. The operation therefore raises a flag
+        (``skip_ramp_requested``) and ``_tick_body()``'s RAMPING branch
+        stops the ramp in place, leaving the instrument clamped where it had
+        reached. Doing it there rather than here keeps every hardware write
+        on the tick, which is the single-writer rule.
+
+        Args:
+            key: The step key, forwarded verbatim to the operation's
+                ``skip_step()``.
+        """
+        if not self._is_operation_active():
+            msg = "Cannot skip operation step: no operation is currently running."
+            logger.info("Blocked skip_operation_step: %s", msg)
+            self.action_blocked.emit(msg)
+            return
+        skip_step = getattr(self._procedure, "skip_step", None)
+        if callable(skip_step):
+            # Guarded exactly like confirm_operation(): called straight from
+            # a Qt slot, so an undeclared or unskippable key becomes a
+            # verdict, never an unhandled exception in the GUI thread.
+            try:
+                skip_step(key)
+            except Exception as exc:  # noqa: BLE001 — verdict, not crash
+                logger.error("skip_operation_step(%r) rejected: %s", key, exc)
+                self.action_blocked.emit(f"Cannot skip {key!r}: {exc}")
+                return
+        logger.warning(
+            "Operator skipped step %r of %s — recorded as an override.",
+            key,
+            getattr(self._procedure, "name", type(self._procedure).__name__),
+        )
+        self._emit_status(f"Skipped: {key}")
+
+    def _stop_ramps_for_skipped_step(self) -> bool:
+        """Stop the active run's ramps in place if a skipped step asked for it.
+
+        Reads and clears the active operation's ``skip_ramp_requested``
+        flag. ``Station.stop_ramps()`` is a hold-in-place — the same call
+        ``pause_procedure()`` makes — so the instrument stays wherever the
+        ramp had reached rather than returning anywhere, which is exactly
+        what "skip the warm-up" should mean: stop climbing, hold here.
+
+        Only VIs in ``_active_system_vis`` are stopped. That set is built
+        from the run's plan *targets* (see ``_start_procedure``), so for a
+        sample-access operation it is the VTI alone; magnets, dispatched as
+        commands, keep ramping down to zero field, which is both safe and
+        wanted — skipping the warm-up is not a reason to leave the magnet
+        energised while the cryostat is opened.
+
+        Returns:
+            True if a skip was pending and the ramps were stopped, False
+            otherwise (the overwhelmingly common case, one attribute read).
+        """
+        if not self._is_operation_active():
+            return False
+        if not getattr(self._procedure, "skip_ramp_requested", False):
+            return False
+        self._procedure.skip_ramp_requested = False
+        self._station.stop_ramps(self._active_system_vis or None)
+        logger.warning(
+            "Stopped the active run's ramps in place: the operator skipped "
+            "the step that started them."
+        )
+        self._emit_status("Ramp stopped — step skipped, holding here")
+        return True
+
     def recover_from_error(self) -> None:
         """Return to IDLE after the user has reviewed an ERROR condition.
 
@@ -1941,6 +2022,13 @@ class Orchestrator(QObject):
         elif self._state == OrchestratorState.INITIATING:
             self._change_state(OrchestratorState.RAMPING)
         elif self._state == OrchestratorState.RAMPING:
+            # A skipped auto_ramp step ends this ramp early. The operation
+            # cannot do it itself — step() is not called in RAMPING — so the
+            # flag it raised is honoured here, on the tick, where every
+            # other hardware write happens. stop_ramps() holds in place, so
+            # check_ramps() reports complete on this same tick and the run
+            # proceeds exactly as if the ramp had landed.
+            self._stop_ramps_for_skipped_step()
             if self._station.check_ramps():  # True = all ramps complete
                 if self._procedure is None:
                     # Manual ramp from GUI — return to IDLE.

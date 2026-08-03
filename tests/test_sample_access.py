@@ -53,6 +53,12 @@ import time
 import pytest
 
 from cryosoft.core.exceptions import CryoSoftConfigError
+from cryosoft.core.operation import (
+    STEP_KIND_AUTO_RAMP,
+    STEP_KIND_OPERATOR_ACK,
+    STEP_STATUS_DONE,
+    STEP_STATUS_SKIPPED,
+)
 from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 from cryosoft.core.plan import PhasePlan, Target
 from cryosoft.core.station import build_station
@@ -185,17 +191,82 @@ def test_construction_rejects_non_manual_needle_valve(op_cls, station):
         op_cls(station, needle_valve="auto")
 
 
-# ── Operator confirmations (the declaration standard itself) ─────────────────
+# ── The declared step sequence (the step standard itself) ────────────────────
+
+
+_EXPECTED_STEP_KEYS = [
+    "warm_vti",
+    "close_needle_valve",
+    "open_access_valve",
+    "move_rod",
+    "close_access_valve",
+    "flush",
+]
 
 
 @pytest.mark.parametrize("op_cls", _OPERATION_CLASSES, ids=_OPERATION_IDS)
-def test_operator_confirmations_declared_and_confirm_confirmed_roundtrip(op_cls, station):
+def test_steps_declared_in_physical_order(op_cls, station):
+    """The sequence is the physical procedure, in the order it is performed."""
     op = op_cls(station)
-    assert op.operator_confirmations == {"needle_valve": "Needle valve closed"}
-    assert op.confirmed("needle_valve") is False
+    assert [s.key for s in op.steps()] == _EXPECTED_STEP_KEYS
 
-    op.confirm("needle_valve")
-    assert op.confirmed("needle_valve") is True
+    kinds = {s.key: s.kind for s in op.steps()}
+    assert kinds["warm_vti"] == STEP_KIND_AUTO_RAMP
+    assert all(
+        kind == STEP_KIND_OPERATOR_ACK
+        for key, kind in kinds.items()
+        if key != "warm_vti"
+    ), "everything except the VTI ramp is a physical act the software cannot do"
+
+    # Every step is skippable — a sample change must never be blocked.
+    assert all(s.skippable for s in op.steps())
+
+
+def test_rod_step_label_is_the_only_difference_between_load_and_unload(station):
+    load = SampleLoadOperation(station)
+    unload = SampleUnloadOperation(station)
+
+    load_steps = {s.key: s.label for s in load.steps()}
+    unload_steps = {s.key: s.label for s in unload.steps()}
+
+    assert load_steps["move_rod"] == "Insert the sample rod"
+    assert unload_steps["move_rod"] == "Withdraw the sample rod"
+    assert {k: v for k, v in load_steps.items() if k != "move_rod"} == {
+        k: v for k, v in unload_steps.items() if k != "move_rod"
+    }
+
+
+@pytest.mark.parametrize("op_cls", _OPERATION_CLASSES, ids=_OPERATION_IDS)
+def test_current_step_advances_only_as_each_is_recorded(op_cls, station):
+    """Sequential, one at a time: current_step() is the first without an outcome."""
+    op = op_cls(station)
+    assert op.current_step().key == "warm_vti"
+
+    op.confirm("warm_vti")
+    assert op.current_step().key == "close_needle_valve"
+
+    # Skipping advances too — an override is an outcome, not a failure.
+    op.skip_step("close_needle_valve")
+    assert op.current_step().key == "open_access_valve"
+
+    for key in ("open_access_valve", "move_rod", "close_access_valve", "flush"):
+        op.confirm(key)
+    assert op.current_step() is None
+
+
+@pytest.mark.parametrize("op_cls", _OPERATION_CLASSES, ids=_OPERATION_IDS)
+def test_confirm_roundtrip_and_skipped_step_is_not_confirmed(op_cls, station):
+    op = op_cls(station)
+    assert op.confirmed("close_needle_valve") is False
+
+    op.confirm("close_needle_valve")
+    assert op.confirmed("close_needle_valve") is True
+
+    # A skipped step is recorded, but is NOT "confirmed" — the distinction
+    # is what makes the override visible in postconditions_unmet.
+    op.skip_step("flush")
+    assert op.step_records()["flush"].status == STEP_STATUS_SKIPPED
+    assert op.confirmed("flush") is False
 
 
 @pytest.mark.parametrize("op_cls", _OPERATION_CLASSES, ids=_OPERATION_IDS)
@@ -203,6 +274,69 @@ def test_confirm_unknown_key_raises(op_cls, station):
     op = op_cls(station)
     with pytest.raises(ValueError):
         op.confirm("not_a_declared_key")
+
+
+@pytest.mark.parametrize("op_cls", _OPERATION_CLASSES, ids=_OPERATION_IDS)
+def test_skip_unknown_key_raises(op_cls, station):
+    op = op_cls(station)
+    with pytest.raises(ValueError):
+        op.skip_step("not_a_declared_key")
+
+
+@pytest.mark.parametrize("op_cls", _OPERATION_CLASSES, ids=_OPERATION_IDS)
+def test_recording_an_outcome_twice_keeps_the_first(op_cls, station):
+    """A double-click must not rewrite the time something already happened."""
+    op = op_cls(station)
+    op.confirm("flush")
+    first = op.step_records()["flush"]
+
+    op.confirm("flush")
+    op.skip_step("flush")
+    assert op.step_records()["flush"] == first
+
+
+@pytest.mark.parametrize("op_cls", _OPERATION_CLASSES, ids=_OPERATION_IDS)
+def test_skipping_the_warm_up_asks_for_the_ramp_to_stop(op_cls, station):
+    """Only an auto_ramp step raises the flag the Orchestrator acts on."""
+    op = op_cls(station)
+    assert op.skip_ramp_requested is False
+
+    op.skip_step("flush")
+    assert op.skip_ramp_requested is False, "an operator_ack step drives no hardware"
+
+    op.skip_step("warm_vti")
+    assert op.skip_ramp_requested is True
+
+
+@pytest.mark.parametrize("op_cls", _OPERATION_CLASSES, ids=_OPERATION_IDS)
+def test_step_record_captures_conditions_including_non_numeric(op_cls, station):
+    """The step record is where string-valued readings land; the trace cannot hold them."""
+    station.get_state()
+    op = op_cls(station)
+    op.confirm("close_needle_valve")
+
+    conditions = op.step_records()["close_needle_valve"].conditions
+    assert conditions["temperature_vti.needle_valve_mode"] in {"AUTO", "MANUAL"}
+    assert isinstance(conditions["temperature_vti.temperature"], (int, float))
+    for magnet in station.magnet_vi_names():
+        assert isinstance(conditions[f"{magnet}.magnet_state"], str)
+
+
+@pytest.mark.parametrize("op_cls", _OPERATION_CLASSES, ids=_OPERATION_IDS)
+def test_steps_summary_lists_every_step_including_pending(op_cls, station):
+    op = op_cls(station)
+    op.confirm("warm_vti")
+    op.skip_step("close_needle_valve")
+
+    summary = {row["key"]: row for row in op.steps_summary()}
+    assert [row["key"] for row in op.steps_summary()] == _EXPECTED_STEP_KEYS
+    assert summary["warm_vti"]["status"] == STEP_STATUS_DONE
+    assert summary["close_needle_valve"]["status"] == STEP_STATUS_SKIPPED
+    assert summary["flush"]["status"] == "pending"
+    assert summary["flush"]["unix_time"] is None
+    assert summary["warm_vti"]["unix_time"] > 0
+    # JSON-plain: it round-trips through the run manifest into a sidecar.
+    json.dumps(op.steps_summary())
 
 
 # ── Full happy-path run ────────────────────────────────────────────────────
@@ -230,7 +364,8 @@ def test_holds_until_finish_then_all_postconditions_held(op_cls, orchestrator, s
     assert started and started[0]["kind"] == "operation"
     assert started[0]["procedure"] == op_cls.name
 
-    orchestrator.confirm_operation("needle_valve")
+    for key in _EXPECTED_STEP_KEYS:
+        orchestrator.confirm_operation(key)
 
     # Let the ramps settle to zero field / target temperature, then run a
     # further batch of ticks — the run must NOT finish on its own (the hold
@@ -264,8 +399,10 @@ def test_holds_until_finish_then_all_postconditions_held(op_cls, orchestrator, s
 
 
 @pytest.mark.parametrize("op_cls", _OPERATION_CLASSES, ids=_OPERATION_IDS)
-def test_records_vti_and_magnet_fields(op_cls, orchestrator, station, qtbot):
-    """sample() records the VTI temperature + every magnet's field every hold-phase tick."""
+def test_records_every_numeric_monitored_channel_on_the_station(
+    op_cls, orchestrator, station, qtbot
+):
+    """The recording spans the whole station, not just the VTI and the magnets."""
     _fast_magnets(station)
     _fast_vti(station)
 
@@ -274,7 +411,7 @@ def test_records_vti_and_magnet_fields(op_cls, orchestrator, station, qtbot):
     orchestrator.run_finished.connect(finished.append)
 
     orchestrator.run_operation(op)
-    orchestrator.confirm_operation("needle_valve")
+    orchestrator.confirm_operation("close_needle_valve")
 
     # A handful of hold-phase ticks (sample() runs once per MEASURING state).
     for _ in range(50):
@@ -289,6 +426,21 @@ def test_records_vti_and_magnet_fields(op_cls, orchestrator, station, qtbot):
     assert "temperature_vti.temperature" in channels
     for magnet in station.magnet_vi_names():
         assert f"{magnet}.magnet_field_T" in channels
+
+    # The point of the widened trace: instruments that have nothing to do
+    # with the sample access itself are recorded too, because "what was the
+    # system doing while the cryostat was open" is the question the log
+    # entry has to answer. Cryogen levels are the case that matters most —
+    # a sample change is when helium gets lost.
+    assert "level_meter.helium_level" in channels
+    assert "level_meter.nitrogen_level" in channels
+    assert "temperature_sample.temperature" in channels
+    assert "temperature_vti.needle_valve" in channels
+
+    # No string-valued channel leaked into the numeric trace.
+    assert "temperature_vti.needle_valve_mode" not in channels
+    assert "magnet_z.magnet_state" not in channels
+
     assert len(recording["unix_time"]) >= 1
     for series in channels.values():
         assert len(series) == len(recording["unix_time"])
@@ -326,8 +478,133 @@ def test_needle_valve_not_confirmed_finishes_promptly_with_unmet_postcondition(
     orchestrator.finish_operation()
     _tick_until(orchestrator, lambda: bool(finished), max_ticks=1000, sleep_s=0.005)
     assert finished[0]["status"] == "done"
-    assert finished[0]["postconditions_unmet"] == ["needle_valve_confirmed"]
+    # warm_vti completed on its own (the VTI already reads the target), so
+    # every remaining unmet gate is an unconfirmed operator step.
+    assert finished[0]["postconditions_unmet"] == [
+        "step_close_needle_valve",
+        "step_open_access_valve",
+        "step_move_rod",
+        "step_close_access_valve",
+        "step_flush",
+    ]
     assert orchestrator._state == OrchestratorState.IDLE
+
+
+@pytest.mark.parametrize("op_cls", _OPERATION_CLASSES, ids=_OPERATION_IDS)
+def test_warm_up_step_completes_itself_when_the_vti_reaches_target(
+    op_cls, orchestrator, station, qtbot
+):
+    """The one step the system performs is recorded by the system, not the operator."""
+    _fast_magnets(station)
+    _fast_vti(station)
+    station.temperature_vti._driver._temperature = 250.0
+    station.temperature_vti._driver._setpoint = 250.0
+
+    op = _make_op(op_cls, station, target_temperature_K=290.0, sample_period_s=0.0)
+    orchestrator.run_operation(op)
+    assert op.current_step().key == "warm_vti"
+
+    _tick_until(
+        orchestrator,
+        lambda: "warm_vti" in op.step_records(),
+        max_ticks=2000,
+        sleep_s=0.01,
+    )
+    assert op.step_records()["warm_vti"].status == STEP_STATUS_DONE
+    assert op.current_step().key == "close_needle_valve"
+    assert abs(station.temperature_vti.temperature() - 290.0) <= 2.0
+
+
+# ── Skipping: a sample change is never blocked, only recorded ──────────────
+
+
+@pytest.mark.parametrize("op_cls", _OPERATION_CLASSES, ids=_OPERATION_IDS)
+def test_skipping_the_warm_up_stops_the_ramp_and_clamps_the_vti(
+    op_cls, orchestrator, station, qtbot
+):
+    """The headline behaviour: change a sample at base temperature, on the record."""
+    _fast_magnets(station)
+    # Deliberately NOT _fast_vti: the VTI keeps its real 2 K/min ramp rate,
+    # so the run is genuinely stuck in RAMPING far from 290 K when the
+    # operator skips. That is the situation this exists for — a sample that
+    # has to come out now, at base temperature.
+    vti = station.temperature_vti
+    vti._driver._temperature = 4.0
+    vti._driver._setpoint = 4.0
+
+    op = _make_op(op_cls, station, target_temperature_K=290.0, sample_period_s=0.0)
+    finished: list[dict] = []
+    orchestrator.run_finished.connect(finished.append)
+    orchestrator.run_operation(op)
+
+    # The run parks in RAMPING: without the skip it would sit here for the
+    # ~2.4 hours the warm-up actually takes.
+    for _ in range(20):
+        orchestrator._tick()
+    assert orchestrator._state == OrchestratorState.RAMPING
+    assert vti.ramp_status() == "RAMPING"
+    assert vti.temperature() < 290.0
+
+    orchestrator.skip_operation_step("warm_vti")
+    assert op.skip_ramp_requested is True
+
+    # The Orchestrator stops the ramp on the tick, not in the GUI call —
+    # the single-writer rule. One tick is enough, and it also releases the
+    # run from RAMPING, which is the part the operation cannot do itself.
+    orchestrator._tick()
+    assert op.skip_ramp_requested is False
+    assert vti.ramp_status() == "IDLE", "the VTI ramp was not stopped"
+    assert orchestrator._state != OrchestratorState.RAMPING
+
+    for _ in range(200):
+        orchestrator._tick()
+
+    clamped_at = vti.temperature()
+    assert clamped_at == pytest.approx(4.0, abs=1.0), (
+        f"VTI drifted to {clamped_at} K after the warm-up was skipped; it "
+        "should be clamped where it was"
+    )
+    assert op.step_records()["warm_vti"].status == STEP_STATUS_SKIPPED
+    assert op.current_step().key == "close_needle_valve", (
+        "the sequence must carry on past a skipped step"
+    )
+
+    orchestrator.finish_operation()
+    _tick_until(orchestrator, lambda: bool(finished), max_ticks=2000, sleep_s=0.005)
+
+    assert finished[0]["status"] == "done", "a skip must never fail the run"
+    unmet = finished[0]["postconditions_unmet"]
+    assert "step_warm_vti" in unmet
+    assert "vti_at_target" in unmet
+    steps = {row["key"]: row for row in finished[0]["summary"]["steps"]}
+    assert steps["warm_vti"]["status"] == STEP_STATUS_SKIPPED
+    assert steps["warm_vti"]["conditions"]["temperature_vti.temperature"] < 290.0
+
+
+def test_skip_operation_step_is_blocked_when_no_operation_runs(orchestrator, qtbot):
+    blocked: list[str] = []
+    orchestrator.action_blocked.connect(blocked.append)
+
+    orchestrator.skip_operation_step("warm_vti")
+    assert blocked and "no operation" in blocked[0].lower()
+
+
+@pytest.mark.parametrize("op_cls", _OPERATION_CLASSES, ids=_OPERATION_IDS)
+def test_skip_operation_step_rejects_an_undeclared_key_as_a_verdict(
+    op_cls, orchestrator, station, qtbot
+):
+    """An unknown key must be a verdict, never an exception in a Qt slot."""
+    _fast_magnets(station)
+    _fast_vti(station)
+    op = _make_op(op_cls, station)
+    orchestrator.run_operation(op)
+
+    blocked: list[str] = []
+    orchestrator.action_blocked.connect(blocked.append)
+    orchestrator.skip_operation_step("not_a_declared_key")
+
+    assert blocked and "not_a_declared_key" in blocked[0]
+    assert op.skip_ramp_requested is False
 
 
 # ── initiate() dispatch: measurement standby (no switch dispatch — dropped

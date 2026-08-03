@@ -202,9 +202,19 @@ def test_next_due_reads_the_configured_level_vi(station):
 
 @pytest.mark.parametrize("op_cls", _SAMPLE_ACCESS_CLASSES, ids=_SAMPLE_ACCESS_IDS)
 def test_sample_access_readiness_conditions_keys(op_cls, station):
+    """The checklist is the magnet check, then the step sequence in order."""
     op = op_cls(station)
     keys = [c.key for c in op.readiness_conditions()]
-    assert keys == ["zero_field", "vti_at_target", "needle_valve_confirmed"]
+    assert keys == ["zero_field"] + [s.key for s in op.steps()]
+    assert keys == [
+        "zero_field",
+        "warm_vti",
+        "close_needle_valve",
+        "open_access_valve",
+        "move_rod",
+        "close_access_valve",
+        "flush",
+    ]
 
 
 @pytest.mark.parametrize("op_cls", _SAMPLE_ACCESS_CLASSES, ids=_SAMPLE_ACCESS_IDS)
@@ -223,30 +233,49 @@ def test_sample_access_zero_field_true_and_false(op_cls, station):
 
 
 @pytest.mark.parametrize("op_cls", _SAMPLE_ACCESS_CLASSES, ids=_SAMPLE_ACCESS_IDS)
-def test_sample_access_vti_at_target_true_and_false_with_detail(op_cls, station):
+def test_sample_access_warm_step_row_shows_the_live_temperature(op_cls, station):
+    """A pending step's detail is live; a recorded one reports its outcome."""
     op = op_cls(station)  # default target_temperature_K = 290.0
     conditions = {c.key: c for c in op.readiness_conditions()}
+    row = conditions["warm_vti"]
     vti_name = "temperature_vti"
 
     at_target = {vti_name: {"temperature": 290.0}}
-    assert conditions["vti_at_target"].check(at_target) is True
-    assert conditions["vti_at_target"].detail(at_target) == "currently 290.0 K"
-
     off_target = {vti_name: {"temperature": 250.3}}
-    assert conditions["vti_at_target"].check(off_target) is False
-    assert conditions["vti_at_target"].detail(off_target) == "currently 250.3 K"
+
+    # Pending: the row is not yet met, and shows where the VTI actually is.
+    assert row.check(at_target) is False
+    assert row.detail(at_target) == "currently 290.0 K"
+    assert row.detail(off_target) == "currently 250.3 K"
+
+    # Recorded done: met, regardless of what the snapshot says.
+    op.confirm("warm_vti")
+    assert row.check(off_target) is True
+    assert row.detail(off_target) == "done"
 
 
 @pytest.mark.parametrize("op_cls", _SAMPLE_ACCESS_CLASSES, ids=_SAMPLE_ACCESS_IDS)
-def test_sample_access_needle_valve_confirmed_uses_confirmed_and_ignores_snapshot(op_cls, station):
+def test_sample_access_step_rows_read_outcomes_not_the_snapshot(op_cls, station):
+    """An operator-ack row depends on the record alone — no hardware can verify it."""
     op = op_cls(station)
     conditions = {c.key: c for c in op.readiness_conditions()}
-    condition = conditions["needle_valve_confirmed"]
-    assert condition.detail is None
+    row = conditions["close_needle_valve"]
 
-    assert condition.check({"anything": "irrelevant"}) is False
-    op.confirm("needle_valve")
-    assert condition.check({"anything": "irrelevant"}) is True
+    assert row.check({"anything": "irrelevant"}) is False
+    op.confirm("close_needle_valve")
+    assert row.check({"anything": "irrelevant"}) is True
+
+
+@pytest.mark.parametrize("op_cls", _SAMPLE_ACCESS_CLASSES, ids=_SAMPLE_ACCESS_IDS)
+def test_sample_access_skipped_step_row_stays_unmet_and_says_so(op_cls, station):
+    """A skip must never read as done — the panel has to show the override."""
+    op = op_cls(station)
+    conditions = {c.key: c for c in op.readiness_conditions()}
+    row = conditions["flush"]
+
+    op.skip_step("flush")
+    assert row.check({}) is False
+    assert row.detail({}) == "skipped by operator"
 
 
 def test_sample_access_config_key_and_ready_message():
