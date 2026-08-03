@@ -1,6 +1,6 @@
 # Session tier and terminology cleanup
 
-**Status: proposal, not started.** A new middle tier in the measurement
+**Status: IMPLEMENTED 2026-08-03.** A new middle tier in the measurement
 filesystem hierarchy (root → session → experiment → data files), plus a
 rename cascade that resolves the fact that "session" already names four
 unrelated things in this codebase. Companion to
@@ -275,7 +275,10 @@ addressed by this plan.
 
 ## Out of scope here
 
-- Writing the actual `docs/user-docs/upgrading-to-session-folders.md`
-  content — location is decided, content waits for implementation details.
+- ~~Writing the actual `docs/user-docs/upgrading-to-session-folders.md`
+  content — location is decided, content waits for implementation
+  details.~~ **Done 2026-08-03**: written now that the real folder-naming
+  details are final; see that file.
 - Any change to `config_directory()`/`data_directory()` — that's
-  `config-directory-migration.md`'s territory, unrelated tier.
+  `config-directory-migration.md`'s territory, unrelated tier. Still
+  deferred, untouched by this work.
