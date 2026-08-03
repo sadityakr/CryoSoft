@@ -139,7 +139,7 @@ is the typed currency shared by all of them.
   **Severity ladder**; full text in `core/conditions.py`'s module
   docstring): every "something is wrong" signal in CryoSoft — a VI's
   `evaluate_safety()` flag, the Station's comm-fault detection, a
-  `SessionEnvelope.check_state()` violation — is a `Condition` from one of
+  `ExperimentEnvelope.check_state()` violation — is a `Condition` from one of
   exactly three producers (`"comm"`, `"safety"`, `"envelope"`), and scope
   follows from severity alone, never from which producer reported it:
   `"advisory"` (no enforcement, reserved), `"hold"` (scoped to

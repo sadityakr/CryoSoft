@@ -111,7 +111,7 @@ from cryosoft.core.conditions import Condition, decide, envelope_conditions
 from cryosoft.core.events import ErrorEvent
 from cryosoft.core.exceptions import CryoSoftSafetyError
 from cryosoft.core.operational_status import build_operational_status
-from cryosoft.core.plan import Command, SessionEnvelope, Target
+from cryosoft.core.plan import Command, ExperimentEnvelope, Target
 from cryosoft.core.ramps import RampRecord, build_ramp_records
 from cryosoft.core.station import FaultRecord, Station
 from cryosoft.core.tiered_trend_logger import TieredTrendLogger
@@ -315,7 +315,7 @@ class Orchestrator(QObject):
         # Session envelope (sample-specific bounds, narrower than config
         # limits) — set by the session layer, enforced here so it binds every
         # writer (GUI and agents alike). None = no envelope active.
-        self._session_envelope: SessionEnvelope | None = None
+        self._session_envelope: ExperimentEnvelope | None = None
 
         # Active run manifest: captured at run_started (the data file path is
         # gone by the time the run ends) and re-emitted once on run_finished.
@@ -459,7 +459,7 @@ class Orchestrator(QObject):
     # Public API
     # ------------------------------------------------------------------
 
-    def set_session_envelope(self, envelope: SessionEnvelope | None) -> None:
+    def set_experiment_envelope(self, envelope: ExperimentEnvelope | None) -> None:
         """Install (or clear) the active experiment's session envelope.
 
         Called by the session layer on experiment start/close. Config

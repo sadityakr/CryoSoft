@@ -3,25 +3,25 @@
 #   form_autosave: the GUI's form-autosave model (historically called the
 #   "session model" — renamed so "session" is free for the L6 Session
 #   Management layer, which manages experiments/runs/users; this module is
-#   purely form persistence). A SessionState holds the content a user would
+#   purely form persistence). A FormAutosaveState holds the content a user would
 #   otherwise retype on every launch — sample metadata, data directory, the
 #   last-selected procedure and its parameters, and the run queue with
 #   per-item status. It serialises to a single JSON file so a closed app is
 #   restored on the next open. Deliberately Qt-free (stdlib only) so it
 #   unit-tests without a QApplication; the *location* of the file is resolved
-#   separately by app_settings.session_file_path().
+#   separately by app_settings.autosave_file_path().
 # entry_point: Not run directly. Constructed and (de)serialised by the GUI windows.
 # dependencies: []  # standard library only
 # input: |
 #   load(path) reads a JSON file previously written by save(). A missing or
-#   malformed file yields a default SessionState rather than raising, so a
+#   malformed file yields a default FormAutosaveState rather than raising, so a
 #   corrupt autosave can never block application startup.
 # process: |
 #   to_dict()/from_dict() convert between the dataclass tree and plain JSON
 #   types, tolerating missing keys (older files) and ignoring unknown ones.
 # output: |
 #   save(state, path) writes the JSON autosave file atomically. load(path)
-#   returns a SessionState.
+#   returns a FormAutosaveState.
 # ---
 
 """form_autosave — the CryoSoft GUI's form-autosave model.
@@ -31,13 +31,14 @@ The GUI splits persistence into two tiers. Window geometry and dock layout
 *content* the physicist typed and queued lives here, in a plain JSON file that
 is inspectable, portable, and archivable next to the run data.
 
-Naming note: this module was ``gui/session.py`` and its classes keep their
-historical names (``SessionState``, the ``last_session.json`` file), so
-existing autosave files keep loading unchanged. The word "session" now belongs
-to the L6 Session Management layer (``cryosoft.session``), which manages
+Naming note: this module was ``gui/session.py`` and its classes were once
+named ``SessionState``, renamed to ``FormAutosaveState`` so "session" is free
+for the L6 Session Management layer (``cryosoft.session``), which manages
 experiments, runs, and users — a different concept from this form autosave.
+The on-disk ``last_session.json`` filename is unchanged, so existing autosave
+files keep loading unchanged.
 
-``SessionState`` is a ``@dataclass``: a class whose ``__init__`` and field
+``FormAutosaveState`` is a ``@dataclass``: a class whose ``__init__`` and field
 storage are generated from the annotated attributes below, so we declare the
 shape once instead of hand-writing a constructor. ``load``/``save`` never raise
 on bad input — a broken autosave file degrades to defaults rather than bricking
@@ -137,7 +138,7 @@ class QueueItemState:
 
 
 @dataclass
-class SessionState:
+class FormAutosaveState:
     """The full persisted content of a CryoSoft session.
 
     Attributes:
@@ -176,8 +177,8 @@ class SessionState:
         }
 
     @classmethod
-    def from_dict(cls, data: object) -> SessionState:
-        """Build a ``SessionState`` from parsed JSON, tolerating bad input.
+    def from_dict(cls, data: object) -> FormAutosaveState:
+        """Build a ``FormAutosaveState`` from parsed JSON, tolerating bad input.
 
         Every field falls back to its default when missing or of the wrong
         type, so an older or partially-written file still loads. Unknown keys
@@ -207,30 +208,30 @@ class SessionState:
         )
 
 
-def load(path: Path) -> SessionState:
+def load(path: Path) -> FormAutosaveState:
     """Load a session from ``path``, returning defaults on any failure.
 
     Args:
         path: The JSON session file to read.
 
     Returns:
-        The parsed ``SessionState``, or a default ``SessionState`` if the file
+        The parsed ``FormAutosaveState``, or a default ``FormAutosaveState`` if the file
         is missing, unreadable, or not valid JSON. This function never raises:
         a corrupt session must not stop the application from opening.
     """
     try:
         raw = path.read_text(encoding="utf-8")
     except OSError:
-        return SessionState()
+        return FormAutosaveState()
     try:
         parsed = json.loads(raw)
     except (TypeError, ValueError) as exc:
         logger.warning("session: %s is not valid JSON (%s); using defaults", path, exc)
-        return SessionState()
-    return SessionState.from_dict(parsed)
+        return FormAutosaveState()
+    return FormAutosaveState.from_dict(parsed)
 
 
-def save(state: SessionState, path: Path) -> None:
+def save(state: FormAutosaveState, path: Path) -> None:
     """Write ``state`` to ``path`` as JSON, atomically.
 
     The file is written to a sibling ``.tmp`` path and then ``os.replace``-d

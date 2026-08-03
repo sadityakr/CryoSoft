@@ -79,7 +79,7 @@ from cryosoft.core.station import Station
 from cryosoft.gui import window_geometry
 from cryosoft.gui.live_plot_panel import LivePlotPanel
 from cryosoft.gui.notification_banner import NotificationBanner
-from cryosoft.gui.form_autosave import STATUS_PENDING, SessionState
+from cryosoft.gui.form_autosave import STATUS_PENDING, FormAutosaveState
 from cryosoft.gui.procedure_discovery import discover_procedures
 from cryosoft.gui.procedure_params_panel import ProcedureParamsPanel
 from cryosoft.gui.queue_panel import QueueEntry, QueuePanel
@@ -123,7 +123,7 @@ class ProcedureWindow(QMainWindow):
         parent: Optional Qt parent widget.
         initial_session: Persisted form-autosave content to restore, if any.
         get_experiment_info: Callable returning the session layer's experiment
-            context (``SessionManager.experiment_context()``), stamped into
+            context (``ExperimentManager.experiment_context()``), stamped into
             every built procedure as ``experiment_info``. ``None`` means no
             session layer is wired (unit tests) — procedures get ``{}``.
     """
@@ -135,7 +135,7 @@ class ProcedureWindow(QMainWindow):
         get_sample_info: Callable[[], dict[str, str]],
         get_data_dir: Callable[[], str],
         parent: QWidget | None = None,
-        initial_session: SessionState | None = None,
+        initial_session: FormAutosaveState | None = None,
         get_experiment_info: Callable[[], dict[str, str]] | None = None,
     ) -> None:
         super().__init__(parent)
@@ -631,21 +631,21 @@ class ProcedureWindow(QMainWindow):
         experiment that is open when it actually gets built and run.
 
         Returns:
-            ``SessionManager.experiment_context()``, or ``{}`` when no session
+            ``ExperimentManager.experiment_context()``, or ``{}`` when no session
             layer is wired.
         """
         if self._get_experiment_info is None:
             return {}
         return self._get_experiment_info()
 
-    def _restore_session(self, session_state: SessionState) -> None:
+    def _restore_session(self, session_state: FormAutosaveState) -> None:
         """Apply a loaded session to the procedure form and queue."""
         self._params_panel.restore_session(session_state)
         self._queue_panel.restore_items(
             session_state.queue, self._params_panel.procedure_by_name
         )
 
-    def export_session_state(self, state: SessionState) -> None:
+    def export_session_state(self, state: FormAutosaveState) -> None:
         """Write this window's selection, params, and queue into ``state``."""
         self._params_panel.export_session_state(state)
         state.queue = self._queue_panel.export_items()

@@ -44,7 +44,7 @@ class LoginDialog(QDialog):
 
     Identity only — no password. Whatever is selected becomes
     ``app_settings.current_user_id()``, which switches which form-autosave
-    file ``SessionInfoPanel``'s sample fields and the run queue restore from.
+    file ``ExperimentInfoPanel``'s sample fields and the run queue restore from.
     """
 
     def __init__(

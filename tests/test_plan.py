@@ -19,10 +19,10 @@ from cryosoft.core.plan import (
     Command,
     DataSchema,
     EnvelopeBound,
+    ExperimentEnvelope,
     ParamGroup,
     ParamSpec,
     PhasePlan,
-    SessionEnvelope,
     StepPlan,
     Target,
 )
@@ -690,7 +690,7 @@ def test_validate_measurement_array_wrong_loop_shape():
         s.validate({"voltage_V_array": [[[1.0, 2.0, 3.0]]]})  # missing loop1 index 1
 
 
-# ── EnvelopeBound / SessionEnvelope ──────────────────────────────────────────
+# ── EnvelopeBound / ExperimentEnvelope ──────────────────────────────────────────
 
 class TestEnvelopeBound:
     def test_requires_at_least_one_bound(self):
@@ -716,17 +716,17 @@ class TestEnvelopeBound:
         assert bound.violation("HOLDING") is None
 
 
-class TestSessionEnvelope:
+class TestExperimentEnvelope:
     def test_rejects_empty_bounds(self):
         with pytest.raises(ValueError):
-            SessionEnvelope(bounds={})
+            ExperimentEnvelope(bounds={})
 
     def test_rejects_wrong_value_type(self):
         with pytest.raises(TypeError):
-            SessionEnvelope(bounds={"magnet_z": (0.0, 1.0)})
+            ExperimentEnvelope(bounds={"magnet_z": (0.0, 1.0)})
 
     def test_check_target(self):
-        env = SessionEnvelope(
+        env = ExperimentEnvelope(
             bounds={"magnet_z": EnvelopeBound(min_value=-2.0, max_value=2.0)}
         )
         assert env.check_target("magnet_z", 1.0) is None
@@ -735,7 +735,7 @@ class TestSessionEnvelope:
         assert "session envelope" in message and "magnet_z" in message
 
     def test_check_state_uses_state_key_and_skips_missing(self):
-        env = SessionEnvelope(
+        env = ExperimentEnvelope(
             bounds={
                 "temperature_sample": EnvelopeBound(
                     min_value=4.0, state_key="temperature"

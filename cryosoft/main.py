@@ -20,7 +20,7 @@
 #   Initialises logging, creates QApplication, builds the ConfigCatalog, resolves
 #   the Station via build_station_with_fallback(), persists the config that
 #   actually loaded, constructs the session layer (ExperimentStore rooted at
-#   app_settings.sessions_root() + UserRoster + SessionManager wired to the
+#   app_settings.sessions_root() + UserRoster + ExperimentManager wired to the
 #   Orchestrator — sessions_root() is a dedicated, app-settings-backed
 #   location, decoupled from the Data Directory form field), then — only when
 #   the active config declares a cryogenics: block AND the station has the
@@ -64,7 +64,7 @@ from cryosoft.core.station import (
 from cryosoft.gui import app_settings
 from cryosoft.gui.monitor_window import MonitorWindow
 from cryosoft.gui.theme import PLOT_AXIS, PLOT_BG, build_stylesheet
-from cryosoft.session.manager import SessionManager
+from cryosoft.session.manager import ExperimentManager
 from cryosoft.session.servicing_log import (
     CryogenicsRecorder,
     HeliumRecordStore,
@@ -157,9 +157,9 @@ def main() -> None:
     # setting, never derived from the Data Directory form field (which is
     # itself now *derived from* the open session). The user roster stays
     # setup-local, next to the app-settings files.
-    session_manager = SessionManager(
+    session_manager = ExperimentManager(
         store=ExperimentStore(app_settings.sessions_root()),
-        roster=UserRoster(app_settings.session_file_path().parent / "users.json"),
+        roster=UserRoster(app_settings.autosave_file_path().parent / "users.json"),
         orchestrator=orchestrator,
         station=station,
         config_name=used_entry.name if used_entry is not None else Path(used_path).name,

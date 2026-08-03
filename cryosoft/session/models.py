@@ -1,24 +1,26 @@
 # ---
 # description: |
 #   Typed records of the L6 Session Management layer: User (who measures),
-#   RunRecord (one procedure execution -> one HDF5 file), ExperimentRecord
-#   (a named group of runs on one sample, with its session envelope and ELN
-#   linkage), ElnLink (the experiment's ELN entry reference), and
-#   ServiceLogEntry (one revision of one servicing-log entry — see
-#   session/servicing_log.py). All follow the tolerant-parse standard of
-#   gui/form_autosave.py: to_dict()/from_dict() convert to/from plain JSON
+#   Session (the per-user, multi-experiment folder tier between the
+#   measurement root and an experiment), RunRecord (one procedure execution
+#   -> one HDF5 file), ExperimentRecord (a named group of runs on one sample,
+#   with its session envelope and ELN linkage), ElnLink (the experiment's ELN
+#   entry reference), and ServiceLogEntry (one revision of one servicing-log
+#   entry — see session/servicing_log.py). All follow the tolerant-parse
+#   standard of gui/form_autosave.py: to_dict()/from_dict() convert to/from
+#   plain JSON
 #   types, missing keys take defaults, unknown keys are ignored, and
 #   from_dict() never raises on junk input. Machine-checked by the
 #   session-model conformance tests.
 # entry_point: Not run directly. Used by store.py / manager.py /
 #   servicing_log.py and tests.
 # dependencies:
-#   - cryosoft.core.plan (SessionEnvelope / EnvelopeBound serialisation)
+#   - cryosoft.core.plan (ExperimentEnvelope / EnvelopeBound serialisation)
 # input: |
 #   from_dict(data) accepts anything; non-dict input yields a default instance.
 # process: |
 #   Plain dataclasses; envelope_to_dict()/envelope_from_dict() bridge the typed
-#   core.plan.SessionEnvelope and its JSON form stored on ExperimentRecord.
+#   core.plan.ExperimentEnvelope and its JSON form stored on ExperimentRecord.
 # output: |
 #   JSON-serialisable dicts via to_dict(); typed records via from_dict().
 # ---
@@ -38,7 +40,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-from cryosoft.core.plan import EnvelopeBound, SessionEnvelope
+from cryosoft.core.plan import EnvelopeBound, ExperimentEnvelope
 
 logger = logging.getLogger(__name__)
 
@@ -106,8 +108,8 @@ def _as_dict_list(value: object) -> list[dict[str, Any]]:
     return [dict(item) for item in value if isinstance(item, dict)]
 
 
-def envelope_to_dict(envelope: SessionEnvelope | None) -> dict[str, Any]:
-    """Serialise a ``SessionEnvelope`` to the JSON form stored on records.
+def envelope_to_dict(envelope: ExperimentEnvelope | None) -> dict[str, Any]:
+    """Serialise a ``ExperimentEnvelope`` to the JSON form stored on records.
 
     Args:
         envelope: The typed envelope, or ``None`` for "no envelope".
@@ -128,15 +130,15 @@ def envelope_to_dict(envelope: SessionEnvelope | None) -> dict[str, Any]:
     }
 
 
-def envelope_from_dict(data: object) -> SessionEnvelope | None:
-    """Rebuild a ``SessionEnvelope`` from its stored JSON form, tolerantly.
+def envelope_from_dict(data: object) -> ExperimentEnvelope | None:
+    """Rebuild a ``ExperimentEnvelope`` from its stored JSON form, tolerantly.
 
     Args:
         data: The dict written by ``envelope_to_dict()`` (or junk).
 
     Returns:
         The typed envelope, or ``None`` when ``data`` is empty, not a dict, or
-        fails ``SessionEnvelope`` validation (logged at WARNING — a corrupt
+        fails ``ExperimentEnvelope`` validation (logged at WARNING — a corrupt
         envelope must not brick loading, but silently *narrowing* it would be
         worse than none, so the whole envelope is dropped and the operator is
         told).
@@ -155,7 +157,7 @@ def envelope_from_dict(data: object) -> SessionEnvelope | None:
         }
         if not bounds:
             return None
-        return SessionEnvelope(bounds=bounds)
+        return ExperimentEnvelope(bounds=bounds)
     except (TypeError, ValueError) as exc:
         logger.warning("session envelope in record is invalid (%s); dropping it", exc)
         return None
@@ -249,7 +251,7 @@ class ElnLink:
 class RunRecord:
     """One procedure execution — one HDF5 file — inside an experiment.
 
-    Created by the ``SessionManager`` from the Orchestrator's ``run_started``
+    Created by the ``ExperimentManager`` from the Orchestrator's ``run_started``
     manifest and completed from ``run_finished``. The initiate-time instrument
     settings are kept here so the experiment file answers "what were the
     settings for run N" without opening HDF5.
@@ -387,7 +389,7 @@ class ExperimentRecord:
         ``SCHEMA_VERSION`` (never ``self.schema_version``) — this is the
         write side of the format-version contract; a future-version record
         loaded read-only is never actually re-saved (see
-        ``SessionManager._save_current``), so this constant stamp is safe.
+        ``ExperimentManager._save_current``), so this constant stamp is safe.
         """
         return {
             "experiment_id": self.experiment_id,
@@ -460,6 +462,84 @@ class ExperimentRecord:
             if run.run_id == run_id:
                 return run
         return None
+
+
+@dataclass
+class Session:
+    """The new middle tier between the measurement root and an experiment.
+
+    A named, resumable, per-user folder holding multiple experiments —
+    ``<measurement_root>/sessions/<session_id>/``, one level above
+    ``<experiment_id>/`` (see ``docs/plans/session-tier-and-terminology.md``,
+    "Filesystem layout"). One user can own several sessions; a session is not
+    identified by its owner alone. Persisted as ``session.json`` by
+    ``SessionStore``.
+
+    Attributes:
+        session_id: Unique store key (slug + date, see
+            ``SessionStore.make_session_id``).
+        user_id: Roster key of the session's owner.
+        name: Display name, user-chosen at creation.
+        default_experiment_dir: The saved default parent folder offered when
+            starting a new experiment inside this session; user-editable.
+            Empty string means "not set yet" (falls back to the session
+            folder itself).
+        last_open_experiment_id: The experiment id to auto-reopen on resume;
+            empty string means none.
+        created_utc: ISO 8601 creation time (UTC).
+        last_opened_utc: ISO 8601 time this session was last made active.
+        schema_version: The on-disk format version this record was loaded
+            from (see ``SCHEMA_VERSION``). Absent on disk ⇒ ``1``. A value
+            greater than the running app's ``SCHEMA_VERSION`` means the
+            record was written by a newer app; callers must treat it as
+            read-only rather than silently tolerant-parsing an unknown
+            future shape (same contract as ``ExperimentRecord.schema_version``).
+    """
+
+    session_id: str = ""
+    user_id: str = ""
+    name: str = ""
+    default_experiment_dir: str = ""
+    last_open_experiment_id: str = ""
+    created_utc: str = ""
+    last_opened_utc: str = ""
+    schema_version: int = SCHEMA_VERSION
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-safe dict representation.
+
+        ``schema_version`` is always stamped as the running app's
+        ``SCHEMA_VERSION`` (never ``self.schema_version``) — same write-side
+        contract as ``ExperimentRecord.to_dict()``.
+        """
+        return {
+            "session_id": self.session_id,
+            "user_id": self.user_id,
+            "name": self.name,
+            "default_experiment_dir": self.default_experiment_dir,
+            "last_open_experiment_id": self.last_open_experiment_id,
+            "created_utc": self.created_utc,
+            "last_opened_utc": self.last_opened_utc,
+            "schema_version": SCHEMA_VERSION,
+        }
+
+    @classmethod
+    def from_dict(cls, data: object) -> Session:
+        """Build a ``Session`` from a parsed dict, tolerating bad input."""
+        if not isinstance(data, dict):
+            return cls()
+        return cls(
+            session_id=_as_str(data.get("session_id")),
+            user_id=_as_str(data.get("user_id")),
+            name=_as_str(data.get("name")),
+            default_experiment_dir=_as_str(data.get("default_experiment_dir")),
+            last_open_experiment_id=_as_str(data.get("last_open_experiment_id")),
+            created_utc=_as_str(data.get("created_utc")),
+            last_opened_utc=_as_str(data.get("last_opened_utc")),
+            # Absent on disk means "today's files" — version 1, not whatever
+            # SCHEMA_VERSION the running app happens to define.
+            schema_version=_as_int(data.get("schema_version"), 1),
+        )
 
 
 @dataclass

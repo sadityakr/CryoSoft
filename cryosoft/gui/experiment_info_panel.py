@@ -1,49 +1,49 @@
 # ---
 # description: |
-#   SessionInfoPanel: the Session Information quadrant of MonitorWindow — the
-#   GUI surface for the Experiment tier (Setup-tier concerns — config
+#   ExperimentInfoPanel: the Session Information quadrant of MonitorWindow —
+#   the GUI surface for the Experiment tier (Setup-tier concerns — config
 #   identity, instrument metadata, user login — live in the menu bar, not
-#   here). Holds the experiment status/Start-Close control (when a
-#   SessionManager is wired), sample name/ID/comments and the data-directory
-#   field with its Browse button, and an eLab status line (publish controls
-#   land with Track B; today it just reflects ElnLink on the open
-#   experiment). The sample fields stay free-editable per run regardless of
-#   whether an experiment is open; whatever they hold at "Start Experiment"
-#   time is snapshotted onto the ExperimentRecord for record-keeping. It is
-#   the single owner of session-level sample metadata in the GUI, read by
-#   ProcedureWindow through MonitorWindow's get_sample_info/get_data_dir
-#   callables. Data Dir is derived-but-editable: opening/switching a session
-#   forces the field to that session's own data/ folder (remembering
-#   whatever it held before, to restore on close), and a plain status note
-#   (no stylesheet) appears whenever the field points outside the open
-#   session's folder.
+#   here). Holds the experiment status/Start-Close control (when an
+#   ExperimentManager is wired), sample name/ID/comments and the
+#   data-directory field with its Browse button, and an eLab status line
+#   (publish controls land with Track B; today it just reflects ElnLink on
+#   the open experiment). The sample fields stay free-editable per run
+#   regardless of whether an experiment is open; whatever they hold at
+#   "Start Experiment" time is snapshotted onto the ExperimentRecord for
+#   record-keeping. It is the single owner of session-level sample metadata
+#   in the GUI, read by ProcedureWindow through MonitorWindow's
+#   get_sample_info/get_data_dir callables. Data Dir is derived-but-editable:
+#   opening/switching a session forces the field to that session's own
+#   data/ folder (remembering whatever it held before, to restore on
+#   close), and a plain status note (no stylesheet) appears whenever the
+#   field points outside the open session's folder.
 # entry_point: Not run directly. Hosted as MonitorWindow's bottom-left quadrant.
 # dependencies:
 #   - PyQt6 >= 6.5
 #   - cryosoft.gui.app_settings (sessions_root default fallback)
-#   - cryosoft.gui.form_autosave (SessionState)
+#   - cryosoft.gui.form_autosave (FormAutosaveState)
 #   - cryosoft.gui.theme (button classes)
 #   - cryosoft.gui.experiment_dialogs (Start/Close experiment dialogs)
-#   - cryosoft.session.manager (SessionManager, optional)
+#   - cryosoft.session.manager (ExperimentManager, optional)
 # input: |
-#   A loaded SessionState (via apply_session) to prefill the fields, and an
-#   optional SessionManager whose experiment_changed signal drives the
+#   A loaded FormAutosaveState (via apply_session) to prefill the fields, and
+#   an optional ExperimentManager whose experiment_changed signal drives the
 #   experiment status row and the Data Dir field.
 # process: |
 #   Builds the form inside a QScrollArea (objectNames session_info_quadrant /
 #   session_info_scroll and the *_input fields are preserved API for tests).
-#   The experiment row is always built; without a SessionManager its button
-#   stays disabled. On each experiment_changed, an open/switched experiment
-#   (a changed experiment_id) forces Data Dir to current_data_dir(); closing
-#   restores the field to whatever it held immediately before the session
-#   opened.
+#   The experiment row is always built; without an ExperimentManager its
+#   button stays disabled. On each experiment_changed, an open/switched
+#   experiment (a changed experiment_id) forces Data Dir to
+#   current_data_dir(); closing restores the field to whatever it held
+#   immediately before the session opened.
 # output: |
 #   get_sample_info()/get_data_dir() read the live field values.
-#   SessionManager.start_experiment()/close_experiment()/set_findings()/
+#   ExperimentManager.start_experiment()/close_experiment()/set_findings()/
 #   set_attended() are called from the dialogs' results.
 # ---
 
-"""SessionInfoPanel — the Session Information quadrant (experiment + sample metadata)."""
+"""ExperimentInfoPanel — the Session Information quadrant (experiment + sample metadata)."""
 
 from __future__ import annotations
 
@@ -69,15 +69,15 @@ from PyQt6.QtWidgets import (
 
 from cryosoft.gui import app_settings
 from cryosoft.gui.experiment_dialogs import CloseExperimentDialog, StartExperimentDialog
-from cryosoft.gui.form_autosave import SessionState
+from cryosoft.gui.form_autosave import FormAutosaveState
 from cryosoft.gui.theme import TEXT_PRIMARY
-from cryosoft.session.manager import SessionManager
+from cryosoft.session.manager import ExperimentManager
 
 _ELN_NOT_CONFIGURED_TEXT = "eLab publishing is not configured yet"
 _OUTSIDE_SESSION_NOTE_TEXT = "saving outside the current session folder"
 
 
-class SessionInfoPanel(QWidget):
+class ExperimentInfoPanel(QWidget):
     """The Session Information quadrant: experiment control, plus sample fields.
 
     ObjectNames (``session_info_quadrant``, ``session_info_scroll``,
@@ -88,7 +88,7 @@ class SessionInfoPanel(QWidget):
 
     Args:
         parent: Optional Qt parent widget.
-        session_manager: The L6 SessionManager. When ``None`` (unit tests
+        session_manager: The L6 ExperimentManager. When ``None`` (unit tests
             that build the panel standalone), the experiment row is shown
             but its button stays disabled.
     """
@@ -96,7 +96,7 @@ class SessionInfoPanel(QWidget):
     def __init__(
         self,
         parent: QWidget | None = None,
-        session_manager: SessionManager | None = None,
+        session_manager: ExperimentManager | None = None,
     ) -> None:
         super().__init__(parent)
         self._session_manager = session_manager
@@ -206,7 +206,7 @@ class SessionInfoPanel(QWidget):
             self._session_manager.set_attended(checked)
 
     def _on_experiment_changed(self, record: dict) -> None:
-        """Reflect a SessionManager ``experiment_changed`` payload in the row.
+        """Reflect an ExperimentManager ``experiment_changed`` payload in the row.
 
         Args:
             record: ``ExperimentRecord.to_dict()``, or ``{}`` when none open.
@@ -303,7 +303,7 @@ class SessionInfoPanel(QWidget):
 
         dir_row = QHBoxLayout()
         # Starts empty ("no explicit choice yet"); apply_session() (called
-        # right after construction by MonitorWindow) and/or the SessionManager
+        # right after construction by MonitorWindow) and/or the ExperimentManager
         # experiment_changed handler above fill in the right value — the
         # session's own folder when one is open, else the sessions_root()
         # default (see _default_data_dir_text()).
@@ -351,7 +351,7 @@ class SessionInfoPanel(QWidget):
         folder's ``data/`` sub-directory). No session open, or an empty
         field, both hide the note.
         """
-        session_folder = self._current_session_folder()
+        session_folder = self._current_experiment_folder()
         text = self._data_dir_input.text().strip()
         if session_folder is None or not text:
             self._data_dir_note.hide()
@@ -362,7 +362,7 @@ class SessionInfoPanel(QWidget):
             outside = True
         self._data_dir_note.setVisible(outside)
 
-    def _current_session_folder(self) -> Path | None:
+    def _current_experiment_folder(self) -> Path | None:
         """Return the open experiment's session folder, or ``None`` when none is open."""
         if self._session_manager is None:
             return None
@@ -414,7 +414,7 @@ class SessionInfoPanel(QWidget):
             return str(session_folder_data_dir)
         return str(app_settings.sessions_root())
 
-    def apply_session(self, state: SessionState) -> None:
+    def apply_session(self, state: FormAutosaveState) -> None:
         """Populate the fields from a loaded session.
 
         Args:

@@ -1,22 +1,22 @@
 # ---
 # description: |
-#   session_dialogs: modal dialogs for switching between existing L6 session
-#   records (experiments) — currently just LoadSessionDialog, the picker
-#   MonitorWindow's User menu "Load Session…" action opens. Mirrors
+#   open_experiment_dialog: modal dialogs for switching between existing L6
+#   session records (experiments) — currently just OpenExperimentDialog, the
+#   picker MonitorWindow's User menu "Load Session…" action opens. Mirrors
 #   UserPickerWidget's list-plus-accept pattern from experiment_dialogs.py:
-#   every stored experiment is listed via SessionManager.store, open ones
+#   every stored experiment is listed via ExperimentManager.store, open ones
 #   selectable, closed ones shown grayed out with a "(closed)" suffix and
 #   disabled (item flags, never a stylesheet). The caller reads back the
 #   chosen experiment_id after accept() and drives the actual switch itself
-#   (MonitorWindow._switch_session) — this module never calls SessionManager
-#   mutators, same separation experiment_dialogs.py uses.
+#   (MonitorWindow._switch_experiment) — this module never calls
+#   ExperimentManager mutators, same separation experiment_dialogs.py uses.
 # entry_point: Not run directly. Opened by cryosoft.gui.monitor_window.
 # dependencies:
 #   - PyQt6 >= 6.5
-#   - cryosoft.session.manager (SessionManager)
+#   - cryosoft.session.manager (ExperimentManager)
 #   - cryosoft.session.models (EXPERIMENT_STATUS_OPEN)
 # input: |
-#   A SessionManager, read once at construction via its store's
+#   An ExperimentManager, read once at construction via its store's
 #   list_experiments()/load() for each experiment's title/user/status/
 #   created date.
 # process: |
@@ -27,7 +27,7 @@
 #   selected_experiment_id() returns the chosen id after exec() accepts.
 # ---
 
-"""session_dialogs — dialogs for picking an existing session (L6 experiment)."""
+"""open_experiment_dialog — dialogs for picking an existing session (L6 experiment)."""
 
 from __future__ import annotations
 
@@ -41,13 +41,13 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from cryosoft.session.manager import SessionManager
+from cryosoft.session.manager import ExperimentManager
 from cryosoft.session.models import EXPERIMENT_STATUS_OPEN
 
 _EXPERIMENT_ID_ROLE = Qt.ItemDataRole.UserRole
 
 
-class LoadSessionDialog(QDialog):
+class OpenExperimentDialog(QDialog):
     """Pick an existing session (experiment) to switch to.
 
     Every experiment in ``session_manager.store`` is listed, newest id last
@@ -59,7 +59,7 @@ class LoadSessionDialog(QDialog):
     """
 
     def __init__(
-        self, session_manager: SessionManager, parent: QWidget | None = None
+        self, session_manager: ExperimentManager, parent: QWidget | None = None
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Load Session")

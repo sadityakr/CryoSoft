@@ -1,18 +1,19 @@
 # ---
 # description: |
-#   SessionManager — the L6 façade and the single writer of experiment state.
-#   Owns the experiment lifecycle (start/close, findings, attendance), records
-#   every run automatically from the Orchestrator's run_started/run_finished
-#   manifests, installs the experiment's session envelope on the Orchestrator,
-#   and supplies experiment_context() — a two-tier {setup, experiment} dict —
-#   for stamping HDF5 files. The Setup tier (config identity + each VI's
-#   optional devices.yaml metadata block) is read once at construction via
-#   read_instrument_metadata() and is present even with no experiment open.
-#   Qt-widget-free: a QObject with signals, no gui imports (contract C11).
+#   ExperimentManager — the L6 façade and the single writer of experiment
+#   state. Owns the experiment lifecycle (start/close, findings, attendance),
+#   records every run automatically from the Orchestrator's
+#   run_started/run_finished manifests, installs the experiment's envelope on
+#   the Orchestrator, and supplies experiment_context() — a two-tier {setup,
+#   experiment} dict — for stamping HDF5 files. The Setup tier (config
+#   identity + each VI's optional devices.yaml metadata block) is read once
+#   at construction via read_instrument_metadata() and is present even with
+#   no experiment open. Qt-widget-free: a QObject with signals, no gui
+#   imports (contract C11).
 # entry_point: Not run directly. Constructed in cryosoft.main after the
 #   Orchestrator; injected into the GUI like the ConfigCatalog.
 # dependencies:
-#   - cryosoft.core.orchestrator (run manifests, set_session_envelope)
+#   - cryosoft.core.orchestrator (run manifests, set_experiment_envelope)
 #   - cryosoft.core.station (settings snapshots, read_instrument_metadata)
 #   - cryosoft.session.store / cryosoft.session.models
 # input: |
@@ -33,7 +34,7 @@
 #   renders.
 # ---
 
-"""SessionManager — the L6 façade and single writer of experiment state."""
+"""ExperimentManager — the L6 façade and single writer of experiment state."""
 
 from __future__ import annotations
 
@@ -45,7 +46,7 @@ from typing import Any
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from cryosoft.core.orchestrator import Orchestrator
-from cryosoft.core.plan import SessionEnvelope
+from cryosoft.core.plan import ExperimentEnvelope
 from cryosoft.core.station import Station, read_instrument_metadata
 from cryosoft.session.models import (
     EXPERIMENT_STATUS_CLOSED,
@@ -68,7 +69,7 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-class SessionManager(QObject):
+class ExperimentManager(QObject):
     """The session layer's façade — the only object main/GUI (and later the
     Agent Gateway) talk to.
 
@@ -110,7 +111,7 @@ class SessionManager(QObject):
             store: The experiment store (normally rooted in the data dir).
             roster: The setup-local user roster.
             orchestrator: The active Orchestrator; its run manifests drive run
-                recording, and its ``set_session_envelope()`` receives the
+                recording, and its ``set_experiment_envelope()`` receives the
                 experiment's envelope.
             station: The active Station (settings snapshots at run start).
             config_name: Identity of the active config, recorded on new
@@ -203,7 +204,7 @@ class SessionManager(QObject):
         title: str,
         user_id: str,
         sample_info: dict[str, Any],
-        envelope: SessionEnvelope | None = None,
+        envelope: ExperimentEnvelope | None = None,
         attended: bool = True,
     ) -> ExperimentRecord:
         """Open a new experiment and install its envelope on the Orchestrator.
@@ -250,7 +251,7 @@ class SessionManager(QObject):
         self._store.save(record)
         self._store.set_active(record.experiment_id)
         self._experiment = record
-        self._orchestrator.set_session_envelope(envelope)
+        self._orchestrator.set_experiment_envelope(envelope)
         logger.info(
             "Experiment %s started (user=%s, attended=%s)",
             record.experiment_id,
@@ -268,7 +269,7 @@ class SessionManager(QObject):
         self._experiment.closed_utc = _utc_now_iso()
         self._save_current()
         self._store.set_active(None)
-        self._orchestrator.set_session_envelope(None)
+        self._orchestrator.set_experiment_envelope(None)
         logger.info("Experiment %s closed", self._experiment.experiment_id)
         self._experiment = None
         self.experiment_changed.emit({})
@@ -362,7 +363,7 @@ class SessionManager(QObject):
             )
         self._experiment = record
         self._store.set_active(record.experiment_id)
-        self._orchestrator.set_session_envelope(envelope_from_dict(record.envelope))
+        self._orchestrator.set_experiment_envelope(envelope_from_dict(record.envelope))
         logger.info("Switched to experiment %s", record.experiment_id)
         self.experiment_changed.emit(record.to_dict())
         return record
@@ -503,7 +504,7 @@ class SessionManager(QObject):
         self._experiment = record
         if stale:
             self._save_current()
-        self._orchestrator.set_session_envelope(
+        self._orchestrator.set_experiment_envelope(
             envelope_from_dict(record.envelope)
         )
         logger.info("Resumed experiment %s (%d runs)", record.experiment_id, len(record.runs))

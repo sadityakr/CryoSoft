@@ -10,7 +10,7 @@
 #   (HKCU\Software\CryoSoft\CryoSoft). Routing every construction through this
 #   factory lets GUI tests monkeypatch it to point at a throwaway .ini file, so
 #   a pytest run never overwrites the user's real saved geometry.
-#   session_file_path(user_id) is the per-user form autosave (used only when no
+#   autosave_file_path(user_id) is the per-user form autosave (used only when no
 #   L6 session is open): with a logged-in user_id it resolves to that person's
 #   own file under sessions/, so switching users switches what's remembered.
 #   sessions_root() resolves to <Documents>/CryoData at runtime whenever the
@@ -67,7 +67,7 @@ def get_settings() -> QSettings:
     return QSettings(_ORGANISATION, _APPLICATION)
 
 
-def session_file_path(user_id: str | None = None) -> Path:
+def autosave_file_path(user_id: str | None = None) -> Path:
     """Return the path to a persistent form-autosave JSON file.
 
     The file lives in the platform per-installation application-data
