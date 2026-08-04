@@ -1,5 +1,16 @@
 # Safety hold enforcement: making a hold a maintained invariant
 
+**ARCHIVED — IMPLEMENTED 2026-08-04.** Landed on `develop` as `3c74e23`
+(base-derived `standby_status()` from command provenance) and `b421a47`
+(level-triggered `Orchestrator._enforce_safety_holds()`, the re-assertion and
+escalation events, the two `hold_enforcement_*` config keys). The vocabulary
+this introduced lives in `GLOSSARY.md` under **Hold enforcement**, **Safety
+hold**, and **Severity ladder**; the mechanism is documented on
+`_enforce_safety_holds()` and in `virtual_instruments/base.py`. Read below for
+rationale, never as a roadmap.
+
+The original status line follows, unrewritten.
+
 **Status: proposal, not started.** Written 2026-08-04. Supersedes the
 enforcement half of `safety-hold-enforcement-and-diagnostics.md`, whose
 diagnosis is confirmed and whose proposed fix is revised below. Its sibling

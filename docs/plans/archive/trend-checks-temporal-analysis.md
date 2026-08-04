@@ -1,5 +1,21 @@
 # Trend checks: named temporal judgements over the trend-history store
 
+**ARCHIVED — IMPLEMENTED 2026-08-05.** Landed on `develop` via the
+`claude/trend-checks` merge `5fe3673`: `core/trend_checks.py` (the pure check
+declarations and predicates, isolated by import-linter contract C15),
+`core/trend_check_runner.py` (the Qt scheduler on its own timer, deliberately
+outside the tick path), `core/stall_detection.py` (renamed from
+`core/watchdog.py`, threshold units fixed), `Station.publish_conditions()`,
+and the `troubleshoot trends` CLI subcommand. The vocabulary lives in
+`GLOSSARY.md` under **Trend check** and the fourth `"trend"` origin in
+**System condition**. Two items were shipped as known-open and are recorded
+in the merge handoff rather than here: the hardcoded state keys in
+`trend_checks.py` (an unmatched key yields an indeterminate result, which
+publishes nothing, so a misconfiguration reads as silence) and the untuned
+default thresholds. Read below for rationale, never as a roadmap.
+
+The original status line follows, unrewritten.
+
 **Status: proposal, not started.** Written 2026-08-04. Supersedes the
 diagnostics half of `safety-hold-enforcement-and-diagnostics.md`. Its sibling
 `safety-hold-enforcement.md` covers the enforcement half; the two are
