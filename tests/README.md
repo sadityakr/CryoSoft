@@ -39,6 +39,15 @@ Tests requiring physical instruments must be marked `@pytest.mark.hardware`;
 `make test` and CI exclude them. Everything else must pass on a bare machine.
 Shared fixtures belong in `conftest.py`.
 
+`scenarios.py` (not itself a test file) names the sim-driver state-injection
+recipes every hazard/fault test needs — helium low, quench, a disconnected
+instrument, a measurement instrument erroring instead of returning data, a
+procedure running — as composable functions instead of each test hand-rolling
+driver flags plus a `qtbot.waitUntil`. Each has a plain `apply_*` form (sets
+the driver attribute, no wait — importable from outside pytest, e.g.
+`scripts/run_scenario.py`) and, where convergence matters, a wrapped form
+that also waits. See `test_scenarios.py` for usage.
+
 ## How to add a new module
 
 - **Testing a new driver / VI / procedure:** you get conformance coverage for

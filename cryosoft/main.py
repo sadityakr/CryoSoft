@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import sys
 from pathlib import Path
+from typing import Callable
 
 import pyqtgraph as pg
 from PyQt6.QtCore import QProcess
@@ -15,6 +16,7 @@ from cryosoft.core.logging_config import setup_logging
 from cryosoft.core.orchestrator import Orchestrator
 from cryosoft.core.paths import measurement_root
 from cryosoft.core.station import (
+    Station,
     build_station_with_fallback,
     read_cryogenics_config,
     read_operations_config,
@@ -107,8 +109,18 @@ def _restart_application() -> None:
     QApplication.quit()
 
 
-def main() -> None:
-    """Start the CryoSoft application."""
+def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
+    """Start the CryoSoft application.
+
+    Args:
+        on_station_built: Optional hook run once, immediately after the
+            Station is built and before the Monitor window is shown.
+            Monitoring is off at that point (the production default), so a
+            hook that sets sim-driver test-control attributes (e.g.
+            ``scripts/run_scenario.py``, driving ``tests.scenarios``' apply
+            functions) lands them before anything polls the hardware. Never
+            used in normal `python -m cryosoft.main` startup.
+    """
     setup_logging()
 
     app = QApplication(sys.argv)
@@ -121,6 +133,8 @@ def main() -> None:
         app_settings.shipped_config_dir(), app_settings.user_config_dir()
     )
     station, used_path, warnings = build_station_with_fallback(_startup_candidates())
+    if on_station_built is not None:
+        on_station_built(station)
     # Persist the config that actually loaded (by identity, not path) so the
     # next launch starts there even from a different clone/worktree.
     used_entry = catalog.get_by_path(used_path)

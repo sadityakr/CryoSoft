@@ -22,6 +22,7 @@
 !/data/
 !/docs/
 !/tests/
+!/scripts/
 
 # Claude Code project skills/agents are tracked (git history is the safety net);
 # the rest of .claude/ (local settings) stays untracked — this repo is public.
