@@ -63,6 +63,7 @@ from cryosoft.core.decorators import (
     get_control_panel,
     get_control_scope,
     get_control_specs,
+    get_monitored_methods,
 )
 from cryosoft.core.exceptions import CryoSoftCommunicationError, CryoSoftSafetyError
 from cryosoft.core.operation import (
@@ -2061,6 +2062,12 @@ def test_declared_trend_checks_name_real_state_keys(config_dir: Path) -> None:
     every other conformance test that calls `get_state()`
     (`test_evaluate_safety_flags_are_declared_in_manifest` et al.) also
     restricts to sim-buildable configs for exactly this reason.
+
+    This is the precise runtime check, but it only reaches the two
+    sim-buildable configs. `test_declared_trend_checks_name_derivable_state_keys`
+    below covers all four shipped configs, including the two real-hardware
+    setups, via the static derivation this test's own key set is verified
+    against.
     """
     from cryosoft.core.station import read_trends_config
     from cryosoft.core.trend_checks import declared_checks
@@ -2076,4 +2083,91 @@ def test_declared_trend_checks_name_real_state_keys(config_dir: Path) -> None:
                 f"{config_dir.name}: trend check {check.name!r} names key "
                 f"{key!r}, which is not in this config's last_state_flat() "
                 f"({sorted(flat_keys)})"
+            )
+
+    # Every key last_state_flat() actually produced at runtime must also
+    # appear in the statically derived candidate set below — if it did not,
+    # the static derivation would silently diverge from runtime, and the
+    # all-four-configs test that relies on it (below) would not be trustworthy
+    # for the two real-hardware configs it cannot exercise this way.
+    static_keys = _static_flat_keys(config_dir)
+    missing_from_static = flat_keys - static_keys
+    assert not missing_from_static, (
+        f"{config_dir.name}: last_state_flat() produced key(s) "
+        f"{sorted(missing_from_static)} at runtime that "
+        f"_static_flat_keys() does not derive — the static derivation used "
+        f"to cover the real-hardware configs has drifted from "
+        f"Station.last_state_flat()'s actual behaviour"
+    )
+
+
+def _static_flat_keys(config_dir: Path) -> set[str]:
+    """Derive the set of flat state keys a config COULD produce, no hardware.
+
+    Mirrors `Station.last_state_flat()`'s key construction
+    (`f"{vi_name}_{monitored_method_name}"`) and its exclusions — VIs
+    registered `vi_type: measurement` (`station.py`'s
+    `last_state_flat()` skips them) and any `_`-prefixed monitored method
+    name — using only `devices.yaml` and each VI class's `@monitored`
+    methods (`get_monitored_methods()` accepts a class, not just an
+    instance, so this needs no station build and no hardware poll).
+
+    This is a static OVER-approximation, not an exact match: unlike
+    `last_state_flat()`, it cannot know at import time whether a monitored
+    method returns a numeric scalar (excluded here) versus a string (e.g.
+    `ramp_status`, excluded by `last_state_flat()` at call time). A key this
+    function derives may therefore not actually reach the flat state; the
+    reverse — a real flat-state key this function fails to derive — is
+    what `test_declared_trend_checks_name_real_state_keys` checks never
+    happens, for the two configs it can build.
+
+    Args:
+        config_dir: A `cryosoft/configs/<name>/` directory.
+
+    Returns:
+        Every `f"{vi_name}_{method_name}"` candidate key.
+    """
+    devices = _load_yaml(config_dir / "devices.yaml")
+    keys: set[str] = set()
+    for vi_name, vi_cfg in devices.get("virtual_instruments", {}).items():
+        if vi_cfg.get("vi_type") == "measurement":
+            continue
+        vi_cls = _import_class(vi_cfg["class"])
+        for method_name in get_monitored_methods(vi_cls):
+            if method_name.startswith("_"):
+                continue
+            keys.add(f"{vi_name}_{method_name}")
+    return keys
+
+
+@pytest.mark.parametrize("config_dir", _config_dirs(), ids=lambda p: p.name)
+def test_declared_trend_checks_name_derivable_state_keys(config_dir: Path) -> None:
+    """Every declared TrendCheck's `keys` exist in this config's DERIVABLE state.
+
+    Covers all four shipped configs, including `12t-cryo` and
+    `a-sample-real-cryostat` — the two real-hardware setups
+    `test_declared_trend_checks_name_real_state_keys` cannot reach, because
+    it needs `get_state()`, a hardware poll. If a site renames the VI a
+    trend check names (`temperature_sample`, `level_meter`), the check's key
+    stops resolving and `summarize()` reports `persisted=False` forever —
+    an indeterminate result that publishes nothing, silently and
+    permanently, with no signal that coverage was lost. This test moves
+    that failure to CI, statically, via `_static_flat_keys()` — no hardware
+    needed (`get_monitored_methods()` accepts a class), the same no-hardware
+    pattern `test_config_schema` and
+    `test_panels_config_names_real_vis_and_controls` already use to cover
+    all four configs.
+    """
+    from cryosoft.core.station import read_trends_config
+    from cryosoft.core.trend_checks import declared_checks
+
+    derivable_keys = _static_flat_keys(config_dir)
+    trends_config = read_trends_config(str(config_dir))
+
+    for check in declared_checks(trends_config):
+        for key in check.keys:
+            assert key in derivable_keys, (
+                f"{config_dir.name}: trend check {check.name!r} names key "
+                f"{key!r}, which no VI in this config's devices.yaml can "
+                f"produce ({sorted(derivable_keys)})"
             )
