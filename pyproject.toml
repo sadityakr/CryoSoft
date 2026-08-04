@@ -286,3 +286,20 @@ forbidden_modules = [
     "cryosoft.core.data_manager",
     "cryosoft.core.conditions",
 ]
+
+[[tool.importlinter.contracts]]
+name = "C15: cryosoft.core.trend_checks is pure policy — no Qt, no Station/Orchestrator, no drivers/VIs/procedures/GUI"
+type = "forbidden"
+source_modules = ["cryosoft.core.trend_checks"]
+forbidden_modules = [
+    "cryosoft.drivers",
+    "cryosoft.virtual_instruments",
+    "cryosoft.procedures",
+    "cryosoft.gui",
+    "cryosoft.main",
+    "cryosoft.core.station",
+    "cryosoft.core.orchestrator",
+    "cryosoft.core.trend_check_runner",
+    "cryosoft.core.plan",
+    "cryosoft.core.data_manager",
+]

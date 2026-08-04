@@ -168,11 +168,18 @@ def build_operational_status(
             gates, if any (see ``cryosoft.core.gates.Gate``).
         conditions: This tick's System-Condition standard registry (see
             `cryosoft.core.conditions.Condition`) — the union of the
-            Station's comm/safety conditions and, when a session envelope is
-            active, its envelope conditions. Defaults to empty, so callers
-            that do not pass it (and old status.jsonl records written before
-            this field existed) simply carry no conditions — additive and
-            backward-compatible.
+            Station's comm/safety/trend conditions and, when a session
+            envelope is active, its envelope conditions. Defaults to empty,
+            so callers that do not pass it (and old status.jsonl records
+            written before this field existed) simply carry no conditions —
+            additive and backward-compatible. Every advisory-severity
+            condition also contributes one line to the returned record's
+            ``alerts`` (see below) — the generic mechanism that makes a
+            failing trend check visible in `DiagnosticsWindow` (which
+            renders ``alerts``, not ``conditions``) without this module
+            knowing anything about trend checks specifically; a
+            hold/critical condition is already visible through its own
+            enforcement (standby, EMERGENCY) and is not duplicated here.
 
     Returns:
         ``(record, new_gaps)`` — the JSON-ready record dict and the gap map to
@@ -228,6 +235,15 @@ def build_operational_status(
         )
         verdict = _worse(verdict, code)
 
+    sorted_conditions = sorted(conditions, key=lambda c: c.key)
+    # Advisory conditions have no enforcement of their own (see
+    # cryosoft.core.conditions's severity ladder), so this is their only
+    # visible trace short of reading status.jsonl directly — one alerts line
+    # per condition, generic over origin (today: only "trend").
+    advisory_alerts = [
+        f"{c.key}: {c.message}" for c in sorted_conditions if c.severity == "advisory"
+    ]
+
     record = {
         "orch_state": orch_state,
         "elapsed_in_state_s": round(elapsed_in_state_s, 1),
@@ -238,9 +254,9 @@ def build_operational_status(
         ),
         "progress": progress,
         "verdict": verdict.value,
-        "alerts": [],
+        "alerts": advisory_alerts,
         "vis": vis,
         "active_gates": list(active_gates) if active_gates else [],
-        "conditions": [_condition_as_dict(c) for c in sorted(conditions, key=lambda c: c.key)],
+        "conditions": [_condition_as_dict(c) for c in sorted_conditions],
     }
     return record, new_gaps

@@ -114,7 +114,7 @@ def test_hold_with_empty_affected_vis_raises_value_error():
 
 def test_severities_and_origins_are_the_documented_tuples():
     assert SEVERITIES == ("advisory", "hold", "critical")
-    assert ORIGINS == ("comm", "safety", "envelope")
+    assert ORIGINS == ("comm", "safety", "envelope", "trend")
 
 
 def test_condition_is_frozen_and_hashable():

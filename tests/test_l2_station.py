@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import ClassVar
 
 import pytest
+from cryosoft.core.conditions import Condition
 from cryosoft.core.plan import Target
 from cryosoft.core.station import Station, build_station
 from cryosoft.virtual_instruments.base import BaseVirtualInstrument
@@ -847,6 +848,77 @@ def test_update_conditions_warns_once_for_unconsumed_hold_flag(caplog: pytest.Lo
     assert station.conditions() == {}
     matching = [r for r in caplog.records if "widget_stuck" in r.getMessage()]
     assert len(matching) == 1
+
+
+def _trend_condition(name: str, message: str = "unstable", since: float = 0.0) -> Condition:
+    return Condition(
+        key=f"trend:{name}",
+        origin="trend",
+        severity="advisory",
+        kind=name,
+        source_vis=(),
+        affected_vis=None,
+        message=message,
+        since=since,
+    )
+
+
+def test_publish_conditions_adds_and_clears_by_origin(sim_station: Station):
+    """publish_conditions() upserts the desired set and prunes the rest, origin-scoped."""
+    sim_station.publish_conditions("trend", [_trend_condition("a"), _trend_condition("b")])
+    assert set(sim_station.conditions()) == {"trend:a", "trend:b"}
+
+    # A refresh naming only "a" clears "b" — the desired set is complete, not a delta.
+    sim_station.publish_conditions("trend", [_trend_condition("a")])
+    assert set(sim_station.conditions()) == {"trend:a"}
+
+    # An empty refresh clears everything of this origin.
+    sim_station.publish_conditions("trend", [])
+    assert sim_station.conditions() == {}
+
+
+def test_publish_conditions_preserves_since_and_acknowledged(sim_station: Station):
+    """A key that stays continuously active keeps its original since/acknowledged."""
+    sim_station.publish_conditions("trend", [_trend_condition("a", since=100.0)])
+    sim_station.acknowledge_condition("trend:a")
+
+    sim_station.publish_conditions("trend", [_trend_condition("a", since=999.0, message="still unstable")])
+
+    condition = sim_station.conditions()["trend:a"]
+    assert condition.since == 100.0
+    assert condition.acknowledged is True
+    assert condition.message == "still unstable"
+
+
+def test_publish_conditions_rejects_origin_mismatch(sim_station: Station):
+    from dataclasses import replace
+
+    mismatched = replace(_trend_condition("a"), origin="safety")
+    with pytest.raises(ValueError, match="origin"):
+        sim_station.publish_conditions("trend", [mismatched])
+
+
+def test_publish_conditions_does_not_disturb_other_origins(sim_station: Station):
+    """The trend origin's refresh never wipes a safety-origin condition, and vice versa."""
+    level_driver = sim_station.level_meter._driver
+    level_driver._simulate_error = True
+    safety: dict[str, bool] = {}
+    for _ in range(10):
+        state = sim_station.get_state()
+        safety = sim_station.check_safety(state)
+        if safety.get("helium_low"):
+            break
+    sim_station.update_conditions(safety, tolerated_flags=frozenset())
+    assert "safety:helium_low" in sim_station.conditions()
+
+    # The trend refresh (its own cadence) must not touch the safety condition.
+    sim_station.publish_conditions("trend", [_trend_condition("a")])
+    assert "safety:helium_low" in sim_station.conditions()
+    assert "trend:a" in sim_station.conditions()
+
+    # The per-tick safety refresh must not touch the trend condition either.
+    sim_station.update_conditions(safety, tolerated_flags=frozenset())
+    assert "trend:a" in sim_station.conditions()
 
 
 def test_acknowledge_condition_unknown_key_returns_false(sim_station: Station):

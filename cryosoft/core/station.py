@@ -11,7 +11,7 @@ from __future__ import annotations
 import importlib
 import logging
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -913,6 +913,55 @@ class Station:
                 since=time.time(),
             )
         )
+
+    def publish_conditions(self, origin: str, conditions: Iterable[Condition]) -> None:
+        """Replace *origin*'s active conditions with *conditions*, in one refresh.
+
+        The public, origin-scoped counterpart of the safety producer's
+        inline prune-then-upsert (`update_conditions()`, near the bottom of
+        this class): delete every existing condition of *origin* that is
+        not in the new desired set, then upsert each desired one via
+        `_upsert_condition()` (preserving `since`/`acknowledged` for a key
+        that stays continuously active). Scoping the prune to *origin* is
+        what lets producers refresh on independent cadences without one
+        wiping another's conditions mid-cycle — e.g. the safety producer
+        refreshes every tick (`update_conditions()`) while the trend-check
+        producer refreshes every ~60 s
+        (`cryosoft.core.trend_check_runner.TrendCheckRunner`), and neither
+        refresh touches the other's entries.
+
+        Unlike `update_conditions()`, this method builds no `Condition`
+        itself — the caller (e.g. `cryosoft.core.trend_checks.
+        conditions_for()`) has already decided severity/scope/message; this
+        is purely the registry-refresh mechanics, reusable by any future
+        origin that needs the same "refresh my own slice, leave everyone
+        else's alone" behaviour.
+
+        Args:
+            origin: The origin these conditions belong to. Every condition
+                in *conditions* must have this exact `origin` (checked
+                below) — a mismatch would silently prune conditions this
+                call did not intend to own.
+            conditions: This refresh's COMPLETE desired set for *origin*
+                (not a delta): a condition of *origin* absent from this set
+                is cleared, e.g. because the check/flag/detector that would
+                have produced it now passes.
+
+        Raises:
+            ValueError: If any condition's `origin` does not equal *origin*.
+        """
+        desired = {c.key: c for c in conditions}
+        for condition in desired.values():
+            if condition.origin != origin:
+                raise ValueError(
+                    f"publish_conditions(origin={origin!r}) received a condition "
+                    f"with origin={condition.origin!r} (key={condition.key!r})"
+                )
+        for key in [k for k, c in self._conditions.items() if c.origin == origin]:
+            if key not in desired:
+                del self._conditions[key]
+        for key, condition in desired.items():
+            self._conditions[key] = self._upsert_condition(condition)
 
     def conditions(self) -> dict[str, Condition]:
         """Return a copy of the unified condition registry, ``{key: Condition}``.
@@ -1915,6 +1964,21 @@ _SAFETY_DEFAULTS: dict[str, float] = {
     "stall_seconds": 18.0,
 }
 
+# Defaults applied by read_trends_config() for every key the config omits —
+# always defaulted like _SAFETY_DEFAULTS, never {} on an absent block, so the
+# trend-check scheduler (cryosoft.core.trend_check_runner) always has a
+# refresh cadence to run on even for a setup that has never touched this
+# block. A separate ``trends:`` block rather than folding into ``safety:``:
+# a trend check is never enforcement (it can only ever publish an advisory
+# Condition — see core/trend_checks.py), whereas every existing safety:
+# key (manual_override_timeout_s, stall_seconds) times something that
+# feeds an enforcement or run-fault path. Keeping the blocks separate keeps
+# that distinction legible in devices.yaml, at the cost of one more block
+# name to remember.
+_TREND_DEFAULTS: dict[str, float] = {
+    "refresh_interval_s": 60.0,
+}
+
 
 def _load_devices_yaml(config_path: str) -> dict[str, Any] | None:
     """Parse ``devices.yaml`` under *config_path*, GUI-safe.
@@ -2074,6 +2138,42 @@ def read_safety_config(config_path: str) -> dict[str, float]:
     if devices_config is None:
         return merged
     block = devices_config.get("safety")
+    if not isinstance(block, dict):
+        return merged
+    merged.update(block)
+    return merged
+
+
+def read_trends_config(config_path: str) -> dict[str, float]:
+    """Read the optional ``trends:`` block, GUI-safe, always defaulted.
+
+    Mirrors ``read_safety_config()``'s pattern exactly: the trend-check
+    scheduler (`cryosoft.core.trend_check_runner.TrendCheckRunner`) always
+    needs a refresh cadence, so an absent block means "use the defaults",
+    never "feature disabled" (unlike ``read_cryogenics_config()``). See
+    ``_TREND_DEFAULTS``'s comment for why this is its own block rather than
+    an extension of ``safety:``. No shipped ``devices.yaml`` declares a
+    ``trends:`` block today — this is the code-default pattern, the same
+    precedent ``stall_seconds`` established for ``safety:``.
+
+    Expected shape::
+
+        trends:
+          refresh_interval_s: 60.0
+
+    Args:
+        config_path: Path to the config directory containing ``devices.yaml``.
+
+    Returns:
+        ``_TREND_DEFAULTS`` with any declared overrides merged in. Falls
+        back to the defaults untouched if the config directory/file/YAML is
+        unreadable or the block is absent/malformed — never raises.
+    """
+    merged = dict(_TREND_DEFAULTS)
+    devices_config = _load_devices_yaml(config_path)
+    if devices_config is None:
+        return merged
+    block = devices_config.get("trends")
     if not isinstance(block, dict):
         return merged
     merged.update(block)

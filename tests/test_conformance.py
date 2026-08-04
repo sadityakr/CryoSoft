@@ -2040,3 +2040,40 @@ def test_reading_loop_standard_on_sim_station() -> None:
     # The sim station must exercise the standard: the switch's route and the
     # DC VI's current at minimum.
     assert checked >= 2, "sim station should declare at least two loopable parameters"
+
+
+# ── Trend check declarations ────────────────────────────────────────────────
+# Every TrendCheck declared_checks() returns must name state keys a shipped
+# config can actually produce (Station.last_state_flat()) — a typo'd key
+# would otherwise mean a check silently and permanently reports "no data".
+# Auto-discovering declared_checks() (rather than a fixed list) means a new
+# check declared in a future phase is covered by this test the moment it
+# exists, with no test change required.
+
+
+@pytest.mark.parametrize("config_dir", _sim_config_dirs(), ids=lambda p: p.name)
+def test_declared_trend_checks_name_real_state_keys(config_dir: Path) -> None:
+    """Every declared TrendCheck's `keys` exist in this config's flat state.
+
+    Uses `_sim_config_dirs()`, not `_config_dirs()`: `last_state_flat()`
+    reads the monitor-tick cache, which is only populated by `get_state()`
+    — a real hardware poll on a config with unreachable real drivers, which
+    every other conformance test that calls `get_state()`
+    (`test_evaluate_safety_flags_are_declared_in_manifest` et al.) also
+    restricts to sim-buildable configs for exactly this reason.
+    """
+    from cryosoft.core.station import read_trends_config
+    from cryosoft.core.trend_checks import declared_checks
+
+    station = build_station(str(config_dir))
+    station.get_state()  # populate the monitor-tick cache last_state_flat() reads
+    flat_keys = set(station.last_state_flat())
+    trends_config = read_trends_config(str(config_dir))
+
+    for check in declared_checks(trends_config):
+        for key in check.keys:
+            assert key in flat_keys, (
+                f"{config_dir.name}: trend check {check.name!r} names key "
+                f"{key!r}, which is not in this config's last_state_flat() "
+                f"({sorted(flat_keys)})"
+            )

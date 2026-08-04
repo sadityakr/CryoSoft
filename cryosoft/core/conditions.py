@@ -1,6 +1,6 @@
 """The System-Condition standard: origin x severity, scope follows severity.
 
-CryoSoft has exactly three producers of "something is wrong":
+CryoSoft has exactly four producers of "something is wrong":
 
 - ``"safety"`` — a Virtual Instrument's ``evaluate_safety()`` (see
   `virtual_instruments/base.py` and the **Control-validation standard** in
@@ -10,11 +10,16 @@ CryoSoft has exactly three producers of "something is wrong":
 - ``"envelope"`` — ``ExperimentEnvelope.check_state()`` protecting the sample
   under experiment-scoped bounds narrower than the config limits (see
   `GLOSSARY.md`'s **Session envelope**).
+- ``"trend"`` — a failing named judgement over the trend-history store (see
+  `core/trend_checks.py` and `GLOSSARY.md`'s **Trend check**), published on
+  a slow independent cadence rather than every tick. Every trend check
+  declared so far is ``"advisory"`` severity, making this origin the first
+  real producer of that reserved rung (see the severity list below).
 
 Each origin emits `Condition` objects with one of three severities:
 
-- ``"advisory"`` — reported, no enforcement. A reserved rung; nothing maps
-  to it yet.
+- ``"advisory"`` — reported, no enforcement. Every ``"trend"``-origin
+  condition uses this rung today; no other origin has published one yet.
 - ``"hold"`` — scoped to the condition's `affected_vis`: those VIs go to
   standby on onset, their manual controls are refused while the condition
   persists, and a run watching one of them fails.
@@ -24,11 +29,11 @@ Each origin emits `Condition` objects with one of three severities:
 
 This module is the *pure policy* layer of the standard: it holds the
 `Condition`/`Verdict` value objects and the deterministic `decide()`
-function, and imports nothing beyond the Python standard library. The three
+function, and imports nothing beyond the Python standard library. The four
 producers and the enforcement they trigger (standby, EMERGENCY entry, run
-failure) live above this module (Station, Orchestrator) and are out of
-scope here — see `core/README.md` for how those layers consume `decide()`'s
-`Verdict`.
+failure) live above this module (Station, Orchestrator, and — for
+``"trend"`` — `core/trend_check_runner.py`) and are out of scope here — see
+`core/README.md` for how those layers consume `decide()`'s `Verdict`.
 
 A tripped safety flag can be *tolerated* by an operation's
 ``tolerated_safety_flags`` (see `GLOSSARY.md`'s **Helium fill (operation)**);
@@ -45,7 +50,7 @@ from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 
 SEVERITIES = ("advisory", "hold", "critical")
-ORIGINS = ("comm", "safety", "envelope")
+ORIGINS = ("comm", "safety", "envelope", "trend")
 
 
 @dataclass(frozen=True)
@@ -59,15 +64,17 @@ class Condition:
 
     Attributes:
         key: Stable identity for this condition, e.g. ``"comm:magnet_z"``,
-            ``"safety:helium_low"``, ``"envelope:<bound-description>"``.
-            Non-empty; used to sort and to deduplicate.
+            ``"safety:helium_low"``, ``"envelope:<bound-description>"``,
+            ``"trend:sample_temperature_stable"``. Non-empty; used to sort
+            and to deduplicate.
         origin: One of `ORIGINS` — which producer reported this.
         severity: One of `SEVERITIES` — determines enforcement scope.
         kind: A short discriminator within the origin: ``"stale"`` or
             ``"disconnected"`` for comm; the tripped flag name for safety;
-            ``"envelope"`` for envelope.
+            ``"envelope"`` for envelope; the check name for trend.
         source_vis: The VI name(s) that reported this condition, in
-            reporting order. Empty for envelope (the envelope is not a VI).
+            reporting order. Empty for envelope (the envelope is not a VI)
+            and for trend (a check reads state keys, not a specific VI).
         affected_vis: The VI names this condition scopes enforcement to.
             Must be `None` (station-wide) for a critical condition, and a
             non-empty `frozenset` for a hold condition. Advisory conditions

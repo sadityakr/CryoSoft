@@ -23,7 +23,10 @@ from cryosoft.core.station import (
     read_panels_config,
     read_safety_config,
     read_servicing_logs_config,
+    read_trends_config,
 )
+from cryosoft.core.trend_check_runner import TrendCheckRunner
+from cryosoft.core.trend_checks import declared_checks
 from cryosoft.gui import app_settings
 from cryosoft.gui.monitor_window import MonitorWindow
 from cryosoft.gui.theme import PLOT_AXIS, PLOT_BG, build_stylesheet
@@ -156,6 +159,21 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
         tick_interval_ms=3000,
         manual_override_timeout_s=safety_config["manual_override_timeout_s"],
         stall_seconds=safety_config["stall_seconds"],
+    )
+
+    # Trend-check standard (core/trend_checks.py, GLOSSARY.md's **Trend
+    # check**): a small, single-purpose scheduler independent of the
+    # Orchestrator — it holds only a Station, never an Orchestrator — that
+    # evaluates this setup's declared checks on its own slow timer and
+    # publishes failing ones as advisory-severity conditions. Attached to
+    # `app` (rather than left as a bare local) so its ownership is explicit:
+    # a QObject with no Python reference is eligible for GC regardless of
+    # Qt-side parenting, and `app` outlives everything else built in main().
+    trends_config = read_trends_config(used_path)
+    app.trend_check_runner = TrendCheckRunner(
+        station,
+        declared_checks(trends_config),
+        refresh_interval_s=trends_config["refresh_interval_s"],
     )
 
     # Session layer (L6 + the Session tier above it). measurement_root() is
