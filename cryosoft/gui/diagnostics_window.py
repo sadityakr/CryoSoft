@@ -55,9 +55,11 @@ _CODE_EXPLANATIONS: dict[str, str] = {
         "load, or the instrument not accepting setpoints."
     ),
     RunFaultCode.STALLED_RUN.value: (
-        "The run is wedged in a step that should be momentary — suspect a "
-        "procedure step that is not returning, or a measurement instrument "
-        "that is not responding."
+        "Reserved, no longer produced by a running app — kept only so an "
+        "older status.jsonl still renders. If you see this on a live run, "
+        "the log predates the fixed 30 s single-tick-state timeout being "
+        "removed as unreliable (a long lock-in time constant or heavily "
+        "averaged point could legitimately exceed it)."
     ),
 }
 
@@ -184,8 +186,8 @@ class DiagnosticsWindow(QMainWindow):
 
         Args:
             record: The dict from ``cryosoft.core.operational_status``,
-                already annotated by the watchdog (verdict, alerts, per-VI
-                codes).
+                already annotated by the stall detector (verdict, alerts,
+                per-VI codes).
         """
         self._latest_record = record
 

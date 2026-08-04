@@ -427,7 +427,7 @@ def _cmd_status(args: argparse.Namespace) -> tuple[bool, dict[str, Any]]:
     Reads status.jsonl from the resolved log directory (see
     ``cryosoft.core.paths.log_directory()``; written by the
     Orchestrator each tick) and reports the current state, per-instrument
-    ramp progress and trend, and any watchdog alerts. Exit 0 only when a log
+    ramp progress and trend, and any stall alerts. Exit 0 only when a log
     exists and its verdict is OK, so an agent can gate on the exit code.
     This is the one troubleshoot command that reads the LIVE app rather than
     opening instruments with the app closed.

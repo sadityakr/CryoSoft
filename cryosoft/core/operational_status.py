@@ -28,9 +28,23 @@ class RunFaultCode(str, Enum):
     * ``VI_STALE``        — the instrument stopped updating (cached values).
     * ``VI_DISCONNECTED`` — repeated comms failures; assumed off the bus.
     * ``QUENCH``          — a magnet reported a quench.
-    * ``RAMP_STALLED``    — a ramp made no progress for several ticks (watchdog).
-    * ``STALLED_RUN``     — the run sat in a transient state far too long
-                            (watchdog).
+    * ``RAMP_STALLED``    — a ramp made no progress for several ticks
+                            (``cryosoft.core.stall_detection``).
+    * ``STALLED_RUN``     — RESERVED, no longer emitted. Previously a fixed
+                            30 s timeout on any state assumed to last a single
+                            tick, which was an assumption about how
+                            procedures are written rather than a physical
+                            fact (a long lock-in time constant or a heavily
+                            averaged point can legitimately keep MEASURING
+                            active past 30 s). The producer was removed;
+                            the member is kept because
+                            ``resources/mcp-compatibility.md`` documents
+                            ``RunFaultCode`` values as a stable API that is
+                            never renamed, and existing consumers
+                            (``troubleshoot.status_reader``,
+                            ``gui.diagnostics_window``) still map the string
+                            for display so an old ``status.jsonl`` renders
+                            correctly.
     """
 
     OK = "OK"
@@ -139,7 +153,7 @@ def build_operational_status(
     already-polled ``state`` snapshot and ``ramp_info`` (Station.get_ramp_status,
     which carries value/target/rate/ramp_status/phase per system VI) so this
     does not poll anything itself. Only unambiguous codes are set here; the
-    heuristic stall verdict is layered on by ``cryosoft.core.watchdog``.
+    heuristic stall verdict is layered on by ``cryosoft.core.stall_detection``.
 
     Args:
         orch_state: Orchestrator state name (e.g. ``"RAMPING"``).

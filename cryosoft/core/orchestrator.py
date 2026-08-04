@@ -30,9 +30,9 @@ from cryosoft.core.exceptions import CryoSoftSafetyError
 from cryosoft.core.operational_status import build_operational_status
 from cryosoft.core.plan import Command, ExperimentEnvelope, Target
 from cryosoft.core.ramps import RampRecord, build_ramp_records
+from cryosoft.core.stall_detection import StallConfig, StallState, apply_stall_verdict
 from cryosoft.core.station import FaultRecord, Station
 from cryosoft.core.tiered_trend_logger import TieredTrendLogger
-from cryosoft.core.watchdog import WatchdogConfig, WatchdogState, apply_watchdog
 # Procedures will be imported/type-checked but for now we expect a BaseProcedure mock.
 # We don't import BaseProcedure directly to avoid circular dependency.
 
@@ -170,6 +170,7 @@ class Orchestrator(QObject):
         station: Station,
         tick_interval_ms: int = 3000,
         manual_override_timeout_s: float = 300.0,
+        stall_seconds: float = 18.0,
     ) -> None:
         super().__init__()
         self._station = station
@@ -237,8 +238,14 @@ class Orchestrator(QObject):
         self._prev_gaps: dict[str, float] = {}
         self._operational_status: dict = {}
         self._status_logger = logging.getLogger("cryosoft.status")
-        self._watchdog_state = WatchdogState()
-        self._watchdog_config = WatchdogConfig()
+        self._stall_state = StallState()
+        # stall_seconds is converted to a tick count exactly once here, using
+        # this Orchestrator's own tick_interval_ms — see StallConfig's
+        # docstring for why the conversion cannot happen per-tick or in config
+        # directly.
+        self._stall_config = StallConfig(
+            stall_seconds=stall_seconds, tick_interval_ms=tick_interval_ms
+        )
 
         # Tiered trend-history writer: the disk-backed store of per-tick
         # station readings, downsampled live into the raw/3min/hourly tiers
@@ -335,7 +342,7 @@ class Orchestrator(QObject):
         return self._state.value
 
     def start_monitoring(self) -> bool:
-        """Begin the per-tick monitoring cycle (state polling + safety watchdog).
+        """Begin the per-tick monitoring cycle (state polling + stall detection).
 
         Idempotent. Until this is called, ticks process GUI actions and the
         state machine but touch no instrument — call it once the instruments
@@ -356,7 +363,7 @@ class Orchestrator(QObject):
         """Stop the per-tick monitoring cycle (e.g. to debug an instrument).
 
         Refused (with an ``action_blocked`` signal) outside IDLE/ERROR: while
-        a procedure runs or hardware ramps, the safety watchdog and stale
+        a procedure runs or hardware ramps, the stall detector and stale
         detection that live in the monitoring cycle must keep running.
         Idempotent when already stopped.
 
@@ -369,7 +376,7 @@ class Orchestrator(QObject):
         if self._state not in (OrchestratorState.IDLE, OrchestratorState.ERROR):
             msg = (
                 f"Cannot stop monitoring in state {self._state.name}: "
-                "the safety watchdog must keep running while hardware is active."
+                "the stall detector must keep running while hardware is active."
             )
             logger.info("Blocked stop_monitoring: %s", msg)
             self.action_blocked.emit(msg)
@@ -449,7 +456,7 @@ class Orchestrator(QObject):
             self._station.stop_ramps()
             logger.info("Manual ramp cancelled — procedure starting.")
 
-        # A run without the per-tick safety watchdog and stale detection would
+        # A run without the per-tick stall detector and stale detection would
         # be blind to a quench or a dead controller, so monitoring is mandatory
         # while a procedure executes.
         if not self._monitoring:
@@ -528,7 +535,7 @@ class Orchestrator(QObject):
             self._station.stop_ramps()
             logger.info("Manual ramp cancelled — operation starting.")
 
-        # A run without the per-tick safety watchdog and stale detection would
+        # A run without the per-tick stall detector and stale detection would
         # be blind to a quench or a dead controller, so monitoring is mandatory
         # while an operation executes.
         if not self._monitoring:
@@ -1629,8 +1636,8 @@ class Orchestrator(QObject):
                 active_gates=[g.name for g in self._pending_gates],
                 conditions=conditions,
             )
-            record, self._watchdog_state = apply_watchdog(
-                record, self._watchdog_state, self._watchdog_config
+            record, self._stall_state = apply_stall_verdict(
+                record, self._stall_state, self._stall_config
             )
             self._operational_status = record
             self.operational_status.emit(record)
@@ -1838,8 +1845,8 @@ class Orchestrator(QObject):
         # start_monitoring()). While it is off, no instrument is polled at
         # all: a freshly launched app stays quiet until the instruments have
         # been initiated. run_procedure() auto-starts monitoring and
-        # stop_monitoring() is refused outside IDLE/ERROR, so the safety
-        # watchdog and stale detection below are guaranteed to run whenever
+        # stop_monitoring() is refused outside IDLE/ERROR, so the stall
+        # detector and stale detection below are guaranteed to run whenever
         # a procedure is active.
         if self._monitoring:
             state = self._station.get_state()

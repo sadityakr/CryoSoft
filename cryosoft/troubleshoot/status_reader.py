@@ -35,9 +35,11 @@ CODE_HELP: dict[str, str] = {
         "instrument not accepting setpoints."
     ),
     "STALLED_RUN": (
-        "The run is wedged in a step that should be momentary (initiating/"
-        "measuring/sweeping). Suspect a procedure step that is not returning or a "
-        "measurement instrument that is not responding."
+        "Reserved, no longer produced by a running app — kept only so an "
+        "older status.jsonl still renders. If you see this on a live run, "
+        "the log predates the fixed 30 s single-tick-state timeout being "
+        "removed as unreliable (a long lock-in time constant or heavily "
+        "averaged point could legitimately exceed it)."
     ),
 }
 

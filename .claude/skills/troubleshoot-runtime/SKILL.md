@@ -1,6 +1,6 @@
 ---
 name: troubleshoot-runtime
-description: Explain what a RUNNING CryoSoft measurement is doing and whether it is stuck, slow, or normal. Reads the live operational-status log (status.jsonl, in the resolved log directory — see cryosoft.core.paths.log_directory(), overridable via CRYOSOFT_LOG_DIR — written by the Orchestrator each tick) via `python -m cryosoft.troubleshoot status` and interprets state, per-instrument ramp progress, ETA, and watchdog alerts in plain language for the operator. Use when the app is running and the user asks "why is this taking so long", "is it stuck", "what is it doing", "is this normal". NOT for setup-time instrument or config faults with the app closed — that is the setup-supervisor skill.
+description: Explain what a RUNNING CryoSoft measurement is doing and whether it is stuck, slow, or normal. Reads the live operational-status log (status.jsonl, in the resolved log directory — see cryosoft.core.paths.log_directory(), overridable via CRYOSOFT_LOG_DIR — written by the Orchestrator each tick) via `python -m cryosoft.troubleshoot status` and interprets state, per-instrument ramp progress, ETA, and stall alerts in plain language for the operator. Use when the app is running and the user asks "why is this taking so long", "is it stuck", "what is it doing", "is this normal". NOT for setup-time instrument or config faults with the app closed — that is the setup-supervisor skill.
 ---
 
 # troubleshoot-runtime — explain what a running measurement is doing
@@ -26,20 +26,21 @@ python -m cryosoft.troubleshoot status --last 20 # widen the trend window
 ```
 
 It reads the tail of `status.jsonl` and prints: the orchestrator state and how
-long it has been in it, the overall verdict, any watchdog alerts, and per
+long it has been in it, the overall verdict, any stall alerts, and per
 instrument `value -> target (gap, ramp_status, trend, ETA) [code]`. Exit code is
 0 only when a log exists and the verdict is `OK`, so you can gate on it.
 
 ## How to answer the common questions
 
-- **"Is it stuck?"** Look at `verdict` and `alerts`. `RAMP_STALLED` or
-  `STALLED_RUN` is a high-confidence "yes, stuck" (the watchdog is deliberately
-  lenient, so an alert is meaningful). `OK` with a gap that is `closing` is
-  normal progress.
+- **"Is it stuck?"** Look at `verdict` and `alerts`. `RAMP_STALLED` is a
+  high-confidence "yes, stuck" (the stall detector is deliberately lenient, so
+  an alert is meaningful). `STALLED_RUN` is reserved vocabulary that a current
+  build no longer produces — if you see it, the log is old. `OK` with a gap
+  that is `closing` is normal progress.
 - **"Why is it taking so long?"** Look at the instrument's `gap`, `trend`, and
   ETA. If it is `closing` with a large ETA, it is simply a big/slow ramp, not a
   fault. If the gap is `flat` and not closing, it is stalling even if no alert
-  has fired yet (the watchdog waits several ticks before flagging).
+  has fired yet (the stall detector waits several ticks before flagging).
 - **"What is it doing right now?"** Report the state, the procedure progress
   percentage, and which instrument is ramping toward what target.
 
@@ -72,4 +73,4 @@ final word. The open-ended reasoning is yours:
 Reading status is safe and needs no permission. But pausing, aborting, or
 restarting a run is destructive (partial data, hardware ramps). Report what you
 found and recommend an action; let the user decide. Never abort a run just
-because a watchdog alert fired.
+because a stall alert fired.

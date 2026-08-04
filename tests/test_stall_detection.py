@@ -1,20 +1,20 @@
-"""Tests for the deterministic runtime watchdog."""
+"""Tests for the deterministic per-VI stall detector."""
 
 from __future__ import annotations
 
 from cryosoft.core.operational_status import build_operational_status
-from cryosoft.core.watchdog import WatchdogState, apply_watchdog
+from cryosoft.core.stall_detection import StallConfig, StallState, apply_stall_verdict
 
 
 def _run_ticks(values, target, rate, *, phase=None, ramp_status="RAMPING", config=None):
-    """Feed measured values through build + watchdog; return the per-tick records.
+    """Feed measured values through build + stall detection; return the per-tick records.
 
     One system VI "m" ramping toward *target*; each entry in *values* is its
-    measured value on that tick. prev_gaps and WatchdogState are threaded across
+    measured value on that tick. prev_gaps and StallState are threaded across
     ticks exactly as the Orchestrator does.
     """
     prev_gaps: dict[str, float] = {}
-    wd = WatchdogState()
+    stall_state = StallState()
     records = []
     for v in values:
         ramp_info = {
@@ -25,7 +25,7 @@ def _run_ticks(values, target, rate, *, phase=None, ramp_status="RAMPING", confi
             orch_state="RAMPING", elapsed_in_state_s=1.0, state={"m": {}},
             ramp_info=ramp_info, prev_gaps=prev_gaps,
         )
-        record, wd = apply_watchdog(record, wd, config)
+        record, stall_state = apply_stall_verdict(record, stall_state, config)
         records.append(record)
     return records
 
@@ -40,7 +40,8 @@ def test_converging_ramp_never_stalls():
 def test_flat_ramp_stalls_after_threshold():
     values = [5.0] * 9  # gap frozen: tick0 has no delta, then 8 non-closing ticks
     records = _run_ticks(values, target=10.0, rate=1.0)
-    # Below threshold (default stall_ticks=6): still quiet at the 4th record.
+    # Below threshold (default stall_seconds=18.0 / tick_interval_ms=3000 -> 6 ticks):
+    # still quiet at the 4th record.
     assert records[3]["verdict"] == "OK"
     assert not records[3]["alerts"]
     # Past threshold: stalled, with a per-VI code and a human alert.
@@ -72,27 +73,33 @@ def test_progress_resets_the_stall_counter():
     assert all(r["verdict"] == "OK" for r in records)
 
 
-def test_transient_state_dwell_flags_stalled_run():
-    record = {"orch_state": "MEASURING", "elapsed_in_state_s": 45.0,
-              "verdict": "OK", "alerts": [], "vis": []}
-    record, _ = apply_watchdog(record, WatchdogState())
-    assert record["verdict"] == "STALLED_RUN"
-    assert any("wedged" in a for a in record["alerts"])
+def test_seconds_to_ticks_conversion_matches_wall_clock_across_tick_intervals():
+    # Regression guard for the units bug: the same stall_seconds must trigger
+    # at (approximately) the same wall-clock elapsed time regardless of the
+    # setup's tick_interval_ms, even though the tick COUNT to get there
+    # necessarily differs (6 ticks at 1000 ms vs 2 ticks at 3000 ms).
+    fast_config = StallConfig(stall_seconds=6.0, tick_interval_ms=1000)
+    slow_config = StallConfig(stall_seconds=6.0, tick_interval_ms=3000)
+    assert fast_config.stall_ticks == 6
+    assert slow_config.stall_ticks == 2
+
+    values = [5.0] * 9  # frozen gap throughout
+
+    fast_records = _run_ticks(values, target=10.0, rate=1.0, config=fast_config)
+    slow_records = _run_ticks(values, target=10.0, rate=1.0, config=slow_config)
+
+    fast_stall_tick = next(i for i, r in enumerate(fast_records) if r["verdict"] == "RAMP_STALLED")
+    slow_stall_tick = next(i for i, r in enumerate(slow_records) if r["verdict"] == "RAMP_STALLED")
+
+    fast_wall_clock_s = fast_stall_tick * (fast_config.tick_interval_ms / 1000.0)
+    slow_wall_clock_s = slow_stall_tick * (slow_config.tick_interval_ms / 1000.0)
+    assert abs(fast_wall_clock_s - slow_wall_clock_s) <= max(
+        fast_config.tick_interval_ms, slow_config.tick_interval_ms
+    ) / 1000.0
 
 
-def test_transient_state_ok_within_budget():
-    record = {"orch_state": "MEASURING", "elapsed_in_state_s": 5.0,
-              "verdict": "OK", "alerts": [], "vis": []}
-    record, _ = apply_watchdog(record, WatchdogState())
-    assert record["verdict"] == "OK"
-    assert not record["alerts"]
-
-
-def test_long_ramping_state_is_not_a_wedge():
-    # RAMPING may legitimately last a long time (slow ramp); only transient
-    # states count as wedged. Progress there is judged per-VI, not by dwell.
-    record = {"orch_state": "RAMPING", "elapsed_in_state_s": 9999.0,
-              "verdict": "OK", "alerts": [], "vis": []}
-    record, _ = apply_watchdog(record, WatchdogState())
-    assert record["verdict"] == "OK"
-    assert not record["alerts"]
+def test_seconds_to_ticks_conversion_floors_at_one_tick():
+    # A tick interval longer than the configured stall_seconds must still
+    # yield at least one tick, not zero (which would never trigger).
+    config = StallConfig(stall_seconds=1.0, tick_interval_ms=3000)
+    assert config.stall_ticks == 1

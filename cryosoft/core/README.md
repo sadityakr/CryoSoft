@@ -48,8 +48,8 @@ is the typed currency shared by all of them.
   submits `Procedure` objects and VI/global action requests to it.
 - A `Procedure` is constructed with a `Station`, `sample_info`,
   `data_directory`, and GUI param values; it builds `plan.py` value objects.
-- `Orchestrator` calls `build_operational_status()` then `apply_watchdog()` each
-  tick from the already-polled station snapshot.
+- `Orchestrator` calls `build_operational_status()` then `apply_stall_verdict()`
+  each tick from the already-polled station snapshot.
 - The GUI (`gui/operations_panel.py`'s `OperationsPanel`/`OperationCard`)
   submits an `OperationBase` instance to `Orchestrator.run_operation()` /
   `queue_operation()` — a second, higher-priority request type driven by the
@@ -207,7 +207,7 @@ skip it).
 | `data_manager.py` | L5 HDF5 file lifecycle for one procedure run: pre-allocated datasets, per-point save, abort trimming. A **Raw diagnostic block**'s dataset is self-describing: `axes` names every dimension in order and, when `measurement_block_labels` declares them, `channel_names` gives the channel-axis column names — both written as HDF5 attributes directly on `/data/<block_name>`, never only in the JSON `data_config` metadata blob | `DataManager` (`save_datapoint`, `close`) | `test_l5_data_manager.py` |
 | `sweep_builder.py` | Reusable sweep-array construction and the declarative `SweepAxis` used by procedures | `SweepSegment`, `build_piecewise_sweep()`, `load_custom_sweep_csv()`, `apply_hysteresis()`, `SweepAxis`, `sweep_axis_param_specs()`, `build_axis_sweep()` | `test_sweep_builder.py` |
 | `operational_status.py` | Pure builder of the per-tick runtime "why is the run slow/stuck" status record | `build_operational_status()`, `RunFaultCode`, `worst_code()`, `VIHealth` | `test_operational_status.py` |
-| `watchdog.py` | Deterministic stall detection layered on the status record (RAMP_STALLED, STALLED_RUN) | `apply_watchdog()`, `WatchdogState`, `WatchdogConfig` | `test_watchdog.py` |
+| `stall_detection.py` | Deterministic per-VI ramp-stall detection layered on the status record (RAMP_STALLED); thresholds taken in seconds and converted to a tick count once at construction via the setup's `tick_interval_ms` | `apply_stall_verdict()`, `StallState`, `StallConfig` | `test_stall_detection.py` |
 | `config_catalog.py` | Qt-free discovery and versioning of shipped vs user config directories (copy-on-edit fork, named history) | `ConfigCatalog`, `ConfigEntry`, `ConfigVersion` | `test_config_catalog.py` |
 | `paths.py` | Resolves machine-local, per-installation directories and settings outside source control: the log directory (`CRYOSOFT_LOG_DIR` env var, then the platform user-data location, then `cryosoft/logs/`) and the fixed measurement root (`CRYOSOFT_MEASUREMENT_ROOT` env var, else the `measurement_root` key in the machine-level `App-config.yaml` settings file, else refuse to start — see GLOSSARY.md's **Measurement root**). `config_directory()`/`data_directory()` for site-specific configs and incident reports are planned, see `docs/plans/config-directory-migration.md`. Stdlib-only, import-linter contract C1 foundation module | `log_directory()`, `measurement_root()` | `test_paths.py` |
 | `logging_config.py` | Configures the rotating file + console handlers and four time-rotated JSONL streams — `cryosoft.status` (`status.jsonl`, daily/UTC, 7 backups) and the tiered trend-history streams `cryosoft.trend_raw`/`trend_3min`/`trend_hourly` (`trend_history_{raw,3min,hourly}.jsonl`, daily/daily/weekly, all UTC, 2/8/53 backups); log directory resolution delegates to `paths.log_directory()` | `setup_logging()` | `test_logging_config.py` |

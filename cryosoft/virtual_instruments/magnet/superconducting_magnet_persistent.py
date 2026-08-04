@@ -73,8 +73,8 @@ class SuperconductingMagnetPersistentVI(SuperconductingMagnetVI):
         # persistent-park workflow). Procedures run only in normal mode.
         self._persistent_mode_enabled: bool = False
 
-        # Current ramp sub-phase, for the watchdog (no-motion phases must not
-        # read as a stall). Set as the generator walks its steps.
+        # Current ramp sub-phase, for the stall detector (no-motion phases
+        # must not read as a stall). Set as the generator walks its steps.
         self._phase: str = "idle"
 
     # ------------------------------------------------------------------
@@ -140,9 +140,9 @@ class SuperconductingMagnetPersistentVI(SuperconductingMagnetVI):
 
         One of ``matching`` / ``warmup`` / ``ramping`` / ``cooldown`` /
         ``parking`` while a ramp is in flight, or ``"idle"`` when none is
-        active. The watchdog suppresses stall detection during the no-motion
-        phases (matching/warmup/cooldown/parking), where the field deliberately
-        holds still and a flat gap is expected, not a fault.
+        active. The stall detector suppresses stall detection during the
+        no-motion phases (matching/warmup/cooldown/parking), where the field
+        deliberately holds still and a flat gap is expected, not a fault.
         """
         return "idle" if self._ramp_gen is None else self._phase
 
@@ -183,7 +183,7 @@ class SuperconductingMagnetPersistentVI(SuperconductingMagnetVI):
             # after an app restart the driver reports "ON" while the freshly
             # constructed SwitchHeater still tracks OFF. Without this adoption
             # is_ready() can never become true and the warmup wait below spins
-            # forever (silently — "warmup" is a watchdog no-motion phase).
+            # forever (silently — "warmup" is a stall-detector no-motion phase).
             # turn_on() is a no-op when already tracked on, so a sweep still pays
             # the warmup only once; on first adoption it starts the clock now,
             # costing at most one extra warmup on an already-warm heater.

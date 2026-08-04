@@ -1902,8 +1902,17 @@ _CRYOGENICS_DEFAULTS: dict[str, float | str] = {
 # unlike _CRYOGENICS_DEFAULTS, these apply even when the whole ``safety:``
 # block is absent (Orchestrator.acknowledge()'s override window is not an
 # opt-in feature the way cryogenics is; every setup gets a timeout).
+#
+# stall_seconds mirrors 18.0 s (the previous hardcoded 6-tick threshold at
+# this module's 3000 ms reference tick interval — see
+# cryosoft.core.stall_detection.StallConfig) as a wall-clock default so an
+# omitted key preserves that setup's prior behaviour exactly; setups with a
+# shorter tick_interval_ms now get a genuinely equivalent wall-clock
+# threshold instead of a shorter one, which is the units-bug fix this default
+# exists to deliver.
 _SAFETY_DEFAULTS: dict[str, float] = {
     "manual_override_timeout_s": 300.0,
+    "stall_seconds": 18.0,
 }
 
 
@@ -2050,6 +2059,7 @@ def read_safety_config(config_path: str) -> dict[str, float]:
 
         safety:
           manual_override_timeout_s: 300.0
+          stall_seconds: 18.0
 
     Args:
         config_path: Path to the config directory containing ``devices.yaml``.

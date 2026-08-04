@@ -1409,7 +1409,7 @@ def test_gui_actions_execute_while_monitoring_off(station, qtbot, monkeypatch):
 
 
 def test_run_procedure_auto_starts_monitoring(station, qtbot):
-    """A procedure must run under the safety watchdog: monitoring auto-starts."""
+    """A procedure must run under the stall detector: monitoring auto-starts."""
     orch = Orchestrator(station, tick_interval_ms=10)
     assert orch.is_monitoring() is False
     orch.run_procedure(MockProcedure(station))

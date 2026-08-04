@@ -178,8 +178,8 @@ class OperationBase:
     An operation is a *different contract submitted to the same single
     writer* as a procedure (see): both speak the ``PhasePlan`` /
     ``StepPlan`` / ``Target`` / ``Command`` / ``Gate`` currency and are driven
-    by the same Orchestrator tick loop, state machine, watchdog, and safety
-    checks. What differs is submission priority and the EMERGENCY carve-out
+    by the same Orchestrator tick loop, state machine, stall detector, and
+    safety checks. What differs is submission priority and the EMERGENCY carve-out
     (``Orchestrator.run_operation()`` / ``queue_operation()``), the capability
     scope its plans may carry (``command_scope = "operation"`` — see the
     capability-scope standard in GLOSSARY.md), and completion: a verified
