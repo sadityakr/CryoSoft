@@ -319,6 +319,23 @@ def test_trends_human_output_lists_every_check(
     assert "trend_store_live" in out
 
 
+def test_trends_human_output_renders_key_summary_evidence_readably(
+    sim_config, isolated_trend_log_dir: Path, capsys
+) -> None:
+    """A "cannot tell" verdict's evidence cites a KeySummary; its fields must render, not a repr.
+
+    With no trend-history files on disk, `no_data_outcome()` stores raw
+    `KeySummary` objects in `CheckResult.evidence` (see its docstring), and
+    the human CLI path must render their fields inline rather than Python's
+    default dataclass `repr()` — see `_render_check_result()`'s docstring.
+    """
+    exit_code = cli.main(["trends", "--config", sim_config])
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "KeySummary(" not in out
+    assert "persisted=False" in out
+
+
 # ── transcript ────────────────────────────────────────────────────────────────
 
 

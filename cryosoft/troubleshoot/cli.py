@@ -474,15 +474,37 @@ def _parse_window(value: str) -> float:
     return amount * _WINDOW_UNITS[match.group(2).lower()]
 
 
+def _format_evidence_value(value: Any) -> str:
+    """Render one evidence value for the human-readable CLI path.
+
+    A plain value (number, string) renders as-is. A dataclass instance
+    (e.g. `trend_history.KeySummary`, which `no_data_outcome()` stores
+    directly in a `CheckResult.evidence` mapping) renders its fields
+    inline instead of falling back to its default `repr()` — the
+    ``ClassName(field=value, ...)`` dump that is otherwise indistinguishable
+    from noise to a human reading the CLI at 3 AM. Generic over any
+    dataclass so a future check's evidence never needs a name-specific
+    branch here — see `_render_check_result()`'s docstring.
+    """
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        fields = ", ".join(f"{k}={v!r}" for k, v in dataclasses.asdict(value).items())
+        return f"{{{fields}}}"
+    return str(value)
+
+
 def _render_check_result(result: CheckResult) -> str:
     """One human-readable line for a `CheckResult`, evidence included.
 
     An agent reading this at 3 AM instead of a log needs the numbers behind
     the verdict, not just the verdict — this repository's first principle is
-    that claims are traceable to their source.
+    that claims are traceable to their source. Evidence values render
+    through `_format_evidence_value()` rather than plain `str()`/`f"{v}"`,
+    so a dataclass value (e.g. the `KeySummary` a "no data" verdict cites)
+    prints its fields instead of a bare `KeySummary(...)` repr; `--json`
+    output is unaffected (`dataclasses.asdict()` already flattens it there).
     """
     marker = {True: "PASS", False: "FAIL", None: "N/A "}[result.passed]
-    evidence = ", ".join(f"{k}={v}" for k, v in result.evidence.items())
+    evidence = ", ".join(f"{k}={_format_evidence_value(v)}" for k, v in result.evidence.items())
     line = f"[{marker}] {result.name} — {result.message}"
     if evidence:
         line += f"\n{'':<9} evidence: {evidence}"
