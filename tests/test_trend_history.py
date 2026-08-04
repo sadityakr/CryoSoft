@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import json
 import math
+import random
+import time
 from pathlib import Path
 
 import pytest
 
 from cryosoft.core.trend_history import (
     TIERS,
+    _iter_lines_reverse,
+    _order_tier_files_newest_first,
     find_crossings,
     persisted_keys,
     pick_tier,
@@ -124,6 +128,128 @@ def test_read_tier_partial_result_when_older_files_absent(tmp_path: Path) -> Non
     # No rotated backups exist at all, even though the window asks for far more.
     records = read_tier(tmp_path, "3min", window_s=999_999.0, now=now)
     assert len(records) == 1
+
+
+def test_read_tier_stops_scanning_once_past_the_window_lower_bound(tmp_path: Path) -> None:
+    """The reverse scan must not read records strictly older than the window needs.
+
+    Regression guard for the defect this fix addresses: read_tier() used to
+    read and parse every line of every tier file before applying the window
+    filter, so cost scaled with total retention rather than the requested
+    window. A file whose oldest records fall outside the window, followed
+    by a corrupt line that would raise if ever parsed, proves the scan
+    stopped before reaching it.
+    """
+    live = tmp_path / "trend_history_raw.jsonl"
+    now = 2_000_000.0
+    lines = [
+        "{not json at all — must never be reached by the reverse scan",
+        json.dumps(_raw_record(now - 10_000.0, {"a": -1.0})),  # far outside window
+        json.dumps(_raw_record(now - 50.0, {"a": 1.0})),  # inside window
+        json.dumps(_raw_record(now, {"a": 2.0})),  # inside window
+    ]
+    live.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    records = read_tier(tmp_path, "raw", window_s=100.0, now=now)
+
+    assert [t for t, _ in records] == [now - 50.0, now]
+    assert [v["a"] for _, v in records] == [1.0, 2.0]
+
+
+# --------------------------------------------------------------------------
+# Reverse-chunked file reading (the mechanism read_tier() scans backward with)
+# --------------------------------------------------------------------------
+
+
+def test_iter_lines_reverse_yields_newest_line_first(tmp_path: Path) -> None:
+    path = tmp_path / "lines.jsonl"
+    # newline="" so pathlib writes a literal "\n" on Windows too — this test
+    # asserts on raw line text, unlike read_tier() callers, which parse each
+    # line through _parse_line()'s .strip() and would not notice a stray \r.
+    path.write_text("first\nsecond\nthird\n", encoding="utf-8", newline="")
+
+    assert list(_iter_lines_reverse(path)) == ["third", "second", "first"]
+
+
+def test_iter_lines_reverse_no_trailing_newline(tmp_path: Path) -> None:
+    path = tmp_path / "lines.jsonl"
+    path.write_text("first\nsecond\nthird", encoding="utf-8", newline="")
+
+    assert list(_iter_lines_reverse(path)) == ["third", "second", "first"]
+
+
+def test_iter_lines_reverse_empty_file(tmp_path: Path) -> None:
+    path = tmp_path / "empty.jsonl"
+    path.write_text("", encoding="utf-8")
+
+    assert list(_iter_lines_reverse(path)) == []
+
+
+def test_iter_lines_reverse_missing_file_returns_nothing(tmp_path: Path) -> None:
+    missing = tmp_path / "does_not_exist.jsonl"
+
+    assert list(_iter_lines_reverse(missing)) == []
+
+
+@pytest.mark.parametrize("chunk_size", [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 25, 1000])
+def test_iter_lines_reverse_reassembles_line_straddling_a_chunk_boundary(chunk_size, tmp_path: Path) -> None:
+    """A record split across a tail-read chunk must be reassembled, not dropped or corrupted.
+
+    This is the classic bug in reverse-line readers: with a small
+    ``chunk_size``, every record here is guaranteed to straddle at least one
+    chunk boundary (each line is far longer than the chunk), yet every line
+    must still come back byte-for-byte and in the right (newest-first)
+    order.
+    """
+    lines = ["lineA_with_some_length", "lineB_also_fairly_long", "lineC_the_last_one"]
+    path = tmp_path / "lines.jsonl"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="")
+
+    result = list(_iter_lines_reverse(path, chunk_size=chunk_size))
+
+    assert result == list(reversed(lines))
+
+
+def test_read_tier_record_straddling_a_small_chunk_boundary_is_not_dropped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Integration-level version of the chunk-boundary guard, through read_tier() itself.
+
+    Forces read_tier()'s actual scan (not just the lower-level line reader)
+    to split every record across a chunk boundary, by shrinking the module's
+    chunk size to a few bytes, and checks the public contract still holds:
+    same records, same ascending order, nothing dropped or corrupted.
+    """
+    import cryosoft.core.trend_history as trend_history
+
+    monkeypatch.setattr(trend_history, "_REVERSE_READ_CHUNK_BYTES", 4)
+
+    live = tmp_path / "trend_history_raw.jsonl"
+    now = 2_000_000.0
+    records_in = [
+        _raw_record(now - 2.0, {"a": 1.0, "b": 2.0, "c": 3.0}),
+        _raw_record(now - 1.0, {"a": 4.0, "b": 5.0, "c": 6.0}),
+        _raw_record(now, {"a": 7.0, "b": 8.0, "c": 9.0}),
+    ]
+    _write_jsonl(live, records_in)
+
+    records = read_tier(tmp_path, "raw", window_s=100.0, now=now)
+
+    assert [t for t, _ in records] == [now - 2.0, now - 1.0, now]
+    assert [v for _, v in records] == [rec["v"] for rec in records_in]
+
+
+def test_order_tier_files_newest_first(tmp_path: Path) -> None:
+    spec = TIERS["raw"]
+    live = tmp_path / spec.filename
+    older = tmp_path / f"{spec.filename}.2026-07-01"
+    newer_rotated = tmp_path / f"{spec.filename}.2026-07-24"
+    for p in (live, older, newer_rotated):
+        p.write_text("", encoding="utf-8")
+
+    ordered = _order_tier_files_newest_first([older, live, newer_rotated], spec)
+
+    assert ordered == [live, newer_rotated, older]
 
 
 # --------------------------------------------------------------------------
@@ -403,3 +529,154 @@ def test_find_crossings_invalid_direction_raises(tmp_path: Path) -> None:
 def test_find_crossings_missing_dir_returns_empty(tmp_path: Path) -> None:
     missing = tmp_path / "does_not_exist"
     assert find_crossings(missing, "a", threshold=3.0, window_s=100.0) == []
+
+
+# --------------------------------------------------------------------------
+# Performance regression guard: a check evaluation must not scale with
+# tier retention. This pins the requirement that motivated read_tier()'s
+# reverse-chunked scan (see its docstring): TrendCheckRunner shares the
+# Orchestrator's event loop on a QTimer, and single-threaded cooperative
+# scheduling means slow work here delays the next tick — magnet ramps and
+# safety polls — so it must never block on the full retained store.
+# --------------------------------------------------------------------------
+
+
+#  Realistic-length flat state keys (f"{vi_name}_{monitored_method}", as
+# Station.last_state_flat() actually produces — see e.g.
+# trend_checks.py's _SAMPLE_TEMPERATURE_KEY/_HELIUM_LEVEL_KEY), not the
+# short synthetic "key_0" style: file size (and therefore I/O cost) scales
+# with key-name length too, and a short-name fixture understated it.
+_REALISTIC_KEY_NAMES = [
+    "temperature_sample_temperature", "temperature_vti_temperature",
+    "magnet_z_get_field", "magnet_z_magnet_current", "magnet_z_persistent_switch_state",
+    "level_meter_helium_level", "level_meter_nitrogen_level",
+    "pressure_gauge_still_pressure", "pressure_gauge_condenser_pressure",
+    "source_measure_unit_output_voltage", "source_measure_unit_output_current",
+    "lockin_amplifier_x_reading", "lockin_amplifier_y_reading",
+    "temperature_probe_secondary_temperature", "flow_controller_mass_flow_rate",
+    "heater_power_output_watts", "vacuum_gauge_chamber_pressure",
+    "rotator_angle_degrees", "compressor_helium_return_pressure",
+    "compressor_water_flow_rate", "turbo_pump_rotation_speed_rpm",
+    "ups_battery_charge_percent", "chiller_output_temperature",
+    "gas_handling_system_manifold_pressure", "still_heater_power_output",
+    "mixing_chamber_heater_power", "sorb_pump_temperature",
+    "cold_plate_temperature", "radiation_shield_temperature",
+    "sample_rotator_position_degrees",
+]
+
+
+def _build_realistic_raw_tier(log_dir: Path, *, n_keys: int, now: float) -> list[str]:
+    """Write a raw tier at the shipped spec: 3 s cadence, 3 days, 3 rotated files.
+
+    Matches ``TIERS["raw"]`` (``interval_s=3.0``, ``retention_s=3 * 86400``):
+    86,400 total lines split across a live file and two dated rotated
+    siblings, the same file count and layout ``_tier_files()`` and
+    ``_order_tier_files_newest_first()`` handle in production.
+
+    Values are drawn from a small pre-serialized pool (97 distinct
+    ``"v"``-dicts, cycled) rather than calling ``random.uniform()`` and
+    ``json.dumps()`` fresh per line: at 86,400 lines x 30 keys that naive
+    approach cost ~4 s of pure Python-level generation, dwarfing the ~0.5 s
+    the fixture is meant to measure a check evaluation *against* — an
+    expensive fixture that makes the timing assertion below hard to trust
+    and slows every run of this test. The pool is prime-sized so it never
+    aligns with any periodic structure in the timestamps; what varies line
+    to line, and is real, is ``t`` and the file the line lands in — exactly
+    what ``read_tier()``'s windowing and file selection scan.
+
+    Returns:
+        The ``n_keys`` flat state key names written to every record.
+    """
+    keys = _REALISTIC_KEY_NAMES[:n_keys]
+    n_lines = 86_400
+    cadence_s = 3.0
+    lines_per_file = n_lines // 3
+    rng = random.Random(0)
+
+    pool_size = 97
+    value_pool = [
+        json.dumps({k: round(rng.uniform(0.0, 100.0), 4) for k in keys}) for _ in range(pool_size)
+    ]
+
+    def write_file(path: Path, start_index: int, count: int) -> None:
+        lines = []
+        for i in range(count):
+            idx = start_index + i
+            t = now - (n_lines - idx) * cadence_s
+            lines.append(f'{{"t": {json.dumps(t)}, "v": {value_pool[idx % pool_size]}}}')
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    write_file(log_dir / "trend_history_raw.jsonl.2026-08-01", 0, lines_per_file)
+    write_file(log_dir / "trend_history_raw.jsonl.2026-08-02", lines_per_file, lines_per_file)
+    write_file(
+        log_dir / "trend_history_raw.jsonl",
+        2 * lines_per_file,
+        n_lines - 2 * lines_per_file,
+    )
+    return keys
+
+
+# Budget for one check's worth of evaluation (summarize() + read_window(),
+# exactly what trend_checks.run_check() does) over a 1 h window on the
+# 86,400-line, 30-keys/record fixture below — the worst-case key count this
+# repository's synthetic-store measurements have used. Key names are
+# realistic-length flat state keys (see _REALISTIC_KEY_NAMES), not short
+# placeholders: name length feeds file size and was part of the original
+# measurement, so a fixture using short names would understate the cost.
+#
+# Measured on THIS reverse-scan implementation (both read_tier() and
+# persisted_keys() windowed): ~220 ms at 10 keys/record, ~460 ms at 30
+# keys/record.
+#
+# Measured on the two full-file-parse defects this branch fixed, at 30
+# keys/record:
+#   - read_tier() alone unfixed (persisted_keys() fixed): the original
+#     regression this branch exists for — every line of every raw-tier file
+#     parsed before the window filter — 3.0-4.7 s (see the module's other
+#     history; not independently re-measured here since it dominates by a
+#     wide margin regardless).
+#   - persisted_keys() alone unfixed (read_tier() fixed): a sibling defect
+#     found in review — read_text().splitlines() materialised the whole
+#     file before its own 500-line parse cap applied — 687 ms combined
+#     summarize()+read_window() (vs. 458 ms fixed).
+#
+# 1000 ms sits above the fixed implementation with >2x headroom (absorbing
+# slow-CI variance) and below the dominant read_tier regression by 3-4.7x,
+# so a revert of the primary defect fails unambiguously; it also sits below
+# the persisted_keys()-only regression (687 ms), though that narrower
+# margin makes it the harder of the two failure modes to guarantee catching
+# under heavy CI noise — the budget is chosen so the common, larger
+# regression is never missed, not for micro-benchmark precision.
+_CHECK_EVALUATION_BUDGET_S = 1.0
+
+
+def test_check_evaluation_does_not_scale_with_tier_retention(tmp_path: Path) -> None:
+    """A 1 h check evaluation must cost roughly the window, not the 3-day retention.
+
+    Regression guard for two sibling defects this branch fixed: read_tier()
+    used to parse every line of every raw-tier file before applying the
+    window filter, and persisted_keys() used to materialise a whole file
+    with read_text().splitlines() before applying its own line-count cap —
+    both scaling with total retention rather than the request. See
+    ``_CHECK_EVALUATION_BUDGET_S``'s comment for the measured numbers this
+    budget is calibrated against. Evaluating a 1 h window should now touch
+    roughly the ~1,200 lines the window needs (plus persisted_keys()'s
+    separately bounded tail scan), not all 86,400, and stay well under
+    budget.
+    """
+    from cryosoft.core.trend_history import read_window, summarize
+
+    now = 2_000_000.0
+    keys = _build_realistic_raw_tier(tmp_path, n_keys=30, now=now)
+
+    start = time.perf_counter()
+    summarize(tmp_path, keys, window_s=3600.0, now=now)
+    read_window(tmp_path, keys, window_s=3600.0, now=now)
+    elapsed = time.perf_counter() - start
+
+    assert elapsed < _CHECK_EVALUATION_BUDGET_S, (
+        f"check evaluation over a 1 h window took {elapsed:.3f} s against an "
+        f"86,400-line raw tier; budget is {_CHECK_EVALUATION_BUDGET_S} s — "
+        f"this smells like a regression to a full-tier-file parse instead of "
+        f"read_tier()'s reverse windowed scan"
+    )

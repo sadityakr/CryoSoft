@@ -21,7 +21,7 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Iterator, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +31,14 @@ logger = logging.getLogger(__name__)
 # file (e.g. a stuck rotation) cannot make a "what keys exist" query scan an
 # unbounded amount of data.
 _PERSISTED_KEYS_MAX_LINES = 500
+
+# Tail-read chunk size for read_tier()'s reverse scan. 64 KiB comfortably
+# covers many raw-tier records per read() call (each line is well under 1 KiB
+# even at 30 keys/record) while keeping memory bounded; it is not load-bearing
+# for correctness — _iter_lines_reverse() reassembles a record split across a
+# chunk boundary regardless of this value (see its docstring and the
+# dedicated boundary test in tests/test_trend_history.py).
+_REVERSE_READ_CHUNK_BYTES = 65536
 
 
 @dataclass(frozen=True)
@@ -193,6 +201,95 @@ def _parse_line(line: str, path: Path) -> dict | None:
     return obj
 
 
+def _iter_lines_reverse(
+    path: Path, chunk_size: int = _REVERSE_READ_CHUNK_BYTES
+) -> Iterator[str]:
+    """Yield ``path``'s lines newest-to-oldest, reading fixed-size tail chunks.
+
+    The classic reverse-line-reading algorithm: seek backward from
+    end-of-file in ``chunk_size`` blocks, split each block on ``b"\\n"``, and
+    carry the block's leading fragment (``parts[0]``) forward as ``leftover``
+    for the NEXT (older, further-back) read — that fragment is the start of a
+    line whose end was already yielded from the chunk read just before it, so
+    prepending the next chunk's bytes to it reassembles the line exactly,
+    including when the split lands in the middle of a multi-byte UTF-8
+    character (splitting only ever happens at ``b"\\n"``, which never appears
+    as a UTF-8 continuation byte). A record straddling a chunk boundary is
+    therefore never dropped or corrupted, only reassembled one read later
+    than the rest of its neighbours — see the dedicated boundary test in
+    ``tests/test_trend_history.py``.
+
+    Args:
+        path: File to read.
+        chunk_size: Bytes to read per tail chunk. Exposed for testing (a
+            small value makes it easy to force a record to straddle a
+            boundary); production callers use the module default.
+
+    Yields:
+        Raw line text (not yet stripped), newest physical line first. Never
+        raises — an ``OSError`` opening or reading the file yields nothing,
+        logged at DEBUG, matching ``read_tier()``'s prior per-file tolerance.
+    """
+    try:
+        with path.open("rb") as f:
+            f.seek(0, 2)
+            remaining = f.tell()
+            leftover = b""
+            at_eof_chunk = True
+            while remaining > 0:
+                read_size = min(chunk_size, remaining)
+                remaining -= read_size
+                f.seek(remaining)
+                chunk = f.read(read_size)
+                data = chunk + leftover
+                parts = data.split(b"\n")
+                leftover = parts[0]
+                tail_parts = parts[1:]
+                if at_eof_chunk and tail_parts and tail_parts[-1] == b"":
+                    # The file's trailing "\n" splits into a final empty
+                    # fragment representing whatever comes after it — nothing
+                    # — not a genuine blank line. Drop only this one, only in
+                    # the chunk touching end-of-file, for parity with
+                    # str.splitlines() (which likewise emits no trailing
+                    # empty entry for a final newline).
+                    tail_parts = tail_parts[:-1]
+                at_eof_chunk = False
+                for part in reversed(tail_parts):
+                    yield part.decode("utf-8", errors="replace")
+            if leftover:
+                yield leftover.decode("utf-8", errors="replace")
+    except OSError:
+        logger.debug("trend_history: could not read %s", path)
+        return
+
+
+def _order_tier_files_newest_first(files: list[Path], spec: TierSpec) -> list[Path]:
+    """Order one tier's files for a backward (newest-first) scan.
+
+    The live (undated) file always holds the most recent records — a
+    ``TimedRotatingFileHandler`` rotation renames it to a dated suffix and
+    starts a fresh live file — so it sorts first, ahead of every dated
+    sibling. Dated siblings then sort by their ``YYYY-MM-DD`` suffix,
+    newest date first (lexicographic order matches date order for this
+    zero-padded format).
+
+    Args:
+        files: This tier's files, as returned by ``_tier_files()`` (any
+            order).
+        spec: The tier whose live filename identifies the undated file.
+
+    Returns:
+        ``files`` reordered newest-first.
+    """
+
+    def sort_key(p: Path) -> tuple[int, str]:
+        if p.name == spec.filename:
+            return (1, "")
+        return (0, p.name[len(spec.filename) + 1 :])
+
+    return sorted(files, key=sort_key, reverse=True)
+
+
 def read_tier(
     log_dir: Path, tier: str, window_s: float, now: float | None = None
 ) -> list[tuple[float, dict]]:
@@ -202,6 +299,18 @@ def read_tier(
     ``find_crossings``. Reads the live undated file plus its rotated
     ``.jsonl.<date>`` siblings, merges them oldest-first, and filters to
     ``now - window_s <= t <= now``.
+
+    Scans backward: since each file is append-ordered by timestamp, this
+    walks files newest-first (``_order_tier_files_newest_first``) and each
+    file's lines newest-first (``_iter_lines_reverse``, fixed-size tail
+    chunks), stopping the instant it reaches a record older than the
+    window's lower bound. Cost is therefore set by the requested window, not
+    by total retention — a 1 h window on a raw tier holding 3 days of 3 s
+    samples touches roughly the ~1,200 lines the window actually needs,
+    never the ~86,400 lines on disk. A malformed or blank line does not stop
+    the scan (``_parse_line`` tolerates it, matching the forward reader this
+    replaces); only a line with a valid, in-order timestamp older than the
+    window does.
 
     Args:
         log_dir: Directory containing the tier's JSONL files (as resolved
@@ -229,14 +338,15 @@ def read_tier(
         now = time.time()
     lower = now - window_s
 
+    ordered_files = _order_tier_files_newest_first(files, spec)
+
     records: list[tuple[float, dict]] = []
-    for path in files:
-        try:
-            text = path.read_text(encoding="utf-8")
-        except OSError:
-            logger.debug("trend_history: could not read %s", path)
-            continue
-        for line in text.splitlines():
+    for path in ordered_files:
+        stop = False
+        # Looked up on the module rather than relying on the parameter
+        # default, so a test can shrink it via monkeypatch and force this
+        # scan itself to exercise a record split across a chunk boundary.
+        for line in _iter_lines_reverse(path, chunk_size=_REVERSE_READ_CHUNK_BYTES):
             obj = _parse_line(line, path)
             if obj is None:
                 continue
@@ -247,10 +357,18 @@ def read_tier(
             if not isinstance(v, dict):
                 continue
             t = float(t)
-            if lower <= t <= now:
-                records.append((t, v))
+            if t < lower:
+                # Append-ordered by timestamp: everything earlier in this
+                # file, and every older file behind it, is older still.
+                stop = True
+                break
+            if t > now:
+                continue
+            records.append((t, v))
+        if stop:
+            break
 
-    records.sort(key=lambda item: item[0])
+    records.reverse()
     return records
 
 
@@ -266,6 +384,16 @@ def persisted_keys(log_dir: Path, tier: str) -> set[str]:
     persisted recently is what matters for this distinction, and scanning
     the entire retention window would be unnecessarily slow for a store
     that can hold up to a year of hourly data.
+
+    Reads each file backward via ``_iter_lines_reverse`` (the same
+    fixed-size-chunk tail scan ``read_tier`` uses) rather than materialising
+    the whole file with ``read_text().splitlines()`` — this was the sibling
+    of the defect ``read_tier`` was fixed for: the line-count cap bounded
+    how much got *parsed*, but not the I/O or the split, which still scaled
+    with file size (a 30 MB live file dwarfed the file bound this function's
+    own docstring promises). The generator is abandoned as soon as the cap
+    is hit — a ``for`` loop that ``break``s never calls it again — so this
+    reads only the trailing bytes it actually needs.
 
     Args:
         log_dir: Directory containing the tier's JSONL files.
@@ -285,11 +413,7 @@ def persisted_keys(log_dir: Path, tier: str) -> set[str]:
     keys: set[str] = set()
     lines_read = 0
     for path in files:
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            continue
-        for line in reversed(lines):
+        for line in _iter_lines_reverse(path, chunk_size=_REVERSE_READ_CHUNK_BYTES):
             if lines_read >= _PERSISTED_KEYS_MAX_LINES:
                 break
             obj = _parse_line(line, path)
