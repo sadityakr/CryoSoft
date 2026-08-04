@@ -636,10 +636,12 @@ class MonitorWindow(QMainWindow):
     def _on_monitoring_clicked(self, checked: bool) -> None:
         """Start or stop monitoring from the header toggle.
 
-        The Orchestrator may refuse a stop (outside IDLE/ERROR the safety
-        watchdog must keep running; the refusal reason arrives on
-        ``action_blocked`` and shows in the banner), so the button is re-synced
-        from the confirmed state rather than left at the clicked position.
+        The Orchestrator may refuse a stop (outside IDLE/ERROR the tick loop
+        must keep running so hold enforcement can keep re-asserting standby
+        on any held VI — GLOSSARY.md's **Hold enforcement**; the refusal
+        reason arrives on ``action_blocked`` and shows in the banner), so the
+        button is re-synced from the confirmed state rather than left at the
+        clicked position.
 
         Args:
             checked: The button's new checked state after the click.
@@ -1506,7 +1508,9 @@ class MonitorWindow(QMainWindow):
             return
         remaining = max(0.0, expires_at - time.time())
         minutes, seconds = divmod(int(remaining), 60)
-        self._ack_countdown_label.setText(f"Acknowledged ({minutes:02d}:{seconds:02d})")
+        self._ack_countdown_label.setText(
+            f"Acknowledged ({minutes:02d}:{seconds:02d}) — held VIs return to standby at 00:00"
+        )
         self._ack_countdown_label.setVisible(True)
 
     def _refresh_hold_banner(self, held: frozenset[str]) -> None:

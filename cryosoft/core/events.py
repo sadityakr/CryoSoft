@@ -20,8 +20,12 @@ class ErrorEvent:
             quarantines only that VI), ``"run_failure"`` (an active run's
             claimed VI faulted — the run fails, the machine returns to
             IDLE), ``"safety"`` (a tripped safety flag — global EMERGENCY),
-            or ``"internal"`` (an unhandled tick-boundary exception —
-            global ERROR, unknown blast radius).
+            ``"internal"`` (an unhandled tick-boundary exception —
+            global ERROR, unknown blast radius), or ``"safety_hold"`` (a
+            VI-scoped safety-hold enforcement action — the Orchestrator
+            re-asserting or failing to re-assert ``standby()`` on a VI held
+            by a hold-severity safety condition; scoped to that one VI,
+            never a blast radius beyond it, unlike ``"safety"`` above).
         severity: ``"warning"``, ``"error"``, or ``"emergency"``.
         message: Human-readable description, suitable for direct display.
         timestamp: Unix time the event was created (``time.time()``).

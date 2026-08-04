@@ -155,6 +155,8 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
         station,
         tick_interval_ms=3000,
         manual_override_timeout_s=safety_config["manual_override_timeout_s"],
+        hold_enforcement_interval_s=safety_config["hold_enforcement_interval_s"],
+        hold_enforcement_max_attempts=safety_config["hold_enforcement_max_attempts"],
     )
 
     # Session layer (L6 + the Session tier above it). measurement_root() is

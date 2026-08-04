@@ -24,7 +24,7 @@ from typing import Any
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
 from cryosoft.core.availability import TAG_POLICY, Availability
-from cryosoft.core.conditions import Condition, decide, envelope_conditions
+from cryosoft.core.conditions import Condition, Verdict, decide, envelope_conditions
 from cryosoft.core.events import ErrorEvent
 from cryosoft.core.exceptions import CryoSoftSafetyError
 from cryosoft.core.operational_status import build_operational_status
@@ -113,11 +113,16 @@ class Orchestrator(QObject):
             ``"run_failure"`` — the active run's claimed VI faulted, the run
             fails and the machine returns to IDLE; ``"safety"`` — a tripped
             safety flag, global EMERGENCY; ``"internal"`` — an unhandled
-            tick-boundary exception, global ERROR), ``severity``
+            tick-boundary exception, global ERROR; ``"safety_hold"`` — a
+            VI-scoped safety-hold enforcement action, either a routine
+            re-assertion (``severity="warning"``) or an escalation once the
+            hold proves unenforceable (``severity="error"``) — see
+            ``_enforce_safety_holds()``), ``severity``
             (``"warning"``/``"error"``/``"emergency"``), ``message``, and
             ``timestamp``. A plain per-VI fault (``kind="fault"``,
-            ``severity="warning"``) fires ONLY this signal, deliberately NOT
-            ``error_occurred`` — mere staleness on an unclaimed VI was never
+            ``severity="warning"``) and a routine hold re-assertion
+            (``kind="safety_hold"``, ``severity="warning"``) both fire ONLY
+            this signal, deliberately NOT ``error_occurred`` — neither was
             an ``error_occurred``-worthy event before this plan and must not
             become banner-noisy in every window that still only listens to
             the compat signal (e.g. ProcedureWindow).
@@ -170,6 +175,8 @@ class Orchestrator(QObject):
         station: Station,
         tick_interval_ms: int = 3000,
         manual_override_timeout_s: float = 300.0,
+        hold_enforcement_interval_s: float = 10.0,
+        hold_enforcement_max_attempts: int = 3,
     ) -> None:
         super().__init__()
         self._station = station
@@ -224,6 +231,24 @@ class Orchestrator(QObject):
         # within the same window.
         self._hold_override_until: dict[str, float] = {}
         self._manual_override_timeout_s = float(manual_override_timeout_s)
+
+        # Safety-hold enforcement (see _enforce_safety_holds()): the
+        # level-triggered invariant that keeps every held, un-overridden VI
+        # at standby for as long as its hold persists, not just at onset.
+        # _hold_enforcement_last_s: vi_name -> the last unix time a standby()
+        # RE-ASSERTION was attempted on it (rate limit; absent = never
+        # attempted, so a freshly held VI fires immediately). _hold_
+        # enforcement_attempts: vi_name -> consecutive raise count since the
+        # last time standby_status() left "away". _hold_enforcement_
+        # escalated: vi_names whose CRITICAL escalation has already fired
+        # this episode, so it logs/emits once, not on every attempt past the
+        # threshold. All three entries for a VI are cleared the instant it
+        # stops being held-and-away — see _enforce_safety_holds()'s docstring.
+        self._hold_enforcement_last_s: dict[str, float] = {}
+        self._hold_enforcement_attempts: dict[str, int] = {}
+        self._hold_enforcement_escalated: set[str] = set()
+        self._hold_enforcement_interval_s = float(hold_enforcement_interval_s)
+        self._hold_enforcement_max_attempts = int(hold_enforcement_max_attempts)
 
         # Scanner (switch VI) availability: an on/off flag procedures check
         # via Station.scanner_enabled() rather than assuming the first switch
@@ -1700,8 +1725,8 @@ class Orchestrator(QObject):
         runs inside an exception boundary that degrades to ERROR, and a
         cosmetic status line must not be able to trip it.
 
-        Routed by the active run's kind (hard status separation, plan
-        operation-concurrency-and-error-scoping.md §2): while an operation is
+        Routed by the active run's kind — the hard status separation (see
+        GLOSSARY.md): while an operation is
         active this goes to ``operation_status``/``cryosoft.operation_status``
         instead of ``status_message``/``cryosoft.procedure_status`` — the
         Procedure window must never see operation chatter. Neither logger is
@@ -1923,19 +1948,18 @@ class Orchestrator(QObject):
                     envelope_conditions(self._session_envelope.check_state(state), time.time())
                 )
 
-            # Onset diff: ONE registry-key set replaces the old separate
-            # fault-VI and safety-hold-VI trackers. A NEW comm-origin key on
-            # an unwatched VI is a per-instrument warning (a watched VI's
-            # fault is handled by the run-failure verdict below instead,
-            # with a matching, more severe event, so it must not ALSO get a
-            # warning here). A NEW hold-severity SAFETY key (the safety-hold
-            # standard: some VI's safety_concerns() names a newly-tripped,
-            # non-tolerated flag) dispatches one standby() to every VI it
-            # holds — not repeated every tick the hold persists, and
-            # naturally re-fired if the key disappears (a tolerance window)
-            # and later reappears, since it is then "new" again. Comm
-            # conditions never get this standby dispatch — a stale VI was
-            # never told to stand by, only warned about or failed.
+            # Onset diff: fires a one-shot warning for a NEW comm-origin
+            # condition on an unwatched VI (a watched VI's fault is handled
+            # as a run failure below instead, with a matching, more severe
+            # event, so it must not ALSO get a warning here). This diff is
+            # comm-origin ONLY — a hold-severity safety condition is no
+            # longer handled by ONSET here at all: it is a LEVEL-TRIGGERED
+            # invariant enforced every tick by _enforce_safety_holds() below
+            # (over verdict.held_vis, once decide() has run), which re-issues
+            # standby() for as long as the hold persists rather than once at
+            # onset — see that method's docstring for why an edge-triggered
+            # dispatch here left a hold that survived an acknowledge-then-
+            # expire cycle permanently unenforced.
             by_key = {c.key: c for c in conditions}
             current_keys = set(by_key)
             new_keys = current_keys - self._known_condition_keys
@@ -1947,12 +1971,6 @@ class Orchestrator(QObject):
                     if run_active and vi_name in watched_vis:
                         continue  # handled as a run failure below, this same tick
                     self._emit_fault_event(vi_name, condition.kind, condition.message)
-                elif condition.origin == "safety" and condition.severity == "hold":
-                    for vi_name in sorted(condition.affected_vis or ()):
-                        try:
-                            self._station.get_vi(vi_name).standby()
-                        except Exception:
-                            logger.exception("standby failed on held VI '%s'", vi_name)
 
             # Single verdict over every condition (comm + safety + envelope):
             # decide() partitions by severity — critical -> emergency,
@@ -1991,6 +2009,18 @@ class Orchestrator(QObject):
                     reason_parts.append("; ".join(c.message for c in envelope_conds))
                 self._enter_emergency("; ".join(reason_parts), tuple(sorted(vi_names)))
                 return  # emergency entry already cleaned up; nothing else this tick
+
+            # Safety-hold enforcement (the level-triggered invariant — see
+            # _enforce_safety_holds()'s docstring): runs AFTER the override
+            # pruning above (so override_active() reads this tick's fresh
+            # expiries, not a stale one) and AFTER the emergency block (an
+            # EMERGENCY already issued its own blanket standby_all() and
+            # returned above; there is no per-VI concerned subset left to
+            # enforce). Runs BEFORE the run-failure check below, so a hold
+            # that also fails a watched run is still enforced on this same
+            # tick — the run ending must not silently stop the invariant
+            # that keeps its now-unclaimed VI safe.
+            self._enforce_safety_holds(verdict)
 
             # Run failure: the watched VI's hold — comm-origin (stale) or
             # safety-origin (a non-tolerated concern) — that decide() found.
@@ -2523,6 +2553,7 @@ class Orchestrator(QObject):
         vi_name: str | None = None,
         kind: str = "internal",
         severity: str = "error",
+        log_level: int = logging.ERROR,
     ) -> None:
         """Report an error: log it, emit the compat + structured signals.
 
@@ -2537,10 +2568,19 @@ class Orchestrator(QObject):
             vi_name: The originating VI, if any (``None`` for a machine-wide
                 event, or a comma-joined list for more than one VI).
             kind: ``"internal"`` (default, unhandled tick-boundary
-                exception), ``"run_failure"``, or ``"safety"``.
+                exception), ``"run_failure"``, ``"safety"``, or
+                ``"safety_hold"`` (a VI-scoped safety-hold-enforcement
+                escalation — see ``_enforce_safety_holds()``).
             severity: ``"error"`` (default) or ``"emergency"``.
+            log_level: The ``logging`` level *message* is logged at
+                (default ``logging.ERROR``). CLAUDE.md reserves
+                ``CRITICAL`` for safety events; a caller reporting one
+                (e.g. the hold-enforcement escalation) passes
+                ``logging.CRITICAL`` here instead of also logging
+                separately, so the file log carries the right severity in
+                exactly one line rather than two near-duplicates.
         """
-        logger.error(message)
+        logger.log(log_level, message)
         self.error_occurred.emit(message)
         try:
             self.error_event.emit(
@@ -2599,3 +2639,211 @@ class Orchestrator(QObject):
             )
         except Exception:  # noqa: BLE001 — a signal-emit failure must never disrupt the run
             logger.exception("error_event emit failed in _emit_fault_event")
+
+    # ------------------------------------------------------------------
+    # Safety-hold enforcement (the System-Condition standard's hold
+    # invariant — GLOSSARY.md's **Safety hold**)
+    # ------------------------------------------------------------------
+
+    def _enforce_safety_holds(self, verdict: Verdict) -> None:
+        """Keep every held, un-overridden VI at standby for as long as it is held.
+
+        A hold-severity condition's enforcement is a LEVEL-TRIGGERED
+        invariant, not a one-shot onset action: for as long as a VI appears
+        in ``verdict.held_vis`` and its hold is not acknowledged
+        (``override_active()``), that VI is driven to — and kept at — the
+        safe idle state its own ``standby()`` defines, using
+        ``BaseVirtualInstrument.standby_status()`` (the standby-provenance
+        standard, see ``virtual_instruments/base.py``) as the evidence of
+        whether it is already there. Replaces the old onset-only dispatch,
+        which fired exactly once when a hold began and then never again —
+        so a hold that outlived an acknowledge-then-expire cycle (the
+        operator moved the VI away from standby while unlocked, then the
+        override lapsed) left the VI at its new, unsafe position
+        indefinitely: expiry revokes manual permission, it does not
+        re-command hardware.
+
+        Generality (CLAUDE.md's "standards over one-off code"): this reads
+        only ``Condition.severity == "hold"`` and its ``affected_vis`` —
+        both already resolved into ``verdict.held_vis`` by
+        ``core.conditions.decide()`` — and never names a flag. ``helium_low``
+        is simply the only hold-severity flag any VI declares today; a
+        future one is a declaration on a category base plus a config
+        threshold, inheriting this enforcement with zero Orchestrator
+        change. The one thing that is NOT general: ``standby()`` is the
+        only safe response this contract models. A future hold-severity
+        flag that needs a different safe action belongs as a declaration
+        on the VI itself (a new hook alongside ``standby_status()``), never
+        as a special case in this method.
+
+        Rate-limited via ``self._hold_enforcement_last_s`` to at most one
+        ``standby()`` attempt per VI per ``self._hold_enforcement_
+        interval_s`` — a VI with no recorded attempt yet fires immediately,
+        which is what makes hold ONSET and hold RE-ASSERTION the same code
+        path (a freshly held VI has never been enforced, so it reads
+        ``"away"`` and is dispatched on this very tick). A VI whose
+        ``standby()`` keeps raising past ``self._hold_enforcement_
+        max_attempts`` is escalated exactly once per episode (see
+        ``_emit_hold_enforcement_escalation``) — the invariant is then not
+        merely unsatisfied, it is unsatisfiable (a driver failing silently,
+        or hardware ignoring the command), which is a CRITICAL condition
+        even though this method never transitions the state machine to
+        EMERGENCY; that remains a separate decision made elsewhere.
+
+        Args:
+            verdict: This tick's ``core.conditions.decide()`` result — read
+                for ``held_vis`` only.
+        """
+        held_names = set(verdict.held_vis)
+
+        # Bookkeeping belongs only to a VI that is CURRENTLY held AND away;
+        # drop it the instant either stops being true, so a later, unrelated
+        # episode on the same VI starts its attempt count from zero instead
+        # of inheriting a stale escalation marker or attempt tally.
+        for vi_name in list(self._hold_enforcement_attempts) + list(
+            self._hold_enforcement_last_s
+        ):
+            if vi_name not in held_names:
+                self._hold_enforcement_attempts.pop(vi_name, None)
+                self._hold_enforcement_last_s.pop(vi_name, None)
+                self._hold_enforcement_escalated.discard(vi_name)
+
+        now = time.time()
+        for vi_name in sorted(held_names):
+            if self.override_active(vi_name):
+                # Acknowledged: the operator is deliberately in control.
+                continue
+
+            condition = verdict.held_vis[vi_name]
+            try:
+                vi = self._station.get_vi(vi_name)
+            except Exception:
+                logger.exception(
+                    "held VI '%s' no longer resolves on the Station; "
+                    "skipping enforcement this tick",
+                    vi_name,
+                )
+                continue
+
+            try:
+                status = vi.standby_status()
+            except Exception:
+                # Conservative: a VI whose status accessor itself fails
+                # (e.g. reaching ramp_status() on unreachable hardware) is
+                # treated as "away" — re-issuing standby() is the safe
+                # direction to guess wrong in.
+                logger.exception(
+                    "standby_status() raised on held VI '%s'; treating as 'away'",
+                    vi_name,
+                )
+                status = "away"
+
+            if status != "away":
+                # Reached or converging: nothing to enforce this tick.
+                self._hold_enforcement_attempts.pop(vi_name, None)
+                self._hold_enforcement_last_s.pop(vi_name, None)
+                self._hold_enforcement_escalated.discard(vi_name)
+                continue
+
+            last_attempt = self._hold_enforcement_last_s.get(vi_name)
+            if last_attempt is not None and now - last_attempt < self._hold_enforcement_interval_s:
+                continue
+            self._hold_enforcement_last_s[vi_name] = now
+
+            try:
+                vi.standby()
+            except Exception:
+                logger.exception(
+                    "standby() raised re-asserting the safety hold on VI '%s'", vi_name
+                )
+                attempts = self._hold_enforcement_attempts.get(vi_name, 0) + 1
+                self._hold_enforcement_attempts[vi_name] = attempts
+                if (
+                    attempts >= self._hold_enforcement_max_attempts
+                    and vi_name not in self._hold_enforcement_escalated
+                ):
+                    self._hold_enforcement_escalated.add(vi_name)
+                    self._emit_hold_enforcement_escalation(vi_name, condition, attempts)
+                continue
+
+            # Success: standby() returning is not proof the VI reached safe
+            # idle (see the docstring) so the attempt counter is
+            # deliberately left untouched — only standby_status() leaving
+            # "away", checked at the top of a later tick, resets it.
+            self._emit_hold_enforcement_event(vi_name, condition)
+
+    def _emit_hold_enforcement_event(self, vi_name: str, condition: Condition) -> None:
+        """Announce a routine safety-hold re-assertion: a warning ``ErrorEvent``.
+
+        Re-asserting standby moves hardware without the operator asking for
+        it — correct for a hazard interlock, but it must never be silent:
+        an operator who finds a field changed with no explanation learns to
+        distrust the safety system. Modeled on ``_emit_fault_event()``:
+        deliberately does NOT go through ``_error()``, since a single VI
+        being kept at standby is VI-scoped, not machine-wide, and must not
+        fire the compat ``error_occurred`` signal any more than a per-VI
+        comm fault does.
+
+        Args:
+            vi_name: The VI just (re-)commanded to standby.
+            condition: The hold-severity ``Condition`` holding it —
+                ``condition.kind`` names the tripped flag,
+                ``condition.message`` is its human-readable description.
+        """
+        message = (
+            f"{vi_name}: driven to standby for the active safety hold "
+            f"'{condition.kind}' ({condition.message})"
+        )
+        logger.warning("Safety-hold enforcement: %s", message)
+        self._emit_status(message)
+        try:
+            self.error_event.emit(
+                ErrorEvent(
+                    vi_name=vi_name,
+                    kind="safety_hold",
+                    severity="warning",
+                    message=message,
+                    timestamp=time.time(),
+                )
+            )
+        except Exception:  # noqa: BLE001 — a signal-emit failure must never disrupt the run
+            logger.exception("error_event emit failed in _emit_hold_enforcement_event")
+
+    def _emit_hold_enforcement_escalation(
+        self, vi_name: str, condition: Condition, attempts: int
+    ) -> None:
+        """Escalate an unenforceable safety hold: CRITICAL log + louder ``ErrorEvent``.
+
+        Reached once a held VI's ``standby()`` has raised
+        ``self._hold_enforcement_max_attempts`` times in a row with no
+        intervening tick where ``standby_status()`` left ``"away"``: the
+        hold invariant is not merely unsatisfied, it is unsatisfiable — the
+        driver is failing silently or the hardware is ignoring the command.
+        Routed through ``_error()`` (louder than the routine per-attempt
+        announcement above) so it also reaches the compat
+        ``error_occurred`` signal, with ``log_level=logging.CRITICAL`` so
+        the file log carries the severity CLAUDE.md reserves for safety
+        events, in exactly one line rather than a second, near-duplicate
+        one. Fires once per episode — ``_enforce_safety_holds()`` tracks
+        that in ``self._hold_enforcement_escalated`` and clears it the
+        instant the VI stops being held-and-away.
+
+        Deliberately does NOT transition the state machine to EMERGENCY —
+        that is a separate decision this standard does not make; this
+        method's whole job is to make the failure visible, not to act on
+        it further.
+
+        Args:
+            vi_name: The VI whose hold could not be enforced.
+            condition: The hold-severity ``Condition`` holding it.
+            attempts: The consecutive raise count that triggered escalation.
+        """
+        self._error(
+            f"Safety-hold enforcement on '{vi_name}' failed {attempts} consecutive "
+            f"times ({condition.kind}): standby() keeps raising and the hold is not "
+            "being enforced. Check the instrument.",
+            vi_name=vi_name,
+            kind="safety_hold",
+            severity="error",
+            log_level=logging.CRITICAL,
+        )
