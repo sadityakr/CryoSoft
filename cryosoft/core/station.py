@@ -1949,8 +1949,9 @@ _CRYOGENICS_DEFAULTS: dict[str, float | str] = {
 
 # Defaults applied by read_safety_config() for every key the config omits —
 # unlike _CRYOGENICS_DEFAULTS, these apply even when the whole ``safety:``
-# block is absent (Orchestrator.acknowledge()'s override window is not an
-# opt-in feature the way cryogenics is; every setup gets a timeout).
+# block is absent (Orchestrator.acknowledge()'s override window, the
+# safety-hold enforcement invariant, and stall detection are not opt-in
+# features the way cryogenics is; every setup gets them).
 #
 # stall_seconds mirrors 18.0 s (the previous hardcoded 6-tick threshold at
 # this module's 3000 ms reference tick interval — see
@@ -1962,6 +1963,15 @@ _CRYOGENICS_DEFAULTS: dict[str, float | str] = {
 _SAFETY_DEFAULTS: dict[str, float] = {
     "manual_override_timeout_s": 300.0,
     "stall_seconds": 18.0,
+    # Minimum seconds between standby() re-assertion attempts on the same
+    # held VI (Orchestrator._enforce_safety_holds() — GLOSSARY.md's
+    # **Safety hold**): keeps a persistently-held VI from being re-commanded
+    # every tick.
+    "hold_enforcement_interval_s": 10.0,
+    # Consecutive failed standby() attempts on the same held VI before the
+    # Orchestrator escalates (CRITICAL log + ErrorEvent) instead of quietly
+    # retrying forever.
+    "hold_enforcement_max_attempts": 3,
 }
 
 # Defaults applied by read_trends_config() for every key the config omits —
@@ -2187,14 +2197,19 @@ def read_safety_config(config_path: str) -> dict[str, float]:
         safety:
           manual_override_timeout_s: 300.0
           stall_seconds: 18.0
+          hold_enforcement_interval_s: 10.0
+          hold_enforcement_max_attempts: 3
 
     Args:
         config_path: Path to the config directory containing ``devices.yaml``.
 
     Returns:
-        ``_SAFETY_DEFAULTS`` with any declared overrides merged in. Falls
-        back to the defaults untouched if the config directory/file/YAML is
-        unreadable or the block is absent/malformed — never raises.
+        ``_SAFETY_DEFAULTS`` (``manual_override_timeout_s``,
+        ``stall_seconds``, ``hold_enforcement_interval_s``,
+        ``hold_enforcement_max_attempts``)
+        with any declared overrides merged in. Falls back to the defaults
+        untouched if the config directory/file/YAML is unreadable or the
+        block is absent/malformed — never raises.
     """
     merged = dict(_SAFETY_DEFAULTS)
     devices_config = _load_devices_yaml(config_path)

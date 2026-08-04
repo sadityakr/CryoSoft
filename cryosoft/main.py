@@ -159,6 +159,8 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
         tick_interval_ms=3000,
         manual_override_timeout_s=safety_config["manual_override_timeout_s"],
         stall_seconds=safety_config["stall_seconds"],
+        hold_enforcement_interval_s=safety_config["hold_enforcement_interval_s"],
+        hold_enforcement_max_attempts=safety_config["hold_enforcement_max_attempts"],
     )
 
     # Trend-check standard (core/trend_checks.py, GLOSSARY.md's **Trend

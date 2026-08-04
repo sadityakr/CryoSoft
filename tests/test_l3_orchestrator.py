@@ -1,12 +1,16 @@
 import json
 import logging
+import time
+from typing import ClassVar
 
 import pytest
 
 
 from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 from cryosoft.core.plan import PhasePlan, StepPlan, Target
-from cryosoft.core.station import build_station
+from cryosoft.core.station import Station, build_station
+from cryosoft.virtual_instruments.base import BaseVirtualInstrument
+from cryosoft.virtual_instruments.rampable import RampableVI
 
 
 class MockProcedure:
@@ -1851,3 +1855,559 @@ def test_detached_vi_admitted_by_tag_policy(orchestrator, station):
         assert reason == ""
     finally:
         del vi.is_attached
+
+
+# ---------------------------------------------------------------------------
+# Safety-hold enforcement (Orchestrator._enforce_safety_holds()): the
+# level-triggered invariant that keeps every held, un-overridden VI at
+# standby for as long as its hold persists — not just once at onset. See
+# core/README.md's tick-pipeline paragraph and GLOSSARY.md's **Safety hold**.
+# ---------------------------------------------------------------------------
+
+
+def _force_ramp_to_settle(driver) -> None:
+    """Rewind *driver*'s simulated clock so its next poll snaps to setpoint.
+
+    The sim PSU (``SimOxfordIPS120``) advances its simulated current toward
+    the commanded setpoint based on REAL elapsed wall time since
+    ``_last_update``; the configured ramp rates (~0.5 T/min) would otherwise
+    make a real ramp-to-completion take real minutes. Rewinding the clock
+    far enough that ``max_step`` exceeds any remaining distance makes the
+    very next simulated poll (any ``get_current()``/``get_status()`` call)
+    snap straight to the setpoint — mirrors the technique
+    ``tests/test_l1_virtual_instruments.py`` uses directly against the VI.
+    """
+    driver._last_update = time.time() - 3600.0
+
+
+def test_expired_override_re_asserts_standby_on_the_held_vi(station, qtbot):
+    """Regression: a hold that outlives an acknowledge-then-expire window must
+    still drive the VI back to standby — expiry revokes manual PERMISSION,
+    it must not leave the hardware wherever the operator last put it.
+
+    This is the reported bug: helium_low trips, the operator acknowledges to
+    unlock manual control, sets a nonzero field during the unlocked window,
+    and the window expires. On ``develop`` (the old onset-only dispatch at
+    the deleted ``elif condition.origin == "safety" and condition.severity
+    == "hold":`` branch) the hold was already "known" from the moment it
+    began, so nothing re-fires when the override lapses — the magnet is
+    simply never told to stand down again, and this test times out waiting
+    for the field to return to zero. With ``_enforce_safety_holds()`` the
+    hold is a level-triggered invariant re-checked every tick, so the very
+    next eligible tick after the override lapses re-issues ``standby()``.
+    """
+    driver = station.magnet_z._driver
+    vi = station.magnet_z
+    orch = Orchestrator(
+        station,
+        tick_interval_ms=10,
+        manual_override_timeout_s=0.2,
+        hold_enforcement_interval_s=0.05,
+    )
+    orch.start_monitoring()
+    try:
+        station.level_meter._driver._force_helium_level = 5.0
+
+        def magnet_held():
+            return "magnet_z" in orch._held_vis()
+
+        qtbot.waitUntil(magnet_held, timeout=2000)
+
+        orch.acknowledge()
+        assert orch.override_active("magnet_z") is True
+
+        with qtbot.waitSignal(orch.action_succeeded, timeout=500):
+            orch.submit_vi_action("magnet_z", "set_field", target_T=2.0)
+
+        def field_at_target():
+            _force_ramp_to_settle(driver)
+            return abs(vi.magnet_field_T() - 2.0) < 0.01 and vi.ramp_status() == "TARGET_REACHED"
+
+        qtbot.waitUntil(field_at_target, timeout=2000)
+
+        qtbot.wait(300)  # well past the 0.2s override window
+        assert orch.override_active("magnet_z") is False
+
+        def field_back_to_zero():
+            _force_ramp_to_settle(driver)
+            return abs(vi.magnet_field_T()) < 0.01
+
+        qtbot.waitUntil(field_back_to_zero, timeout=3000)
+    finally:
+        station.level_meter._driver._force_helium_level = None
+        orch.shutdown()
+
+
+def test_enforcement_interrupts_a_ramp_still_in_flight(station, qtbot, monkeypatch):
+    """The "2 T hole": enforcement must not wait for an in-flight manual ramp
+    to finish before re-asserting the hold.
+
+    A held magnet sent to 2 T during an acknowledge window, still climbing
+    when that window lapses, must be re-commanded to standby WHILE the ramp
+    is in flight — never exempted until it arrives. ``standby_status()`` is
+    command-PROVENANCE-based (the standby-provenance standard,
+    ``virtual_instruments/base.py``), never a physical read of where the
+    field currently is, so it reports ``"away"`` the instant a manual
+    ``start_ramp()`` supersedes a prior ``standby()``. A check written
+    against the magnet's own ``magnet_state()`` instead would see
+    ``"ramping"`` — with no notion of ramping to WHAT — classify the magnet
+    as converging on safety, and leave it climbing to 2 T forever. That is
+    the hole this test exists to keep closed.
+    """
+    vi = station.magnet_z
+    orch = Orchestrator(
+        station,
+        tick_interval_ms=10,
+        hold_enforcement_interval_s=0.02,
+    )
+    orch.start_monitoring()
+    try:
+        standby_calls: list[float] = []
+        original_standby = vi.standby
+
+        def counting_standby():
+            standby_calls.append(time.time())
+            return original_standby()
+
+        monkeypatch.setattr(vi, "standby", counting_standby)
+
+        station.level_meter._driver._force_helium_level = 5.0
+
+        def magnet_held():
+            return "magnet_z" in orch._held_vis()
+
+        qtbot.waitUntil(magnet_held, timeout=2000)
+        qtbot.waitUntil(lambda: len(standby_calls) >= 1, timeout=2000)  # onset attempt
+        orch.acknowledge()
+
+        with qtbot.waitSignal(orch.action_succeeded, timeout=500):
+            orch.submit_vi_action("magnet_z", "set_field", target_T=2.0)
+
+        calls_before = len(standby_calls)
+        assert vi.ramp_status() == "RAMPING"
+        assert vi.standby_status() == "away"
+
+        # Force the override to have already expired, with the ramp toward
+        # 2 T still climbing (the sim PSU ramps in real time, so the field
+        # is nowhere near 2 T yet and stays that way for the whole test).
+        orch._hold_override_until = {key: 0.0 for key in orch._hold_override_until}
+        assert orch.override_active("magnet_z") is False
+
+        # Enforcement must fire on the next eligible tick, mid-ramp.
+        qtbot.waitUntil(lambda: len(standby_calls) > calls_before, timeout=2000)
+
+        # It interrupted the climb rather than waiting for it: the magnet is
+        # now converging on standby's target, and never got anywhere near
+        # the 2 T the operator asked for.
+        assert vi.standby_status() in ("converging", "reached")
+        assert abs(vi.magnet_field_T() - 2.0) > 0.5
+    finally:
+        station.level_meter._driver._force_helium_level = None
+        orch.shutdown()
+
+
+def test_converging_standby_is_not_re_issued_and_the_ramp_completes(station, qtbot, monkeypatch):
+    """No wedging: while ``standby()`` is converging, it must not be re-issued.
+
+    Catches the naive fix that calls ``standby()`` unconditionally every
+    tick a hold persists: rebuilding ``SuperconductingMagnetVI``'s ramp
+    generator on every tick would restart the ramp from scratch each time
+    and the magnet would never arrive. A tiny
+    ``hold_enforcement_interval_s`` (well under the whole test's duration)
+    makes sure the assertion is actually exercising the ``standby_status()
+    != "away"`` skip, not merely benefiting from the rate limit.
+    """
+    driver = station.magnet_z._driver
+    vi = station.magnet_z
+    orch = Orchestrator(
+        station,
+        tick_interval_ms=10,
+        hold_enforcement_interval_s=0.01,
+    )
+    orch.start_monitoring()
+    try:
+        # Move the magnet away from zero first, so standby() has ground to
+        # cover once the hold trips.
+        with qtbot.waitSignal(orch.action_succeeded, timeout=500):
+            orch.submit_vi_action("magnet_z", "set_field", target_T=1.0)
+
+        def field_at_1T():
+            _force_ramp_to_settle(driver)
+            return abs(vi.magnet_field_T() - 1.0) < 0.01 and vi.ramp_status() == "TARGET_REACHED"
+
+        qtbot.waitUntil(field_at_1T, timeout=2000)
+
+        standby_calls: list[float] = []
+        original_standby = vi.standby
+
+        def counting_standby():
+            standby_calls.append(time.time())
+            return original_standby()
+
+        monkeypatch.setattr(vi, "standby", counting_standby)
+
+        station.level_meter._driver._force_helium_level = 5.0
+
+        def magnet_held():
+            return "magnet_z" in orch._held_vis()
+
+        qtbot.waitUntil(magnet_held, timeout=2000)
+        qtbot.waitUntil(lambda: vi.standby_status() == "converging", timeout=2000)
+        assert len(standby_calls) == 1
+
+        # Several more ticks pass while still converging, well past the 0.01s
+        # rate-limit interval — standby() must not be re-issued.
+        qtbot.wait(200)
+        assert vi.standby_status() == "converging"
+        assert len(standby_calls) == 1
+
+        def field_back_to_zero():
+            _force_ramp_to_settle(driver)
+            return abs(vi.magnet_field_T()) < 0.01 and vi.standby_status() == "reached"
+
+        qtbot.waitUntil(field_back_to_zero, timeout=2000)
+        assert len(standby_calls) == 1  # the ramp finished on its own — never restarted
+    finally:
+        station.level_meter._driver._force_helium_level = None
+        orch.shutdown()
+
+
+def test_failed_standby_is_retried_and_escalates_exactly_once(station, qtbot, monkeypatch, caplog):
+    """A raising ``standby()`` is retried at the next interval and escalates
+    once ``hold_enforcement_max_attempts`` is reached — logged CRITICAL and
+    reported via one ``kind="safety_hold"``/``severity="error"``
+    ``ErrorEvent``, not one per attempt past the threshold.
+    """
+    vi = station.magnet_z
+    orch = Orchestrator(
+        station,
+        tick_interval_ms=10,
+        hold_enforcement_interval_s=0.03,
+        hold_enforcement_max_attempts=3,
+    )
+    orch.start_monitoring()
+    try:
+
+        def raising_standby():
+            raise RuntimeError("PSU refused standby")
+
+        monkeypatch.setattr(vi, "standby", raising_standby)
+
+        events = []
+        orch.error_event.connect(events.append)
+
+        station.level_meter._driver._force_helium_level = 5.0
+
+        def magnet_held():
+            return "magnet_z" in orch._held_vis()
+
+        qtbot.waitUntil(magnet_held, timeout=2000)
+
+        with caplog.at_level(logging.CRITICAL, logger="cryosoft.core.orchestrator"):
+            qtbot.waitUntil(
+                lambda: orch._hold_enforcement_attempts.get("magnet_z", 0) >= 3, timeout=3000
+            )
+            qtbot.wait(60)  # let the escalating tick's signal land
+
+        escalations = [
+            e for e in events if e.kind == "safety_hold" and e.severity == "error"
+        ]
+        assert len(escalations) == 1
+        assert "magnet_z" in escalations[0].message
+        critical_records = [r for r in caplog.records if r.levelno == logging.CRITICAL]
+        assert len(critical_records) == 1
+
+        # Retried, not abandoned: a further interval later, a fourth attempt happens.
+        qtbot.wait(150)
+        assert orch._hold_enforcement_attempts.get("magnet_z", 0) >= 4
+
+        # Escalation still fires only once per episode.
+        escalations = [
+            e for e in events if e.kind == "safety_hold" and e.severity == "error"
+        ]
+        assert len(escalations) == 1
+    finally:
+        station.level_meter._driver._force_helium_level = None
+        orch.shutdown()
+
+
+def test_hold_enforcement_bookkeeping_resets_on_settle_and_fresh_episode_starts_at_zero(
+    station, qtbot, monkeypatch
+):
+    """Attempt/escalation bookkeeping is scoped to the CURRENT held-and-away
+    episode: it must clear the instant ``standby_status()`` leaves "away",
+    and a later, unrelated episode on the same VI must not inherit it.
+    """
+    vi = station.magnet_z
+    driver = station.magnet_z._driver
+    original_standby = vi.standby
+    orch = Orchestrator(
+        station,
+        tick_interval_ms=10,
+        hold_enforcement_interval_s=0.02,
+        hold_enforcement_max_attempts=100,  # never escalate in this test
+    )
+    orch.start_monitoring()
+    try:
+        call_count = {"n": 0}
+
+        def flaky_standby():
+            call_count["n"] += 1
+            if call_count["n"] <= 2:
+                raise RuntimeError("transient PSU fault")
+            return original_standby()
+
+        monkeypatch.setattr(vi, "standby", flaky_standby)
+        station.level_meter._driver._force_helium_level = 5.0
+
+        def magnet_held():
+            return "magnet_z" in orch._held_vis()
+
+        qtbot.waitUntil(magnet_held, timeout=2000)
+        qtbot.waitUntil(
+            lambda: orch._hold_enforcement_attempts.get("magnet_z", 0) >= 2, timeout=2000
+        )
+
+        def field_settled():
+            _force_ramp_to_settle(driver)
+            return vi.standby_status() != "away"
+
+        qtbot.waitUntil(field_settled, timeout=2000)
+        # standby_status() itself updates the instant the 3rd (successful)
+        # call returns; the Orchestrator's own bookkeeping-clear only runs
+        # at the START of the NEXT enforcement pass — give it one more tick.
+        qtbot.wait(30)
+        assert "magnet_z" not in orch._hold_enforcement_attempts
+        assert "magnet_z" not in orch._hold_enforcement_last_s
+        assert "magnet_z" not in orch._hold_enforcement_escalated
+
+        # Recover, move the magnet away from standby's target again while
+        # UNHELD (an ordinary manual action), then re-trip: a second,
+        # unrelated episode.
+        station.level_meter._driver._force_helium_level = None
+        qtbot.waitUntil(lambda: "magnet_z" not in orch._held_vis(), timeout=2000)
+        monkeypatch.setattr(vi, "standby", original_standby)
+
+        with qtbot.waitSignal(orch.action_succeeded, timeout=500):
+            orch.submit_vi_action("magnet_z", "set_field", target_T=0.5)
+
+        def field_at_half_tesla():
+            _force_ramp_to_settle(driver)
+            return abs(vi.magnet_field_T() - 0.5) < 0.01
+
+        qtbot.waitUntil(field_at_half_tesla, timeout=2000)
+
+        station.level_meter._driver._force_helium_level = 5.0
+        qtbot.waitUntil(magnet_held, timeout=2000)
+
+        def field_back_to_zero():
+            _force_ramp_to_settle(driver)
+            return abs(vi.magnet_field_T()) < 0.01
+
+        qtbot.waitUntil(field_back_to_zero, timeout=2000)
+        # The fresh episode never accumulated a raise: bookkeeping started
+        # at zero, exactly as if this were the VI's very first hold.
+        assert orch._hold_enforcement_attempts.get("magnet_z", 0) == 0
+    finally:
+        station.level_meter._driver._force_helium_level = None
+        orch.shutdown()
+
+
+def test_override_suppresses_enforcement(station, qtbot, monkeypatch):
+    """While ``override_active(vi_name)`` is True, enforcement must not call
+    ``standby()`` at all — the operator is deliberately in control.
+    """
+    vi = station.magnet_z
+    orch = Orchestrator(
+        station,
+        tick_interval_ms=10,
+        hold_enforcement_interval_s=0.02,  # tiny: would re-fire fast if not suppressed
+    )
+    orch.start_monitoring()
+    try:
+        standby_calls: list[float] = []
+        original_standby = vi.standby
+
+        def counting_standby():
+            standby_calls.append(time.time())
+            return original_standby()
+
+        monkeypatch.setattr(vi, "standby", counting_standby)
+
+        station.level_meter._driver._force_helium_level = 5.0
+
+        def magnet_held():
+            return "magnet_z" in orch._held_vis()
+
+        qtbot.waitUntil(magnet_held, timeout=2000)
+        qtbot.waitUntil(lambda: len(standby_calls) >= 1, timeout=2000)  # the onset attempt
+
+        orch.acknowledge()
+        assert orch.override_active("magnet_z") is True
+
+        calls_before = len(standby_calls)
+        with qtbot.waitSignal(orch.action_succeeded, timeout=500):
+            orch.submit_vi_action("magnet_z", "set_field", target_T=1.5)
+        assert vi.standby_status() == "away"  # would be enforced if not overridden
+
+        qtbot.wait(150)
+        assert len(standby_calls) == calls_before
+    finally:
+        station.level_meter._driver._force_helium_level = None
+        orch.shutdown()
+
+
+class _SyntheticHoldFlagRampableVI(BaseVirtualInstrument, RampableVI):
+    """Test-local double: declares its OWN hold-severity safety flag.
+
+    Proves the enforcement standard's generality (see
+    ``Orchestrator._enforce_safety_holds()``'s docstring): nothing there
+    names a flag or a VI category — it reads only ``Condition.severity ==
+    "hold"`` and ``affected_vis``, both already resolved by
+    ``core.conditions.decide()``. A brand-new flag on a brand-new,
+    non-magnet VI is enforced identically with zero Orchestrator change —
+    this VI is both the flag's producer AND the sole VI concerned with it,
+    unlike ``helium_low`` (produced by the level meter, concerned-with by
+    the magnets), which exercises the same mechanism from the other side.
+    """
+
+    vi_type = "system"
+    safety_flags: ClassVar[dict[str, str]] = {"widget_stuck": "hold"}
+
+    def __init__(self, drivers: dict, **init_params: object) -> None:
+        super().__init__(drivers, **init_params)
+        self.value = 0.0
+        self._target = 0.0
+        self._ramping = False
+        self.tripped = False
+
+    def safety_concerns(self) -> set[str]:
+        return {"widget_stuck"}
+
+    def evaluate_safety(self, state: dict) -> dict[str, bool]:
+        return {"widget_stuck": self.tripped}
+
+    def start_ramp(self, target: float) -> None:
+        self._target = target
+        self._ramping = True
+
+    def advance_ramp(self) -> None:
+        if self._ramping:
+            self.value = self._target
+            self._ramping = False
+
+    def ramp_status(self) -> str:
+        return "RAMPING" if self._ramping else "TARGET_REACHED"
+
+    def stop_ramp(self) -> None:
+        self._ramping = False
+
+    def standby(self) -> None:
+        self.start_ramp(0.0)
+
+
+def test_generality_second_hold_flag_on_non_magnet_vi_enforced_identically(qtbot):
+    """A second, unrelated hold-severity flag on a non-magnet VI is enforced
+    by the exact same, unmodified ``_enforce_safety_holds()`` — see
+    ``_SyntheticHoldFlagRampableVI``'s docstring for what this proves.
+    """
+    station = Station()
+    station.register_vi("widget", _SyntheticHoldFlagRampableVI({}), "system")
+    orch = Orchestrator(station, tick_interval_ms=10, hold_enforcement_interval_s=0.02)
+    orch.start_monitoring()
+    vi = station.get_vi("widget")
+    try:
+        vi.start_ramp(5.0)
+        vi.advance_ramp()
+        assert vi.value == 5.0
+
+        vi.tripped = True
+
+        def widget_held():
+            return "widget" in orch._held_vis()
+
+        qtbot.waitUntil(widget_held, timeout=2000)
+
+        def widget_back_to_zero_and_settled():
+            return vi.value == 0.0 and vi.standby_status() == "reached"
+
+        qtbot.waitUntil(widget_back_to_zero_and_settled, timeout=2000)
+    finally:
+        vi.tripped = False
+        orch.shutdown()
+
+
+class _SyntheticNonRampableHoldFlagVI(BaseVirtualInstrument):
+    """Test-local double: a non-``RampableVI`` held by its own hold-severity flag."""
+
+    vi_type = "system"
+    safety_flags: ClassVar[dict[str, str]] = {"sensor_stuck": "hold"}
+
+    def __init__(self, drivers: dict, **init_params: object) -> None:
+        super().__init__(drivers, **init_params)
+        self.tripped = False
+        self.standby_calls = 0
+
+    def safety_concerns(self) -> set[str]:
+        return {"sensor_stuck"}
+
+    def evaluate_safety(self, state: dict) -> dict[str, bool]:
+        return {"sensor_stuck": self.tripped}
+
+    def standby(self) -> None:
+        self.standby_calls += 1
+
+
+def test_non_rampable_held_vi_reports_reached_and_is_never_recommanded(qtbot):
+    """A held non-``RampableVI`` has no intermediate state to converge
+    through — ``standby_status()`` is unconditionally ``"reached"`` — so
+    enforcement never calls its ``standby()`` at all.
+    """
+    station = Station()
+    station.register_vi("sensor", _SyntheticNonRampableHoldFlagVI({}), "system")
+    orch = Orchestrator(station, tick_interval_ms=10, hold_enforcement_interval_s=0.02)
+    orch.start_monitoring()
+    vi = station.get_vi("sensor")
+    try:
+        vi.tripped = True
+
+        def sensor_held():
+            return "sensor" in orch._held_vis()
+
+        qtbot.waitUntil(sensor_held, timeout=2000)
+        assert vi.standby_status() == "reached"
+        qtbot.wait(150)
+        assert vi.standby_calls == 0
+    finally:
+        vi.tripped = False
+        orch.shutdown()
+
+
+def test_hold_enforcement_announces_reassertion(orchestrator, station, qtbot):
+    """A routine re-assertion emits BOTH the concise status line and a
+    ``kind="safety_hold"``/``severity="warning"`` ``ErrorEvent`` naming the
+    VI and the tripped condition — silent hardware motion is unacceptable
+    even for a correct safety action (see ``_emit_hold_enforcement_event``'s
+    docstring).
+    """
+    status_messages: list[str] = []
+    orchestrator.status_message.connect(status_messages.append)
+    events = []
+    orchestrator.error_event.connect(events.append)
+
+    station.level_meter._driver._force_helium_level = 5.0
+    try:
+
+        def hold_events():
+            return [
+                e for e in events if e.kind == "safety_hold" and e.vi_name == "magnet_z"
+            ]
+
+        qtbot.waitUntil(lambda: len(hold_events()) >= 1, timeout=2000)
+        event = hold_events()[0]
+        assert event.severity == "warning"
+        assert "magnet_z" in event.message
+        assert "helium_low" in event.message
+        assert any("magnet_z" in message for message in status_messages)
+    finally:
+        station.level_meter._driver._force_helium_level = None

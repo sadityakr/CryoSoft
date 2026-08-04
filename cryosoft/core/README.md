@@ -158,16 +158,31 @@ is the typed currency shared by all of them.
   flags** — the single application point for a hold-severity flag's
   tolerance), the result is merged with this tick's `envelope_conditions()`,
   an onset diff over the merged condition-key set fires per-instrument
-  fault events and one-shot `standby()` dispatches, one `decide()` call
-  turns the merged list into a `Verdict`, and the Orchestrator executes it
-  (`emergency` → `_enter_emergency()`, always a blanket `standby_all()`;
-  `run_failure` → `_fail_run_for_fault()`). EMERGENCY refuses every manual
-  action station-wide — there is no "unconcerned VI" once critical severity
-  has stopped the whole station — until `Orchestrator.acknowledge()` unlocks
-  the front-panel override (time-boxed, GLOSSARY.md's **Hold acknowledge**);
-  the same `acknowledge()` also unlocks a plain hold-severity condition
-  (e.g. `helium_low`) without ever entering EMERGENCY. `core/conditions.py`
-  holds the pure policy (the
+  fault events for a NEW comm-origin condition (comm-origin only — a
+  hold-severity safety condition's enforcement no longer lives in this
+  diff), one `decide()` call turns the merged list into a `Verdict`,
+  and the Orchestrator executes it: `_enforce_safety_holds(verdict)` keeps
+  every VI in `verdict.held_vis` at standby for as long as it is held and
+  not acknowledged — a LEVEL-TRIGGERED invariant (re-checked and, if
+  needed, re-asserted every tick, rate-limited per VI by
+  `hold_enforcement_interval_s`) rather than a one-shot onset action, so a
+  hold that survives an acknowledge-then-expire cycle is still enforced
+  after the override lapses; a VI whose `standby()` keeps failing past
+  `hold_enforcement_max_attempts` is escalated once per episode (CRITICAL
+  log + a `kind="safety_hold"` `ErrorEvent`) without transitioning the
+  state machine — then `emergency` → `_enter_emergency()` (always a
+  blanket `standby_all()`, which is why `_enforce_safety_holds()` runs
+  only when not already handled by that block — see its call site's
+  comment) and `run_failure` → `_fail_run_for_fault()`. EMERGENCY refuses
+  every manual action station-wide — there is no "unconcerned VI" once
+  critical severity has stopped the whole station — until
+  `Orchestrator.acknowledge()` unlocks the front-panel override (time-boxed,
+  GLOSSARY.md's **Hold acknowledge**); the same `acknowledge()` also unlocks
+  a plain hold-severity condition (e.g. `helium_low`) without ever entering
+  EMERGENCY — and `_enforce_safety_holds()` treats an acknowledged hold
+  exactly like `_manual_action_admissible()` does, skipping enforcement for
+  as long as the override is live. `core/conditions.py` holds the pure
+  policy (the
   `Condition`/`Verdict` value objects and the deterministic `decide()`
   function) with no dependency on the Station or Orchestrator (import-linter
   contract C13), so the policy is unit-testable without a running system.

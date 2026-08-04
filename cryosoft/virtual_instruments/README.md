@@ -59,6 +59,17 @@ a `drivers` dict of role → driver instance (e.g. `{"main": ...}`,
   particular must be a pure accessor over what the generator last commanded
   — never a hardware read — and must be cleared in `stop_ramp()` alongside
   the target.
+- `standby_status()` — whether this VI is at the safe idle state its own
+  `standby()` drives it to (`"reached"`), on its way there
+  (`"converging"`), or neither (`"away"`). Derived entirely from command
+  PROVENANCE by `BaseVirtualInstrument`'s `__init_subclass__` wrap of a
+  directly defined `standby()` / `start_ramp()` / `stop_ramp()` (the same
+  inherited-enforcement idiom the control-validation standard uses for
+  `@control`): a VI author writes nothing to get this, and inherits it even
+  when it defines none of the three wrapped methods itself. Not physical
+  verification — it knows the standby command was issued and its ramp
+  finished, not that the hardware actually arrived — so a VI with its own
+  means of checking may override it to add a physics check on top.
 
 ## GUI presentation: who decides what a card shows
 Read this before adding or "hiding" a control — the split trips people up:
@@ -165,9 +176,14 @@ Shared contracts at the root; concrete classes live in the subfolders.
   `get_state()`, `evaluate_safety()`/`safety_flags`/`merged_safety_flags()`/
   `safety_concerns()` (the System-Condition standard's producer/consumer
   declarations — GLOSSARY.md's **Safety-flag manifest** / **Safety concern**
-  / **Safety hold** / **Critical safety flag**), and the full
+  / **Safety hold** / **Critical safety flag**), the full
   measurement-method standard in
-  `MeasurementInstrumentBase`'s docstring. (`@monitored`/`@control` decorators
+  `MeasurementInstrumentBase`'s docstring, and `standby_status()` — the
+  command-provenance accessor answering "reached" / "converging" / "away"
+  for whether a VI is at, heading to, or away from its own `standby()`'s
+  safe idle state, maintained automatically by the same `__init_subclass__`
+  wrap of `standby()`/`start_ramp()`/`stop_ramp()`.
+  (`@monitored`/`@control` decorators
   themselves are defined in `cryosoft.core.decorators`.) tests:
   `tests/test_conformance.py`, `tests/test_l1_virtual_instruments.py`.
 - `rampable.py` — `RampableVI` mixin: the abstract ramp API

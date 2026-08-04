@@ -2249,9 +2249,9 @@ def test_monitor_persistence_roundtrip_splitters_and_trends(
 
     # Feed history AFTER the third panel exists so its refresh() (triggered by
     # this emit) populates its Y combo with a real key to select.
-    fake_state = {"magnet_z": {"get_field": 0.5, "magnet_current": 10.0}}
+    fake_state = {"magnet_z": {"magnet_field_T": 0.5, "magnet_current": 10.0}}
     orchestrator.states_updated.emit(fake_state)
-    third_panel.set_selected_key("magnet_z_get_field")
+    third_panel.set_selected_key("magnet_z_magnet_field_T")
     third_panel.set_selected_window_s(21600.0)  # "6 h"
 
     assert len(win1._trends._trend_panels) == 3
@@ -2273,8 +2273,44 @@ def test_monitor_persistence_roundtrip_splitters_and_trends(
 
     third_id_2 = list(win2._trends._trend_panels.keys())[2]
     third_panel_2 = win2._trends._trend_panels[third_id_2]
-    assert third_panel_2.selected_key() == "magnet_z_get_field"
+    assert third_panel_2.selected_key() == "magnet_z_magnet_field_T"
     assert third_panel_2.selected_window_s() == 21600.0
+
+
+def test_monitor_restore_migrates_renamed_trend_channel_keys(
+    station, orchestrator, qtbot, isolated_settings
+):
+    """A layout saved under a channel's OLD name restores onto its CURRENT name.
+
+    ``TrendsQuadrant._apply_trend_restore()`` carries a key-migration map so
+    a user's saved trend selection survives a VI reading being renamed
+    (``magnet_z_get_field`` -> ``magnet_z_magnet_field_T``). Without it the
+    persisted key would simply never match a combo item, ``set_selected_key()``
+    would no-op, and the panel would silently fall back to a default channel —
+    the selection lost with no indication why.
+    """
+    import json
+
+    from cryosoft.gui.trends_quadrant import _TRENDS_KEY
+
+    # A settings blob written by an older build, before the rename.
+    _app_settings.get_settings().setValue(
+        _TRENDS_KEY,
+        json.dumps([{"key": "magnet_z_get_field", "window_s": 21600.0}]),
+    )
+
+    win = MonitorWindow(station, orchestrator)
+    qtbot.addWidget(win)
+    win.show()
+
+    # Feed the CURRENT key, so only the migrated name is ever selectable.
+    orchestrator.states_updated.emit(
+        {"magnet_z": {"magnet_field_T": 0.5, "magnet_current": 10.0}}
+    )
+
+    panel = next(iter(win._trends._trend_panels.values()))
+    assert panel.selected_key() == "magnet_z_magnet_field_T"
+    assert panel.selected_window_s() == 21600.0
 
 
 def test_monitor_default_layout_when_settings_empty(monitor_win, station):
