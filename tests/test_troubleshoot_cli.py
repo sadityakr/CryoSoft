@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from pathlib import Path
 
 import pytest
@@ -215,6 +217,106 @@ def test_query_without_raw_handle_is_clean_error(sim_config, capsys) -> None:
     )
     assert exit_code == 1
     assert "raw VISA handle" in _json_out(capsys)["error"]
+
+
+# ── trends ────────────────────────────────────────────────────────────────────
+
+
+def _write_trend_jsonl(path: Path, records: list[dict]) -> None:
+    path.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
+
+
+@pytest.fixture()
+def isolated_trend_log_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A fresh, empty log directory, wired through CRYOSOFT_LOG_DIR."""
+    log_dir = tmp_path / "trend_logs"
+    log_dir.mkdir()
+    monkeypatch.setenv("CRYOSOFT_LOG_DIR", str(log_dir))
+    return log_dir
+
+
+def test_trends_indeterminate_with_no_store_on_disk(
+    sim_config, isolated_trend_log_dir: Path, capsys
+) -> None:
+    """No trend-history files at all: every check is "cannot tell", never a failure."""
+    exit_code = cli.main(["trends", "--config", sim_config, "--json"])
+    assert exit_code == 0
+    payload = _json_out(capsys)
+    assert payload["ok"] is True
+    names = {r["name"] for r in payload["results"]}
+    assert names == {"sample_temperature_stable", "helium_consumption_normal", "trend_store_live"}
+    assert all(r["passed"] is None for r in payload["results"])
+
+
+def test_trends_fails_on_unstable_temperature(
+    sim_config, isolated_trend_log_dir: Path, capsys
+) -> None:
+    now = time.time()
+    records = [
+        {"t": now - i * 60, "v": {"temperature_sample_temperature": v}}
+        for i, v in enumerate([4.0, 4.6, 4.0, 4.6])
+    ]
+    _write_trend_jsonl(isolated_trend_log_dir / "trend_history_raw.jsonl", records)
+
+    exit_code = cli.main(["trends", "--config", sim_config, "--json"])
+
+    assert exit_code == 1
+    payload = _json_out(capsys)
+    assert payload["ok"] is False
+    by_name = {r["name"]: r for r in payload["results"]}
+    assert by_name["sample_temperature_stable"]["passed"] is False
+    assert "range_K" in by_name["sample_temperature_stable"]["evidence"]
+
+
+def test_trends_store_live_fails_when_stale(
+    sim_config, isolated_trend_log_dir: Path, capsys
+) -> None:
+    now = time.time()
+    stale_t = now - 10_000.0
+    path = isolated_trend_log_dir / "trend_history_raw.jsonl"
+    path.write_text(
+        json.dumps({"t": stale_t, "v": {"temperature_sample_temperature": 4.2}}) + "\n",
+        encoding="utf-8",
+    )
+    os.utime(path, (stale_t, stale_t))
+
+    exit_code = cli.main(["trends", "--config", sim_config, "--json"])
+
+    assert exit_code == 1
+    payload = _json_out(capsys)
+    by_name = {r["name"]: r for r in payload["results"]}
+    assert by_name["trend_store_live"]["passed"] is False
+
+
+def test_trends_window_override_applies_to_every_declared_check(
+    sim_config, isolated_trend_log_dir: Path, capsys
+) -> None:
+    now = time.time()
+    records = [{"t": now - i, "v": {"temperature_sample_temperature": 4.2}} for i in range(5)]
+    _write_trend_jsonl(isolated_trend_log_dir / "trend_history_raw.jsonl", records)
+
+    exit_code = cli.main(["trends", "--config", sim_config, "--window", "600", "--json"])
+
+    assert exit_code == 0
+    payload = _json_out(capsys)
+    by_name = {r["name"]: r for r in payload["results"]}
+    assert by_name["sample_temperature_stable"]["evidence"]["window_s"] == 600.0
+
+
+def test_trends_invalid_window_is_a_clean_error(sim_config) -> None:
+    with pytest.raises(SystemExit):
+        cli.main(["trends", "--config", sim_config, "--window", "nonsense"])
+
+
+def test_trends_human_output_lists_every_check(
+    sim_config, isolated_trend_log_dir: Path, capsys
+) -> None:
+    exit_code = cli.main(["trends", "--config", sim_config])
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "sample_temperature_stable" in out
+    assert "helium_consumption_normal" in out
+    assert "trend_store_live" in out
 
 
 # ── transcript ────────────────────────────────────────────────────────────────

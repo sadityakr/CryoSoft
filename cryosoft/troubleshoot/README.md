@@ -61,6 +61,7 @@ hardening the triage skill).
 | `probe <address>` | raw identify query to one bare address | yes |
 | `check [--config X] [--no-bus]` | preflight every driver in a config | yes |
 | `bench-l0 [--config X]` | L0 bench: idn + one passive getter per driver (zero excitation) | yes |
+| `trends [--config X] [--window 8h]` | evaluate the declared trend checks (temperature stability, helium consumption) plus the pull-only `trend_store_live` check, against the trend-history store on disk | yes |
 | `methods <target>` | list a driver's public methods | yes |
 | `idn <target>` | identify one instrument via its driver | yes |
 | `read <target> <method> [args] [--repeat N] [--interval S]` | call a read-only driver method; repeats expose intermittent/timing faults | yes |
@@ -76,7 +77,11 @@ saved active config, falling back to `sim_cryostat`.
 ## Files
 - `engine.py` — bus scan, config preflight (`check_config`), the L0 bench
   (`bench_l0` — idn + one passive getter per driver), `DriverBench`
-  (introspect / call / raw query-send), `FaultCode` taxonomy.
+  (introspect / call / raw query-send), `FaultCode` taxonomy, and
+  `check_trend_store_live` — the pull-only half of the **Trend check**
+  standard (GLOSSARY.md), reading the trend-history store's file state
+  directly from this separate process rather than through
+  `cryosoft.core.trend_check_runner`.
 - `cli.py` — the one-shot argparse CLI over the engine (grammar above is API
   for skills and allowlists).
 - `__main__.py` — `python -m cryosoft.troubleshoot` entry point.

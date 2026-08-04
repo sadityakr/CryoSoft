@@ -7,12 +7,16 @@ from pathlib import Path
 
 import pytest
 
+import inspect
+import os
+
 from cryosoft.core.exceptions import CryoSoftCommunicationError
 from cryosoft.troubleshoot.engine import (
     DriverBench,
     FaultCode,
     ProbeResult,
     check_config,
+    check_trend_store_live,
     is_read_only,
     probe_address,
     scan_bus,
@@ -424,3 +428,84 @@ def test_is_read_only_prefixes() -> None:
     assert is_read_only("ping")
     assert not is_read_only("set_range")
     assert not is_read_only("initiate")
+
+
+# ── check_trend_store_live ──────────────────────────────────────────────────
+
+
+def _write_raw_record(path: Path, t: float, value: float = 4.2) -> None:
+    path.write_text(
+        json.dumps({"t": t, "v": {"temperature_sample_temperature": value}}) + "\n",
+        encoding="utf-8",
+    )
+
+
+def test_check_trend_store_live_signature_reads_file_state_only() -> None:
+    """The whole point of this check is catching a wedged process from
+    outside; its parameters are file-state inputs only (a log directory, a
+    threshold, and a reference time) — never a Station/Orchestrator
+    reference or an in-process counter, which would freeze alongside the
+    thing this check exists to detect."""
+    params = list(inspect.signature(check_trend_store_live).parameters)
+    assert params == ["log_dir", "stale_seconds", "now"]
+
+
+def test_check_trend_store_live_passes_for_a_fresh_record(tmp_path: Path) -> None:
+    now = 2_000_000.0
+    path = tmp_path / "trend_history_raw.jsonl"
+    _write_raw_record(path, now - 5.0)
+    os.utime(path, (now - 5.0, now - 5.0))
+
+    result = check_trend_store_live(tmp_path, stale_seconds=60.0, now=now)
+
+    assert result.name == "trend_store_live"
+    assert result.passed is True
+    assert result.evidence["newest_record_age_s"] == pytest.approx(5.0, abs=0.1)
+    assert result.evidence["file_mtime_age_s"] == pytest.approx(5.0, abs=0.1)
+
+
+def test_check_trend_store_live_fails_when_newest_record_is_stale(tmp_path: Path) -> None:
+    """The required proof: a store that stopped receiving records — file mtime
+    and newest record both old — fails, using file state alone. Nothing in
+    this test constructs an Orchestrator, a Station, or any in-process
+    counter, yet the wedge is still detected."""
+    now = 2_000_000.0
+    path = tmp_path / "trend_history_raw.jsonl"
+    _write_raw_record(path, now - 500.0)
+    os.utime(path, (now - 500.0, now - 500.0))
+
+    result = check_trend_store_live(tmp_path, stale_seconds=60.0, now=now)
+
+    assert result.passed is False
+    assert "wedged or crashed" in result.message
+    assert result.evidence["newest_record_age_s"] == pytest.approx(500.0, abs=0.1)
+    assert result.evidence["stale_threshold_s"] == 60.0
+
+
+def test_check_trend_store_live_indeterminate_when_store_never_written(tmp_path: Path) -> None:
+    result = check_trend_store_live(tmp_path, stale_seconds=60.0, now=2_000_000.0)
+    assert result.passed is None
+    assert "does not exist" in result.message
+
+
+def test_check_trend_store_live_indeterminate_on_unparsable_last_line(tmp_path: Path) -> None:
+    path = tmp_path / "trend_history_raw.jsonl"
+    path.write_text("not json\n", encoding="utf-8")
+    result = check_trend_store_live(tmp_path, stale_seconds=60.0, now=2_000_000.0)
+    assert result.passed is None
+    assert "could not be read" in result.message
+
+
+def test_check_trend_store_live_uses_only_the_live_undated_file(tmp_path: Path) -> None:
+    """A rotated sibling (yesterday's file) must never mask a stopped live file."""
+    now = 2_000_000.0
+    live = tmp_path / "trend_history_raw.jsonl"
+    rotated = tmp_path / "trend_history_raw.jsonl.2026-08-01"
+    _write_raw_record(live, now - 500.0)
+    os.utime(live, (now - 500.0, now - 500.0))
+    _write_raw_record(rotated, now)  # fresh, but not the live file
+    os.utime(rotated, (now, now))
+
+    result = check_trend_store_live(tmp_path, stale_seconds=60.0, now=now)
+
+    assert result.passed is False

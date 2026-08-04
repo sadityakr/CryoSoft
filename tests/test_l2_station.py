@@ -102,6 +102,23 @@ def test_read_panels_config_tolerates_absent_or_malformed(tmp_path):
     assert read_panels_config(str(tmp_path)) == {"good_vi": ["set_x"]}
 
 
+def test_read_tick_interval_ms_reads_the_configured_value(tmp_path):
+    from cryosoft.core.station import read_tick_interval_ms
+
+    (tmp_path / "monitor.yaml").write_text("monitor:\n  tick_interval_ms: 1000\n")
+    assert read_tick_interval_ms(str(tmp_path)) == 1000
+
+
+def test_read_tick_interval_ms_defaults_when_absent_or_missing(tmp_path):
+    from cryosoft.core.station import read_tick_interval_ms
+
+    # No monitor.yaml at all.
+    assert read_tick_interval_ms(str(tmp_path / "nowhere")) == 3000
+    # monitor.yaml present but omits the key.
+    (tmp_path / "monitor.yaml").write_text("monitor:\n  max_vi_errors: 3\n")
+    assert read_tick_interval_ms(str(tmp_path)) == 3000
+
+
 def test_build_station_success(sim_station: Station):
     """build_station('cryosoft/configs/sim_cryostat') works without errors."""
     assert sim_station is not None

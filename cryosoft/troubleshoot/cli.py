@@ -17,9 +17,12 @@ harness's job, and a hung prompt is the worst failure mode for an agent.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import logging
+import re
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -27,6 +30,8 @@ from typing import Any
 import cryosoft
 from cryosoft.core.logging_config import setup_logging
 from cryosoft.core.paths import log_directory
+from cryosoft.core.station import read_tick_interval_ms, read_trends_config
+from cryosoft.core.trend_checks import CheckResult, declared_checks, run_checks
 from cryosoft.troubleshoot import engine, status_reader
 from cryosoft.troubleshoot.engine import (
     DriverBench,
@@ -34,6 +39,7 @@ from cryosoft.troubleshoot.engine import (
     ProbeResult,
     bench_l0,
     check_config,
+    check_trend_store_live,
     probe_address,
     scan_bus,
 )
@@ -443,6 +449,105 @@ def _cmd_status(args: argparse.Namespace) -> tuple[bool, dict[str, Any]]:
     return ok, digest
 
 
+_WINDOW_UNITS = {"s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0, "": 1.0}
+
+
+def _parse_window(value: str) -> float:
+    """Parse a `--window` value like ``"8h"``, ``"90m"``, ``"2d"``, or a bare seconds number.
+
+    Args:
+        value: The raw `--window` string.
+
+    Returns:
+        The window length in seconds.
+
+    Raises:
+        SystemExit: If `value` does not match ``<number><unit>`` with unit in
+            ``s``/``m``/``h``/``d`` (or no unit, meaning seconds).
+    """
+    match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([smhdSMHD]?)\s*", value)
+    if not match:
+        raise SystemExit(
+            f"error: invalid --window value {value!r} (expected e.g. '8h', '90m', '3600')"
+        )
+    amount = float(match.group(1))
+    return amount * _WINDOW_UNITS[match.group(2).lower()]
+
+
+def _render_check_result(result: CheckResult) -> str:
+    """One human-readable line for a `CheckResult`, evidence included.
+
+    An agent reading this at 3 AM instead of a log needs the numbers behind
+    the verdict, not just the verdict — this repository's first principle is
+    that claims are traceable to their source.
+    """
+    marker = {True: "PASS", False: "FAIL", None: "N/A "}[result.passed]
+    evidence = ", ".join(f"{k}={v}" for k, v in result.evidence.items())
+    line = f"[{marker}] {result.name} — {result.message}"
+    if evidence:
+        line += f"\n{'':<9} evidence: {evidence}"
+    return line
+
+
+def _cmd_trends(args: argparse.Namespace) -> tuple[bool, dict[str, Any]]:
+    """Evaluate this setup's declared trend checks plus the pull-only store-liveness check.
+
+    Runs `cryosoft.core.trend_checks.declared_checks()` (the same standard
+    the in-process `TrendCheckRunner` publishes from) against the resolved
+    trend-history log directory, and separately evaluates
+    `trend_store_live` — the one check that is pull-only by design (see
+    `declared_checks()`'s docstring): it reads the store's file state
+    directly, from this separate CLI process, so it can catch a running
+    application that has wedged, which no check scheduled inside that same
+    process ever could.
+
+    `--window`, when given, overrides every declared check's `window_s`
+    uniformly (`dataclasses.replace`, not a per-check branch) — an ad hoc
+    "was everything fine over the last N hours" query distinct from each
+    check's own configured default window.
+
+    Returns:
+        ``(ok, payload)`` where `ok` is `False` if any check's `passed` is
+        `False` — an indeterminate (`None`) result does not fail the
+        command, since "cannot tell" is not itself a problem (see
+        `cryosoft.core.trend_checks`'s module docstring).
+    """
+    config = resolve_config(args.config)
+    trends_config = read_trends_config(config)
+    log_dir = log_directory()
+    now = time.time()
+
+    checks = declared_checks(trends_config)
+    if args.window:
+        window_s = _parse_window(args.window)
+        checks = tuple(dataclasses.replace(check, window_s=window_s) for check in checks)
+    results = list(run_checks(checks, log_dir, now=now))
+
+    tick_interval_ms = read_tick_interval_ms(config)
+    stale_seconds = trends_config["store_live_stale_ticks"] * tick_interval_ms / 1000.0
+    results.append(check_trend_store_live(log_dir, stale_seconds, now=now))
+
+    ok = not any(r.passed is False for r in results)
+    payload: dict[str, Any] = {
+        "config": config,
+        "log_directory": str(log_dir),
+        "ok": ok,
+        "results": [dataclasses.asdict(r) for r in results],
+    }
+    if args.json:
+        _print_json(payload)
+    else:
+        print(f"Config: {config}")
+        print(f"Trend-history log directory: {log_dir}")
+        for result in results:
+            print(_render_check_result(result))
+        n_pass = sum(1 for r in results if r.passed is True)
+        n_fail = sum(1 for r in results if r.passed is False)
+        n_indet = sum(1 for r in results if r.passed is None)
+        print(f"=> {n_pass} pass, {n_fail} fail, {n_indet} indeterminate")
+    return ok, payload
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the argparse command tree (kept separate for --help testing)."""
     parser = argparse.ArgumentParser(
@@ -499,6 +604,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--last", type=int, default=5,
                    help="recent records to fold in for the gap trend (default 5)")
     p.set_defaults(func=_cmd_status)
+
+    p = sub.add_parser("trends", parents=[common],
+                       help="evaluate the declared trend checks (temperature stability, "
+                            "helium consumption) plus the pull-only store-liveness check")
+    _add_config_arg(p)
+    p.add_argument(
+        "--window",
+        help="override every declared check's window uniformly, e.g. '8h', '90m', "
+        "'3600' (default: each check's own configured window)",
+    )
+    p.set_defaults(func=_cmd_trends)
 
     p = sub.add_parser("methods", parents=[common], help="list a driver's public methods")
     _add_target_args(p)

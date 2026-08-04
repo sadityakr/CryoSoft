@@ -1975,8 +1975,34 @@ _SAFETY_DEFAULTS: dict[str, float] = {
 # feeds an enforcement or run-fault path. Keeping the blocks separate keeps
 # that distinction legible in devices.yaml, at the cost of one more block
 # name to remember.
+#
+# The per-check keys below (sample_temperature_*, helium_consumption_*,
+# store_live_stale_ticks) are mirrored, not imported, in
+# cryosoft.core.trend_checks's own `.get()` fallbacks (import-linter
+# contract C15 keeps that module Station-free) — a real setup's config
+# always arrives there already merged through read_trends_config(), so the
+# mirror only matters for a caller that evaluates declared_checks() against
+# a partial dict directly (this module's own tests).
+#
+# Defaults are deliberately loose rather than tuned to any one setup's
+# noise floor: sample_temperature_std_limit_K/range_limit_K are set well
+# above what a controller with zero sensor noise reports (the sim drivers
+# model no temperature noise at all, so a stable simulated run reports
+# std ~ 0), and helium_consumption_rate_limit_pct_per_hour (5.0 %/h) sits
+# comfortably above the sim level meter's own steady drift (0.01 %/min =
+# 0.6 %/h, cryosoft.drivers.sim_oxford_ilm200.SimOxfordILM200) while still
+# catching a genuinely fast boil-off. An unvalidated threshold that fires
+# constantly is worse than no check at all, so every default here is
+# expected to be re-tuned per real setup once real noise/consumption data
+# exists.
 _TREND_DEFAULTS: dict[str, float] = {
     "refresh_interval_s": 60.0,
+    "sample_temperature_window_s": 3600.0,
+    "sample_temperature_std_limit_K": 0.1,
+    "sample_temperature_range_limit_K": 0.5,
+    "helium_consumption_window_s": 7200.0,
+    "helium_consumption_rate_limit_pct_per_hour": 5.0,
+    "store_live_stale_ticks": 10.0,
 }
 
 
@@ -2036,6 +2062,43 @@ def _load_monitor_yaml(config_path: str) -> dict[str, Any] | None:
         return None
     except Exception:  # noqa: BLE001 — malformed YAML must not break the GUI
         return None
+
+
+# Orchestrator's own construction default (core/orchestrator.py's
+# `tick_interval_ms: int = 3000` parameter) — mirrored here, not imported,
+# since this module builds the Orchestrator's inputs and must not depend on
+# it (core/ never imports upward from L2 to L3).
+_DEFAULT_TICK_INTERVAL_MS = 3000
+
+
+def read_tick_interval_ms(config_path: str) -> int:
+    """Read ``monitor.yaml``'s ``tick_interval_ms``, GUI-safe, defaulted.
+
+    A general config accessor, not built for one caller: any code that needs
+    to reason in wall-clock seconds about a setup's tick cadence without
+    constructing a full ``Orchestrator`` (e.g. the troubleshoot CLI's
+    ``trends`` subcommand, evaluating `trend_store_live` from outside the
+    running app) reads it through here rather than re-parsing
+    ``monitor.yaml`` itself.
+
+    Args:
+        config_path: Path to the config directory containing ``monitor.yaml``.
+
+    Returns:
+        The configured tick interval in milliseconds, or
+        ``_DEFAULT_TICK_INTERVAL_MS`` if the file is missing, unreadable, or
+        omits the key — never raises.
+    """
+    monitor_config = _load_monitor_yaml(config_path)
+    if monitor_config is None:
+        return _DEFAULT_TICK_INTERVAL_MS
+    mon = monitor_config.get("monitor")
+    if not isinstance(mon, dict):
+        return _DEFAULT_TICK_INTERVAL_MS
+    try:
+        return int(mon.get("tick_interval_ms", _DEFAULT_TICK_INTERVAL_MS))
+    except (TypeError, ValueError):
+        return _DEFAULT_TICK_INTERVAL_MS
 
 
 def read_panels_config(config_path: str) -> dict[str, list[str]]:

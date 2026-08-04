@@ -34,7 +34,9 @@ def _fixed_verdict_check(name: str, passed: bool) -> TrendCheck:
         keys=("temperature_vti_sample_temperature",),
         window_s=3600.0,
         severity="advisory",
-        predicate=lambda summaries: CheckOutcome(passed, f"fixed verdict: {passed}", {}),
+        predicate=lambda summaries, series, window_s: CheckOutcome(
+            passed, f"fixed verdict: {passed}", {}
+        ),
     )
 
 

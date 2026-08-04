@@ -15,17 +15,21 @@ Design constraints (these are load-bearing for agent use):
 from __future__ import annotations
 
 import inspect
+import json
 import logging
+import time
 import typing
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from cryosoft.core import trend_history
 from cryosoft.core.exceptions import CryoSoftCommunicationError, CryoSoftConfigError
 # _import_class / validate_config_dir are the Station factory's own config
 # helpers; the conformance tests already reuse them the same way.
 from cryosoft.core.station import _import_class, validate_config_dir
+from cryosoft.core.trend_checks import CheckResult
 
 logger = logging.getLogger(__name__)
 
@@ -740,3 +744,162 @@ def _coerce_one(raw: str, target: Any) -> Any:
     if target is float:
         return float(raw)
     return raw
+
+
+# ── trend_store_live (pull-only Trend check) ────────────────────────────────
+# See cryosoft.core.trend_checks.declared_checks()'s docstring for why this
+# one check is not declared there: it exists to catch a wedged or crashed
+# application, and a check scheduled on that same process's own QTimer
+# (cryosoft.core.trend_check_runner) cannot fire once the process is the
+# thing that is hung — it would report healthy in exactly the scenario it
+# is built for. It lives here, next to the other troubleshoot diagnostic
+# primitives, because it is evaluated only from a separate process (the
+# troubleshoot CLI) reading the store's file state from outside, exactly
+# like every other check in this module reads driver/bus state from outside
+# a running instrument session.
+
+_TREND_STORE_LIVE_TAIL_BYTES = 4096  # "one record", read cheaply from the file's tail
+
+
+def _tail_last_line(path: Path, max_bytes: int = _TREND_STORE_LIVE_TAIL_BYTES) -> str | None:
+    """Return the last non-blank line of *path*, reading only its final bytes.
+
+    Deliberately not a full-file parse (`trend_history.read_tier()`'s job for
+    a real window query): `trend_store_live` only ever needs the single
+    newest record, so this seeks near the end of the file instead of loading
+    every line the way a full tier read would.
+
+    Args:
+        path: File to tail.
+        max_bytes: How many trailing bytes to read — generous for one JSONL
+            record, which is at most a few hundred bytes.
+
+    Returns:
+        The last non-blank line's text, or `None` if the file could not be
+        read or has no non-blank line within the tailed bytes.
+    """
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as f:
+            f.seek(max(0, size - max_bytes))
+            chunk = f.read()
+    except OSError:
+        return None
+    lines = [line for line in chunk.decode("utf-8", errors="ignore").splitlines() if line.strip()]
+    return lines[-1] if lines else None
+
+
+def _extract_record_t(line: str) -> float | None:
+    """Parse one trend-history JSONL line and return its `"t"` field, if valid."""
+    try:
+        obj = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    t = obj.get("t")
+    if isinstance(t, (int, float)) and not isinstance(t, bool):
+        return float(t)
+    return None
+
+
+def check_trend_store_live(
+    log_dir: Path, stale_seconds: float, now: float | None = None
+) -> CheckResult:
+    """Is the trend-history store still receiving records at all?
+
+    Reads FILE state only — the live raw-tier file's mtime plus its newest
+    record's timestamp — never an in-process counter, which would freeze
+    alongside the very application wedge this check exists to detect. Fails
+    when the newest record is older than `stale_seconds`. Deliberately cheap
+    (one file's tail, not `trend_history.summarize()`/`read_tier()` over a
+    whole window) and deliberately narrow: it reads only the live undated
+    `trend_history_raw.jsonl`, not its rotated siblings, since "is the store
+    live right now" only ever needs the newest record.
+
+    Not useless while the app is otherwise healthy: it also catches the
+    tiered-trend *logger* dying while the rest of the application keeps
+    running (a narrower failure than a full wedge, but the same file-state
+    signal catches both).
+
+    Args:
+        log_dir: Directory containing the trend-history JSONL files, as
+            resolved by `cryosoft.core.paths.log_directory()`.
+        stale_seconds: Age, in seconds, beyond which the newest record is
+            considered stale. Computed by the caller from this setup's
+            `trends.store_live_stale_ticks` config value times its
+            `monitor.tick_interval_ms` (see
+            `cryosoft.core.station.read_tick_interval_ms()`), never
+            hardcoded here.
+        now: Reference "now" timestamp; defaults to `time.time()`.
+
+    Returns:
+        A `cryosoft.core.trend_checks.CheckResult` named `"trend_store_live"`,
+        reusing that type only as a value object — this function evaluates
+        outside the `TrendCheck`/`run_check()` machinery entirely, since its
+        data source (file mtime) is not `trend_history.summarize()`. `passed`
+        is `None` (cannot tell) if the live file is missing or unreadable —
+        e.g. the app has never run against this log directory — mirroring
+        the rest of the Trend check standard's "no data" convention rather
+        than treating an absent store as a definite failure.
+    """
+    if now is None:
+        now = time.time()
+    spec = trend_history.TIERS["raw"]
+    path = Path(log_dir) / spec.filename
+
+    if not path.exists():
+        return CheckResult(
+            name="trend_store_live",
+            passed=None,
+            message=f"Cannot tell — {path} does not exist (never written, or an unreachable log directory).",
+            evidence={"path": str(path)},
+        )
+
+    try:
+        mtime_age_s = now - path.stat().st_mtime
+    except OSError as exc:
+        return CheckResult(
+            name="trend_store_live",
+            passed=None,
+            message=f"Cannot tell — could not stat {path}: {exc}",
+            evidence={"path": str(path)},
+        )
+
+    last_line = _tail_last_line(path)
+    record_t = _extract_record_t(last_line) if last_line is not None else None
+    if record_t is None:
+        return CheckResult(
+            name="trend_store_live",
+            passed=None,
+            message=f"Cannot tell — {path} exists but its newest record could not be read.",
+            evidence={"path": str(path), "file_mtime_age_s": round(mtime_age_s, 1)},
+        )
+
+    record_age_s = now - record_t
+    evidence = {
+        "path": str(path),
+        "newest_record_age_s": round(record_age_s, 1),
+        "file_mtime_age_s": round(mtime_age_s, 1),
+        "stale_threshold_s": stale_seconds,
+    }
+    if record_age_s > stale_seconds:
+        return CheckResult(
+            name="trend_store_live",
+            passed=False,
+            message=(
+                f"Store stale — newest record is {record_age_s:.0f} s old "
+                f"(file last written {mtime_age_s:.0f} s ago), past the "
+                f"{stale_seconds:.0f} s threshold. The application may be wedged or crashed."
+            ),
+            evidence=evidence,
+        )
+    return CheckResult(
+        name="trend_store_live",
+        passed=True,
+        message=(
+            f"Store live — newest record is {record_age_s:.0f} s old "
+            f"(file last written {mtime_age_s:.0f} s ago), threshold {stale_seconds:.0f} s."
+        ),
+        evidence=evidence,
+    )
