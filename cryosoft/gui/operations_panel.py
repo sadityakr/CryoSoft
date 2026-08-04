@@ -362,20 +362,6 @@ class OperationCard(QGroupBox):
         self._ready_banner.style().polish(self._ready_banner)
         outer.addWidget(self._ready_banner)
 
-        # Unmet-postcondition warning (design doc operation-concurrency-and-
-        # error-scoping.md §2): finish is immediate and never blocks on a
-        # postcondition, so an unmet one is surfaced here instead — the
-        # same validated "verdict_badge" QSS class, severity="warning".
-        self._postcondition_warning = QLabel("")
-        self._postcondition_warning.setObjectName(f"{self._slug}_postcondition_warning")
-        self._postcondition_warning.setProperty("class", "verdict_badge")
-        self._postcondition_warning.setProperty("severity", "warning")
-        self._postcondition_warning.setWordWrap(True)
-        self._postcondition_warning.hide()
-        self._postcondition_warning.style().unpolish(self._postcondition_warning)
-        self._postcondition_warning.style().polish(self._postcondition_warning)
-        outer.addWidget(self._postcondition_warning)
-
         button_row = QHBoxLayout()
         self._action_btn = QPushButton()
         self._action_btn.setObjectName(f"{self._slug}_action_btn")
@@ -534,7 +520,6 @@ class OperationCard(QGroupBox):
         self._last_all_holding = False
         self._status_label.setText("")
         self._status_label.hide()
-        self._postcondition_warning.hide()
         if self._pending_instance is not None:
             # Re-bind the checklist to the instance the orchestrator is
             # actually running (and mutating — confirm_operation() lands
@@ -562,14 +547,6 @@ class OperationCard(QGroupBox):
         self._last_run_done = str(manifest.get("status", "")) == "done"
         self._status_label.setText("")
         self._status_label.hide()
-        unmet = manifest.get("postconditions_unmet") or []
-        if unmet:
-            self._postcondition_warning.setText(
-                f"⚠ Finished with unmet postcondition(s): {', '.join(unmet)}"
-            )
-            self._postcondition_warning.show()
-        else:
-            self._postcondition_warning.hide()
         self._sync_button()
         self._sync_abort_button()
         self._sync_option_checkboxes()

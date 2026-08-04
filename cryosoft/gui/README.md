@@ -122,15 +122,17 @@ is alive and not mid-tick.
 - **Never** block the Qt event loop (no `time.sleep`, no synchronous I/O). Data
   arrives via Orchestrator signals; do not poll instruments.
 - **`operations_panel.py`'s `OperationCard` is the single per-operation card
-  standard (plan §12).** It contains no per-operation logic — every visible
+  standard.** It contains no per-operation logic — every visible
   detail (checklist rows, next-due line, status line, ready banner,
-  unmet-postcondition warning, confirmations) renders generically from an
+  confirmations) renders generically from an
   `OperationBase` instance's declarations (`readiness_conditions()`,
   `next_due()`, `ready_message`, `operator_confirmations`) plus a
   panel-supplied factory closure for building a fresh run instance. Finish is
   immediate: the button goes to a disabled "Finishing…" state the instant
-  it's clicked, not on `run_finished` (docs/plans/operation-concurrency-and-
-  error-scoping.md §2). Adding an operation to a setup never touches this
+  it's clicked, not on `run_finished`. An unmet postcondition at finish is
+  recorded on the run manifest and logbook (see `session/README.md`) rather
+  than surfaced on the card; the operator reviews it in the log. Adding an
+  operation to a setup never touches this
   file; a new operation with none of those declarations still gets a working
   card (just a bare button).
 - **`ramp_tracker_panel.py`'s `RampRow` is the single per-ramp row
