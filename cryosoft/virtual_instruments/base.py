@@ -23,6 +23,7 @@ from cryosoft.core.exceptions import (
     CryoSoftSafetyError,
 )
 from cryosoft.core.plan import ParamSpec
+from cryosoft.virtual_instruments.rampable import RampableVI
 
 
 class BaseVirtualInstrument:
@@ -216,6 +217,20 @@ class BaseVirtualInstrument:
     # merged_safety_flags() — a subclass declares only the flags it adds.
     safety_flags: ClassVar[dict[str, str]] = {}
 
+    # The standby-provenance standard's command-history bit (see
+    # ``standby_status()``): a CLASS-level default of False, shadowed by an
+    # instance attribute the first time a wrapped standby()/start_ramp()/
+    # stop_ramp() writes to it (see ``_make_standby_wrapper`` and
+    # ``_make_standby_invalidation_wrapper``). This is deliberately not set
+    # in ``__init__`` — a freshly constructed VI, including a subclass that
+    # defines none of the three wrapped methods and simply inherits them,
+    # reads this class attribute and gets False ("away") until the first
+    # standby()/start_ramp()/stop_ramp() call gives it an instance value.
+    # Deliberately NOT annotated ``ClassVar``, unlike ``safety_flags`` above:
+    # ClassVar means "never assigned on an instance", which is the opposite
+    # of how this attribute works.
+    _standby_commanded: bool = False
+
     # ── Reading-loop participation (see GLOSSARY "Reading loop") ──────────
     # A VI in the reading path may declare parameters the generic sweep
     # procedure can loop at every sweep point: ``reading_setters`` maps a
@@ -299,34 +314,58 @@ class BaseVirtualInstrument:
                 setattr(cls, attr_name, wrapped)
 
         # The detach-when-idle declaration's enforcement (see the class
-        # docstring): wrap a directly defined standby() so the release
-        # fires after it returns, the same inherited-enforcement idiom used
-        # above for @control. This wrap is UNCONDITIONAL — at class-creation
-        # time ``vars(cls)["detach_when_idle"]`` (when overridden at all) is
-        # a property OBJECT, not a resolved bool, so whether to detach can
+        # docstring) AND the standby-provenance standard (see
+        # ``standby_status()``): wrap a directly defined standby() so the
+        # release AND the ``_standby_commanded`` flag are set after it
+        # returns, the same inherited-enforcement idiom used above for
+        # @control. This wrap is UNCONDITIONAL — at class-creation time
+        # ``vars(cls)["detach_when_idle"]`` (when overridden at all) is a
+        # property OBJECT, not a resolved bool, so whether to detach can
         # only be decided at CALL time, inside the wrapper itself (see
-        # _make_detach_wrapper). A VI that does not define its own
+        # _make_standby_wrapper). A VI that does not define its own
         # standby() is not touched here — it inherits BaseVirtualInstrument.
-        # standby(), which detaches directly, without needing this wrap.
+        # standby(), which sets the flag and detaches directly, without
+        # needing this wrap.
         standby_method = vars(cls).get("standby")
         if callable(standby_method):
-            cls.standby = BaseVirtualInstrument._make_detach_wrapper(standby_method)
+            cls.standby = BaseVirtualInstrument._make_standby_wrapper(standby_method)
+
+        # The standby-provenance standard's invalidation half: any directly
+        # defined start_ramp()/stop_ramp() clears _standby_commanded, since
+        # either means the VI is no longer converging on (or resting at) the
+        # state standby() drives it to. Same vars(cls) discipline as above —
+        # a subclass that does not redefine one of these inherits the
+        # already-wrapped parent version and is not re-wrapped.
+        for ramp_method_name in ("start_ramp", "stop_ramp"):
+            ramp_method = vars(cls).get(ramp_method_name)
+            if callable(ramp_method):
+                setattr(
+                    cls,
+                    ramp_method_name,
+                    BaseVirtualInstrument._make_standby_invalidation_wrapper(
+                        ramp_method
+                    ),
+                )
 
     # ------------------------------------------------------------------
-    # Detach-when-idle wrapper factory (see the class docstring's
-    # "Detach-when-idle declaration")
+    # standby() wrapper factory: detach-when-idle release + standby
+    # provenance (see the class docstring's "Detach-when-idle declaration"
+    # and ``standby_status()``'s docstring)
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _make_detach_wrapper(method):
-        """Return *method* wrapped to release the driver session afterward.
+    def _make_standby_wrapper(method):
+        """Return *method* wrapped with the detach and provenance side effects.
 
         Calls the ORIGINAL ``standby()`` first — so a concrete VI's own
-        safe-off commands still run exactly as written — then
-        ``self._detach()`` if ``self.detach_when_idle`` is true. The flag is
-        read on ``self`` at CALL time (never at class-creation time — see
-        ``__init_subclass__``'s comment for why it cannot be resolved
-        earlier).
+        safe-off commands still run exactly as written — and only once it
+        returns without raising does it (a) record ``self._standby_commanded
+        = True`` (the standby-provenance standard: a raise leaves the flag
+        ``False``, so the caller knows to retry) and (b) call
+        ``self._detach()`` if ``self.detach_when_idle`` is true. Both flags
+        are read/written on ``self`` at CALL time (never at class-creation
+        time — see ``__init_subclass__``'s comment for why ``detach_when_idle``
+        cannot be resolved earlier).
 
         Args:
             method: The subclass's directly defined ``standby``.
@@ -338,9 +377,40 @@ class BaseVirtualInstrument:
         @functools.wraps(method)
         def wrapper(self, *args: Any, **kwargs: Any):
             result = method(self, *args, **kwargs)
+            self._standby_commanded = True
             if self.detach_when_idle:
                 self._detach()
             return result
+
+        return wrapper
+
+    # ------------------------------------------------------------------
+    # start_ramp()/stop_ramp() wrapper factory: standby-provenance
+    # invalidation (see ``standby_status()``'s docstring)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _make_standby_invalidation_wrapper(method):
+        """Return *method* wrapped to clear ``_standby_commanded`` before it runs.
+
+        Either commanding a new ramp target (``start_ramp``) or freezing the
+        hardware mid-ramp (``stop_ramp``) means the VI is no longer at, or
+        converging on, the state ``standby()`` drives it to — set
+        immediately, before the wrapped call, so the invalidation holds even
+        if the call itself goes on to raise.
+
+        Args:
+            method: The subclass's directly defined ``start_ramp`` or
+                ``stop_ramp``.
+
+        Returns:
+            The wrapped method, to be set back onto the class.
+        """
+
+        @functools.wraps(method)
+        def wrapper(self, *args: Any, **kwargs: Any):
+            self._standby_commanded = False
+            return method(self, *args, **kwargs)
 
         return wrapper
 
@@ -479,14 +549,19 @@ class BaseVirtualInstrument:
         ``disconnect()``, which releases the bus session and changes nothing
         the instrument is doing.
 
-        Honours the detach-when-idle declaration (see the class docstring):
-        a VI that inherits this base implementation unchanged — never
-        overriding ``standby()`` itself — still releases its driver session
-        here when ``detach_when_idle`` is true. A subclass that DOES
-        override ``standby()`` gets the same release from
-        ``__init_subclass__``'s wrap instead, so this line is only ever
-        reached directly by a VI with no override of its own.
+        Honours the detach-when-idle declaration (see the class docstring)
+        and the standby-provenance standard (see ``standby_status()``): a VI
+        that inherits this base implementation unchanged — never overriding
+        ``standby()`` itself — still records ``self._standby_commanded =
+        True`` and releases its driver session here when ``detach_when_idle``
+        is true. A subclass that DOES override ``standby()`` gets both of
+        those from ``__init_subclass__``'s wrap instead (``_make_standby_
+        wrapper``), so this method body is only ever reached directly by a
+        VI with no override of its own — the one call site
+        ``__init_subclass__`` cannot reach, since it fires for subclasses
+        only.
         """
+        self._standby_commanded = True
         if self.detach_when_idle:
             self._detach()
 
@@ -600,6 +675,51 @@ class BaseVirtualInstrument:
                     exc_info=True,
                 )
         self._attached = False
+
+    # ------------------------------------------------------------------
+    # Standby provenance (the command-provenance standard)
+    # ------------------------------------------------------------------
+
+    def standby_status(self) -> str:
+        """Whether this VI is at the safe idle state ``standby()`` drives it to.
+
+        Derived entirely from command PROVENANCE, never from a VI-specific
+        notion of what its safe state physically is — no VI author writes
+        anything to get this; ``__init_subclass__``'s wrap of a directly
+        defined ``standby()``/``start_ramp()``/``stop_ramp()`` (or this
+        base's own ``standby()``, for a VI that inherits it unchanged)
+        maintains ``self._standby_commanded`` entirely on its own (see the
+        class attribute's docstring).
+
+        Returns:
+            ``"reached"`` — at safe idle; nothing to enforce. Also the
+                answer for any VI that is not a ``RampableVI``, since its
+                ``standby()`` is one instantaneous command with no
+                intermediate state to converge through.
+            ``"converging"`` — ``standby()`` is underway (its last command
+                was the standby ramp, not yet finished) and will arrive; do
+                not re-command.
+            ``"away"`` — neither: no standby command is in flight, so
+                ``standby()`` must be (re-)issued.
+
+        Command provenance is not physical verification: this method knows
+        that the standby command was issued and that its ramp finished
+        (``ramp_status() != "RAMPING"``), not that the hardware physically
+        arrived — a PSU that silently ignores a ramp still reports
+        ``"reached"`` here. The method stays overridable so a VI with its
+        own means of checking can add a physics check on top.
+
+        ``standby()`` is also the only safe response this contract models:
+        it answers "is this VI at (or converging on) the state its OWN
+        standby() drives it to", nothing about what safe response some other
+        future safety flag might require — that belongs as a declaration on
+        the VI itself, never as a special case here.
+        """
+        if not isinstance(self, RampableVI):
+            return "reached"
+        if not self._standby_commanded:
+            return "away"
+        return "converging" if self.ramp_status() == "RAMPING" else "reached"
 
     def ping(self) -> bool:
         """Send an identity query to every driver; True if all of them answer.

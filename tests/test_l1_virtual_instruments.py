@@ -846,3 +846,186 @@ def test_rotator_ramp_setpoint_equals_its_target():
 
     vi.stop_ramp()
     assert vi.ramp_setpoint() is None
+
+
+# 17. Standby-provenance standard: standby_status() (see BaseVirtualInstrument's
+#     __init_subclass__ wrap of standby()/start_ramp()/stop_ramp())
+def test_standby_status_fresh_rampable_vi_is_away():
+    """Nothing has commanded standby() yet on a freshly built rampable VI."""
+    from cryosoft.virtual_instruments.magnet.superconducting_magnet import (
+        SuperconductingMagnetVI,
+    )
+
+    driver = SimOxfordIPS120("SIM")
+    vi = SuperconductingMagnetVI({"main": driver}, amperes_per_tesla=10.0)
+
+    assert vi.standby_status() == "away"
+
+
+def test_standby_status_lifecycle_converging_then_reached():
+    """standby() -> converging while the ramp-to-zero is still running, reached once it finishes."""
+    from cryosoft.virtual_instruments.magnet.superconducting_magnet import (
+        SuperconductingMagnetVI,
+    )
+
+    driver = SimOxfordIPS120("SIM")
+    vi = SuperconductingMagnetVI(
+        {"main": driver}, default_ramp_rate=1200.0, amperes_per_tesla=10.0
+    )
+
+    # Move away from the safe idle state first, so standby() has ground to cover.
+    vi.start_ramp(1.0)
+    for _ in range(50):
+        vi.advance_ramp()
+        driver._last_update = time.time() - 0.5
+        driver._update_simulation()
+    assert vi.standby_status() == "away"  # start_ramp, not standby, was last commanded
+
+    vi.standby()
+    assert vi.standby_status() == "converging"
+
+    for _ in range(50):
+        vi.advance_ramp()
+        driver._last_update = time.time() - 0.5
+        driver._update_simulation()
+    assert vi.ramp_status() == "TARGET_REACHED"
+    assert vi.standby_status() == "reached"
+
+
+def test_standby_status_start_ramp_after_standby_is_away_even_mid_ramp():
+    """start_ramp() invalidates standby provenance even while ramp_status() still reports RAMPING.
+
+    Load-bearing: a check based on magnet_state() alone (rather than the
+    _standby_commanded flag) would still see the field converging on some
+    setpoint here and misreport "converging".
+    """
+    from cryosoft.virtual_instruments.magnet.superconducting_magnet import (
+        SuperconductingMagnetVI,
+    )
+
+    driver = SimOxfordIPS120("SIM")
+    vi = SuperconductingMagnetVI(
+        {"main": driver}, default_ramp_rate=1200.0, amperes_per_tesla=10.0
+    )
+
+    vi.start_ramp(1.0)
+    for _ in range(50):
+        vi.advance_ramp()
+        driver._last_update = time.time() - 0.5
+        driver._update_simulation()
+
+    vi.standby()
+    assert vi.standby_status() == "converging"
+
+    vi.start_ramp(0.5)
+    assert vi.ramp_status() == "RAMPING"
+    assert vi.standby_status() == "away"
+
+
+def test_standby_status_stop_ramp_after_standby_is_away():
+    from cryosoft.virtual_instruments.magnet.superconducting_magnet import (
+        SuperconductingMagnetVI,
+    )
+
+    driver = SimOxfordIPS120("SIM")
+    vi = SuperconductingMagnetVI(
+        {"main": driver}, default_ramp_rate=1200.0, amperes_per_tesla=10.0
+    )
+
+    vi.start_ramp(1.0)
+    for _ in range(50):
+        vi.advance_ramp()
+        driver._last_update = time.time() - 0.5
+        driver._update_simulation()
+
+    vi.standby()
+    assert vi.standby_status() == "converging"
+
+    vi.stop_ramp()
+    assert vi.standby_status() == "away"
+
+
+def test_standby_status_raising_standby_leaves_it_away():
+    """A standby() that raises must not be mistaken for a converging/reached VI."""
+    from cryosoft.virtual_instruments.base import BaseVirtualInstrument
+    from cryosoft.virtual_instruments.rampable import RampableVI
+
+    class RaisingStandbyRampable(BaseVirtualInstrument, RampableVI):
+        vi_type = "mock"
+
+        def __init__(self):
+            super().__init__({})
+            self._ramping = False
+
+        def start_ramp(self, target):
+            self._ramping = True
+
+        def advance_ramp(self):
+            pass
+
+        def ramp_status(self):
+            return "RAMPING" if self._ramping else "IDLE"
+
+        def stop_ramp(self):
+            self._ramping = False
+
+        def standby(self):
+            raise RuntimeError("standby failed")
+
+    vi = RaisingStandbyRampable()
+    with pytest.raises(RuntimeError):
+        vi.standby()
+    assert vi.standby_status() == "away"
+
+
+def test_standby_status_non_rampable_vi_always_reached():
+    """A measurement VI (or any non-RampableVI) has no intermediate state to converge through."""
+    from cryosoft.virtual_instruments.measurement.measurement_dc_mode import (
+        DCModeMeasurementVI,
+    )
+
+    source = SimKeithley6221("SIM")
+    meter = SimKeithley2182A("SIM")
+    source._paired_meter = meter
+    vi = DCModeMeasurementVI({"source": source, "meter": meter})
+
+    assert vi.standby_status() == "reached"
+    vi.standby()
+    assert vi.standby_status() == "reached"
+
+
+def test_standby_status_inherited_standby_still_tracked():
+    """A subclass that does NOT define its own standby() still gets correct provenance.
+
+    Exercises the inherited-wrap path in __init_subclass__: only a directly
+    defined standby()/start_ramp()/stop_ramp() is re-wrapped, so this
+    subclass relies entirely on the wrap already applied to its parent.
+    """
+    from cryosoft.virtual_instruments.magnet.superconducting_magnet import (
+        SuperconductingMagnetVI,
+    )
+
+    class UnmodifiedMagnetVI(SuperconductingMagnetVI):
+        """Adds nothing; standby()/start_ramp()/stop_ramp() are all inherited."""
+
+    driver = SimOxfordIPS120("SIM")
+    vi = UnmodifiedMagnetVI(
+        {"main": driver}, default_ramp_rate=1200.0, amperes_per_tesla=10.0
+    )
+
+    assert vi.standby_status() == "away"
+
+    vi.start_ramp(1.0)
+    for _ in range(50):
+        vi.advance_ramp()
+        driver._last_update = time.time() - 0.5
+        driver._update_simulation()
+
+    vi.standby()
+    assert vi.standby_status() == "converging"
+
+    for _ in range(50):
+        vi.advance_ramp()
+        driver._last_update = time.time() - 0.5
+        driver._update_simulation()
+    assert vi.standby_status() == "reached"
