@@ -125,6 +125,38 @@ ever be `"hold"` severity instead (a runaway boil-off arguably should stop a
 run)? Start every check advisory. Promoting one later is a one-word change in
 its declaration, and that asymmetry is the argument for starting low.
 
+### The noise boundary: recorded and diagnosable, never interrupting
+
+**Settled 2026-08-04.** A trend check must not be able to interrupt the
+operator. Many temporal judgements are inherently low-confidence, and a layer
+that pushes a banner every time a temperature wobbles trains the operator to
+dismiss banners, which costs more than the layer is worth.
+
+The existing surfaces already draw this line, so nothing new is needed to
+enforce it:
+
+- `operational_status.py:230` serializes every condition regardless of
+  severity, so an advisory trend condition lands in `status.jsonl`
+  automatically. That is the persistent history an agent reads after the fact.
+- `DiagnosticsWindow` renders `record["alerts"]` (`:216-217`), not
+  `record["conditions"]`. A failing check therefore also appends one `alerts`
+  line, exactly as the stall detector does. Diagnostics is opt-in and
+  read-only, so this is wanted visibility rather than noise.
+- The Monitor banner filters `severity == "hold"`
+  (`monitor_window.py:1536-1537`) and returns early unless a VI is held.
+  Advisory severity is structurally unable to reach it.
+
+That last point is what makes "start every check advisory" load-bearing rather
+than merely cautious: advisory is the severity that cannot interrupt. Promoting
+a check to `"hold"` is what would put it on the operator's banner, which is the
+real reason promotion stays deferred.
+
+One check does not fit this shape. `trend_store_live` exists to catch a wedged
+or crashed application, and an in-process timer cannot report that its own
+process is hung. It has to run from outside, reading the store's file state, so
+it lives in the CLI path only and publishes nothing. That split follows from
+what the check detects, not from a preference.
+
 ### Cadence
 
 These checks must not run every tick. Their windows are hours; re-evaluating
