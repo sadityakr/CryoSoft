@@ -239,12 +239,18 @@ QPushButton[class="danger"]:disabled {{
 }}
 
 /* ── Emergency acknowledge (targeted by objectName) ──────────────────── */
+/* Deliberately at the smallest size/padding used anywhere in this
+   stylesheet (matches QLabel[class="secondary_label"]'s 9pt) — it must
+   still read as an urgent control via its red fill, but a big bold
+   button was dominating the header out of proportion to how often it's
+   actually the thing the operator needs to click. */
 QPushButton#ack_emergency_btn {{
     background-color: {BTN_DANGER_FILL};
     color: {TEXT_ON_ACCENT};
     border: none;
     font-weight: bold;
-    font-size: 11pt;
+    font-size: 9pt;
+    padding: 2px 8px;
 }}
 QPushButton#ack_emergency_btn:hover {{
     background-color: {BTN_DANGER_HOVER};

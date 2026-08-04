@@ -491,7 +491,7 @@ class MonitorWindow(QMainWindow):
         self._ack_countdown_label.setObjectName("ack_countdown_label")
         self._ack_countdown_label.setVisible(False)
         ack_row.addWidget(self._ack_countdown_label)
-        self._ack_btn = QPushButton("ACKNOWLEDGE EMERGENCY")
+        self._ack_btn = QPushButton("Acknowledge emergency")
         self._ack_btn.setObjectName("ack_emergency_btn")
         self._ack_btn.setVisible(False)
         self._ack_btn.clicked.connect(self._on_ack_clicked)
@@ -502,6 +502,12 @@ class MonitorWindow(QMainWindow):
         # so states_updated can dismiss it once every fault clears without
         # stomping on an unrelated banner message.
         self._last_fault_message: str | None = None
+
+        # Tracks the last hold-severity condition message shown on the
+        # banner (see _refresh_ack_controls()), so it can be dismissed once
+        # every hold condition clears without stomping on an unrelated
+        # banner message (e.g. a fault warning that appeared since).
+        self._last_hold_message: str | None = None
 
         # ── Fixed 2x2 quadrant grid (Page 1 — Monitor) ───────────────
         top_left = self._build_instruments_quadrant(measurement_vis, switch_vis)
@@ -1491,8 +1497,9 @@ class MonitorWindow(QMainWindow):
         held = self._orchestrator.held_vi_names()
         self._ack_btn.setVisible(self._in_emergency or bool(held))
         self._ack_btn.setText(
-            "ACKNOWLEDGE EMERGENCY" if self._in_emergency else "ACKNOWLEDGE & UNLOCK"
+            "Acknowledge emergency" if self._in_emergency else "Acknowledge & unlock"
         )
+        self._refresh_hold_banner(held)
         expires_at = self._orchestrator.manual_override_expires_at()
         if expires_at is None:
             self._ack_countdown_label.setVisible(False)
@@ -1501,6 +1508,49 @@ class MonitorWindow(QMainWindow):
         minutes, seconds = divmod(int(remaining), 60)
         self._ack_countdown_label.setText(f"Acknowledged ({minutes:02d}:{seconds:02d})")
         self._ack_countdown_label.setVisible(True)
+
+    def _refresh_hold_banner(self, held: frozenset[str]) -> None:
+        """Show why the ACKNOWLEDGE & UNLOCK button appeared, on the banner.
+
+        A plain hold-severity condition (e.g. ``helium_low`` tripped without
+        triggering EMERGENCY) drives ``_ack_btn``'s visibility but never goes
+        through ``Orchestrator._error()`` — that path is reserved for
+        ``internal``/``run_failure``/EMERGENCY-severity events (see
+        ``_on_error()``) — so nothing else ever puts its description on the
+        banner. This fills that gap from the same public
+        ``get_operational_status()`` conditions list that
+        ``held_vi_names()`` is derived from, without duplicating or
+        pre-empting the EMERGENCY message path.
+
+        Args:
+            held: The currently held VI names, as returned by
+                ``Orchestrator.held_vi_names()`` (only used to short-circuit
+                when nothing is held).
+        """
+        if self._in_emergency or not held:
+            if self._last_hold_message is not None:
+                self._banner.dismiss()
+                self._last_hold_message = None
+            return
+
+        conditions = self._orchestrator.get_operational_status().get("conditions", [])
+        hold_conditions = [c for c in conditions if c.get("severity") == "hold"]
+        if not hold_conditions:
+            if self._last_hold_message is not None:
+                self._banner.dismiss()
+                self._last_hold_message = None
+            return
+
+        message = "; ".join(
+            f"{c['message']} — affecting {', '.join(c.get('affected', []))}"
+            if c.get("affected")
+            else c["message"]
+            for c in hold_conditions
+        )
+        if message == self._last_hold_message:
+            return
+        self._last_hold_message = message
+        self._banner.show_message(message, BANNER_SEVERITY_WARNING)
 
     def _on_error(self, message: str) -> None:
         """Show a non-modal error banner when ERROR or EMERGENCY is entered.

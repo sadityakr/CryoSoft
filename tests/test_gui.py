@@ -1932,6 +1932,54 @@ def test_ack_button_absent_from_procedure_window(procedure_win):
     assert procedure_win.findChild(QPushButton, "ack_emergency_btn") is None
 
 
+def test_hold_banner_shows_message_and_dismisses_on_clear(monitor_win, orchestrator, monkeypatch):
+    """A plain hold condition (e.g. helium_low, NOT emergency) populates the banner.
+
+    Regression test: previously the ACK button appeared alone with no
+    explanation on the banner above it (see _refresh_hold_banner()). Stubs
+    the Orchestrator's public API (held_vi_names / get_operational_status)
+    rather than reaching into the Station's private condition registry.
+    """
+    held = {"magnet_y", "magnet_z"}
+    monkeypatch.setattr(orchestrator, "held_vi_names", lambda: frozenset(held))
+    monkeypatch.setattr(
+        orchestrator,
+        "get_operational_status",
+        lambda: {
+            "conditions": [
+                {
+                    "key": "safety:helium_low",
+                    "origin": "safety",
+                    "severity": "hold",
+                    "kind": "helium_low",
+                    "message": "Safety flag 'helium_low' is tripped",
+                    "affected": sorted(held),
+                    "since": 0.0,
+                    "acknowledged": False,
+                }
+            ]
+        },
+    )
+
+    monitor_win._in_emergency = False
+    monitor_win._refresh_ack_controls()
+
+    assert monitor_win._ack_btn.isVisible()
+    assert monitor_win._banner.isVisible()
+    assert "helium_low" in monitor_win._banner._label.text()
+    assert "magnet_y" in monitor_win._banner._label.text()
+
+    # Clearing the hold condition dismisses the banner it owns.
+    held.clear()
+    monkeypatch.setattr(orchestrator, "held_vi_names", lambda: frozenset())
+    monkeypatch.setattr(orchestrator, "get_operational_status", lambda: {"conditions": []})
+
+    monitor_win._refresh_ack_controls()
+
+    assert not monitor_win._ack_btn.isVisible()
+    assert not monitor_win._banner.isVisible()
+
+
 def test_progress_bar_updates(procedure_win, orchestrator):
     """Progress bar reflects procedure_progress signal."""
     orchestrator.procedure_progress.emit(0.42)
