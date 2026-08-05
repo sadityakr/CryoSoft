@@ -889,6 +889,36 @@ class SweepMeasureProcedure(BaseProcedure):
         self._snapshot_recorded: bool = False
 
     # ------------------------------------------------------------------
+    # The axis column (what _axis_readback's value is stored under)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def axis_data_key(cls) -> str:
+        """Return the data column holding the axis read-back at each point.
+
+        Defaults to the declared ``sweep_axis``'s ``data_key``, which is the
+        answer for any procedure that sweeps a ramped setpoint. A procedure
+        whose axis is NOT a setpoint — elapsed time, say — declares
+        ``sweep_axis = None`` (so the GUI renders no linear/segments/CSV
+        shape editor, which would be meaningless) and overrides this with
+        its own column name.
+
+        Returns:
+            The sweep-column name for this procedure's axis.
+
+        Raises:
+            NotImplementedError: If the procedure declares neither a
+                ``sweep_axis`` nor an override — the run would otherwise
+                write its axis read-back into a column no schema declares.
+        """
+        if cls.sweep_axis is not None:
+            return cls.sweep_axis.data_key
+        raise NotImplementedError(
+            f"{cls.__name__} declares no sweep_axis; it must override "
+            f"axis_data_key() with the column its _axis_readback() fills."
+        )
+
+    # ------------------------------------------------------------------
     # Reading-loop plumbing (shared by __init__, the form, and the plots)
     # ------------------------------------------------------------------
 
@@ -1387,7 +1417,7 @@ class SweepMeasureProcedure(BaseProcedure):
         sweep_columns: dict[str, str] = {"unix_time": "float"}
         for key in self._station.last_state_flat():
             sweep_columns[key] = "float"
-        sweep_columns[type(self).sweep_axis.data_key] = "float"
+        sweep_columns[type(self).axis_data_key()] = "float"
         row_counts = vi.raw_block_row_counts(self._measurement_params)
         measurement_blocks = {
             name: (row_counts[name], len(labels))
@@ -1581,7 +1611,7 @@ class SweepMeasureProcedure(BaseProcedure):
             # array column does (see DataSchema.measurement_blocks).
             for block_key in vi.measurement_raw_blocks:
                 measured_data[block_key] = grids[block_key][0][0]
-        measured_data[type(self).sweep_axis.data_key] = self._axis_readback()
+        measured_data[type(self).axis_data_key()] = self._axis_readback()
         self._save_datapoint(measured_data)
 
     def standby(self) -> PhasePlan:

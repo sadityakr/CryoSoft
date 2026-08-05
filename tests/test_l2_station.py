@@ -343,6 +343,37 @@ def test_check_ramps(sim_station: Station):
     assert sim_station.check_ramps() is True
 
 
+def test_check_ramps_reports_only_the_named_vis(sim_station: Station):
+    """A ramp outside the requested scope does not make check_ramps() report False.
+
+    The ramp-scope standard: a caller waits for the ramps IT started. An
+    empty scope therefore means "nothing to wait for" even while other
+    hardware is moving — the case for a procedure that commands no targets.
+    """
+    sim_station.process_system_targets({"magnet_z": Target(1.0)})
+
+    assert sim_station.check_ramps() is False                      # whole station
+    assert sim_station.check_ramps({"magnet_z"}) is False           # in scope
+    assert sim_station.check_ramps({"temperature_vti"}) is True     # out of scope
+    assert sim_station.check_ramps(set()) is True                   # owns nothing
+
+
+def test_check_ramps_advances_out_of_scope_ramps(sim_station: Station):
+    """Every ramp advances regardless of scope — scope only narrows the verdict.
+
+    check_ramps() is the sole driver of ramp generators in the tick loop, so
+    narrowing the *advance* alongside the *report* would freeze an unwatched
+    ramp mid-flight instead of merely not waiting for it.
+    """
+    sim_station.process_system_targets({"magnet_z": Target(1.0)})
+    start = sim_station.magnet_z.magnet_field_T()
+
+    for _ in range(5):
+        assert sim_station.check_ramps(set()) is True
+
+    assert sim_station.magnet_z.magnet_field_T() > start
+
+
 def test_get_ramp_status_carries_the_full_introspection_snapshot(sim_station: Station):
     """get_ramp_status() aggregates every RampableVI introspection hook per VI.
 

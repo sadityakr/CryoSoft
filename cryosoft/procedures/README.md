@@ -10,6 +10,11 @@ sweep-and-measure engine itself lives one layer down in
 `cryosoft.core.procedure.SweepMeasureProcedure`; the files here supply only the
 axis specifics.
 
+The axis need not be a ramped setpoint. `time_series.py` sweeps elapsed time
+and commands no hardware at all, which is why the base class asks for the axis
+column through `axis_data_key()` rather than assuming every procedure declares
+a `SweepAxis` (see Time series below).
+
 ## Architecture layer
 
 L4 (Procedures). Sits above L3 (Orchestrator) and L2 (Station); uses
@@ -114,6 +119,37 @@ per-plot Loop 1 / Loop 2 selectors (fed by `live_plot_loop_labels()`, items
 like "A1 = Mux-Ch1" with the axis index as item data); axis keys stay the
 plain column names and the panel indexes directly into the grid at draw time.
 
+### Time series: an axis that is not a setpoint, and a run that commands nothing
+
+`time_series.py` is the third shape a procedure can take, and the most
+permissive one. It sends NO system targets: `initiate()` arms the selected
+measurement VI and nothing else, the first reading is taken on the next tick,
+and readings repeat on a fixed cadence until an end condition fires. There are
+deliberately no temperature or field parameters — the operator sets those by
+hand on the monitor panel, before or during the run.
+
+Three pieces of the framework make that work, and each is reusable by a future
+procedure of the same shape:
+
+| Piece | What it does |
+|---|---|
+| `sweep_axis = None` + `axis_data_key()` | The axis is elapsed time (`elapsed_s`), not a ramped quantity, so the GUI renders no linear/segments/CSV shape editor. `_build_sweep_array()` returns the schedule of measurement instants; its length is `max_duration_s / step_time_s`, which is what keeps the progress bar, `n_sweep_points`, and "Point n/N" meaningful. |
+| A narrowed `claimed_vi_names()` | Returns only the measurement VI plus any reading-loop VI, so the Orchestrator's admission gate leaves every magnet and temperature front panel live for the whole run. The only procedure that does not claim the whole station. |
+| An empty **ramp scope** (GLOSSARY.md) | A run owns the ramps it targeted; this one targets nothing. A manual front-panel ramp therefore neither delays its next reading nor is stopped when the run ends. Ramp *advancement* is unaffected: every non-PAUSED tick still steps every ramp generator. |
+
+The end condition is either the schedule alone or a watched channel reaching a
+threshold. Direction is inferred from the channel's value at `initiate()` —
+starting below the threshold stops on the way up, starting above stops on the
+way down — so there is no rising/falling parameter to set wrong. `end_tolerance`
+exists for an asymptotic approach that would never quite cross. `max_duration_s`
+always applies as well.
+
+Cadence is measured from each scheduled instant rather than from the end of the
+previous reading, so measurement time is absorbed instead of accumulating into
+drift. It is a floor, not a guarantee: one datapoint costs three Orchestrator
+ticks (measure, advance, settle), so the fastest achievable cadence is three
+times the setup's `tick_interval_ms`.
+
 ## Operations
 
 `procedures/operations/` (its own `README.md`) holds a DIFFERENT kind of
@@ -157,7 +193,9 @@ directly and implement the five lifecycle methods and its own `DataManager`;
 
 **Magnet and temperature VI names are hardcoded in the procedures.**
 `FieldSweep` and `TemperatureSweep` address `magnet_z`, `magnet_y`,
-`temperature_vti` and `temperature_sample` as literal strings. A setup that
+`temperature_vti` and `temperature_sample` as literal strings, and
+`TimeSeries` does the same for the three channels its end condition can
+watch (`_END_CHANNELS`). A setup that
 names its instruments differently cannot run the shipped procedures without
 editing them — which is what forced the 2026-07-20 global `magnet_x` ->
 `magnet_z` rename across every config and test.
@@ -183,6 +221,7 @@ Each row: responsibility, key public class, and the test file(s) in `tests/`.
 |------|----------------|----------------|-------|
 | `__init__.py` | Package marker | (none) | none |
 | `field_sweep.py` | Sweeps magnetic field (`magnet_z`), optionally holding `temperature_vti` and/or `temperature_sample` (see Temperature channels below), running any selected measurement VI at each point; parks `magnet_z` at 0 T on standby. Requires `magnet_z`, at least one measurement VI, and a VI for each switched-on temperature channel. | `FieldSweep` (axis hooks over `SweepMeasureProcedure`) | `test_new_procedures.py`, `test_l4_procedure.py`, `test_field_voltage_procedure.py` |
+| `time_series.py` | Measures repeatedly against elapsed time, commanding no system hardware and claiming only the reading path, so the operator keeps manual control of the whole cryostat during the run. Ends on `max_duration_s`, or when a watched channel (`temperature_vti`, `temperature_sample`, `magnet_z`) reaches `end_value`. Requires at least one measurement VI; a watched channel's VI must exist. | `TimeSeries` (axis hooks + `axis_data_key`/`claimed_vi_names` over `SweepMeasureProcedure`) | `test_time_series_procedure.py`, `test_l3_orchestrator.py` (ramp scope) |
 | `temperature_sweep.py` | Sweeps temperature (`temperature_vti`) at a per-sweep ramp rate, optionally holding `temperature_sample` and optional `magnet_z` / `magnet_y` fields, running any selected measurement VI at each stable point. Requires at least one measurement VI; magnets optional (skipped at 0, refused at nonzero when absent). | `TemperatureSweep` (axis hooks over `SweepMeasureProcedure`) | `test_new_procedures.py` |
 
 ### Temperature channels (on/off)

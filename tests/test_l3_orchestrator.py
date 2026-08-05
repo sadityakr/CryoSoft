@@ -2411,3 +2411,135 @@ def test_hold_enforcement_announces_reassertion(orchestrator, station, qtbot):
         assert any("magnet_z" in message for message in status_messages)
     finally:
         station.level_meter._driver._force_helium_level = None
+
+
+# ── Ramp scope: a run waits for, and stops, only the ramps it started ─────────
+
+
+class NoTargetProcedure:
+    """A procedure shaped like TimeSeries: commands nothing, claims the reading path.
+
+    Stands in for the real thing at L3 so the state-machine behaviour is
+    tested without a measurement VI, an HDF5 file, or a schedule.
+    """
+
+    name = "No-Target Series"
+
+    def __init__(self, station, points: int = 3):
+        self._station = station
+        self._sweep = list(range(points))
+        self._index = 0
+        self.measure_called = 0
+
+    def initiate(self):
+        return PhasePlan(targets={}, commands=(), wait_s=0.0)
+
+    def change_sweep_step(self):
+        self._index += 1
+        if self._index >= len(self._sweep):
+            return None
+        return StepPlan(targets={}, wait_s=0.0)
+
+    def measure(self):
+        self.measure_called += 1
+
+    def standby(self):
+        return PhasePlan(targets={}, commands=(), wait_s=0.0)
+
+    def abort(self):
+        return ()
+
+    def claimed_vi_names(self):
+        return {"keithley_delta_mode"}
+
+    def get_progress(self):
+        return self._index / len(self._sweep)
+
+
+def _slow_manual_ramp(station):
+    """Start a slow magnet ramp the way a front-panel click would."""
+    station.magnet_z._default_ramp_rate = 0.001
+    station.magnet_z._ramp_segments = []
+    station.process_system_targets({"magnet_z": Target(1.0)})
+    assert station.magnet_z.ramp_status() == "RAMPING"
+
+
+def test_manual_ramp_does_not_block_a_run_that_owns_no_ramps(
+    orchestrator, station, qtbot
+):
+    """A run with no targets measures on schedule while the operator ramps by hand.
+
+    Before the ramp scope existed, the RAMPING->MEASURING gate asked whether
+    ANY hardware was still moving, so a manual front-panel ramp stalled every
+    measurement of a procedure that had commanded nothing at all.
+    """
+    procedure = NoTargetProcedure(station)
+    orchestrator.run_procedure(procedure)
+    _slow_manual_ramp(station)
+
+    with qtbot.waitSignal(orchestrator.procedure_finished, timeout=5000):
+        pass
+
+    assert procedure.measure_called == 3
+    # Untouched by the run's standby: the operator's ramp is still going.
+    assert station.magnet_z.ramp_status() == "RAMPING"
+
+
+def test_abort_leaves_an_unowned_manual_ramp_running(orchestrator, station, qtbot):
+    """Aborting a run stops the ramps it started — not the operator's.
+
+    The run commanded no targets, so it owns no ramps and has nothing to
+    hold in place; freezing the manual ramp would be the run reaching
+    outside its own claim.
+    """
+    orchestrator.run_procedure(NoTargetProcedure(station))
+    _slow_manual_ramp(station)
+
+    orchestrator.abort_procedure()
+
+    assert orchestrator._procedure is None
+    assert station.magnet_z.ramp_status() == "RAMPING"
+
+
+def test_run_that_owns_a_ramp_still_waits_for_it(orchestrator, station, qtbot):
+    """The scope narrows nothing for an ordinary sweep: it still waits for its own.
+
+    MockProcedure targets magnet_z, so magnet_z is in its ramp scope and the
+    measurement gate behaves exactly as before the change.
+    """
+    procedure = MockProcedure(station)
+    station.magnet_z._default_ramp_rate = 0.001
+    station.magnet_z._ramp_segments = []
+    orchestrator.run_procedure(procedure)
+
+    qtbot.waitUntil(lambda: orchestrator._state == OrchestratorState.RAMPING, timeout=2000)
+    qtbot.wait(200)
+
+    assert station.magnet_z.ramp_status() == "RAMPING"
+    assert procedure.measure_called == 0  # held at the gate by its OWN ramp
+    orchestrator.abort_procedure()
+
+
+def test_out_of_scope_ramp_advances_in_every_run_state(orchestrator, station, qtbot):
+    """A manual ramp progresses on every tick of a run, not only on RAMPING ticks.
+
+    Ramp generators step exactly once per call to the Station's advance, and
+    that call used to live only in the ramp-aware states. A run that no
+    longer waits for a foreign ramp spends most of its ticks elsewhere, so
+    without an advance in those states the operator's ramp would crawl at a
+    third of its rate — or, behind a gate, freeze outright.
+    """
+    orchestrator.run_procedure(NoTargetProcedure(station, points=30))
+    _slow_manual_ramp(station)
+
+    measured_at = []
+    fields = []
+    for _ in range(12):
+        orchestrator._tick()
+        fields.append(station.magnet_z.magnet_field_T())
+        measured_at.append(orchestrator._state)
+
+    # Strictly increasing: every single tick moved the ramp, whatever state
+    # the run was in.
+    assert all(b > a for a, b in zip(fields, fields[1:])), fields
+    orchestrator.abort_procedure()

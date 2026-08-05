@@ -608,7 +608,9 @@ class Orchestrator(QObject):
             # was requested — logged once, at INFO, on receipt.
             logger.info("%s plan (initiate): %r", kind.capitalize(), plan)
 
-            # Track active system VIs for stale monitoring
+            # Track active system VIs for stale monitoring, and as the run's
+            # ramp scope (see _run_ramp_scope) — each step's targets are
+            # accumulated into it as they are dispatched.
             self._active_system_vis = set(plan.targets.keys())
 
             self._dispatch_targets(plan.targets)
@@ -658,6 +660,33 @@ class Orchestrator(QObject):
         self._last_system_targets = dict(targets)
         self._station.process_system_targets(targets)
 
+    def _run_ramp_scope(self) -> set[str] | None:
+        """Return the VIs whose ramps the active run owns (the ramp scope).
+
+        The ramp-scope standard: a run waits for, holds, and stops the ramps
+        IT started — never hardware someone else is moving. The owned set is
+        ``_active_system_vis``, accumulated from every plan's targets, so it
+        is precisely the VIs this run has ever sent a setpoint to.
+
+        For every sweep procedure the distinction is invisible: a run can
+        only start from IDLE, and a manual ramp leaves IDLE on the tick it
+        starts, so nothing outside the scope can be ramping anyway. It
+        matters for a procedure that commands no targets and narrows its
+        ``claimed_vi_names()`` (see ``TimeSeries``): the operator keeps
+        driving the cryostat from the front panel while the run records, and
+        those manual ramps must neither stall the run's measurements nor be
+        stopped when it ends.
+
+        Returns:
+            The run's owned VI names — possibly EMPTY, meaning the run owns
+            no ramps at all (waits for nothing, stops nothing). ``None``
+            when no run is active, which asks the whole-station question:
+            the Orchestrator is then the only owner there is.
+        """
+        if self._procedure is None:
+            return None
+        return self._active_system_vis
+
     def queue_procedure(self, procedure: Any) -> None:
         """Add procedure to queue."""
         self._procedure_queue.append(procedure)
@@ -701,7 +730,7 @@ class Orchestrator(QObject):
             self._pre_pause_state = self._state
             if self._wait_started:
                 self._paused_wait_elapsed = time.time() - self._wait_start_time
-            self._station.stop_ramps(self._active_system_vis or None)
+            self._station.stop_ramps(self._run_ramp_scope())
             self._change_state(OrchestratorState.PAUSED)
             self._emit_status("Paused - hardware held")
 
@@ -927,7 +956,7 @@ class Orchestrator(QObject):
         if not getattr(self._procedure, "skip_ramp_requested", False):
             return False
         self._procedure.skip_ramp_requested = False
-        self._station.stop_ramps(self._active_system_vis or None)
+        self._station.stop_ramps(self._run_ramp_scope())
         logger.warning(
             "Stopped the active run's ramps in place: the operator skipped "
             "the step that started them."
@@ -2105,7 +2134,11 @@ class Orchestrator(QObject):
             # check_ramps() reports complete on this same tick and the run
             # proceeds exactly as if the ramp had landed.
             self._stop_ramps_for_skipped_step()
-            if self._station.check_ramps():  # True = all ramps complete
+            # Scoped to the run's OWN ramps (see _run_ramp_scope): a manual
+            # front-panel ramp on a VI this run neither targets nor claims
+            # must not hold its next measurement. Every ramp still advances
+            # inside this call, in or out of scope.
+            if self._station.check_ramps(self._run_ramp_scope()):  # True = this run's ramps complete
                 if self._procedure is None:
                     # Manual ramp from GUI — return to IDLE.
                     self._change_state(OrchestratorState.IDLE)
@@ -2134,6 +2167,13 @@ class Orchestrator(QObject):
                             self._first_measurement = False
                             self._change_state(OrchestratorState.MEASURING)
         elif self._state in (OrchestratorState.INITIATION_GATE, OrchestratorState.READING_GATE):
+            # A gate can be waiting ON a ramp that is outside the run's ramp
+            # scope — the helium fill's magnets are commanded into standby
+            # rather than targeted, so its zero_field gate holds while they
+            # ramp down. Nothing but this call moves a ramp generator, so a
+            # tick spent here must still advance them or the gate can never
+            # come true.
+            self._station.advance_ramps()
             if self._is_operation_active() and getattr(
                 self._procedure, "finish_requested", False
             ):
@@ -2152,6 +2192,11 @@ class Orchestrator(QObject):
                     self._first_measurement = False
                     self._change_state(OrchestratorState.MEASURING)
         elif self._state == OrchestratorState.MEASURING:
+            # Ramps outside the run's scope keep moving while it measures —
+            # a manual front-panel ramp must not advance at a third of its
+            # rate just because two ticks of every measurement cycle are
+            # spent in states that historically never saw a live ramp.
+            self._station.advance_ramps()
             if self._procedure:
                 is_operation = self._is_operation_active()
                 self._emit_status(self._measure_status_line())
@@ -2173,6 +2218,7 @@ class Orchestrator(QObject):
                     self.measurement_ready.emit(dict(last_datapoint))
             self._change_state(OrchestratorState.SWEEPING)
         elif self._state == OrchestratorState.SWEEPING:
+            self._station.advance_ramps()  # see MEASURING above
             if self._procedure:
                 step_plan = self._procedure.change_sweep_step()
                 if step_plan is None:
@@ -2180,6 +2226,11 @@ class Orchestrator(QObject):
                     self._change_state(OrchestratorState.STANDBY)
                 else:
                     logger.info("Procedure plan (step): %r", step_plan)
+                    # A step may target a VI initiate() never did, and from
+                    # this moment the run owns that ramp — accumulate, so the
+                    # ramp scope (see _run_ramp_scope) covers every VI this
+                    # run has ever commanded, not just its opening plan's.
+                    self._active_system_vis |= set(step_plan.targets)
                     self._dispatch_targets(step_plan.targets)
                     self._current_wait_time = step_plan.wait_s
                     self._change_state(OrchestratorState.RAMPING)
@@ -2191,10 +2242,13 @@ class Orchestrator(QObject):
                 # _standby_operation_immediate()'s docstring.
                 self._standby_operation_immediate()
             elif not self._standby_dispatched:
-                # Wait for whatever ramp was already in flight when SWEEPING
+                # Wait for whatever ramp THIS RUN had in flight when SWEEPING
                 # ended, then call standby() exactly once and dispatch
-                # whatever targets it returns (e.g. ramp magnet to 0 T).
-                if self._station.check_ramps():
+                # whatever targets it returns (e.g. ramp magnet to 0 T). A
+                # manual ramp outside the run's scope is not waited for —
+                # otherwise stopping a run that commands nothing would hang
+                # until the operator's own ramp happened to land.
+                if self._station.check_ramps(self._run_ramp_scope()):
                     self._emit_status("Sweep complete - closing data file")
                     if self._procedure and hasattr(self._procedure, "standby"):
                         plan = self._procedure.standby()
@@ -2216,7 +2270,7 @@ class Orchestrator(QObject):
                 # postcondition_gates() — that hook is operation-only, and an
                 # operation never reaches this branch (see the fork above) —
                 # so a procedure always finishes as soon as this ramp settles.
-                if self._station.check_ramps():
+                if self._station.check_ramps(self._run_ramp_scope()):
                     self._finish_run()
         elif self._state == OrchestratorState.PAUSED:
             pass # Monitor continues, no ramp advancement
@@ -2268,7 +2322,7 @@ class Orchestrator(QObject):
         try:
             # Hold hardware where it is: clearing generators alone would let
             # autonomous hardware (magnet PSU) keep ramping to its last setpoint.
-            self._station.stop_ramps(self._active_system_vis or None)
+            self._station.stop_ramps(self._run_ramp_scope())
         except Exception:
             logger.exception("Stopping ramps during abort failed")
 

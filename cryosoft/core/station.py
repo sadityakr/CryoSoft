@@ -1147,34 +1147,64 @@ class Station:
             logger.info("Starting ramp on '%s' to target=%s", vi_name, target)
             vi.start_ramp(target, **kwargs)  # type: ignore[call-arg]
 
-    def check_ramps(self) -> bool:
-        """Advance all active system VI ramps and report completion.
+    def advance_ramps(self) -> set[str]:
+        """Step every active system-VI ramp generator forward by one tick.
 
-        Calls ``advance_ramp()`` on every system VI that implements ``RampableVI``
-        and is currently in ``"RAMPING"`` state.
+        This is the ONLY thing that makes a ramp progress: a ramp is a
+        generator yielding one step per tick (the single-threaded
+        cooperative design), and nothing else calls ``advance_ramp()``. So
+        every tick must reach this method, in whatever state, or an
+        in-flight ramp silently freezes. The one deliberate exception is
+        PAUSED, where holding the hardware still IS the intent.
 
         Returns:
-            ``True`` if all system VIs have reached their targets (or are IDLE).
-            ``False`` if any system VI is still ramping.
+            The names of the system VIs still ramping after this step.
         """
-        all_done = True
+        still_ramping: set[str] = set()
         for vi_name, vi_type in self._vi_registry.items():
             if vi_type != "system":
                 continue
             vi = self._virtual_instruments[vi_name]
             if not isinstance(vi, RampableVI):
                 continue
-            status = vi.ramp_status()
-            if status == "RAMPING":
+            if vi.ramp_status() == "RAMPING":
                 vi.advance_ramp()
-                all_done = False
-            elif status == "IDLE":
-                # No ramp active — this VI is done (or never started).
-                pass
-            else:
-                # TARGET_REACHED
-                pass
-        return all_done
+                still_ramping.add(vi_name)
+            # IDLE (no ramp active) and TARGET_REACHED are both "done".
+        return still_ramping
+
+    def check_ramps(self, vi_names: set[str] | None = None) -> bool:
+        """Advance all active system VI ramps and report completion for a subset.
+
+        Two separable jobs, kept in one call because a tick in a ramp-aware
+        state wants both:
+
+        1. **Advance** every ramp, regardless of *vi_names* — see
+           ``advance_ramps()``. Narrowing the advance to the scope would
+           freeze an unwatched ramp mid-flight rather than merely not
+           waiting for it.
+        2. **Report** completion for the VIs in *vi_names* only — the
+           ramp-scope standard: a caller waits for the ramps IT started,
+           never for hardware someone else is moving. An empty set
+           therefore means "nothing to wait for" and reports ``True``,
+           which is exactly right for a run that commanded no targets.
+
+        Mirrors ``stop_ramps(vi_names)``, which scopes the same way.
+
+        Args:
+            vi_names: Report completion over these system VIs only.
+                ``None`` (the default) reports over every system VI, the
+                whole-station question the Orchestrator asks when no run
+                owns the hardware.
+
+        Returns:
+            ``True`` if every in-scope system VI has reached its target (or
+            is IDLE); ``False`` if any in-scope VI is still ramping.
+        """
+        still_ramping = self.advance_ramps()
+        if vi_names is None:
+            return not still_ramping
+        return not (still_ramping & vi_names)
 
     def stop_ramps(self, vi_names: set[str] | None = None) -> None:
         """Stop active ramps and hold hardware where it is.
