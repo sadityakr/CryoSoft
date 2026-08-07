@@ -45,10 +45,7 @@ _NEEDLE_VALVE_MANUAL = "manual"
 # and the servicing-log notes all key off them.
 _STEP_WARM_VTI = "warm_vti"
 _STEP_CLOSE_NEEDLE_VALVE = "close_needle_valve"
-_STEP_OPEN_ACCESS_VALVE = "open_access_valve"
-_STEP_MOVE_ROD = "move_rod"
-_STEP_CLOSE_ACCESS_VALVE = "close_access_valve"
-_STEP_FLUSH = "flush"
+_STEP_LOAD_UNLOAD_SAMPLE = "load_unload_sample"
 
 
 class _SampleAccessOperationBase(OperationBase):
@@ -104,12 +101,11 @@ class _SampleAccessOperationBase(OperationBase):
     2. ``close_needle_valve`` (``operator_ack``) — declared only while
        ``needle_valve == "manual"``; see the module-level note on why that
        is the only mode wired up.
-    3. ``open_access_valve`` (``operator_ack``) — the sample-space valve
-       opened to pass the rod, distinct from the needle valve.
-    4. ``move_rod`` (``operator_ack``) — the only step whose label differs
-       between the two concrete classes, via ``rod_step_label``.
-    5. ``close_access_valve`` (``operator_ack``).
-    6. ``flush`` (``operator_ack``).
+    3. ``load_unload_sample`` (``operator_ack``) — the physical sample
+       change itself (valve, rod, flush — the wiki-documented procedure),
+       confirmed as one step rather than broken into its own sub-sequence.
+       Identical between the two concrete classes: neither needs its own
+       wording, unlike the old per-step labels this replaced.
 
     Every step is skippable, including the warm-up. This is deliberate and
     is the main behavioural change from the operation's first design: a
@@ -140,12 +136,6 @@ class _SampleAccessOperationBase(OperationBase):
     #: Hold-phase operation: the ready banner may show mid-run, not only after
     #: Finish — see ``OperationBase.hold_for_operator``'s docstring.
     hold_for_operator = True
-
-    #: Label for the rod step — the ONLY thing that differs between the two
-    #: concrete classes' sequences. Set by ``SampleLoadOperation`` /
-    #: ``SampleUnloadOperation``; the fallback here is deliberately neutral
-    #: so the base class is still usable in a test on its own.
-    rod_step_label: str = "Move the sample rod"
 
     #: Declared pre-run toggles: {config key: human-readable checkbox label}.
     #: Unlike operator_confirmations (shown only while running, one-way,
@@ -248,10 +238,11 @@ class _SampleAccessOperationBase(OperationBase):
         """Return the ordered sample-access sequence.
 
         Returns:
-            Six steps for the usual manual-needle-valve setup, five if a
-            future ``needle_valve`` mode makes that step machine-verified
-            and it drops out. Only ``move_rod``'s label differs between the
-            load and unload subclasses (``rod_step_label``).
+            Three steps for the usual manual-needle-valve setup (``warm_vti``,
+            ``close_needle_valve``, ``load_unload_sample``), two if a future
+            ``needle_valve`` mode makes the needle-valve step
+            machine-verified and it drops out. Identical between the load
+            and unload subclasses.
         """
 
         def _vti_temperature(state: dict[str, Any]) -> float | None:
@@ -307,25 +298,10 @@ class _SampleAccessOperationBase(OperationBase):
         steps.extend(
             [
                 OperationStep(
-                    key=_STEP_OPEN_ACCESS_VALVE,
-                    label="Open the sample access valve",
+                    key=_STEP_LOAD_UNLOAD_SAMPLE,
+                    label="Load or unload sample. Follow the steps from the wiki.",
                     kind=STEP_KIND_OPERATOR_ACK,
-                ),
-                OperationStep(
-                    key=_STEP_MOVE_ROD,
-                    label=self.rod_step_label,
-                    kind=STEP_KIND_OPERATOR_ACK,
-                ),
-                OperationStep(
-                    key=_STEP_CLOSE_ACCESS_VALVE,
-                    label="Close the sample access valve",
-                    kind=STEP_KIND_OPERATOR_ACK,
-                ),
-                OperationStep(
-                    key=_STEP_FLUSH,
-                    label="Flush the sample space",
-                    kind=STEP_KIND_OPERATOR_ACK,
-                ),
+                )
             ]
         )
         return tuple(steps)

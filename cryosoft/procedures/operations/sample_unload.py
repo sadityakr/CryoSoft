@@ -10,14 +10,12 @@ class SampleUnloadOperation(_SampleAccessOperationBase):
 
     All behavior is inherited from ``_SampleAccessOperationBase`` — see its
     docstring. This class exists to give the "unload" half of the
-    sample-access pair its own display name, config key,
+    sample-access pair its own display name, config key, and
     servicing-log ``entry_kind`` (derived from ``name`` by
-    ``CryogenicsRecorder``), and rod-step wording, distinct from
-    ``SampleLoadOperation``'s.
+    ``CryogenicsRecorder``), distinct from ``SampleLoadOperation``'s.
     """
 
     name = "Sample Unload"
     description = "Bring the cryostat to a safe state to unload the sample"
     ready_message = "Ready — sample can be unloaded"
     config_key = "sample_unload"
-    rod_step_label = "Withdraw the sample rod"

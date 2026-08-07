@@ -196,10 +196,7 @@ def test_sample_access_readiness_conditions_keys(op_cls, station):
         "zero_field",
         "warm_vti",
         "close_needle_valve",
-        "open_access_valve",
-        "move_rod",
-        "close_access_valve",
-        "flush",
+        "load_unload_sample",
     ]
 
 
@@ -257,9 +254,9 @@ def test_sample_access_skipped_step_row_stays_unmet_and_says_so(op_cls, station)
     """A skip must never read as done — the panel has to show the override."""
     op = op_cls(station)
     conditions = {c.key: c for c in op.readiness_conditions()}
-    row = conditions["flush"]
+    row = conditions["load_unload_sample"]
 
-    op.skip_step("flush")
+    op.skip_step("load_unload_sample")
     assert row.check({}) is False
     assert row.detail({}) == "skipped by operator"
 

@@ -150,10 +150,7 @@ def test_construction_rejects_non_manual_needle_valve(op_cls, station):
 _EXPECTED_STEP_KEYS = [
     "warm_vti",
     "close_needle_valve",
-    "open_access_valve",
-    "move_rod",
-    "close_access_valve",
-    "flush",
+    "load_unload_sample",
 ]
 
 
@@ -175,18 +172,14 @@ def test_steps_declared_in_physical_order(op_cls, station):
     assert all(s.skippable for s in op.steps())
 
 
-def test_rod_step_label_is_the_only_difference_between_load_and_unload(station):
+def test_steps_are_identical_between_load_and_unload(station):
     load = SampleLoadOperation(station)
     unload = SampleUnloadOperation(station)
 
     load_steps = {s.key: s.label for s in load.steps()}
     unload_steps = {s.key: s.label for s in unload.steps()}
 
-    assert load_steps["move_rod"] == "Insert the sample rod"
-    assert unload_steps["move_rod"] == "Withdraw the sample rod"
-    assert {k: v for k, v in load_steps.items() if k != "move_rod"} == {
-        k: v for k, v in unload_steps.items() if k != "move_rod"
-    }
+    assert load_steps == unload_steps
 
 
 @pytest.mark.parametrize("op_cls", _OPERATION_CLASSES, ids=_OPERATION_IDS)
@@ -200,10 +193,9 @@ def test_current_step_advances_only_as_each_is_recorded(op_cls, station):
 
     # Skipping advances too — an override is an outcome, not a failure.
     op.skip_step("close_needle_valve")
-    assert op.current_step().key == "open_access_valve"
+    assert op.current_step().key == "load_unload_sample"
 
-    for key in ("open_access_valve", "move_rod", "close_access_valve", "flush"):
-        op.confirm(key)
+    op.confirm("load_unload_sample")
     assert op.current_step() is None
 
 
@@ -217,9 +209,9 @@ def test_confirm_roundtrip_and_skipped_step_is_not_confirmed(op_cls, station):
 
     # A skipped step is recorded, but is NOT "confirmed" — the distinction
     # is what makes the override visible in postconditions_unmet.
-    op.skip_step("flush")
-    assert op.step_records()["flush"].status == STEP_STATUS_SKIPPED
-    assert op.confirmed("flush") is False
+    op.skip_step("load_unload_sample")
+    assert op.step_records()["load_unload_sample"].status == STEP_STATUS_SKIPPED
+    assert op.confirmed("load_unload_sample") is False
 
 
 @pytest.mark.parametrize("op_cls", _OPERATION_CLASSES, ids=_OPERATION_IDS)
@@ -240,12 +232,12 @@ def test_skip_unknown_key_raises(op_cls, station):
 def test_recording_an_outcome_twice_keeps_the_first(op_cls, station):
     """A double-click must not rewrite the time something already happened."""
     op = op_cls(station)
-    op.confirm("flush")
-    first = op.step_records()["flush"]
+    op.confirm("load_unload_sample")
+    first = op.step_records()["load_unload_sample"]
 
-    op.confirm("flush")
-    op.skip_step("flush")
-    assert op.step_records()["flush"] == first
+    op.confirm("load_unload_sample")
+    op.skip_step("load_unload_sample")
+    assert op.step_records()["load_unload_sample"] == first
 
 
 @pytest.mark.parametrize("op_cls", _OPERATION_CLASSES, ids=_OPERATION_IDS)
@@ -254,7 +246,7 @@ def test_skipping_the_warm_up_asks_for_the_ramp_to_stop(op_cls, station):
     op = op_cls(station)
     assert op.skip_ramp_requested is False
 
-    op.skip_step("flush")
+    op.skip_step("load_unload_sample")
     assert op.skip_ramp_requested is False, "an operator_ack step drives no hardware"
 
     op.skip_step("warm_vti")
@@ -285,8 +277,8 @@ def test_steps_summary_lists_every_step_including_pending(op_cls, station):
     assert [row["key"] for row in op.steps_summary()] == _EXPECTED_STEP_KEYS
     assert summary["warm_vti"]["status"] == STEP_STATUS_DONE
     assert summary["close_needle_valve"]["status"] == STEP_STATUS_SKIPPED
-    assert summary["flush"]["status"] == "pending"
-    assert summary["flush"]["unix_time"] is None
+    assert summary["load_unload_sample"]["status"] == "pending"
+    assert summary["load_unload_sample"]["unix_time"] is None
     assert summary["warm_vti"]["unix_time"] > 0
     # JSON-plain: it round-trips through the run manifest into a sidecar.
     json.dumps(op.steps_summary())
@@ -435,10 +427,7 @@ def test_needle_valve_not_confirmed_finishes_promptly_with_unmet_postcondition(
     # every remaining unmet gate is an unconfirmed operator step.
     assert finished[0]["postconditions_unmet"] == [
         "step_close_needle_valve",
-        "step_open_access_valve",
-        "step_move_rod",
-        "step_close_access_valve",
-        "step_flush",
+        "step_load_unload_sample",
     ]
     assert orchestrator._state == OrchestratorState.IDLE
 
@@ -682,8 +671,7 @@ def test_cryogenics_recorder_records_one_servicing_entry(op_cls, orchestrator, s
     orchestrator.run_finished.connect(finished.append)
     orchestrator.run_operation(op)
     orchestrator.confirm_operation("close_needle_valve")
-    orchestrator.confirm_operation("open_access_valve")
-    orchestrator.skip_operation_step("flush")
+    orchestrator.skip_operation_step("load_unload_sample")
 
     # The hold phase: several ticks pass with the run still active before
     # Finish is clicked, so sample() has a chance to record.
@@ -706,7 +694,7 @@ def test_cryogenics_recorder_records_one_servicing_entry(op_cls, orchestrator, s
     assert "step_close_needle_valve" not in notes
     # A SKIPPED step is the opposite: the override must be visible in the
     # log entry a human reads, not only in the sidecar.
-    assert "step_flush" in notes
+    assert "step_load_unload_sample" in notes
     # The recorded station-wide series was written as a sidecar, referenced
     # from this entry.
     assert entry.values["recording"]
@@ -722,8 +710,7 @@ def test_cryogenics_recorder_records_one_servicing_entry(op_cls, orchestrator, s
     assert [row["key"] for row in sidecar["steps"]] == _EXPECTED_STEP_KEYS
     assert steps["close_needle_valve"]["status"] == STEP_STATUS_DONE
     assert steps["close_needle_valve"]["unix_time"] > 0
-    assert steps["flush"]["status"] == STEP_STATUS_SKIPPED
-    assert steps["move_rod"]["status"] == "pending"
+    assert steps["load_unload_sample"]["status"] == STEP_STATUS_SKIPPED
     # Non-numeric conditions, which the numeric series cannot hold, are
     # preserved on the step record instead.
     assert steps["close_needle_valve"]["conditions"]["temperature_vti.needle_valve_mode"]
