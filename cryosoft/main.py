@@ -31,6 +31,7 @@ from cryosoft.gui import app_settings
 from cryosoft.gui.monitor_window import MonitorWindow
 from cryosoft.gui.theme import PLOT_AXIS, PLOT_BG, build_stylesheet
 from cryosoft.session.manager import ExperimentManager
+from cryosoft.session.models import GUEST_USER_ID, GUEST_USER_NAME, User
 from cryosoft.session.servicing_log import (
     CryogenicsRecorder,
     HeliumRecordStore,
@@ -76,29 +77,49 @@ def _startup_candidates() -> list[str]:
     return ordered
 
 
-def _resolve_active_session(store: SessionStore) -> str:
-    """Return the active session id, auto-creating a bootstrap session if needed.
+def _ensure_guest_user_registered(roster: UserRoster) -> None:
+    """Ensure the fixed Guest roster identity exists (idempotent).
+
+    Runs unconditionally, every launch — the same "must never fail to start
+    for lack of an explicit choice" principle ``_resolve_active_session``
+    already follows one level down: nobody having logged in must not make
+    ``ExperimentManager.start_experiment()``'s roster-membership check
+    reject ``user_id=GUEST_USER_ID`` the first time it's used. Never
+    clobbers an existing Guest entry (e.g. an admin who gave it a different
+    display name) — only adds it when entirely absent.
+
+    Args:
+        roster: The setup-local user roster.
+    """
+    if roster.get(GUEST_USER_ID) is None:
+        roster.add(User(user_id=GUEST_USER_ID, name=GUEST_USER_NAME))
+
+
+def _resolve_active_session(store: SessionStore) -> tuple[str, str]:
+    """Return the active ``(user_id, session_id)``, auto-creating a bootstrap session if needed.
 
     The app must never fail to start for lack of an explicit session choice
     (see ``docs/plans/session-tier-and-terminology.md``, "Startup wiring
-    (decided)"): when the store's active pointer is unset, or points at a
-    session record that fails to load (first-ever launch, or a corrupt
-    pointer), a bootstrap session is created and activated on the spot.
+    (decided)"): when the store's active pointer is unset, points at a
+    session record that fails to load, or is in the pre-per-user-nesting
+    shape (first-ever launch, a corrupt pointer, or an older install), a
+    bootstrap session is created and activated on the spot, owned by
+    whoever is logged in (or ``GUEST_USER_ID`` when nobody is).
 
     Args:
         store: The ``SessionStore`` rooted at ``measurement_root() / "sessions"``.
 
     Returns:
-        The active session's id — either the one already pointed to, or a
-        freshly created bootstrap session's.
+        The active session's ``(user_id, session_id)`` — either the pair
+        already pointed to, or a freshly created bootstrap session's.
     """
-    active_id = store.get_active()
-    if active_id is not None and store.load(active_id) is not None:
-        return active_id
-    user_id = app_settings.current_user_id() or ""
-    session = store.create_session(name=user_id or "default", user_id=user_id)
-    store.set_active(session.session_id)
-    return session.session_id
+    active = store.get_active()
+    if active is not None and store.load(*active) is not None:
+        return active
+    user_id = app_settings.current_user_id() or GUEST_USER_ID
+    session = store.create_session(name=user_id, user_id=user_id)
+    store.set_active(user_id, session.session_id)
+    return user_id, session.session_id
 
 
 def _restart_application() -> None:
@@ -182,11 +203,15 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
     # the fixed, machine-level, admin-set root (never derived from the Data
     # Directory form field, which is itself now *derived from* the open
     # experiment — see cryosoft.core.paths.measurement_root()). SessionStore
-    # owns the Session tier: sessions/<session_id>/ folders one level above
-    # experiments. _resolve_active_session() auto-creates a bootstrap session
-    # on first-ever launch (or a corrupt pointer) so the app never refuses to
-    # start for lack of an explicit session choice. ExperimentStore is then
-    # rooted one level deeper, inside that one active session's own folder —
+    # owns the Session tier: sessions/<user_id>/<session_id>/ folders one
+    # level above experiments, nested per owner so ownership is structural,
+    # not just a field inside session.json. _ensure_guest_user_registered()
+    # guarantees the fixed Guest roster identity exists before anything looks
+    # it up; _resolve_active_session() auto-creates a bootstrap session on
+    # first-ever launch (or a corrupt/legacy-shape pointer) so the app never
+    # refuses to start for lack of an explicit session choice, owned by
+    # whoever is logged in or Guest otherwise. ExperimentStore is then rooted
+    # two levels deeper, inside that one active session's own folder —
     # switching sessions (User menu, Resume Session…) only updates
     # SessionStore's active pointer and takes effect on the next launch;
     # ExperimentManager keeps this ExperimentStore for the process lifetime
@@ -194,15 +219,18 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
     # docs/plans/session-tier-and-terminology.md). The user roster relocates
     # to measurement_root()/"users.json", alongside "sessions/" and
     # "servicing/".
+    roster = UserRoster(measurement_root() / "users.json")
+    _ensure_guest_user_registered(roster)
     session_store = SessionStore(measurement_root() / "sessions")
-    active_session_id = _resolve_active_session(session_store)
+    active_user_id, active_session_id = _resolve_active_session(session_store)
     session_manager = ExperimentManager(
-        store=ExperimentStore(measurement_root() / "sessions" / active_session_id),
-        roster=UserRoster(measurement_root() / "users.json"),
+        store=ExperimentStore(measurement_root() / "sessions" / active_user_id / active_session_id),
+        roster=roster,
         orchestrator=orchestrator,
         station=station,
         config_name=used_entry.name if used_entry is not None else Path(used_path).name,
         config_path=used_path,
+        session_store=session_store,
     )
 
     # Cryogenics management:

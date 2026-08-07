@@ -56,6 +56,7 @@ from cryosoft.gui.theme import (
 )
 from cryosoft.gui.trends_quadrant import TrendsQuadrant
 from cryosoft.session.manager import ExperimentManager
+from cryosoft.session.models import GUEST_USER_ID
 from cryosoft.session.store import SessionStore
 
 if TYPE_CHECKING:
@@ -1185,15 +1186,14 @@ class MonitorWindow(QMainWindow):
                 self, "Resume Session", "Session management is not available."
             )
             return
-        dialog = ResumeSessionDialog(
-            self._session_store, self._current_user_id, self
-        )
+        user_id = self._current_user_id or GUEST_USER_ID
+        dialog = ResumeSessionDialog(self._session_store, user_id, self)
         if dialog.exec() != dialog.DialogCode.Accepted:
             return
         session_id = dialog.selected_session_id()
         if not session_id:
             return
-        self._session_store.set_active(session_id)
+        self._session_store.set_active(user_id, session_id)
         self._status_bar.showMessage(
             "Session updated — applies fully on next launch", 5000
         )

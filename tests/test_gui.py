@@ -1204,7 +1204,7 @@ def monitor_win_session(station, orchestrator, session_manager, qtbot):
 class _FakeStartDialog:
     """Stand-in for StartExperimentDialog that auto-accepts fixed values."""
 
-    def __init__(self, values: tuple[str, str, bool]) -> None:
+    def __init__(self, values: tuple[str, str, bool, str | None]) -> None:
         self._values = values
 
     def exec(self):
@@ -1227,14 +1227,14 @@ class _FakeCloseDialog:
         return self._findings_text
 
 
-def _stub_start_dialog(monkeypatch, title, user_id, attended=True):
+def _stub_start_dialog(monkeypatch, title, user_id, attended=True, dirname=None):
     """Replace StartExperimentDialog with a fake that auto-accepts ``values``."""
     from cryosoft.gui import experiment_info_panel as sip
 
     monkeypatch.setattr(
         sip,
         "StartExperimentDialog",
-        lambda roster, parent=None: _FakeStartDialog((title, user_id, attended)),
+        lambda roster, parent=None: _FakeStartDialog((title, user_id, attended, dirname)),
     )
 
 
@@ -1347,6 +1347,90 @@ def test_add_user_dialog_autofills_id_from_name(qtbot):
     user = dialog.user()
     assert user.user_id == "jane_o_doe"
     assert user.name == "Jane O'Doe"
+
+
+def _start_dialog_roster(tmp_path):
+    from cryosoft.session.models import User
+    from cryosoft.session.store import UserRoster
+
+    roster = UserRoster(tmp_path / "users.json")
+    roster.add(User(user_id="jdoe", name="J. Doe"))
+    return roster
+
+
+def test_start_experiment_dialog_default_dirname_from_title(qtbot, tmp_path):
+    """The folder name field auto-fills from the title until hand-edited."""
+    from cryosoft.gui.experiment_dialogs import StartExperimentDialog
+
+    dialog = StartExperimentDialog(_start_dialog_roster(tmp_path))
+    qtbot.addWidget(dialog)
+
+    dialog._title_input.setText("Hall bar A3 — SOT switching")
+
+    assert dialog._dirname_input.text() == "hall_bar_a3_sot_switching"
+    _title, _user_id, _attended, dirname = dialog.result_values()
+    assert dirname == "hall_bar_a3_sot_switching"
+
+
+def test_start_experiment_dialog_dirname_hand_edit_stops_autofill(qtbot, tmp_path):
+    """Typing directly into the folder name field stops title-driven auto-fill."""
+    from PyQt6.QtTest import QTest
+
+    from cryosoft.gui.experiment_dialogs import StartExperimentDialog
+
+    dialog = StartExperimentDialog(_start_dialog_roster(tmp_path))
+    qtbot.addWidget(dialog)
+
+    dialog._title_input.setText("Hall bar A3")
+    # setText() alone never fires textEdited (only real keystrokes do, which
+    # is what _on_dirname_edited listens for) — QTest.keyClicks simulates an
+    # actual hand edit, unlike a plain setText() call.
+    dialog._dirname_input.clear()
+    QTest.keyClicks(dialog._dirname_input, "my_own_name")
+    dialog._title_input.setText("Hall bar A3 — renamed")
+
+    assert dialog._dirname_input.text() == "my_own_name"
+
+
+def test_start_experiment_dialog_result_values_dirname_none_when_empty(qtbot, tmp_path):
+    """An empty folder name field surfaces as None — the manager auto-derives one."""
+    from cryosoft.gui.experiment_dialogs import StartExperimentDialog
+
+    dialog = StartExperimentDialog(_start_dialog_roster(tmp_path))
+    qtbot.addWidget(dialog)
+
+    dialog._title_input.setText("Hall bar A3")
+    dialog._dirname_input.setText("")
+
+    _title, _user_id, _attended, dirname = dialog.result_values()
+    assert dirname is None
+
+
+def test_start_experiment_with_custom_dirname_creates_expected_directory(
+    monitor_win_session, session_manager, monkeypatch
+):
+    """A folder name entered in the dialog becomes the experiment's directory on disk."""
+    _stub_start_dialog(monkeypatch, "Hall bar A3", "jdoe", dirname="my_custom_folder")
+    panel = monitor_win_session._session_info
+    panel._start_close_btn.click()
+
+    record = session_manager.current_experiment()
+    assert record.experiment_id == "my_custom_folder"
+    assert (session_manager.store.root / "my_custom_folder" / "experiment.json").is_file()
+
+
+def test_start_experiment_with_invalid_dirname_shows_warning_and_stays_closed(
+    monitor_win_session, session_manager, monkeypatch
+):
+    """A dirname the manager rejects surfaces as a warning, same as any other ValueError."""
+    _stub_start_dialog(monkeypatch, "Hall bar A3", "jdoe", dirname="a/b")
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a))
+    panel = monitor_win_session._session_info
+    panel._start_close_btn.click()
+
+    assert warned
+    assert session_manager.current_experiment() is None
 
 
 # ── Setup tier: login and instrument info (User / Config menus) ───────────────
@@ -1634,6 +1718,7 @@ def test_open_resume_session_dialog_sets_active_and_notes_status(
     )
     qtbot.addWidget(win)
     win.show()
+    win._switch_user("jdoe")
 
     class _FakeResumeSessionDialog:
         DialogCode = QDialog.DialogCode
@@ -1650,8 +1735,47 @@ def test_open_resume_session_dialog_sets_active_and_notes_status(
     monkeypatch.setattr(mw, "ResumeSessionDialog", _FakeResumeSessionDialog)
     win._open_resume_session_dialog()
 
-    assert store.get_active() == created.session_id
+    assert store.get_active() == ("jdoe", created.session_id)
     assert "next launch" in win._status_bar.currentMessage()
+
+
+def test_open_resume_session_dialog_resolves_logged_out_user_to_guest(
+    station, orchestrator, session_manager, qtbot, tmp_path, monkeypatch
+):
+    """Nobody logged in: the dialog lists/activates sessions under the Guest identity."""
+    from cryosoft.gui import monitor_window as mw
+    from cryosoft.session.models import GUEST_USER_ID
+    from cryosoft.session.store import SessionStore
+
+    store = SessionStore(tmp_path / "sessions")
+    created = store.create_session(name="Walk-in Cooldown", user_id=GUEST_USER_ID)
+
+    win = MonitorWindow(
+        station, orchestrator, session_manager=session_manager, session_store=store
+    )
+    qtbot.addWidget(win)
+    win.show()
+    assert win._current_user_id is None
+
+    seen_user_ids = []
+
+    class _FakeResumeSessionDialog:
+        DialogCode = QDialog.DialogCode
+
+        def __init__(self, store, user_id, parent=None):
+            seen_user_ids.append(user_id)
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+        def selected_session_id(self):
+            return created.session_id
+
+    monkeypatch.setattr(mw, "ResumeSessionDialog", _FakeResumeSessionDialog)
+    win._open_resume_session_dialog()
+
+    assert seen_user_ids == [GUEST_USER_ID]
+    assert store.get_active() == (GUEST_USER_ID, created.session_id)
 
 
 # ── Data Dir: derived-but-editable from the open session ───────────────────────

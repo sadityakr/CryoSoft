@@ -38,7 +38,17 @@ _VALID_EXPERIMENT_STATUSES = frozenset(
 # active.json. Bump only when the JSON shape changes in a way older code
 # cannot tolerantly parse; a value greater than this on load means "written
 # by a newer app" and the record is treated read-only (see store.py/manager.py).
-SCHEMA_VERSION = 1
+# Bumped 1 -> 2 for Session.experiments: an older app's Session.to_dict()
+# does not emit that field, so resaving a newer session.json without this
+# bump would silently drop the experiment index.
+SCHEMA_VERSION = 2
+
+# The fixed roster identity used when nobody has logged in (see
+# cryosoft.main._ensure_guest_user_registered). A real roster entry, not a
+# null-user sentinel, so ExperimentManager.start_experiment()'s
+# roster-membership check never rejects it.
+GUEST_USER_ID = "guest"
+GUEST_USER_NAME = "Guest"
 
 
 def _as_str(value: object, default: str = "") -> str:
@@ -438,11 +448,78 @@ class ExperimentRecord:
 
 
 @dataclass
+class ExperimentIndexEntry:
+    """One line of a session's authoritative experiment index.
+
+    ``Session.experiments`` holds one of these per experiment folder inside
+    the session, so a session answers "what experiments do I contain and
+    where" from ``session.json`` alone — no directory scan, no opening every
+    ``experiment.json``. Maintained by ``ExperimentManager`` on
+    ``start_experiment()``/``close_experiment()`` (never edited elsewhere).
+
+    Deliberately carries no data-directory field: an experiment's data
+    folder is always ``experiment_id`` + ``"/data"`` (the fixed convention
+    ``ExperimentStore.data_dir()`` already computes), and storing a second
+    copy of that path here would risk drifting from what the store actually
+    uses.
+
+    Attributes:
+        experiment_id: The store key — also the experiment's directory name,
+            directly under the session folder (flat; no nesting).
+        title: Human title, mirrored from ``ExperimentRecord.title``.
+        user_id: Roster key of the person running the experiment.
+        status: ``open`` or ``closed``.
+        created_utc: ISO 8601 creation time (UTC), mirrored from the record.
+        closed_utc: ISO 8601 close time; empty while open.
+    """
+
+    experiment_id: str = ""
+    title: str = ""
+    user_id: str = ""
+    status: str = EXPERIMENT_STATUS_OPEN
+    created_utc: str = ""
+    closed_utc: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-safe dict representation."""
+        return {
+            "experiment_id": self.experiment_id,
+            "title": self.title,
+            "user_id": self.user_id,
+            "status": self.status,
+            "created_utc": self.created_utc,
+            "closed_utc": self.closed_utc,
+        }
+
+    @classmethod
+    def from_dict(cls, data: object) -> ExperimentIndexEntry:
+        """Build an ``ExperimentIndexEntry`` from a parsed dict, tolerating bad input.
+
+        An unrecognised ``status`` degrades to ``closed`` — same rule as
+        ``ExperimentRecord.from_dict``: an index entry lying about "open"
+        status is worse than none.
+        """
+        if not isinstance(data, dict):
+            return cls()
+        status = _as_str(data.get("status"), EXPERIMENT_STATUS_OPEN)
+        if status not in _VALID_EXPERIMENT_STATUSES:
+            status = EXPERIMENT_STATUS_CLOSED
+        return cls(
+            experiment_id=_as_str(data.get("experiment_id")),
+            title=_as_str(data.get("title")),
+            user_id=_as_str(data.get("user_id")),
+            status=status,
+            created_utc=_as_str(data.get("created_utc")),
+            closed_utc=_as_str(data.get("closed_utc")),
+        )
+
+
+@dataclass
 class Session:
     """The new middle tier between the measurement root and an experiment.
 
     A named, resumable, per-user folder holding multiple experiments —
-    ``<measurement_root>/sessions/<session_id>/``, one level above
+    ``<measurement_root>/sessions/<user_id>/<session_id>/``, one level above
     ``<experiment_id>/`` (see ``docs/plans/session-tier-and-terminology.md``,
     "Filesystem layout"). One user can own several sessions; a session is not
     identified by its owner alone. Persisted as ``session.json`` by
@@ -451,7 +528,10 @@ class Session:
     Attributes:
         session_id: Unique store key (slug + date, see
             ``SessionStore.make_session_id``).
-        user_id: Roster key of the session's owner.
+        user_id: Roster key of the session's owner. Also the session's path
+            segment (``sessions/<user_id>/<session_id>/``) — the two must
+            never disagree; ``SessionStore.save()`` derives the path from
+            this field.
         name: Display name, user-chosen at creation.
         default_experiment_dir: The saved default parent folder offered when
             starting a new experiment inside this session; user-editable.
@@ -459,6 +539,14 @@ class Session:
             folder itself).
         last_open_experiment_id: The experiment id to auto-reopen on resume;
             empty string means none.
+        experiments: This session's authoritative index of experiment
+            folders — title, owner, status, and timestamps for lookup
+            without opening every ``experiment.json``. Maintained by
+            ``ExperimentManager`` on ``start_experiment()``/
+            ``close_experiment()``; never edited elsewhere. A session
+            created before this index existed keeps an empty list until an
+            experiment of its own is next started or closed — there is no
+            backfill from existing experiment folders on disk.
         created_utc: ISO 8601 creation time (UTC).
         last_opened_utc: ISO 8601 time this session was last made active.
         schema_version: The on-disk format version this record was loaded
@@ -474,6 +562,7 @@ class Session:
     name: str = ""
     default_experiment_dir: str = ""
     last_open_experiment_id: str = ""
+    experiments: list[ExperimentIndexEntry] = field(default_factory=list)
     created_utc: str = ""
     last_opened_utc: str = ""
     schema_version: int = SCHEMA_VERSION
@@ -491,6 +580,7 @@ class Session:
             "name": self.name,
             "default_experiment_dir": self.default_experiment_dir,
             "last_open_experiment_id": self.last_open_experiment_id,
+            "experiments": [entry.to_dict() for entry in self.experiments],
             "created_utc": self.created_utc,
             "last_opened_utc": self.last_opened_utc,
             "schema_version": SCHEMA_VERSION,
@@ -501,12 +591,17 @@ class Session:
         """Build a ``Session`` from a parsed dict, tolerating bad input."""
         if not isinstance(data, dict):
             return cls()
+        experiments = [
+            ExperimentIndexEntry.from_dict(item)
+            for item in _as_dict_list(data.get("experiments"))
+        ]
         return cls(
             session_id=_as_str(data.get("session_id")),
             user_id=_as_str(data.get("user_id")),
             name=_as_str(data.get("name")),
             default_experiment_dir=_as_str(data.get("default_experiment_dir")),
             last_open_experiment_id=_as_str(data.get("last_open_experiment_id")),
+            experiments=experiments,
             created_utc=_as_str(data.get("created_utc")),
             last_opened_utc=_as_str(data.get("last_opened_utc")),
             # Absent on disk means "today's files" — version 1, not whatever

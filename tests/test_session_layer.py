@@ -17,6 +17,7 @@ from cryosoft.session.models import (
     RUN_STATUS_RUNNING,
     SCHEMA_VERSION,
     ElnLink,
+    ExperimentIndexEntry,
     ExperimentRecord,
     RunRecord,
     Session,
@@ -24,7 +25,12 @@ from cryosoft.session.models import (
     envelope_from_dict,
     envelope_to_dict,
 )
-from cryosoft.session.store import ExperimentStore, SessionStore, UserRoster
+from cryosoft.session.store import (
+    ExperimentStore,
+    SessionStore,
+    UserRoster,
+    _write_json_atomic,
+)
 
 CONFIG_PATH = "cryosoft/configs/sim_cryostat"
 
@@ -74,6 +80,28 @@ def manager(store, roster, orchestrator, station):
         station=station,
         config_name="sim_cryostat",
     )
+
+
+@pytest.fixture
+def indexed_manager(tmp_path, roster, orchestrator, station):
+    """A manager wired to a real Session, for testing session-index maintenance.
+
+    Returns a ``(manager, session_store, session)`` tuple — ``session_store``
+    and ``session`` let a test reload ``session.json`` and inspect its
+    ``experiments`` index after a lifecycle call.
+    """
+    session_store = SessionStore(tmp_path / "sessions")
+    session = session_store.create_session("Lab A", "jdoe")
+    exp_store = ExperimentStore(session_store.root / "jdoe" / session.session_id)
+    exp_manager = ExperimentManager(
+        store=exp_store,
+        roster=roster,
+        orchestrator=orchestrator,
+        station=station,
+        config_name="sim_cryostat",
+        session_store=session_store,
+    )
+    return exp_manager, session_store, session
 
 
 # ── Models ───────────────────────────────────────────────────────────────────
@@ -291,6 +319,15 @@ def test_session_round_trips_with_content():
         name="Lab A",
         default_experiment_dir="C:/data/lab_a",
         last_open_experiment_id="20260717_test",
+        experiments=[
+            ExperimentIndexEntry(
+                experiment_id="20260717_test",
+                title="Test",
+                user_id="jdoe",
+                status=EXPERIMENT_STATUS_OPEN,
+                created_utc="2026-07-17T12:00:00+00:00",
+            )
+        ],
         created_utc="2026-07-17T12:00:00+00:00",
         last_opened_utc="2026-07-18T09:00:00+00:00",
     )
@@ -309,6 +346,42 @@ def test_session_from_dict_tolerates_junk():
     assert partial.user_id == ""
     assert partial.default_experiment_dir == ""
     assert partial.last_open_experiment_id == ""
+    assert partial.experiments == []
+
+
+def test_session_experiments_absent_on_disk_defaults_to_empty_list():
+    """A session.json written before the index existed loads with experiments=[]."""
+    session = Session.from_dict({"session_id": "x", "name": "X"})
+    assert session.experiments == []
+
+
+def test_session_experiments_tolerates_junk_entries():
+    """Non-list/non-dict entries degrade to [] / are dropped, never raise."""
+    assert Session.from_dict({"experiments": "not-a-list"}).experiments == []
+    entries = Session.from_dict(
+        {"experiments": [{"experiment_id": "e1"}, "junk", 5]}
+    ).experiments
+    assert len(entries) == 1
+    assert entries[0].experiment_id == "e1"
+
+
+def test_experiment_index_entry_round_trips_with_content():
+    """A populated ExperimentIndexEntry survives to_dict()/from_dict() unchanged."""
+    entry = ExperimentIndexEntry(
+        experiment_id="20260717_test",
+        title="Test",
+        user_id="jdoe",
+        status=EXPERIMENT_STATUS_CLOSED,
+        created_utc="2026-07-17T12:00:00+00:00",
+        closed_utc="2026-07-18T09:00:00+00:00",
+    )
+    assert ExperimentIndexEntry.from_dict(entry.to_dict()) == entry
+
+
+def test_experiment_index_entry_untrusted_status_degrades_to_closed():
+    """An entry with an unknown status must not claim to be open."""
+    entry = ExperimentIndexEntry.from_dict({"experiment_id": "x", "status": "bogus"})
+    assert entry.status == EXPERIMENT_STATUS_CLOSED
 
 
 def test_session_schema_version_absent_defaults_to_one():
@@ -325,36 +398,55 @@ def test_session_store_creates_nothing_until_save(tmp_path):
     """Construction and reads must not create directories (lazy creation)."""
     root = tmp_path / "sessions"
     session_store = SessionStore(root)
-    assert session_store.list_sessions() == []
+    assert session_store.list_sessions("jdoe") == []
     assert session_store.get_active() is None
-    assert session_store.load("nope") is None
+    assert session_store.load("jdoe", "nope") is None
     assert not root.exists()
 
 
 def test_session_store_save_load_and_active_pointer(session_store):
     session = Session(session_id="20260717_lab_a", user_id="jdoe", name="Lab A")
     session_store.save(session)
-    session_store.set_active("20260717_lab_a")
-    assert session_store.list_sessions() == ["20260717_lab_a"]
-    assert session_store.load("20260717_lab_a") == session
-    assert session_store.get_active() == "20260717_lab_a"
-    session_store.set_active(None)
-    assert session_store.get_active() is None
+    session_store.set_active("jdoe", "20260717_lab_a")
+    assert session_store.list_sessions("jdoe") == ["20260717_lab_a"]
+    assert session_store.load("jdoe", "20260717_lab_a") == session
+    assert session_store.get_active() == ("jdoe", "20260717_lab_a")
     # No stray .tmp files after atomic writes.
     assert not list(session_store.root.rglob("*.tmp"))
 
 
-def test_session_store_save_requires_session_id(session_store):
+def test_session_store_get_active_returns_none_for_legacy_flat_shape(session_store):
+    """A pointer written before per-user nesting has neither key — treated as unset."""
+    _write_json_atomic(session_store.root / "active.json", {"active": "20260717_lab_a"})
+    assert session_store.get_active() is None
+
+
+def test_session_store_save_requires_user_id_and_session_id(session_store):
     with pytest.raises(ValueError):
         session_store.save(Session())
+    with pytest.raises(ValueError):
+        session_store.save(Session(session_id="x"))
+    with pytest.raises(ValueError):
+        session_store.save(Session(user_id="jdoe"))
 
 
-def test_session_store_make_session_id_slug_and_collisions(session_store):
+def test_session_store_save_derives_path_from_record_user_and_session_id(session_store):
+    session = Session(session_id="20260717_lab_a", user_id="jdoe", name="Lab A")
+    session_store.save(session)
+    assert (session_store.root / "jdoe" / "20260717_lab_a" / "session.json").is_file()
+
+
+def test_session_store_make_session_id_scoped_per_user(session_store):
     created = "2026-07-17T12:00:00+00:00"
-    first = session_store.make_session_id("Lab A — Cryostat 1!", created)
+    first = session_store.make_session_id("Lab A — Cryostat 1!", created, "jdoe")
     assert first == "20260717_lab_a_cryostat_1"
-    session_store.save(Session(session_id=first))
-    assert session_store.make_session_id("Lab A — Cryostat 1!", created) == f"{first}_2"
+    session_store.save(Session(session_id=first, user_id="jdoe"))
+    assert (
+        session_store.make_session_id("Lab A — Cryostat 1!", created, "jdoe")
+        == f"{first}_2"
+    )
+    # A different user picking the same name/date does not collide.
+    assert session_store.make_session_id("Lab A — Cryostat 1!", created, "asmith") == first
 
 
 def test_session_store_create_session_builds_saves_and_returns(session_store):
@@ -363,31 +455,27 @@ def test_session_store_create_session_builds_saves_and_returns(session_store):
     assert session.name == "Lab A"
     assert session.session_id
     assert session.created_utc == session.last_opened_utc
-    assert session_store.load(session.session_id) == session
+    assert session_store.load("jdoe", session.session_id) == session
 
 
-def test_session_store_list_sessions_filters_by_user_id(session_store):
+def test_session_store_list_sessions_scoped_to_user_directory(session_store):
     session_store.create_session("Lab A", "jdoe")
     session_store.create_session("Lab B", "asmith")
     second_for_jdoe = session_store.create_session("Lab C", "jdoe")
 
-    assert len(session_store.list_sessions()) == 3
-    jdoe_sessions = session_store.list_sessions(user_id="jdoe")
-    assert set(jdoe_sessions) == {
-        s
-        for s in session_store.list_sessions()
-        if session_store.load(s).user_id == "jdoe"
-    }
+    jdoe_sessions = session_store.list_sessions("jdoe")
+    assert len(jdoe_sessions) == 2
     assert second_for_jdoe.session_id in jdoe_sessions
-    assert session_store.list_sessions(user_id="nobody") == []
+    assert session_store.list_sessions("asmith") != jdoe_sessions
+    assert session_store.list_sessions("nobody") == []
 
 
 def test_session_store_load_tolerates_corrupt_file(session_store):
-    path = session_store.root / "bad" / "session.json"
+    path = session_store.root / "jdoe" / "bad" / "session.json"
     path.parent.mkdir(parents=True)
     path.write_text("{not json", encoding="utf-8")
-    assert session_store.load("bad") is None
-    assert "bad" in session_store.list_sessions()  # listed (folder exists) but unloadable
+    assert session_store.load("jdoe", "bad") is None
+    assert "bad" in session_store.list_sessions("jdoe")  # listed but unloadable
 
 
 def test_roster_add_get_replace(tmp_path):
@@ -469,6 +557,83 @@ def test_start_experiment_rejects_unknown_user_and_double_open(manager):
     manager.start_experiment("X", "jdoe", SAMPLE_INFO)
     with pytest.raises(ValueError, match="still open"):
         manager.start_experiment("Y", "jdoe", SAMPLE_INFO)
+
+
+def test_start_experiment_with_custom_dirname_uses_it_as_experiment_id(manager, store):
+    record = manager.start_experiment(
+        "X", "jdoe", SAMPLE_INFO, experiment_dirname="my_custom_folder"
+    )
+    assert record.experiment_id == "my_custom_folder"
+    assert store.load("my_custom_folder") == record
+
+
+def test_start_experiment_rejects_empty_dirname(manager):
+    with pytest.raises(ValueError, match="must not be empty"):
+        manager.start_experiment("X", "jdoe", SAMPLE_INFO, experiment_dirname="   ")
+
+
+@pytest.mark.parametrize("bad_dirname", ["a/b", "a\\b", ".", ".."])
+def test_start_experiment_rejects_separator_or_dot_dirname(manager, bad_dirname):
+    with pytest.raises(ValueError):
+        manager.start_experiment("X", "jdoe", SAMPLE_INFO, experiment_dirname=bad_dirname)
+
+
+def test_start_experiment_rejects_dirname_collision(manager):
+    manager.start_experiment("X", "jdoe", SAMPLE_INFO, experiment_dirname="taken")
+    manager.close_experiment()
+    with pytest.raises(ValueError, match="already exists"):
+        manager.start_experiment("Y", "jdoe", SAMPLE_INFO, experiment_dirname="taken")
+
+
+def test_start_experiment_updates_session_index(indexed_manager):
+    exp_manager, session_store, session = indexed_manager
+    record = exp_manager.start_experiment("X", "jdoe", SAMPLE_INFO)
+
+    reloaded = session_store.load("jdoe", session.session_id)
+    assert len(reloaded.experiments) == 1
+    entry = reloaded.experiments[0]
+    assert entry.experiment_id == record.experiment_id
+    assert entry.title == "X"
+    assert entry.user_id == "jdoe"
+    assert entry.status == EXPERIMENT_STATUS_OPEN
+    assert entry.created_utc == record.created_utc
+    assert entry.closed_utc == ""
+
+
+def test_close_experiment_updates_session_index_status_and_closed_utc(indexed_manager):
+    exp_manager, session_store, session = indexed_manager
+    record = exp_manager.start_experiment("X", "jdoe", SAMPLE_INFO)
+    exp_manager.close_experiment()
+
+    reloaded = session_store.load("jdoe", session.session_id)
+    assert len(reloaded.experiments) == 1
+    entry = reloaded.experiments[0]
+    assert entry.experiment_id == record.experiment_id
+    assert entry.status == EXPERIMENT_STATUS_CLOSED
+    assert entry.closed_utc
+
+
+def test_switch_experiment_does_not_alter_session_index(indexed_manager):
+    exp_manager, session_store, session = indexed_manager
+    first = exp_manager.start_experiment("First", "jdoe", SAMPLE_INFO)
+    exp_manager.close_experiment()
+    exp_manager.start_experiment("Second", "jdoe", SAMPLE_INFO)
+    exp_manager.close_experiment()
+    exp_manager.store.save(
+        ExperimentRecord(
+            experiment_id=first.experiment_id, title="First", status=EXPERIMENT_STATUS_OPEN
+        )
+    )
+    before = session_store.load("jdoe", session.session_id).experiments
+    exp_manager.switch_experiment(first.experiment_id)
+    after = session_store.load("jdoe", session.session_id).experiments
+    assert before == after
+
+
+def test_manager_without_session_store_skips_index_update(manager):
+    """A manager built with session_store=None (the default) never touches one."""
+    manager.start_experiment("X", "jdoe", SAMPLE_INFO)
+    manager.close_experiment()  # must not raise for lack of a session_store
 
 
 def test_close_experiment_clears_envelope_and_context(manager, orchestrator, store):

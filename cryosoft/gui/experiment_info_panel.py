@@ -135,13 +135,14 @@ class ExperimentInfoPanel(QWidget):
         dialog = StartExperimentDialog(self._session_manager.roster, self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        title, user_id, attended = dialog.result_values()
+        title, user_id, attended, dirname = dialog.result_values()
         try:
             self._session_manager.start_experiment(
                 title=title,
                 user_id=user_id,
                 sample_info=self.get_sample_info(),
                 attended=attended,
+                experiment_dirname=dirname,
             )
         except ValueError as exc:
             QMessageBox.warning(self, "Could not start experiment", str(exc))

@@ -85,8 +85,8 @@ class ExperimentStore:
 
         Args:
             root: Directory holding the experiment folders (normally
-                ``<measurement_root>/sessions/<session_id>``, one active
-                ``SessionStore`` session's own folder).
+                ``<measurement_root>/sessions/<user_id>/<session_id>``, one
+                active ``SessionStore`` session's own folder).
         """
         self._root = Path(root)
 
@@ -276,21 +276,26 @@ class SessionStore:
     The tier above ``ExperimentStore``: a session is a named, resumable,
     per-user folder holding multiple experiments (see
     ``docs/plans/session-tier-and-terminology.md``, "Filesystem layout").
-    Each session's own ``ExperimentStore`` is rooted one level deeper, at
-    ``<root>/<session_id>``.
+    Sessions nest one level deeper than the store's own root, under their
+    owner's ``user_id`` — ownership is structural (a directory), not just a
+    field inside ``session.json`` that has to be read to be known. Each
+    session's own ``ExperimentStore`` is rooted one level deeper still, at
+    ``<root>/<user_id>/<session_id>``.
 
     Layout::
 
         <root>/                             <measurement_root>/sessions
-            active.json                     {"active": "<session_id>", ...}
-            <session_id>/
-                session.json
-                <experiment_id>/            an ExperimentStore rooted here
+            active.json                     {"active_user_id": ..., "active_session_id": ..., ...}
+            <user_id>/
+                <session_id>/
+                    session.json
+                    <experiment_id>/         an ExperimentStore rooted here
 
-    This ``active.json`` tracks the active *session*; it is a distinct file
-    from ``ExperimentStore``'s own ``active.json``, which lives one level
-    deeper (inside a session folder) and tracks that session's active
-    *experiment*. The two must never be confused.
+    This ``active.json`` tracks the one active *session* for the whole
+    machine; it is a distinct file from ``ExperimentStore``'s own
+    ``active.json``, which lives two levels deeper (inside a session
+    folder) and tracks that session's active *experiment*. The two must
+    never be confused.
 
     The store creates nothing on construction — directories appear on the
     first ``save()``, exactly like ``ExperimentStore``.
@@ -310,63 +315,57 @@ class SessionStore:
         """The store's root directory."""
         return self._root
 
-    def make_session_id(self, name: str, created_utc: str) -> str:
-        """Derive a unique session id from the name and creation date.
+    def make_session_id(self, name: str, created_utc: str, user_id: str) -> str:
+        """Derive a unique session id from the name, date, and owner.
 
         ``YYYYMMDD_<slug>`` with a ``_2``, ``_3`` … suffix on collision —
         the same scheme as ``ExperimentStore.make_experiment_id``, checked
-        against ``list_sessions()`` instead of ``list_experiments()``.
+        against ``list_sessions(user_id)`` instead of ``list_experiments()``.
+        Collisions are scoped to one user's own folder, not the whole store:
+        two different users picking the same name on the same day never
+        fight over a shared suffix counter, since their paths never collide.
 
         Args:
             name: The session's display name (any text; slugged).
             created_utc: ISO 8601 creation time (its date part is used).
+            user_id: Roster key of the intended owner.
 
         Returns:
-            A store-unique session id.
+            A store-unique (within ``user_id``'s own folder) session id.
         """
         date_part = re.sub(r"[^0-9]", "", created_utc[:10]) or "00000000"
         slug = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or "session"
         base = f"{date_part}_{slug}"
         candidate = base
         counter = 2
-        existing = set(self.list_sessions())
+        existing = set(self.list_sessions(user_id))
         while candidate in existing:
             candidate = f"{base}_{counter}"
             counter += 1
         return candidate
 
-    def list_sessions(self, user_id: str | None = None) -> list[str]:
-        """Return every stored session id (sorted; [] when none/no root).
+    def list_sessions(self, user_id: str) -> list[str]:
+        """Return every session id owned by ``user_id`` (sorted; [] when none).
+
+        Ownership is structural (a directory, ``<root>/<user_id>/``), so
+        this is a cheap directory listing — no need to open every
+        ``session.json`` to filter, unlike the flat, unnested layout this
+        replaced.
 
         Args:
-            user_id: When given, only session ids owned by this roster key
-                are returned. Applying this filter loads every session's
-                ``session.json`` (there is no index of ``user_id`` outside
-                the files themselves), so on a setup with a large session
-                roster this is O(n) file reads, not a cheap directory
-                listing — the same honest cost tradeoff
-                ``ExperimentStore.list_experiments()`` accepts for
-                directory-only listing, extended here because the filter
-                needs data that isn't in the filename.
+            user_id: Roster key whose sessions to list.
 
         Returns:
-            Sorted session ids, optionally filtered by owner.
+            Sorted session ids owned by ``user_id``.
         """
-        if not self._root.is_dir():
+        user_dir = self._root / user_id
+        if not user_dir.is_dir():
             return []
-        session_ids = sorted(
+        return sorted(
             entry.name
-            for entry in self._root.iterdir()
+            for entry in user_dir.iterdir()
             if entry.is_dir() and (entry / _SESSION_FILENAME).is_file()
         )
-        if user_id is None:
-            return session_ids
-        return [
-            session_id
-            for session_id in session_ids
-            if (session := self.load(session_id)) is not None
-            and session.user_id == user_id
-        ]
 
     def create_session(self, name: str, user_id: str) -> Session:
         """Create, save, and return a new ``Session`` owned by ``user_id``.
@@ -383,7 +382,7 @@ class SessionStore:
         """
         created = _utc_now_iso()
         session = Session(
-            session_id=self.make_session_id(name, created),
+            session_id=self.make_session_id(name, created, user_id),
             user_id=user_id,
             name=name,
             created_utc=created,
@@ -392,10 +391,11 @@ class SessionStore:
         self.save(session)
         return session
 
-    def load(self, session_id: str) -> Session | None:
+    def load(self, user_id: str, session_id: str) -> Session | None:
         """Load one session record, tolerating a corrupt file.
 
         Args:
+            user_id: Roster key of the owner (the session's path segment).
             session_id: The store key.
 
         Returns:
@@ -404,7 +404,7 @@ class SessionStore:
             ``schema_version`` is newer than this app's ``SCHEMA_VERSION``
             (logged at WARNING) — same contract as ``ExperimentStore.load``.
         """
-        data = _read_json(self._root / session_id / _SESSION_FILENAME)
+        data = _read_json(self._root / user_id / session_id / _SESSION_FILENAME)
         if data is None:
             return None
         session = Session.from_dict(data)
@@ -419,40 +419,59 @@ class SessionStore:
         return session
 
     def save(self, session: Session) -> None:
-        """Persist ``session`` atomically under its ``session_id``.
+        """Persist ``session`` atomically under its ``user_id``/``session_id``.
 
         Args:
-            session: The record to write; ``session_id`` must be non-empty.
+            session: The record to write; ``user_id`` and ``session_id``
+                must both be non-empty.
 
         Raises:
-            ValueError: If ``session.session_id`` is empty.
+            ValueError: If ``session.user_id`` or ``session.session_id`` is
+                empty.
             OSError: If the file cannot be written.
         """
+        if not session.user_id:
+            raise ValueError("Session.user_id must be set before save()")
         if not session.session_id:
             raise ValueError("Session.session_id must be set before save()")
-        path = self._root / session.session_id / _SESSION_FILENAME
+        path = self._root / session.user_id / session.session_id / _SESSION_FILENAME
         _write_json_atomic(path, session.to_dict())
 
-    def get_active(self) -> str | None:
-        """Return the persisted active session id, or ``None``."""
+    def get_active(self) -> tuple[str, str] | None:
+        """Return the persisted ``(user_id, session_id)`` active pair, or ``None``.
+
+        Returns ``None`` for an unset pointer, a corrupt file, or a pointer
+        written in the pre-per-user-nesting shape (``{"active": "..."}``,
+        which has neither of the keys this reads) — all three tolerantly
+        fall through to the caller's "unset" bootstrap branch (see
+        ``cryosoft.main._resolve_active_session``).
+        """
         data = _read_json(self._root / _ACTIVE_FILENAME)
-        if isinstance(data, dict) and isinstance(data.get("active"), str):
-            return data["active"] or None
+        if not isinstance(data, dict):
+            return None
+        user_id = data.get("active_user_id")
+        session_id = data.get("active_session_id")
+        if isinstance(user_id, str) and user_id and isinstance(session_id, str) and session_id:
+            return user_id, session_id
         return None
 
-    def set_active(self, session_id: str | None) -> None:
-        """Persist (or clear) the active session pointer.
+    def set_active(self, user_id: str, session_id: str) -> None:
+        """Persist the active ``(user_id, session_id)`` pair.
 
         Args:
-            session_id: The id to resume on next start, or ``None`` to clear
-                the pointer.
+            user_id: Owner of the session to resume on next start.
+            session_id: The session to resume on next start.
 
         Raises:
             OSError: If the pointer file cannot be written.
         """
         _write_json_atomic(
             self._root / _ACTIVE_FILENAME,
-            {"active": session_id or "", "schema_version": SCHEMA_VERSION},
+            {
+                "active_user_id": user_id,
+                "active_session_id": session_id,
+                "schema_version": SCHEMA_VERSION,
+            },
         )
 
 

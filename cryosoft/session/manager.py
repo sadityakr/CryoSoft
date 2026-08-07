@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -18,12 +19,13 @@ from cryosoft.session.models import (
     RUN_STATUS_FAILED,
     RUN_STATUS_RUNNING,
     SCHEMA_VERSION,
+    ExperimentIndexEntry,
     ExperimentRecord,
     RunRecord,
     envelope_from_dict,
     envelope_to_dict,
 )
-from cryosoft.session.store import ExperimentStore, UserRoster
+from cryosoft.session.store import ExperimentStore, SessionStore, UserRoster
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +70,7 @@ class ExperimentManager(QObject):
         station: Station,
         config_name: str = "",
         config_path: str | None = None,
+        session_store: SessionStore | None = None,
     ) -> None:
         """Wire into the Orchestrator and resume any active experiment.
 
@@ -84,6 +87,15 @@ class ExperimentManager(QObject):
                 VI's optional ``metadata:`` block (``read_instrument_metadata``).
                 ``None`` (e.g. in unit tests) just means no instrument
                 metadata is stamped — never an error.
+            session_store: The Session-tier store, used to keep the active
+                session's ``experiments`` index in sync on
+                ``start_experiment()``/``close_experiment()``. ``None``
+                (e.g. in unit tests that only exercise the Experiment tier)
+                simply skips index maintenance — every other feature works
+                unchanged. When given, the session identity is derived from
+                ``store.root``'s own two path segments
+                (``sessions/<user_id>/<session_id>``), not passed separately,
+                so there is no second source of truth to drift.
         """
         super().__init__()
         self._store = store
@@ -94,6 +106,7 @@ class ExperimentManager(QObject):
         self._instrument_metadata = (
             read_instrument_metadata(config_path) if config_path else {}
         )
+        self._session_store = session_store
         self._experiment: ExperimentRecord | None = None
         self._store_save_ok = True
 
@@ -170,23 +183,33 @@ class ExperimentManager(QObject):
         sample_info: dict[str, Any],
         envelope: ExperimentEnvelope | None = None,
         attended: bool = True,
+        experiment_dirname: str | None = None,
     ) -> ExperimentRecord:
         """Open a new experiment and install its envelope on the Orchestrator.
 
         Args:
-            title: Human title (also slugged into the experiment id).
+            title: Human title (also slugged into the experiment id when
+                ``experiment_dirname`` is not given).
             user_id: Roster key of the person running the experiment.
             sample_info: The sample fields to snapshot onto the record.
             envelope: Optional per-experiment sample bounds, enforced by the
                 Orchestrator for every writer until the experiment closes.
             attended: Initial attendance flag.
+            experiment_dirname: Optional override for the experiment's
+                folder name (and therefore its ``experiment_id``), directly
+                under the session folder — flat only, no nesting. ``None``
+                (the default) falls back to
+                ``self._store.make_experiment_id(title, created)``.
 
         Returns:
             The persisted, now-active ``ExperimentRecord``.
 
         Raises:
-            ValueError: If ``title`` is empty, another experiment is open, or
-                ``user_id`` is not in the roster.
+            ValueError: If ``title`` is empty, another experiment is open,
+                ``user_id`` is not in the roster, or ``experiment_dirname``
+                is given but is empty, contains a path separator, is
+                ``"."``/``".."``, or collides with an existing experiment
+                folder in this session.
             OSError: If the record cannot be written.
         """
         if not title.strip():
@@ -201,8 +224,9 @@ class ExperimentManager(QObject):
                 f"Unknown user {user_id!r} — add the user to the roster first."
             )
         created = _utc_now_iso()
+        experiment_id = self._resolve_experiment_id(title, created, experiment_dirname)
         record = ExperimentRecord(
-            experiment_id=self._store.make_experiment_id(title, created),
+            experiment_id=experiment_id,
             title=title.strip(),
             user_id=user_id,
             sample_info=dict(sample_info),
@@ -222,8 +246,55 @@ class ExperimentManager(QObject):
             user_id,
             attended,
         )
+        self._update_session_index(
+            ExperimentIndexEntry(
+                experiment_id=record.experiment_id,
+                title=record.title,
+                user_id=record.user_id,
+                status=record.status,
+                created_utc=record.created_utc,
+                closed_utc=record.closed_utc,
+            )
+        )
         self.experiment_changed.emit(record.to_dict())
         return record
+
+    def _resolve_experiment_id(
+        self, title: str, created_utc: str, experiment_dirname: str | None
+    ) -> str:
+        """Return the experiment id to use — auto-derived or user-chosen.
+
+        Args:
+            title: The experiment title (used for the auto-derived id).
+            created_utc: ISO 8601 creation time (used for the auto-derived id).
+            experiment_dirname: The caller's override, or ``None`` for the
+                default auto-derived id.
+
+        Returns:
+            A valid, non-colliding experiment id.
+
+        Raises:
+            ValueError: If ``experiment_dirname`` is given but invalid (see
+                ``start_experiment``'s docstring for the exact rules).
+        """
+        if experiment_dirname is None:
+            return self._store.make_experiment_id(title, created_utc)
+        candidate = experiment_dirname.strip()
+        if not candidate:
+            raise ValueError("Experiment folder name must not be empty")
+        if os.sep in candidate or (os.altsep and os.altsep in candidate) or "/" in candidate:
+            raise ValueError(
+                f"Experiment folder name {experiment_dirname!r} must not contain "
+                "a path separator — it names a single folder directly under "
+                "the session, not a nested path"
+            )
+        if candidate in (".", ".."):
+            raise ValueError(f"Experiment folder name {experiment_dirname!r} is not allowed")
+        if candidate in self._store.list_experiments():
+            raise ValueError(
+                f"An experiment folder named {candidate!r} already exists in this session"
+            )
+        return candidate
 
     def close_experiment(self) -> None:
         """Close the open experiment and clear the envelope. No-op when none."""
@@ -235,6 +306,16 @@ class ExperimentManager(QObject):
         self._store.set_active(None)
         self._orchestrator.set_experiment_envelope(None)
         logger.info("Experiment %s closed", self._experiment.experiment_id)
+        self._update_session_index(
+            ExperimentIndexEntry(
+                experiment_id=self._experiment.experiment_id,
+                title=self._experiment.title,
+                user_id=self._experiment.user_id,
+                status=self._experiment.status,
+                created_utc=self._experiment.created_utc,
+                closed_utc=self._experiment.closed_utc,
+            )
+        )
         self._experiment = None
         self.experiment_changed.emit({})
 
@@ -399,6 +480,57 @@ class ExperimentManager(QObject):
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    def _current_session_identity(self) -> tuple[str, str] | None:
+        """Return the ``(user_id, session_id)`` owning ``self._store``, or ``None``.
+
+        ``None`` when no ``session_store`` was given at construction — the
+        caller then knows to skip index maintenance entirely. Otherwise
+        derived from ``self._store.root``'s own two path segments
+        (``sessions/<user_id>/<session_id>``), never passed or cached
+        separately, so this can never disagree with the store it describes.
+        """
+        if self._session_store is None:
+            return None
+        return self._store.root.parent.name, self._store.root.name
+
+    def _update_session_index(self, entry: ExperimentIndexEntry) -> None:
+        """Upsert ``entry`` into the active session's ``experiments`` index.
+
+        Tolerates a missing/corrupt ``session.json`` or a failed save by
+        logging and returning — the index mirrors the experiment lifecycle,
+        it must never be allowed to block it. No-op when this manager was
+        built without a ``session_store``.
+
+        Args:
+            entry: The index row to upsert, keyed by ``entry.experiment_id``.
+        """
+        identity = self._current_session_identity()
+        if identity is None:
+            return
+        user_id, session_id = identity
+        session = self._session_store.load(user_id, session_id)
+        if session is None:
+            logger.warning(
+                "Could not load session %s/%s to update its experiment index",
+                user_id,
+                session_id,
+            )
+            return
+        session.experiments = [
+            existing
+            for existing in session.experiments
+            if existing.experiment_id != entry.experiment_id
+        ]
+        session.experiments.append(entry)
+        try:
+            self._session_store.save(session)
+        except OSError:
+            logger.exception(
+                "Could not save session %s/%s's updated experiment index",
+                user_id,
+                session_id,
+            )
 
     def _save_current(self) -> None:
         """Persist the current record, tolerating write failures.

@@ -23,19 +23,22 @@ _SESSION_ID_ROLE = Qt.ItemDataRole.UserRole
 class ResumeSessionDialog(QDialog):
     """Pick an existing Session to resume, or create a new one.
 
-    Every session owned by ``user_id`` (or every session, when ``user_id`` is
-    ``None`` — nobody logged in yet) is listed via
-    ``SessionStore.list_sessions()``. ``selected_session_id()`` is only
-    meaningful after ``exec()`` returns ``Accepted``. Switching sessions is
-    deferred-until-restart (see ``docs/plans/session-tier-and-terminology.md``,
-    "Startup wiring") — this dialog only picks or creates the record; the
-    caller persists it as active and tells the operator to restart.
+    Every session owned by ``user_id`` is listed via
+    ``SessionStore.list_sessions()`` — sessions live under
+    ``sessions/<user_id>/``, so "nobody logged in yet" must already have
+    been resolved to the fixed Guest identity by the caller before this
+    dialog is built (see ``cryosoft.session.models.GUEST_USER_ID``).
+    ``selected_session_id()`` is only meaningful after ``exec()`` returns
+    ``Accepted``. Switching sessions is deferred-until-restart (see
+    ``docs/plans/session-tier-and-terminology.md``, "Startup wiring") —
+    this dialog only picks or creates the record; the caller persists it as
+    active and tells the operator to restart.
     """
 
     def __init__(
         self,
         store: SessionStore,
-        user_id: str | None,
+        user_id: str,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -75,9 +78,9 @@ class ResumeSessionDialog(QDialog):
         layout.addWidget(buttons)
 
     def _populate(self) -> None:
-        """List every session owned by ``user_id`` (or every session)."""
-        for session_id in self._store.list_sessions(user_id=self._user_id):
-            session = self._store.load(session_id)
+        """List every session owned by ``user_id``."""
+        for session_id in self._store.list_sessions(self._user_id):
+            session = self._store.load(self._user_id, session_id)
             if session is None:
                 continue
             label = f"{session.name} ({session.created_utc[:10]})"
@@ -96,7 +99,7 @@ class ResumeSessionDialog(QDialog):
         name = self._new_name_input.text().strip()
         if not name:
             return
-        session = self._store.create_session(name=name, user_id=self._user_id or "")
+        session = self._store.create_session(name=name, user_id=self._user_id)
         item = QListWidgetItem(f"{session.name} ({session.created_utc[:10]})")
         item.setData(_SESSION_ID_ROLE, session.session_id)
         self._list.addItem(item)

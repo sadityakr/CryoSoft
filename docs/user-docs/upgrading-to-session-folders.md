@@ -44,3 +44,25 @@ If you're not sure which Session an old experiment should go into, or
 you're unsure where your measurement root is, ask before moving anything —
 moving the wrong folder into the wrong Session is easy to undo (just move
 it back), but it's still better to check first.
+
+## 2026-08-05 addendum — Sessions now nest under who owns them
+
+Sessions used to sit directly under `sessions/`
+(`<measurement_root>/sessions/<session_id>/`). They now nest one level
+deeper, under the owner's user id
+(`<measurement_root>/sessions/<user_id>/<session_id>/`) — nobody logged in
+uses the fixed folder `sessions/guest/`. This is the same "nothing moves
+automatically" situation as the original Session-folder change above: a
+Session created before this update is not picked up by `Resume Session…`
+until you move its folder by hand, from
+`sessions/<session_id>/` to `sessions/<user_id>/<session_id>/` (using
+whichever user id owned it — check that Session's `session.json` for its
+`"user_id"` field if you're not sure). Its experiments move with it; nothing
+inside the Session folder itself needs to change.
+
+Each Session's `session.json` also now keeps a running list of its own
+experiments (title, status, dates) for quick lookup. This list only starts
+filling in once you next start or close an experiment in that Session — it
+is not backfilled for experiments that were already there, though those
+experiments remain fully visible and usable through **Open Experiment…** as
+before.

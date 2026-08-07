@@ -157,11 +157,19 @@ class UserPickerWidget(QWidget):
 
 
 class StartExperimentDialog(QDialog):
-    """Collect a title, user, and attendance flag to open a new experiment."""
+    """Collect a title, user, attendance flag, and folder name to open a new experiment.
+
+    The folder name field lets the operator override the experiment's
+    directory name (always directly under the active session — flat, no
+    nesting); left alone, it auto-fills from the title the same way
+    ``AddUserDialog``'s id field auto-fills from the name, and stops
+    auto-filling the moment the operator types in it by hand.
+    """
 
     def __init__(self, roster: UserRoster, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Start Experiment")
+        self._dirname_edited_by_hand = False
 
         form = QFormLayout()
 
@@ -169,7 +177,18 @@ class StartExperimentDialog(QDialog):
         self._title_input.setObjectName("experiment_title_input")
         self._title_input.setPlaceholderText("e.g. Hall bar A3 — SOT switching vs T")
         self._title_input.textChanged.connect(self._update_ok_enabled)
+        self._title_input.textChanged.connect(self._on_title_changed)
         form.addRow("Title:", self._title_input)
+
+        self._dirname_input = QLineEdit()
+        self._dirname_input.setObjectName("experiment_dirname_input")
+        self._dirname_input.setPlaceholderText("auto (from title)")
+        self._dirname_input.setToolTip(
+            "Optional — override where this experiment's folder lives inside "
+            "the active session. Defaults to a name derived from the title."
+        )
+        self._dirname_input.textEdited.connect(self._on_dirname_edited)
+        form.addRow("Folder name:", self._dirname_input)
 
         self._user_picker = UserPickerWidget(roster)
         self._user_picker.selection_changed_signal().connect(self._update_ok_enabled)
@@ -193,22 +212,34 @@ class StartExperimentDialog(QDialog):
 
         self._update_ok_enabled()
 
+    def _on_title_changed(self, text: str) -> None:
+        """Auto-fill the folder name from the title until hand-edited."""
+        if not self._dirname_edited_by_hand:
+            self._dirname_input.setText(_slugify(text))
+
+    def _on_dirname_edited(self, _text: str) -> None:
+        self._dirname_edited_by_hand = True
+
     def _update_ok_enabled(self) -> None:
         self._ok_button.setEnabled(
             bool(self._title_input.text().strip()) and self._user_picker.has_users()
         )
 
-    def result_values(self) -> tuple[str, str, bool]:
-        """Return ``(title, user_id, attended)``. Only meaningful after accept.
+    def result_values(self) -> tuple[str, str, bool, str | None]:
+        """Return ``(title, user_id, attended, experiment_dirname)``.
+
+        Only meaningful after accept.
 
         Returns:
-            The entered title, the selected user's roster id, and the
-            attendance checkbox state.
+            The entered title, the selected user's roster id, the
+            attendance checkbox state, and the folder name override (``None``
+            when left empty — falls back to the auto-derived id).
         """
         return (
             self._title_input.text().strip(),
             self._user_picker.selected_user_id(),
             self._attended_checkbox.isChecked(),
+            self._dirname_input.text().strip() or None,
         )
 
 

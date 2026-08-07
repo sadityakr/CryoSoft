@@ -106,7 +106,7 @@ virtual_instruments:
       default_ramp_rate: 2.0
       tolerance: 1.0
       min_temperature_K: 1.4
-      max_temperature_K: 320.0
+      max_temperature_K: 240.0
       max_ramp_rate_K_per_min: 20.0
 
   level_meter:
@@ -114,7 +114,7 @@ virtual_instruments:
     drivers: {main: ilm_210}
     vi_type: level
     init_params:
-      helium_low_threshold: 35.0
+      helium_low_threshold: 25.0
       buffer_size: 5
 
   temperature_sample:
@@ -122,10 +122,10 @@ virtual_instruments:
     drivers: {main: lakeshore_sample}
     vi_type: system
     init_params:
-      default_ramp_rate: 1.0
+      default_ramp_rate: 2.0
       tolerance: 0.3
       min_temperature_K: 1.4
-      max_temperature_K: 320.0
+      max_temperature_K: 310.0
       max_ramp_rate_K_per_min: 20.0
 
   keithley_delta_mode:
@@ -159,18 +159,7 @@ virtual_instruments:
         ch6: ["6"]
         ch7: ["7"]
         ch8: ["8"]
-        ch9: ["9"]
-        ch10: ["10"]
-        ch11: ["11"]
-        ch12: ["12"]
-        ch13: ["13"]
-        ch14: ["14"]
-        ch15: ["15"]
-        ch16: ["16"]
-        ch17: ["17"]
-        ch18: ["18"]
-        ch19: ["19"]
-        ch20: ["20"]
+
       settle_time_s: 1.0
       pole_mode: 4
       # Hot-switching (default True, also runtime-toggleable via
@@ -236,7 +225,7 @@ servicing_logs:                  # which declared log kinds this setup keeps
 operations:
   sample_load:
     vti_vi: temperature_vti
-    target_temperature_K: 290.0
+    target_temperature_K: 240.0
     temperature_tolerance_K: 2.0
     temperature_window_s: 60.0
     needle_valve: manual           # "manual" -> operator confirmation; a VI-capability ref is future work
