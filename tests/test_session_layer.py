@@ -613,7 +613,13 @@ def test_close_experiment_updates_session_index_status_and_closed_utc(indexed_ma
     assert entry.closed_utc
 
 
-def test_switch_experiment_does_not_alter_session_index(indexed_manager):
+def test_switch_experiment_reconciles_session_index(indexed_manager):
+    """switch_experiment() is an "opened" event too — it re-reconciles the index.
+
+    Simulates the record having changed on disk out-of-band since the index
+    was last touched (exactly what a manual folder move would also cause):
+    the reconciled index must reflect that new reality, not the stale one.
+    """
     exp_manager, session_store, session = indexed_manager
     first = exp_manager.start_experiment("First", "jdoe", SAMPLE_INFO)
     exp_manager.close_experiment()
@@ -621,13 +627,85 @@ def test_switch_experiment_does_not_alter_session_index(indexed_manager):
     exp_manager.close_experiment()
     exp_manager.store.save(
         ExperimentRecord(
-            experiment_id=first.experiment_id, title="First", status=EXPERIMENT_STATUS_OPEN
+            experiment_id=first.experiment_id,
+            title="First",
+            user_id="jdoe",
+            status=EXPERIMENT_STATUS_OPEN,
         )
     )
     before = session_store.load("jdoe", session.session_id).experiments
+    assert next(e for e in before if e.experiment_id == first.experiment_id).status == (
+        EXPERIMENT_STATUS_CLOSED
+    )
+
     exp_manager.switch_experiment(first.experiment_id)
+
     after = session_store.load("jdoe", session.session_id).experiments
-    assert before == after
+    assert next(e for e in after if e.experiment_id == first.experiment_id).status == (
+        EXPERIMENT_STATUS_OPEN
+    )
+
+
+def test_reconciliation_picks_up_an_experiment_folder_moved_in_and_keeps_its_user_id(
+    indexed_manager, roster, orchestrator, station,
+):
+    """An experiment folder moved into a session by hand is picked up, author intact.
+
+    Models handing an experiment off to a different user's session to
+    continue the project: the folder physically moves, but the record's own
+    ``user_id`` (who actually ran it) must survive untouched.
+    """
+    exp_manager, session_store, session = indexed_manager
+    moved = exp_manager.start_experiment("Moved In", "jdoe", SAMPLE_INFO)
+    exp_manager.close_experiment()
+
+    other_session = session_store.create_session("Lab B", "jdoe")
+    other_root = session_store.root / "jdoe" / other_session.session_id
+    other_root.mkdir(parents=True, exist_ok=True)
+    shutil.move(
+        str(exp_manager.store.root / moved.experiment_id),
+        str(other_root / moved.experiment_id),
+    )
+
+    other_manager = ExperimentManager(
+        store=ExperimentStore(other_root),
+        roster=roster,
+        orchestrator=orchestrator,
+        station=station,
+        config_name="sim_cryostat",
+        session_store=session_store,
+    )
+    other_manager.start_experiment("Native", "jdoe", SAMPLE_INFO)
+    other_manager.close_experiment()
+
+    reloaded = session_store.load("jdoe", other_session.session_id)
+    entry = next(e for e in reloaded.experiments if e.experiment_id == moved.experiment_id)
+    assert entry.user_id == "jdoe"
+    assert entry.title == "Moved In"
+
+
+def test_reconciliation_drops_an_experiment_folder_moved_out_of_a_session(indexed_manager):
+    exp_manager, session_store, session = indexed_manager
+    moved = exp_manager.start_experiment("Moved Out", "jdoe", SAMPLE_INFO)
+    exp_manager.close_experiment()
+    reloaded = session_store.load("jdoe", session.session_id)
+    assert any(e.experiment_id == moved.experiment_id for e in reloaded.experiments)
+
+    other_session = session_store.create_session("Lab B", "jdoe")
+    other_root = session_store.root / "jdoe" / other_session.session_id
+    other_root.mkdir(parents=True, exist_ok=True)
+    shutil.move(
+        str(exp_manager.store.root / moved.experiment_id),
+        str(other_root / moved.experiment_id),
+    )
+
+    stayed = exp_manager.start_experiment("Still Here", "jdoe", SAMPLE_INFO)
+    exp_manager.close_experiment()
+
+    reloaded = session_store.load("jdoe", session.session_id)
+    ids = {e.experiment_id for e in reloaded.experiments}
+    assert moved.experiment_id not in ids
+    assert stayed.experiment_id in ids
 
 
 def test_manager_without_session_store_skips_index_update(manager):

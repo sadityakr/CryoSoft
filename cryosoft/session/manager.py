@@ -87,15 +87,16 @@ class ExperimentManager(QObject):
                 VI's optional ``metadata:`` block (``read_instrument_metadata``).
                 ``None`` (e.g. in unit tests) just means no instrument
                 metadata is stamped — never an error.
-            session_store: The Session-tier store, used to keep the active
-                session's ``experiments`` index in sync on
-                ``start_experiment()``/``close_experiment()``. ``None``
-                (e.g. in unit tests that only exercise the Experiment tier)
-                simply skips index maintenance — every other feature works
-                unchanged. When given, the session identity is derived from
-                ``store.root``'s own two path segments
-                (``sessions/<user_id>/<session_id>``), not passed separately,
-                so there is no second source of truth to drift.
+            session_store: The Session-tier store, used to reconcile the
+                active session's ``experiments`` index against its folder on
+                ``start_experiment()``/``close_experiment()``/
+                ``switch_experiment()`` (see ``_reconcile_session_index()``).
+                ``None`` (e.g. in unit tests that only exercise the
+                Experiment tier) simply skips index maintenance — every
+                other feature works unchanged. When given, the session
+                identity is derived from ``store.root``'s own two path
+                segments (``sessions/<user_id>/<session_id>``), not passed
+                separately, so there is no second source of truth to drift.
         """
         super().__init__()
         self._store = store
@@ -246,16 +247,7 @@ class ExperimentManager(QObject):
             user_id,
             attended,
         )
-        self._update_session_index(
-            ExperimentIndexEntry(
-                experiment_id=record.experiment_id,
-                title=record.title,
-                user_id=record.user_id,
-                status=record.status,
-                created_utc=record.created_utc,
-                closed_utc=record.closed_utc,
-            )
-        )
+        self._reconcile_session_index()
         self.experiment_changed.emit(record.to_dict())
         return record
 
@@ -306,16 +298,7 @@ class ExperimentManager(QObject):
         self._store.set_active(None)
         self._orchestrator.set_experiment_envelope(None)
         logger.info("Experiment %s closed", self._experiment.experiment_id)
-        self._update_session_index(
-            ExperimentIndexEntry(
-                experiment_id=self._experiment.experiment_id,
-                title=self._experiment.title,
-                user_id=self._experiment.user_id,
-                status=self._experiment.status,
-                created_utc=self._experiment.created_utc,
-                closed_utc=self._experiment.closed_utc,
-            )
-        )
+        self._reconcile_session_index()
         self._experiment = None
         self.experiment_changed.emit({})
 
@@ -410,6 +393,7 @@ class ExperimentManager(QObject):
         self._store.set_active(record.experiment_id)
         self._orchestrator.set_experiment_envelope(envelope_from_dict(record.envelope))
         logger.info("Switched to experiment %s", record.experiment_id)
+        self._reconcile_session_index()
         self.experiment_changed.emit(record.to_dict())
         return record
 
@@ -494,16 +478,31 @@ class ExperimentManager(QObject):
             return None
         return self._store.root.parent.name, self._store.root.name
 
-    def _update_session_index(self, entry: ExperimentIndexEntry) -> None:
-        """Upsert ``entry`` into the active session's ``experiments`` index.
+    def _reconcile_session_index(self) -> None:
+        """Rebuild the active session's ``experiments`` index from its folder.
 
-        Tolerates a missing/corrupt ``session.json`` or a failed save by
-        logging and returning — the index mirrors the experiment lifecycle,
-        it must never be allowed to block it. No-op when this manager was
-        built without a ``session_store``.
+        Called after every ``start_experiment()``/``close_experiment()``/
+        ``switch_experiment()`` — the three points an experiment becomes or
+        stops being the one this manager is looking at. Rather than
+        upserting just the one record that changed, this rescans
+        ``self._store.list_experiments()`` (a live directory listing) and
+        reads every ``experiment.json`` found there, replacing
+        ``session.experiments`` wholesale. That is what makes moving an
+        experiment folder by hand safe: an experiment folder moved OUT of
+        this session (e.g. handed off to a different user's session to
+        continue the project) drops out of the rebuilt list, and one moved
+        IN is picked up, the next time any experiment in this session opens
+        or closes — no separate "move" operation needs to touch the index
+        itself. Each entry's ``user_id`` is copied verbatim from its
+        ``ExperimentRecord`` — whoever originally ran that experiment stays
+        on record regardless of which session folder it currently lives in;
+        this method never rewrites it.
 
-        Args:
-            entry: The index row to upsert, keyed by ``entry.experiment_id``.
+        Tolerates a missing/corrupt ``session.json``, an unreadable
+        individual ``experiment.json`` (skipped, logged, the rest still
+        reconcile), or a failed save — the index mirrors the experiment
+        lifecycle, it must never be allowed to block it. No-op when this
+        manager was built without a ``session_store``.
         """
         identity = self._current_session_identity()
         if identity is None:
@@ -512,22 +511,39 @@ class ExperimentManager(QObject):
         session = self._session_store.load(user_id, session_id)
         if session is None:
             logger.warning(
-                "Could not load session %s/%s to update its experiment index",
+                "Could not load session %s/%s to reconcile its experiment index",
                 user_id,
                 session_id,
             )
             return
-        session.experiments = [
-            existing
-            for existing in session.experiments
-            if existing.experiment_id != entry.experiment_id
-        ]
-        session.experiments.append(entry)
+        entries: list[ExperimentIndexEntry] = []
+        for experiment_id in self._store.list_experiments():
+            record = self._store.load(experiment_id)
+            if record is None:
+                logger.warning(
+                    "Skipping unreadable experiment %r while reconciling "
+                    "session %s/%s's index",
+                    experiment_id,
+                    user_id,
+                    session_id,
+                )
+                continue
+            entries.append(
+                ExperimentIndexEntry(
+                    experiment_id=record.experiment_id,
+                    title=record.title,
+                    user_id=record.user_id,
+                    status=record.status,
+                    created_utc=record.created_utc,
+                    closed_utc=record.closed_utc,
+                )
+            )
+        session.experiments = entries
         try:
             self._session_store.save(session)
         except OSError:
             logger.exception(
-                "Could not save session %s/%s's updated experiment index",
+                "Could not save session %s/%s's reconciled experiment index",
                 user_id,
                 session_id,
             )

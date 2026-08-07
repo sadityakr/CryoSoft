@@ -454,8 +454,13 @@ class ExperimentIndexEntry:
     ``Session.experiments`` holds one of these per experiment folder inside
     the session, so a session answers "what experiments do I contain and
     where" from ``session.json`` alone — no directory scan, no opening every
-    ``experiment.json``. Maintained by ``ExperimentManager`` on
-    ``start_experiment()``/``close_experiment()`` (never edited elsewhere).
+    ``experiment.json``, for whatever reads the index. The index itself is
+    rebuilt by ``ExperimentManager._reconcile_session_index()`` — which DOES
+    do that scan and open every ``experiment.json`` — on
+    ``start_experiment()``/``close_experiment()``/``switch_experiment()``
+    (never edited elsewhere), so a folder moved by hand since the last
+    reconciliation is reflected in full the next time any of those three
+    fire.
 
     Deliberately carries no data-directory field: an experiment's data
     folder is always ``experiment_id`` + ``"/data"`` (the fixed convention
@@ -467,7 +472,13 @@ class ExperimentIndexEntry:
         experiment_id: The store key — also the experiment's directory name,
             directly under the session folder (flat; no nesting).
         title: Human title, mirrored from ``ExperimentRecord.title``.
-        user_id: Roster key of the person running the experiment.
+        user_id: Roster key of the person who actually ran the experiment,
+            mirrored from ``ExperimentRecord.user_id``. Authorship, not
+            custody: reconciliation copies it verbatim and never rewrites it
+            to match whichever session folder the experiment currently sits
+            in, so moving an experiment into a different user's session (to
+            hand a project off to whoever is continuing it) never rewrites
+            who actually ran it.
         status: ``open`` or ``closed``.
         created_utc: ISO 8601 creation time (UTC), mirrored from the record.
         closed_utc: ISO 8601 close time; empty while open.
@@ -539,14 +550,25 @@ class Session:
             folder itself).
         last_open_experiment_id: The experiment id to auto-reopen on resume;
             empty string means none.
-        experiments: This session's authoritative index of experiment
-            folders — title, owner, status, and timestamps for lookup
-            without opening every ``experiment.json``. Maintained by
-            ``ExperimentManager`` on ``start_experiment()``/
-            ``close_experiment()``; never edited elsewhere. A session
-            created before this index existed keeps an empty list until an
-            experiment of its own is next started or closed — there is no
-            backfill from existing experiment folders on disk.
+        experiments: This session's index of experiment folders — title,
+            owner, status, and timestamps for lookup without opening every
+            ``experiment.json``. Reconciled by ``ExperimentManager`` against
+            a live directory listing on ``start_experiment()``/
+            ``close_experiment()``/``switch_experiment()`` (see
+            ``ExperimentManager._reconcile_session_index()``); never edited
+            elsewhere. Because it is rebuilt from the folder each time
+            rather than incrementally patched, an experiment folder moved
+            into or out of this session by hand — e.g. handed off to a
+            different user's session to continue the project — is picked up
+            or dropped the next time any experiment in this session opens
+            or closes, with no separate "move" step required. Each entry's
+            ``user_id`` records who actually ran that experiment and is
+            never rewritten by a move. A session created before this index
+            existed starts with an empty list, but because reconciliation
+            fully rebuilds from the folder rather than patching one entry,
+            the very next start/close/switch in that session backfills every
+            experiment folder already on disk — nothing is permanently
+            stuck unindexed.
         created_utc: ISO 8601 creation time (UTC).
         last_opened_utc: ISO 8601 time this session was last made active.
         schema_version: The on-disk format version this record was loaded

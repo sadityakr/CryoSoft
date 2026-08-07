@@ -103,12 +103,22 @@ GUI imports session).
   (GUI-authored, opaque to this layer) and a `data/` folder where the
   experiment's HDF5 files live (sub-folders allowed, e.g.
   `data/heating_runs/`) — see **Format rules** below.
-- `Session.experiments` — this session's authoritative index of experiment
-  folders (title, owner, status, timestamps), maintained by
-  `ExperimentManager` on `start_experiment()`/`close_experiment()`, so a
-  session answers "what experiments do I contain and where" from
-  `session.json` alone, without a directory scan or opening every
-  `experiment.json`.
+- `Session.experiments` — this session's index of experiment folders (title,
+  owner, status, timestamps), so a session answers "what experiments do I
+  contain and where" from `session.json` alone, without a directory scan or
+  opening every `experiment.json` — for whatever reads it. It is kept
+  accurate by `ExperimentManager._reconcile_session_index()`, which DOES do
+  that scan (rebuilding the list from `ExperimentStore.list_experiments()`
+  plus every `experiment.json` found), on `start_experiment()`/
+  `close_experiment()`/`switch_experiment()` — the three points an
+  experiment becomes or stops being the one in view. Because it rebuilds
+  rather than patches one entry, an experiment folder moved into or out of a
+  session by hand (e.g. handed off to a different user's session to
+  continue the project) is picked up or dropped the next time any
+  experiment in that session opens or closes — no separate "move" operation
+  is needed. Each entry's `user_id` is copied verbatim from its
+  `ExperimentRecord`, never re-derived from which session it currently sits
+  in, so a move never rewrites who actually ran the experiment.
 - `Orchestrator.set_experiment_envelope()` — the experiment's sample bounds,
   enforced in the Orchestrator for every writer.
 - `experiment_context()` — the dict the GUI passes as `experiment_info` when
@@ -143,12 +153,14 @@ file-format change, not a routine edit.
   pointer written before per-user nesting (`{"active": "..."}`) has neither
   key, so `get_active()` tolerantly returns `None` — the same "unset
   pointer" bootstrap path as a first-ever launch, not a crash.
-- **`Session.experiments` is flat-only, not backfilled.** Each entry's
-  `experiment_id` is a single path segment directly under the session
-  folder — no nested subfolders. The index is populated only going forward,
-  by `start_experiment()`/`close_experiment()`; a session that already had
-  experiments on disk before this index existed keeps an empty (or
-  partial) index rather than being reconciled against the filesystem.
+- **`Session.experiments` is flat-only.** Each entry's `experiment_id` is a
+  single path segment directly under the session folder — no nested
+  subfolders. Since reconciliation rebuilds the whole list from the folder
+  rather than patching one entry, a session that already had experiments on
+  disk before this index existed is NOT stuck with an empty/partial index
+  forever — the next `start_experiment()`/`close_experiment()`/
+  `switch_experiment()` in that session backfills every experiment folder
+  already there.
 - **Bundle-relative data paths.** `RunRecord.data_file` is stored relative to
   the experiment's session folder whenever the file lives under it (normally
   inside `data/`, sub-folders included, e.g. `data/heating_runs/xyz.h5`) —
@@ -240,5 +252,5 @@ file-format change, not a routine edit.
 |------|----------------|----------------|-------------|
 | `models.py` | Tolerant-parse records: users, sessions (the L6 tier above an experiment, incl. its `experiments` index), runs, experiments (incl. `queue` and `schema_version`), ELN links, servicing-log entries; envelope (de)serialisation. | `SCHEMA_VERSION`, `GUEST_USER_ID`, `GUEST_USER_NAME`, `User`, `Session`, `ExperimentIndexEntry`, `RunRecord`, `ExperimentRecord`, `ElnLink`, `ServiceLogEntry`, `envelope_to_dict`, `envelope_from_dict` | `tests/test_session_layer.py` / `tests/test_servicing_log.py` + conformance |
 | `store.py` | Disk persistence: per-user, per-session folders (`session.json` + machine-wide active pointer) via `SessionStore`, one level above per-experiment folders (`experiment.json`, `gui_state.json`, `data/`) + their own active pointer via `ExperimentStore`; user roster; bundle-relative data-path (de)resolution. | `SessionStore` (`list_sessions(user_id)`, `create_session`, `load(user_id, session_id)`, `save`, `get_active` → `tuple[str, str] \| None`, `set_active(user_id, session_id)`, `make_session_id`), `ExperimentStore` (`list_experiments`, `load`, `save`, `get_active`, `set_active`, `make_experiment_id`, `data_dir`, `gui_state_path`, `relativize_data_file`, `resolve_data_file`), `UserRoster` (`list_users`, `get`, `add`) | `tests/test_session_layer.py` |
-| `manager.py` | The L6 façade: experiment lifecycle (incl. switching between open experiments, the run queue, and a chosen experiment folder name), automatic run recording from manifests, envelope installation, HDF5 context, save-health surfacing, session-index maintenance. | `ExperimentManager` (`start_experiment(..., experiment_dirname=None)`, `close_experiment`, `set_findings`, `set_attended`, `set_queue`, `switch_experiment`, `current_data_dir`, `current_gui_state_path`, `experiment_context`, `current_experiment`; optional `session_store` constructor arg; signals `experiment_changed`, `run_recorded`, `store_health_changed`) | `tests/test_session_layer.py` |
+| `manager.py` | The L6 façade: experiment lifecycle (incl. switching between open experiments, the run queue, and a chosen experiment folder name), automatic run recording from manifests, envelope installation, HDF5 context, save-health surfacing, session experiment-index reconciliation. | `ExperimentManager` (`start_experiment(..., experiment_dirname=None)`, `close_experiment`, `set_findings`, `set_attended`, `set_queue`, `switch_experiment`, `current_data_dir`, `current_gui_state_path`, `experiment_context`, `current_experiment`; optional `session_store` constructor arg; signals `experiment_changed`, `run_recorded`, `store_health_changed`) | `tests/test_session_layer.py` |
 | `servicing_log.py` | The Servicing Log framework: declared log kinds (incl. the unifying flat `servicing` kind, the only one the recorder writes as of Phase 2), revisioned per-kind storage, the hourly helium record, consumption fit, the automatic recorder, and legacy-log migration. | `LogKindSpec`, `DECLARED_LOG_KINDS`, `ServicingLogStore` (`add_entry`, `revise_entry`, `delete_entry`, `append_machine_entry`, `entries`, `revisions`, `recordings_path`, `migrate_legacy`), `HeliumRecordStore` (`append`, `samples`), `consumption_rate_pct_per_h`, `CryogenicsRecorder` (`on_states_updated`, `on_run_started`, `on_run_finished`; signal `cryo_warning`), `migrate_legacy_servicing_log` | `tests/test_servicing_log.py` + conformance |
