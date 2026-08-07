@@ -208,14 +208,24 @@ class PhasePlan:
         commands: Ordered VI commands to dispatch, normalised to a tuple.
         wait_s: Settle time in seconds after applying targets/commands. Finite
             and non-negative.
+        claim_commands: Ordered ``initiate()`` commands for this run's claimed
+            VIs (see ``BaseProcedure._claim_initiate_commands()``), normalised
+            to a tuple. Dispatched by the Orchestrator FIRST, before
+            ``targets`` and ``commands`` — a claimed VI must already be in its
+            standard operating state (e.g. a temperature controller's heater
+            in closed-loop AUTO, not left MANUAL from a prior bench test)
+            before this plan's own targets/commands assume that state. Empty
+            by default; only ``initiate()`` plans populate it — ``standby()``
+            plans have nothing to claim-initiate.
     """
 
     targets: dict[str, Target]
     commands: tuple[Command, ...] = ()
     wait_s: float = 0.0
+    claim_commands: tuple[Command, ...] = ()
 
     def __post_init__(self) -> None:
-        """Validate the fields; copy ``targets`` and normalise ``commands``.
+        """Validate the fields; copy ``targets`` and normalise the command tuples.
 
         Raises:
             TypeError: If ``targets`` / a command / ``wait_s`` has the wrong type.
@@ -223,13 +233,14 @@ class PhasePlan:
         """
         object.__setattr__(self, "targets", _validate_targets(self.targets, "PhasePlan"))
 
-        commands = tuple(self.commands)
-        for i, cmd in enumerate(commands):
-            if not isinstance(cmd, Command):
-                raise TypeError(
-                    f"PhasePlan.commands[{i}] must be a Command, got {cmd!r}"
-                )
-        object.__setattr__(self, "commands", commands)
+        for field_name in ("commands", "claim_commands"):
+            commands = tuple(getattr(self, field_name))
+            for i, cmd in enumerate(commands):
+                if not isinstance(cmd, Command):
+                    raise TypeError(
+                        f"PhasePlan.{field_name}[{i}] must be a Command, got {cmd!r}"
+                    )
+            object.__setattr__(self, field_name, commands)
 
         object.__setattr__(self, "wait_s", _validate_wait(self.wait_s, "PhasePlan"))
 

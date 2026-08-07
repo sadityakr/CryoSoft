@@ -372,10 +372,20 @@ class SampleTemperatureControllerVI(TemperatureControllerBase, RampableVI):
     # ------------------------------------------------------------------
 
     def initiate(self) -> None:
-        """Put the heater under closed-loop control.
+        """Put the heater under closed-loop control, at the current temperature.
 
-        Sets heater mode to AUTO so the PID loop drives the heater output
-        toward the setpoint (the standard startup state for a measurement).
+        Pins the setpoint to the nearest whole kelvin of the CURRENT reading
+        first, then sets heater mode to AUTO. Ordering matters: an operator
+        may have left the heater in MANUAL (e.g. switched off by hand during
+        a sample test) with a stale setpoint still on the controller from
+        whatever it was last regulating to — flipping straight to AUTO would
+        hand the PID that stale, possibly far-off target and it would
+        immediately start driving toward it. Writing the setpoint first,
+        while still in whatever mode the heater was left in (`set_setpoint`
+        is unguarded by heater mode — see the driver contract), means AUTO
+        never sees a target other than "hold near here"; a subsequent
+        `set_temperature()`/`start_ramp()` call then starts its ramp from
+        this pinned point exactly as it would from any other resting state.
 
         This is the ONLY place closed-loop control is switched on. The ITC
         503 driver used to force AUTO from its own ``__init__``, so merely
@@ -385,6 +395,8 @@ class SampleTemperatureControllerVI(TemperatureControllerBase, RampableVI):
         the operator decides when the loop is handed to CryoSoft by
         pressing Initiate.
         """
+        current_T = self._driver.get_temperature()  # type: ignore[attr-defined]
+        self._driver.set_setpoint(round(current_T))  # type: ignore[attr-defined]
         self._driver.set_heater_mode("AUTO")  # type: ignore[attr-defined]
 
     def standby(self) -> None:

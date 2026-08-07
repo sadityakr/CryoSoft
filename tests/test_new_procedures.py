@@ -164,6 +164,11 @@ def test_field_sweep_initiate_full_phaseplan(station, tmp_path, meas):
     assert plan.targets["magnet_z"] == Target(-0.1)
     assert plan.targets["temperature_vti"] == Target(300.0)
 
+    # FieldSweep keeps the default claim (claimed_vi_names() -> None), so
+    # claim_commands initiate every station VI, in station registration order.
+    assert [c.vi_name for c in plan.claim_commands] == station.get_vi_names()
+    assert all(c.method == "initiate" and c.kwargs == {} for c in plan.claim_commands)
+
     assert len(plan.commands) == 1
     cmd = plan.commands[0]
     assert isinstance(cmd, Command)
@@ -290,6 +295,10 @@ def test_temp_sweep_initiate_full_phaseplan(station, tmp_path, meas):
     assert plan.targets["magnet_z"] == Target(0.0)
     assert plan.targets["magnet_y"] == Target(0.0)
 
+    # TemperatureSweep keeps the default claim too — every station VI.
+    assert [c.vi_name for c in plan.claim_commands] == station.get_vi_names()
+    assert all(c.method == "initiate" and c.kwargs == {} for c in plan.claim_commands)
+
     assert len(plan.commands) == 1
     cmd = plan.commands[0]
     assert cmd.vi_name == meas["measurement_vi"]
@@ -328,6 +337,29 @@ def test_temp_sweep_measure_saves_data(station, tmp_path, meas):
     with h5py.File(filepath, "r") as f:
         assert not np.isnan(f["data"]["temperature_K"][0])
         assert not np.any(np.isnan(f["data"]["voltage_V"][0]))
+
+
+def test_temp_sweep_run_resets_a_stale_manual_heater_to_auto(station, tmp_path):
+    """A run resets a heater the operator left in MANUAL back to AUTO.
+
+    Regression test for the scenario claim_commands exists to solve: an
+    operator switches temperature_vti's heater to MANUAL by hand (e.g.
+    during a bench test) and leaves it that way. Without claim-initiating
+    every claimed VI at run start, the closed loop would stay off for the
+    whole run and the sweep's ramp target would never actually be reached.
+    """
+    from cryosoft.core.orchestrator import Orchestrator
+
+    station.temperature_vti.set_heater_mode("MANUAL")
+    assert station.temperature_vti.heater_mode() == "MANUAL"
+
+    proc = _temp_proc(station, tmp_path, DC)
+    orch = Orchestrator(station, tick_interval_ms=10)
+    try:
+        orch.run_procedure(proc)
+        assert station.temperature_vti.heater_mode() == "AUTO"
+    finally:
+        orch.shutdown()
 
 
 def test_temp_sweep_full_orchestrator_loop(station, tmp_path, qtbot):

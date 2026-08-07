@@ -805,6 +805,18 @@ class TestSampleTemperatureControllerVI:
         vi.initiate()
         assert vi.heater_mode() == "AUTO"
 
+    def test_initiate_pins_setpoint_to_rounded_current_temperature(self, itc_driver):
+        """A stale setpoint left over from before the heater was switched to
+        MANUAL must not survive initiate() — otherwise flipping to AUTO hands
+        the PID a far-off target and the heater immediately starts driving
+        toward it."""
+        vi = self._make_vi(itc_driver)
+        vi.set_heater_mode("MANUAL")
+        itc_driver._temperature = 42.3
+        itc_driver.set_setpoint(250.0)
+        vi.initiate()
+        assert itc_driver.get_setpoint() == pytest.approx(42.0)
+
     def test_standby_sets_heater_manual_and_zero_output(self, itc_driver):
         vi = self._make_vi(itc_driver)
         vi.set_heater_mode("MANUAL")
@@ -922,6 +934,14 @@ class TestVTITemperatureControllerVI:
         vi.set_heater_mode("MANUAL")
         vi.initiate()
         assert vi.heater_mode() == "AUTO"
+
+    def test_initiate_pins_setpoint_to_rounded_current_temperature(self, itc_driver):
+        vi = self._make_vi(itc_driver)
+        vi.set_heater_mode("MANUAL")
+        itc_driver._temperature = 4.7
+        itc_driver.set_setpoint(300.0)
+        vi.initiate()
+        assert itc_driver.get_setpoint() == pytest.approx(5.0)
 
     def test_standby_closes_needle_valve_and_sets_heater_manual(self, itc_driver):
         vi = self._make_vi(itc_driver)

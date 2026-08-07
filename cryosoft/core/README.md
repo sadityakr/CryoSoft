@@ -138,7 +138,13 @@ is the typed currency shared by all of them.
   every system VI); the Orchestrator captures it at run start and refuses a
   manual VI action only for a VI actually claimed by the active run,
   through the single `_manual_action_admissible()` predicate shared by
-  `submit_vi_action()` and the tick's GUI-action drain gate.
+  `submit_vi_action()` and the tick's GUI-action drain gate. A second
+  consumer: `BaseProcedure._claim_initiate_commands()` turns the same
+  declaration into one `initiate()` `Command` per claimed VI, carried in
+  `PhasePlan.claim_commands` and dispatched by `Orchestrator._start_run()`
+  BEFORE that plan's own `targets`/`commands` — so every VI a run claims is
+  already in its standard operating state before the run's first target or
+  command reaches it.
 - The **System-Condition standard** (GLOSSARY.md's **System condition** /
   **Severity ladder**; full text in `core/conditions.py`'s module
   docstring): every "something is wrong" signal in CryoSoft — a VI's

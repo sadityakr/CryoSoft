@@ -613,8 +613,14 @@ class Orchestrator(QObject):
             # accumulated into it as they are dispatched.
             self._active_system_vis = set(plan.targets.keys())
 
-            self._dispatch_targets(plan.targets)
+            # claim_commands (each claimed VI's own initiate()) go out FIRST,
+            # before this plan's targets/commands — see PhasePlan.claim_commands
+            # and BaseProcedure._claim_initiate_commands().
             allowed_scope = getattr(procedure, "command_scope", "measurement")
+            self._station.send_measurement_commands(
+                plan.claim_commands, allowed_scope=allowed_scope
+            )
+            self._dispatch_targets(plan.targets)
             self._station.send_measurement_commands(plan.commands, allowed_scope=allowed_scope)
             self._current_wait_time = plan.wait_s
 

@@ -451,6 +451,28 @@ class BaseProcedure:
         """
         return None
 
+    def _claim_initiate_commands(self) -> tuple[Command, ...]:
+        """Build an ``initiate()`` command for every VI this procedure claims.
+
+        A concrete ``initiate()`` override puts this in the returned
+        ``PhasePlan.claim_commands`` — dispatched by the Orchestrator BEFORE
+        the plan's own ``targets``/``commands``, so a claimed VI is always
+        back in its standard operating state first. This closes the gap the
+        temperature VI lifecycle standard describes
+        (``SampleTemperatureControllerVI.initiate()``): an operator may have
+        left a claimed heater in MANUAL after a bench test, and a target
+        ramping straight into that state would either hand the PID a stale
+        setpoint or never move at all.
+
+        Returns:
+            One ``Command(vi_name, "initiate", {})`` per VI named in
+            ``claimed_vi_names()`` — every station VI, in registration order,
+            when that is ``None`` (the claim-everything default).
+        """
+        claimed = self.claimed_vi_names()
+        vi_names = self._station.get_vi_names() if claimed is None else claimed
+        return tuple(Command(vi_name, "initiate", {}) for vi_name in vi_names)
+
     def get_data_keys(self) -> list[str]:
         """Return all datapoint keys available for live-plot axis selection.
 
@@ -517,10 +539,12 @@ class BaseProcedure:
         4. Return the wait time (seconds) after reaching initial targets.
 
         Returns:
-            A ``PhasePlan`` bundling ``targets`` (a ``{"vi_name": Target(...)}``
-            mapping), ``commands`` (an ordered ``tuple[Command, ...]`` of
-            measurement-VI calls), and ``wait_s`` (seconds to settle after the
-            targets are reached).
+            A ``PhasePlan`` bundling ``claim_commands`` (normally
+            ``self._claim_initiate_commands()``, unchanged — every claimed VI
+            back in its standard state before anything below is dispatched),
+            ``targets`` (a ``{"vi_name": Target(...)}`` mapping), ``commands``
+            (an ordered ``tuple[Command, ...]`` of measurement-VI calls), and
+            ``wait_s`` (seconds to settle after the targets are reached).
 
         Raises:
             NotImplementedError: If not overridden in subclass.
@@ -1439,9 +1463,12 @@ class SweepMeasureProcedure(BaseProcedure):
         """Ramp to the first sweep point, arm the selected VI, open the file.
 
         Returns:
-            A ``PhasePlan`` with the initial system ``targets``, the selected
-            VI's arming ``Command``, and ``wait_s`` from ``_initiate_wait_s()``.
+            A ``PhasePlan`` with ``claim_commands`` for every claimed VI
+            (``_claim_initiate_commands()``), the initial system ``targets``,
+            the selected VI's arming ``Command``, and ``wait_s`` from
+            ``_initiate_wait_s()``.
         """
+        claim_commands = self._claim_initiate_commands()
         vi = self._station.get_vi(self._measurement_vi)
         targets = self._initial_system_targets()
         arm_command = Command(
@@ -1506,7 +1533,12 @@ class SweepMeasureProcedure(BaseProcedure):
             len(self._sweep),
             self._measurement_vi,
         )
-        return PhasePlan(targets=targets, commands=commands, wait_s=self._initiate_wait_s())
+        return PhasePlan(
+            targets=targets,
+            commands=commands,
+            wait_s=self._initiate_wait_s(),
+            claim_commands=claim_commands,
+        )
 
     def change_sweep_step(self) -> StepPlan | None:
         """Advance to the next sweep point.

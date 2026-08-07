@@ -113,6 +113,11 @@ def test_initiate_commands_no_system_hardware(station, tmp_path, meas):
         assert plan.wait_s == pytest.approx(0.0)  # first reading on the next tick
         assert [c.vi_name for c in plan.commands] == [meas["measurement_vi"]]
         assert plan.commands[0].method == "initiate_measurement"
+        # Narrowed claim (see test_claims_only_the_reading_path below): only
+        # the measurement VI gets claim-initiated, never magnet_z/temperature_vti/
+        # temperature_sample, which stay exactly as the operator left them.
+        assert [c.vi_name for c in plan.claim_commands] == [meas["measurement_vi"]]
+        assert plan.claim_commands[0].method == "initiate"
     finally:
         proc.standby()
 

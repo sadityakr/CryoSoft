@@ -48,12 +48,17 @@ typed plan objects from `cryosoft.core.plan` (never bare dicts/tuples):
 | `standby()` | `PhasePlan` | Sweep complete or aborted |
 | `abort()` | `tuple[Command, ...]` | User abort / ERROR / EMERGENCY |
 
-A `PhasePlan` carries `targets` (VI name -> `Target`), ordered `commands`, and a
-`wait_s` settle time; a `StepPlan` carries the next point's `targets` and its
-`wait_s`. A `Target` carries an optional `rate` (forwarded to the VI's
-`start_ramp()` only when set) and a `persistent` flag; `Command` order is
-meaningful and never reordered. Every plan object validates at construction, so
-a malformed plan fails at the procedure boundary, not in the tick loop.
+A `PhasePlan` carries `targets` (VI name -> `Target`), ordered `commands`, a
+`wait_s` settle time, and `claim_commands` — one `initiate()` `Command` per
+claimed VI (`BaseProcedure._claim_initiate_commands()`), dispatched by the
+Orchestrator BEFORE `targets`/`commands` so every claimed VI is already in its
+standard operating state (see **Claim** below) when this plan's own
+targets/commands reach it; a `StepPlan` carries the next point's `targets` and
+its `wait_s` (no `claim_commands` — only `initiate()`'s plan claim-initiates).
+A `Target` carries an optional `rate` (forwarded to the VI's `start_ramp()`
+only when set) and a `persistent` flag; `Command` order is meaningful and
+never reordered. Every plan object validates at construction, so a malformed
+plan fails at the procedure boundary, not in the tick loop.
 
 ## Interface contract
 
@@ -80,7 +85,12 @@ axis hooks.
   GLOSSARY.md): declares which VIs a running procedure exclusively owns, so
   the Orchestrator knows what a manual front-panel action may touch while
   it runs. Default `None` (claim everything) — procedures stay exclusive in
-  this iteration; no shipped procedure overrides it.
+  this iteration; only `TimeSeries` narrows it (see below). The same
+  declaration drives `_claim_initiate_commands()`: one `initiate()` `Command`
+  per claimed VI, carried in `initiate()`'s returned `PhasePlan.claim_commands`
+  and dispatched first — so a claimed VI an operator left in a non-standard
+  state (heater switched to MANUAL, say) is always reset to standard before
+  this run's own targets/commands assume it.
 
 ### Generic sweep and the reading loop (owned by the base, no per-procedure code)
 
@@ -134,7 +144,7 @@ procedure of the same shape:
 | Piece | What it does |
 |---|---|
 | `sweep_axis = None` + `axis_data_key()` | The axis is elapsed time (`elapsed_s`), not a ramped quantity, so the GUI renders no linear/segments/CSV shape editor. `_build_sweep_array()` returns the schedule of measurement instants; its length is `max_duration_s / step_time_s`, which is what keeps the progress bar, `n_sweep_points`, and "Point n/N" meaningful. |
-| A narrowed `claimed_vi_names()` | Returns only the measurement VI plus any reading-loop VI, so the Orchestrator's admission gate leaves every magnet and temperature front panel live for the whole run. The only procedure that does not claim the whole station. |
+| A narrowed `claimed_vi_names()` | Returns only the measurement VI plus any reading-loop VI, so the Orchestrator's admission gate leaves every magnet and temperature front panel live for the whole run. The only procedure that does not claim the whole station. This also narrows `_claim_initiate_commands()` — a Time Series run never calls `initiate()` on a magnet or temperature controller it does not claim, so it never disturbs whatever state the operator has it in. |
 | An empty **ramp scope** (GLOSSARY.md) | A run owns the ramps it targeted; this one targets nothing. A manual front-panel ramp therefore neither delays its next reading nor is stopped when the run ends. Ramp *advancement* is unaffected: every non-PAUSED tick still steps every ramp generator. |
 
 The end condition is either the schedule alone or a watched channel reaching a

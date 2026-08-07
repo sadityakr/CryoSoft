@@ -7,7 +7,7 @@ import pytest
 
 
 from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
-from cryosoft.core.plan import PhasePlan, StepPlan, Target
+from cryosoft.core.plan import Command, PhasePlan, StepPlan, Target
 from cryosoft.core.station import Station, build_station
 from cryosoft.virtual_instruments.base import BaseVirtualInstrument
 from cryosoft.virtual_instruments.rampable import RampableVI
@@ -67,6 +67,58 @@ def orchestrator(station, qtbot):
     orch.start_monitoring()
     yield orch
     orch.shutdown()
+
+
+# ── claim_commands: dispatched before this run's own targets/commands ─────────
+
+
+class ClaimingProcedure(MockProcedure):
+    """MockProcedure whose plan also claim-initiates magnet_z."""
+
+    def initiate(self):
+        return PhasePlan(
+            targets={"magnet_z": Target(self._sweep[0])},
+            commands=(Command("keithley_delta_mode", "initiate_measurement", {}),),
+            claim_commands=(Command("magnet_z", "initiate", {}),),
+            wait_s=0.0,
+        )
+
+
+def test_start_run_dispatches_claim_commands_before_targets_and_commands(
+    orchestrator, station, monkeypatch
+):
+    """A run's claim_commands reach the VI before its targets/commands do.
+
+    Otherwise a temperature controller's initiate() (heater AUTO, setpoint
+    pinned to the current reading — see SampleTemperatureControllerVI) would
+    run AFTER the ramp target already set the real sweep setpoint, stomping
+    it right back down. magnet_z stands in here since it is simpler to spy
+    on; the ordering guarantee is generic, not magnet-specific.
+    """
+    call_order = []
+    orig_send = orchestrator._station.send_measurement_commands
+    orig_dispatch = orchestrator._dispatch_targets
+
+    def spy_send(commands, *, allowed_scope="measurement"):
+        if commands:
+            call_order.append(("commands", tuple(c.vi_name for c in commands)))
+        return orig_send(commands, allowed_scope=allowed_scope)
+
+    def spy_dispatch(targets):
+        if targets:
+            call_order.append(("targets", tuple(targets)))
+        return orig_dispatch(targets)
+
+    monkeypatch.setattr(orchestrator._station, "send_measurement_commands", spy_send)
+    monkeypatch.setattr(orchestrator, "_dispatch_targets", spy_dispatch)
+
+    orchestrator.run_procedure(ClaimingProcedure(station))
+
+    assert call_order == [
+        ("commands", ("magnet_z",)),  # claim_commands
+        ("targets", ("magnet_z",)),
+        ("commands", ("keithley_delta_mode",)),
+    ]
 
 
 def _degraded_station(tmp_path, vi_type: str = "measurement"):

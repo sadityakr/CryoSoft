@@ -74,6 +74,29 @@ def test_base_procedure_not_instantiable_without_methods():
         proc.standby()
 
 
+def test_claim_initiate_commands_default_claims_every_station_vi(station):
+    """claimed_vi_names() defaulting to None claim-initiates every station VI."""
+    class NullProc(BaseProcedure):
+        pass
+
+    proc = NullProc(station=station, sample_info={}, data_directory="/tmp")
+    commands = proc._claim_initiate_commands()
+    assert [c.vi_name for c in commands] == station.get_vi_names()
+    assert all(c.method == "initiate" and c.kwargs == {} for c in commands)
+
+
+def test_claim_initiate_commands_honours_narrowed_claim(station):
+    """A narrowed claimed_vi_names() claim-initiates only the named VIs."""
+    class NarrowProc(BaseProcedure):
+        def claimed_vi_names(self):
+            return {"magnet_z", "temperature_vti"}
+
+    proc = NarrowProc(station=station, sample_info={}, data_directory="/tmp")
+    commands = proc._claim_initiate_commands()
+    assert {c.vi_name for c in commands} == {"magnet_z", "temperature_vti"}
+    assert all(c.method == "initiate" and c.kwargs == {} for c in commands)
+
+
 def test_base_procedure_empty_sweep():
     """Default _build_sweep_array returns [] and get_progress returns 1.0."""
     class NullProc(BaseProcedure):

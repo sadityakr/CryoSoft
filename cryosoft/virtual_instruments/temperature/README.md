@@ -46,8 +46,14 @@ numbering; heater range choices = OFF/LOW/MEDIUM/HIGH).
 `stop_ramp()` (pins the setpoint to the current temperature — used by the
 Orchestrator on abort/pause/error).
 **Lifecycle** (standard, mirrored across VI types — see the magnet VI's
-README): `initiate()` sets heater mode AUTO (closed-loop PID to setpoint).
-`standby()` sets heater mode MANUAL and commands zero heater output, so no
+README): `initiate()` first pins the setpoint to the nearest whole kelvin of
+the current reading (`round(temperature())`), THEN sets heater mode AUTO
+(closed-loop PID to setpoint) — the ordering means AUTO never inherits a
+stale setpoint left over from before the heater was switched to MANUAL, so
+initiating never kicks off a surprise ramp to some old target; a subsequent
+`set_temperature()`/`start_ramp()` starts its ramp from this pinned point
+like any other resting state. `standby()` sets heater mode MANUAL and
+commands zero heater output, so no
 closed-loop setpoint can drive power while idle; on `VTITemperatureControllerVI`,
 `standby()` additionally switches needle valve mode to MANUAL before closing
 it (0 % open), cutting bath helium flow — the mode switch must happen first,
@@ -85,9 +91,10 @@ All classes here extend `SampleTemperatureControllerVI` (itself inheriting from
   `heater_mode` is MANUAL), the `RampableVI` methods. `heater_mode` lives
   here (not on a driver-specific subclass) because both the Lakeshore 335
   and Oxford ITC503 drivers implement `get_heater_mode`/`set_heater_mode`
-  with the same 'AUTO'/'MANUAL' vocabulary. `initiate()`/`standby()` set
-  heater mode AUTO/MANUAL (standby also zeroes heater output) — the
-  lifecycle standard. tests: `tests/test_l1_new_vis.py`
+  with the same 'AUTO'/'MANUAL' vocabulary. `initiate()` pins the setpoint to
+  `round(temperature())` before setting heater mode AUTO; `standby()` sets
+  heater mode MANUAL and zeroes heater output — the lifecycle standard.
+  tests: `tests/test_l1_new_vis.py`
   (`TestSampleTemperatureControllerVI`), `tests/test_l1_virtual_instruments.py`.
 - `vti_temperature_controller.py` — `VTITemperatureControllerVI`: extends above with
   needle valve `@monitored needle_valve` / `needle_valve_mode` and

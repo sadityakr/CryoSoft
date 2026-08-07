@@ -114,6 +114,7 @@ def test_command_kwargs_defensive_copy():
 def test_phaseplan_happy_and_defaults():
     p = PhasePlan(targets={"field": Target(1.0)})
     assert p.commands == ()
+    assert p.claim_commands == ()
     assert p.wait_s == 0.0
 
 
@@ -123,6 +124,19 @@ def test_phaseplan_commands_normalized_to_tuple_order_preserved():
     p = PhasePlan(targets={}, commands=[c1, c2])
     assert isinstance(p.commands, tuple)
     assert p.commands == (c1, c2)
+
+
+def test_phaseplan_claim_commands_normalized_to_tuple_order_preserved():
+    c1 = Command("magnet_z", "initiate")
+    c2 = Command("temperature_vti", "initiate")
+    p = PhasePlan(targets={}, claim_commands=[c1, c2])
+    assert isinstance(p.claim_commands, tuple)
+    assert p.claim_commands == (c1, c2)
+
+
+def test_phaseplan_bad_claim_command():
+    with pytest.raises(TypeError, match="PhasePlan.claim_commands"):
+        PhasePlan(targets={}, claim_commands=["nope"])
 
 
 def test_phaseplan_bad_target_value():
