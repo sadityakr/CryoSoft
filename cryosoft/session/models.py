@@ -235,9 +235,10 @@ class RunRecord:
     """One procedure execution — one HDF5 file — inside an experiment.
 
     Created by the ``ExperimentManager`` from the Orchestrator's ``run_started``
-    manifest and completed from ``run_finished``. The initiate-time instrument
-    settings are kept here so the experiment file answers "what were the
-    settings for run N" without opening HDF5.
+    manifest and completed from ``run_finished``. ``procedure`` and ``params``
+    are kept here so the experiment file answers "which procedure ran run N,
+    with what parameters" without opening HDF5 — the basis for searching
+    across runs by procedure/param.
 
     Attributes:
         run_id: The manifest's unique run id.
@@ -249,7 +250,6 @@ class RunRecord:
         finished_utc: ISO 8601 end time; empty while running.
         status: ``running`` → ``done`` / ``failed`` / ``aborted``.
         reason: Error text for a failed run; empty otherwise.
-        settings_snapshot: Full station snapshot captured at run start.
         published: Whether this run has been mirrored to the ELN entry yet
             (written by the publishing track).
     """
@@ -263,7 +263,6 @@ class RunRecord:
     finished_utc: str = ""
     status: str = RUN_STATUS_RUNNING
     reason: str = ""
-    settings_snapshot: dict[str, Any] = field(default_factory=dict)
     published: bool = False
 
     def to_dict(self) -> dict[str, Any]:
@@ -278,7 +277,6 @@ class RunRecord:
             "finished_utc": self.finished_utc,
             "status": self.status,
             "reason": self.reason,
-            "settings_snapshot": dict(self.settings_snapshot),
             "published": self.published,
         }
 
@@ -305,7 +303,6 @@ class RunRecord:
             finished_utc=_as_str(data.get("finished_utc")),
             status=status,
             reason=_as_str(data.get("reason")),
-            settings_snapshot=_as_dict(data.get("settings_snapshot")),
             published=_as_bool(data.get("published"), False),
         )
 

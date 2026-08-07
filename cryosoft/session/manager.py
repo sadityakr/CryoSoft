@@ -12,7 +12,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 
 from cryosoft.core.orchestrator import Orchestrator
 from cryosoft.core.plan import ExperimentEnvelope
-from cryosoft.core.station import Station, read_instrument_metadata
+from cryosoft.core.station import read_instrument_metadata
 from cryosoft.session.models import (
     EXPERIMENT_STATUS_CLOSED,
     EXPERIMENT_STATUS_OPEN,
@@ -67,7 +67,6 @@ class ExperimentManager(QObject):
         store: ExperimentStore,
         roster: UserRoster,
         orchestrator: Orchestrator,
-        station: Station,
         config_name: str = "",
         config_path: str | None = None,
         session_store: SessionStore | None = None,
@@ -80,7 +79,6 @@ class ExperimentManager(QObject):
             orchestrator: The active Orchestrator; its run manifests drive run
                 recording, and its ``set_experiment_envelope()`` receives the
                 experiment's envelope.
-            station: The active Station (settings snapshots at run start).
             config_name: Identity of the active config, recorded on new
                 experiments.
             config_path: Directory of the active config, read once for each
@@ -102,7 +100,6 @@ class ExperimentManager(QObject):
         self._store = store
         self._roster = roster
         self._orchestrator = orchestrator
-        self._station = station
         self._config_name = config_name
         self._instrument_metadata = (
             read_instrument_metadata(config_path) if config_path else {}
@@ -421,10 +418,6 @@ class ExperimentManager(QObject):
         """
         if self._experiment is None:
             return
-        settings = {
-            vi_name: dict(vi_state)
-            for vi_name, vi_state in self._station.cached_state.items()
-        }
         raw_data_file = str(manifest.get("data_file", ""))
         data_file = (
             self._store.relativize_data_file(self._experiment.experiment_id, raw_data_file)
@@ -439,7 +432,6 @@ class ExperimentManager(QObject):
             data_file=data_file,
             started_utc=str(manifest.get("started_utc", "")),
             status=RUN_STATUS_RUNNING,
-            settings_snapshot=settings,
         )
         self._experiment.runs.append(run)
         self._save_current()

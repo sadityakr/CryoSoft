@@ -77,7 +77,6 @@ def manager(store, roster, orchestrator, station):
         store=store,
         roster=roster,
         orchestrator=orchestrator,
-        station=station,
         config_name="sim_cryostat",
     )
 
@@ -97,7 +96,6 @@ def indexed_manager(tmp_path, roster, orchestrator, station):
         store=exp_store,
         roster=roster,
         orchestrator=orchestrator,
-        station=station,
         config_name="sim_cryostat",
         session_store=session_store,
     )
@@ -506,7 +504,6 @@ def test_experiment_context_includes_instrument_metadata_from_config(
         store=store,
         roster=roster,
         orchestrator=orchestrator,
-        station=station,
         config_name="sim_cryostat",
         config_path=CONFIG_PATH,
     )
@@ -521,7 +518,6 @@ def test_experiment_context_tolerates_missing_config_path(store, roster, orchest
         store=store,
         roster=roster,
         orchestrator=orchestrator,
-        station=station,
         config_path="/no/such/config",
     )
     assert manager.experiment_context()["setup"]["instruments"] == {}
@@ -671,7 +667,6 @@ def test_reconciliation_picks_up_an_experiment_folder_moved_in_and_keeps_its_use
         store=ExperimentStore(other_root),
         roster=roster,
         orchestrator=orchestrator,
-        station=station,
         config_name="sim_cryostat",
         session_store=session_store,
     )
@@ -797,7 +792,6 @@ def test_resume_marks_stale_running_runs_failed(
         store=store,
         roster=roster,
         orchestrator=fresh_orchestrator,
-        station=station,
         config_name="sim_cryostat",
     )
     experiment = resumed.current_experiment()
@@ -818,7 +812,6 @@ def test_resume_with_missing_record_clears_pointer(store, roster, orchestrator, 
         store=store,
         roster=roster,
         orchestrator=orchestrator,
-        station=station,
     )
     assert manager.current_experiment() is None
     assert store.get_active() is None
@@ -988,8 +981,6 @@ def test_end_to_end_run_recorded_and_stamped(
     assert run.kind == "run"
     assert run.procedure == "Field Sweep"
     assert run.params["field_steps"] == 3
-    assert run.settings_snapshot, "expected an initiate-time settings snapshot"
-    assert "magnet_z" in run.settings_snapshot
 
     # The record's data_file is the real HDF5 file, stamped with the context.
     with h5py.File(run.data_file, "r") as f:

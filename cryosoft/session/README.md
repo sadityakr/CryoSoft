@@ -71,8 +71,7 @@ GUI imports session).
 - GUI lifecycle calls on the `ExperimentManager`: `start_experiment`,
   `close_experiment`, `set_findings`, `set_attended`, `set_queue`,
   `switch_experiment`.
-- The active config identity (from `main.py`) and the station's cached state
-  (settings snapshot at each run start).
+- The active config identity (from `main.py`).
 - Servicing-log writes: `ServicingLogStore.add_entry`/`revise_entry`/
   `delete_entry` (manual, from the GUI's add/edit dialogs, and
   `CryogenicsRecorder`'s machine-attributed `"servicing"` entries — see

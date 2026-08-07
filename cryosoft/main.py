@@ -227,7 +227,6 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
         store=ExperimentStore(measurement_root() / "sessions" / active_user_id / active_session_id),
         roster=roster,
         orchestrator=orchestrator,
-        station=station,
         config_name=used_entry.name if used_entry is not None else Path(used_path).name,
         config_path=used_path,
         session_store=session_store,

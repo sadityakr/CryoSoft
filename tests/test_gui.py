@@ -1187,7 +1187,6 @@ def session_manager(tmp_path, station, orchestrator):
         store=store,
         roster=roster,
         orchestrator=orchestrator,
-        station=station,
         config_name="sim_cryostat",
     )
 
@@ -1480,7 +1479,6 @@ def test_switch_user_saves_outgoing_and_loads_incoming_session(
         store=ExperimentStore(tmp_path / "experiments"),
         roster=roster,
         orchestrator=orchestrator,
-        station=station,
         config_name="sim_cryostat",
     )
     win = MonitorWindow(station, orchestrator, session_manager=manager)
@@ -1517,7 +1515,6 @@ def test_load_session_dialog_lists_open_and_closed(station, orchestrator, qtbot,
         store=ExperimentStore(tmp_path / "experiments"),
         roster=roster,
         orchestrator=orchestrator,
-        station=station,
         config_name="sim_cryostat",
     )
     manager.start_experiment(title="Closed One", user_id="jdoe", sample_info={})
@@ -1624,7 +1621,6 @@ def test_switch_session_saves_outgoing_and_loads_incoming(
         store=store,
         roster=roster,
         orchestrator=orchestrator,
-        station=station,
         config_name="sim_cryostat",
     )
     win = MonitorWindow(station, orchestrator, session_manager=manager)
@@ -1674,7 +1670,6 @@ def test_switch_session_rejects_unknown_id_with_warning(
         store=ExperimentStore(tmp_path / "experiments"),
         roster=roster,
         orchestrator=orchestrator,
-        station=station,
         config_name="sim_cryostat",
     )
     win = MonitorWindow(station, orchestrator, session_manager=manager)
@@ -1944,7 +1939,6 @@ def test_open_login_dialog_full_flow(station, orchestrator, qtbot, tmp_path, mon
         store=ExperimentStore(tmp_path / "experiments"),
         roster=roster,
         orchestrator=orchestrator,
-        station=station,
     )
     win = MonitorWindow(station, orchestrator, session_manager=manager)
     qtbot.addWidget(win)
