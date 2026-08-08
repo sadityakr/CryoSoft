@@ -96,9 +96,10 @@ No task is complete until `make check` passes (equivalently `ruff check .`,
 `lint-imports`, `pytest -m "not hardware"`, all from the activated `.venv`).
 CI runs exactly these targets on every push. Three parts:
 
-- **Layer contracts (C1–C12)**: import-linter rules in `pyproject.toml` that
-  enforce the layer boundaries mechanically. Never edit or weaken a contract
-  to make it pass; propose the change instead.
+- **Layer contracts**: the numbered import-linter rules in `pyproject.toml`
+  (which is their only source of truth — do not restate the count here, it
+  grows) that enforce the layer boundaries mechanically. Never edit or weaken
+  a contract to make it pass; propose the change instead.
 - **Conformance tests** (`tests/test_conformance.py`): auto-discover every
   driver, VI, procedure, and config and check it against its standard. A new
   module is covered the moment the file exists. If a conformance test fails
