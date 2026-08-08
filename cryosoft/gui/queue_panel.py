@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
 
 from cryosoft.core.orchestrator import Orchestrator
 from cryosoft.core.procedure import BaseProcedure
+from cryosoft.core.run_builder import PROCEDURE_BUILD_ERRORS, build_procedure
 from cryosoft.core.station import Station
 from cryosoft.gui.form_autosave import (
     STATUS_DONE,
@@ -300,15 +301,21 @@ class QueuePanel(QGroupBox):
             self._get_experiment_info() if self._get_experiment_info else {}
         )
         try:
-            return entry.cls(
+            return build_procedure(
+                entry.cls,
                 station=self._station,
+                params=entry.params,
                 sample_info=entry.sample_info,
                 data_directory=entry.data_dir,
                 file_prefix=entry.file_prefix,
                 experiment_info=experiment_info,
-                **entry.params,
             )
-        except (TypeError, ValueError) as exc:
+        except PROCEDURE_BUILD_ERRORS as exc:
+            # Widened from (TypeError, ValueError): a procedure that refuses a
+            # restored run raises CryoSoftConfigError, which derives from
+            # CryoSoftError, not from ValueError — so the narrower catch let it
+            # escape into restore_items() and take the window down while
+            # reopening a session.
             logger.warning(
                 "session: could not rebuild queued %s: %s", entry.cls.name, exc
             )
