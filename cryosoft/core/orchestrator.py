@@ -728,21 +728,26 @@ class Orchestrator(QObject):
         moving. The wait clock is also frozen and restored on resume.
         """
         if self._procedure is None:
+            self.action_blocked.emit("Cannot pause: no run is active")
             return
-        if self._state in (OrchestratorState.INITIATING, OrchestratorState.RAMPING,
-                           OrchestratorState.INITIATION_GATE, OrchestratorState.READING_GATE,
-                           OrchestratorState.MEASURING, OrchestratorState.SWEEPING,
-                           OrchestratorState.STANDBY):
-            self._pre_pause_state = self._state
-            if self._wait_started:
-                self._paused_wait_elapsed = time.time() - self._wait_start_time
-            self._station.stop_ramps(self._run_ramp_scope())
-            self._change_state(OrchestratorState.PAUSED)
-            self._emit_status("Paused - hardware held")
+        if self._state not in (OrchestratorState.INITIATING, OrchestratorState.RAMPING,
+                               OrchestratorState.INITIATION_GATE,
+                               OrchestratorState.READING_GATE,
+                               OrchestratorState.MEASURING, OrchestratorState.SWEEPING,
+                               OrchestratorState.STANDBY):
+            self.action_blocked.emit(f"Cannot pause while {self._state.value}")
+            return
+        self._pre_pause_state = self._state
+        if self._wait_started:
+            self._paused_wait_elapsed = time.time() - self._wait_start_time
+        self._station.stop_ramps(self._run_ramp_scope())
+        self._change_state(OrchestratorState.PAUSED)
+        self._emit_status("Paused - hardware held")
 
     def resume_procedure(self) -> None:
         """Resume from PAUSED: restart held ramps and unfreeze the wait clock."""
         if self._state != OrchestratorState.PAUSED:
+            self.action_blocked.emit(f"Cannot resume while {self._state.value}")
             return
         # pause_procedure() held the hardware, which forgot its ramp — states
         # that were mid-ramp need their targets re-dispatched to continue.
@@ -767,6 +772,9 @@ class Orchestrator(QObject):
         """
         if self._state == OrchestratorState.EMERGENCY:
             logger.info("abort_procedure ignored during EMERGENCY")
+            self.action_blocked.emit(
+                "Cannot abort during EMERGENCY — acknowledge the emergency first"
+            )
             return
         self._abort_active_procedure()
         self._emit_run_finished("aborted")
@@ -977,8 +985,12 @@ class Orchestrator(QObject):
         procedures are NOT auto-started — after an error the queue's
         assumptions may no longer hold; the user restarts explicitly.
         """
-        if self._state == OrchestratorState.ERROR:
-            self._change_state(OrchestratorState.IDLE)
+        if self._state != OrchestratorState.ERROR:
+            self.action_blocked.emit(
+                f"Nothing to recover from: not in ERROR (currently {self._state.value})"
+            )
+            return
+        self._change_state(OrchestratorState.IDLE)
 
     def acknowledge(self) -> None:
         """Single GUI entry point: acknowledge EMERGENCY, or unlock held VIs.
@@ -1522,6 +1534,9 @@ class Orchestrator(QObject):
         """
         if self._scanner_vi_name is None:
             logger.info("set_scanner_enabled ignored: no switch VI in station")
+            self.action_blocked.emit(
+                "Cannot change scanner availability: this station has no switch instrument"
+            )
             return
         self._station.set_scanner_enabled(bool(enabled))
 
