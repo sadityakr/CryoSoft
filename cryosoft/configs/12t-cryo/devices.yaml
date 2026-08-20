@@ -106,7 +106,7 @@ virtual_instruments:
       default_ramp_rate: 2.0
       tolerance: 1.0
       min_temperature_K: 1.4
-      max_temperature_K: 240.0
+      max_temperature_K: 300.0
       max_ramp_rate_K_per_min: 20.0
 
   level_meter:
