@@ -62,12 +62,15 @@ def _tick_until(orchestrator, predicate, max_ticks: int = 2000):
 
 
 def _pause_at_boundary(orchestrator):
-    """Request a pause and tick until it lands at the pause boundary (PAUSED).
+    """Pause from MEASURING and tick until it lands at the pause boundary.
 
-    The deferred-pause helper for tests that need a PAUSED Orchestrator but are
-    not themselves about pause timing: ``pause_procedure()`` only *requests* a
-    pause now, so reaching PAUSED means letting the current point finish.
+    The deferred-pause helper for tests that want a run PAUSED *between*
+    points: a pause requested in MEASURING waits for that datapoint to be read
+    and saved, so reaching PAUSED means ticking through the measurement.
     """
+    _tick_until(
+        orchestrator, lambda: orchestrator._state == OrchestratorState.MEASURING
+    )
     orchestrator.pause_procedure()
     _tick_until(orchestrator, lambda: orchestrator._state == OrchestratorState.PAUSED)
 
@@ -478,92 +481,123 @@ def test_pause_resume(orchestrator, qtbot, station):
     orchestrator.abort_procedure()
 
 
-def test_pause_request_does_not_interrupt_the_current_point(orchestrator, station):
-    """A pause requested mid-ramp leaves the run ramping, with the flag pending."""
+def test_pause_mid_ramp_holds_immediately_and_resumes_the_same_point(
+    orchestrator, station
+):
+    """Pausing mid-ramp holds the hardware on the spot — no deferral.
+
+    Holding the cryostat where it stands is the point of the control, and a
+    ramp carries no data, so there is nothing to protect by waiting.
+    """
     procedure = MockProcedure(station)  # slow default magnet ramp
     orchestrator.run_procedure(procedure)
     orchestrator._tick()
     assert orchestrator._state == OrchestratorState.RAMPING
 
     orchestrator.pause_procedure()
-    assert orchestrator.pause_pending is True
+    assert orchestrator._state == OrchestratorState.PAUSED
+    assert orchestrator.pause_pending is False  # nothing deferred
+    assert station.magnet_z._driver.get_status() == "HOLD"
+    assert procedure.measure_called == 0
+
     for _ in range(20):
         orchestrator._tick()
-    # Still ramping to the current point — the pause has not landed and the
-    # point has not been measured.
+    assert orchestrator._state == OrchestratorState.PAUSED
+    assert procedure.measure_called == 0  # nothing advances while paused
+
+    orchestrator.resume_procedure()
+    # Resumes the point it was ramping to, not the next one.
     assert orchestrator._state == OrchestratorState.RAMPING
-    assert procedure.measure_called == 0
-    assert orchestrator.pause_pending is True
+    assert procedure._index == 0
+    assert station.magnet_z.ramp_status() == "RAMPING"
 
     orchestrator.abort_procedure()
-    assert orchestrator.pause_pending is False  # cleared with the run
 
 
-def test_pause_lands_after_the_current_point_and_resumes_into_the_next_ramp(
+def test_pause_while_measuring_defers_until_the_datapoint_is_saved(
     orchestrator, station
 ):
-    """The pause boundary: finish the point being measured, then hold.
+    """The pause boundary: a point being read is never left stranded.
 
-    A pause requested while ramping to point 2 lets that point complete —
-    ramp, measure, save — and only then enters PAUSED, with the next point
-    not yet asked for. Resume re-enters SWEEPING, whose first act is the ramp
-    to point 3.
+    A pause requested in MEASURING — the one state where a point is ramped,
+    settled and gated but not yet read — waits for ``measure()`` to save its
+    datapoint, then holds at SWEEPING with the next point not yet asked for.
+    Resume's first act is the ramp to that next point.
     """
     _fast_magnet(station)
     procedure = MockProcedure(station)
     orchestrator.run_procedure(procedure)
 
-    # Run point 1 to completion, then step into the ramp toward point 2.
-    _tick_until(orchestrator, lambda: procedure.measure_called == 1)
-    assert orchestrator._state == OrchestratorState.SWEEPING
-    orchestrator._tick()
-    assert orchestrator._state == OrchestratorState.RAMPING
-    assert procedure._index == 1
+    _tick_until(
+        orchestrator, lambda: orchestrator._state == OrchestratorState.MEASURING
+    )
+    assert procedure.measure_called == 0  # this point has not been read yet
 
     orchestrator.pause_procedure()
-    assert orchestrator._state == OrchestratorState.RAMPING
+    assert orchestrator._state == OrchestratorState.MEASURING  # not paused yet
     assert orchestrator.pause_pending is True
 
     _tick_until(orchestrator, lambda: orchestrator._state == OrchestratorState.PAUSED)
-    assert procedure.measure_called == 2       # point 2 was measured, not skipped
-    assert procedure._index == 1               # point 3 not asked for yet
+    assert procedure.measure_called == 1        # the point was read, not skipped
+    assert procedure._index == 0                # the next point is not asked for
     assert orchestrator.pause_pending is False  # request honoured
     assert orchestrator._pre_pause_state == OrchestratorState.SWEEPING
+    assert station.magnet_z._driver.get_status() == "HOLD"
 
     for _ in range(10):
         orchestrator._tick()
     assert orchestrator._state == OrchestratorState.PAUSED
-    assert procedure.measure_called == 2  # nothing advances while paused
+    assert procedure.measure_called == 1  # nothing advances while paused
 
     orchestrator.resume_procedure()
     assert orchestrator._state == OrchestratorState.SWEEPING
-    orchestrator._tick()  # SWEEPING -> change_sweep_step() -> ramp to point 3
+    orchestrator._tick()  # SWEEPING -> change_sweep_step() -> ramp to point 2
     assert orchestrator._state == OrchestratorState.RAMPING
-    assert procedure._index == 2
-    _tick_until(orchestrator, lambda: procedure.measure_called == 3)
+    assert procedure._index == 1
+    _tick_until(orchestrator, lambda: procedure.measure_called == 2)
 
     orchestrator.abort_procedure()
 
 
 def test_resume_cancels_a_pause_request_that_has_not_landed(orchestrator, station):
     """Resume while the request is still pending withdraws it; the run carries on."""
+    _fast_magnet(station)
     procedure = MockProcedure(station)
     orchestrator.run_procedure(procedure)
-    orchestrator._tick()
+    _tick_until(
+        orchestrator, lambda: orchestrator._state == OrchestratorState.MEASURING
+    )
 
     orchestrator.pause_procedure()
     assert orchestrator.pause_pending is True
 
     orchestrator.resume_procedure()
     assert orchestrator.pause_pending is False
-    assert orchestrator._state == OrchestratorState.RAMPING
+    assert orchestrator._state == OrchestratorState.MEASURING
 
-    _fast_magnet(station)
+    _tick_until(orchestrator, lambda: procedure.measure_called == 2)
+    assert orchestrator._state != OrchestratorState.PAUSED  # never paused
     orchestrator.abort_procedure()
 
 
+def test_abort_clears_a_pending_pause_request(orchestrator, station):
+    """A request must not outlive its run, or the next one would pause itself."""
+    _fast_magnet(station)
+    procedure = MockProcedure(station)
+    orchestrator.run_procedure(procedure)
+    _tick_until(
+        orchestrator, lambda: orchestrator._state == OrchestratorState.MEASURING
+    )
+    orchestrator.pause_procedure()
+    assert orchestrator.pause_pending is True
+
+    orchestrator.abort_procedure()
+    assert orchestrator._state == OrchestratorState.IDLE
+    assert orchestrator.pause_pending is False
+
+
 def test_pause_during_standby_pauses_immediately(orchestrator, station):
-    """STANDBY has no next measurement to finish, so its pause is not deferred."""
+    """STANDBY holds on the spot like every other non-MEASURING state."""
     _fast_magnet(station)
     procedure = MockProcedure(station)
     orchestrator.run_procedure(procedure)
@@ -1454,15 +1488,30 @@ def test_malformed_initiate_return_fails_loudly(orchestrator, station):
     assert orchestrator._state == OrchestratorState.IDLE
 
 
-def test_pause_holds_hardware_and_resume_ramps_to_the_next_point(
+def test_pause_holds_hardware_and_resume_redispatches(orchestrator, station, qtbot):
+    """Pause must freeze the autonomous PSU; resume must restart the ramp."""
+    proc = MockProcedure(station)
+    orchestrator.run_procedure(proc)  # slow ramp toward 1.0 T
+    assert station.magnet_z.ramp_status() == "RAMPING"
+
+    orchestrator.pause_procedure()
+    assert orchestrator._state == OrchestratorState.PAUSED
+    drv = station.magnet_z._driver
+    assert drv.get_status() == "HOLD"  # field frozen, not still ramping
+
+    orchestrator.resume_procedure()
+    assert orchestrator._state in (
+        OrchestratorState.INITIATING, OrchestratorState.RAMPING
+    )
+    assert station.magnet_z.ramp_status() == "RAMPING"  # ramp re-dispatched
+
+    orchestrator.abort_procedure()
+
+
+def test_boundary_pause_holds_hardware_and_resume_ramps_to_the_next_point(
     orchestrator, station, qtbot
 ):
-    """The landed pause must freeze the autonomous PSU; resume must ramp on.
-
-    The hold is what makes a pause a pause: a magnet PSU ramps autonomously to
-    its last setpoint, so a software-only pause would leave the field moving.
-    Resume steps the sweep, which dispatches the next point's target.
-    """
+    """A pause taken at the boundary holds too, and resume steps the sweep."""
     _fast_magnet(station)
     proc = MockProcedure(station)
     orchestrator.run_procedure(proc)
@@ -1905,14 +1954,12 @@ def test_reading_gate_used_after_first_measurement_not_initiation(orchestrator, 
     assert calls["n"] == 2
 
 
-def test_pause_during_reading_gate_defers_until_the_point_is_measured(
-    orchestrator, station
-):
-    """A pause requested mid-gate lets the gate finish settling and measure.
+def test_pause_resume_during_reading_gate_holds_and_resumes(orchestrator, station):
+    """Pausing mid-gate holds pending_gates; resume continues stepping them.
 
-    Pausing inside a reading gate would strand the point half-settled, so the
-    request waits: the gate keeps stepping, the point is measured, and only
-    then does the run stop at the pause boundary.
+    A gate carries no data — its ``check`` is simply re-evaluated until it
+    holds — so a pause here stops on the spot like any other non-MEASURING
+    state, and the gate picks up where it left off.
     """
     from cryosoft.core.gates import Gate
 
@@ -1936,16 +1983,15 @@ def test_pause_during_reading_gate_defers_until_the_point_is_measured(
     assert orchestrator._state == OrchestratorState.READING_GATE
 
     orchestrator.pause_procedure()
-    assert orchestrator._state == OrchestratorState.READING_GATE
+    assert orchestrator._state == OrchestratorState.PAUSED
     orchestrator._tick()
-    assert calls["n"] == n_before_pause + 1  # the gate keeps stepping
-
-    _tick_until(orchestrator, lambda: orchestrator._state == OrchestratorState.PAUSED)
-    assert calls["n"] >= 5                  # the gate ran to completion
-    assert procedure.measure_called == 2    # the gated point was measured
+    assert calls["n"] == n_before_pause  # no stepping while paused
 
     orchestrator.resume_procedure()
-    assert orchestrator._state == OrchestratorState.SWEEPING
+    assert orchestrator._state == OrchestratorState.READING_GATE
+    orchestrator._tick()
+    assert calls["n"] == n_before_pause + 1
+
     orchestrator.abort_procedure()
 
 

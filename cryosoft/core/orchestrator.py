@@ -329,12 +329,12 @@ class Orchestrator(QObject):
 
         self._pre_pause_state = OrchestratorState.IDLE
         self._paused_wait_elapsed = 0.0
-        # Deferred pause (GLOSSARY.md's "Pause boundary"): pause_procedure()
-        # raises this flag instead of pausing where the run happens to be, and
-        # the SWEEPING branch of _tick_body() honours it — so a pause always
-        # lands after the current point has been measured and saved, never
-        # mid-ramp, mid-settle or mid-reading-loop. Cleared on every run
-        # teardown path so a request can never outlive its run.
+        # Deferred pause (GLOSSARY.md's "Pause boundary"): set ONLY when a
+        # pause is requested in MEASURING, where pausing would strand a
+        # settled-but-unread point. The SWEEPING branch of _tick_body()
+        # honours it once measure() has saved its datapoint. Every other
+        # state pauses immediately, so this stays False there. Cleared on
+        # every run teardown path so a request can never outlive its run.
         self._pause_requested = False
         # Last targets dispatched to the Station — re-dispatched on resume,
         # because pause_procedure() holds the hardware (which forgets its ramp).
@@ -729,59 +729,65 @@ class Orchestrator(QObject):
 
     @property
     def pause_pending(self) -> bool:
-        """True while a pause has been requested but the run has not reached its boundary.
+        """True while a pause is waiting for the current datapoint to finish.
 
         The read half of the deferred-pause surface (GLOSSARY.md's "Pause
         boundary"): the GUI and tests ask this instead of reading the private
-        flag. Goes False again the moment the run enters PAUSED, or when the
-        request is cancelled by ``resume_procedure()``/``abort_procedure()``.
+        flag. Only ever True for a pause requested in ``MEASURING`` — every
+        other state pauses on the spot. Goes False again the moment the run
+        enters PAUSED, or when the request is cancelled by
+        ``resume_procedure()``/``abort_procedure()``.
         """
         return self._pause_requested
 
     def pause_procedure(self) -> None:
-        """Request a pause; it takes effect once the current point is measured.
+        """Pause the run, holding the hardware — but never mid-datapoint.
 
-        Pausing is deferred to the **pause boundary** — the SWEEPING state,
-        reached after the current sweep point's measurement has been taken and
-        saved and before ``change_sweep_step()`` ramps to the next one. A pause
-        requested anywhere in a point's cycle (ramping to the setpoint, waiting
-        out ``wait_s``, stepping the reading gates, running the reading loop)
-        therefore lets that point finish, so no point is ever half-measured,
-        measured across a pause, or measured with the wait/gate settling it was
-        supposed to get. Resume always restarts at "ramp to the next point".
+        Pausing stops the physical ramps, not just the schedule: a magnet PSU
+        ramps autonomously to its last setpoint, so without a hardware hold
+        "pause" would only stop the software while the field kept moving. The
+        wait clock is frozen with it and restored on resume, so a point that
+        was half-way through its settle still gets the settle it was declared
+        to need. That hold is immediate from every state — mid-ramp, mid-wait,
+        mid-gate — because holding the cryostat where it stands is the whole
+        point of the control.
 
-        STANDBY is the one state that still pauses immediately: the sweep is
-        over, no further measurement is coming, so deferring the request would
-        mean it never took effect. An operator who needs the hardware held
-        *now*, mid-ramp, aborts instead — abort holds every ramp in place and
-        keeps the partial data.
+        ``MEASURING`` is the single exception, and the reason the **pause
+        boundary** exists: pausing there would strand a point that is ramped,
+        settled and gated but not yet read, and resuming would then take that
+        reading after an arbitrarily long hold. So a pause requested in
+        ``MEASURING`` is *deferred* — the flag is raised, ``measure()`` runs
+        and saves its datapoint on the next tick, and the ``SWEEPING`` branch
+        of ``_tick_body()`` honours the request the moment the point is
+        complete. Resume then starts at the ramp to the next point.
 
-        Whenever the pause does land, it holds the hardware, not just the
-        schedule: a magnet PSU ramps autonomously to its last setpoint, so
-        without a hardware hold "pause" would only stop the software while the
-        field kept moving. The wait clock is frozen and restored on resume.
+        (The reading loop itself is never at risk: ``measure()`` runs
+        synchronously inside one tick, so a click can only ever arrive
+        between ticks, never between two readings of a datapoint.)
         """
         if self._procedure is None:
             return
-        if self._state == OrchestratorState.STANDBY:
-            self._enter_paused()
-            return
-        if self._state in (OrchestratorState.INITIATING, OrchestratorState.RAMPING,
-                           OrchestratorState.INITIATION_GATE, OrchestratorState.READING_GATE,
-                           OrchestratorState.MEASURING, OrchestratorState.SWEEPING):
+        if self._state == OrchestratorState.MEASURING:
+            # Mid-datapoint: defer to the pause boundary rather than strand a
+            # settled, unread point.
             if self._pause_requested:
                 return
             self._pause_requested = True
             self._emit_status("Pause requested - pausing after this point")
+            return
+        if self._state in (OrchestratorState.INITIATING, OrchestratorState.RAMPING,
+                           OrchestratorState.INITIATION_GATE, OrchestratorState.READING_GATE,
+                           OrchestratorState.SWEEPING, OrchestratorState.STANDBY):
+            self._enter_paused()
 
     def _enter_paused(self) -> None:
         """Enter PAUSED from the current state, holding all of the run's hardware.
 
         The single PAUSED-entry path, shared by ``pause_procedure()``'s
-        immediate STANDBY case and by the pause boundary in ``_tick_body()``.
-        Records the state to return to, freezes the wait clock, and stops the
-        run's ramps (see ``pause_procedure()`` for why the hold is a hardware
-        one, and GLOSSARY.md's **Ramp scope** for why only this run's).
+        immediate cases and by the pause boundary in ``_tick_body()``. Records
+        the state to return to, freezes the wait clock, and stops the run's
+        ramps (see ``pause_procedure()`` for why the hold is a hardware one,
+        and GLOSSARY.md's **Ramp scope** for why only this run's).
         Clears any pending request — it has now been honoured.
         """
         self._pause_requested = False
@@ -795,13 +801,14 @@ class Orchestrator(QObject):
     def resume_procedure(self) -> None:
         """Resume from PAUSED, or cancel a pause that has not landed yet.
 
-        From PAUSED: restarts the held ramps and unfreezes the wait clock. A
-        pause taken at the pause boundary returns to SWEEPING, so the run's
-        next act is ``change_sweep_step()`` — the ramp to the next point.
+        From PAUSED: restarts the held ramps and unfreezes the wait clock, and
+        the run picks up where it was held — a pause taken mid-ramp finishes
+        that ramp and measures its point; one taken at the pause boundary
+        returns to SWEEPING, whose next act is the ramp to the next point.
 
         Called while a pause is merely *requested* (the run is still finishing
-        its point), this withdraws the request and the run carries on
-        uninterrupted.
+        the datapoint it was reading), this withdraws the request and the run
+        carries on uninterrupted.
         """
         if self._state != OrchestratorState.PAUSED:
             if self._pause_requested:
@@ -2292,10 +2299,10 @@ class Orchestrator(QObject):
         elif self._state == OrchestratorState.SWEEPING:
             self._station.advance_ramps()  # see MEASURING above
             if self._pause_requested:
-                # The pause boundary: the point just measured is saved and the
-                # next one has not been asked for yet, so this is the only
-                # place a pause can land without stranding a point. Resume
-                # re-enters SWEEPING and steps from here.
+                # The pause boundary: a pause requested during MEASURING waits
+                # here, where the point just read is saved and the next one has
+                # not been asked for yet. Resume re-enters SWEEPING and steps
+                # from here.
                 self._enter_paused()
             elif self._procedure:
                 step_plan = self._procedure.change_sweep_step()
