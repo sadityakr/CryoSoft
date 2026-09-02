@@ -1,9 +1,22 @@
 """Simulated Oxford ITC 503 Temperature Controller driver."""
 
+import logging
 import math
 import time
 
-from cryosoft.core.exceptions import CryoSoftCommunicationError
+from cryosoft.core.exceptions import (
+    CryoSoftCommunicationError,
+    CryoSoftInstrumentError,
+)
+
+log = logging.getLogger(__name__)
+
+# ISOBUS control modes: L = Local, R = Remote, L/U = Locked/Unlocked panel.
+# The real driver takes "RU" (Remote Unlocked) at construction, because
+# without remote the controller carries no commands at all. The sim starts
+# in the same mode and models what happens if it is ever lost: control
+# commands are answered with the ISOBUS '?' refusal.
+_REMOTE_CONTROL_MODES = frozenset({"RU", "RL"})
 
 
 class SimOxfordITC503:
@@ -42,6 +55,14 @@ class SimOxfordITC503:
         self._derivative_action_time: float = 0.0
         self._auto_pid: bool = True
 
+        # Instrument-error model (the driver error-reporting standard,
+        # drivers/README.md): the ISOBUS control mode. "RU" (Remote
+        # Unlocked) is what the real driver takes at construction; drop this
+        # to a local mode and every control command is answered with the
+        # ISOBUS '?' refusal instead of being carried out — the failure that
+        # otherwise looks like "the setpoint just never moves".
+        self._control_mode: str = "RU"
+
         # Test control flags
         self._simulate_error: bool = False
         # Connection-lifecycle standard: True once close() has released
@@ -69,6 +90,7 @@ class SimOxfordITC503:
         Args:
             setpoint: Desired temperature in Kelvin. Must be >= 0.
         """
+        self._refuse_if_local("set_setpoint")
         if setpoint < 0.0:
             raise ValueError(f"Temperature setpoint must be >= 0 K, got {setpoint}")
         self._setpoint = setpoint
@@ -108,7 +130,57 @@ class SimOxfordITC503:
         Args:
             position: Percent open in [0.0, 100.0]. Clamped silently.
         """
+        self._refuse_if_local("set_needle_valve")
         self._needle_valve = max(0.0, min(100.0, position))
+
+    # ------------------------------------------------------------------
+    # Instrument-error model (the driver error-reporting standard)
+    # ------------------------------------------------------------------
+
+    def _refuse_if_local(self, context: str) -> None:
+        """Answer the ISOBUS ``?`` refusal when the controller is not in remote.
+
+        Mirrors what the real controller puts on the wire, which pymeasure's
+        Oxford base raises and the real driver's ``_write_failure()`` turns
+        into this same typed error. A control command sent while the ITC is
+        in Local is not executed and not reported anywhere else.
+
+        Args:
+            context: The driver call being refused, e.g. ``"set_setpoint"``.
+
+        Raises:
+            CryoSoftInstrumentError: ``?`` if the control mode is not remote.
+        """
+        if self._control_mode in _REMOTE_CONTROL_MODES:
+            return
+        raise CryoSoftInstrumentError(
+            f"Simulated ITC 503 refused {context}: replied '?' — the "
+            f"controller is in control mode {self._control_mode!r}, not "
+            f"remote, so it carries no control command.",
+            code="?",
+            instrument_message="?",
+            context=context,
+            vi_name="SimOxfordITC503",
+        )
+
+    # ------------------------------------------------------------------
+    # Safe state (the safe-shutdown standard)
+    # ------------------------------------------------------------------
+
+    def safe_shutdown(self) -> None:
+        """Take the simulated heater off; idempotent, never raises.
+
+        Safe idle is the heater under MANUAL control at 0 %, so no closed
+        loop keeps chasing a setpoint. The needle valve and the setpoint are
+        deliberately preserved — see the real driver for why.
+        """
+        log.info("SimOxfordITC503: safe shutdown — heater to MANUAL 0 %%.")
+        self._heater_mode = "MANUAL"
+        self._heater_output = 0.0
+
+    def _is_in_safe_state(self) -> bool:
+        """Return True when the heater is manual and commanding no power."""
+        return self._heater_mode == "MANUAL" and self._heater_output == 0.0
 
     # ------------------------------------------------------------------
     # Internal simulation logic
@@ -169,6 +241,7 @@ class SimOxfordITC503:
             output: Percent of maximum voltage/power in [0.0, 99.9].
         """
         self._check_error()
+        self._refuse_if_local("set_heater_output")
         self._heater_output = max(0.0, min(99.9, output))
 
     def get_heater_mode(self) -> str:
@@ -183,6 +256,7 @@ class SimOxfordITC503:
             mode: Must be 'MANUAL' or 'AUTO'.
         """
         self._check_error()
+        self._refuse_if_local("set_heater_mode")
         if mode not in ("MANUAL", "AUTO"):
             raise ValueError(f"Heater mode must be 'MANUAL' or 'AUTO', got {mode}")
         self._heater_mode = mode
@@ -199,6 +273,7 @@ class SimOxfordITC503:
             mode: Must be 'MANUAL' or 'AUTO'.
         """
         self._check_error()
+        self._refuse_if_local("set_needle_valve_mode")
         if mode not in ("MANUAL", "AUTO"):
             raise ValueError(f"Needle valve mode must be 'MANUAL' or 'AUTO', got {mode}")
         self._needle_valve_mode = mode
@@ -215,6 +290,7 @@ class SimOxfordITC503:
             pb: Proportional band in Kelvin. Must be in [0.0, 1677.7].
         """
         self._check_error()
+        self._refuse_if_local("set_proportional_band")
         self._proportional_band = max(0.0, min(1677.7, pb))
 
     def get_integral_action_time(self) -> float:
@@ -229,6 +305,7 @@ class SimOxfordITC503:
             iat: Integral action time in minutes. Must be in [0.0, 140.0].
         """
         self._check_error()
+        self._refuse_if_local("set_integral_action_time")
         self._integral_action_time = max(0.0, min(140.0, iat))
 
     def get_derivative_action_time(self) -> float:
@@ -243,6 +320,7 @@ class SimOxfordITC503:
             dat: Derivative action time in minutes. Must be in [0.0, 273.0].
         """
         self._check_error()
+        self._refuse_if_local("set_derivative_action_time")
         self._derivative_action_time = max(0.0, min(273.0, dat))
 
     def get_auto_pid(self) -> bool:
@@ -257,4 +335,5 @@ class SimOxfordITC503:
             enabled: True to enable Auto-PID, False to disable.
         """
         self._check_error()
+        self._refuse_if_local("set_auto_pid")
         self._auto_pid = bool(enabled)

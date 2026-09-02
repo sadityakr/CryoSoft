@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import random
 
-from cryosoft.core.exceptions import CryoSoftCommunicationError
+from cryosoft.core.exceptions import (
+    CryoSoftCommunicationError,
+    CryoSoftInstrumentError,
+)
+
+log = logging.getLogger(__name__)
 
 # Duplicated verbatim from tensormeter_rtm2.py's _DATA_COLUMNS — kept
 # independent (not imported) so this sim driver never depends on the real
@@ -160,6 +166,73 @@ class SimTensormeterRTM2:
         self._closed = False
 
     # ------------------------------------------------------------------
+    # Instrument-error model (the driver error-reporting standard)
+    # ------------------------------------------------------------------
+
+    def _refuse_beyond_current_protection(
+        self, cmd: str, amps: float, context: str
+    ) -> None:
+        """Refuse a current setpoint the protection limit will not allow.
+
+        Models what the device puts on the wire: a setpoint it will not apply
+        produces a protocol-level error instead of the state-update echo the
+        real driver's ``_send_and_confirm()`` waits for, which that method
+        turns into this same typed error. Without it, a source setpoint
+        beyond the protection limit would look applied while the instrument
+        drove nothing.
+
+        Args:
+            cmd: The 4-character RTM2 command the setter would have sent.
+            amps: The requested current in Amperes.
+            context: The driver method being refused.
+
+        Raises:
+            CryoSoftInstrumentError: ``PROTOCOL`` if ``|amps|`` exceeds the
+                configured current protection limit.
+        """
+        if abs(float(amps)) <= self._current_protection_A:
+            return
+        message = (
+            f"setpoint {abs(float(amps)):.4g} A exceeds the current protection "
+            f"limit {self._current_protection_A:.4g} A"
+        )
+        raise CryoSoftInstrumentError(
+            f"Simulated Tensormeter RTM2 refused {cmd!r}: protocol error {message}",
+            code="PROTOCOL",
+            instrument_message=message,
+            context=context,
+            vi_name="SimTensormeterRTM2",
+        )
+
+    # ------------------------------------------------------------------
+    # Safe state (the safe-shutdown standard)
+    # ------------------------------------------------------------------
+
+    def safe_shutdown(self) -> None:
+        """Zero every simulated source setpoint; idempotent, never raises.
+
+        All four source knobs (AC/DC current, AC/DC voltage) go to zero,
+        because Control Mode 1 keeps the current and voltage setpoints
+        simultaneously live — see the real driver's docstring. Ranges,
+        analysis mode and the switch matrix are left alone.
+        """
+        log.info("SimTensormeterRTM2: safe shutdown — zeroing all source setpoints.")
+        self._current_amplitude_A = 0.0
+        self._current_dc_A = 0.0
+        self._voltage_amplitude_V = 0.0
+        self._voltage_dc_V = 0.0
+        self._active_current_A = 0.0
+
+    def _is_in_safe_state(self) -> bool:
+        """Return True when every source setpoint is zero."""
+        return (
+            self._current_amplitude_A == 0.0
+            and self._current_dc_A == 0.0
+            and self._voltage_amplitude_V == 0.0
+            and self._voltage_dc_V == 0.0
+        )
+
+    # ------------------------------------------------------------------
     # Switch matrix (§3.11)
     # ------------------------------------------------------------------
 
@@ -205,15 +278,42 @@ class SimTensormeterRTM2:
     # ------------------------------------------------------------------
 
     def set_current_amplitude(self, amps: float, ramp_time_s: float | None = None) -> float:
-        """Set the AC current amplitude setpoint (ramp_time_s stored but unused in sim)."""
+        """Set the AC current amplitude setpoint (ramp_time_s stored but unused in sim).
+
+        Args:
+            amps: AC current amplitude in Amperes.
+            ramp_time_s: Stored but unused in simulation.
+
+        Returns:
+            The applied amplitude in Amperes.
+
+        Raises:
+            CryoSoftInstrumentError: ``PROTOCOL`` if the setpoint exceeds the
+                configured current protection limit (see
+                :meth:`_refuse_beyond_current_protection`).
+        """
         self._check_error()
+        self._refuse_beyond_current_protection("camp", amps, "set_current_amplitude")
         self._current_amplitude_A = float(amps)
         self._active_current_A = self._current_amplitude_A
         return self._current_amplitude_A
 
     def set_current_dc(self, amps: float, ramp_time_s: float | None = None) -> float:
-        """Set the DC current setpoint (ramp_time_s stored but unused in sim)."""
+        """Set the DC current setpoint (ramp_time_s stored but unused in sim).
+
+        Args:
+            amps: DC current in Amperes.
+            ramp_time_s: Stored but unused in simulation.
+
+        Returns:
+            The applied current in Amperes.
+
+        Raises:
+            CryoSoftInstrumentError: ``PROTOCOL`` if the setpoint exceeds the
+                configured current protection limit.
+        """
         self._check_error()
+        self._refuse_beyond_current_protection("cudc", amps, "set_current_dc")
         self._current_dc_A = float(amps)
         self._active_current_A = self._current_dc_A
         return self._current_dc_A

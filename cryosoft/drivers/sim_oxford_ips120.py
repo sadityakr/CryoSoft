@@ -1,8 +1,15 @@
 """Simulated Oxford IPS 120-10 Magnet Power Supply driver."""
 
+import logging
 import time
 
-from cryosoft.core.exceptions import CryoSoftCommunicationError, CryoSoftSafetyError
+from cryosoft.core.exceptions import (
+    CryoSoftCommunicationError,
+    CryoSoftInstrumentError,
+    CryoSoftSafetyError,
+)
+
+log = logging.getLogger(__name__)
 
 
 class SimOxfordIPS120:
@@ -109,11 +116,34 @@ class SimOxfordIPS120:
     def set_ramp_rate(self, rate: float) -> None:
         """Set the current ramp rate.
 
+        Models the instrument-error half of the driver error-reporting
+        standard: while the PSU is CLAMPED it answers a SIG: write with
+        ``DENIED`` on the acknowledgement line and does not apply it. The
+        real driver detects exactly that reply in ``_write()``; here it is
+        raised directly, so a caller that never checked for a clamp finds
+        out at the point of the write rather than by wondering why the ramp
+        rate never changed.
+
         Args:
             rate: Ramp rate in A/min. Must be positive.
+
+        Raises:
+            ValueError: If *rate* is not positive (a programming error,
+                caught before anything reaches the bus).
+            CryoSoftInstrumentError: ``DENIED`` if the PSU is clamped.
         """
         if rate <= 0:
             raise ValueError(f"Ramp rate must be positive, got {rate}")
+        if self._simulate_clamp:
+            context = f"set_ramp_rate({rate!r})"
+            raise CryoSoftInstrumentError(
+                f"Simulated IPS 120 refused {context}: "
+                f"STAT:SET:DEV:GRPZ:PSU:SIG:RCST:DENIED — the PSU is CLAMPED",
+                code="DENIED",
+                instrument_message="STAT:SET:DEV:GRPZ:PSU:SIG:RCST:DENIED",
+                context=context,
+                vi_name="SimOxfordIPS120",
+            )
         self._ramp_rate = rate
 
     def get_ramp_rate(self) -> float:
@@ -261,6 +291,29 @@ class SimOxfordIPS120:
         else:
             direction = 1 if remaining > 0 else -1
             self._current += direction * max_step
+
+    # ------------------------------------------------------------------
+    # Safe state (the safe-shutdown standard)
+    # ------------------------------------------------------------------
+
+    def safe_shutdown(self) -> None:
+        """Freeze the simulated magnet where it is; idempotent, never raises.
+
+        Safe idle for a superconducting magnet is HOLD, not zero field — see
+        the real driver's docstring for why ramping down is a supervised
+        operation and never a cleanup step. The switch heater is left
+        untouched, because changing it across a PSU/coil current mismatch is
+        what quenches the magnet.
+        """
+        log.info("SimOxfordIPS120: safe shutdown — HOLD (magnet stays at field).")
+        self._update_simulation()
+        self._setpoint = self._current
+        if self._status == "RAMPING":
+            self._status = "HOLD"
+
+    def _is_in_safe_state(self) -> bool:
+        """Return True when no ramp is running and the setpoint is where the PSU is."""
+        return self._status != "RAMPING" and self._setpoint == self._current
 
     # ------------------------------------------------------------------
     # Connection lifecycle (the connection-lifecycle standard)

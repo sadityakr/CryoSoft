@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 import pyvisa
 
-from cryosoft.core.exceptions import CryoSoftCommunicationError
+from cryosoft.core.exceptions import (
+    CryoSoftCommunicationError,
+    CryoSoftInstrumentError,
+)
 
 log = logging.getLogger(__name__)
 
@@ -75,8 +78,17 @@ class Keithley705:
         The 705 has no error reporting on the bus: a command it cannot execute
         (an out-of-range channel, or any command while REMOTE is unasserted) is
         discarded silently and the readback is unchanged. Never infer success
-        from the absence of an exception — read back
-        :meth:`closed_channels` when a close must be guaranteed.
+        from the absence of an exception.
+
+    Verification method under the **driver error-reporting standard** (see
+    ``drivers/README.md``): **explicit readback**. There is no error queue and
+    no acknowledgement to poll, so every method that opens or closes a channel
+    reads the G2 buffer dump back and raises
+    ``CryoSoftInstrumentError(code="READBACK_MISMATCH")`` when the instrument's
+    own state does not match what was asked for. This is the whole of the
+    standard that this instrument can support, and it is why the standard is
+    written as "error queue, protocol acknowledgement, **or** explicit
+    readback, and the driver documents which".
 
     Driver contract:
     1. It is a Python class.
@@ -204,12 +216,24 @@ class Keithley705:
         Args:
             specs: Channel numbers as strings (e.g. ``["1", "005"]``). Each is
                 normalised to the instrument's three-digit form.
+
+        Raises:
+            CryoSoftInstrumentError: ``READBACK_MISMATCH`` if the instrument
+                does not report every requested channel closed afterwards
+                (the driver error-reporting standard: readback is this
+                instrument's only verification).
         """
+        wanted = {self._channel_spec(spec) for spec in specs}
         for spec in specs:
             self._write(
                 f"{_CMD_CLOSE_PREFIX}{self._channel_spec(spec)}{_CMD_EXECUTE}"
             )
             self._closed.add(self._channel_spec(spec))
+        self._verify_closed(
+            lambda actual: wanted <= actual,
+            f"close_channels({list(specs)!r})",
+            f"channels {sorted(wanted)} closed",
+        )
 
     def open_channels(self, specs: Sequence[str]) -> None:
         """Open (disconnect) the given channels, one DDC command each.
@@ -217,12 +241,22 @@ class Keithley705:
         Args:
             specs: Channel numbers as strings. Each is normalised to the
                 instrument's three-digit form.
+
+        Raises:
+            CryoSoftInstrumentError: ``READBACK_MISMATCH`` if any requested
+                channel is still reported closed afterwards.
         """
+        unwanted = {self._channel_spec(spec) for spec in specs}
         for spec in specs:
             self._write(
                 f"{_CMD_OPEN_PREFIX}{self._channel_spec(spec)}{_CMD_EXECUTE}"
             )
             self._closed.discard(self._channel_spec(spec))
+        self._verify_closed(
+            lambda actual: not (unwanted & actual),
+            f"open_channels({list(specs)!r})",
+            f"channels {sorted(unwanted)} open",
+        )
 
     def open_all(self) -> None:
         """Open every channel (DDC reset), re-asserting the pole mode.
@@ -233,6 +267,12 @@ class Keithley705:
         mode with it means the scanner cannot drift into a different pole
         configuration mid-experiment — which would silently renumber every
         channel the route table names.
+
+        Raises:
+            CryoSoftInstrumentError: ``READBACK_MISMATCH`` if any channel is
+                still reported closed afterwards. This one matters most: the
+                exclusive-mux policy builds every route on the assumption
+                that the reset actually opened everything.
         """
         if self._pole_mode is None:
             self._write(_CMD_OPEN_ALL)
@@ -241,6 +281,9 @@ class Keithley705:
                 f"{_POLE_COMMANDS[self._pole_mode]}{_CMD_RESET}{_CMD_EXECUTE}"
             )
         self._closed.clear()
+        self._verify_closed(
+            lambda actual: not actual, "open_all()", "no channels closed"
+        )
 
     def closed_channels(self) -> list[str]:
         """Return the channels the instrument reports as closed, sorted.
@@ -346,22 +389,115 @@ class Keithley705:
 
         Args:
             channel: Channel number as a string (e.g. ``"5"``).
+
+        Raises:
+            CryoSoftInstrumentError: ``READBACK_MISMATCH`` if the instrument
+                does not report exactly this channel closed afterwards.
         """
         ch = self._channel_spec(channel)
         self._write(_CMD_OPEN_ALL)
         self._write(f"{_CMD_CLOSE_PREFIX}{ch}{_CMD_EXECUTE}")
         self._closed.clear()
         self._closed.add(ch)
+        self._verify_closed(
+            lambda actual: actual == {ch},
+            f"close_channel({channel!r})",
+            f"only channel {ch} closed",
+        )
 
     def open_channel(self, channel: str) -> None:
         """Open (disconnect) a single channel.
 
         Args:
             channel: Channel number as a string (e.g. ``"5"``).
+
+        Raises:
+            CryoSoftInstrumentError: ``READBACK_MISMATCH`` if the channel is
+                still reported closed afterwards.
         """
         ch = self._channel_spec(channel)
         self._write(f"{_CMD_OPEN_PREFIX}{ch}{_CMD_EXECUTE}")
         self._closed.discard(ch)
+        self._verify_closed(
+            lambda actual: ch not in actual,
+            f"open_channel({channel!r})",
+            f"channel {ch} open",
+        )
+
+    # ------------------------------------------------------------------
+    # Verification (the driver error-reporting standard)
+    # ------------------------------------------------------------------
+
+    def _verify_closed(
+        self,
+        holds: Callable[[set[str]], bool],
+        context: str,
+        expectation: str,
+    ) -> None:
+        """Read the channel state back and raise if *holds* does not.
+
+        The 705's whole implementation of the **driver error-reporting
+        standard** (see ``drivers/README.md``). This instrument has no error
+        queue and acknowledges nothing, so a command it cannot execute — an
+        out-of-range channel (IDDCO), or any command at all while REMOTE is
+        unasserted — is discarded with no trace on the bus and the readback
+        simply stays as it was. Reading the state back and comparing it with
+        what was asked for is the only truth available, and doing it inside
+        the driver is what turns "the route silently never connected" into a
+        typed error at the call site.
+
+        Args:
+            holds: Predicate over the set of channels the instrument reports
+                closed; True means the command took effect.
+            context: The driver call being verified, e.g. ``"close_channel('5')"``.
+            expectation: Plain-English description of what was expected, for
+                the error message.
+
+        Raises:
+            CryoSoftInstrumentError: ``READBACK_MISMATCH`` if *holds* is False.
+        """
+        actual = set(self.closed_channels())
+        if holds(actual):
+            return
+        log.error(
+            "Keithley 705: %s did not take effect — expected %s, instrument "
+            "reports %s closed",
+            context, expectation, sorted(actual),
+        )
+        raise CryoSoftInstrumentError(
+            f"Keithley 705 did not carry out {context}: expected {expectation}, "
+            f"but the instrument reports {sorted(actual)} closed. The 705 "
+            f"discards a command it cannot execute (out-of-range channel, or "
+            f"REMOTE unasserted) without reporting anything on the bus.",
+            code="READBACK_MISMATCH",
+            instrument_message=f"closed channels: {sorted(actual)}",
+            context=context,
+            vi_name="Keithley705",
+        )
+
+    # ------------------------------------------------------------------
+    # Safe state (the safe-shutdown standard)
+    # ------------------------------------------------------------------
+
+    def safe_shutdown(self) -> None:
+        """Unconditionally open every channel; never raises.
+
+        The 705's half of the **safe-shutdown standard** (see
+        ``drivers/README.md``): idempotent, callable from any leftover state.
+
+        Safe idle for a scanner is every channel open — nothing routed to the
+        sample, so whatever a source does next reaches nothing. The pole mode
+        is re-asserted with the reset, exactly as :meth:`open_all` does, so
+        the channel numbering cannot drift.
+
+        Recovers from: any set of closed channels, including ones closed from
+        the front panel or left by an abandoned route.
+        """
+        log.info("Keithley 705: safe shutdown — opening every channel.")
+        try:
+            self.open_all()
+        except Exception as exc:  # noqa: BLE001 — safe shutdown must never raise
+            log.warning("Keithley 705: safe shutdown could not open all: %s", exc)
 
     # ------------------------------------------------------------------
     # Private VISA helpers

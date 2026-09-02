@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import logging
 
-from cryosoft.core.exceptions import CryoSoftCommunicationError
+from cryosoft.core.exceptions import (
+    CryoSoftCommunicationError,
+    CryoSoftInstrumentError,
+)
 
 log = logging.getLogger(__name__)
 
@@ -103,9 +106,10 @@ class OxfordITC503:
         try:
             self._itc.temperature_setpoint = setpoint
         except Exception as exc:
-            raise CryoSoftCommunicationError(
+            raise self._write_failure(
+                exc,
+                "set_setpoint",
                 f"ITC503: could not set setpoint to {setpoint} K: {exc}",
-                vi_name="OxfordITC503",
             ) from exc
 
     def get_heater_output(self) -> float:
@@ -163,6 +167,86 @@ class OxfordITC503:
             log.debug("ITC503: error closing ISOBUS session: %s", exc)
 
     # ------------------------------------------------------------------
+    # Safe state (the safe-shutdown standard)
+    # ------------------------------------------------------------------
+
+    def safe_shutdown(self) -> None:
+        """Unconditionally take the heater off; never raises.
+
+        The ITC 503's half of the **safe-shutdown standard** (see
+        ``drivers/README.md``): idempotent, callable from any leftover state.
+
+        Safe idle for this controller is the heater under MANUAL control at
+        0 % — closed-loop control chasing a setpoint is exactly what must not
+        keep running after everything above it has gone away. The order
+        matters: MANUAL first, so the PID cannot immediately overwrite the
+        zero.
+
+        The needle valve is deliberately left exactly as it is. Slamming it
+        shut is not a safe action on a flow cryostat — it can strand the
+        VTI's cooling with the sample space still cold — so the gas flow
+        stays whatever the operator or the auto loop last set it to, and the
+        setpoint is preserved for the same reason as on the Lakeshore: it
+        heats nothing while the heater output is zero and manual.
+
+        Recovers from: a closed-loop heater chasing a setpoint, and a
+        non-zero manual heater output.
+        """
+        log.info("ITC503: safe shutdown — heater to MANUAL 0 %%.")
+        for step, apply in (
+            ("set_heater_mode('MANUAL')", lambda: self.set_heater_mode("MANUAL")),
+            ("set_heater_output(0.0)", lambda: self.set_heater_output(0.0)),
+        ):
+            try:
+                apply()
+            except Exception as exc:  # noqa: BLE001 — safe shutdown must never raise
+                log.warning("ITC503: safe shutdown could not %s: %s", step, exc)
+
+    # ------------------------------------------------------------------
+    # Verification (the driver error-reporting standard)
+    # ------------------------------------------------------------------
+
+    def _write_failure(
+        self, exc: Exception, context: str, message: str
+    ) -> CryoSoftCommunicationError:
+        """Return the right typed error for a failed setter.
+
+        The ITC 503's half of the **driver error-reporting standard** (see
+        ``drivers/README.md``). Its verification method is the ISOBUS
+        **protocol acknowledgement**, and pymeasure's Oxford base class
+        already performs it: every command is echoed back, and a command the
+        controller will not carry out is answered with ``?`` + the command,
+        which pymeasure raises as ``OxfordVISAError``. All this driver has to
+        do is not flatten that distinction — an instrument that refused a
+        command is a different fact from a link that broke, and only the
+        first tells the caller its setpoint never landed.
+
+        Args:
+            exc: The exception pymeasure raised.
+            context: The driver method that failed, e.g. ``"set_setpoint"``.
+            message: The human-readable message for the returned error.
+
+        Returns:
+            ``CryoSoftInstrumentError`` (code ``"?"``) when the controller
+            itself refused the command, otherwise a plain
+            ``CryoSoftCommunicationError``.
+        """
+        # pymeasure is imported lazily in __init__, so the class is matched by
+        # name rather than by an import this module must not require.
+        if type(exc).__name__ == "OxfordVISAError":
+            return CryoSoftInstrumentError(
+                message,
+                code="?",
+                instrument_message=str(exc),
+                context=context,
+                vi_name="OxfordITC503",
+                original_error=exc,
+            )
+        return CryoSoftCommunicationError(
+            message, vi_name="OxfordITC503", original_error=exc
+        )
+
+    # ------------------------------------------------------------------
     # Needle-valve API  (VTITemperatureControllerVI only)
     # ------------------------------------------------------------------
 
@@ -192,9 +276,10 @@ class OxfordITC503:
         try:
             self._itc.gasflow = clamped
         except Exception as exc:
-            raise CryoSoftCommunicationError(
+            raise self._write_failure(
+                exc,
+                "set_needle_valve",
                 f"ITC503: could not set gasflow to {clamped}: {exc}",
-                vi_name="OxfordITC503",
             ) from exc
 
     def set_heater_output(self, output: float) -> None:
@@ -207,9 +292,10 @@ class OxfordITC503:
         try:
             self._itc.heater = clamped
         except Exception as exc:
-            raise CryoSoftCommunicationError(
+            raise self._write_failure(
+                exc,
+                "set_heater_output",
                 f"ITC503: could not set heater output to {clamped}: {exc}",
-                vi_name="OxfordITC503",
             ) from exc
 
     def get_heater_mode(self) -> str:
@@ -241,9 +327,10 @@ class OxfordITC503:
                 new_mode = "MA" if current_gas == "AUTO" else "MANUAL"
             self._itc.heater_gas_mode = new_mode
         except Exception as exc:
-            raise CryoSoftCommunicationError(
+            raise self._write_failure(
+                exc,
+                "set_heater_mode",
                 f"ITC503: could not set heater mode to {mode}: {exc}",
-                vi_name="OxfordITC503",
             ) from exc
 
     def get_needle_valve_mode(self) -> str:
@@ -275,9 +362,10 @@ class OxfordITC503:
                 new_mode = "AM" if current_heater == "AUTO" else "MANUAL"
             self._itc.heater_gas_mode = new_mode
         except Exception as exc:
-            raise CryoSoftCommunicationError(
+            raise self._write_failure(
+                exc,
+                "set_needle_valve_mode",
                 f"ITC503: could not set needle valve mode to {mode}: {exc}",
-                vi_name="OxfordITC503",
             ) from exc
 
     def get_proportional_band(self) -> float:
@@ -300,9 +388,10 @@ class OxfordITC503:
         try:
             self._itc.proportional_band = clamped
         except Exception as exc:
-            raise CryoSoftCommunicationError(
+            raise self._write_failure(
+                exc,
+                "set_proportional_band",
                 f"ITC503: could not set proportional band to {clamped}: {exc}",
-                vi_name="OxfordITC503",
             ) from exc
 
     def get_integral_action_time(self) -> float:
@@ -325,9 +414,10 @@ class OxfordITC503:
         try:
             self._itc.integral_action_time = clamped
         except Exception as exc:
-            raise CryoSoftCommunicationError(
+            raise self._write_failure(
+                exc,
+                "set_integral_action_time",
                 f"ITC503: could not set integral action time to {clamped}: {exc}",
-                vi_name="OxfordITC503",
             ) from exc
 
     def get_derivative_action_time(self) -> float:
@@ -350,9 +440,10 @@ class OxfordITC503:
         try:
             self._itc.derivative_action_time = clamped
         except Exception as exc:
-            raise CryoSoftCommunicationError(
+            raise self._write_failure(
+                exc,
+                "set_derivative_action_time",
                 f"ITC503: could not set derivative action time to {clamped}: {exc}",
-                vi_name="OxfordITC503",
             ) from exc
 
     def get_auto_pid(self) -> bool:
@@ -374,7 +465,8 @@ class OxfordITC503:
         try:
             self._itc.auto_pid = bool(enabled)
         except Exception as exc:
-            raise CryoSoftCommunicationError(
+            raise self._write_failure(
+                exc,
+                "set_auto_pid",
                 f"ITC503: could not set auto_pid to {enabled}: {exc}",
-                vi_name="OxfordITC503",
             ) from exc

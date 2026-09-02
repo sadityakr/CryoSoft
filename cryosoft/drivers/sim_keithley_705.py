@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import logging
+from collections.abc import Callable, Sequence
 
-from cryosoft.core.exceptions import CryoSoftCommunicationError
+from cryosoft.core.exceptions import (
+    CryoSoftCommunicationError,
+    CryoSoftInstrumentError,
+)
+
+log = logging.getLogger(__name__)
 
 
 class SimKeithley705:
@@ -74,13 +80,23 @@ class SimKeithley705:
 
         Args:
             specs: Channel numbers as strings, normalised to three digits.
-                Out-of-range channels are silently ignored (see
-                :meth:`_channel_spec`).
+
+        Raises:
+            CryoSoftInstrumentError: ``READBACK_MISMATCH`` if a channel does
+                not actually close — an out-of-range channel is discarded by
+                the instrument with no bus error (see :meth:`_in_range`), and
+                readback is the only way to find out.
         """
+        wanted = {self._channel_spec(spec) for spec in specs}
         for spec in specs:
             ch = self._channel_spec(spec)
             if self._in_range(ch):
                 self._closed.add(ch)
+        self._verify_closed(
+            lambda actual: wanted <= actual,
+            f"close_channels({list(specs)!r})",
+            f"channels {sorted(wanted)} closed",
+        )
 
     def open_channels(self, specs: Sequence[str]) -> None:
         """Open (disconnect) the given channels.
@@ -88,13 +104,31 @@ class SimKeithley705:
         Args:
             specs: Channel numbers as strings. Channels not currently closed
                 are ignored.
+
+        Raises:
+            CryoSoftInstrumentError: ``READBACK_MISMATCH`` if a channel is
+                still reported closed afterwards.
         """
+        unwanted = {self._channel_spec(spec) for spec in specs}
         for spec in specs:
             self._closed.discard(self._channel_spec(spec))
+        self._verify_closed(
+            lambda actual: not (unwanted & actual),
+            f"open_channels({list(specs)!r})",
+            f"channels {sorted(unwanted)} open",
+        )
 
     def open_all(self) -> None:
-        """Open every channel (clear the closed-channel set)."""
+        """Open every channel (clear the closed-channel set).
+
+        Raises:
+            CryoSoftInstrumentError: ``READBACK_MISMATCH`` if any channel is
+                still reported closed afterwards.
+        """
         self._closed.clear()
+        self._verify_closed(
+            lambda actual: not actual, "open_all()", "no channels closed"
+        )
 
     def closed_channels(self) -> list[str]:
         """Return the currently-closed channels, sorted.
@@ -106,6 +140,64 @@ class SimKeithley705:
         """
         self._check_error()
         return sorted(self._closed)
+
+    # ------------------------------------------------------------------
+    # Verification (the driver error-reporting standard)
+    # ------------------------------------------------------------------
+
+    def _verify_closed(
+        self,
+        holds: Callable[[set[str]], bool],
+        context: str,
+        expectation: str,
+    ) -> None:
+        """Read the channel state back and raise if *holds* does not.
+
+        Mirrors the real driver method of the same name. The 705 has no error
+        queue and acknowledges nothing, so readback is its only verification
+        (the driver error-reporting standard, ``drivers/README.md``): a
+        command the instrument discards — an out-of-range channel, or any
+        command while REMOTE is unasserted — shows up here and nowhere else.
+
+        Args:
+            holds: Predicate over the closed-channel set; True means the
+                command took effect.
+            context: The driver call being verified.
+            expectation: Plain-English description of what was expected.
+
+        Raises:
+            CryoSoftInstrumentError: ``READBACK_MISMATCH`` if *holds* is False.
+        """
+        actual = set(self._closed)
+        if holds(actual):
+            return
+        raise CryoSoftInstrumentError(
+            f"Simulated Keithley 705 did not carry out {context}: expected "
+            f"{expectation}, but the instrument reports {sorted(actual)} "
+            f"closed. The 705 discards a command it cannot execute without "
+            f"reporting anything on the bus.",
+            code="READBACK_MISMATCH",
+            instrument_message=f"closed channels: {sorted(actual)}",
+            context=context,
+            vi_name="SimKeithley705",
+        )
+
+    # ------------------------------------------------------------------
+    # Safe state (the safe-shutdown standard)
+    # ------------------------------------------------------------------
+
+    def safe_shutdown(self) -> None:
+        """Open every simulated channel; idempotent, never raises.
+
+        Safe idle for a scanner is every channel open — nothing routed to the
+        sample. Matches the real driver's ``open_all()``.
+        """
+        log.info("SimKeithley705: safe shutdown — opening every channel.")
+        self._closed.clear()
+
+    def _is_in_safe_state(self) -> bool:
+        """Return True when no channel is closed."""
+        return not self._closed
 
     # ------------------------------------------------------------------
     # Connection lifecycle (the connection-lifecycle standard)
@@ -178,21 +270,40 @@ class SimKeithley705:
 
         Args:
             channel: Channel number as a string (e.g. ``"5"``).
+
+        Raises:
+            CryoSoftInstrumentError: ``READBACK_MISMATCH`` if the channel
+                does not actually close (e.g. it is past the installed range).
         """
         self._check_error()
         ch = self._channel_spec(channel)
         self._closed.clear()
         if self._in_range(ch):
             self._closed.add(ch)
+        self._verify_closed(
+            lambda actual: actual == {ch},
+            f"close_channel({channel!r})",
+            f"only channel {ch} closed",
+        )
 
     def open_channel(self, channel: str) -> None:
         """Open (disconnect) a single channel.
 
         Args:
             channel: Channel number as a string (e.g. ``"5"``).
+
+        Raises:
+            CryoSoftInstrumentError: ``READBACK_MISMATCH`` if the channel is
+                still reported closed afterwards.
         """
         self._check_error()
-        self._closed.discard(self._channel_spec(channel))
+        ch = self._channel_spec(channel)
+        self._closed.discard(ch)
+        self._verify_closed(
+            lambda actual: ch not in actual,
+            f"open_channel({channel!r})",
+            f"channel {ch} open",
+        )
 
     # ------------------------------------------------------------------
     # Channel-spec modelling (mirrors the real instrument's behaviour)

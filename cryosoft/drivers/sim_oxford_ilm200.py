@@ -1,8 +1,14 @@
 """Simulated Oxford ILM 200 Cryogen Level Meter driver."""
 
+import logging
 import time
 
-from cryosoft.core.exceptions import CryoSoftCommunicationError
+from cryosoft.core.exceptions import (
+    CryoSoftCommunicationError,
+    CryoSoftInstrumentError,
+)
+
+log = logging.getLogger(__name__)
 
 
 class SimOxfordILM200:
@@ -33,6 +39,14 @@ class SimOxfordILM200:
         # Test control: override helium level reading (None = use simulation)
         self._force_helium_level: float | None = None
 
+        # Instrument-error model (the driver error-reporting standard,
+        # drivers/README.md): which measurement channels actually have a
+        # probe fitted. A command naming an unfitted channel is answered
+        # with the ISOBUS '?' refusal, not with a level — the failure mode
+        # a config that names a nitrogen channel this meter does not have
+        # would otherwise show as a nonsense reading.
+        self._channels_fitted: set[int] = {1, 2}
+
         # Test control flags
         self._simulate_error: bool = False
         # Connection-lifecycle standard: True once close() has released
@@ -49,6 +63,7 @@ class SimOxfordILM200:
         If _force_helium_level is set, that value is returned directly.
         """
         self._check_error()
+        self._refuse_if_unfitted(1, "R1", "get_helium_level()")
         self._update_simulation()
         if self._force_helium_level is not None:
             return float(self._force_helium_level)
@@ -60,6 +75,7 @@ class SimOxfordILM200:
         Nitrogen stays nearly constant in this simulation.
         """
         self._check_error()
+        self._refuse_if_unfitted(2, "R2", "get_nitrogen_level()")
         return self._nitrogen_level
 
     def get_refresh_rate(self) -> int:
@@ -78,6 +94,9 @@ class SimOxfordILM200:
         """
         if mode not in (0, 1, 2):
             raise ValueError(f"Refresh rate mode must be 0, 1, or 2, got {mode}")
+        self._refuse_if_unfitted(
+            1, "T1" if mode == 2 else "S1", f"set_refresh_rate({mode!r})"
+        )
         self._refresh_rate = mode
 
     def get_idn(self) -> str:
@@ -97,6 +116,55 @@ class SimOxfordILM200:
 
         drift = self._helium_drift_rate * dt_min
         self._helium_level = max(0.0, self._helium_level - drift)
+
+    # ------------------------------------------------------------------
+    # Instrument-error model (the driver error-reporting standard)
+    # ------------------------------------------------------------------
+
+    def _refuse_if_unfitted(self, channel: int, cmd: str, context: str) -> None:
+        """Answer the ISOBUS ``?`` refusal for a channel with no probe fitted.
+
+        Mirrors what the real meter puts on the wire: instead of a level (or
+        an echo), it replies ``?`` + the command, which the real driver's
+        ``_check_acknowledgement()`` turns into this same typed error.
+
+        Args:
+            channel: The ISOBUS channel the command addresses (1 = He, 2 = N2).
+            cmd: The ISOBUS command that would have been sent.
+            context: The driver call being refused.
+
+        Raises:
+            CryoSoftInstrumentError: ``?`` if *channel* has no probe fitted.
+        """
+        if channel in self._channels_fitted:
+            return
+        raise CryoSoftInstrumentError(
+            f"Simulated ILM 200 refused command {cmd!r}: replied '?{cmd}'. "
+            f"An ISOBUS '?' reply means the instrument did not carry the "
+            f"command out (here: no probe fitted on channel {channel}).",
+            code="?",
+            instrument_message=f"?{cmd}",
+            context=context,
+            vi_name="SimOxfordILM200",
+        )
+
+    # ------------------------------------------------------------------
+    # Safe state (the safe-shutdown standard)
+    # ------------------------------------------------------------------
+
+    def safe_shutdown(self) -> None:
+        """Take the simulated probe off continuous drive; never raises.
+
+        Safe idle for a level meter is the pulsed refresh rate, not "off" —
+        the level is a safety input and must keep arriving, but FAST mode
+        keeps the probe energised and boils helium. See the real driver.
+        """
+        log.info("SimOxfordILM200: safe shutdown — probe back to pulsed refresh.")
+        self._refresh_rate = 0
+
+    def _is_in_safe_state(self) -> bool:
+        """Return True when the probe is not in FAST/continuous mode."""
+        return self._refresh_rate != 2
 
     # ------------------------------------------------------------------
     # Connection lifecycle (the connection-lifecycle standard)

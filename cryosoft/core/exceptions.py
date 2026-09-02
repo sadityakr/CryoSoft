@@ -3,6 +3,7 @@
 Exception tree:
     CryoSoftError
     ├── CryoSoftCommunicationError   — VISA / instrument communication failure
+    │   └── CryoSoftInstrumentError  — the instrument itself refused a command
     ├── CryoSoftSafetyError          — safety condition violated
     ├── CryoSoftConfigError          — YAML config invalid or missing
     └── DataSchemaError              — datapoint does not match its declared HDF5 schema
@@ -27,6 +28,66 @@ class CryoSoftCommunicationError(CryoSoftError):
         self.vi_name = vi_name
         self.original_error = original_error
         super().__init__(message)
+
+
+class CryoSoftInstrumentError(CryoSoftCommunicationError):
+    """Raised when the instrument itself reports that it refused a command.
+
+    The typed error of the **driver error-reporting standard** (see
+    ``drivers/README.md``): the bus transaction succeeded — bytes went out
+    and, where the protocol answers, bytes came back — but the instrument
+    then told CryoSoft it did not carry the command out. That is a
+    different fact from "the link is broken", and silently discarding it is
+    the failure mode the standard exists to prevent: the caller believes it
+    set a current, the instrument disagrees, and everything downstream is
+    fiction.
+
+    A subclass of ``CryoSoftCommunicationError`` on purpose: every layer
+    that already treats a driver call as fallible (``Station.get_state()``'s
+    stale-value handling, a VI's guarded control path) keeps working
+    unchanged, while code that cares about the distinction can catch this
+    type specifically and read the instrument's own words out of it.
+
+    Attributes:
+        code: The instrument's own refusal code as a string, verbatim where
+            the instrument emits one (``"-221"`` from a SCPI error queue,
+            ``"?"`` from an Oxford ISOBUS reply, ``"DENIED"`` from a Mercury
+            acknowledgement) and, for the protocols that report a refusal
+            without a code, the standard's own token for how the refusal was
+            detected (``"READBACK_MISMATCH"``, ``"PROTOCOL"``). See the
+            per-driver table in ``drivers/README.md``.
+        instrument_message: The instrument's own message text, verbatim
+            (e.g. ``'Settings conflict'``), empty when the protocol sends
+            none.
+        context: What the driver was doing when the instrument refused
+            (e.g. ``"set_current(0.0001)"``) — the half the instrument
+            cannot know and the reader always needs.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        code: str = "",
+        instrument_message: str = "",
+        context: str = "",
+        vi_name: str = "",
+        original_error: Exception | None = None,
+    ):
+        """Build the typed instrument-refusal error.
+
+        Args:
+            message: Human-readable description, normally assembled from the
+                other fields by the driver raising it.
+            code: The instrument's refusal code (see the class docstring).
+            instrument_message: The instrument's own message text.
+            context: The driver call that was refused.
+            vi_name: Name of the driver/VI that encountered the error.
+            original_error: The underlying exception, when there was one.
+        """
+        self.code = code
+        self.instrument_message = instrument_message
+        self.context = context
+        super().__init__(message, vi_name=vi_name, original_error=original_error)
 
 
 class CryoSoftSafetyError(CryoSoftError):
