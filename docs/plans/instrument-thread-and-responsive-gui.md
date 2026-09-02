@@ -453,6 +453,10 @@ cancellation flag between readings (decision 4).
 
 ## 4. Merge and build plan
 
+*Sequencing across all four owning documents now lives in
+`development-plan-contracts-to-agents.md`; this section keeps the redline's
+step numbering for the steps this plan owns.*
+
 Numbering follows the redline so the two documents can be read together.
 Each step ends with `make check` green and is independently mergeable.
 Nothing before Phase 1 changes behaviour on `main`.
