@@ -16,6 +16,7 @@ __all__ = [
     "StepPlan",
     "ParamSpec",
     "ParamGroup",
+    "UIGroup",
     "DataSchema",
     "EnvelopeBound",
     "ExperimentEnvelope",
@@ -493,6 +494,93 @@ class ParamGroup:
                     f"ParamGroup.params[{name!r}] must be a ParamSpec, got {spec!r}"
                 )
         object.__setattr__(self, "params", dict(self.params))
+
+
+@dataclass(frozen=True)
+class UIGroup:
+    """One titled group of a Virtual Instrument's own capabilities.
+
+    The VI-side counterpart of ``ParamGroup``, and deliberately a separate
+    type: ``ParamGroup`` groups the *parameters of one procedure run* and
+    carries ``ParamSpec``s, whereas a ``UIGroup`` groups the *methods of one
+    instrument* — its ``@monitored`` readings and ``@control`` actions — by
+    naming them in ``members``. A VI declares its groups in the
+    ``ui_groups`` class attribute (see the UI-group standard in
+    ``virtual_instruments/base.py``), and the base class validates every
+    group and every ``group=`` tag at class creation.
+
+    Groups are presentation and description only: they order and title what
+    the instrument front panel renders and what the capability manifest
+    describes. Nothing about a group crosses the action queue — a control is
+    still submitted on its own, by method name, with flat scalar kwargs.
+
+    ``members`` is explicit rather than derived from the ``group=`` tags,
+    because its order IS the render order and it doubles as documentation of
+    the workflow order for an agent reading the manifest. A method may also
+    carry the matching ``group=`` tag; the base class checks the two agree.
+
+    Attributes:
+        key: Stable identity, the value a method's ``group=`` tag names.
+            Non-empty string, unique within one VI.
+        title: Human-readable heading. Non-empty string.
+        description: Optional sentence saying what the group is for.
+        members: Ordered ``@monitored`` / ``@control`` method names, at least
+            one, no duplicates. Coerced to a tuple.
+    """
+
+    key: str
+    title: str
+    description: str = ""
+    members: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Validate the declaration and freeze ``members`` as a tuple.
+
+        Raises:
+            TypeError: If ``key``, ``title`` or ``description`` is not a
+                string, if ``members`` is not a sequence of strings, or if a
+                member name is not a string.
+            ValueError: If ``key``, ``title`` or a member name is empty, if
+                ``members`` is empty, or if a member name repeats.
+        """
+        for name, val in (("key", self.key), ("title", self.title)):
+            if not isinstance(val, str):
+                raise TypeError(f"UIGroup.{name} must be a str, got {val!r}")
+            if not val:
+                raise ValueError(f"UIGroup.{name} must be a non-empty str")
+
+        if not isinstance(self.description, str):
+            raise TypeError(
+                f"UIGroup.description must be a str, got {self.description!r}"
+            )
+
+        if isinstance(self.members, str) or not isinstance(
+            self.members, (tuple, list)
+        ):
+            raise TypeError(
+                f"UIGroup.members must be a tuple of method names, got "
+                f"{self.members!r}"
+            )
+        members = tuple(self.members)
+        if not members:
+            raise ValueError(
+                f"UIGroup {self.key!r} must name at least one member — a group "
+                f"with no members declares nothing"
+            )
+        for member in members:
+            if not isinstance(member, str):
+                raise TypeError(
+                    f"UIGroup {self.key!r} member must be a str, got {member!r}"
+                )
+            if not member:
+                raise ValueError(
+                    f"UIGroup {self.key!r} member must be a non-empty str"
+                )
+        if len(set(members)) != len(members):
+            raise ValueError(
+                f"UIGroup {self.key!r} lists a member twice: {list(members)}"
+            )
+        object.__setattr__(self, "members", members)
 
 
 def _validate_dtype_columns(field_name: str, columns: Any) -> dict[str, str]:

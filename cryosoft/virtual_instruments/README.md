@@ -144,6 +144,30 @@ The written standards all live in this root and are enforced by
 - The control-declaration standard: `params=` ParamSpecs must match the
   method signature exactly (checked at import) and agree with its type
   annotations (conformance-checked); `panel=` must be a bool.
+- The **declaration standard**: a VI describes its whole capability surface
+  on the decorators, because the same declaration feeds the GUI, the
+  tooltips and the capability manifest an agent reads. Every `@monitored`
+  method declares `unit=` (the SI unit of the value it returns — `""` only
+  for a genuinely dimensionless, boolean or string reading, and never
+  omitted) and `description=` (one sentence). Every `@control` method that
+  takes parameters declares a `params=` ParamSpec for each of them. A
+  measurement VI gets both of its parameter-bearing controls for free: the
+  base class installs `measurement_parameters` as `initiate_measurement`'s
+  specs, and the matching single spec on each `reading_setters` setter, so
+  the arming control renders the same drop-downs and units the procedure
+  form does (an explicit `params=` still wins). Conformance-checked by
+  `test_capability_manifest_is_complete`, which has no exemption list.
+- The **UI-group standard** (GLOSSARY.md's **UI group**; full text in
+  `BaseVirtualInstrument`'s docstring): a VI may declare
+  `ui_groups: ClassVar[tuple[UIGroup, ...]]`, each `UIGroup` a `key`,
+  `title`, optional `description` and an explicit ordered `members` tuple of
+  its own `@monitored`/`@control` method names; a method may carry the
+  matching `group="key"` tag. Declared order is render and manifest order.
+  Groups are presentation and description ONLY — nothing about a group
+  crosses the action queue, and a group implies no atomicity. Validated at
+  class creation: unique keys, every member a real capability of the class,
+  every tag naming a declared group, tag and membership agreeing; each
+  failure raises at import naming the class and the method.
 - Measurement VIs additionally obey the self-describing measurement-method
   standard (`measurement_parameters` / `measurement_data_keys` /
   `measurement_scalar_columns` plus the `data_arrays` /
@@ -157,12 +181,15 @@ The written standards all live in this root and are enforced by
    `LevelMeterBase`, `RotatorBase`, `MeasurementInstrumentBase` /
    `DCMeasurementBase`, or `BaseVirtualInstrument` directly for a switch),
    adding `RampableVI` if it ramps.
-3. Tag reads `@monitored` and actions `@control`; declare `control_limits` for any
-   bounded parameter and read the value from `init_params`. Give each control
-   its GUI metadata: `params={name: ParamSpec}` for typed widgets (unit,
-   bounds, choices, tooltips) and `panel=False` for anything that belongs in
-   the front panel rather than the compact card (see "GUI presentation"
-   above).
+3. Tag reads `@monitored(unit=..., description=...)` and actions `@control`;
+   declare `control_limits` for any bounded parameter and read the value from
+   `init_params`. Give each control its GUI metadata: `params={name:
+   ParamSpec}` for typed widgets (unit, bounds, choices, tooltips) and
+   `panel=False` for anything that belongs in the front panel rather than the
+   compact card (see "GUI presentation" above). Where several capabilities
+   form one workflow (a heater's mode, output and PID; a measurement's arming
+   and its per-reading setter), declare a `UIGroup` in `ui_groups` naming them
+   in `members` and tag each with `group=`.
 4. Register the VI in a config `devices.yaml`; add behaviour tests to the
    subfolder's test file. Conformance covers the contract automatically.
 
@@ -178,7 +205,11 @@ Shared contracts at the root; concrete classes live in the subfolders.
   declarations — GLOSSARY.md's **Safety-flag manifest** / **Safety concern**
   / **Safety hold** / **Critical safety flag**), the full
   measurement-method standard in
-  `MeasurementInstrumentBase`'s docstring, and `standby_status()` — the
+  `MeasurementInstrumentBase`'s docstring (whose `__init_subclass__` also
+  installs `measurement_parameters` as the declared `params=` of
+  `initiate_measurement` and of each `reading_setters` setter), the
+  UI-group standard's `ui_groups` declaration and its class-creation
+  validation, and `standby_status()` — the
   command-provenance accessor answering "reached" / "converging" / "away"
   for whether a VI is at, heading to, or away from its own `standby()`'s
   safe idle state, maintained automatically by the same `__init_subclass__`
