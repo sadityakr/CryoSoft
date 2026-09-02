@@ -98,10 +98,6 @@ from cryosoft.core.decorators import (
 from cryosoft.core.exceptions import (
     CryoSoftCommunicationError,
     CryoSoftInstrumentError,
-    CryoSoftSafetyError,
-)
-from cryosoft.core.exceptions import (
-    CryoSoftCommunicationError,
     CryoSoftPrivateActionError,
     CryoSoftSafetyError,
     CryoSoftUndeclaredActionError,
@@ -3238,6 +3234,7 @@ ORCHESTRATOR_NON_COMMANDS: dict[str, str] = {
     "override_active": "read: whether a manual override is in force",
     "scanner_enabled": "read: whether the scanner is enabled",
     "vi_faults": "read: the current FaultRecord per VI",
+    "envelope_variables": "read: the variables an experiment envelope may bound",
     # ── Process lifecycle: owned by main.py and test teardown, not by a
     #    client. A client that could stop the tick timer could strand a ramp.
     "shutdown": "lifecycle: stops the tick timer at application exit",

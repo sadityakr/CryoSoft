@@ -300,6 +300,7 @@ class CommandName(str, Enum):
     ACKNOWLEDGE_FAULT = "acknowledge_fault"
     RETRY_FAULT = "retry_fault"
     RECOVER_FROM_ERROR = "recover_from_error"
+    EMERGENCY_STANDBY = "emergency_standby"
 
     # Monitoring and policy
     START_MONITORING = "start_monitoring"
