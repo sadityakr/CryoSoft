@@ -36,7 +36,10 @@ from __future__ import annotations
 from typing import Any, ClassVar
 
 from cryosoft.core.decorators import control
-from cryosoft.virtual_instruments.base import DCMeasurementBase
+from cryosoft.virtual_instruments.base import (
+    EXCITATION_CURRENT_LIMIT,
+    DCMeasurementBase,
+)
 
 _NOT_INITIATED = object()
 
@@ -82,6 +85,14 @@ class DCSeparateMeasurementVI(DCMeasurementBase):
     # loop a list of currents (e.g. "1e-6, -1e-6" for +/- offset cancellation)
     # at every sweep point.
     reading_setters: ClassVar[dict[str, str]] = {"current_A": "set_source_current"}
+
+    # Control-validation standard (see BaseVirtualInstrument): MERGED with the
+    # base's excitation bound rather than replacing it, so the per-reading
+    # setter is guarded by the same setup ceiling as arming is.
+    control_limits: ClassVar[dict[str, dict[str, str]]] = {
+        **DCMeasurementBase.control_limits,
+        "set_source_current": {"current_A": EXCITATION_CURRENT_LIMIT},
+    }
 
     def __init__(self, drivers: dict[str, object], **init_params: Any) -> None:
         super().__init__(drivers, **init_params)

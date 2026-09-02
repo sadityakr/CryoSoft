@@ -128,7 +128,26 @@ The written standards all live in this root and are enforced by
 - A `vi_type` class attribute (`system` / `measurement` / `level` / `switch`).
 - The control-validation standard: bounded `@control` parameters declared in
   `control_limits`, limit values populated from `init_params`, enforced by the
-  base class before the hardware call.
+  base class before the hardware call. Coverage is machine-checked, not
+  optional: every numeric (`float`/`int`) `@control` parameter of every VI
+  must appear in `control_limits` or in `test_conformance.py`'s
+  `CONTROL_LIMIT_EXEMPTIONS` with a one-line physical reason a range cannot
+  bound it (an enumerated mode code, a dimensionless count, a dwell time, a
+  compliance ceiling that is itself protective). A stale exemption — one whose
+  parameter has since gained a limit, been renamed or been deleted — fails
+  too, so the list stays as short as honesty allows.
+  `BaseVirtualInstrument.limit_bounds(limit_name)` is the standard's public
+  READ side: how the Station reports what a setup allows (for an experiment's
+  envelope to narrow) without reaching into `_limits`.
+- The excitation ceiling: every VI that drives current through the sample
+  reads `max_source_current_A` from its config `init_params` — directly (the
+  DC and delta-mode VIs bound the sourced current to ±that value, symmetric
+  because current reversal is routine) or derived (the voltage-sourced lock-in
+  bounds its oscillator amplitude by `max_source_current_A ×
+  series_resistance_ohm`). `base._populate_excitation_current_limit()` is the
+  one place the key becomes a bound. Every SHIPPED config must declare it —
+  conformance-checked per config, real setups included — because the ceiling
+  is a property of the sample wiring, not of the code.
 - The capability-scope standard: `@control` (bare, or `@control(scope=...)`)
   carries a scope — `"measurement"` (default, usable by any plan) or
   `"operation"` (usable only by an operation's plan; a human in IDLE can still
@@ -158,7 +177,9 @@ The written standards all live in this root and are enforced by
    `DCMeasurementBase`, or `BaseVirtualInstrument` directly for a switch),
    adding `RampableVI` if it ramps.
 3. Tag reads `@monitored` and actions `@control`; declare `control_limits` for any
-   bounded parameter and read the value from `init_params`. Give each control
+   bounded parameter and read the value from `init_params` (a numeric control
+   with no limit fails conformance unless you write down why a range cannot
+   bound it). Give each control
    its GUI metadata: `params={name: ParamSpec}` for typed widgets (unit,
    bounds, choices, tooltips) and `panel=False` for anything that belongs in
    the front panel rather than the compact card (see "GUI presentation"

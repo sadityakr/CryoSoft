@@ -41,7 +41,11 @@ from typing import Any, ClassVar
 
 from cryosoft.core.decorators import control
 from cryosoft.core.plan import ParamSpec
-from cryosoft.virtual_instruments.base import MeasurementInstrumentBase
+from cryosoft.virtual_instruments.base import (
+    EXCITATION_CURRENT_LIMIT,
+    MeasurementInstrumentBase,
+    _populate_excitation_current_limit,
+)
 
 # Sentinel to detect the un-armed state.
 _NOT_INITIATED = object()
@@ -89,6 +93,15 @@ class DeltaModeMeasurementVI(MeasurementInstrumentBase):
     # between readings (delta mode has no in-place current change), letting the
     # generic sweep procedure loop a list of currents at every sweep point.
     reading_setters: ClassVar[dict[str, str]] = {"current": "set_delta_current"}
+
+    # Control-validation standard (see BaseVirtualInstrument): both ways of
+    # commanding the peak delta current — arming it and re-arming between
+    # readings — are bounded by the setup's own ceiling, populated in __init__
+    # from the config's max_source_current_A.
+    control_limits: ClassVar[dict[str, dict[str, str]]] = {
+        "initiate_measurement": {"current": EXCITATION_CURRENT_LIMIT},
+        "set_delta_current": {"current": EXCITATION_CURRENT_LIMIT},
+    }
 
     _ARRAY_KEYS, _SCALAR_COLUMNS = MeasurementInstrumentBase.quantity_columns(
         "voltage_V", "current_A"
@@ -148,9 +161,18 @@ class DeltaModeMeasurementVI(MeasurementInstrumentBase):
     }
 
     def __init__(self, drivers: dict[str, object], **init_params: Any) -> None:
+        """Wire the source/meter pair and read the setup's excitation ceiling.
+
+        Args:
+            drivers: ``{"source": <current source>, "meter": <voltmeter>}``.
+            **init_params: Setup parameters; ``max_source_current_A`` bounds
+                the peak delta current to ``±`` that value (see
+                ``_populate_excitation_current_limit``).
+        """
         super().__init__(drivers, **init_params)
         self._source = drivers["source"]
         self._meter = drivers["meter"]
+        _populate_excitation_current_limit(self, init_params)
 
         # Configuration state — set by initiate_measurement().
         self._armed: object = _NOT_INITIATED
