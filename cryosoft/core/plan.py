@@ -18,7 +18,9 @@ __all__ = [
     "ParamGroup",
     "DataSchema",
     "EnvelopeBound",
+    "EnvelopeVariable",
     "ExperimentEnvelope",
+    "SETPOINT_PARAM_PREFIX",
 ]
 
 # Scalar Python types accepted for GUI-facing parameters and their HDF5 dtypes.
@@ -782,6 +784,59 @@ class DataSchema:
             )
 
 
+#: The setpoint-parameter convention: a ``@control`` parameter whose name
+#: starts with this prefix carries its VI's enveloped quantity — the same
+#: physical quantity ``RampableVI.start_ramp(target)`` takes and a ``Target``
+#: commands (tesla for a magnet, kelvin for a temperature controller, degrees
+#: for a rotator). Naming it this way is what lets the session envelope bind a
+#: manual action as well as a plan's ``Target``, with no per-VI table for the
+#: Orchestrator to keep in step: it asks the Station which of an action's
+#: keyword arguments is the setpoint and checks that one. A VI declares at
+#: most one such parameter, on the single capability that commands its
+#: setpoint; machine-checked for every rampable VI by
+#: ``tests/test_conformance.py``.
+SETPOINT_PARAM_PREFIX: str = "target_"
+
+
+@dataclass(frozen=True)
+class EnvelopeVariable:
+    """One VI's enveloped quantity: the capability that sets it and its bounds.
+
+    The read side of the setpoint-parameter convention
+    (``SETPOINT_PARAM_PREFIX``), assembled by
+    ``Station.envelope_variables()``. It answers the two questions the
+    envelope editor and the Orchestrator's manual-action check both ask about
+    a VI: *which* keyword argument carries the enveloped value, and *what
+    range does the setup itself already allow* — the ``control_limits`` bound
+    the config populated, which an experiment's ``EnvelopeBound`` narrows.
+
+    Attributes:
+        vi_name: The VI this variable belongs to.
+        method_name: The ``@control`` capability that commands it.
+        param_name: That capability's setpoint parameter (``target_*``).
+        config_min: Setup lower bound in the quantity's SI unit, or ``None``
+            when the setup leaves it unbounded below.
+        config_max: Setup upper bound, or ``None`` when unbounded above.
+    """
+
+    vi_name: str
+    method_name: str
+    param_name: str
+    config_min: float | None = None
+    config_max: float | None = None
+
+    @property
+    def unit_suffix(self) -> str:
+        """Return the parameter's trailing unit token, or ``""``.
+
+        Derived from the setpoint parameter's own name — ``target_T`` → ``T``,
+        ``target_K`` → ``K``, ``target_deg`` → ``deg`` — which the SI-units
+        rule already makes the authoritative unit marker on a VI's API. Used
+        only to label the envelope editor's fields.
+        """
+        return self.param_name[len(SETPOINT_PARAM_PREFIX):]
+
+
 @dataclass(frozen=True)
 class EnvelopeBound:
     """One session-envelope limit on a system VI's swept quantity.
@@ -873,6 +928,11 @@ class ExperimentEnvelope:
     — a human slip in the GUI is caught by the same check as an agent call:
 
     * every submitted ``Target`` for a bounded VI is validated before dispatch;
+    * every manual action on the **direct action path** is validated the same
+      way, on the setpoint parameter the setpoint-parameter convention
+      identifies (``SETPOINT_PARAM_PREFIX``), so a bounded VI's setpoint is
+      refused outside the envelope whether it arrives as a ``Target`` or as an
+      action — at submission AND again when the tick drains the queue;
     * every tick, each bound with a ``state_key`` is checked against the VI's
       live reading, entering EMERGENCY on a violation exactly like a tripped
       safety flag.

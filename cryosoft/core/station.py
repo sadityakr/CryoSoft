@@ -18,16 +18,36 @@ from typing import Any
 
 from cryosoft.core.availability import Availability, state_for
 from cryosoft.core.conditions import Condition
+from cryosoft.core.decorators import get_control_methods, get_control_scope
 from cryosoft.core.exceptions import (
+    CryoSoftActionScopeError,
     CryoSoftCommunicationError,
     CryoSoftConfigError,
+    CryoSoftPrivateActionError,
     CryoSoftSafetyError,
+    CryoSoftUndeclaredActionError,
 )
-from cryosoft.core.plan import Command, Target
+from cryosoft.core.plan import (
+    SETPOINT_PARAM_PREFIX,
+    Command,
+    EnvelopeVariable,
+    Target,
+)
 from cryosoft.virtual_instruments.base import BaseVirtualInstrument
 from cryosoft.virtual_instruments.rampable import RampableVI
 
 logger = logging.getLogger(__name__)
+
+#: The two connection-lifecycle operating-state methods (see
+#: ``BaseVirtualInstrument``'s "Connection-lifecycle standard"). They carry no
+#: ``@control`` — every VI inherits or defines them as plain methods — but they
+#: ARE capabilities of the direct action path: the per-panel lifecycle toggle
+#: and "Initiate All"/"Standby All" dispatch nothing else. Listing them here is
+#: what lets ``execute_vi_action()`` refuse every OTHER undecorated method
+#: without breaking the lifecycle path. They are measurement-scope, the same
+#: default an undecorated method gets in
+#: ``Station.send_measurement_commands()``.
+LIFECYCLE_ACTIONS: frozenset[str] = frozenset({"initiate", "standby"})
 
 # The one reason string used wherever an instrument opened a session but did
 # not answer the identity query — the single connection check of the
@@ -1693,23 +1713,170 @@ class Station:
     # VI action dispatch
     # ------------------------------------------------------------------
 
-    def execute_vi_action(self, vi_name: str, method_name: str, **kwargs: Any) -> Any:
-        """Call a @control method on a named VI directly.
+    def execute_vi_action(
+        self,
+        vi_name: str,
+        method_name: str,
+        *,
+        allowed_scope: str = "measurement",
+        **kwargs: Any,
+    ) -> Any:
+        """Call one capability on a named VI — the direct action path.
+
+        The single entry point through which a manual action (a GUI click, an
+        agent call) reaches an instrument, as opposed to a procedure's
+        ``Command`` batch, which goes through
+        ``send_measurement_commands()``. See GLOSSARY.md's **Direct action
+        path**.
+
+        Three admission checks run BEFORE the method is called, mirroring the
+        read/write split ``troubleshoot.engine.DriverBench.call()`` enforces
+        one layer down. Each raises its own subclass of
+        ``CryoSoftActionRefusedError`` with its own reason string, so a caller
+        gets a specific verdict rather than an undifferentiated failure:
+
+        1. **Private name** — a leading underscore is a VI's internal API and
+           is never a capability.
+        2. **Undeclared capability** — the method must carry ``@control`` or
+           be one of ``LIFECYCLE_ACTIONS`` (``initiate``/``standby``). A
+           ``@monitored`` poller, a procedure-only helper such as
+           ``take_reading()``, or any other public method is refused.
+        3. **Capability scope** — an ``@control(scope="operation")`` method is
+           refused unless *allowed_scope* is ``"operation"`` too, exactly as
+           ``send_measurement_commands()`` refuses an operation-scope command
+           in a measurement-scope plan.
+
+        *allowed_scope* defaults to the RESTRICTIVE ``"measurement"``, so a
+        caller that never thinks about scope cannot reach an operation-scope
+        capability by accident. A human at the instrument front panel is the
+        operation authority, so the Orchestrator's manual-action path passes
+        ``"operation"`` explicitly (see ``Orchestrator.submit_vi_action()``);
+        that opt-in is the deliberate, single place where the wider scope is
+        granted.
+
+        Beyond these checks the method's own guards still apply: the
+        control-validation standard's ``control_limits`` wrapper raises
+        ``CryoSoftSafetyError`` for an out-of-limit value before any hardware
+        command is sent. The session envelope is checked one layer up, by the
+        Orchestrator, which is where it lives.
 
         Args:
             vi_name: Name of the target VI.
-            method_name: Name of the method to call.
+            method_name: Name of the capability to call.
+            allowed_scope: The caller's capability scope — ``"measurement"``
+                (default) or ``"operation"``.
             **kwargs: Keyword arguments forwarded to the method.
 
         Returns:
             Return value of the method (if any).
 
         Raises:
-            AttributeError: If the VI or method does not exist.
+            KeyError: If no VI named *vi_name* is registered (an absent or
+                disconnected instrument — there is nothing to dispatch to).
+            CryoSoftPrivateActionError: If *method_name* starts with ``_``.
+            AttributeError: If the VI has no such method.
+            CryoSoftUndeclaredActionError: If the method is neither
+                ``@control`` nor a lifecycle action.
+            CryoSoftActionScopeError: If the method's capability scope is
+                outside *allowed_scope*.
+            CryoSoftSafetyError: If the method's own ``control_limits`` guard
+                refuses the value. Nothing is sent to the instrument.
         """
         vi = self._virtual_instruments[vi_name]
+        if method_name.startswith("_"):
+            raise CryoSoftPrivateActionError(
+                f"execute_vi_action: '{vi_name}.{method_name}' is a private "
+                f"name — the direct action path dispatches capabilities only, "
+                f"never a VI's internal API. Action refused."
+            )
         method = getattr(vi, method_name)
+        is_control = getattr(method, "_is_control", False)
+        if not is_control and method_name not in LIFECYCLE_ACTIONS:
+            raise CryoSoftUndeclaredActionError(
+                f"execute_vi_action: '{vi_name}.{method_name}' is not a "
+                f"declared capability — it carries no @control and is not one "
+                f"of {sorted(LIFECYCLE_ACTIONS)}. Action refused."
+            )
+        required_scope = get_control_scope(method) if is_control else "measurement"
+        if required_scope == "operation" and allowed_scope != "operation":
+            raise CryoSoftActionScopeError(
+                f"execute_vi_action: '{vi_name}.{method_name}' requires "
+                f"operation-scope access, but this caller is "
+                f"{allowed_scope}-scope. Action refused."
+            )
+        logger.debug("Dispatching %s.%s(%s)", vi_name, method_name, kwargs)
         return method(**kwargs)
+
+    # ------------------------------------------------------------------
+    # Setpoint capabilities (the setpoint-parameter convention)
+    # ------------------------------------------------------------------
+
+    def setpoint_parameters(self, vi_name: str, method_name: str) -> tuple[str, ...]:
+        """Return one capability's setpoint parameters, in declaration order.
+
+        The setpoint-parameter convention (see ``core/plan.py``'s
+        ``SETPOINT_PARAM_PREFIX`` and ``ExperimentEnvelope``): a ``@control``
+        parameter named ``target_*`` carries the VI's enveloped quantity — the
+        same quantity ``RampableVI.start_ramp(target)`` takes and a ``Target``
+        commands. It is what lets the session envelope bind a manual action as
+        well as a procedure's target, without the Orchestrator having to know
+        what any particular instrument measures.
+
+        Args:
+            vi_name: Name of the VI.
+            method_name: Name of the capability.
+
+        Returns:
+            The matching parameter names, or ``()`` when the VI, the method,
+            or a setpoint parameter is absent.
+        """
+        vi = self._virtual_instruments.get(vi_name)
+        if vi is None:
+            return ()
+        method = getattr(vi, method_name, None)
+        if method is None or not getattr(method, "_is_control", False):
+            return ()
+        return tuple(
+            name
+            for name in getattr(method, "_control_params", {})
+            if name.startswith(SETPOINT_PARAM_PREFIX)
+        )
+
+    def envelope_variables(self) -> dict[str, EnvelopeVariable]:
+        """Return the enveloped quantity of every system VI that declares one.
+
+        The read side of the setpoint-parameter convention, and the source
+        the Start Experiment dialog's envelope editor pre-fills from: for each
+        registered VI with a ``target_*`` ``@control`` parameter, the
+        capability that commands it and the setup's own bounds on it, taken
+        from the ``control_limits`` limit the config populated. An experiment's
+        envelope NARROWS those bounds, so the operator adjusts numbers that
+        are already there rather than composing them from nothing.
+
+        Returns:
+            ``{vi_name: EnvelopeVariable}``, empty when no VI declares a
+            setpoint capability. A VI whose setpoint parameter is not covered
+            by ``control_limits`` still appears, with ``None`` bounds.
+        """
+        variables: dict[str, EnvelopeVariable] = {}
+        for vi_name, vi in self._virtual_instruments.items():
+            limits = type(vi).control_limits
+            for method_name in get_control_methods(vi):
+                params = self.setpoint_parameters(vi_name, method_name)
+                if not params:
+                    continue
+                param_name = params[0]
+                limit_name = limits.get(method_name, {}).get(param_name)
+                lo, hi = vi.limit_bounds(limit_name) if limit_name else (None, None)
+                variables[vi_name] = EnvelopeVariable(
+                    vi_name=vi_name,
+                    method_name=method_name,
+                    param_name=param_name,
+                    config_min=lo,
+                    config_max=hi,
+                )
+                break
+        return variables
 
     # ------------------------------------------------------------------
     # Bulk lifecycle

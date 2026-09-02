@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
@@ -28,7 +28,12 @@ from cryosoft.core.conditions import Condition, Verdict, decide, envelope_condit
 from cryosoft.core.events import ErrorEvent
 from cryosoft.core.exceptions import CryoSoftSafetyError
 from cryosoft.core.operational_status import build_operational_status
-from cryosoft.core.plan import Command, ExperimentEnvelope, Target
+from cryosoft.core.plan import (
+    Command,
+    EnvelopeVariable,
+    ExperimentEnvelope,
+    Target,
+)
 from cryosoft.core.ramps import RampRecord, build_ramp_records
 from cryosoft.core.stall_detection import StallConfig, StallState, apply_stall_verdict
 from cryosoft.core.station import FaultRecord, Station
@@ -37,6 +42,16 @@ from cryosoft.core.tiered_trend_logger import TieredTrendLogger
 # We don't import BaseProcedure directly to avoid circular dependency.
 
 logger = logging.getLogger(__name__)
+
+#: The capability scope a MANUAL action is dispatched with (see the
+#: capability-scope standard in GLOSSARY.md and
+#: ``Station.execute_vi_action()``). A human at an instrument's front panel is
+#: the operation authority — the same authority that starts an operation — so
+#: the Orchestrator grants operation scope explicitly here, in one named
+#: place, rather than leaving ``execute_vi_action()``'s restrictive default to
+#: be the accident that decides it. Every other caller of the direct action
+#: path gets ``"measurement"`` unless it opts in the same way.
+MANUAL_ACTION_SCOPE: str = "operation"
 
 
 class OrchestratorState(Enum):
@@ -448,7 +463,9 @@ class Orchestrator(QObject):
         the mounted sample with narrower per-experiment bounds. Enforcement
         happens here in the Orchestrator — the single choke point every writer
         goes through — in two places: every submitted ``Target`` for a bounded
-        VI is validated before dispatch, and every tick each bound with a
+        VI is validated before dispatch, every manual action on the direct
+        action path is validated the same way (see
+        ``_envelope_refusal()``), and every tick each bound with a
         ``state_key`` is checked against the VI's live reading (a violation
         enters EMERGENCY exactly like a tripped safety flag).
 
@@ -460,6 +477,56 @@ class Orchestrator(QObject):
             logger.info("Session envelope cleared")
         else:
             logger.info("Session envelope set: %r", envelope)
+
+    def envelope_variables(self) -> dict[str, EnvelopeVariable]:
+        """Return each VI's enveloped quantity and the setup's bounds on it.
+
+        The read surface the Start Experiment dialog's envelope editor
+        pre-fills from, so the operator NARROWS the setup's own limits rather
+        than composing an envelope from nothing. A pure passthrough to
+        ``Station.envelope_variables()`` — the GUI talks only to the
+        Orchestrator's public API.
+
+        Returns:
+            ``{vi_name: EnvelopeVariable}``; empty when no VI declares a
+            setpoint capability.
+        """
+        return self._station.envelope_variables()
+
+    def emergency_standby(self, reason: str) -> None:
+        """Stand the whole station down NOW — permitted in every state.
+
+        The unconditional safe-off path: an operator (or an agent) can always
+        reach it, including from EMERGENCY and ERROR, which is exactly where
+        every other manual route is refused and where making the machine safe
+        matters most. It is deliberately NOT governed by
+        ``_manual_action_admissible()``: an admission gate on the stop button
+        is a gate on the wrong thing.
+
+        Routes into the same emergency flow a tripped critical flag takes
+        (aborting the active run, emitting ``run_finished``, entering
+        EMERGENCY, and standing every VI down), so there is one shutdown
+        implementation, not two. Re-entrant: calling it while already in
+        EMERGENCY re-asserts the standby rather than refusing.
+
+        Runs on the CALLER's stack, following ``stop_ramp()``/
+        ``abort_procedure()``'s precedent — a safety action is never queued
+        for the next tick. **Accepted latency:** the tick is synchronous and
+        single-threaded, so a call arriving while a tick is mid-flight lands
+        only after the current ``measure()`` returns. For a slow instrument
+        that is seconds, bounded by one reading. This is a property of the
+        cooperative single-thread design (no second thread, no blocking call
+        in the tick path), not an oversight: the alternative — interrupting a
+        bus transaction — is how GPIB races and half-written setpoints
+        happen.
+
+        Args:
+            reason: Why the station is being stood down. Logged at CRITICAL
+                and carried into the emergency's error message and
+                ``ErrorEvent``, so the record says who asked and why.
+        """
+        logger.critical("Emergency standby requested: %s", reason)
+        self._enter_emergency(f"emergency standby requested: {reason}")
 
     def run_procedure(self, procedure: Any) -> None:
         """Start a procedure immediately if IDLE or during a manual ramp; else queue it.
@@ -1365,17 +1432,96 @@ class Orchestrator(QObject):
             )
         return True, ""
 
+    def _envelope_refusal(
+        self, vi_name: str, method_name: str, kwargs: Mapping[str, Any]
+    ) -> str | None:
+        """Return why the active envelope refuses this manual action, or ``None``.
+
+        The direct action path's half of the session-envelope contract (see
+        ``ExperimentEnvelope``): the envelope binds every writer, so a
+        setpoint that would leave it is refused whether it arrives as a plan's
+        ``Target`` (checked in ``_dispatch_targets()``) or as a manual action.
+        The setpoint-parameter convention
+        (``core.plan.SETPOINT_PARAM_PREFIX``) is what makes this generic — the
+        Station reports which keyword argument of this capability carries the
+        enveloped quantity, so no per-VI table lives here.
+
+        Args:
+            vi_name: The VI the action targets.
+            method_name: The capability being called.
+            kwargs: The action's keyword arguments.
+
+        Returns:
+            A refusal reason naming the violated envelope bound, or ``None``
+            when no envelope is active, the VI is unbounded, the capability
+            has no setpoint parameter, or the value is inside the bound.
+        """
+        if self._session_envelope is None:
+            return None
+        for param_name in self._station.setpoint_parameters(vi_name, method_name):
+            if param_name not in kwargs:
+                continue
+            message = self._session_envelope.check_target(
+                vi_name, kwargs[param_name]
+            )
+            if message is not None:
+                return (
+                    f"Cannot control {vi_name}: {method_name}("
+                    f"{param_name}={kwargs[param_name]!r}) violates the "
+                    f"{message}"
+                )
+        return None
+
+    def _manual_action_verdict(
+        self, vi_name: str, method_name: str, kwargs: Mapping[str, Any]
+    ) -> tuple[bool, str]:
+        """Return the full admission verdict for one manual action.
+
+        ``_manual_action_admissible()`` decides whether this VI may be
+        controlled at all; this adds the value-level check the envelope owns.
+        Shared verbatim by ``submit_vi_action()`` (what may be *queued*) and
+        the ``_tick_body()`` drain gate (what may be *dispatched*), the same
+        re-validation-at-drain discipline every other admission rule follows —
+        an experiment (and therefore an envelope) can be opened or closed
+        between the click and the tick.
+
+        Args:
+            vi_name: The VI the action targets.
+            method_name: The capability being called.
+            kwargs: The action's keyword arguments.
+
+        Returns:
+            ``(admitted, reason)``; *reason* is empty when admitted.
+        """
+        admitted, reason = self._manual_action_admissible(vi_name)
+        if not admitted:
+            return False, reason
+        envelope_reason = self._envelope_refusal(vi_name, method_name, kwargs)
+        if envelope_reason is not None:
+            return False, envelope_reason
+        return True, ""
+
     def submit_vi_action(self, vi_name: str, method_name: str, **kwargs: Any) -> None:
         """Submit a GUI action to a specific VI.
 
-        Admission is decided by ``_manual_action_admissible()``: a faulted
+        Admission is decided by ``_manual_action_verdict()``: a faulted
         or safety-held VI is always refused (the latter unless the
         EMERGENCY manual override is unlocked); IDLE / a manual ramp /
         EMERGENCY (for an unheld VI) always admit; ERROR always refuses;
         otherwise a run is active and the action is admitted iff *vi_name*
-        is not one of the active run's claimed VIs.
+        is not one of the active run's claimed VIs. An admitted action is
+        then checked against the active session envelope, which refuses a
+        setpoint outside its bounds.
+
+        Admitted actions are QUEUED, not dispatched: the tick is the single
+        hardware writer, and it re-runs this same verdict before dispatching
+        (see ``_tick_body()``). The dispatch itself goes through
+        ``Station.execute_vi_action()``, whose own three checks refuse a
+        private name, a method that is not a declared capability, and — for
+        callers narrower than ``MANUAL_ACTION_SCOPE`` — an out-of-scope
+        capability.
         """
-        admitted, reason = self._manual_action_admissible(vi_name)
+        admitted, reason = self._manual_action_verdict(vi_name, method_name, kwargs)
         if not admitted:
             logger.info("Blocked action: %s", reason)
             self.action_blocked.emit(reason)
@@ -2225,7 +2371,9 @@ class Orchestrator(QObject):
         pending_actions = list(self._gui_action_queue)
         self._gui_action_queue.clear()
         for action in pending_actions:
-            admitted, reason = self._manual_action_admissible(action["vi_name"])
+            admitted, reason = self._manual_action_verdict(
+                action["vi_name"], action["method_name"], action["kwargs"]
+            )
             if not admitted:
                 logger.info("Blocked queued action on %s: %s", action["vi_name"], reason)
                 self.action_blocked.emit(reason)
@@ -2234,6 +2382,7 @@ class Orchestrator(QObject):
                 self._station.execute_vi_action(
                     action["vi_name"],
                     action["method_name"],
+                    allowed_scope=MANUAL_ACTION_SCOPE,
                     **action["kwargs"]
                 )
                 self.action_succeeded.emit(action["vi_name"], action["method_name"])

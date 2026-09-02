@@ -83,8 +83,8 @@ config also has automatic `test_conformance.py` coverage on top of these.
 |------------|---------------------|
 | `cryosoft/drivers/*` | `tests/test_l0_simulated.py`, `tests/test_l0_new_drivers.py`, `tests/test_l0_switch_driver.py` |
 | `cryosoft/virtual_instruments/*` | `tests/test_l1_virtual_instruments.py`, `tests/test_l1_new_vis.py`, `tests/test_l1_switch_vi.py`, `tests/test_measurement_dc_vi.py` |
-| `cryosoft/core/station.py`, config loading | `tests/test_l2_station.py`, `tests/test_config_validation.py`, `tests/test_config_catalog.py` |
-| `cryosoft/core/orchestrator.py` | `tests/test_l3_orchestrator.py`, `tests/test_operations.py` |
+| `cryosoft/core/station.py`, config loading | `tests/test_l2_station.py`, `tests/test_config_validation.py`, `tests/test_config_catalog.py`, `tests/test_direct_action_path.py` (`execute_vi_action()`'s refusals) |
+| `cryosoft/core/orchestrator.py` | `tests/test_l3_orchestrator.py`, `tests/test_operations.py`, `tests/test_direct_action_path.py` |
 | `cryosoft/core/operation.py` | `tests/test_operations.py` |
 | `cryosoft/core/procedure.py`, `cryosoft/procedures/*` | `tests/test_l4_procedure.py`, `tests/test_new_procedures.py`, `tests/test_field_voltage_procedure.py` |
 | `cryosoft/procedures/operations/*` (concrete operations) | `tests/test_helium_fill.py`, `tests/test_sample_access.py` |
@@ -113,7 +113,7 @@ config also has automatic `test_conformance.py` coverage on top of these.
 - **L0 drivers:** `test_l0_simulated.py`, `test_l0_new_drivers.py`, `test_l0_switch_driver.py`.
 - **L1 virtual instruments:** `test_l1_virtual_instruments.py`, `test_l1_new_vis.py`, `test_l1_switch_vi.py`, `test_measurement_dc_vi.py`, `test_switch_heater.py`.
 - **L2 station + config:** `test_l2_station.py`, `test_config_validation.py`, `test_config_catalog.py`.
-- **L3 orchestrator:** `test_l3_orchestrator.py`.
+- **L3 orchestrator:** `test_l3_orchestrator.py`; `test_direct_action_path.py` (the direct action path: the five refusals a manual action can meet — private name, non-capability, out-of-scope capability, out-of-limit value, out-of-envelope setpoint — plus `emergency_standby()` from every state).
 - **L3/L4 operations:** `test_operations.py` (`OperationBase`, `run_operation`/`queue_operation`/`finish_operation`, tolerated safety flags, postcondition gates, capability-scope dispatch); `test_operation_readiness.py` (the readiness/next-due contract — `ReadinessCondition`/`NextDue`, `OperationBase` defaults, `HeliumFillOperation`'s and the shared `_SampleAccessOperationBase`'s (via `SampleLoadOperation`/`SampleUnloadOperation`) concrete `readiness_conditions()`/`next_due()`, Qt-free); `test_helium_fill.py` (`HeliumFillOperation` end-to-end against a real Orchestrator + `sim_cryostat`, including the `CryogenicsRecorder` wiring); `test_sample_access.py` (`SampleLoadOperation`/`SampleUnloadOperation` end-to-end against a real Orchestrator + `sim_cryostat`, parametrized over both, including `confirm_operation()`'s operator-confirmation gate and postcondition timeout).
 - **L4 procedures + planning:** `test_l4_procedure.py`, `test_new_procedures.py`, `test_field_voltage_procedure.py`, `test_plan.py`, `test_sweep_builder.py`.
 - **L5 data manager:** `test_l5_data_manager.py`.
