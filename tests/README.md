@@ -56,6 +56,15 @@ that also waits. See `test_scenarios.py` for usage.
 - **A conformance test fails on your new module:** fix the module to match the
   contract (the assertion message says what is expected). Do not weaken or
   special-case the conformance tests.
+- **Your new VI has an unbounded numeric `@control` parameter:**
+  `test_every_numeric_control_param_is_bounded_or_exempt` fails until that
+  parameter is either declared in `control_limits` (its value coming from the
+  config's `init_params`, never from code) or written into
+  `CONTROL_LIMIT_EXEMPTIONS` in `test_conformance.py` with a one-line physical
+  reason a range cannot bound it — an enumerated mode, a dimensionless count, a
+  timing parameter, a tuning constant. The table is checked in both directions:
+  `test_no_stale_control_limit_exemptions` fails on a row whose parameter has
+  since gained a limit, so the exemptions stay as short as the code allows.
 - **Adding a new contract:** extend `test_conformance.py` with a discovery
   helper + parametrized test, and document the contract in GLOSSARY.md.
 
