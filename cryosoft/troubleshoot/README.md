@@ -2,11 +2,15 @@
 
 ## Purpose
 Diagnostic toolbox for commissioning a new setup and debugging a misbehaving
-one: scan the VISA bus, preflight a config against the real instruments, and
-exercise individual driver methods or raw SCPI commands. Built primarily for
-agents (the setup-supervisor skill family drives it via the CLI), usable by
-humans directly. The main application never uses this package; it is run
-while the app is closed, because serial instruments are exclusive-open.
+one: scan the VISA bus, preflight a config against the real instruments,
+exercise individual driver methods or raw SCPI commands, and — with no
+instrument touched at all — read back what a run or a whole experiment
+already did. Built primarily for agents (the setup-supervisor skill family
+drives it via the CLI), usable by humans directly. The main application never
+uses this package; anything that opens an instrument is run while the app is
+closed, because serial instruments are exclusive-open — the file-reading
+commands (`status`, `session`) are the exception and are meant to be run
+while it is open.
 
 ## Architecture layer
 None of L0–L5. Like `cryosoft/main.py`, this package sits *beside* the stack
@@ -17,13 +21,17 @@ helpers (L2), and nothing in cryosoft imports it. Contracts C9/C10 in
 ## Entry (what comes in)
 Config directories (`devices.yaml`), VISA addresses, driver aliases, and
 driver method names with string arguments. A pyvisa `ResourceManager` is
-injected everywhere, so tests substitute a fake bus.
+injected everywhere, so tests substitute a fake bus. The two read-only
+commands take files instead of instruments: `status` a `status.jsonl` log,
+`session` an experiment folder.
 
 ## Exit (what goes out)
 `ProbeResult` and `MethodInfo` dataclasses — JSON-ready via `as_dict()`, with
 every failure classified by a stable `FaultCode` (the machine-readable fault
-taxonomy the triage skill branches on). Log records via the standard logging
-setup. The engine writes no files.
+taxonomy the triage skill branches on), and plain JSON-ready dicts from the
+two file readers, each with a plain-text rendering for a human. Log records
+via the standard logging setup. Nothing in this package writes a file except
+the CLI's own invocation transcript.
 
 ## Interface contract
 Three invariants, load-bearing for agent use:
@@ -43,10 +51,13 @@ identify probe, and on the optional `expect_idn` key in a config's
 `real_drivers` entry (substring, case-insensitive) for identity checks.
 
 ## How to add a new module
-This package should stay small. New diagnostic primitives go into
-`engine.py` (Qt-free, injectable dependencies, always-terminating); new user
-surfaces (CLI subcommands) go into `cli.py`. Anything Qt belongs in
-`cryosoft/gui/`, not here.
+This package should stay small. New instrument-facing diagnostic primitives
+go into `engine.py` (Qt-free, injectable dependencies, always-terminating);
+new user surfaces (CLI subcommands) go into `cli.py`. A reader of a *new kind
+of on-disk artifact* gets its own module beside `status_reader.py` and
+`session_report.py`, and depends on that artifact's documented format rather
+than on the package that writes it — that is what keeps contracts C9/C10/C12
+satisfiable at all. Anything Qt belongs in `cryosoft/gui/`, not here.
 
 ## CLI
 `python -m cryosoft.troubleshoot <subcommand>` — one-shot commands, each
@@ -62,6 +73,7 @@ hardening the triage skill).
 | `check [--config X] [--no-bus]` | preflight every driver in a config | yes |
 | `bench-l0 [--config X]` | L0 bench: idn + one passive getter per driver (zero excitation) | yes |
 | `status [--log P] [--last N] [--max-age S]` | summarize the RUNNING app's operational-status log (`status.jsonl`); the only command that reads the live app rather than the instruments | yes |
+| `session [EXPERIMENT_DIR]` | report on one experiment folder — its runs in order (kind, procedure, outcome, start/end, duration, data file), its session envelope, and any incident reports filed beside it; defaults to the most recently modified experiment under the measurement root | yes |
 | `trends [--config X] [--window 8h]` | evaluate the declared trend checks (temperature stability, helium consumption) plus the pull-only `trend_store_live` check, against the trend-history store on disk | yes |
 | `methods <target>` | list a driver's public methods | yes |
 | `idn <target>` | identify one instrument via its driver | yes |
@@ -69,6 +81,14 @@ hardening the triage skill).
 | `write <target> <method> [args]` | call a state-changing method | **no — keep prompted** |
 | `query <target> "<cmd>"` | raw command with reply | **no — raw bytes can mutate state** |
 | `send <target> "<cmd>"` | raw command, no reply | **no — keep prompted** |
+
+`session` exits 0 when a report was produced, 1 when there was nothing to
+report on — no experiment resolved, or its `experiment.json` missing or
+unparseable. A *failed run* is content of a successful report, not a failure
+of the command: an agent gating on the exit code is asking "did I get the
+record?", and reads the outcomes out of the payload. It writes nothing and
+opens no instrument, so it is the one command that is safe to run while the
+application is open.
 
 `status` exits 0 only when a record exists and its verdict is `OK`. That
 alone does not prove the app is *running*: a log left behind by a process
@@ -103,6 +123,15 @@ saved active config, falling back to `sim_cryostat`.
   (contract C10). Reads the window by tailing from the end of the file, so
   the cost of "what is it doing right now" does not grow with the length of
   the run, and treats a half-written final line as not-yet-a-record.
+- `session_report.py` — the after-the-fact half: reads one experiment
+  folder's `experiment.json` and reports its runs, envelope, and incident
+  reports. Contract C12 forbids this package from importing
+  `cryosoft.session`, so it parses the record files directly from the shape
+  `cryosoft/session/models.py` documents and the layout
+  `cryosoft/session/store.py` writes — those two files are its contract, and
+  a change to either belongs here too. Tolerant like the session layer's own
+  `from_dict()`: junk degrades to a default rather than raising, so a
+  half-written record still reports the runs it does contain.
 - `cli.py` — the one-shot argparse CLI over the engine (grammar above is API
   for skills and allowlists).
 - `__main__.py` — `python -m cryosoft.troubleshoot` entry point.
