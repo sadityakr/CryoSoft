@@ -38,6 +38,7 @@ from cryosoft.core.station import build_station
 from cryosoft.gui import app_settings as _app_settings
 from cryosoft.gui import form_autosave as session_store
 from cryosoft.gui import window_geometry
+from cryosoft.gui.instrument_front_panel import InstrumentFrontPanel
 from cryosoft.gui.instrument_panel import InstrumentPanel
 from cryosoft.gui.monitor_window import MonitorWindow
 from cryosoft.gui.diagnostics_window import DiagnosticsWindow
@@ -601,6 +602,61 @@ def test_spec_controls_emptied_field_falls_back_to_method_default(spec_panel):
     panel._submit_control("set_temperature")
     assert len(submitted) == 1
     assert "target_K" not in submitted[0][2]
+
+
+# ── Arming controls render from measurement_parameters ───────────────────────
+# initiate_measurement takes its parameters via **params, so the panel can only
+# type its widgets from the specs MeasurementInstrumentBase installs on it from
+# measurement_parameters. These pin that one declaration reaching the front
+# panel: a bare arming control rendered seven untyped text boxes.
+
+
+@pytest.fixture
+def delta_front_panel(station, orchestrator, qtbot):
+    """InstrumentFrontPanel over the sim station's delta-mode measurement VI."""
+    vi_name = "keithley_delta_mode"
+    panel = InstrumentFrontPanel(vi_name, station.get_vi(vi_name), orchestrator)
+    qtbot.addWidget(panel)
+    return vi_name, panel
+
+
+def test_arming_control_renders_typed_widgets(delta_front_panel):
+    """The arming control's declared choices and bools become combos/checkboxes."""
+    vi_name, panel = delta_front_panel
+    prefix = f"{vi_name}_initiate_measurement"
+    assert isinstance(
+        panel.findChild(QWidget, f"{prefix}_voltmeter_range_V_input"), QComboBox
+    )
+    assert isinstance(
+        panel.findChild(QWidget, f"{prefix}_compliance_abort_input"), QCheckBox
+    )
+    assert isinstance(panel.findChild(QWidget, f"{prefix}_current_input"), QLineEdit)
+
+
+def test_arming_control_labels_carry_units(delta_front_panel):
+    """Every arming parameter with a unit is labelled with it."""
+    _, panel = delta_front_panel
+    labels = {lbl.text() for lbl in panel.findChildren(QLabel)}
+    assert "current (A):" in labels
+    assert "compliance_V (V):" in labels
+    assert "delay_s (s):" in labels
+
+
+def test_arming_control_fields_carry_descriptions(delta_front_panel):
+    """The declared description reaches the widget tooltip, not just the schema."""
+    vi_name, panel = delta_front_panel
+    field = panel.findChild(
+        QWidget, f"{vi_name}_initiate_measurement_current_input"
+    )
+    assert field.toolTip().strip()
+
+
+def test_reading_setter_renders_its_single_spec(delta_front_panel):
+    """A reading_setters setter inherits the one measurement_parameters spec."""
+    vi_name, panel = delta_front_panel
+    field = panel.findChild(QWidget, f"{vi_name}_set_delta_current_current_input")
+    assert isinstance(field, QLineEdit)
+    assert field.toolTip().strip()
 
 
 def test_spec_controls_unparseable_value_aborts_submit(spec_panel, monkeypatch):

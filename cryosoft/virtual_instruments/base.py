@@ -22,7 +22,7 @@ from cryosoft.core.exceptions import (
     CryoSoftConfigError,
     CryoSoftSafetyError,
 )
-from cryosoft.core.plan import ParamSpec
+from cryosoft.core.plan import ParamSpec, UIGroup
 from cryosoft.virtual_instruments.rampable import RampableVI
 
 
@@ -159,6 +159,46 @@ class BaseVirtualInstrument:
 
         control_limits = {**ParentVI.control_limits, "set_x": {"x": "x_lim"}}
 
+    UI-group standard
+    -----------------
+    A VI may declare titled groups of its own capabilities in the
+    ``ui_groups`` class attribute, a tuple of ``core.plan.UIGroup``::
+
+        ui_groups: ClassVar[tuple[UIGroup, ...]] = (
+            UIGroup(
+                key="heater",
+                title="Heater",
+                description="Closed-loop and manual heater control.",
+                members=("heater_mode", "heater_output",
+                         "set_heater_mode", "set_heater_output"),
+            ),
+        )
+
+    Declared order is render order and manifest order; a group's ``members``
+    tuple is the order WITHIN the group, and every member names a
+    ``@monitored`` or ``@control`` method of this class. A method may also
+    carry the matching ``@monitored(group="heater")`` / ``@control(group=
+    "heater")`` tag, which is the declaration a reader of the method sees;
+    tag and membership must agree.
+
+    Groups are presentation and description only — they title what the
+    instrument front panel renders and what the capability manifest
+    describes. NOTHING about a group crosses the action queue: a control is
+    still submitted alone, by method name, with flat scalar kwargs, and a
+    group implies no atomicity and no ordering guarantee.
+
+    ``__init_subclass__`` validates the declaration at class creation, so a
+    renamed or moved method cannot leave a dangling tag: group keys must be
+    unique, every member must exist as a monitored or control method, every
+    ``group=`` tag must name a declared group, and a member's own tag (if
+    any) must name the group that lists it. Each failure raises at import
+    naming the VI class and the offending method or key.
+
+    Subclasses that ADD groups must merge, not replace, exactly like
+    ``control_limits``::
+
+        ui_groups = (*ParentVI.ui_groups, UIGroup(...))
+
     Safety-flag manifest standard
     ------------------------------
     Every flag a VI's ``evaluate_safety()`` can report MUST be declared in
@@ -216,6 +256,11 @@ class BaseVirtualInstrument:
     # standard" in the class docstring. Merged across the MRO by
     # merged_safety_flags() — a subclass declares only the flags it adds.
     safety_flags: ClassVar[dict[str, str]] = {}
+
+    # Declarative UI-group manifest: the titled groups this VI's own
+    # capabilities fall into, in render order. See "UI-group standard" in the
+    # class docstring; validated by __init_subclass__.
+    ui_groups: ClassVar[tuple[UIGroup, ...]] = ()
 
     # The standby-provenance standard's command-history bit (see
     # ``standby_status()``): a CLASS-level default of False, shadowed by an
@@ -289,6 +334,16 @@ class BaseVirtualInstrument:
                 if is_monitored:
                     wrapped._is_monitored = True
                     wrapped._display_name = getattr(attr_value, "_display_name", attr_name)
+                    # The monitored declaration (unit/description) and the
+                    # UI-group tag, carried through the wrap the same way the
+                    # control metadata below is.
+                    wrapped._monitored_unit = getattr(
+                        attr_value, "_monitored_unit", None
+                    )
+                    wrapped._monitored_description = getattr(
+                        attr_value, "_monitored_description", ""
+                    )
+                    wrapped._ui_group = getattr(attr_value, "_ui_group", "")
                 if is_control:
                     wrapped._is_control = True
                     wrapped._display_name = getattr(attr_value, "_display_name", attr_name)
@@ -311,6 +366,7 @@ class BaseVirtualInstrument:
                             )
                     wrapped._control_specs = specs
                     wrapped._control_panel = getattr(attr_value, "_control_panel", True)
+                    wrapped._ui_group = getattr(attr_value, "_ui_group", "")
                 setattr(cls, attr_name, wrapped)
 
         # The detach-when-idle declaration's enforcement (see the class
@@ -345,6 +401,105 @@ class BaseVirtualInstrument:
                     BaseVirtualInstrument._make_standby_invalidation_wrapper(
                         ramp_method
                     ),
+                )
+
+        # The UI-group standard (see the class docstring): resolve every
+        # group= tag against the declared ui_groups now, at class creation,
+        # so a renamed or moved method can never leave a dangling tag for a
+        # renderer to trip over at runtime.
+        BaseVirtualInstrument._validate_ui_groups(cls)
+
+    # ------------------------------------------------------------------
+    # UI-group validation (see the class docstring's "UI-group standard")
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _validate_ui_groups(cls: type) -> None:
+        """Check *cls*'s ``ui_groups`` declaration and every ``group=`` tag.
+
+        Runs at class creation over the FULLY RESOLVED capability surface
+        (inherited monitored/control methods included), so a subclass that
+        inherits a tagged method also inherits the obligation to declare its
+        group.
+
+        Args:
+            cls: The Virtual Instrument class being created.
+
+        Raises:
+            TypeError: If ``ui_groups`` is not a tuple of ``UIGroup``.
+            ValueError: If two groups share a key, if a group names a member
+                that is not a ``@monitored`` or ``@control`` method of this
+                class, if a method's ``group=`` tag names no declared group,
+                or if a member's own tag names a different group.
+        """
+        groups = cls.ui_groups
+        if not isinstance(groups, tuple):
+            raise TypeError(
+                f"{cls.__name__}.ui_groups must be a tuple of UIGroup, got "
+                f"{groups!r}"
+            )
+        for group in groups:
+            if not isinstance(group, UIGroup):
+                raise TypeError(
+                    f"{cls.__name__}.ui_groups entries must be UIGroup, got "
+                    f"{type(group).__name__}"
+                )
+
+        keys: list[str] = []
+        for group in groups:
+            if group.key in keys:
+                raise ValueError(
+                    f"{cls.__name__}.ui_groups declares the group key "
+                    f"{group.key!r} twice — group keys must be unique"
+                )
+            keys.append(group.key)
+
+        # The capability surface: every monitored or control method reachable
+        # on this class, with its tag.
+        tags: dict[str, str] = {}
+        for attr_name in dir(cls):
+            try:
+                attr = getattr(cls, attr_name)
+            except AttributeError:
+                continue
+            if not callable(attr):
+                continue
+            if getattr(attr, "_is_monitored", False) or getattr(
+                attr, "_is_control", False
+            ):
+                tags[attr_name] = getattr(attr, "_ui_group", "")
+
+        owner: dict[str, str] = {}
+        for group in groups:
+            for member in group.members:
+                if member not in tags:
+                    raise ValueError(
+                        f"{cls.__name__}.ui_groups[{group.key!r}] names member "
+                        f"{member!r}, which is not a @monitored or @control "
+                        f"method of {cls.__name__}"
+                    )
+                if member in owner:
+                    raise ValueError(
+                        f"{cls.__name__}.ui_groups: method {member!r} is a "
+                        f"member of both {owner[member]!r} and {group.key!r} — "
+                        f"a capability belongs to at most one group"
+                    )
+                owner[member] = group.key
+
+        for method_name, tag in tags.items():
+            if not tag:
+                continue
+            if tag not in keys:
+                raise ValueError(
+                    f"{cls.__name__}.{method_name} is tagged group={tag!r}, "
+                    f"which names no group in {cls.__name__}.ui_groups "
+                    f"(declared: {keys})"
+                )
+            if owner.get(method_name, tag) != tag:
+                raise ValueError(
+                    f"{cls.__name__}.{method_name} is tagged group={tag!r} but "
+                    f"is listed in the members of {owner[method_name]!r} — the "
+                    f"tag and the group's members must agree"
                 )
 
     # ------------------------------------------------------------------
@@ -1276,6 +1431,91 @@ class MeasurementInstrumentBase(BaseVirtualInstrument):
     # configured_externally is true. Empty (the default) changes nothing for
     # a VI that does not support external configuration.
     externally_owned_parameters: ClassVar[frozenset[str]] = frozenset()
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        """Install ``measurement_parameters`` as the declared control specs.
+
+        The one-declaration rule of the measurement-method standard: a
+        measurement VI already owns rich ``ParamSpec``s for its knobs in
+        ``measurement_parameters`` (units, bounds, drop-down ``choices``), and
+        the procedure form renders them. This hook hands the SAME specs to the
+        GUI's control renderer and the capability manifest, so the arming
+        control and the reading-loop setters show the same widgets and the
+        same units instead of bare text boxes — no per-VI duplication, and no
+        second place to keep in step.
+
+        Two controls are covered, and only when the subclass defines them
+        itself and declares no ``params=`` of its own (an explicit
+        declaration always wins):
+
+        * ``initiate_measurement`` — the whole ``measurement_parameters``
+          mapping, which its signature must accept exactly.
+        * every ``reading_setters`` setter — the single spec of the parameter
+          it sets, when that is the setter's only parameter.
+
+        Args:
+            **kwargs: Forwarded to ``BaseVirtualInstrument.__init_subclass__``.
+
+        Raises:
+            ValueError: If ``initiate_measurement`` is a ``@control`` whose
+                parameters are not exactly the ``measurement_parameters``
+                keys, which the measurement-method standard requires.
+        """
+        cls._install_measurement_control_specs()
+        super().__init_subclass__(**kwargs)
+
+    @classmethod
+    def _install_measurement_control_specs(cls) -> None:
+        """Copy ``measurement_parameters`` onto the directly defined controls.
+
+        Runs BEFORE ``BaseVirtualInstrument.__init_subclass__`` wraps the
+        methods, so the specs it writes onto the decorator's function are
+        carried onto the wrapper (and type-checked there) exactly like a
+        hand-written ``params=``. Only ``vars(cls)`` is touched: an inherited
+        method is left alone, since its specs were installed when its own
+        class was created and mutating it would change the parent for
+        everyone.
+
+        Raises:
+            ValueError: If ``initiate_measurement``'s parameters are not
+                exactly the ``measurement_parameters`` keys.
+        """
+        params = cls.measurement_parameters
+        if not params:
+            return
+
+        arming = vars(cls).get("initiate_measurement")
+        if callable(arming) and getattr(arming, "_is_control", False):
+            sig_names = {
+                name
+                for name in inspect.signature(arming).parameters
+                if name != "self"
+            }
+            if sig_names != set(params):
+                raise ValueError(
+                    f"{cls.__name__}.initiate_measurement() takes "
+                    f"{sorted(sig_names)} but measurement_parameters declares "
+                    f"{sorted(params)} — the measurement-method standard "
+                    f"requires them to match exactly."
+                )
+            if not getattr(arming, "_control_specs", None):
+                arming._control_specs = dict(params)
+
+        for param_name, setter_name in cls.reading_setters.items():
+            setter = vars(cls).get(setter_name)
+            if not callable(setter) or not getattr(setter, "_is_control", False):
+                continue
+            if getattr(setter, "_control_specs", None):
+                continue
+            if param_name not in params:
+                continue
+            sig_names = {
+                name
+                for name in inspect.signature(setter).parameters
+                if name != "self"
+            }
+            if sig_names == {param_name}:
+                setter._control_specs = {param_name: params[param_name]}
 
     def __init__(self, drivers: dict[str, object], **init_params: Any) -> None:
         """Initialise the measurement VI.

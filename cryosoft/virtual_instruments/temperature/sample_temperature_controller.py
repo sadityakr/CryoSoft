@@ -7,7 +7,7 @@ from typing import Any, Generator
 
 from cryosoft.core.decorators import control, monitored
 from cryosoft.core.exceptions import CryoSoftSafetyError
-from cryosoft.core.plan import ParamSpec
+from cryosoft.core.plan import ParamSpec, UIGroup
 from cryosoft.virtual_instruments.base import TemperatureControllerBase
 from cryosoft.virtual_instruments.rampable import RampableVI
 
@@ -60,6 +60,38 @@ class SampleTemperatureControllerVI(TemperatureControllerBase, RampableVI):
         "set_temperature": {"target_K": "temperature_K"},
         "set_ramp_rate": {"rate_K_per_min": "ramp_rate_K_per_min"},
     }
+
+    # UI-group standard (see BaseVirtualInstrument): the two workflows this
+    # controller really has. Setting a temperature means reading the sensor,
+    # commanding a target and choosing the rate the ramp walks the setpoint
+    # at; tuning the heater means the loop mode, the manual output it enables,
+    # and the PID gains that drive it in AUTO. Declared order is render order,
+    # and each group's members order is its own working order.
+    ui_groups = (
+        UIGroup(
+            key="temperature_control",
+            title="Temperature control",
+            description=(
+                "Read the sensor and command a ramp to a target temperature."
+            ),
+            members=("temperature", "setpoint", "set_temperature", "set_ramp_rate"),
+        ),
+        UIGroup(
+            key="heater",
+            title="Heater",
+            description=(
+                "Closed-loop or manual heater control and the PID gains behind "
+                "it."
+            ),
+            members=(
+                "heater_mode",
+                "heater_output",
+                "set_heater_mode",
+                "set_heater_output",
+                "set_pid",
+            ),
+        ),
+    )
 
     def __init__(self, drivers: dict[str, object], **init_params: Any) -> None:
         super().__init__(drivers, **init_params)
@@ -213,22 +245,39 @@ class SampleTemperatureControllerVI(TemperatureControllerBase, RampableVI):
     # @monitored methods
     # ------------------------------------------------------------------
 
-    @monitored
+    @monitored(
+        unit="K",
+        description="Temperature read from the control sensor",
+        group="temperature_control",
+    )
     def temperature(self) -> float:
         """Return the current temperature in kelvin."""
         return self._driver.get_temperature()  # type: ignore[attr-defined]
 
-    @monitored
+    @monitored(
+        unit="K",
+        description="Temperature the controller is currently regulating to",
+        group="temperature_control",
+    )
     def setpoint(self) -> float:
         """Return the current temperature setpoint in kelvin."""
         return self._driver.get_setpoint()  # type: ignore[attr-defined]
 
-    @monitored
+    @monitored(
+        unit="%",
+        description="Heater power as a percentage of the heater's maximum",
+        group="heater",
+    )
     def heater_output(self) -> float:
         """Return the heater output percentage (0–100%)."""
         return self._driver.get_heater_output()  # type: ignore[attr-defined]
 
-    @monitored
+    # Dimensionless: a two-valued control mode, not a measured quantity.
+    @monitored(
+        unit="",
+        description="Heater control mode: AUTO (closed-loop PID) or MANUAL",
+        group="heater",
+    )
     def heater_mode(self) -> str:
         """Return the heater control mode: 'AUTO' (closed-loop PID) or 'MANUAL'."""
         return self._driver.get_heater_mode()  # type: ignore[attr-defined]
@@ -237,7 +286,21 @@ class SampleTemperatureControllerVI(TemperatureControllerBase, RampableVI):
     # @control methods
     # ------------------------------------------------------------------
 
-    @control
+    # The upper bound is a setup property read from the config through
+    # control_limits (the control-validation standard), so it is not
+    # repeated on the spec; the default mirrors this VI's own
+    # default_ramp_rate fallback.
+    @control(
+        group="temperature_control",
+        params={
+            "rate_K_per_min": ParamSpec(
+                type=float,
+                default=5.0,
+                unit="K/min",
+                description="Rate subsequent temperature ramps walk the setpoint at",
+            ),
+        },
+    )
     def set_ramp_rate(self, rate_K_per_min: float) -> None:
         """Change the default temperature ramp rate.
 
@@ -255,7 +318,20 @@ class SampleTemperatureControllerVI(TemperatureControllerBase, RampableVI):
             )
         self._default_ramp_rate = float(rate_K_per_min)
 
-    @control
+    # Bounds come from control_limits/config as above. The spec's default
+    # is only the form seed: zero commands the coldest the setup allows,
+    # i.e. heater off, the same direction standby() drives in.
+    @control(
+        group="temperature_control",
+        params={
+            "target_K": ParamSpec(
+                type=float,
+                default=0.0,
+                unit="K",
+                description="Temperature to ramp the controller to",
+            ),
+        },
+    )
     def set_temperature(self, target_K: float) -> None:
         """Manually command a temperature ramp (GUI use; blocked during procedures).
 
@@ -269,6 +345,7 @@ class SampleTemperatureControllerVI(TemperatureControllerBase, RampableVI):
     # instrument front panel, not the compact monitor card.
     @control(
         panel=False,
+        group="heater",
         params={
             "mode": ParamSpec(
                 type=str,
@@ -298,6 +375,7 @@ class SampleTemperatureControllerVI(TemperatureControllerBase, RampableVI):
     # not a setup limit, so it does not go through control_limits/config.
     @control(
         panel=False,
+        group="heater",
         params={
             "output_pct": ParamSpec(
                 type=float, default=0.0, unit="%", min=0.0, max=99.9,
@@ -333,6 +411,7 @@ class SampleTemperatureControllerVI(TemperatureControllerBase, RampableVI):
     # they do not go through control_limits/config.
     @control(
         panel=False,
+        group="heater",
         params={
             "p_K": ParamSpec(
                 type=float, default=10.0, unit="K", min=0.0, max=1677.7,

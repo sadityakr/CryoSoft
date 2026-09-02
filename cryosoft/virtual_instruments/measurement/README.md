@@ -309,8 +309,11 @@ shared-6221 handoff test for the pattern.
   VI the setter **stops and re-arms** the engine (delta latches its peak current
   at arm time), so each loop step pays a delta start-up and its first readings
   include the settling transient. `current` is a peak amplitude that delta
-  reverses each cycle, so looping the sign is redundant. tests:
-  `tests/test_l1_virtual_instruments.py`.
+  reverses each cycle, so looping the sign is redundant. Declares the
+  **UI group** `delta_engine` (`ui_groups`, tagged `group=` on both
+  controls): arming and the peak-current setter are one workflow and are
+  titled together on the front panel instead of sitting alphabetically among
+  the lifecycle controls. tests: `tests/test_l1_virtual_instruments.py`.
 - `lockin_harmonic.py` — `LockInHarmonicMeasurementVI`: lock-in first/second
   harmonic (1f/2f) measurement, sourced by the lock-in's own internal
   oscillator through a series resistor. A single-demodulator lock-in reports

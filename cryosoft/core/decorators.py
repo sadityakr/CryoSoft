@@ -18,6 +18,13 @@ The @monitored decorator marks a method that:
 - Returns a value to be polled every monitor tick.
 - Is displayed as a live-updating number on the GUI panel.
 - Is called by get_state() to build the VI state dict.
+- Carries its own declaration: ``unit=`` (the SI unit label of the value it
+  returns, ``""`` only for a genuinely dimensionless, boolean or string
+  reading) and ``description=`` (one human-readable sentence). Both are
+  plain strings stored on the function; the declaration standard (see
+  ``virtual_instruments/README.md``) requires every monitored field to
+  declare them, and ``tests/test_conformance.py``'s
+  ``test_capability_manifest_is_complete`` enforces it.
 
 The @control decorator marks a method that:
 - Appears as a button (with text-box inputs for arguments) on the GUI panel.
@@ -29,6 +36,13 @@ The @control decorator marks a method that:
   way; a human in IDLE can still click any @control as before. The scope is
   enforced only at plan-dispatch time, by
   ``Station.send_measurement_commands()``.
+
+Both decorators accept ``group=``, the UI-group tag: the key of one of the
+``UIGroup``s the VI declares in its ``ui_groups`` class attribute (see the
+UI-group standard in ``virtual_instruments/base.py``). It is stored here as
+an opaque plain string — this module imports no spec type (layer contract
+C1) — and the VI base class resolves it against the declared groups at
+class creation, so a tag naming no declared group fails at import.
 """
 
 from __future__ import annotations
@@ -44,8 +58,17 @@ from typing import Any, Callable
 VALID_CONTROL_SCOPES: frozenset[str] = frozenset({"measurement", "operation"})
 
 
-def monitored(func: Callable) -> Callable:
+def monitored(
+    func: Callable | None = None,
+    *,
+    unit: str | None = None,
+    description: str = "",
+    group: str | None = None,
+) -> Callable:
     """Mark a method as a monitored variable.
+
+    Works both bare (``@monitored``) and parametrized
+    (``@monitored(unit="K", description="Sample-stage temperature")``).
 
     The method will be:
     1. Called every monitor tick by get_state().
@@ -58,14 +81,70 @@ def monitored(func: Callable) -> Callable:
     as the dict key wherever this value is monitored, logged, or
     persisted) — trend-history logs and saved GUI layouts referencing the
     old key will need a migration path to keep reading historical data.
-    """
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        return func(*args, **kwargs)
 
-    wrapper._is_monitored = True
-    wrapper._display_name = func.__name__
-    return wrapper
+    Args:
+        func: The method being decorated (bare-decorator form only; ``None``
+            when called parametrized).
+        unit: SI unit label of the returned value ("K", "T", "A", "%"), or
+            ``""`` for a genuinely dimensionless, boolean or string reading.
+            ``None`` (the default) means UNDECLARED, which the declaration
+            standard forbids on a shipped VI — it is not the same as ``""``.
+        description: One human-readable sentence saying what the value is.
+        group: Optional UI-group key (see the module docstring).
+
+    Returns:
+        The wrapped method (bare form) or a decorator (parametrized form).
+
+    Raises:
+        TypeError: If ``unit``, ``description`` or ``group`` is not a string.
+        ValueError: If ``group`` is an empty string.
+    """
+    _check_declaration_strings(unit=unit, description=description, group=group)
+
+    def _decorate(inner_func: Callable) -> Callable:
+        @functools.wraps(inner_func)
+        def wrapper(*args, **kwargs):
+            return inner_func(*args, **kwargs)
+
+        wrapper._is_monitored = True
+        wrapper._display_name = inner_func.__name__
+        wrapper._monitored_unit = unit
+        wrapper._monitored_description = description
+        wrapper._ui_group = group or ""
+        return wrapper
+
+    if func is not None:
+        # Bare form: @monitored
+        return _decorate(func)
+    # Parametrized form: @monitored(unit=..., description=...)
+    return _decorate
+
+
+def _check_declaration_strings(**values: str | None) -> None:
+    """Validate the plain-string declaration keywords shared by both decorators.
+
+    Args:
+        **values: Keyword name -> declared value. ``None`` is accepted for
+            every one (it means "not declared"); anything that is not a
+            string otherwise is a typo caught at import.
+
+    Raises:
+        TypeError: If a value is neither ``None`` nor a string.
+        ValueError: If ``group`` is declared as an empty string (a group tag
+            names a declared ``UIGroup``, so it can never be blank).
+    """
+    for name, value in values.items():
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            raise TypeError(
+                f"@monitored/@control {name}= must be a str, got {value!r}"
+            )
+        if name == "group" and not value:
+            raise ValueError(
+                "@monitored/@control group= must be a non-empty str naming a "
+                "declared UIGroup key"
+            )
 
 
 def control(
@@ -74,6 +153,7 @@ def control(
     scope: str = "measurement",
     params: dict[str, Any] | None = None,
     panel: bool = True,
+    group: str | None = None,
 ) -> Callable:
     """Mark a method as a user-controllable action.
 
@@ -102,14 +182,19 @@ def control(
             monitor card, ``False`` keeps it in the instrument's front panel
             only. A setup's ``monitor.yaml`` ``panels:`` block overrides this
             per VI; the flag is display-only and never a safety mechanism.
+        group: Optional UI-group key (see the module docstring). Stored
+            opaquely and resolved by the VI base class at class creation.
 
     Returns:
         The wrapped method (bare form) or a decorator (parametrized form).
 
     Raises:
-        ValueError: If ``scope`` is not one of ``VALID_CONTROL_SCOPES``, or if
-            ``params`` keys do not exactly match the method's parameters.
+        TypeError: If ``group`` is not a string.
+        ValueError: If ``scope`` is not one of ``VALID_CONTROL_SCOPES``, if
+            ``group`` is an empty string, or if ``params`` keys do not
+            exactly match the method's parameters.
     """
+    _check_declaration_strings(group=group)
     if scope not in VALID_CONTROL_SCOPES:
         raise ValueError(
             f"@control scope must be one of {sorted(VALID_CONTROL_SCOPES)}, "
@@ -125,6 +210,7 @@ def control(
         wrapper._display_name = inner_func.__name__
         wrapper._control_scope = scope
         wrapper._control_panel = panel
+        wrapper._ui_group = group or ""
 
         if params is not None:
             sig_names = [
@@ -219,6 +305,48 @@ def get_control_panel(method: Callable) -> bool:
         belongs in the instrument front panel only.
     """
     return getattr(method, "_control_panel", True)
+
+
+def get_monitored_unit(method: Callable) -> str | None:
+    """Return a @monitored method's declared unit label.
+
+    Args:
+        method: A callable, typically a bound VI method.
+
+    Returns:
+        The ``unit=`` string given at decoration time — ``""`` for a
+        deliberately dimensionless reading — or ``None`` when the method
+        declared none (which the declaration standard forbids on a shipped
+        VI; see ``virtual_instruments/README.md``).
+    """
+    return getattr(method, "_monitored_unit", None)
+
+
+def get_monitored_description(method: Callable) -> str:
+    """Return a @monitored method's declared description.
+
+    Args:
+        method: A callable, typically a bound VI method.
+
+    Returns:
+        The ``description=`` string given at decoration time, or ``""`` when
+        the method declared none.
+    """
+    return getattr(method, "_monitored_description", "")
+
+
+def get_ui_group(method: Callable) -> str:
+    """Return a @monitored or @control method's UI-group tag.
+
+    Args:
+        method: A callable, typically a bound VI method.
+
+    Returns:
+        The ``group=`` key given at decoration time, or ``""`` when the
+        method belongs to no group (the default: an ungrouped capability is
+        rendered after every declared group).
+    """
+    return getattr(method, "_ui_group", "")
 
 
 def get_control_scope(method: Callable) -> str:

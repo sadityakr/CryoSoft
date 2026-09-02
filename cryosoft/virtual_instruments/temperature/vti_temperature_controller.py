@@ -54,12 +54,22 @@ class VTITemperatureControllerVI(SampleTemperatureControllerVI):
     # @monitored methods — needle valve
     # ------------------------------------------------------------------
 
-    @monitored
+    @monitored(
+        unit="%",
+        description="Needle valve position, 0 fully closed to 100 fully open",
+    )
     def needle_valve(self) -> float:
         """Return the needle valve position as percent open (0–100)."""
         return self._driver.get_needle_valve()  # type: ignore[attr-defined]
 
-    @monitored
+    # Dimensionless: a two-valued control mode, not a measured quantity.
+    @monitored(
+        unit="",
+        description=(
+            "Needle valve control mode: AUTO (instrument gas-flow loop) or "
+            "MANUAL"
+        ),
+    )
     def needle_valve_mode(self) -> str:
         """Return the needle valve control mode: 'AUTO' or 'MANUAL'."""
         return self._driver.get_needle_valve_mode()  # type: ignore[attr-defined]
@@ -68,7 +78,19 @@ class VTITemperatureControllerVI(SampleTemperatureControllerVI):
     # @control methods — needle valve
     # ------------------------------------------------------------------
 
-    @control
+    # The 0-100 % bound is the valve's own physical range, declared in
+    # control_limits (the control-validation standard) rather than repeated
+    # on the spec. The default is the closed position standby() drives to.
+    @control(
+        params={
+            "position": ParamSpec(
+                type=float,
+                default=0.0,
+                unit="%",
+                description="Needle valve position, 0 fully closed to 100 fully open",
+            ),
+        },
+    )
     def set_needle_valve(self, position: float) -> None:
         """Set the needle valve position.
 
