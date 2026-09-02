@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 
+from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -19,6 +22,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from cryosoft.core.plan import EnvelopeBound, EnvelopeVariable, ExperimentEnvelope
 from cryosoft.session.models import User
 from cryosoft.session.store import UserRoster
 
@@ -26,6 +30,11 @@ from cryosoft.session.store import UserRoster
 def _slugify(text: str) -> str:
     """Derive a roster-key slug from free text (lowercase, ``_``-joined)."""
     return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
+
+
+def _format_bound(value: float | None) -> str:
+    """Render a bound for an editor field (``""`` for "unbounded")."""
+    return "" if value is None else f"{value:g}"
 
 
 class AddUserDialog(QDialog):
@@ -156,6 +165,189 @@ class UserPickerWidget(QWidget):
         return self._combo.currentIndexChanged
 
 
+class EnvelopeEditorWidget(QGroupBox):
+    """Per-experiment sample bounds, pre-filled from the setup's own limits.
+
+    The experiment envelope protects the *sample*: the config's limits protect
+    the instrument and never change, while these bounds say what the device
+    mounted for THIS experiment may see. The editor is deliberately pre-filled
+    with the setup limits rather than left blank, because an envelope composed
+    from nothing is an envelope nobody fills in — the operator's job here is to
+    NARROW numbers that are already correct.
+
+    Narrowing is enforced, not merely intended: a bound wider than the setup's
+    own limit is rejected with a reason, since it could only mislead (the
+    control-validation standard would refuse the value anyway).
+
+    Bounds are entered in each quantity's SI unit, taken from the setpoint
+    parameter's name (``target_T`` → T). A blank field means "unbounded on that
+    side"; a VI with both fields blank contributes no bound at all.
+
+    ObjectNames (API for tests and muscle memory): the group is
+    ``envelope_editor_group``, its toggle ``envelope_enabled_checkbox``, the
+    validation message ``envelope_error_label``, and each VI's two fields
+    ``envelope_min_<vi_name>`` / ``envelope_max_<vi_name>``.
+
+    Args:
+        variables: ``{vi_name: EnvelopeVariable}`` from
+            ``ExperimentManager.envelope_variables()``.
+        parent: Optional Qt parent widget.
+    """
+
+    changed = pyqtSignal()
+
+    def __init__(
+        self,
+        variables: Mapping[str, EnvelopeVariable],
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__("Sample envelope", parent)
+        self.setObjectName("envelope_editor_group")
+        self._variables = dict(sorted(variables.items()))
+        self._rows: dict[str, tuple[QLineEdit, QLineEdit]] = {}
+        self._error = ""
+
+        layout = QVBoxLayout(self)
+
+        self._enabled_checkbox = QCheckBox(
+            "Bound this experiment to a sample envelope"
+        )
+        self._enabled_checkbox.setObjectName("envelope_enabled_checkbox")
+        self._enabled_checkbox.setChecked(True)
+        self._enabled_checkbox.setToolTip(
+            "Refuse any target or manual action that would take an instrument "
+            "outside these bounds, for the whole experiment."
+        )
+        self._enabled_checkbox.toggled.connect(self._on_enabled_toggled)
+        layout.addWidget(self._enabled_checkbox)
+
+        form = QFormLayout()
+        for vi_name, variable in self._variables.items():
+            unit = variable.unit_suffix
+            min_edit = QLineEdit(_format_bound(variable.config_min))
+            min_edit.setObjectName(f"envelope_min_{vi_name}")
+            min_edit.setPlaceholderText("no lower bound")
+            max_edit = QLineEdit(_format_bound(variable.config_max))
+            max_edit.setObjectName(f"envelope_max_{vi_name}")
+            max_edit.setPlaceholderText("no upper bound")
+            for edit in (min_edit, max_edit):
+                edit.setToolTip(
+                    f"{vi_name}.{variable.method_name}"
+                    f"({variable.param_name}) — setup limit "
+                    f"[{_format_bound(variable.config_min) or '-inf'}, "
+                    f"{_format_bound(variable.config_max) or '+inf'}]"
+                )
+                edit.textChanged.connect(self._on_field_changed)
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.addWidget(min_edit, 1)
+            row.addWidget(QLabel("to"))
+            row.addWidget(max_edit, 1)
+            row_widget = QWidget()
+            row_widget.setLayout(row)
+            label = f"{vi_name} ({unit}):" if unit else f"{vi_name}:"
+            form.addRow(label, row_widget)
+            self._rows[vi_name] = (min_edit, max_edit)
+        layout.addLayout(form)
+
+        # Reuses DiagnosticsWindow's validated "verdict_badge" QSS class
+        # rather than inventing a colour for one message.
+        self._error_label = QLabel("")
+        self._error_label.setObjectName("envelope_error_label")
+        self._error_label.setProperty("class", "verdict_badge")
+        self._error_label.setProperty("severity", "error")
+        self._error_label.setWordWrap(True)
+        self._error_label.setVisible(False)
+        layout.addWidget(self._error_label)
+
+        self._revalidate()
+
+    def _on_enabled_toggled(self, checked: bool) -> None:
+        """Enable or disable every field, then revalidate."""
+        for min_edit, max_edit in self._rows.values():
+            min_edit.setEnabled(checked)
+            max_edit.setEnabled(checked)
+        self._revalidate()
+
+    def _on_field_changed(self, _text: str) -> None:
+        self._revalidate()
+
+    def _parse(self) -> tuple[dict[str, EnvelopeBound], str]:
+        """Return ``(bounds, error)`` for the current field contents.
+
+        Returns:
+            The parsed bounds keyed by VI name and an error message; the
+            message is empty when every field is acceptable, and the bounds
+            are then complete.
+        """
+        bounds: dict[str, EnvelopeBound] = {}
+        for vi_name, (min_edit, max_edit) in self._rows.items():
+            variable = self._variables[vi_name]
+            values: dict[str, float | None] = {}
+            for side, edit in (("min", min_edit), ("max", max_edit)):
+                text = edit.text().strip()
+                if not text:
+                    values[side] = None
+                    continue
+                try:
+                    values[side] = float(text)
+                except ValueError:
+                    return {}, f"{vi_name}: {side} bound {text!r} is not a number"
+            if values["min"] is None and values["max"] is None:
+                continue
+            if values["min"] is not None and variable.config_min is not None:
+                if values["min"] < variable.config_min:
+                    return {}, (
+                        f"{vi_name}: minimum {values['min']:g} is below the "
+                        f"setup limit {variable.config_min:g} — an envelope "
+                        f"narrows the setup's limits, it cannot widen them"
+                    )
+            if values["max"] is not None and variable.config_max is not None:
+                if values["max"] > variable.config_max:
+                    return {}, (
+                        f"{vi_name}: maximum {values['max']:g} is above the "
+                        f"setup limit {variable.config_max:g} — an envelope "
+                        f"narrows the setup's limits, it cannot widen them"
+                    )
+            try:
+                bounds[vi_name] = EnvelopeBound(
+                    min_value=values["min"], max_value=values["max"]
+                )
+            except (TypeError, ValueError) as exc:
+                return {}, f"{vi_name}: {exc}"
+        return bounds, ""
+
+    def _revalidate(self) -> None:
+        """Re-parse the fields, show any error, and announce the change."""
+        if self._enabled_checkbox.isChecked():
+            _bounds, self._error = self._parse()
+        else:
+            self._error = ""
+        self._error_label.setText(self._error)
+        self._error_label.setVisible(bool(self._error))
+        self.changed.emit()
+
+    def error(self) -> str:
+        """Return why the current entry is unusable, or ``""`` when it is valid."""
+        return self._error
+
+    def envelope(self) -> ExperimentEnvelope | None:
+        """Return the edited envelope, or ``None`` for "no envelope".
+
+        Returns:
+            An ``ExperimentEnvelope`` over every VI with at least one bound
+            entered; ``None`` when the editor is switched off, when no bound
+            was entered at all, or while ``error()`` is non-empty (the dialog
+            keeps OK disabled in that case, so this is belt and braces).
+        """
+        if not self._enabled_checkbox.isChecked():
+            return None
+        bounds, error = self._parse()
+        if error or not bounds:
+            return None
+        return ExperimentEnvelope(bounds=bounds)
+
+
 class StartExperimentDialog(QDialog):
     """Collect a title, user, attendance flag, and folder name to open a new experiment.
 
@@ -164,9 +356,27 @@ class StartExperimentDialog(QDialog):
     nesting); left alone, it auto-fills from the title the same way
     ``AddUserDialog``'s id field auto-fills from the name, and stops
     auto-filling the moment the operator types in it by hand.
+
+    When the caller supplies *envelope_variables* the dialog also carries an
+    ``EnvelopeEditorWidget``, so the experiment's sample bounds are set where
+    the experiment is opened — the only moment at which the operator knows what
+    is mounted.
+
+    Args:
+        roster: The setup-local user roster.
+        parent: Optional Qt parent widget.
+        envelope_variables: ``{vi_name: EnvelopeVariable}`` (see
+            ``ExperimentManager.envelope_variables()``). ``None`` or empty
+            leaves the envelope editor out entirely, which is what a caller
+            with no station wired — a unit test, say — gets.
     """
 
-    def __init__(self, roster: UserRoster, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        roster: UserRoster,
+        parent: QWidget | None = None,
+        envelope_variables: Mapping[str, EnvelopeVariable] | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Start Experiment")
         self._dirname_edited_by_hand = False
@@ -199,6 +409,11 @@ class StartExperimentDialog(QDialog):
         self._attended_checkbox.setChecked(True)
         form.addRow("", self._attended_checkbox)
 
+        self._envelope_editor: EnvelopeEditorWidget | None = None
+        if envelope_variables:
+            self._envelope_editor = EnvelopeEditorWidget(envelope_variables)
+            self._envelope_editor.changed.connect(self._update_ok_enabled)
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -208,6 +423,8 @@ class StartExperimentDialog(QDialog):
 
         layout = QVBoxLayout(self)
         layout.addLayout(form)
+        if self._envelope_editor is not None:
+            layout.addWidget(self._envelope_editor)
         layout.addWidget(buttons)
 
         self._update_ok_enabled()
@@ -221,9 +438,28 @@ class StartExperimentDialog(QDialog):
         self._dirname_edited_by_hand = True
 
     def _update_ok_enabled(self) -> None:
-        self._ok_button.setEnabled(
-            bool(self._title_input.text().strip()) and self._user_picker.has_users()
+        envelope_ok = (
+            self._envelope_editor is None or not self._envelope_editor.error()
         )
+        self._ok_button.setEnabled(
+            bool(self._title_input.text().strip())
+            and self._user_picker.has_users()
+            and envelope_ok
+        )
+
+    def envelope(self) -> ExperimentEnvelope | None:
+        """Return the edited experiment envelope, or ``None`` for none.
+
+        Only meaningful after accept.
+
+        Returns:
+            The envelope the operator narrowed to, or ``None`` when this
+            dialog carries no editor, the editor is switched off, or no bound
+            was entered.
+        """
+        if self._envelope_editor is None:
+            return None
+        return self._envelope_editor.envelope()
 
     def result_values(self) -> tuple[str, str, bool, str | None]:
         """Return ``(title, user_id, attended, experiment_dirname)``.

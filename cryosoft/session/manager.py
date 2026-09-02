@@ -10,7 +10,7 @@ from typing import Any
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from cryosoft.core.orchestrator import Orchestrator
-from cryosoft.core.plan import ExperimentEnvelope
+from cryosoft.core.plan import EnvelopeVariable, ExperimentEnvelope
 from cryosoft.core.station import read_instrument_metadata
 from cryosoft.session.models import (
     EXPERIMENT_STATUS_CLOSED,
@@ -129,6 +129,23 @@ class ExperimentManager(QObject):
     def current_experiment(self) -> ExperimentRecord | None:
         """Return the open experiment record, or ``None``."""
         return self._experiment
+
+    def envelope_variables(self) -> dict[str, EnvelopeVariable]:
+        """Return each enveloped quantity and the setup's own bounds on it.
+
+        The read side of the envelope this layer installs: the Start
+        Experiment dialog pre-fills its envelope editor from these bounds, so
+        the operator NARROWS what the setup already allows instead of composing
+        an envelope from nothing. A passthrough to the Orchestrator's public
+        API — the GUI has no Orchestrator of its own here, and this manager
+        already owns the envelope's write side
+        (``set_experiment_envelope()``), so the read side belongs beside it.
+
+        Returns:
+            ``{vi_name: EnvelopeVariable}``; empty when no VI declares a
+            setpoint capability.
+        """
+        return self._orchestrator.envelope_variables()
 
     def experiment_context(self) -> dict[str, Any]:
         """Return the two-tier context dict stamped into every run's metadata.

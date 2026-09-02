@@ -131,8 +131,19 @@ class ExperimentInfoPanel(QWidget):
             self._run_close_dialog()
 
     def _run_start_dialog(self) -> None:
+        """Open the Start Experiment dialog and start what it collected.
+
+        The dialog is handed the setup's own bounds per enveloped quantity, so
+        its envelope editor is pre-filled and the operator narrows rather than
+        composes; whatever it returns is installed on the Orchestrator by the
+        session manager as part of opening the experiment.
+        """
         assert self._session_manager is not None
-        dialog = StartExperimentDialog(self._session_manager.roster, self)
+        dialog = StartExperimentDialog(
+            self._session_manager.roster,
+            self,
+            envelope_variables=self._session_manager.envelope_variables(),
+        )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         title, user_id, attended, dirname = dialog.result_values()
@@ -143,6 +154,7 @@ class ExperimentInfoPanel(QWidget):
                 sample_info=self.get_sample_info(),
                 attended=attended,
                 experiment_dirname=dirname,
+                envelope=dialog.envelope(),
             )
         except ValueError as exc:
             QMessageBox.warning(self, "Could not start experiment", str(exc))
