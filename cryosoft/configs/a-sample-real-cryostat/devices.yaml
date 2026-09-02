@@ -96,16 +96,25 @@ virtual_instruments:
     class: cryosoft.virtual_instruments.measurement.measurement_delta_mode.DeltaModeMeasurementVI
     drivers: {source: keithley_6221, meter: keithley_2182a}
     vi_type: measurement
-    init_params: {}
+    init_params:
+      # Excitation ceiling enforced on every @control that commands current
+      # (control-validation standard). No per-sample limit is documented for
+      # this rack, so the bound is the Keithley 6221's own maximum output,
+      # 105 mA: it catches a mistyped exponent without narrowing what the
+      # operator may legitimately source. Lower it to the sample's own safe
+      # current once that figure is measured.
+      max_source_current_A: 0.105
 
   keithley_dc_mode:
     class: cryosoft.virtual_instruments.measurement.measurement_dc_mode.DCModeMeasurementVI
     drivers: {source: keithley_6221, meter: keithley_2182a}
     vi_type: measurement
-    init_params: {}
+    init_params:
+      max_source_current_A: 0.105   # Keithley 6221 maximum output current
 
   dc_measurement:
     class: cryosoft.virtual_instruments.measurement.dc_separate_measurement.DCSeparateMeasurementVI
     drivers: {source: keithley_6221, meter: keithley_2182a}
     vi_type: measurement
-    init_params: {}
+    init_params:
+      max_source_current_A: 0.105   # Keithley 6221 maximum output current

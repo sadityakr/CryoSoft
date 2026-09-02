@@ -523,6 +523,19 @@ def test_experiment_context_tolerates_missing_config_path(store, roster, orchest
     assert manager.experiment_context()["setup"]["instruments"] == {}
 
 
+def test_envelope_variables_expose_the_setup_bounds_to_narrow(manager, station):
+    """The read side of the envelope: what the Start dialog pre-fills from."""
+    variables = manager.envelope_variables()
+
+    assert "magnet_z" in variables
+    magnet = variables["magnet_z"]
+    assert (magnet.method_name, magnet.param_name) == ("set_field", "target_T")
+    assert (magnet.config_min, magnet.config_max) == station.get_vi(
+        "magnet_z"
+    ).limit_bounds("field_T")
+    assert magnet.unit_suffix == "T"
+
+
 def test_start_experiment_persists_and_installs_envelope(manager, orchestrator, store):
     envelope = ExperimentEnvelope(
         bounds={"magnet_z": EnvelopeBound(min_value=-2.0, max_value=2.0)}

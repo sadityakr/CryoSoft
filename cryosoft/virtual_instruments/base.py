@@ -25,6 +25,57 @@ from cryosoft.core.exceptions import (
 from cryosoft.core.plan import ParamSpec, UIGroup
 from cryosoft.virtual_instruments.rampable import RampableVI
 
+logger = logging.getLogger(__name__)
+
+#: Config key naming a setup's excitation-current ceiling, in amperes.
+#: Every VI that drives current through the sample reads it — directly (the
+#: DC and delta-mode VIs bound the sourced current by it) or derived (a
+#: voltage-sourced lock-in bounds its oscillator amplitude by
+#: ``max_source_current_A × series_resistance_ohm``). Limits are properties of
+#: the setup, so the VALUE always comes from the config; this module only
+#: names the key.
+MAX_SOURCE_CURRENT_KEY: str = "max_source_current_A"
+
+#: ``control_limits`` limit name for a directly sourced excitation current
+#: (the control-validation standard). Shared by every current-sourcing
+#: measurement VI so one config key populates one named bound.
+EXCITATION_CURRENT_LIMIT: str = "source_current_A"
+
+
+def _populate_excitation_current_limit(
+    vi: BaseVirtualInstrument, init_params: Mapping[str, Any]
+) -> None:
+    """Set ``vi._limits[EXCITATION_CURRENT_LIMIT]`` from the setup config.
+
+    The one place the excitation ceiling is turned into a bound, shared by
+    every VI that sources current directly, so the four DC/delta-mode VIs
+    cannot drift apart in how they read the same config key.
+
+    The bound is symmetric: reversing the current is routine in DC and
+    delta-mode resistance work (thermal-EMF cancellation), and the hazard is
+    the magnitude either way. A missing key leaves the limit populated but
+    unbounded on both sides — the same "absent means no bound" rule the
+    temperature, magnet and rotator VIs follow — so an older hand-written
+    config still builds; the conformance suite is what requires every SHIPPED
+    config to declare it.
+
+    Args:
+        vi: The VI being constructed (its ``_limits`` dict is written).
+        init_params: The VI's config ``init_params``.
+    """
+    raw = init_params.get(MAX_SOURCE_CURRENT_KEY)
+    if raw is None:
+        logger.warning(
+            "%s: config declares no '%s' — the excitation current is "
+            "UNBOUNDED for this setup.",
+            type(vi).__name__,
+            MAX_SOURCE_CURRENT_KEY,
+        )
+        vi._limits[EXCITATION_CURRENT_LIMIT] = (None, None)
+        return
+    ceiling = abs(float(raw))
+    vi._limits[EXCITATION_CURRENT_LIMIT] = (-ceiling, ceiling)
+
 
 class BaseVirtualInstrument:
     """Root class for all CryoSoft Virtual Instruments.
@@ -734,6 +785,28 @@ class BaseVirtualInstrument:
         self._standby_commanded = True
         if self.detach_when_idle:
             self._detach()
+
+    def limit_bounds(self, limit_name: str) -> tuple[float | None, float | None]:
+        """Return the ``(lo, hi)`` bounds of one populated control limit.
+
+        The public read side of the control-validation standard (see the class
+        docstring): ``_limits`` is written by each VI's ``__init__`` from its
+        config and read by the enforcement wrapper; this is how a caller
+        OUTSIDE the VI — the Station, assembling the setup bounds an
+        experiment's envelope narrows — asks what the setup already allows,
+        without reaching into that dict.
+
+        Args:
+            limit_name: The limit's name, as referenced from
+                ``control_limits``.
+
+        Returns:
+            ``(lo, hi)`` in the parameter's SI unit; ``None`` on a side means
+            unbounded there. An unknown *limit_name* returns ``(None, None)``
+            — "this setup bounds nothing by that name" — so a caller
+            surveying limits needs no per-VI knowledge of which exist.
+        """
+        return self._limits.get(limit_name, (None, None))
 
     # ------------------------------------------------------------------
     # Connection lifecycle (the connection-lifecycle standard)
@@ -1767,6 +1840,15 @@ class DCMeasurementBase(MeasurementInstrumentBase):
 
     display_label: str = "DC resistance"
 
+    # Control-validation standard (see BaseVirtualInstrument): the excitation
+    # current a DC measurement pushes through the sample is the one @control
+    # parameter here that can damage it, so it is bounded by the setup's own
+    # ceiling. Subclasses that add a per-reading current setter MERGE into
+    # this mapping rather than replacing it.
+    control_limits = {
+        "initiate_measurement": {"current_A": EXCITATION_CURRENT_LIMIT},
+    }
+
     _ARRAY_KEYS, _SCALAR_COLUMNS = MeasurementInstrumentBase.quantity_columns(
         "voltage_V", "current_A"
     )
@@ -1795,6 +1877,22 @@ class DCMeasurementBase(MeasurementInstrumentBase):
             description="DC voltage readings averaged per point",
         ),
     }
+
+    def __init__(self, drivers: dict[str, object], **init_params: Any) -> None:
+        """Populate the excitation-current limit from the setup config.
+
+        Args:
+            drivers: The VI's driver mapping (see the concrete subclass).
+            **init_params: Setup parameters; ``max_source_current_A`` bounds
+                the sourced current symmetrically (current reversal is
+                routine in DC resistance work, so the bound is
+                ``±max_source_current_A``). Absent means unbounded — the
+                same "missing key means no bound on that side" rule every
+                other VI's limits follow. Every shipped config declares it;
+                ``tests/test_conformance.py`` makes that binding.
+        """
+        super().__init__(drivers, **init_params)
+        _populate_excitation_current_limit(self, init_params)
 
     def data_arrays(self, params: Mapping[str, Any]) -> dict[str, int]:
         """Return ``{"voltage_V_array": n, "current_A_array": n}``.

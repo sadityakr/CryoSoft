@@ -100,20 +100,34 @@ from cryosoft.core.exceptions import (
     CryoSoftInstrumentError,
     CryoSoftSafetyError,
 )
+from cryosoft.core.exceptions import (
+    CryoSoftCommunicationError,
+    CryoSoftPrivateActionError,
+    CryoSoftSafetyError,
+    CryoSoftUndeclaredActionError,
+)
 from cryosoft.core.operation import (
     STEP_KINDS,
     OperationBase,
     OperationStep,
     ReadinessCondition,
 )
-from cryosoft.core.plan import ParamSpec, UIGroup
+from cryosoft.core.plan import SETPOINT_PARAM_PREFIX, ParamSpec, UIGroup
 from cryosoft.core.procedure import BaseProcedure
-from cryosoft.core.station import Station, _import_class, build_station
+from cryosoft.core.station import (
+    LIFECYCLE_ACTIONS,
+    Station,
+    _import_class,
+    build_station,
+)
 from cryosoft.session.servicing_log import DECLARED_LOG_KINDS
 from cryosoft.virtual_instruments.base import (
+    EXCITATION_CURRENT_LIMIT,
+    MAX_SOURCE_CURRENT_KEY,
     BaseVirtualInstrument,
     MeasurementInstrumentBase,
 )
+from cryosoft.virtual_instruments.rampable import RampableVI
 
 CONFIGS_DIR = Path(cryosoft.__file__).parent / "configs"
 
@@ -1804,6 +1818,334 @@ def test_measurement_lifecycle_is_measurement_scope(vi_cls: type) -> None:
             f"{vi_cls.__name__}.{method_name} must be measurement-scope, "
             f"got {scope!r}"
         )
+
+
+# ── Control-limit coverage (the direct action path's numeric fence) ───────────
+# The control-validation standard is only as strong as its coverage: a
+# @control parameter nobody remembered to declare is enforced by nothing at
+# all. This section converts it from "enforced if declared" into "declared, or
+# exempted IN WRITING". Every numeric (float/int) parameter of every @control
+# method on every discovered VI must either appear in that VI's
+# ``control_limits`` or appear below with a one-line physical reason.
+#
+# The table is keyed by (declaring class, method, parameter) — the class where
+# the method is DEFINED, so an inherited control is written down once — and its
+# values are the rationale a reviewer reads. Adding a row is a deliberate act;
+# it is not a way to silence the test, because
+# ``test_no_stale_control_limit_exemptions`` fails on any row that no longer
+# names a real unbounded parameter.
+CONTROL_LIMIT_EXEMPTIONS: dict[tuple[str, str, str], str] = {
+    # -- Enumerated instrument settings: the value selects a mode, it is not a
+    #    physical quantity a range could bound.
+    ("CryogenLevelMeterVI", "set_refresh_rate", "mode"): (
+        "ILM refresh-rate code (1=slow/2=fast/3=off), not a physical quantity; "
+        "the VI rejects any other value outright."
+    ),
+    ("Lakeshore335SampleTemperatureControllerVI", "set_curve", "curve"): (
+        "Calibration-curve slot index in the controller's own curve table; an "
+        "index selects a stored curve and drives no output."
+    ),
+    ("SwitchMatrixVI", "set_pole_mode", "poles"): (
+        "Wiring mode, 2 or 4 poles; the VI rejects any other value, and the "
+        "choice reconfigures relays rather than setting a level."
+    ),
+    ("DCMeasurementBase", "initiate_measurement", "voltmeter_range_V"): (
+        "Voltmeter full-scale input range: a receive-side setting that sources "
+        "nothing, and the meter clamps it to its nearest supported range."
+    ),
+    ("DCModeMeasurementVI", "initiate_measurement", "voltmeter_range_V"): (
+        "Voltmeter full-scale input range (enumerated in its ParamSpec "
+        "choices); a receive-side setting that sources nothing."
+    ),
+    ("DeltaModeMeasurementVI", "initiate_measurement", "voltmeter_range_V"): (
+        "Voltmeter full-scale input range (enumerated in its ParamSpec "
+        "choices); a receive-side setting that sources nothing."
+    ),
+    # -- Dimensionless counts.
+    ("DCMeasurementBase", "initiate_measurement", "readings_per_point"): (
+        "Dimensionless sample count; it costs time, not energy in the sample."
+    ),
+    ("DCModeMeasurementVI", "initiate_measurement", "n_readings"): (
+        "Dimensionless sample count, rejected below 1 by the method itself."
+    ),
+    ("DeltaModeMeasurementVI", "initiate_measurement", "n_readings"): (
+        "Dimensionless sample count, rejected below 1 by the method itself."
+    ),
+    ("LockInHarmonicMeasurementVI", "initiate_measurement", "n_readings"): (
+        "Dimensionless count of 1f/2f reading pairs per point."
+    ),
+    ("TensormeterRTM2MeasurementVI", "initiate_measurement", "readings_per_point"): (
+        "Dimensionless sample count taken from the instrument's data block."
+    ),
+    # -- Timing: dwell and integration times change how long a measurement
+    #    takes, never how hard it drives the sample.
+    ("DCModeMeasurementVI", "initiate_measurement", "delay_s"): (
+        "Inter-reading dwell; a timing parameter with no actuation."
+    ),
+    ("DeltaModeMeasurementVI", "initiate_measurement", "delay_s"): (
+        "Delta inter-transition delay; a timing parameter with no actuation."
+    ),
+    ("LockInHarmonicMeasurementVI", "initiate_measurement", "time_constant_s"): (
+        "Demodulator time constant; sets averaging bandwidth, drives nothing."
+    ),
+    ("TensormeterRTM2MeasurementVI", "initiate_measurement", "averaging_time_s"): (
+        "Per-point averaging window; a timing parameter with no actuation."
+    ),
+    # -- Compliance ceilings: these are themselves protective limits. With the
+    #    excitation current already bounded, they only decide how much voltage
+    #    headroom the source may use to deliver that bounded current.
+    ("DCMeasurementBase", "initiate_measurement", "compliance_A"): (
+        "The source's own protective ceiling; the sourced current is already "
+        "bounded, so this only sets headroom, and the instrument clamps it."
+    ),
+    ("DCModeMeasurementVI", "initiate_measurement", "compliance_V"): (
+        "The source's own voltage-compliance ceiling; the sourced current is "
+        "already bounded, so this only sets headroom."
+    ),
+    ("DeltaModeMeasurementVI", "initiate_measurement", "compliance_V"): (
+        "The source's own voltage-compliance ceiling; the sourced current is "
+        "already bounded, so this only sets headroom."
+    ),
+    # -- Closed-loop tuning constants and open-loop heater drive.
+    ("SampleTemperatureControllerVI", "set_heater_output", "output_pct"): (
+        "Heater drive as a percentage of the range the controller is set to; "
+        "the driver clamps it to 0-100 and the heater range, not this VI, is "
+        "what bounds the power available."
+    ),
+    ("SampleTemperatureControllerVI", "set_pid", "p_K"): (
+        "Closed-loop proportional gain: a tuning constant, clamped by the "
+        "controller firmware, that commands no setpoint of its own."
+    ),
+    ("SampleTemperatureControllerVI", "set_pid", "i_min"): (
+        "Closed-loop integral time: a tuning constant, clamped by the "
+        "controller firmware, that commands no setpoint of its own."
+    ),
+    ("SampleTemperatureControllerVI", "set_pid", "d_min"): (
+        "Closed-loop derivative time: a tuning constant, clamped by the "
+        "controller firmware, that commands no setpoint of its own."
+    ),
+    # -- Lock-in oscillator frequency.
+    ("LockInHarmonicMeasurementVI", "initiate_measurement", "oscillator_frequency_Hz"): (
+        "Excitation frequency, clamped to the oscillator's own range by the "
+        "instrument; the sample's power comes from the amplitude, which IS "
+        "bounded (by max_source_current_A through the series resistor)."
+    ),
+}
+
+
+def _exemption_key(cls: type, method_name: str, param_name: str) -> tuple | None:
+    """Return the exemption row covering this parameter, or ``None``.
+
+    Matched along ``cls``'s MRO, so a control declared on a base class is
+    written down ONCE even when concrete VIs override the method to implement
+    it (``DCMeasurementBase.initiate_measurement`` and its two subclasses):
+    the parameter, its unit and the physical reason are the base's, not each
+    implementation's.
+    """
+    for base in cls.__mro__:
+        key = (base.__name__, method_name, param_name)
+        if key in CONTROL_LIMIT_EXEMPTIONS:
+            return key
+    return None
+
+
+def _unbounded_numeric_control_params(cls: type) -> list[tuple[str, str]]:
+    """Return ``(method, param)`` for every numeric @control param without a limit."""
+    found: list[tuple[str, str]] = []
+    for method_name, method in _control_methods(cls).items():
+        for param_name, info in getattr(method, "_control_params", {}).items():
+            if info.get("type") not in (float, int):
+                continue
+            if param_name in cls.control_limits.get(method_name, {}):
+                continue
+            found.append((method_name, param_name))
+    return found
+
+
+@pytest.mark.parametrize("vi_cls", _all_vi_classes(), ids=lambda c: c.__name__)
+def test_every_numeric_control_param_is_bounded_or_exempt(vi_cls: type) -> None:
+    """Every numeric @control parameter is in control_limits or exempted in writing.
+
+    The highest-leverage half of the control-validation standard: declaring a
+    limit is enforced by ``BaseVirtualInstrument._make_limit_wrapper``, but
+    nothing used to notice a parameter for which no limit was declared at all.
+    A new VI now either bounds its numeric controls or writes down, here, the
+    physical reason a range cannot bound them.
+    """
+    unbounded: list[str] = []
+    for method_name, param_name in _unbounded_numeric_control_params(vi_cls):
+        if _exemption_key(vi_cls, method_name, param_name) is None:
+            unbounded.append(f"{method_name}({param_name})")
+    assert not unbounded, (
+        f"{vi_cls.__name__}: numeric @control parameter(s) {sorted(unbounded)} "
+        f"are neither bounded by control_limits nor listed in "
+        f"CONTROL_LIMIT_EXEMPTIONS. Declare the limit (its value belongs in the "
+        f"config's init_params, never in code), or add an exemption row with a "
+        f"one-line physical reason."
+    )
+
+
+def test_no_stale_control_limit_exemptions() -> None:
+    """Every exemption row still names a real, still-unbounded @control parameter.
+
+    Keeps the table honest in both directions: a parameter that gained a limit
+    (or was renamed or deleted) must lose its exemption, so the list stays as
+    short as the code allows rather than accumulating dead prose.
+    """
+    live: set[tuple] = set()
+    for vi_cls in _all_vi_classes():
+        for method_name, param_name in _unbounded_numeric_control_params(vi_cls):
+            key = _exemption_key(vi_cls, method_name, param_name)
+            if key is not None:
+                live.add(key)
+    stale = sorted(set(CONTROL_LIMIT_EXEMPTIONS) - live)
+    assert not stale, (
+        f"CONTROL_LIMIT_EXEMPTIONS rows {stale} no longer name an unbounded "
+        f"numeric @control parameter — delete them."
+    )
+    for key, rationale in CONTROL_LIMIT_EXEMPTIONS.items():
+        assert rationale.strip(), f"exemption {key} carries no rationale"
+
+
+# ── The setpoint-parameter convention ────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "vi_cls",
+    [cls for cls in _all_vi_classes() if issubclass(cls, RampableVI)],
+    ids=lambda c: c.__name__,
+)
+def test_rampable_vi_declares_exactly_one_setpoint_control(vi_cls: type) -> None:
+    """Every rampable VI names its enveloped quantity ``target_*`` on one @control.
+
+    The setpoint-parameter convention (``core.plan.SETPOINT_PARAM_PREFIX``):
+    the session envelope binds a manual action by asking which of the action's
+    keyword arguments carries the VI's setpoint — the same quantity
+    ``start_ramp(target)`` takes. That answer must be unambiguous, so a
+    rampable VI declares exactly one such parameter, and it must be bounded by
+    ``control_limits`` too (the envelope narrows the setup's limit; there has
+    to be a limit to narrow).
+    """
+    setpoints = [
+        (method_name, param_name)
+        for method_name, method in _control_methods(vi_cls).items()
+        for param_name in getattr(method, "_control_params", {})
+        if param_name.startswith(SETPOINT_PARAM_PREFIX)
+    ]
+    assert len(setpoints) == 1, (
+        f"{vi_cls.__name__} declares {len(setpoints)} '{SETPOINT_PARAM_PREFIX}*' "
+        f"@control parameter(s) {sorted(setpoints)}; a rampable VI must declare "
+        f"exactly one — it is how the session envelope binds a manual action"
+    )
+    method_name, param_name = setpoints[0]
+    assert param_name in vi_cls.control_limits.get(method_name, {}), (
+        f"{vi_cls.__name__}.{method_name}({param_name}) is the setpoint "
+        f"capability but is not bounded by control_limits — the envelope "
+        f"narrows the setup's limit, so a limit must exist to narrow"
+    )
+
+
+# ── The excitation ceiling reaches every shipped setup ───────────────────────
+
+#: ``control_limits`` limit names a config's ``max_source_current_A`` populates
+#: — directly (``EXCITATION_CURRENT_LIMIT``, the current-sourcing VIs) or
+#: derived (the lock-in's amplitude bound, ``I_max x R_series``). Discovered
+#: through ``control_limits`` rather than by naming VI classes, so a new VI
+#: reusing either limit is covered the moment its config entry exists.
+MAX_SOURCE_CURRENT_LIMITS = frozenset({EXCITATION_CURRENT_LIMIT, "oscillator_amplitude_V"})
+
+
+def _declared_limit_names(vi_cls: type) -> set[str]:
+    """Return every limit name ``vi_cls.control_limits`` references."""
+    return {
+        limit_name
+        for param_map in vi_cls.control_limits.values()
+        for limit_name in param_map.values()
+    }
+
+
+@pytest.mark.parametrize(
+    "config_name, vi_name, vi_cls, init_params",
+    [
+        spec
+        for spec in _vi_specs_from_configs()
+        if _declared_limit_names(spec[2]) & MAX_SOURCE_CURRENT_LIMITS
+    ],
+    ids=lambda v: v if isinstance(v, str) else "",
+)
+def test_shipped_config_bounds_the_excitation_current(
+    config_name: str, vi_name: str, vi_cls: type, init_params: dict
+) -> None:
+    """Every shipped config gives each excitation-sourcing VI a finite ceiling.
+
+    Covers the REAL setups too, not only the sim-buildable ones: the VI is
+    constructed with stand-in drivers straight from the config's own
+    ``init_params``, so ``12t-cryo`` and ``a-sample-real-cryostat`` — the two
+    configs that actually drive current through a mounted sample — are checked
+    without hardware. A missing ``max_source_current_A`` leaves the VI able to
+    source anything its instrument can deliver, which is exactly the hazard
+    this step closes.
+    """
+    from unittest.mock import MagicMock
+
+    assert MAX_SOURCE_CURRENT_KEY in init_params, (
+        f"{config_name}/{vi_name} ({vi_cls.__name__}) sources excitation "
+        f"current but its init_params declare no '{MAX_SOURCE_CURRENT_KEY}'. "
+        f"The ceiling is a property of this setup's wiring, so it belongs in "
+        f"devices.yaml, never in the VI."
+    )
+
+    class _RecordingDrivers(dict):
+        def __missing__(self, role: str) -> MagicMock:
+            driver = MagicMock(name=f"driver:{role}")
+            self[role] = driver
+            return driver
+
+    vi = vi_cls(_RecordingDrivers(), **init_params)
+    for limit_name in _declared_limit_names(vi_cls) & MAX_SOURCE_CURRENT_LIMITS:
+        assert limit_name in vi._limits, (
+            f"{config_name}/{vi_name}: '{limit_name}' was never populated"
+        )
+        _lo, hi = vi._limits[limit_name]
+        assert hi is not None and hi > 0, (
+            f"{config_name}/{vi_name}: '{limit_name}' upper bound is {hi!r} — "
+            f"'{MAX_SOURCE_CURRENT_KEY}' did not reach the VI"
+        )
+
+
+# ── The direct action path refuses what is not a capability ──────────────────
+
+
+@pytest.mark.parametrize("config_dir", _sim_config_dirs(), ids=lambda p: p.name)
+def test_execute_vi_action_refuses_non_control_names(config_dir: Path) -> None:
+    """Over every VI of every buildable config: only capabilities dispatch.
+
+    Asserts the direct action path's first two checks (see
+    ``Station.execute_vi_action()``) for every discovered VI at once: a
+    private name is refused, and so is every public method that is neither
+    ``@control`` nor one of ``LIFECYCLE_ACTIONS``. Nothing is called on the
+    instrument in either case — the refusal happens before dispatch.
+    """
+    station = build_station(str(config_dir))
+    checked_private = 0
+    checked_undeclared = 0
+    for vi_name in station.get_vi_names():
+        vi = getattr(station, vi_name)
+        with pytest.raises(CryoSoftPrivateActionError):
+            station.execute_vi_action(vi_name, "_limits")
+        checked_private += 1
+        for name, member in inspect.getmembers(type(vi), inspect.isfunction):
+            if name.startswith("_") or name in LIFECYCLE_ACTIONS:
+                continue
+            if getattr(getattr(vi, name), "_is_control", False):
+                continue
+            with pytest.raises(CryoSoftUndeclaredActionError):
+                station.execute_vi_action(vi_name, name)
+            checked_undeclared += 1
+    assert checked_private > 0 and checked_undeclared > 0, (
+        f"{config_dir.name}: discovery found nothing to check "
+        f"({checked_private} private, {checked_undeclared} undeclared)"
+    )
 
 
 # ── Operation contract (L4, cryosoft.core.operation.OperationBase) ───────────

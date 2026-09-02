@@ -92,19 +92,24 @@ virtual_instruments:
     class: cryosoft.virtual_instruments.measurement.measurement_delta_mode.DeltaModeMeasurementVI
     drivers: {source: keithley_6221, meter: keithley_2182a}
     vi_type: measurement
-    init_params: {}
+    init_params:
+      # Mirrors a-sample-real-cryostat exactly — this config is that setup's
+      # digital twin, so its safety envelope must match, not merely resemble.
+      max_source_current_A: 0.105
 
   keithley_dc_mode:
     class: cryosoft.virtual_instruments.measurement.measurement_dc_mode.DCModeMeasurementVI
     drivers: {source: keithley_6221, meter: keithley_2182a}
     vi_type: measurement
-    init_params: {}
+    init_params:
+      max_source_current_A: 0.105
 
   dc_measurement:
     class: cryosoft.virtual_instruments.measurement.dc_separate_measurement.DCSeparateMeasurementVI
     drivers: {source: keithley_6221, meter: keithley_2182a}
     vi_type: measurement
-    init_params: {}
+    init_params:
+      max_source_current_A: 0.105
 
 # Cryogenics management (docs/plans/archive/cryogenics-logbook.md §9): the helium
 # fill operation, the consumption display, and the automatic helium-record

@@ -1423,14 +1423,18 @@ def monitor_win_session(station, orchestrator, session_manager, qtbot):
 class _FakeStartDialog:
     """Stand-in for StartExperimentDialog that auto-accepts fixed values."""
 
-    def __init__(self, values: tuple[str, str, bool, str | None]) -> None:
+    def __init__(self, values: tuple[str, str, bool, str | None], envelope=None) -> None:
         self._values = values
+        self._envelope = envelope
 
     def exec(self):
         return QDialog.DialogCode.Accepted
 
     def result_values(self):
         return self._values
+
+    def envelope(self):
+        return self._envelope
 
 
 class _FakeCloseDialog:
@@ -1446,14 +1450,18 @@ class _FakeCloseDialog:
         return self._findings_text
 
 
-def _stub_start_dialog(monkeypatch, title, user_id, attended=True, dirname=None):
+def _stub_start_dialog(
+    monkeypatch, title, user_id, attended=True, dirname=None, envelope=None
+):
     """Replace StartExperimentDialog with a fake that auto-accepts ``values``."""
     from cryosoft.gui import experiment_info_panel as sip
 
     monkeypatch.setattr(
         sip,
         "StartExperimentDialog",
-        lambda roster, parent=None: _FakeStartDialog((title, user_id, attended, dirname)),
+        lambda roster, parent=None, envelope_variables=None: _FakeStartDialog(
+            (title, user_id, attended, dirname), envelope
+        ),
     )
 
 
@@ -1650,6 +1658,134 @@ def test_start_experiment_with_invalid_dirname_shows_warning_and_stays_closed(
 
     assert warned
     assert session_manager.current_experiment() is None
+
+
+# ── The envelope editor (Start Experiment dialog) ────────────────────────────
+
+
+def _envelope_dialog(qtbot, tmp_path, station):
+    """A Start Experiment dialog carrying the sim station's envelope editor."""
+    from cryosoft.gui.experiment_dialogs import StartExperimentDialog
+
+    dialog = StartExperimentDialog(
+        _start_dialog_roster(tmp_path),
+        envelope_variables=station.envelope_variables(),
+    )
+    qtbot.addWidget(dialog)
+    dialog._title_input.setText("Hall bar A3")
+    return dialog
+
+
+def test_envelope_editor_is_prefilled_from_the_config_limits(qtbot, tmp_path, station):
+    """Every enveloped quantity starts at the setup's own bounds, not blank."""
+    dialog = _envelope_dialog(qtbot, tmp_path, station)
+    editor = dialog._envelope_editor
+
+    assert editor is not None
+    magnet_min, magnet_max = editor._rows["magnet_z"]
+    lo, hi = station.get_vi("magnet_z").limit_bounds("field_T")
+    assert (float(magnet_min.text()), float(magnet_max.text())) == (lo, hi)
+    assert "magnet_z" in dialog.envelope().bounds
+
+
+def test_envelope_editor_absent_without_variables(qtbot, tmp_path):
+    """A dialog built with no station (a unit test, say) carries no editor."""
+    from cryosoft.gui.experiment_dialogs import StartExperimentDialog
+
+    dialog = StartExperimentDialog(_start_dialog_roster(tmp_path))
+    qtbot.addWidget(dialog)
+
+    assert dialog._envelope_editor is None
+    assert dialog.envelope() is None
+
+
+def test_envelope_editor_narrowed_bounds_reach_the_envelope(qtbot, tmp_path, station):
+    """A narrowed field becomes the experiment's bound on that VI."""
+    dialog = _envelope_dialog(qtbot, tmp_path, station)
+    dialog._envelope_editor._rows["magnet_z"][1].setText("2")
+
+    bound = dialog.envelope().bounds["magnet_z"]
+    assert bound.max_value == 2.0
+    assert bound.violation(3.0) is not None
+
+
+def test_envelope_editor_refuses_to_widen_the_setup_limit(qtbot, tmp_path, station):
+    """An envelope narrows the config's limits; it may never widen them."""
+    dialog = _envelope_dialog(qtbot, tmp_path, station)
+    _lo, hi = station.get_vi("magnet_z").limit_bounds("field_T")
+    dialog._envelope_editor._rows["magnet_z"][1].setText(f"{hi + 1:g}")
+
+    assert "narrows the setup's limits" in dialog._envelope_editor.error()
+    # isHidden(), not isVisible(): the dialog itself is never shown in tests.
+    assert not dialog._envelope_editor._error_label.isHidden()
+    assert not dialog._ok_button.isEnabled(), "OK must not accept a widened envelope"
+
+
+def test_envelope_editor_refuses_a_non_numeric_bound(qtbot, tmp_path, station):
+    """Junk in a field is named as such rather than silently dropped."""
+    dialog = _envelope_dialog(qtbot, tmp_path, station)
+    dialog._envelope_editor._rows["magnet_z"][0].setText("cold")
+
+    assert "is not a number" in dialog._envelope_editor.error()
+    assert not dialog._ok_button.isEnabled()
+
+
+def test_envelope_editor_can_be_switched_off(qtbot, tmp_path, station):
+    """Unticking the box means no envelope at all, and re-enables OK."""
+    dialog = _envelope_dialog(qtbot, tmp_path, station)
+    dialog._envelope_editor._rows["magnet_z"][0].setText("cold")
+    dialog._envelope_editor._enabled_checkbox.setChecked(False)
+
+    assert dialog.envelope() is None
+    assert dialog._envelope_editor.error() == ""
+    assert dialog._ok_button.isEnabled()
+
+
+def test_envelope_editor_blank_fields_mean_unbounded(qtbot, tmp_path, station):
+    """A VI with both fields cleared contributes no bound."""
+    dialog = _envelope_dialog(qtbot, tmp_path, station)
+    for edit in dialog._envelope_editor._rows["magnet_z"]:
+        edit.setText("")
+
+    assert "magnet_z" not in dialog.envelope().bounds
+
+
+def test_started_experiment_installs_the_dialog_envelope(
+    monitor_win_session, session_manager, orchestrator, monkeypatch
+):
+    """The envelope the dialog returns is installed on the Orchestrator."""
+    from cryosoft.core.plan import EnvelopeBound, ExperimentEnvelope
+
+    envelope = ExperimentEnvelope(
+        bounds={"magnet_z": EnvelopeBound(min_value=-0.5, max_value=0.5)}
+    )
+    _stub_start_dialog(monkeypatch, "Hall bar A3", "jdoe", envelope=envelope)
+    monitor_win_session._session_info._start_close_btn.click()
+
+    assert session_manager.current_experiment() is not None
+    blocked = []
+    orchestrator.action_blocked.connect(blocked.append)
+    orchestrator.submit_vi_action("magnet_z", "set_field", target_T=2.0)
+    assert blocked and "session envelope" in blocked[0]
+
+
+def test_start_dialog_is_offered_the_setups_envelope_variables(
+    monitor_win_session, session_manager, monkeypatch
+):
+    """The panel hands the dialog the setup's bounds, not an empty editor."""
+    seen: list[dict] = []
+
+    from cryosoft.gui import experiment_info_panel as sip
+
+    def _capture(roster, parent=None, envelope_variables=None):
+        seen.append(envelope_variables)
+        return _FakeStartDialog(("Hall bar A3", "jdoe", True, None))
+
+    monkeypatch.setattr(sip, "StartExperimentDialog", _capture)
+    monitor_win_session._session_info._start_close_btn.click()
+
+    assert seen and "magnet_z" in seen[0]
+    assert seen[0]["magnet_z"].param_name == "target_T"
 
 
 # ── Setup tier: login and instrument info (User / Config menus) ───────────────

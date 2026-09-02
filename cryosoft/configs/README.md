@@ -42,6 +42,17 @@ every `configs/<name>/` directory:
   (`system` / `measurement` / `level` / `switch`). `init_params` carries the
   control-validation limits (`min/max_temperature_K`, `max_ramp_rate_K_per_min`,
   `max_current`, field bounds), magnet `ramp_segments`, and switch `routes`.
+- `max_source_current_A` — REQUIRED on every VI that drives current through the
+  sample (the DC, delta-mode and lock-in measurement VIs), in amperes.
+  Conformance-checked per shipped config, real setups included, because a
+  missing ceiling lets an action source whatever the instrument can deliver.
+  It bounds the sourced current symmetrically (±, current reversal is routine)
+  and, on the voltage-sourced lock-in, is converted to an oscillator-amplitude
+  bound by `max_source_current_A × series_resistance_ohm`. Choose it from the
+  SAMPLE WIRING where that figure is documented (`12t-cryo` records ±10 mA in
+  its `setup.md`) and from the source's own maximum output otherwise
+  (105 mA for a Keithley 6220/6221); narrow it when a sample's safe current is
+  measured. It is a property of the setup, so it lives here, never in the VI.
 
 `monitor.yaml` structure: a `monitor:` block with `tick_interval_ms` (the single
 QTimer tick period) and `max_vi_errors` (consecutive VI-error tolerance before

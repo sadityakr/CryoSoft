@@ -5,6 +5,10 @@ Exception tree:
     ├── CryoSoftCommunicationError   — VISA / instrument communication failure
     │   └── CryoSoftInstrumentError  — the instrument itself refused a command
     ├── CryoSoftSafetyError          — safety condition violated
+    │   └── CryoSoftActionRefusedError    — the direct action path refused a call
+    │       ├── CryoSoftPrivateActionError    — underscore-prefixed method name
+    │       ├── CryoSoftUndeclaredActionError — method carries no @control
+    │       └── CryoSoftActionScopeError      — capability outside the caller's scope
     ├── CryoSoftConfigError          — YAML config invalid or missing
     └── DataSchemaError              — datapoint does not match its declared HDF5 schema
 """
@@ -135,6 +139,57 @@ class CryoSoftSafetyError(CryoSoftError):
         self.hi = hi
         self.limit_name = limit_name
         super().__init__(message)
+
+
+class CryoSoftActionRefusedError(CryoSoftSafetyError):
+    """Base for a refusal on the direct action path.
+
+    The direct action path is ``Station.execute_vi_action()`` — the single
+    entry point through which the Orchestrator dispatches a manual (GUI or
+    agent) action to one VI, as opposed to a procedure's ``Command`` batch
+    (see GLOSSARY.md's **Direct action path**). Its admission checks each
+    raise their own subclass with its own reason string, so a caller can tell
+    "you named a private method", "that method is not a capability" and "that
+    capability is out of your scope" apart without parsing prose.
+
+    A refusal is a ``CryoSoftSafetyError``: nothing was sent to the
+    instrument, exactly like a ``control_limits`` violation or the
+    capability-scope refusal ``Station.send_measurement_commands()`` already
+    raises for a plan.
+    """
+    pass
+
+
+class CryoSoftPrivateActionError(CryoSoftActionRefusedError):
+    """Raised when a direct action names an underscore-prefixed method.
+
+    A leading underscore is a VI's internal API. It is never a capability,
+    so the direct action path refuses it before it is even resolved.
+    """
+    pass
+
+
+class CryoSoftUndeclaredActionError(CryoSoftActionRefusedError):
+    """Raised when a direct action names a method that is not a capability.
+
+    Only a ``@control`` method, or one of the two connection-lifecycle
+    operating-state methods (``initiate``/``standby``), may be dispatched on
+    the direct action path. Anything else — a ``@monitored`` poller, a
+    procedure-only helper such as ``take_reading()``, a plain public utility
+    — is refused.
+    """
+    pass
+
+
+class CryoSoftActionScopeError(CryoSoftActionRefusedError):
+    """Raised when a direct action's capability scope exceeds the caller's.
+
+    The capability-scope standard (GLOSSARY.md's **Capability scope**): an
+    ``@control(scope="operation")`` method is refused for a caller holding
+    only ``"measurement"`` scope, mirroring
+    ``Station.send_measurement_commands()``'s pre-dispatch check for a plan.
+    """
+    pass
 
 
 class CryoSoftConfigError(CryoSoftError):

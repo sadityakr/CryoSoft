@@ -36,12 +36,18 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from typing import Any, ClassVar
 
 from cryosoft.core.decorators import control
 from cryosoft.core.plan import ParamSpec
-from cryosoft.virtual_instruments.base import MeasurementInstrumentBase
+from cryosoft.virtual_instruments.base import (
+    MAX_SOURCE_CURRENT_KEY,
+    MeasurementInstrumentBase,
+)
+
+logger = logging.getLogger(__name__)
 
 # Sentinel to detect the un-armed state.
 _NOT_INITIATED = object()
@@ -102,6 +108,14 @@ class LockInHarmonicMeasurementVI(MeasurementInstrumentBase):
     )
     measurement_data_keys: ClassVar[list[str]] = _ARRAY_KEYS
     measurement_scalar_columns: ClassVar[dict[str, str]] = _SCALAR_COLUMNS
+    # Control-validation standard (see BaseVirtualInstrument): the oscillator
+    # amplitude IS this VI's excitation control — the sample sees
+    # amplitude / series_resistance_ohm — so it carries the setup's
+    # excitation-current ceiling, converted to volts in __init__.
+    control_limits: ClassVar[dict[str, dict[str, str]]] = {
+        "initiate_measurement": {"oscillator_amplitude_V": "oscillator_amplitude_V"},
+    }
+
     measurement_parameters: ClassVar[dict[str, ParamSpec]] = {
         "oscillator_amplitude_V": ParamSpec(
             type=float,
@@ -130,11 +144,44 @@ class LockInHarmonicMeasurementVI(MeasurementInstrumentBase):
     }
 
     def __init__(self, drivers: dict[str, object], **init_params: Any) -> None:
+        """Wire the lock-in and derive its amplitude bound from the setup config.
+
+        The lock-in sources its excitation as a VOLTAGE through an external
+        series resistor, so the setup's excitation-current ceiling becomes an
+        oscillator-amplitude ceiling by Ohm's law:
+        ``max_source_current_A × series_resistance_ohm``. This is the
+        control-validation standard's derived-limit case — the limit is
+        computed, but every value in it comes from the config, because both
+        the ceiling and the series resistor are properties of this setup's
+        wiring. The bound starts at zero rather than the negative mirror the
+        current-sourced VIs use: an oscillator amplitude is an RMS magnitude,
+        and a lock-in reverses phase, not amplitude.
+
+        Args:
+            drivers: ``{"lockin": <lock-in amplifier driver>}``.
+            **init_params: Setup parameters; ``series_resistance_ohm`` (the
+                external series resistor, default 1 MOhm) and
+                ``max_source_current_A`` (absent means unbounded, logged at
+                WARNING).
+        """
         super().__init__(drivers, **init_params)
         self._lockin = drivers["lockin"]
         self._series_resistance_ohm: float = float(
             init_params.get("series_resistance_ohm", 1e6)
         )
+        max_current_A = init_params.get(MAX_SOURCE_CURRENT_KEY)
+        if max_current_A is None:
+            logger.warning(
+                "LockInHarmonicMeasurementVI: config declares no '%s' — the "
+                "oscillator amplitude is UNBOUNDED for this setup.",
+                MAX_SOURCE_CURRENT_KEY,
+            )
+            self._limits["oscillator_amplitude_V"] = (0.0, None)
+        else:
+            self._limits["oscillator_amplitude_V"] = (
+                0.0,
+                abs(float(max_current_A)) * self._series_resistance_ohm,
+            )
 
         # Configuration state — set by initiate_measurement().
         self._armed: object = _NOT_INITIATED
