@@ -29,6 +29,10 @@ import-linter, see pyproject.toml [tool.importlinter]):
   implement the ``data_arrays`` / ``initiate_measurement`` / ``take_reading`` / ``standby``
   lifecycle, and round-trip against their sim drivers so the returned keys and
   array lengths match what they declare.
+* The declaration standard (see virtual_instruments/README.md): every
+  ``@monitored`` field declares a unit and a description, every ``@control``
+  parameter is covered by a ``ParamSpec``, and every UI-group tag resolves —
+  so a VI's capability manifest is complete the moment its file exists.
 * Procedures: subclass BaseProcedure, have a name, declare a default for every
   parameter, and are constructible from defaults alone.
 * Configs: every ``cryosoft/configs/<name>/`` directory has a loadable
@@ -60,10 +64,15 @@ from cryosoft.core.availability import (
 from cryosoft.core.conditions import SEVERITIES
 from cryosoft.core.decorators import (
     VALID_CONTROL_SCOPES,
+    control,
     get_control_panel,
     get_control_scope,
     get_control_specs,
+    get_monitored_description,
     get_monitored_methods,
+    get_monitored_unit,
+    get_ui_group,
+    monitored,
 )
 from cryosoft.core.exceptions import CryoSoftCommunicationError, CryoSoftSafetyError
 from cryosoft.core.operation import (
@@ -72,7 +81,7 @@ from cryosoft.core.operation import (
     OperationStep,
     ReadinessCondition,
 )
-from cryosoft.core.plan import ParamSpec
+from cryosoft.core.plan import ParamSpec, UIGroup
 from cryosoft.core.procedure import BaseProcedure
 from cryosoft.core.station import Station, _import_class, build_station
 from cryosoft.session.servicing_log import DECLARED_LOG_KINDS
@@ -1327,6 +1336,261 @@ def test_control_declarations_are_consistent(vi_cls: type) -> None:
                     f"declares type {spec.type.__name__} but the signature "
                     f"annotates {annotated.__name__} — they must agree"
                 )
+
+
+# ── Declaration standard (the capability manifest) ───────────────────────────
+# See virtual_instruments/README.md's "declaration standard" and GLOSSARY.md's
+# "Declaration standard": one declaration on the decorator feeds the GUI
+# widget, the tooltip, and the capability manifest an agent reads. This test is
+# what makes every future VI agent-operable the moment its file exists.
+
+# Deliberately EMPTY, and asserted so below: a VI that cannot describe itself
+# is an incomplete VI, not an exception to the standard. Adding a name here
+# would hide exactly the gap the manifest exists to close.
+MANIFEST_EXEMPT_VIS: frozenset[str] = frozenset()
+
+
+def _return_type_is_numeric(method: object) -> bool:
+    """Return True if *method*'s annotated return type includes ``float``.
+
+    Args:
+        method: A ``@monitored`` method (possibly wrapped).
+
+    Returns:
+        True when the resolved return annotation is ``float`` or a union
+        containing it (e.g. ``float | None``), so a unit label is required.
+    """
+    try:
+        hints = typing.get_type_hints(inspect.unwrap(method))
+    except Exception:
+        return False
+    annotation = hints.get("return")
+    if annotation is None:
+        return False
+    if annotation is float:
+        return True
+    return float in typing.get_args(annotation)
+
+
+def test_manifest_exemption_list_is_empty() -> None:
+    """The declaration standard ships with no exemptions, by construction."""
+    assert MANIFEST_EXEMPT_VIS == frozenset(), (
+        "The declaration standard has no exemption list — a VI that cannot "
+        "describe itself must be completed, not exempted."
+    )
+
+
+@pytest.mark.parametrize("vi_cls", _all_vi_classes(), ids=lambda c: c.__name__)
+def test_capability_manifest_is_complete(vi_cls: type) -> None:
+    """Every VI declares enough to render a complete capability manifest.
+
+    Three obligations, checked over the VI's whole capability surface:
+
+    1. Every ``@monitored`` field declares a unit — ``""`` only for a
+       genuinely dimensionless reading, never omitted — and a description.
+       A field whose return type includes ``float`` is a physical quantity,
+       so its unit must be non-empty.
+    2. Every ``@control`` parameter is covered by a ``ParamSpec`` carrying a
+       description. A measurement VI's arming control and reading-loop
+       setters get theirs installed from ``measurement_parameters``.
+    3. Every UI-group tag names a declared group (also enforced at import;
+       asserted here so the suite reports it per VI).
+    """
+    assert vi_cls.__name__ not in MANIFEST_EXEMPT_VIS
+
+    group_keys = {group.key for group in vi_cls.ui_groups}
+
+    for method_name in get_monitored_methods(vi_cls):
+        method = getattr(vi_cls, method_name)
+        unit = get_monitored_unit(method)
+        assert unit is not None, (
+            f"{vi_cls.__name__}.{method_name} declares no unit — every "
+            f"@monitored field must declare one, and \"\" (dimensionless) is "
+            f"an explicit choice, not the absence of one"
+        )
+        assert get_monitored_description(method).strip(), (
+            f"{vi_cls.__name__}.{method_name} declares no description — a "
+            f"monitored field reaches an agent's schema as a name plus this "
+            f"sentence"
+        )
+        if _return_type_is_numeric(method):
+            assert unit, (
+                f"{vi_cls.__name__}.{method_name} returns a float but declares "
+                f"unit=\"\" — a physical quantity needs its SI unit"
+            )
+        tag = get_ui_group(method)
+        assert not tag or tag in group_keys, (
+            f"{vi_cls.__name__}.{method_name} is tagged group={tag!r}, which "
+            f"names no declared UIGroup"
+        )
+
+    for method_name, method in _control_methods(vi_cls).items():
+        params = getattr(method, "_control_params", {})
+        specs = get_control_specs(method)
+        undeclared = sorted(set(params) - set(specs))
+        assert not undeclared, (
+            f"{vi_cls.__name__}.{method_name} takes {undeclared} with no "
+            f"ParamSpec — declare params= on @control (a measurement VI gets "
+            f"its arming and reading-loop specs from measurement_parameters)"
+        )
+        for param_name, spec in specs.items():
+            assert spec.description.strip(), (
+                f"{vi_cls.__name__}.{method_name}: params[{param_name!r}] "
+                f"declares no description"
+            )
+        tag = get_ui_group(method)
+        assert not tag or tag in group_keys, (
+            f"{vi_cls.__name__}.{method_name} is tagged group={tag!r}, which "
+            f"names no declared UIGroup"
+        )
+
+
+@pytest.mark.parametrize("vi_cls", _all_vi_classes(), ids=lambda c: c.__name__)
+def test_ui_groups_name_real_capabilities(vi_cls: type) -> None:
+    """Every declared UIGroup member is a @monitored or @control of that VI."""
+    capabilities = set(get_monitored_methods(vi_cls)) | set(_control_methods(vi_cls))
+    seen_keys: set[str] = set()
+    for group in vi_cls.ui_groups:
+        assert isinstance(group, UIGroup), (
+            f"{vi_cls.__name__}.ui_groups entries must be UIGroup"
+        )
+        assert group.key not in seen_keys, (
+            f"{vi_cls.__name__}.ui_groups declares {group.key!r} twice"
+        )
+        seen_keys.add(group.key)
+        assert group.title.strip(), f"{vi_cls.__name__}: UIGroup {group.key!r} needs a title"
+        for member in group.members:
+            assert member in capabilities, (
+                f"{vi_cls.__name__}.ui_groups[{group.key!r}] names {member!r}, "
+                f"which is not a capability of {vi_cls.__name__}"
+            )
+
+
+def test_sweep_axis_specs_are_described() -> None:
+    """Every sweep-axis ParamSpec of every procedure declares a description.
+
+    The axis parameters are merged into a procedure's declared parameters
+    separately from its three explicit dicts, so
+    ``test_procedure_parameter_has_description`` never reached them.
+    """
+    from cryosoft.core.sweep_builder import sweep_axis_param_specs
+
+    checked = 0
+    for proc_cls in _all_procedure_classes():
+        axis = getattr(proc_cls, "sweep_axis", None)
+        if axis is None:
+            continue
+        for name, spec in sweep_axis_param_specs(axis).items():
+            assert spec.description.strip(), (
+                f"{proc_cls.__name__}: sweep-axis parameter {name!r} declares "
+                f"no description"
+            )
+            checked += 1
+    assert checked > 0, "expected at least one procedure with a sweep axis"
+
+
+# ── UI-group validation at class creation ────────────────────────────────────
+# The throwaway VI subclasses below exist only to trip the validation in
+# BaseVirtualInstrument.__init_subclass__; they are never built or registered.
+
+
+def test_dangling_group_tag_fails_at_import() -> None:
+    """A group= tag naming no declared UIGroup raises, naming the method."""
+    with pytest.raises(ValueError, match="temperature.*group='nowhere'"):
+
+        class DanglingTagVI(BaseVirtualInstrument):
+            @monitored(unit="K", description="Sample temperature", group="nowhere")
+            def temperature(self) -> float:
+                return 0.0
+
+
+def test_duplicate_group_key_fails_at_import() -> None:
+    """Two UIGroups sharing a key raise, naming the key."""
+    with pytest.raises(ValueError, match="'heater' twice"):
+
+        class DuplicateKeyVI(BaseVirtualInstrument):
+            ui_groups = (
+                UIGroup(key="heater", title="Heater", members=("heater_output",)),
+                UIGroup(key="heater", title="Heater again", members=("set_heater",)),
+            )
+
+            @monitored(unit="%", description="Heater output")
+            def heater_output(self) -> float:
+                return 0.0
+
+            @control
+            def set_heater(self) -> None:
+                pass
+
+
+def test_unknown_group_member_fails_at_import() -> None:
+    """A UIGroup naming a method the VI does not have raises, naming it."""
+    with pytest.raises(ValueError, match="names member 'set_nothing'"):
+
+        class UnknownMemberVI(BaseVirtualInstrument):
+            ui_groups = (
+                UIGroup(key="heater", title="Heater", members=("set_nothing",)),
+            )
+
+
+def test_group_tag_must_agree_with_membership() -> None:
+    """A member tagged with a different group's key raises, naming the method."""
+    with pytest.raises(ValueError, match="set_heater.*group='cooling'"):
+
+        class MismatchedTagVI(BaseVirtualInstrument):
+            ui_groups = (
+                UIGroup(key="heater", title="Heater", members=("set_heater",)),
+                UIGroup(key="cooling", title="Cooling", members=("set_cooling",)),
+            )
+
+            @control(group="cooling")
+            def set_heater(self) -> None:
+                pass
+
+            @control(group="cooling")
+            def set_cooling(self) -> None:
+                pass
+
+
+def test_group_member_cannot_belong_to_two_groups() -> None:
+    """A method listed by two UIGroups raises, naming the method."""
+    with pytest.raises(ValueError, match="method 'set_heater' is a member of both"):
+
+        class SharedMemberVI(BaseVirtualInstrument):
+            ui_groups = (
+                UIGroup(key="heater", title="Heater", members=("set_heater",)),
+                UIGroup(key="cooling", title="Cooling", members=("set_heater",)),
+            )
+
+            @control
+            def set_heater(self) -> None:
+                pass
+
+
+def test_valid_group_declaration_is_accepted() -> None:
+    """The declared shape both worked examples use passes validation."""
+
+    class GroupedVI(BaseVirtualInstrument):
+        ui_groups = (
+            UIGroup(
+                key="heater",
+                title="Heater",
+                description="Heater readback and control.",
+                members=("heater_output", "set_heater"),
+            ),
+        )
+
+        @monitored(unit="%", description="Heater output", group="heater")
+        def heater_output(self) -> float:
+            return 0.0
+
+        @control(group="heater")
+        def set_heater(self, output_pct: float) -> None:
+            pass
+
+    assert get_ui_group(GroupedVI.heater_output) == "heater"
+    assert get_ui_group(GroupedVI.set_heater) == "heater"
+    assert GroupedVI.ui_groups[0].members == ("heater_output", "set_heater")
 
 
 # ── Capability-scope standard ─────────────────────────────────────────────────

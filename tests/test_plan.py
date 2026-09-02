@@ -9,6 +9,7 @@ from cryosoft.core.plan import (
     EnvelopeBound,
     ExperimentEnvelope,
     ParamGroup,
+    UIGroup,
     ParamSpec,
     PhasePlan,
     StepPlan,
@@ -346,6 +347,64 @@ def test_paramgroup_params_defensive_copy():
     g = ParamGroup(key="k", title="T", params=params)
     params["b"] = ParamSpec(type=int, default=1)
     assert "b" not in g.params
+
+
+# ── UIGroup ───────────────────────────────────────────────────────────────────
+
+
+def test_uigroup_happy():
+    g = UIGroup(
+        key="heater",
+        title="Heater",
+        description="Heater readback and control.",
+        members=("heater_output", "set_heater_output"),
+    )
+    assert g.key == "heater"
+    assert g.members == ("heater_output", "set_heater_output")
+
+
+def test_uigroup_empty_key():
+    with pytest.raises(ValueError, match="UIGroup.key"):
+        UIGroup(key="", title="T", members=("x",))
+
+
+def test_uigroup_empty_title():
+    with pytest.raises(ValueError, match="UIGroup.title"):
+        UIGroup(key="k", title="", members=("x",))
+
+
+def test_uigroup_requires_members():
+    """A group with no members declares nothing, so it is refused."""
+    with pytest.raises(ValueError, match="at least one member"):
+        UIGroup(key="k", title="T")
+
+
+def test_uigroup_members_must_be_strings():
+    with pytest.raises(TypeError, match="member must be a str"):
+        UIGroup(key="k", title="T", members=(1,))  # type: ignore[arg-type]
+
+
+def test_uigroup_members_reject_a_bare_string():
+    """A bare string would silently become a group of single characters."""
+    with pytest.raises(TypeError, match="UIGroup.members"):
+        UIGroup(key="k", title="T", members="set_heater")  # type: ignore[arg-type]
+
+
+def test_uigroup_members_reject_duplicates():
+    with pytest.raises(ValueError, match="lists a member twice"):
+        UIGroup(key="k", title="T", members=("x", "x"))
+
+
+def test_uigroup_members_coerced_to_tuple():
+    """A list is accepted and frozen, so declared order cannot be mutated."""
+    g = UIGroup(key="k", title="T", members=["a", "b"])
+    assert g.members == ("a", "b")
+
+
+def test_uigroup_frozen():
+    g = UIGroup(key="k", title="T", members=("x",))
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        g.title = "other"  # type: ignore[misc]
 
 
 # ── DataSchema ────────────────────────────────────────────────────────────────

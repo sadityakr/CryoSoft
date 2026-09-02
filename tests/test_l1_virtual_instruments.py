@@ -1029,3 +1029,118 @@ def test_standby_status_inherited_standby_still_tracked():
         driver._last_update = time.time() - 0.5
         driver._update_simulation()
     assert vi.standby_status() == "reached"
+
+
+# 3c. The declaration standard: measurement_parameters reaches the controls
+# One declaration on the VI has to render in two places — the procedure form
+# and the instrument front panel — so MeasurementInstrumentBase installs it as
+# the specs of the two controls whose parameters ARE measurement parameters.
+
+
+def _minimal_measurement_vi(**namespace):
+    """Build a throwaway MeasurementInstrumentBase subclass for spec checks.
+
+    Args:
+        **namespace: Class attributes and methods to place on the subclass.
+
+    Returns:
+        The freshly created class (never constructed or registered).
+    """
+    from cryosoft.virtual_instruments.base import MeasurementInstrumentBase
+
+    return type("ThrowawayMeasurementVI", (MeasurementInstrumentBase,), namespace)
+
+
+def test_measurement_parameters_install_on_arming_control():
+    """A bare initiate_measurement inherits every measurement_parameters spec."""
+    from cryosoft.core.decorators import control, get_control_specs
+    from cryosoft.core.plan import ParamSpec
+
+    specs = {
+        "current_A": ParamSpec(type=float, default=1e-6, unit="A", description="I"),
+        "n_readings": ParamSpec(type=int, default=10, description="N"),
+    }
+
+    @control
+    def initiate_measurement(self, current_A=1e-6, n_readings=10):
+        pass
+
+    vi_cls = _minimal_measurement_vi(
+        measurement_parameters=specs,
+        initiate_measurement=initiate_measurement,
+    )
+    assert get_control_specs(vi_cls.initiate_measurement) == specs
+
+
+def test_measurement_parameters_install_on_reading_setter():
+    """A reading_setters setter inherits exactly its own single spec."""
+    from cryosoft.core.decorators import control, get_control_specs
+    from cryosoft.core.plan import ParamSpec
+
+    current_spec = ParamSpec(type=float, default=1e-6, unit="A", description="I")
+    specs = {
+        "current_A": current_spec,
+        "n_readings": ParamSpec(type=int, default=10, description="N"),
+    }
+
+    @control
+    def initiate_measurement(self, current_A=1e-6, n_readings=10):
+        pass
+
+    @control
+    def set_source_current(self, current_A=1e-6):
+        pass
+
+    vi_cls = _minimal_measurement_vi(
+        measurement_parameters=specs,
+        reading_setters={"current_A": "set_source_current"},
+        initiate_measurement=initiate_measurement,
+        set_source_current=set_source_current,
+    )
+    assert get_control_specs(vi_cls.set_source_current) == {"current_A": current_spec}
+
+
+def test_explicit_control_specs_are_not_overwritten():
+    """An explicit params= wins; the install only fills a control that declared none."""
+    from cryosoft.core.decorators import control, get_control_specs
+    from cryosoft.core.plan import ParamSpec
+
+    declared = ParamSpec(type=float, default=0.0, unit="A", description="Declared")
+
+    @control(params={"current_A": declared})
+    def set_source_current(self, current_A=0.0):
+        pass
+
+    @control
+    def initiate_measurement(self, current_A=1e-6):
+        pass
+
+    vi_cls = _minimal_measurement_vi(
+        measurement_parameters={
+            "current_A": ParamSpec(
+                type=float, default=1e-6, unit="A", description="Installed"
+            ),
+        },
+        reading_setters={"current_A": "set_source_current"},
+        initiate_measurement=initiate_measurement,
+        set_source_current=set_source_current,
+    )
+    assert get_control_specs(vi_cls.set_source_current) == {"current_A": declared}
+
+
+def test_arming_signature_must_match_measurement_parameters():
+    """A signature that drifts from measurement_parameters fails at import."""
+    from cryosoft.core.decorators import control
+    from cryosoft.core.plan import ParamSpec
+
+    @control
+    def initiate_measurement(self, current_A=1e-6, stray=1):
+        pass
+
+    with pytest.raises(ValueError, match="measurement_parameters"):
+        _minimal_measurement_vi(
+            measurement_parameters={
+                "current_A": ParamSpec(type=float, default=1e-6, description="I"),
+            },
+            initiate_measurement=initiate_measurement,
+        )
