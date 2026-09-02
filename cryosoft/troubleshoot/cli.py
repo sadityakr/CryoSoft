@@ -4,11 +4,12 @@ Command grammar is API: the setup-supervisor skills and permission allowlists
 hard-code it, so subcommand names and their meanings must stay stable.
 
 Read/write split for permission gating: ``scan``, ``probe``, ``check``,
-``bench-l0``, ``methods``, ``idn``, ``read``, and ``status`` never change
-instrument state and are safe to allowlist (``status`` only reads a log
-file). ``write`` calls state-changing driver methods and ``query`` /
-``send`` transmit arbitrary raw bytes (a raw query can mutate state too), so
-those three should stay behind a permission prompt.
+``bench-l0``, ``methods``, ``idn``, ``read``, ``status``, and ``session``
+never change instrument state and are safe to allowlist (``status`` only
+reads a log file, ``session`` only an experiment folder). ``write`` calls
+state-changing driver methods and ``query`` / ``send`` transmit arbitrary raw
+bytes (a raw query can mutate state too), so those three should stay behind a
+permission prompt.
 
 There are deliberately no interactive prompts: authorization is the
 harness's job, and a hung prompt is the worst failure mode for an agent.
@@ -29,10 +30,10 @@ from typing import Any
 
 import cryosoft
 from cryosoft.core.logging_config import setup_logging
-from cryosoft.core.paths import log_directory
+from cryosoft.core.paths import log_directory, measurement_root
 from cryosoft.core.station import read_tick_interval_ms, read_trends_config
 from cryosoft.core.trend_checks import CheckResult, declared_checks, run_checks
-from cryosoft.troubleshoot import engine, status_reader
+from cryosoft.troubleshoot import engine, session_report, status_reader
 from cryosoft.troubleshoot.engine import (
     DriverBench,
     L0BenchResult,
@@ -622,6 +623,62 @@ def _cmd_trends(args: argparse.Namespace) -> tuple[bool, dict[str, Any]]:
     return ok, payload
 
 
+def _resolve_experiment_dir(explicit: str | None) -> tuple[Path | None, str | None]:
+    """Resolve which experiment folder to report on.
+
+    Args:
+        explicit: The EXPERIMENT_DIR positional argument, or None.
+
+    Returns:
+        ``(directory, reason)`` — the folder to report on, or None together
+        with one operator-readable sentence saying what was looked for and
+        where. An explicitly named folder is taken as given (its record is
+        parsed, and complains for itself if absent); with no argument, the
+        newest experiment under the measurement root wins.
+    """
+    if explicit:
+        return Path(explicit), None
+    try:
+        root = measurement_root()
+    except RuntimeError as exc:
+        return None, str(exc)
+    directory = session_report.latest_experiment_dir(root)
+    if directory is None:
+        return None, (
+            f"No experiment found under {root} (looked for "
+            f"sessions/<user_id>/<session_id>/<experiment_id>/experiment.json)."
+        )
+    return directory, None
+
+
+def _cmd_session(args: argparse.Namespace) -> tuple[bool, dict[str, Any]]:
+    """Report on one finished or in-progress experiment folder (read-only).
+
+    The after-the-fact sibling of ``status``: where that one explains what the
+    running app is doing right now, this reads an experiment's own record off
+    disk and lists its runs in order — kind, procedure, outcome, timestamps,
+    duration, data file — plus the session envelope it ran under and any
+    incident report filed in the folder. It opens no instruments and writes
+    nothing.
+
+    Exit 0 means a report was produced; exit 1 means there was nothing to
+    report on (no experiment resolved, or its ``experiment.json`` missing or
+    unparseable). A failed run is *content* of a successful report, not a
+    failure of the command — an agent gating on the exit code is asking "did
+    I get the record?", and reads the outcomes out of the payload.
+    """
+    directory, reason = _resolve_experiment_dir(args.experiment_dir)
+    if directory is None:
+        report = session_report.unavailable(reason or "No experiment found.")
+    else:
+        report = session_report.build_report(directory)
+    if args.json:
+        _print_json(report)
+    else:
+        print(session_report.render_text(report))
+    return bool(report.get("available")), report
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the argparse command tree (kept separate for --help testing)."""
     parser = argparse.ArgumentParser(
@@ -685,6 +742,21 @@ def build_parser() -> argparse.ArgumentParser:
         "or a log from a process that died days ago reads as a live run",
     )
     p.set_defaults(func=_cmd_status)
+
+    p = sub.add_parser("session", parents=[common],
+                       help="report on one experiment folder: its runs, their "
+                            "outcomes and data files, its envelope, and any "
+                            "incident reports filed beside it")
+    p.add_argument(
+        "experiment_dir",
+        nargs="?",
+        metavar="EXPERIMENT_DIR",
+        help="experiment folder to report on (default: the most recently "
+        "modified experiment under the measurement root — see "
+        "cryosoft.core.paths.measurement_root(), overridable via "
+        "CRYOSOFT_MEASUREMENT_ROOT)",
+    )
+    p.set_defaults(func=_cmd_session)
 
     p = sub.add_parser("trends", parents=[common],
                        help="evaluate the declared trend checks (temperature stability, "

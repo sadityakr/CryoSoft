@@ -38,7 +38,12 @@ a diagnosis is *derived*, not guessed.
    `CRYOSOFT_LOG_DIR` env var; check that env var first if set) — then tail
    `cryosoft.log` in that directory around the failure time; check
    `troubleshoot.jsonl` there for recent diagnostics; look for `_stale` /
-   `_disconnected` flags mentioned in the log.
+   `_disconnected` flags mentioned in the log. If the symptom is about a
+   measurement rather than an instrument, add
+   `python -m cryosoft.troubleshoot session --json` — it reads the newest
+   experiment folder off disk (no instrument touched, safe with the app open)
+   and lists its runs, their outcomes and data files, the session envelope,
+   and any incident report already filed there.
 3. **Run the preflight:** `python -m cryosoft.troubleshoot check --json`.
    Branch on the FaultCodes using `references/triage-tree.md`.
 4. **Narrow with read-only commands** (`scan`, `probe`, `idn`, `read`,
