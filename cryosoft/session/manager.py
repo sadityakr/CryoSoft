@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -271,7 +270,13 @@ class ExperimentManager(QObject):
         candidate = experiment_dirname.strip()
         if not candidate:
             raise ValueError("Experiment folder name must not be empty")
-        if os.sep in candidate or (os.altsep and os.altsep in candidate) or "/" in candidate:
+        # Both separators are rejected on every platform, deliberately not via
+        # os.sep/os.altsep: an experiment folder written on Linux is routinely
+        # opened on a Windows analysis machine, where a backslash in the name
+        # would split into a nested path. Keying off the host's separators let
+        # "a\b" through on Linux (os.sep="/", os.altsep=None) while rejecting
+        # it on Windows — the same name, two different verdicts.
+        if "/" in candidate or "\\" in candidate:
             raise ValueError(
                 f"Experiment folder name {experiment_dirname!r} must not contain "
                 "a path separator — it names a single folder directly under "

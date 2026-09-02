@@ -1,0 +1,90 @@
+"""Headless construction of a procedure instance from plain values.
+
+The one place a ``BaseProcedure`` is instantiated. Every caller — the
+Procedure window's run-now and add-to-queue flows, the queue's session
+restore, and any future non-GUI client — routes through ``build_procedure``
+so a run is assembled identically no matter who asked for it.
+
+Headless by contract: this module imports no Qt and touches no widget, so a
+procedure can be built in a test, from a script, or from a client that has no
+GUI at all. That is the point of it living here rather than on a window —
+construction is domain work, not presentation.
+
+Construction failure is signalled by raising, never by returning ``None``: a
+procedure legitimately refuses a run it cannot honour (a nonzero field on a
+station with no magnet, a parameter outside the setup's limits), and the
+reason belongs in the caller's own error channel — a form dialog for the
+operator, a log line for a restore, an error payload for a remote client.
+``PROCEDURE_BUILD_ERRORS`` names the exceptions that mean "refused", so
+callers catch one well-known tuple instead of each guessing a different subset
+of it.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+from cryosoft.core.exceptions import CryoSoftError
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from cryosoft.core.procedure import BaseProcedure
+    from cryosoft.core.station import Station
+
+#: Exceptions that mean "this procedure refused to be built", as opposed to a
+#: programming error. ``CryoSoftError`` covers ``CryoSoftConfigError`` and
+#: ``CryoSoftSafetyError``, which procedures raise from ``__init__`` when the
+#: station cannot honour the requested run; ``TypeError``/``ValueError`` cover
+#: a stored parameter set that no longer matches the procedure's signature
+#: (e.g. a queue entry restored after the procedure gained or renamed a
+#: parameter). Catch this tuple rather than a hand-picked subset: catching
+#: only ``(TypeError, ValueError)`` silently excludes every ``CryoSoftError``,
+#: because ``CryoSoftError`` derives from ``Exception`` directly.
+PROCEDURE_BUILD_ERRORS: tuple[type[BaseException], ...] = (
+    CryoSoftError,
+    TypeError,
+    ValueError,
+)
+
+
+def build_procedure(
+    cls: type[BaseProcedure],
+    *,
+    station: Station,
+    params: dict[str, Any],
+    sample_info: dict[str, str],
+    data_directory: str,
+    file_prefix: str = "",
+    experiment_info: dict[str, Any] | None = None,
+) -> BaseProcedure:
+    """Instantiate *cls* from plain values.
+
+    Args:
+        cls: The concrete ``BaseProcedure`` subclass to build.
+        station: The Station the run will drive.
+        params: The procedure's own declared parameters, passed as keyword
+            arguments. Keys must match the procedure's ``__init__`` signature.
+        sample_info: Sample metadata recorded with the run.
+        data_directory: Directory the run writes its HDF5 file into. Named for
+            the constructor keyword, not for any caller's field name.
+        file_prefix: Optional filename prefix for the run's data file.
+        experiment_info: Experiment context stamped onto the run, or ``None``
+            when no experiment is open. Forwarded as-is; ``BaseProcedure``
+            already records ``None`` as ``{}``.
+
+    Returns:
+        A ready ``BaseProcedure`` instance.
+
+    Raises:
+        CryoSoftError: If the procedure refuses the run — the station cannot
+            honour it, or a value violates a setup limit.
+        TypeError: If *params* does not match the procedure's signature.
+        ValueError: If a parameter value is invalid.
+    """
+    return cls(
+        station=station,
+        sample_info=sample_info,
+        data_directory=data_directory,
+        file_prefix=file_prefix,
+        experiment_info=experiment_info,
+        **params,
+    )

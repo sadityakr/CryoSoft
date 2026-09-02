@@ -2783,3 +2783,71 @@ def test_out_of_scope_ramp_advances_in_every_run_state(orchestrator, station, qt
     # the run was in.
     assert all(b > a for a, b in zip(fields, fields[1:])), fields
     orchestrator.abort_procedure()
+
+
+# ── Every GUI action gets an explicit verdict ────────────────────────────────
+# The control-validation standard (virtual_instruments/base.py) promises the
+# operator an explicit success or failure for every action. These five entry
+# points used to return silently on their refusal paths, so a click produced
+# no state change and no message — indistinguishable from a wedged app. They
+# matter more once the Orchestrator is not on the GUI thread, where a missing
+# verdict is the only symptom a caller could ever see.
+
+def test_pause_without_a_run_is_refused_with_a_reason(orchestrator, qtbot):
+    with qtbot.waitSignal(orchestrator.action_blocked, timeout=500) as blocker:
+        orchestrator.pause_procedure()
+    assert "no run is active" in blocker.args[0]
+
+
+def test_pause_in_a_disallowed_state_is_refused_with_a_reason(orchestrator, qtbot):
+    orchestrator._procedure = object()          # a run exists...
+    orchestrator._state = OrchestratorState.PAUSED   # ...but this state cannot pause
+    try:
+        with qtbot.waitSignal(orchestrator.action_blocked, timeout=500) as blocker:
+            orchestrator.pause_procedure()
+        assert "PAUSED" in blocker.args[0]
+    finally:
+        orchestrator._procedure = None
+        orchestrator._state = OrchestratorState.IDLE
+
+
+def test_resume_outside_paused_is_refused_with_a_reason(orchestrator, qtbot):
+    with qtbot.waitSignal(orchestrator.action_blocked, timeout=500) as blocker:
+        orchestrator.resume_procedure()
+    assert "IDLE" in blocker.args[0]
+
+
+def test_recover_from_error_outside_error_is_refused_with_a_reason(orchestrator, qtbot):
+    with qtbot.waitSignal(orchestrator.action_blocked, timeout=500) as blocker:
+        orchestrator.recover_from_error()
+    assert "IDLE" in blocker.args[0]
+    assert orchestrator.state == OrchestratorState.IDLE.value
+
+
+def test_abort_during_emergency_is_refused_with_a_reason(orchestrator, qtbot):
+    orchestrator._state = OrchestratorState.EMERGENCY
+    try:
+        with qtbot.waitSignal(orchestrator.action_blocked, timeout=500) as blocker:
+            orchestrator.abort_procedure()
+        assert "EMERGENCY" in blocker.args[0]
+    finally:
+        orchestrator._state = OrchestratorState.IDLE
+
+
+def test_recover_from_error_still_works_in_error(orchestrator, qtbot):
+    """The refusal path must not have broken the real one."""
+    orchestrator._state = OrchestratorState.ERROR
+    orchestrator.recover_from_error()
+    assert orchestrator.state == OrchestratorState.IDLE.value
+
+
+def test_scanner_toggle_without_a_switch_is_refused_with_a_reason(orchestrator, qtbot):
+    """A station with no switch instrument says so instead of ignoring the click."""
+    saved = orchestrator._scanner_vi_name
+    orchestrator._scanner_vi_name = None
+    try:
+        with qtbot.waitSignal(orchestrator.action_blocked, timeout=500) as blocker:
+            orchestrator.set_scanner_enabled(True)
+        assert "no switch instrument" in blocker.args[0]
+    finally:
+        orchestrator._scanner_vi_name = saved

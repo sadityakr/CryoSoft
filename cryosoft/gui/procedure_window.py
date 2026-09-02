@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
 
 from cryosoft.core.orchestrator import Orchestrator
 from cryosoft.core.procedure import BaseProcedure
+from cryosoft.core.run_builder import PROCEDURE_BUILD_ERRORS, build_procedure
 from cryosoft.core.station import Station
 from cryosoft.gui import window_geometry
 from cryosoft.gui.live_plot_panel import LivePlotPanel
@@ -396,15 +397,16 @@ class ProcedureWindow(QMainWindow):
             return None
 
         try:
-            return cls(
+            return build_procedure(
+                cls,
                 station=self._station,
+                params=param_values,
                 sample_info=sample_info,
                 data_directory=data_dir,
                 file_prefix=file_prefix,
                 experiment_info=self._experiment_info(),
-                **param_values,
             )
-        except Exception as exc:
+        except PROCEDURE_BUILD_ERRORS as exc:
             # A procedure may refuse construction (e.g. a nonzero field
             # requested on a magnet this station does not have). Surface it
             # as a form error — an uncaught raise in a Qt slot kills the app.

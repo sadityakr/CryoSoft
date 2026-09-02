@@ -766,6 +766,7 @@ class Orchestrator(QObject):
         between ticks, never between two readings of a datapoint.)
         """
         if self._procedure is None:
+            self.action_blocked.emit("Cannot pause: no run is active")
             return
         if self._state == OrchestratorState.MEASURING:
             # Mid-datapoint: defer to the pause boundary rather than strand a
@@ -779,6 +780,8 @@ class Orchestrator(QObject):
                            OrchestratorState.INITIATION_GATE, OrchestratorState.READING_GATE,
                            OrchestratorState.SWEEPING, OrchestratorState.STANDBY):
             self._enter_paused()
+            return
+        self.action_blocked.emit(f"Cannot pause while {self._state.value}")
 
     def _enter_paused(self) -> None:
         """Enter PAUSED from the current state, holding all of the run's hardware.
@@ -814,6 +817,8 @@ class Orchestrator(QObject):
             if self._pause_requested:
                 self._pause_requested = False
                 self._emit_status("Pause request cancelled")
+                return
+            self.action_blocked.emit(f"Cannot resume while {self._state.value}")
             return
         # _enter_paused() held the hardware, which forgot its ramp — states
         # that were mid-ramp need their targets re-dispatched to continue.
@@ -840,6 +845,9 @@ class Orchestrator(QObject):
         """
         if self._state == OrchestratorState.EMERGENCY:
             logger.info("abort_procedure ignored during EMERGENCY")
+            self.action_blocked.emit(
+                "Cannot abort during EMERGENCY — acknowledge the emergency first"
+            )
             return
         self._abort_active_procedure()
         self._emit_run_finished("aborted")
@@ -1050,8 +1058,12 @@ class Orchestrator(QObject):
         procedures are NOT auto-started — after an error the queue's
         assumptions may no longer hold; the user restarts explicitly.
         """
-        if self._state == OrchestratorState.ERROR:
-            self._change_state(OrchestratorState.IDLE)
+        if self._state != OrchestratorState.ERROR:
+            self.action_blocked.emit(
+                f"Nothing to recover from: not in ERROR (currently {self._state.value})"
+            )
+            return
+        self._change_state(OrchestratorState.IDLE)
 
     def acknowledge(self) -> None:
         """Single GUI entry point: acknowledge EMERGENCY, or unlock held VIs.
@@ -1637,6 +1649,9 @@ class Orchestrator(QObject):
         """
         if self._scanner_vi_name is None:
             logger.info("set_scanner_enabled ignored: no switch VI in station")
+            self.action_blocked.emit(
+                "Cannot change scanner availability: this station has no switch instrument"
+            )
             return
         self._station.set_scanner_enabled(bool(enabled))
 
