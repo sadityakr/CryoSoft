@@ -220,12 +220,18 @@ class SuperconductingMagnetPersistentVI(SuperconductingMagnetVI):
     # @monitored overrides — persistent-mode-correct current/field readback
     # ------------------------------------------------------------------
 
-    @monitored
+    @monitored(unit="A", description="Power-supply output current")
     def psu_current(self) -> float:
         """Return the PSU output current in amperes."""
         return self._driver.get_current()  # type: ignore[attr-defined]
 
-    @monitored
+    @monitored(
+        unit="A",
+        description=(
+            "Current holding the field in the magnet coil — the frozen coil "
+            "current while persistent, the PSU output otherwise"
+        ),
+    )
     def magnet_current(self) -> float:
         """Return the field-holding current in Amperes.
 
@@ -241,7 +247,10 @@ class SuperconductingMagnetPersistentVI(SuperconductingMagnetVI):
             return driver.get_coil_current()
         return driver.get_current()
 
-    @monitored
+    @monitored(
+        unit="T",
+        description="Magnetic field at the sample (persistent-mode-correct)",
+    )
     def magnet_field_T(self) -> float:
         """Return the current magnetic field in tesla (persistent-mode-correct)."""
         return self.magnet_current() / self._amperes_per_tesla
@@ -250,17 +259,33 @@ class SuperconductingMagnetPersistentVI(SuperconductingMagnetVI):
     # @monitored methods — switch heater / persistent mode
     # ------------------------------------------------------------------
 
-    @monitored
+    # Dimensionless: a two-valued hardware state, not a measured quantity.
+    @monitored(
+        unit="",
+        description="Switch-heater state: ON (energised) or OFF",
+    )
     def switch_heater_state(self) -> str:
         """Return 'ON' if the switch heater is energised, 'OFF' otherwise."""
         return self._driver.get_switch_heater_state()  # type: ignore[attr-defined]
 
-    @monitored
+    @monitored(
+        unit="",
+        description=(
+            "True while the coil physically holds the field with the switch "
+            "heater off"
+        ),
+    )
     def is_persistent(self) -> bool:
         """Return True when the magnet is physically persistent (switch heater off)."""
         return self._driver.get_persistent_mode()  # type: ignore[attr-defined]
 
-    @monitored
+    @monitored(
+        unit="",
+        description=(
+            "True while the manual persistent-mode toggle is on, handing "
+            "switch-heater and PSU control to the operator"
+        ),
+    )
     def persistent_mode_enabled(self) -> bool:
         """Return True when the manual persistent-mode toggle is on.
 
@@ -271,7 +296,13 @@ class SuperconductingMagnetPersistentVI(SuperconductingMagnetVI):
         """
         return self._persistent_mode_enabled
 
-    @monitored
+    @monitored(
+        unit="",
+        description=(
+            "Logical magnet state: standby, ramping, holding, persistent, "
+            "quenched or clamped"
+        ),
+    )
     def magnet_state(self) -> str:
         """Return the logical magnet state (persistent-aware).
 

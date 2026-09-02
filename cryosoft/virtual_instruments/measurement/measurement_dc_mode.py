@@ -246,14 +246,20 @@ class DCModeMeasurementVI(MeasurementInstrumentBase):
     # @monitored — last manual read_now() result, for front-panel bench testing
     # ------------------------------------------------------------------
 
-    @monitored
+    @monitored(
+        unit="V",
+        description="Most recent valid voltage sample from the last manual read",
+    )
     def last_voltage_V(self) -> float | None:
         """Most recent valid voltage from the last read_now() call, or None."""
         if self._last_reading is None or self._last_reading["n_valid"] == 0:
             return None
         return self._last_reading["voltage_V_array"][self._last_reading["n_valid"] - 1]
 
-    @monitored
+    @monitored(
+        unit="V",
+        description="Mean voltage over the samples of the last manual read",
+    )
     def last_mean_voltage_V(self) -> float | None:
         """Mean voltage from the last read_now() call, or None.
 
@@ -265,7 +271,11 @@ class DCModeMeasurementVI(MeasurementInstrumentBase):
             return None
         return self._last_reading["voltage_V"]
 
-    @monitored
+    # Dimensionless: a sample count, not a measured quantity.
+    @monitored(
+        unit="",
+        description="Number of valid samples returned by the last manual read",
+    )
     def last_n_valid(self) -> int | None:
         """Valid-reading count from the last read_now() call, or None."""
         if self._last_reading is None:

@@ -40,7 +40,7 @@ from collections.abc import Mapping
 from typing import Any, ClassVar
 
 from cryosoft.core.decorators import control
-from cryosoft.core.plan import ParamSpec
+from cryosoft.core.plan import ParamSpec, UIGroup
 from cryosoft.virtual_instruments.base import MeasurementInstrumentBase
 
 # Sentinel to detect the un-armed state.
@@ -89,6 +89,23 @@ class DeltaModeMeasurementVI(MeasurementInstrumentBase):
     # between readings (delta mode has no in-place current change), letting the
     # generic sweep procedure loop a list of currents at every sweep point.
     reading_setters: ClassVar[dict[str, str]] = {"current": "set_delta_current"}
+
+    # UI-group standard (see BaseVirtualInstrument): delta mode is one
+    # workflow with two steps, and on an ungrouped front panel they sit
+    # alphabetically among the lifecycle and connection controls with nothing
+    # saying they belong together. Members are in working order: arm the
+    # engine, then re-arm it at a new peak current.
+    ui_groups = (
+        UIGroup(
+            key="delta_engine",
+            title="Delta engine",
+            description=(
+                "Arm the 6221/2182A delta engine, then change its peak "
+                "current without re-entering the rest of the configuration."
+            ),
+            members=("initiate_measurement", "set_delta_current"),
+        ),
+    )
 
     _ARRAY_KEYS, _SCALAR_COLUMNS = MeasurementInstrumentBase.quantity_columns(
         "voltage_V", "current_A"
@@ -186,7 +203,7 @@ class DeltaModeMeasurementVI(MeasurementInstrumentBase):
 
     # panel=False: arming is a deliberate act — reachable from the front
     # panel and from procedures, never from the compact monitor card.
-    @control(panel=False)
+    @control(panel=False, group="delta_engine")
     def initiate_measurement(
         self,
         current: float = 1e-6,
@@ -235,7 +252,7 @@ class DeltaModeMeasurementVI(MeasurementInstrumentBase):
     # @control — the reading-loop setter
     # ------------------------------------------------------------------
 
-    @control
+    @control(group="delta_engine")
     def set_delta_current(self, current: float) -> None:
         """Re-arm the delta engine at a new peak current.
 

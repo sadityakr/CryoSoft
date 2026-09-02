@@ -1027,8 +1027,18 @@ class TestLakeshore335SampleTemperatureControllerVI:
         assert spec.default == vi.curve()
 
     def test_control_param_specs_other_methods_unaffected(self, lakeshore_driver):
+        """A control the override does not name falls through to the decorator.
+
+        ``set_temperature`` is declared on ``SampleTemperatureControllerVI``
+        (the declaration standard), so the hook must hand back that
+        inherited declaration untouched rather than injecting anything of
+        its own.
+        """
         vi = self._make_vi(lakeshore_driver)
-        assert vi.control_param_specs("set_temperature") == {}
+        specs = vi.control_param_specs("set_temperature")
+        assert set(specs) == {"target_K"}
+        assert specs["target_K"].unit == "K"
+        assert specs["target_K"].choices is None
 
     # -- heater range (Lakeshore-specific: powers up 'OFF', which is the
     #    reported bug — no heater power regardless of heater_mode or

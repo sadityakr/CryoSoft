@@ -6,6 +6,7 @@ import logging
 from typing import Any, Generator
 
 from cryosoft.core.decorators import control, monitored
+from cryosoft.core.plan import ParamSpec
 from cryosoft.virtual_instruments.base import RotatorBase
 from cryosoft.virtual_instruments.rampable import RampableVI
 
@@ -203,17 +204,27 @@ class RotatorVI(RotatorBase, RampableVI):
     # @monitored methods
     # ------------------------------------------------------------------
 
-    @monitored
+    @monitored(
+        unit="deg",
+        description="Sample orientation angle relative to the field",
+    )
     def get_sample_angle(self) -> float:
         """Return the current sample angle in degrees."""
         return self._driver.get_position()  # type: ignore[attr-defined]
 
-    @monitored
+    @monitored(
+        unit="deg/min",
+        description="Rotation rate the stage is programmed to slew at",
+    )
     def get_rate_sample_angle(self) -> float:
         """Return the configured rotation rate in degrees per minute."""
         return self._rate_deg_per_min
 
-    @monitored
+    # Dimensionless: a two-valued hardware status word.
+    @monitored(
+        unit="",
+        description="Stage status word: HOLD (stationary) or MOVING",
+    )
     def rotator_status(self) -> str:
         """Return the hardware status string (HOLD or MOVING)."""
         return self._driver.get_status()  # type: ignore[attr-defined]
@@ -222,7 +233,19 @@ class RotatorVI(RotatorBase, RampableVI):
     # @control methods
     # ------------------------------------------------------------------
 
-    @control
+    # The angle bound is a setup property read from the config through
+    # control_limits (the control-validation standard), so it is not
+    # repeated on the spec; the default is only the form seed.
+    @control(
+        params={
+            "target_deg": ParamSpec(
+                type=float,
+                default=0.0,
+                unit="deg",
+                description="Sample angle to rotate to",
+            ),
+        },
+    )
     def set_sample_angle(self, target_deg: float) -> None:
         """Manually command a rotation (GUI use; blocked during procedures).
 
@@ -231,7 +254,18 @@ class RotatorVI(RotatorBase, RampableVI):
         """
         self.start_ramp(target_deg)
 
-    @control
+    # Bound from control_limits/config as above; the default mirrors this
+    # VI's own default_rate_deg_per_min fallback.
+    @control(
+        params={
+            "rate_deg_per_min": ParamSpec(
+                type=float,
+                default=1.0,
+                unit="deg/min",
+                description="Rate subsequent rotations slew at",
+            ),
+        },
+    )
     def set_rate_sample_angle(self, rate_deg_per_min: float) -> None:
         """Set the rotation rate used by subsequent ``set_sample_angle`` calls.
 

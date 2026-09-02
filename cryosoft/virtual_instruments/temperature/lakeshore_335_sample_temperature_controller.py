@@ -100,12 +100,20 @@ class Lakeshore335SampleTemperatureControllerVI(SampleTemperatureControllerVI):
     # @monitored methods — calibration curve, heater range
     # ------------------------------------------------------------------
 
-    @monitored
+    # Dimensionless: an instrument curve number (INCRV), not a quantity.
+    @monitored(
+        unit="",
+        description="Calibration curve number assigned to the sample sensor input",
+    )
     def curve(self) -> int:
         """Return the calibration curve number assigned to the sample sensor input."""
         return self._driver.get_sensor_curve(self._SENSOR_INPUT)  # type: ignore[attr-defined]
 
-    @monitored
+    # Dimensionless: a named decade power step, not a quantity.
+    @monitored(
+        unit="",
+        description="Heater output power range: OFF, LOW, MEDIUM or HIGH",
+    )
     def heater_range(self) -> str:
         """Return the heater range ('OFF', 'LOW', 'MEDIUM', or 'HIGH')."""
         return self._driver.get_heater_range()  # type: ignore[attr-defined]
@@ -114,7 +122,20 @@ class Lakeshore335SampleTemperatureControllerVI(SampleTemperatureControllerVI):
     # @control methods — calibration curve, heater range
     # ------------------------------------------------------------------
 
-    @control(panel=False)
+    # The choice list is static (the 335's own curve numbering); only the
+    # DEFAULT is per-instrument, which is why control_param_specs() above
+    # overrides this declaration with the currently-assigned curve.
+    @control(
+        panel=False,
+        params={
+            "curve": ParamSpec(
+                type=int,
+                default=0,
+                choices=_CURVE_CHOICES,
+                description="Calibration curve assigned to the sample sensor input",
+            ),
+        },
+    )
     def set_curve(self, curve: int) -> None:
         """Assign a calibration curve to the sample sensor input.
 
@@ -123,7 +144,21 @@ class Lakeshore335SampleTemperatureControllerVI(SampleTemperatureControllerVI):
         """
         self._driver.set_sensor_curve(int(curve), self._SENSOR_INPUT)  # type: ignore[attr-defined]
 
-    @control(panel=False)
+    # Static choices, per-instrument default — see set_curve above.
+    @control(
+        panel=False,
+        params={
+            "range_setting": ParamSpec(
+                type=str,
+                default="OFF",
+                choices=_HEATER_RANGE_CHOICES,
+                description=(
+                    "Heater output power range — Off switches the heater off "
+                    "entirely, regardless of heater mode or setpoint"
+                ),
+            ),
+        },
+    )
     def set_heater_range(self, range_setting: str) -> None:
         """Set the heater range, switching heater power on or off.
 

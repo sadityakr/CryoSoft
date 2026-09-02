@@ -239,12 +239,22 @@ class SwitchMatrixVI(BaseVirtualInstrument):
     # @monitored — polled into get_state() every tick
     # ------------------------------------------------------------------
 
-    @monitored
+    # Dimensionless: a config-named route, not a measured quantity.
+    @monitored(
+        unit="",
+        description='Config-named route currently closed, or "" when none is',
+    )
     def active_route(self) -> str:
         """Return the currently-selected route name, or "" if none is active."""
         return self._active_route
 
-    @monitored
+    @monitored(
+        unit="",
+        description=(
+            "Index of the active route in config order, or -1 when none is "
+            "closed — the numeric companion to active_route"
+        ),
+    )
     def active_route_index(self) -> int:
         """Return the active route's index in config order, or -1 if none.
 
@@ -255,7 +265,10 @@ class SwitchMatrixVI(BaseVirtualInstrument):
             return -1
         return list(self._routes).index(self._active_route)
 
-    @monitored
+    @monitored(
+        unit="",
+        description="Raw channel specs currently closed, comma-joined",
+    )
     def active_channels(self) -> str:
         """Return the currently-closed raw channel specs, comma-joined.
 
@@ -268,12 +281,21 @@ class SwitchMatrixVI(BaseVirtualInstrument):
         """
         return ",".join(self._currently_closed())
 
-    @monitored
+    @monitored(
+        unit="",
+        description=(
+            "True while routes are switched make-before-break rather than "
+            "break-before-make"
+        ),
+    )
     def hot_switching_enabled(self) -> bool:
         """Return True when hot-switching (make-before-break) is active."""
         return self._hot_switching
 
-    @monitored
+    @monitored(
+        unit="",
+        description="Scanner pole mode (1, 2 or 4), or 0 when never set",
+    )
     def pole_mode(self) -> int:
         """Return the scanner's current pole mode (1, 2 or 4), or 0 if never set."""
         return self._pole_mode or 0
@@ -344,7 +366,19 @@ class SwitchMatrixVI(BaseVirtualInstrument):
     # @control — user/procedure actions
     # ------------------------------------------------------------------
 
-    @control
+    # The route names only exist after construction (they are a setup
+    # property), so control_param_specs() above replaces this declaration
+    # with a drop-down of the configured routes; this static one carries the
+    # meaning for a VI built with no route table.
+    @control(
+        params={
+            "route": ParamSpec(
+                type=str,
+                default="",
+                description="Config-named route to close (exclusive mux)",
+            ),
+        },
+    )
     def select_route(self, route: str) -> None:
         """Connect exactly one configured route (exclusive mux).
 

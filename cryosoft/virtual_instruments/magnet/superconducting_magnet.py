@@ -6,6 +6,7 @@ import logging
 from typing import Any, Generator
 
 from cryosoft.core.decorators import control, monitored
+from cryosoft.core.plan import ParamSpec
 from cryosoft.virtual_instruments.base import MagnetBase
 from cryosoft.virtual_instruments.rampable import RampableVI
 
@@ -275,12 +276,15 @@ class SuperconductingMagnetVI(MagnetBase, RampableVI):
     # @monitored methods
     # ------------------------------------------------------------------
 
-    @monitored
+    @monitored(unit="A", description="Power-supply output current")
     def psu_current(self) -> float:
         """Return the PSU output current in amperes."""
         return self._driver.get_current()  # type: ignore[attr-defined]
 
-    @monitored
+    @monitored(
+        unit="A",
+        description="Current holding the field in the magnet coil",
+    )
     def magnet_current(self) -> float:
         """Return the field-holding current in amperes.
 
@@ -288,12 +292,19 @@ class SuperconductingMagnetVI(MagnetBase, RampableVI):
         """
         return self._driver.get_current()  # type: ignore[attr-defined]
 
-    @monitored
+    @monitored(unit="T", description="Magnetic field at the sample")
     def magnet_field_T(self) -> float:
         """Return the current magnetic field in tesla."""
         return self._driver.get_current() / self._amperes_per_tesla  # type: ignore[attr-defined]
 
-    @monitored
+    # Dimensionless: the PSU's own status word, not a measured quantity.
+    @monitored(
+        unit="",
+        description=(
+            "Power-supply status word as reported by the hardware: HOLD, "
+            "RAMPING, QUENCH or CLAMPED"
+        ),
+    )
     def magnet_status(self) -> str:
         """Return the PSU status string (HOLD, RAMPING, QUENCH, or CLAMPED).
 
@@ -303,7 +314,15 @@ class SuperconductingMagnetVI(MagnetBase, RampableVI):
         """
         return self._driver.get_status()  # type: ignore[attr-defined]
 
-    @monitored
+    # Dimensionless: this VI's logical interpretation of the hardware
+    # report plus the live current readings (see GLOSSARY's Magnet state).
+    @monitored(
+        unit="",
+        description=(
+            "Logical magnet state: standby, ramping, holding, quenched or "
+            "clamped"
+        ),
+    )
     def magnet_state(self) -> str:
         """Return the logical magnet state.
 
@@ -347,7 +366,20 @@ class SuperconductingMagnetVI(MagnetBase, RampableVI):
     # @control methods
     # ------------------------------------------------------------------
 
-    @control
+    # The bound on target_T is NOT declared here: it is a setup property
+    # read from the config through control_limits (see the
+    # control-validation standard). The spec's default is the form seed —
+    # zero field, the same target standby() drives to.
+    @control(
+        params={
+            "target_T": ParamSpec(
+                type=float,
+                default=0.0,
+                unit="T",
+                description="Field to ramp the magnet to",
+            ),
+        },
+    )
     def set_field(self, target_T: float) -> None:
         """Manually command a field ramp (GUI use; blocked during procedures).
 

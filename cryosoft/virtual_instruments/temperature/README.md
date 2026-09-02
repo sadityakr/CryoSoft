@@ -94,6 +94,10 @@ All classes here extend `SampleTemperatureControllerVI` (itself inheriting from
   with the same 'AUTO'/'MANUAL' vocabulary. `initiate()` pins the setpoint to
   `round(temperature())` before setting heater mode AUTO; `standby()` sets
   heater mode MANUAL and zeroes heater output — the lifecycle standard.
+  Declares two **UI groups** (`ui_groups`, tagged `group=` per method),
+  inherited by both subclasses below: `temperature_control` (the sensor
+  reading, the setpoint, and the target/rate controls that drive it) and
+  `heater` (loop mode, manual output, and the PID gains behind them).
   tests: `tests/test_l1_new_vis.py`
   (`TestSampleTemperatureControllerVI`), `tests/test_l1_virtual_instruments.py`.
 - `vti_temperature_controller.py` — `VTITemperatureControllerVI`: extends above with
