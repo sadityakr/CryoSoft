@@ -70,8 +70,12 @@ from cryosoft.core.events import (
     ActorKind,
     Command,
     CommandName,
+    ControlInfo,
     Datapoint,
     Event,
+    GroupInfo,
+    InstrumentInfo,
+    MonitoredInfo,
     QueueChanged,
     Readings,
     RunFinished,
@@ -2525,10 +2529,154 @@ def _contract_specimens() -> dict[str, object]:
             seq=9,
             ts=1_700_000_003.0,
         ),
+        "MonitoredInfo": MonitoredInfo(
+            name="field_T",
+            unit="T",
+            description="Measured magnetic field at the sample",
+            group="coil",
+            returns="float",
+        ),
+        "ControlInfo": ControlInfo(
+            name="start_ramp",
+            scope="operation",
+            panel=False,
+            group="coil",
+            params=(
+                {
+                    "name": "target",
+                    "kind": "float",
+                    "unit": "T",
+                    "description": "Field to ramp to",
+                    "default": 0.0,
+                    "min": -1.0,
+                    "max": 1.0,
+                    "choices": None,
+                },
+            ),
+        ),
+        "GroupInfo": GroupInfo(
+            key="coil",
+            title="Coil",
+            description="Field readback and the ramp that changes it.",
+            members=("field_T", "start_ramp"),
+        ),
+        "InstrumentInfo": InstrumentInfo(
+            name="magnet_z",
+            vi_class="SuperconductingMagnetVI",
+            role="system",
+            kind="magnet",
+            availability=("not_responding",),
+            monitored=(
+                MonitoredInfo(
+                    name="field_T",
+                    unit="T",
+                    description="Measured magnetic field at the sample",
+                    group="coil",
+                    returns="float",
+                ),
+            ),
+            controls=(
+                ControlInfo(
+                    name="start_ramp",
+                    scope="operation",
+                    panel=False,
+                    group="coil",
+                    params=(
+                        {
+                            "name": "target",
+                            "kind": "float",
+                            "unit": "T",
+                            "description": "Field to ramp to",
+                            "default": 0.0,
+                            "min": -1.0,
+                            "max": 1.0,
+                            "choices": None,
+                        },
+                    ),
+                ),
+            ),
+            limits={
+                "start_ramp": {
+                    "target": {"limit": "max_field_T", "min": -1.0, "max": 1.0}
+                }
+            },
+            ui_groups=(
+                GroupInfo(
+                    key="coil",
+                    title="Coil",
+                    description="Field readback and the ramp that changes it.",
+                    members=("field_T", "start_ramp"),
+                ),
+            ),
+            safety_flags={"quench": "critical"},
+        ),
         "StationInfo": StationInfo(
+            setup="sim_cryostat",
+            tick_interval_s=3.0,
             instruments=(
-                {"name": "magnet_z", "vi_type": "magnet", "monitored": ["field_T"]},
-                {"name": "level_meter", "vi_type": "level_meter", "monitored": []},
+                InstrumentInfo(
+                    name="magnet_z",
+                    vi_class="SuperconductingMagnetVI",
+                    role="system",
+                    kind="magnet",
+                    availability=("not_responding",),
+                    monitored=(
+                        MonitoredInfo(
+                            name="field_T",
+                            unit="T",
+                            description="Measured magnetic field at the sample",
+                            group="coil",
+                            returns="float",
+                        ),
+                    ),
+                    controls=(
+                        ControlInfo(
+                            name="start_ramp",
+                            scope="operation",
+                            panel=False,
+                            group="coil",
+                            params=(
+                                {
+                                    "name": "target",
+                                    "kind": "float",
+                                    "unit": "T",
+                                    "description": "Field to ramp to",
+                                    "default": 0.0,
+                                    "min": -1.0,
+                                    "max": 1.0,
+                                    "choices": None,
+                                },
+                            ),
+                        ),
+                    ),
+                    limits={
+                        "start_ramp": {
+                            "target": {
+                                "limit": "max_field_T",
+                                "min": -1.0,
+                                "max": 1.0,
+                            }
+                        }
+                    },
+                    ui_groups=(
+                        GroupInfo(
+                            key="coil",
+                            title="Coil",
+                            description=(
+                                "Field readback and the ramp that changes it."
+                            ),
+                            members=("field_T", "start_ramp"),
+                        ),
+                    ),
+                    safety_flags={"quench": "critical"},
+                ),
+                InstrumentInfo(
+                    name="level_meter",
+                    vi_class="CryogenLevelMeterVI",
+                    role="level",
+                    kind="level",
+                    availability=("connect_failed",),
+                ),
             ),
             seq=10,
             ts=1_700_000_004.0,

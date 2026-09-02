@@ -5,6 +5,15 @@ that the Orchestrator (emitter) and every client (the GUI today, an agent
 gateway later) can import them without dragging a layer along:
 
 * ``ErrorEvent`` — the structured error/fault notification.
+* The **station declaration snapshot**: ``StationInfo`` and its nested
+  ``InstrumentInfo`` / ``MonitoredInfo`` / ``ControlInfo`` / ``GroupInfo``,
+  the frozen picture of what every configured instrument reads, what it can
+  be asked to do, within which bounds, and how those capabilities group.
+  This module DEFINES that shape; ``Station.station_info()`` BUILDS it (only
+  the Station holds both the VI declarations and the config the bounds come
+  from) and ``core.capability_manifest.build_manifest()`` renders it. Keeping
+  the definition here is what lets a client import the whole declaration
+  without dragging the instrument stack in behind it.
 * The **control contract**: ``Actor``, ``Command``, ``Verdict`` and the
   ``Event`` union. The Orchestrator has exactly two clients, the GUI and the
   agent, and they must see the same system and be seen doing the same things.
@@ -154,10 +163,15 @@ class _ContractMessage:
 
         Returns:
             A dict of the declared fields, plus ``"kind"`` for event types.
+            A type that declares ``kind`` as an ordinary FIELD (e.g.
+            ``InstrumentInfo``, where it is the instrument's category) keeps
+            its own value: the discriminator is written only for a type whose
+            ``kind`` is the class-level tag, never over a field of that name.
         """
-        payload = {f.name: _jsonable(getattr(self, f.name)) for f in fields(self)}
+        declared = [f.name for f in fields(self)]
+        payload = {name: _jsonable(getattr(self, name)) for name in declared}
         kind = getattr(type(self), "kind", None)
-        if isinstance(kind, str):
+        if isinstance(kind, str) and "kind" not in declared:
             payload["kind"] = kind
         return payload
 
@@ -531,45 +545,356 @@ class StatusSnapshot(_ContractMessage):
         object.__setattr__(self, "instruments", _checked_mapping(self.instruments))
 
 
+# ── The station declaration snapshot ──────────────────────────────────
+#
+# ``StationInfo`` and its four nested types are the DECLARATION half of
+# what a client renders: what each instrument reads, what it can be asked
+# to do, within which bounds, and how those capabilities group. They are
+# defined here, next to the rest of the contract, and BUILT by the Station
+# (``Station.station_info()``), which is the only layer that holds both the
+# VI declarations and the config the bounds come from. This module
+# deliberately imports nothing from the Station or the VI layer: a client
+# that only consumes the contract must never drag the instrument stack in
+# behind it.
+
+
+def _tuple_of(
+    cls: type, values: Any, field_name: str
+) -> tuple[Any, ...]:
+    """Coerce a declaration field into a tuple of contract instances.
+
+    The same coercion serves construction (the Station passes real
+    instances) and deserialisation (``from_json`` passes the dicts a JSON
+    round trip produced), which is what keeps the round trip exact.
+
+    Args:
+        cls: The nested contract type each entry must end up as.
+        values: A sequence of ``cls`` instances or of their ``to_json()``
+            mappings.
+        field_name: Fully qualified field name, for the error message.
+
+    Returns:
+        A tuple of ``cls`` instances.
+
+    Raises:
+        TypeError: If ``values`` is not a sequence, or an entry is neither
+            a ``cls`` nor a mapping.
+    """
+    if isinstance(values, (Mapping, str)) or not isinstance(values, (list, tuple)):
+        raise TypeError(f"{field_name} must be a sequence of {cls.__name__}")
+    coerced: list[Any] = []
+    for entry in values:
+        if isinstance(entry, cls):
+            coerced.append(entry)
+        elif isinstance(entry, Mapping):
+            coerced.append(cls.from_json(entry))
+        else:
+            raise TypeError(
+                f"{field_name} entries must be {cls.__name__} or its dict, "
+                f"got {type(entry).__name__}"
+            )
+    return tuple(coerced)
+
+
+def _checked_strings(owner: str, **values: Any) -> None:
+    """Validate that every named declaration field is a plain string.
+
+    Args:
+        owner: The declaring type's name, for the error message.
+        **values: Field name -> value.
+
+    Raises:
+        TypeError: If any value is not a ``str``.
+    """
+    for name, value in values.items():
+        if not isinstance(value, str):
+            raise TypeError(f"{owner}.{name} must be a str, got {value!r}")
+
+
+@dataclass(frozen=True)
+class MonitoredInfo(_ContractMessage):
+    """One ``@monitored`` reading of one instrument, as declared.
+
+    Attributes:
+        name: The method name, which is also the reading's channel key
+            wherever it is polled, logged or persisted.
+        unit: SI unit label ("T", "K", "%"), ``""`` for a genuinely
+            dimensionless, boolean or string reading.
+        description: One human-readable sentence saying what the value is.
+        group: The key of the ``GroupInfo`` this reading belongs to, or
+            ``""`` when it belongs to none.
+        returns: Name of the method's declared return type ("float",
+            "str", "float | None"), or ``""`` when it declares none.
+    """
+
+    name: str
+    unit: str = ""
+    description: str = ""
+    group: str = ""
+    returns: str = ""
+
+    def __post_init__(self) -> None:
+        """Validate the declaration strings.
+
+        Raises:
+            TypeError: If any field is not a string.
+            ValueError: If ``name`` is empty.
+        """
+        _checked_strings(
+            "MonitoredInfo",
+            name=self.name,
+            unit=self.unit,
+            description=self.description,
+            group=self.group,
+            returns=self.returns,
+        )
+        if not self.name:
+            raise ValueError("MonitoredInfo.name must be a non-empty str")
+
+
+@dataclass(frozen=True)
+class ControlInfo(_ContractMessage):
+    """One ``@control`` action of one instrument, as declared.
+
+    Attributes:
+        name: The method name, which is what a ``Command`` names to invoke
+            it.
+        scope: Capability scope — ``"measurement"`` or ``"operation"``.
+        panel: Declared default placement: ``True`` on the compact monitor
+            card, ``False`` in the instrument front panel only. Display
+            only, never a safety mechanism.
+        group: The key of the ``GroupInfo`` this action belongs to, or
+            ``""`` when it belongs to none.
+        params: One JSON-rendered ``ParamSpec`` per signature parameter, in
+            signature order. Each carries ``name``, ``kind`` (the scalar
+            type name), ``unit``, ``description``, ``default``, ``min``,
+            ``max`` and ``choices`` (``None`` when the parameter is not
+            enumerated). Flat scalars only: a group never crosses the
+            boundary as a value.
+    """
+
+    name: str
+    scope: str = "measurement"
+    panel: bool = True
+    group: str = ""
+    params: tuple[dict[str, Any], ...] = ()
+
+    def __post_init__(self) -> None:
+        """Validate the strings and JSON-check the parameter renderings.
+
+        Raises:
+            TypeError: If a string field has the wrong type, if ``panel``
+                is not a bool, or if ``params`` is not a sequence of
+                JSON-safe mappings.
+            ValueError: If ``name`` is empty.
+        """
+        _checked_strings(
+            "ControlInfo", name=self.name, scope=self.scope, group=self.group
+        )
+        if not self.name:
+            raise ValueError("ControlInfo.name must be a non-empty str")
+        if not isinstance(self.panel, bool):
+            raise TypeError("ControlInfo.panel must be a bool")
+        if isinstance(self.params, (Mapping, str)) or not isinstance(
+            self.params, (list, tuple)
+        ):
+            raise TypeError("ControlInfo.params must be a sequence of dicts")
+        object.__setattr__(
+            self, "params", tuple(_checked_mapping(spec) for spec in self.params)
+        )
+
+
+@dataclass(frozen=True)
+class GroupInfo(_ContractMessage):
+    """One titled group of one instrument's capabilities, as declared.
+
+    The contract rendering of ``core.plan.UIGroup``: presentation and
+    description only, and its ``members`` order IS the render order and the
+    workflow order an agent reads off the manifest.
+
+    Attributes:
+        key: Stable identity, the value a capability's ``group`` names.
+        title: Human-readable heading.
+        description: Optional sentence saying what the group is for.
+        members: Ordered monitored/control method names.
+    """
+
+    key: str
+    title: str
+    description: str = ""
+    members: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Validate the strings and freeze ``members`` into a tuple.
+
+        Raises:
+            TypeError: If a string field has the wrong type, or ``members``
+                is not a sequence of strings.
+            ValueError: If ``key`` or ``title`` is empty.
+        """
+        _checked_strings(
+            "GroupInfo",
+            key=self.key,
+            title=self.title,
+            description=self.description,
+        )
+        for name, value in (("key", self.key), ("title", self.title)):
+            if not value:
+                raise ValueError(f"GroupInfo.{name} must be a non-empty str")
+        if isinstance(self.members, (Mapping, str)) or not isinstance(
+            self.members, (list, tuple)
+        ):
+            raise TypeError("GroupInfo.members must be a sequence of str")
+        for member in self.members:
+            if not isinstance(member, str):
+                raise TypeError(f"GroupInfo.members entries must be str, got {member!r}")
+        object.__setattr__(self, "members", tuple(self.members))
+
+
+@dataclass(frozen=True)
+class InstrumentInfo(_ContractMessage):
+    """Everything one configured instrument declares about itself.
+
+    Every configured VI appears — live or offline — because an instrument
+    that is currently unreachable still declares the same capabilities;
+    ``availability`` is what says whether they can be used right now.
+
+    Attributes:
+        name: The VI's configured name (``"magnet_z"``), which every
+            ``Command`` targeting it uses.
+        vi_class: The VI class's name, e.g. ``"SuperconductingMagnetVI"``.
+        role: The config registry's role for this VI — ``"system"``,
+            ``"measurement"``, ``"switch"`` or ``"level"`` (GLOSSARY.md's
+            *vi_type (config/registry)*).
+        kind: The VI class's own category — ``"magnet"``,
+            ``"temperature"``, ``"level"``, ``"rotator"``,
+            ``"measurement"`` … (GLOSSARY.md's *vi_type (class)*).
+        availability: The Availability tags standing at snapshot time,
+            sorted — empty for a fully usable instrument (see GLOSSARY.md's
+            **Availability tag**). This is the ONE live field in an
+            otherwise static declaration, which is why a snapshot is
+            rebuilt on connect and disconnect.
+        monitored: The instrument's readings, in declaration order.
+        controls: The instrument's actions, in declaration order.
+        limits: The configured bounds of the control-validation standard's
+            declared limits, ``{method: {param: {"limit": name, "min": lo,
+            "max": hi}}}``. ``min``/``max`` are ``null`` where that side is
+            unbounded, and for an offline instrument, whose config-derived
+            bounds were never computed.
+        ui_groups: The instrument's declared groups, in declared order.
+        safety_flags: ``{flag: severity}``, the VI's merged safety-flag
+            manifest.
+    """
+
+    name: str
+    vi_class: str = ""
+    role: str = ""
+    kind: str = ""
+    availability: tuple[str, ...] = ()
+    monitored: tuple[MonitoredInfo, ...] = ()
+    controls: tuple[ControlInfo, ...] = ()
+    limits: dict[str, Any] = field(default_factory=dict)
+    ui_groups: tuple[GroupInfo, ...] = ()
+    safety_flags: dict[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """Coerce every nested field, accepting instances or their dicts.
+
+        Raises:
+            TypeError: If a field has the wrong shape or carries a
+                non-JSON-safe value.
+            ValueError: If ``name`` is empty.
+        """
+        _checked_strings(
+            "InstrumentInfo",
+            name=self.name,
+            vi_class=self.vi_class,
+            role=self.role,
+            kind=self.kind,
+        )
+        if not self.name:
+            raise ValueError("InstrumentInfo.name must be a non-empty str")
+        if isinstance(self.availability, (Mapping, str)) or not isinstance(
+            self.availability, (list, tuple)
+        ):
+            raise TypeError("InstrumentInfo.availability must be a sequence of str")
+        object.__setattr__(
+            self, "availability", tuple(str(tag) for tag in self.availability)
+        )
+        object.__setattr__(
+            self,
+            "monitored",
+            _tuple_of(MonitoredInfo, self.monitored, "InstrumentInfo.monitored"),
+        )
+        object.__setattr__(
+            self,
+            "controls",
+            _tuple_of(ControlInfo, self.controls, "InstrumentInfo.controls"),
+        )
+        object.__setattr__(
+            self,
+            "ui_groups",
+            _tuple_of(GroupInfo, self.ui_groups, "InstrumentInfo.ui_groups"),
+        )
+        object.__setattr__(self, "limits", _checked_mapping(self.limits))
+        flags = _checked_mapping(self.safety_flags)
+        for flag, severity in flags.items():
+            if not isinstance(severity, str):
+                raise TypeError(
+                    f"InstrumentInfo.safety_flags[{flag!r}] must be a str severity"
+                )
+        object.__setattr__(self, "safety_flags", flags)
+
+
 @dataclass(frozen=True)
 class StationInfo(_ContractMessage):
     """What the station is, as declared — the static half of the picture.
 
-    Captured by the Station at build and re-emitted on connect and disconnect.
-    ``instruments`` is the JSON rendering of the VI declarations themselves:
-    the name, type and offline state of each VI plus its ``@monitored`` fields
-    and ``@control`` methods with their parameter specs, bounds, units and
-    grouping. Both clients render *this*, never a hand-written description of
-    any instrument — the GUI into instrument panels, the agent gateway into
-    its capability manifest. The per-instrument dict's exact keys are the
-    manifest builder's business, which is why this type constrains only that
-    each entry is a JSON-safe dict.
+    Built by the Station from the VI declarations and the config alone (no
+    bus traffic, ever) and re-emitted on connect and disconnect. Both
+    clients render *this*, never a hand-written description of any
+    instrument — the GUI into instrument panels with titled group boxes,
+    the agent gateway into its capability manifest (``core.
+    capability_manifest.build_manifest()`` is that JSON rendering). Neither
+    adapter carries a description of its own, which is what makes the
+    interface translatable rather than merely mirrored.
 
     Attributes:
-        instruments: One JSON-safe dict per VI, in station order.
-        seq: Monotonic sequence number.
+        setup: The setup's identity — the config directory's name — or
+            ``""`` for a Station assembled without one.
+        tick_interval_s: The configured monitor tick period, in seconds.
+        instruments: One ``InstrumentInfo`` per configured VI, live and
+            offline alike, in config order.
+        seq: Monotonic sequence number, incremented on every rebuild.
         ts: Unix time the declaration was captured.
     """
 
     kind: ClassVar[str] = "station_info"
 
-    instruments: tuple[dict[str, Any], ...] = ()
+    setup: str = ""
+    tick_interval_s: float = 0.0
+    instruments: tuple[InstrumentInfo, ...] = ()
     seq: int = 0
     ts: float = field(default_factory=time.time)
 
     def __post_init__(self) -> None:
-        """Freeze ``instruments`` into a tuple of JSON-checked dicts.
+        """Validate the header fields and coerce ``instruments``.
 
         Raises:
-            TypeError: If it is not a sequence of mappings of JSON-safe
-                values.
+            TypeError: If ``setup`` is not a string, ``tick_interval_s`` is
+                not a number, or ``instruments`` is not a sequence of
+                ``InstrumentInfo`` (or their dicts).
         """
-        if isinstance(self.instruments, Mapping) or isinstance(self.instruments, str):
-            raise TypeError("StationInfo.instruments must be a sequence of dicts")
+        _checked_strings("StationInfo", setup=self.setup)
+        if isinstance(self.tick_interval_s, bool) or not isinstance(
+            self.tick_interval_s, (int, float)
+        ):
+            raise TypeError("StationInfo.tick_interval_s must be a number")
+        object.__setattr__(self, "tick_interval_s", float(self.tick_interval_s))
         object.__setattr__(
             self,
             "instruments",
-            tuple(_checked_mapping(entry) for entry in self.instruments),
+            _tuple_of(InstrumentInfo, self.instruments, "StationInfo.instruments"),
         )
 
 
