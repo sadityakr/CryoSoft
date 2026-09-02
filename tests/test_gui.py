@@ -29,8 +29,9 @@ from PyQt6.QtWidgets import (
 )
 
 from cryosoft.core.config_catalog import ConfigCatalog
-from cryosoft.core.decorators import control
+from cryosoft.core.decorators import control, monitored
 from cryosoft.core.events import ErrorEvent
+from cryosoft.core.exceptions import CryoSoftCommunicationError
 from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 from cryosoft.core.plan import ParamSpec
 from cryosoft.core.station import build_station
@@ -328,6 +329,169 @@ def test_instrument_panel_fault_row_disables_controls_and_wires_ack_retry(
     assert not panel._fault_row.isVisible()
     for btn in panel._control_buttons.values():
         assert btn.isEnabled()
+
+
+class _ToggleableFaultDriver:
+    """Test double whose identity/reading calls fail while ``broken`` is True.
+
+    A CLASS-level flag, unlike the sim drivers' instance-level
+    ``_simulate_error``: models hardware that is still disconnected even
+    after ``retry_fault()`` opens a fresh session — an instance-level flag
+    would be left behind on the old, discarded driver object once rebuilt,
+    hiding the exact bug this double exists to reproduce.
+    """
+
+    broken: bool = False
+
+    def __init__(self, resource_string: str) -> None:
+        self.closed = False
+
+    def get_idn(self) -> str:
+        if type(self).broken:
+            raise CryoSoftCommunicationError("bus session is dead")
+        return "CRYOSOFT,GUI-TOGGLE-STUB,0,0"
+
+    def get_reading(self) -> float:
+        if type(self).broken:
+            raise CryoSoftCommunicationError("bus session is dead")
+        return 1.0
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _ToggleableFaultVI(BaseVirtualInstrument):
+    """VI double with one @monitored getter and one @control action, so the
+    front-panel fault row and its control-button-disabling both have
+    something real to exercise.
+    """
+
+    vi_type = "system"
+
+    @monitored
+    def reading(self) -> float:
+        return self._drivers["main"].get_reading()
+
+    @control
+    def nudge(self, value: float = 0.0) -> float:
+        return value
+
+
+def _write_toggleable_config(tmp_path: Path) -> str:
+    """One-VI config wiring _ToggleableFaultVI/_ToggleableFaultDriver."""
+    (tmp_path / "devices.yaml").write_text(
+        "real_drivers:\n"
+        "  toggle_drv:\n"
+        "    class: tests.test_gui._ToggleableFaultDriver\n"
+        '    address: "SIM::TOGGLE"\n'
+        "virtual_instruments:\n"
+        "  toggle_vi:\n"
+        "    class: tests.test_gui._ToggleableFaultVI\n"
+        "    drivers: {main: toggle_drv}\n"
+        "    vi_type: system\n"
+    )
+    (tmp_path / "monitor.yaml").write_text(
+        "monitor:\n  tick_interval_ms: 1000\n  max_vi_errors: 3\n"
+    )
+    return str(tmp_path)
+
+
+def test_instrument_panel_retry_button_rebuilds_a_disconnected_instrument(
+    tmp_path, qtbot
+):
+    """The exact reported bug, driven through the real front-panel button: a
+    hard-disconnected instrument's Retry must actually reconnect it once the
+    hardware is fixed — not just re-poll the same dead session forever.
+    """
+    _ToggleableFaultDriver.broken = False
+    station = build_station(_write_toggleable_config(tmp_path))
+    orch = Orchestrator(station, tick_interval_ms=10)
+    try:
+        vi_name = "toggle_vi"
+        original_driver = station.get_vi(vi_name)._drivers["main"]
+        panel = InstrumentPanel(vi_name, station.get_vi(vi_name), orch)
+        qtbot.addWidget(panel)
+        panel.show()
+        assert not panel._fault_row.isVisible()
+
+        # Accidental hardware disconnect: three consecutive comm failures
+        # escalate the fault from "stale" to "disconnected".
+        _ToggleableFaultDriver.broken = True
+        for _ in range(3):
+            state = station.get_state()
+            orch.states_updated.emit(state)
+        assert station.vi_faults()[vi_name].kind == "disconnected"
+        assert panel._fault_row.isVisible()
+        for btn in panel._control_buttons.values():
+            assert not btn.isEnabled()
+
+        retry_btn = panel.findChild(QPushButton, f"{vi_name}_retry_fault_btn")
+        assert retry_btn is not None
+
+        # Still non-responsive: clicking Retry must fail honestly, not fake
+        # a recovery.
+        with qtbot.waitSignal(orch.action_failed, timeout=500):
+            retry_btn.click()
+        assert vi_name in station.vi_faults()
+        assert station.vi_faults()[vi_name].kind == "disconnected"
+
+        # Hardware fixed: Retry now rebuilds the session and recovers —
+        # this is the exact scenario a bare re-poll of the old handle could
+        # never satisfy.
+        _ToggleableFaultDriver.broken = False
+        with qtbot.waitSignal(orch.action_succeeded, timeout=500):
+            retry_btn.click()
+        assert vi_name not in station.vi_faults()
+        # Proof it was a genuine rebuild, not a re-poll of the same handle.
+        assert station.get_vi(vi_name)._drivers["main"] is not original_driver
+
+        state = station.get_state()
+        orch.states_updated.emit(state)
+        assert not panel._fault_row.isVisible()
+        for btn in panel._control_buttons.values():
+            assert btn.isEnabled()
+    finally:
+        orch.shutdown()
+
+
+def test_instrument_panel_retry_button_blocked_while_run_claims_the_instrument(
+    tmp_path, qtbot
+):
+    """The front panel must refuse to rebuild a claimed instrument's session
+    mid-run — the safety gate that stops a rebuild from bypassing the run's
+    own review, even when the operator can see the hardware is fixed.
+    """
+    _ToggleableFaultDriver.broken = False
+    station = build_station(_write_toggleable_config(tmp_path))
+    orch = Orchestrator(station, tick_interval_ms=10)
+    try:
+        vi_name = "toggle_vi"
+        original_driver = station.get_vi(vi_name)._drivers["main"]
+        panel = InstrumentPanel(vi_name, station.get_vi(vi_name), orch)
+        qtbot.addWidget(panel)
+        panel.show()
+
+        _ToggleableFaultDriver.broken = True
+        for _ in range(3):
+            state = station.get_state()
+            orch.states_updated.emit(state)
+        assert station.vi_faults()[vi_name].kind == "disconnected"
+
+        _ToggleableFaultDriver.broken = False  # hardware IS fixed now...
+        orch._procedure = object()  # ...but a run claims the instrument
+        orch._active_claims = {vi_name}
+        retry_btn = panel.findChild(QPushButton, f"{vi_name}_retry_fault_btn")
+
+        with qtbot.waitSignal(orch.action_blocked, timeout=500):
+            retry_btn.click()
+
+        assert vi_name in station.vi_faults()
+        assert station.vi_faults()[vi_name].kind == "disconnected"
+        assert station.get_vi(vi_name)._drivers["main"] is original_driver
+    finally:
+        orch._procedure = None
+        orch._active_claims = None
+        orch.shutdown()
 
 
 def test_monitor_window_banner_shows_and_clears_vi_fault_warning(

@@ -1561,21 +1561,63 @@ class Orchestrator(QObject):
         else:
             logger.info("acknowledge_fault('%s') ignored: no active fault", vi_name)
 
-    def retry_fault(self, vi_name: str) -> None:
-        """Retry a VI's active runtime fault: reset counters, poll once.
+    def _vi_claimed_by_active_run(self, vi_name: str) -> bool:
+        """Return whether an active run currently claims *vi_name*.
 
-        The runtime counterpart of ``connect_instrument()``: it never rebuilds
-        a driver (the VI is already live) — only ``Station.retry_fault()``'s
-        counter-reset-and-repoll. Unlike ``connect_instrument()`` this is not
-        restricted to IDLE: an unclaimed VI's fault (the common case this
-        exists for) does not require aborting whatever run is in progress
-        to retry it, and everything still runs on the one tick-driven
-        thread so there is no concurrency hazard in doing this synchronously
-        mid-run.
+        Mirrors the claim rule ``_manual_action_admissible()`` applies (its
+        rule 4): no run active -> unclaimed; a claim-everything run
+        (``_active_claims is None``) -> every VI counted claimed; otherwise
+        membership in ``_active_claims``. Used to gate ``retry_fault()``'s
+        disconnected-kind driver rebuild, which must not touch a VI a run
+        is depending on.
+
+        Args:
+            vi_name: The VI to check.
+
+        Returns:
+            True if a run is active and claims this VI.
+        """
+        if self._procedure is None:
+            return False
+        return self._active_claims is None or vi_name in self._active_claims
+
+    def retry_fault(self, vi_name: str) -> None:
+        """Retry a VI's active runtime fault: reset counters, poll once — or,
+        past the disconnect threshold, rebuild its driver session.
+
+        The runtime counterpart of ``connect_instrument()``. For a
+        ``"stale"`` fault this never rebuilds a driver (the VI is already
+        live) — only ``Station.retry_fault()``'s counter-reset-and-repoll —
+        and is not restricted to IDLE: an unclaimed VI's transient fault
+        does not require aborting whatever run is in progress to retry it,
+        and everything still runs on the one tick-driven thread so there is
+        no concurrency hazard in doing this synchronously mid-run.
+
+        A ``"disconnected"`` fault is different: ``Station.retry_fault()``
+        closes and reopens the VI's driver session(s) in that case (see its
+        docstring), which must never happen to a VI an active run currently
+        claims — that would refresh hardware state out from under a run
+        without going through its safety review, the same hazard
+        ``connect_instrument()``/``disconnect_instrument()``'s IDLE-only
+        restriction exists to prevent. So the rebuild is refused (not just
+        deferred) while the VI is claimed; the operator can retry again once
+        the run releases it (ends, fails, or is aborted).
 
         Args:
             vi_name: Name of the faulted VI to retry.
         """
+        condition = self._station.conditions().get(f"comm:{vi_name}")
+        if condition is not None and condition.kind == "disconnected":
+            if self._vi_claimed_by_active_run(vi_name):
+                message = (
+                    f"Cannot retry '{vi_name}': claimed by running "
+                    f"{self._active_run_label()} — wait for the run to end, "
+                    "fail, or be aborted before rebuilding its connection"
+                )
+                logger.info("Retry (rebuild) blocked for '%s': %s", vi_name, message)
+                self.action_blocked.emit(message)
+                return
+
         ok, message = self._station.retry_fault(vi_name)
         if ok:
             logger.info("Retry succeeded for faulted VI '%s'", vi_name)

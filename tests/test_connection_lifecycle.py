@@ -463,6 +463,101 @@ def test_disconnect_survives_a_round_trip_through_the_tick(
         orch.shutdown()
 
 
+# ── L3: retry_fault()'s disconnected-kind driver rebuild, gated by claims ────
+# The bug this guards against: a magnet that lost its bus session to a
+# hardware glitch (cable/power) stayed live-but-faulted, and its "Retry"
+# button re-polled the SAME dead session forever — only a full app restart
+# (rebuilding every driver from config) actually reconnected it. The fix
+# (Station.retry_fault()'s disconnected-kind branch) rebuilds the session in
+# place; these tests cover the Orchestrator-level restriction that makes it
+# safe: never rebuild a VI a run currently claims, mirroring why
+# connect_instrument()/disconnect_instrument() are IDLE-only.
+
+
+def _escalate_to_disconnected(station: Station, vi_name: str) -> None:
+    """Drive vi_name's comm fault to 'disconnected' via three failed polls."""
+    driver = station.get_vi(vi_name)._driver
+    driver._simulate_error = True
+    for _ in range(3):
+        station.get_state()
+    assert station.vi_faults()[vi_name].kind == "disconnected"
+
+
+def test_orchestrator_retry_fault_rebuild_blocked_while_claimed(
+    station: Station, qtbot
+):
+    """A run's claimed VI must not have its driver session rebuilt out from
+    under it — the same hazard connect_instrument()'s IDLE-only restriction
+    exists to prevent, applied to the runtime rebuild path instead.
+    """
+    orch = Orchestrator(station, tick_interval_ms=10)
+    try:
+        _escalate_to_disconnected(station, "magnet_z")
+        original_driver = station.get_vi("magnet_z")._driver
+
+        orch._procedure = object()  # any non-None value marks a run active
+        orch._active_claims = {"magnet_z"}
+        with qtbot.waitSignal(orch.action_blocked, timeout=500) as blocker:
+            orch.retry_fault("magnet_z")
+
+        assert "magnet_z" in blocker.args[0]
+        # Untouched: same (still-broken) driver, still disconnected.
+        assert station.get_vi("magnet_z")._driver is original_driver
+        assert station.vi_faults()["magnet_z"].kind == "disconnected"
+    finally:
+        orch._procedure = None
+        orch._active_claims = None
+        orch.shutdown()
+
+
+def test_orchestrator_retry_fault_rebuild_allowed_when_unclaimed(
+    station: Station, qtbot
+):
+    """An unclaimed VI's disconnected fault may still be rebuilt mid-run —
+    no run depends on it, so there is nothing to bypass.
+    """
+    orch = Orchestrator(station, tick_interval_ms=10)
+    try:
+        _escalate_to_disconnected(station, "magnet_z")
+
+        orch._procedure = object()
+        orch._active_claims = {"some_other_vi"}
+        with qtbot.waitSignal(orch.action_succeeded, timeout=500) as blocker:
+            orch.retry_fault("magnet_z")
+
+        assert blocker.args == ["magnet_z", "retry_fault"]
+        assert "magnet_z" not in station.vi_faults()
+    finally:
+        orch._procedure = None
+        orch._active_claims = None
+        orch.shutdown()
+
+
+def test_orchestrator_retry_fault_stale_not_gated_by_claims(
+    station: Station, qtbot
+):
+    """A merely-stale fault's plain re-poll never rebuilds a driver, so a
+    run's claim on the VI does not need to block it.
+    """
+    orch = Orchestrator(station, tick_interval_ms=10)
+    try:
+        station.get_vi("magnet_z")._driver._simulate_error = True
+        station.get_state()
+        assert station.vi_faults()["magnet_z"].kind == "stale"
+
+        orch._procedure = object()
+        orch._active_claims = {"magnet_z"}
+        station.get_vi("magnet_z")._driver._simulate_error = False
+        with qtbot.waitSignal(orch.action_succeeded, timeout=500):
+            orch.retry_fault("magnet_z")
+
+        assert "magnet_z" not in station.vi_faults()
+    finally:
+        orch._procedure = None
+        orch._active_claims = None
+        orch.shutdown()
+
+
 # ── Test doubles ─────────────────────────────────────────────────────────────
 
 

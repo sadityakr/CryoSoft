@@ -4,6 +4,8 @@ from typing import ClassVar
 
 import pytest
 from cryosoft.core.conditions import Condition
+from cryosoft.core.decorators import monitored
+from cryosoft.core.exceptions import CryoSoftCommunicationError
 from cryosoft.core.plan import Target
 from cryosoft.core.station import Station, build_station
 from cryosoft.virtual_instruments.base import BaseVirtualInstrument
@@ -584,30 +586,59 @@ def test_acknowledge_fault(sim_station: Station):
     assert sim_station.vi_faults()["magnet_z"].acknowledged is True
 
 
-def test_retry_fault_both_outcomes(sim_station: Station):
-    """retry_fault() resets the counter and forces one poll, verdict both ways."""
+def test_retry_fault_stale_resets_counter_and_repolls(sim_station: Station):
+    """Below the disconnect threshold, retry_fault() just resets and re-polls
+    the SAME driver — no rebuild, since the session is presumed fine.
+    """
+    original_driver = sim_station.magnet_z._driver
+    sim_station.magnet_z._driver._simulate_error = True
+    sim_station.get_state()
+    assert sim_station.vi_faults()["magnet_z"].kind == "stale"
+
+    # Still broken: retry fails, fault stands (downgraded — the counter was
+    # reset and only failed once).
+    ok, message = sim_station.retry_fault("magnet_z")
+    assert ok is False
+    assert "magnet_z" in message
+    assert sim_station.vi_faults()["magnet_z"].kind == "stale"
+    assert sim_station.magnet_z._driver is original_driver
+
+    # Recovers: retry succeeds and clears the fault, same driver throughout.
+    sim_station.magnet_z._driver._simulate_error = False
+    ok, message = sim_station.retry_fault("magnet_z")
+    assert ok is True
+    assert "magnet_z" not in sim_station.vi_faults()
+    assert sim_station.magnet_z._driver is original_driver
+
+    # Unknown VI: explicit refusal, not a KeyError.
+    ok, message = sim_station.retry_fault("no_such_vi")
+    assert ok is False
+
+
+def test_retry_fault_disconnected_rebuilds_the_driver_session(sim_station: Station):
+    """Past the disconnect threshold, retry_fault() closes and reopens the
+    driver session instead of re-polling the same (presumed-dead) handle —
+    the fix for a magnet whose reconnect never worked after a hardware
+    glitch until the whole app was restarted (only a restart rebuilds the
+    driver from its config, since ``connect_instrument()``'s rebuild path
+    is only reachable from the OFFLINE registry, not a live-but-faulted VI).
+    """
+    original_driver = sim_station.magnet_z._driver
     sim_station.magnet_z._driver._simulate_error = True
     sim_station.get_state()
     sim_station.get_state()
     sim_station.get_state()
     assert sim_station.vi_faults()["magnet_z"].kind == "disconnected"
 
-    # Still broken: retry fails, fault stands (downgraded to 'stale' — the
-    # counter was reset and only failed once).
     ok, message = sim_station.retry_fault("magnet_z")
-    assert ok is False
-    assert "magnet_z" in message
-    assert sim_station.vi_faults()["magnet_z"].kind == "stale"
 
-    # Recovers: retry succeeds and clears the fault.
-    sim_station.magnet_z._driver._simulate_error = False
-    ok, message = sim_station.retry_fault("magnet_z")
     assert ok is True
+    assert "magnet_z" in message
     assert "magnet_z" not in sim_station.vi_faults()
-
-    # Unknown VI: explicit refusal, not a KeyError.
-    ok, message = sim_station.retry_fault("no_such_vi")
-    assert ok is False
+    # A genuinely fresh session, not the same (still-marked-broken) handle —
+    # a bare re-poll of the OLD driver would still see _simulate_error=True.
+    assert sim_station.magnet_z._driver is not original_driver
+    assert sim_station.magnet_z._driver._simulate_error is False
 
 
 def test_level_meter_disconnect_records_fault_independent_of_debounce(sim_station: Station):
@@ -1196,6 +1227,85 @@ def test_connect_instrument_rejects_non_offline_name(sim_station: Station):
 
     ok, message = sim_station.connect_instrument("no_such_vi")
     assert ok is False
+
+
+class _ToggleableCommDriver:
+    """Test double whose identity/reading calls fail while ``broken`` is True.
+
+    A CLASS-level flag, unlike the sim drivers' instance-level
+    ``_simulate_error``: models hardware that is still disconnected even
+    after a fresh session is opened, which an instance flag cannot (a
+    rebuild constructs a brand new instance, leaving any instance-level
+    "still broken" flag behind on the old, discarded one).
+    """
+
+    broken: bool = False
+
+    def __init__(self, resource_string: str) -> None:
+        self.closed = False
+
+    def get_idn(self) -> str:
+        if type(self).broken:
+            raise CryoSoftCommunicationError("bus session is dead")
+        return "CRYOSOFT,TOGGLE-STUB,0,0"
+
+    def get_reading(self) -> float:
+        if type(self).broken:
+            raise CryoSoftCommunicationError("bus session is dead")
+        return 1.0
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _ToggleableCommVI(_StubVI):
+    """VI double with one @monitored getter that reads its driver.
+
+    ``_StubVI`` alone has no @monitored methods, so ``get_state()`` never
+    touches the driver at all — useless for simulating a live comm fault.
+    """
+
+    @monitored
+    def reading(self) -> float:
+        return self._drivers["main"].get_reading()
+
+
+def test_retry_fault_disconnected_stays_faulted_while_hardware_is_still_broken(
+    tmp_path,
+):
+    """A genuinely still-broken instrument fails the rebuild and stays live+faulted.
+
+    Never demoted to the offline registry — a run watching it can still
+    fail cleanly through the normal comm-condition path.
+    """
+    _ToggleableCommDriver.broken = False
+    station = build_station(
+        _write_degraded_config(
+            tmp_path,
+            "tests.test_l2_station._ToggleableCommDriver",
+            vi_class="tests.test_l2_station._ToggleableCommVI",
+        )
+    )
+    assert station.has_vi("bad_vi") is True
+
+    _ToggleableCommDriver.broken = True
+    station.get_state()
+    station.get_state()
+    station.get_state()
+    assert station.vi_faults()["bad_vi"].kind == "disconnected"
+
+    ok, message = station.retry_fault("bad_vi")
+
+    assert ok is False
+    assert "bad_vi" in message
+    assert station.vi_faults()["bad_vi"].kind == "disconnected"
+    assert station.has_vi("bad_vi") is True
+
+    _ToggleableCommDriver.broken = False
+    ok, message = station.retry_fault("bad_vi")
+
+    assert ok is True
+    assert "bad_vi" not in station.vi_faults()
 
 
 # ---------------------------------------------------------------------------

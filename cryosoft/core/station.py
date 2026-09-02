@@ -1074,12 +1074,23 @@ class Station:
         self._conditions.pop(f"comm:{vi_name}", None)
 
     def retry_fault(self, vi_name: str) -> tuple[bool, str]:
-        """Reset *vi_name*'s error counter and force one fresh poll.
+        """Reset *vi_name*'s error counter and force one fresh poll — or, past
+        the disconnect threshold, rebuild its driver session first.
 
-        The runtime counterpart of ``connect_instrument()``: it does NOT
-        rebuild any driver (the VI is already live) — it only resets the
-        comm-error streak and re-polls once, exactly what a stale/
-        disconnected but otherwise-live instrument needs to recover.
+        The runtime counterpart of ``connect_instrument()``: the VI stays in
+        the live registry throughout (never demoted to ``_offline_vis``), so
+        a run watching it keeps seeing it exactly as before — only its
+        session gets refreshed. A ``"stale"`` fault (below ``max_errors``)
+        just resets the comm-error streak and re-polls once, since the
+        session is presumed fine and only intermittently unresponsive. A
+        ``"disconnected"`` fault (``max_errors`` reached) instead delegates
+        to ``_retry_disconnected()``: at that point the underlying bus
+        session is presumed dead (e.g. a driver like ``OxfordMercuryiPS``
+        opens its VISA resource exactly once in ``__init__`` — a hardware
+        fix does not revive an already-broken handle), so a bare re-poll on
+        the same handle can never recover it; only closing and reopening the
+        session, exactly what ``connect_instrument()`` does for an offline
+        VI, can.
 
         Args:
             vi_name: Name of the (registered, live) VI to retry.
@@ -1092,6 +1103,11 @@ class Station:
         vi = self._virtual_instruments.get(vi_name)
         if vi is None:
             return False, f"'{vi_name}' is not a registered VI"
+
+        condition = self._conditions.get(f"comm:{vi_name}")
+        if condition is not None and condition.kind == "disconnected":
+            return self._retry_disconnected(vi_name)
+
         self._error_counts[vi_name] = 0
         try:
             state = vi.get_state()
@@ -1106,6 +1122,101 @@ class Station:
         self.clear_fault(vi_name)
         logger.info("Retry of '%s' succeeded — fault cleared", vi_name)
         return True, f"'{vi_name}' responded — fault cleared"
+
+    def _retry_disconnected(self, vi_name: str) -> tuple[bool, str]:
+        """Rebuild vi_name's driver session(s) from scratch, then re-verify.
+
+        The ``"disconnected"``-kind branch of ``retry_fault()``: closes and
+        reopens every driver alias *vi_name* exclusively owns, reconstructs
+        the VI, and re-runs the identity check — the same construction
+        sequence ``connect_instrument()`` uses for an offline VI, applied
+        in place instead of via the offline registry. ``vi_name`` stays in
+        ``_virtual_instruments`` for the whole call: even a failed rebuild
+        leaves it live (still faulted), never demoted to ``_offline_vis``,
+        so a run watching it is never bypassed by this recovering silently
+        out from under it. A driver alias another live VI still needs is
+        left untouched, mirroring ``disconnect_instrument()``.
+
+        Args:
+            vi_name: Name of the registered, disconnected VI to rebuild.
+
+        Returns:
+            An explicit ``(ok, message)`` verdict, mirroring
+            ``retry_fault()``'s style.
+        """
+        spec = self._vi_specs.get(vi_name)
+        if spec is None:
+            return False, f"No build recipe retained for '{vi_name}'"
+        role_aliases = dict(spec.get("drivers") or {})
+
+        # The old session(s) are presumed dead at this point (this is the
+        # disconnect threshold) — release vi_name's exclusive aliases so the
+        # loop below actually reopens them instead of reusing broken handles.
+        self._release_drivers(
+            _exclusive_aliases(role_aliases, self._vi_specs, vi_name, self._vi_registry)
+        )
+
+        for alias in dict.fromkeys(role_aliases.values()):
+            if alias in self._drivers:
+                continue
+            driver_cfg = self._driver_specs.get(alias, {})
+            try:
+                cls = _import_class(driver_cfg["class"])
+                self._drivers[alias] = cls(driver_cfg.get("address", "SIM"))
+            except Exception as exc:  # noqa: BLE001 — verdict, never a crash, in GUI context
+                return self._fail_disconnected_retry(vi_name, f"driver '{alias}': {exc}")
+
+        driver_refs = {role: self._drivers[alias] for role, alias in role_aliases.items()}
+        init_params = dict(spec.get("init_params", {}) or {})
+        try:
+            cls = _import_class(spec["class"])
+            vi = cls(driver_refs, **init_params)
+        except Exception as exc:  # noqa: BLE001 — verdict, never a crash, in GUI context
+            return self._fail_disconnected_retry(vi_name, str(exc))
+
+        vi.vi_name = vi_name
+        if not _identity_check(vi_name, vi):
+            self._release_drivers(_exclusive_aliases(role_aliases, self._vi_specs, vi_name))
+            return self._fail_disconnected_retry(vi_name, _IDENTITY_FAILED_REASON)
+
+        self._virtual_instruments[vi_name] = vi
+        self._error_counts[vi_name] = 0
+        try:
+            state = vi.get_state()
+        except CryoSoftCommunicationError as exc:
+            self._error_counts[vi_name] = 1
+            self._record_comm_condition(vi_name, "stale", str(exc))
+            logger.warning(
+                "Rebuild retry of '%s' opened a fresh session but the first poll failed: %s",
+                vi_name,
+                exc,
+            )
+            return False, f"'{vi_name}' reconnected but has not responded yet: {exc}"
+
+        self._last_known_state[vi_name] = state
+        self.clear_fault(vi_name)
+        logger.info("Rebuild retry of '%s' succeeded — fresh session, fault cleared", vi_name)
+        return True, f"'{vi_name}' reconnected — fault cleared"
+
+    def _fail_disconnected_retry(self, vi_name: str, reason: str) -> tuple[bool, str]:
+        """Record a failed rebuild attempt and return its verdict.
+
+        Shared tail of ``_retry_disconnected()``'s three failure branches
+        (driver open, VI construction, identity check): each fails the same
+        way — the error counter stays pinned at the disconnect threshold and
+        the comm condition is refreshed with the latest reason.
+
+        Args:
+            vi_name: Name of the VI whose rebuild failed.
+            reason: Human-readable failure description.
+
+        Returns:
+            ``(False, message)``.
+        """
+        self._error_counts[vi_name] = self._max_errors
+        self._record_comm_condition(vi_name, "disconnected", reason)
+        logger.warning("Rebuild retry of '%s' failed: %s", vi_name, reason)
+        return False, f"'{vi_name}' still not responding: {reason}"
 
     # ------------------------------------------------------------------
     # Ramp management
