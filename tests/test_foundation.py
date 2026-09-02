@@ -51,6 +51,34 @@ class TestExceptionHierarchy:
         assert err.vi_name == ""
         assert err.original_error is None
 
+    def test_safety_error_structured_fields_default_to_none(self):
+        """A message-only raise site keeps working; the fields are optional."""
+        err = CryoSoftSafetyError("quench detected")
+        assert str(err) == "quench detected"
+        assert (err.param, err.value, err.lo, err.hi, err.limit_name) == (
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+
+    def test_safety_error_carries_a_structured_limit_rejection(self):
+        """The limit wrapper's fields survive onto the exception."""
+        err = CryoSoftSafetyError(
+            "refused",
+            param="current_A",
+            value=0.05,
+            lo=-1e-3,
+            hi=1e-3,
+            limit_name="max_current",
+        )
+        assert err.param == "current_A"
+        assert err.value == 0.05
+        assert err.lo == -1e-3
+        assert err.hi == 1e-3
+        assert err.limit_name == "max_current"
+
     def test_catch_all_cryosoft_errors(self):
         """Verify that catching CryoSoftError catches all subtypes."""
         with pytest.raises(CryoSoftError):

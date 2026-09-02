@@ -424,6 +424,11 @@ class BaseVirtualInstrument:
 
         Looks up ``type(self).control_limits`` at call time, so a subclass can
         declare limits for methods it inherits without re-wrapping them.
+
+        An out-of-range call raises ``CryoSoftSafetyError`` carrying both the
+        operator-facing message and its structured form (``param``, ``value``,
+        ``lo``, ``hi``, ``limit_name``), so the refusal reaches a verdict as
+        fields rather than as prose to be parsed.
         """
         sig = inspect.signature(method)
 
@@ -450,12 +455,22 @@ class BaseVirtualInstrument:
                     ):
                         lo_txt = "-inf" if lo is None else f"{lo:g}"
                         hi_txt = "+inf" if hi is None else f"{hi:g}"
+                        # The message is the operator's banner; the keyword
+                        # fields are the same refusal in structured form, so
+                        # a caller turning this into a verdict reads fields
+                        # instead of parsing prose. Never derive one from the
+                        # other — the message text is asserted on verbatim.
                         raise CryoSoftSafetyError(
                             f"{self.vi_name or type(self).__name__}."
                             f"{method_name}: {param_name}={value:g} is outside "
                             f"the allowed range [{lo_txt}, {hi_txt}] for this "
                             f"setup (limit '{limit_name}' from the station "
-                            f"config). Command refused."
+                            f"config). Command refused.",
+                            param=param_name,
+                            value=value,
+                            lo=lo,
+                            hi=hi,
+                            limit_name=limit_name,
                         )
             return method(self, *args, **kwargs)
 
