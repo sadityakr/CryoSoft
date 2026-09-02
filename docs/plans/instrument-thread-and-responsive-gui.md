@@ -312,6 +312,23 @@ does not need: roles and action classes, attendance, the envelope, the kill
 switch, and the `agent_actions.jsonl` feed. It adds nothing the GUI cannot
 do, because both end at the same `submit()` and the same drain gate.
 
+**Where the declaration lives.** The contract's command list is the
+Orchestrator's; but the *instrument* half of what both clients render (the
+readings, the controls, their parameters, bounds, units and grouping) is
+declared once, on the VIs, in the decorators that already mark them:
+`@monitored(unit=, description=, group=)`, `@control(params=, group=)`,
+`control_limits`, and the `ui_groups` tuple that `control-ui-groups.md`
+proposes. `StationInfo` (§3.5) is the frozen snapshot of exactly that
+declaration, built by the Station once and re-emitted on connect and
+disconnect. The proxy renders it into instrument panels with titled group
+boxes; the gateway renders the same object into the framework's capability
+manifest, where each group is one schema object with a title and a
+description. `Command.args` for `submit_vi_action` are shaped by the
+control's `ParamSpec`s and stay flat scalars; groups never cross the
+boundary as values, exactly as that brief's non-goals require. This is
+what makes the interface translatable rather than merely mirrored: neither
+adapter carries a hand-written description of any instrument.
+
 **Conformance.** Every public command method appears in `Command.name`;
 every `Command.name` is exposed by the proxy and by the gateway's tool
 list; every contract type round-trips through JSON; no widget imports
@@ -360,10 +377,15 @@ rather than a bare `dict`, so the cross-thread payload contract is set once
 while there is a single consumer to migrate.
 
 **`StationInfo`** (frozen dataclass), captured by the Station once at build
-(VI names, types, offline registry, monitored and control metadata,
-`ParamSpec`s) and re-emitted on `connect_instrument` /
+(VI names, types, offline registry, monitored fields with unit and
+description, controls with merged `ParamSpec` and `control_limits` bounds,
+scope and `panel` flag, and the VI's `ui_groups` with their members in
+declared order) and re-emitted on `connect_instrument` /
 `disconnect_instrument`. Widgets build from it, never from
-`Station.get_vi()`. `control_param_specs()` must become a pure read of
+`Station.get_vi()`; the capability manifest is a JSON rendering of the same
+object. Its shape is the framework's Phase 1 manifest plus the group
+primitive of `control-ui-groups.md`; those two documents own the
+declaration side, this plan owns only the snapshot and its crossing. `control_param_specs()` must become a pure read of
 config and cached state (the audit document's D1 already asks; the
 Lakeshore VI reads hardware there today), enforced by a conformance test.
 
@@ -446,7 +468,7 @@ Nothing before Phase 1 changes behaviour on `main`.
 | 0.3 | `next_procedure()` pull seam on the engine; `run_queue()` and all three call sites kept. Coupled to 0.2; land as one change. | 1 d |
 | 0.4 | The control contract (§3.4): `Command` with `actor`, `Verdict`, the `Event` union with `StatusSnapshot`, `StateChange` (carrying cause and actor), `StationInfo`; `submit()` on the engine; pure `control_param_specs()`; the payload copy rule; and the removal of every synchronous read listed in §3.3 including the front panel's `ping()`. Also close the silent refusals the audit document's §8 says 0.4a left (`acknowledge_fault` with no fault, `acknowledge()` with nothing held, `submit_global_action` with an unknown action), so the completeness rule holds before it becomes a conformance test. | 3–4 d |
 | 0.5 | A new contract: `cryosoft.gui` may not import `cryosoft.core.station` except under `TYPE_CHECKING`. Numbered from `pyproject.toml` at the time (the audit document's §8 notes the framework's proposed C13 for `data_reader` is already taken and the next free number was C16 as of 2026-08-08); plus the signal-payload standard written into `core/README.md` and `GLOSSARY.md`. Conformance tests: every public command is in `Command.name`, every `Command.name` is exposed by proxy and gateway tool list, every contract type round-trips through JSON; no `time.sleep` under `gui/`; no plan citations in code. | 0.5 d |
-| 0.6 | Capability manifest with two renderers (GUI panels and agent tool schema). **This is the framework plan's Phase 1, not this plan's work**: `@monitored` gains `unit=` / `description=` on the decorator with keys untouched, `core/capability_manifest.py` is built from a live Station, and a conformance test demands complete descriptions. Off the thread's critical path; listed so the two documents agree it exists once. | framework Phase 1, ~2 d |
+| 0.6 | Capability manifest with two renderers (GUI panels and agent tool schema). **This is the framework plan's Phase 1, not this plan's work**: `@monitored` gains `unit=` / `description=` on the decorator with keys untouched, `core/capability_manifest.py` is built from a live Station, and a conformance test demands complete descriptions; `control-ui-groups.md` adds the `group=` tag and `ui_groups`, which the manifest and `StationInfo` both emit. Off the thread's critical path; listed so the three documents agree it exists once. | framework Phase 1 + UI-groups brief, ~3 d |
 
 ### Phase 1 — the thread move
 
@@ -476,6 +498,11 @@ per §3.6. One day.
   path": scope-checked `execute_vi_action()`, bounded excitation currents,
   the coverage conformance test, envelope on the direct path) is a live
   hazard today and is independent of the thread; it can land in parallel.
+- **Instrument description**: the framework's Phase 1 manifest and
+  `control-ui-groups.md` together define what `StationInfo` carries. They
+  can land before, during or after the thread move; whichever lands last
+  adds the plumbing. Until they land, `StationInfo` carries what the
+  decorators expose today and both adapters render it flat.
 - **Result access and analysis**: the framework's Phase 2 step 3,
   `core/data_reader.py` with its own contract, reads completed and probe
   runs. What it does not cover is the run *in progress*, whose HDF5 file
@@ -553,6 +580,7 @@ them and narrows two more. Recorded here so they are not asked again.
 | Does the GUI ever read engine state synchronously? (redline D4) | No, and the framework strengthens the answer. M4: "fire-and-forget plus a later broadcast signal is a GUI pattern; it does not survive contact with a request/response tool call." So the proxy's commands return a `request_id` and the verdict is the framework's `ActionVerdict` (Phase 2 step 1), consumed by GUI and gateway alike. §3.4. |
 | eLab scope and trigger | Not this plan's. Framework §5 defers the eLab publishing track to `archive/session-management-layer.md` Part B: an ELN adapter contract, an offline-first publisher "never in the tick path", `ElnLink` scaffolding already in `session/models.py`. The thread only makes "never in the tick path" structural. |
 | Result access | Framework Phase 2 step 3: `core/data_reader.py` as a standalone sibling of `data_manager.py` with its own contract, for completed and probe runs. What remains open is the run in progress (decision 6). |
+| How the instrument surface is described to both clients | Once, on the VI decorators: units and descriptions (framework Phase 1), `params=` on every control including the six `initiate_measurement` controls that lack it, and titled groups (`control-ui-groups.md`). `StationInfo` snapshots it; the panels and the manifest render it. That brief's own three decisions (card versus front panel, member ordering, the name `UIGroup`) stay with it. |
 | Agent transport | Framework Phases 4 and 5 plus the audit document's D4, reconciled in §3.6: in-process gateway on the GUI thread, then a request spool or `QLocalServer`, then an out-of-process MCP adapter. No decision left; only the wording change at Phase 2. |
 
 The framework's own four decisions (§6: envelope binds the human,
