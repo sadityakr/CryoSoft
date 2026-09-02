@@ -18,6 +18,7 @@ import time
 import pytest
 
 from cryosoft.virtual_instruments.magnet.switch_heater import SwitchHeater
+from tests.mocks.bus_spy import spy_on_driver
 
 
 # ---------------------------------------------------------------------------
@@ -1018,13 +1019,56 @@ class TestLakeshore335SampleTemperatureControllerVI:
         assert state["curve"] == lakeshore_driver.get_sensor_curve("A")
 
     def test_control_param_specs_curve_choices(self, lakeshore_driver):
+        """The curve drop-down defaults to the last POLLED curve, not a fresh read.
+
+        ``control_param_specs()`` is a pure read (see its purity rule in
+        ``BaseVirtualInstrument``): it must default the drop-down from the
+        monitor cycle's cache rather than by asking the instrument, so
+        describing the station never puts traffic on the bus.
+        """
         vi = self._make_vi(lakeshore_driver)
+        lakeshore_driver.set_sensor_curve(21, "A")
+        vi.get_state()  # the monitor cycle's poll fills the cache
+
         specs = vi.control_param_specs("set_curve")
         spec = specs["curve"]
         assert spec.choices["None (0)"] == 0
         assert spec.choices["Standard 1"] == 1
         assert spec.choices["User 59"] == 59
-        assert spec.default == vi.curve()
+        assert spec.default == 21
+
+    def test_control_param_specs_default_before_first_poll(self, lakeshore_driver):
+        """Never polled: the drop-downs fall back rather than reading hardware.
+
+        A ``ParamSpec`` default must be one of its own ``choices``, so the
+        fallback is a declared choice ("None (0)" / "Off") — never whatever
+        the instrument happens to hold, which this path may not ask for.
+        """
+        vi = self._make_vi(lakeshore_driver)
+        lakeshore_driver.set_sensor_curve(21, "A")
+        lakeshore_driver.set_heater_range("HIGH")
+
+        assert vi.control_param_specs("set_curve")["curve"].default == 0
+        assert (
+            vi.control_param_specs("set_heater_range")["range_setting"].default
+            == "OFF"
+        )
+
+    def test_control_param_specs_issue_no_driver_traffic(self, lakeshore_driver):
+        """The describe path sends nothing to the driver, for any control.
+
+        The per-VI counterpart of the station-wide conformance check: the
+        purity rule is what lets ``Station.station_info()`` describe an
+        instrument without operating it.
+        """
+        vi = self._make_vi(lakeshore_driver)
+        vi.get_state()
+
+        calls: list[str] = []
+        spy_on_driver(lakeshore_driver, calls)
+        for method_name in ("set_curve", "set_heater_range", "set_temperature"):
+            vi.control_param_specs(method_name)
+        assert calls == []
 
     def test_control_param_specs_other_methods_unaffected(self, lakeshore_driver):
         """A control the override does not name falls through to the decorator.
