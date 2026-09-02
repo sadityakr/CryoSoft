@@ -107,12 +107,14 @@ config also has automatic `test_conformance.py` coverage on top of these.
 ## Files
 
 - `conftest.py` — shared fixtures (logging setup).
-- `mocks/` — shared mock objects.
+- `mocks/` — shared mock objects, including `bus_spy.py`: recording shims over a
+  live driver's public methods, for proving a path issues no instrument traffic
+  (an empty call log, rather than trust).
 - `test_foundation.py` — core exceptions, decorators, logging config.
 - `test_conformance.py` — auto-discovering interface conformance (see above).
 - **L0 drivers:** `test_l0_simulated.py`, `test_l0_new_drivers.py`, `test_l0_switch_driver.py`.
 - **L1 virtual instruments:** `test_l1_virtual_instruments.py`, `test_l1_new_vis.py`, `test_l1_switch_vi.py`, `test_measurement_dc_vi.py`, `test_switch_heater.py`.
-- **L2 station + config:** `test_l2_station.py`, `test_config_validation.py`, `test_config_catalog.py`.
+- **L2 station + config:** `test_l2_station.py`, `test_config_validation.py`, `test_config_catalog.py`, `test_capability_manifest.py` (the **Station info** declaration snapshot and its **Capability manifest** rendering: declared order, group resolution, the offline branch, the JSON Schema and its validator, and the `python -m cryosoft.core.capability_manifest` entry point).
 - **L3 orchestrator:** `test_l3_orchestrator.py`.
 - **L3/L4 operations:** `test_operations.py` (`OperationBase`, `run_operation`/`queue_operation`/`finish_operation`, tolerated safety flags, postcondition gates, capability-scope dispatch); `test_operation_readiness.py` (the readiness/next-due contract — `ReadinessCondition`/`NextDue`, `OperationBase` defaults, `HeliumFillOperation`'s and the shared `_SampleAccessOperationBase`'s (via `SampleLoadOperation`/`SampleUnloadOperation`) concrete `readiness_conditions()`/`next_due()`, Qt-free); `test_helium_fill.py` (`HeliumFillOperation` end-to-end against a real Orchestrator + `sim_cryostat`, including the `CryogenicsRecorder` wiring); `test_sample_access.py` (`SampleLoadOperation`/`SampleUnloadOperation` end-to-end against a real Orchestrator + `sim_cryostat`, parametrized over both, including `confirm_operation()`'s operator-confirmation gate and postcondition timeout).
 - **L4 procedures + planning:** `test_l4_procedure.py`, `test_new_procedures.py`, `test_field_voltage_procedure.py`, `test_plan.py`, `test_sweep_builder.py`.
