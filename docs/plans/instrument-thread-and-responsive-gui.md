@@ -10,7 +10,13 @@ produced the groundwork branch (its shipped steps, its withdrawn step, and
 its five open decisions), verifies that redline's code claims against
 today's `main`, and adds the design of the thread move itself, which the
 redline left as a single 3–4 day line. The decisions this document needs
-are collected in §8.
+are collected in §8, after the ones `agentic-instrumentation-framework.md`
+(the current roadmap) already settles.
+
+This plan is subordinate to that framework document: the instrument thread
+is the runtime that lets the framework's Phases 4 to 7 run *during* a
+measurement, and every naming choice below (verdicts, manifest, reader,
+gateway) defers to the framework where it has already chosen.
 
 The one-sentence design: **the invariant worth keeping is "exactly one
 thread touches instruments", not "the process has exactly one thread".**
@@ -265,9 +271,17 @@ surface (39 methods today), split by kind:
 
 - *Commands* (`run_procedure`, `pause_procedure`, `submit_vi_action`,
   `acknowledge`, `connect_instrument`, ...) are forwarded as queued
-  invocations. They return `None`; the outcome arrives on the existing
-  `action_succeeded` / `action_failed` / `action_blocked` / `state_changed`
-  signals. This is why 0.4a is a prerequisite.
+  invocations and return a `request_id`. The outcome arrives as the
+  framework plan's `ActionVerdict` (its Phase 2 step 1: `request_id`,
+  `code` enum, `reason`, `result`), carried on a signal the GUI and the
+  gateway both consume. Until that lands, the existing `action_succeeded` /
+  `action_failed` / `action_blocked` signals are the interim channel, which
+  is why 0.4a is a prerequisite. The audit document's §8 is explicit that
+  0.4a's *completeness rule* (every refusal answers) is the standard to keep
+  and its *signal-only, prose-reason mechanism* is not: an agent client
+  cannot await a broadcast. The framework's M4 says the same. So the proxy
+  is designed for correlated verdicts from the start and merely tolerates
+  the prose ones.
 - *Queries* (`state`, `availability`, `vi_faults`, `held_vi_names`,
   `override_active`, `manual_override_expires_at`, `active_run_kind`,
   `scanner_enabled`, `offline_reason`, `pause_pending`, `active_ramps`,
@@ -301,8 +315,9 @@ Lakeshore VI reads hardware there today), enforced by a conformance test.
 **`RunQueue`** (headless, holds specs) and the **`next_procedure()`** pull
 seam (§1.4). `QueueEntry.proc` is dropped; the queue holds
 `(cls, params, sample_info, data_dir, file_prefix)` and the engine calls
-`build_procedure()` when `run_queue()` decides it is time. Where it lives is
-redline D3; when a spec is validated is redline D2.
+`build_procedure()` when `run_queue()` decides it is time. A spec is
+validated when added, through the framework's `validate_run()` (§8,
+settled). Where the queue lives is decision 2.
 
 **`InstrumentHost`** (`cryosoft/core/instrument_host.py`). Owns the
 `QThread`. Builds the Station *inside* the thread so every pyvisa
@@ -355,7 +370,7 @@ until it returns. Afterwards the click is received and acknowledged
 instantly but still executes when `measure()` returns, because the
 instrument thread is inside it. The GUI is responsive; the hardware is
 exactly as responsive as before. Faster Abort would need VIs to poll a
-cancellation flag between readings (decision 7).
+cancellation flag between readings (decision 4).
 
 ---
 
@@ -372,11 +387,11 @@ Nothing before Phase 1 changes behaviour on `main`.
 | **Merge** | Merge `claude/agent-instrument-framework-audit-4vdfci` (five commits) onto `main` with the §1.5 resolution; index the audit document in `docs/plans/README.md`; update `core/README.md`'s `run_builder.py` row. | hours |
 | 0.1 | Headless `build_procedure()` | shipped |
 | 0.4a | Verdicts on six refusal paths | shipped |
-| 0.2 | Queue as data: `RunQueue` of specs, drop `QueueEntry.proc`, remove the three direct writes to `_procedure_queue`. Validation timing per decision 2; home per decision 3. | 1 d |
+| 0.2 | Queue as data: `RunQueue` of specs, drop `QueueEntry.proc`, remove the three direct writes to `_procedure_queue`. Validated at add time through the framework's `validate_run()` (§8, settled); home per decision 2. | 1 d |
 | 0.3 | `next_procedure()` pull seam on the engine; `run_queue()` and all three call sites kept. Coupled to 0.2; land as one change. | 1 d |
-| 0.4 | Engine mirror: `StatusSnapshot`, `StateChange` cause (decision 1), `StationInfo`, pure `control_param_specs()`, the payload copy rule, and the removal of every synchronous read listed in §3.3 including the front panel's `ping()`. | 2–3 d |
-| 0.5 | Contract **C16**: `cryosoft.gui` may not import `cryosoft.core.station` except under `TYPE_CHECKING`; plus the signal-payload standard written into `core/README.md` and `GLOSSARY.md`. Conformance tests: proxy mirrors every public method; no `time.sleep` under `gui/`; no plan citations in code. | 0.5 d |
-| 0.6 | Capability manifest with two renderers (GUI panels and agent tool schema); channel metadata per decision 5. **Off the thread's critical path**: needed for the agent gateway, not for the move. | 1–1.5 d, schedulable later |
+| 0.4 | Engine mirror: `StatusSnapshot`, `StateChange` cause (decision 1), `StationInfo`, pure `control_param_specs()`, the payload copy rule, and the removal of every synchronous read listed in §3.3 including the front panel's `ping()`. Also close the silent refusals the audit document's §8 says 0.4a left (`acknowledge_fault` with no fault, `acknowledge()` with nothing held, `submit_global_action` with an unknown action), so the completeness rule holds before it becomes a conformance test. | 2–3 d |
+| 0.5 | A new contract: `cryosoft.gui` may not import `cryosoft.core.station` except under `TYPE_CHECKING`. Numbered from `pyproject.toml` at the time (the audit document's §8 notes the framework's proposed C13 for `data_reader` is already taken and the next free number was C16 as of 2026-08-08); plus the signal-payload standard written into `core/README.md` and `GLOSSARY.md`. Conformance tests: proxy mirrors every public method; no `time.sleep` under `gui/`; no plan citations in code. | 0.5 d |
+| 0.6 | Capability manifest with two renderers (GUI panels and agent tool schema). **This is the framework plan's Phase 1, not this plan's work**: `@monitored` gains `unit=` / `description=` on the decorator with keys untouched, `core/capability_manifest.py` is built from a live Station, and a conformance test demands complete descriptions. Off the thread's critical path; listed so the two documents agree it exists once. | framework Phase 1, ~2 d |
 
 ### Phase 1 — the thread move
 
@@ -389,7 +404,7 @@ Nothing before Phase 1 changes behaviour on `main`.
 
 ### Phase 2 — default on, and the standard
 
-Flip the default; decide whether `inline` mode stays (decision 8); rewrite
+Flip the default; decide whether `inline` mode stays (decision 5); rewrite
 the `CLAUDE.md` paragraph per §3.1; add **Instrument thread**, **Orchestrator
 proxy**, **Status snapshot**, **Station info**, **Run queue** to
 `GLOSSARY.md`; update `core/README.md`, `gui/README.md`; correct
@@ -398,14 +413,24 @@ per §3.5. One day.
 
 ### After this plan: the features it exists for
 
-- **Agent operation**: framework plan Phases 0–4 unchanged; the gateway is
-  a GUI-thread client of the proxy; the live write path is D4 rung 1 or 2;
-  MCP is an out-of-process adapter. 0.6's manifest feeds the tool schema.
-- **Live analysis**: needs a data source that is not the HDF5 file the
-  instrument thread is writing (decision 9).
-- **eLab export**: network I/O on the GUI thread via `QNetworkAccessManager`
-  or a network worker, triggered from `run_finished` with the run manifest;
-  a session-layer (L6) feature (decision 10).
+- **Agent operation**: the framework plan's Phases 1 to 4 unchanged; the
+  in-process gateway (`cryosoft/session/gateway/`) is a GUI-thread client of
+  the proxy; the live write path is the audit document's D4 rung 1 or 2;
+  MCP is an out-of-process adapter, so the framework's Phase 5 loses its
+  "one sanctioned thread". The audit document's Phase 0 ("close the write
+  path": scope-checked `execute_vi_action()`, bounded excitation currents,
+  the coverage conformance test, envelope on the direct path) is a live
+  hazard today and is independent of the thread; it can land in parallel.
+- **Result access and analysis**: the framework's Phase 2 step 3,
+  `core/data_reader.py` with its own contract, reads completed and probe
+  runs. What it does not cover is the run *in progress*, whose HDF5 file
+  the instrument thread holds open (decision 6).
+- **eLab**: not this plan's question. The framework's §5 defers it to
+  `archive/session-management-layer.md` Part B (the ELN adapter contract,
+  an offline-first publisher that is "never in the tick path", `ElnLink`
+  scaffolding already in `session/models.py`). The instrument thread makes
+  "never in the tick path" true by construction, because the publisher
+  lives on the GUI thread; nothing else changes.
 
 ---
 
@@ -421,7 +446,7 @@ per §3.5. One day.
 | Cross-thread mutation of an emitted payload. | Copy rule plus frozen dataclasses (step 0.4). |
 | The GUI test suite silently stops covering the real wiring. | Every GUI test runs through the proxy in `inline` mode; the `threaded` suite covers the boundary itself. |
 | Flakiness from real threads under pytest-qt. | Only `test_instrument_thread.py` starts a `QThread`; explicit `waitSignal` timeouts; sim station; marked for isolated retry in CI. |
-| Doubling the GUI test matrix forever if `inline` mode is kept. | Decision 8. |
+| Doubling the GUI test matrix forever if `inline` mode is kept. | Decision 5. |
 
 ---
 
@@ -442,7 +467,7 @@ is what that line expands to.
 - It does not parallelise instrument I/O (no per-instrument threads, no
   thread pool). One bus, one writer.
 - It does not move the scheduler out of the engine (§1.4).
-- It does not make `measure()` cooperative or interruptible (decision 7).
+- It does not make `measure()` cooperative or interruptible (decision 4).
 - It does not change tick semantics, the state machine, procedures, VIs or
   drivers.
 - It does not edit or weaken an import contract; C16 is an addition.
@@ -457,84 +482,97 @@ would catch these, so they must be cleaned before it lands.
 
 ---
 
-## 8. Decisions needed
+## 8. Decisions
 
-Recommendation first in each. Decisions 1 to 5 are the redline's, carried
-over unchanged in substance; they block Phase 0. Decisions 6 to 11 come
-from this audit; 6 blocks the merge, 7 and 8 block Phase 1, and 9 to 11 can
-wait until Phase 2.
+### 8.1 Settled by the framework plan; no decision needed
 
-**1 — Does `state_changed` carry a reason?** *(blocks 0.2, 0.3, 0.4)*
-Today `pyqtSignal(str)`. Five IDLE transitions do not chain, so `"idle"`
-alone cannot distinguish a clean finish from a quench acknowledgement. Once
-an agent or scheduler subscribes, and once it is a cross-thread payload
-contract, this is much harder to change.
+The redline asked five questions and this document's first draft asked
+six. `agentic-instrumentation-framework.md` had already answered four of
+them and narrows two more. Recorded here so they are not asked again.
+
+| Question | Answer, and where it comes from |
+|---|---|
+| Do `@monitored` channels gain units and descriptions now, and how? (redline D5) | Yes, on the decorator: `@monitored(unit=..., description=...)` defaulting to `None`, keys untouched, no trend-history migration. Framework Phase 1 step 1. Its own §6 item 3 asks to confirm decorator over config; that confirmation belongs to the framework, not here. |
+| Is a queued run validated when added or when started? (redline D2) | When added, through the framework's `validate_run(procedure_cls, params)`: build without dispatching, check `ParamSpec` bounds, `control_limits` and the envelope, return findings and a duration estimate. Framework Phase 2 step 4. The redline's option A (build and discard) is that function's first form; its option B (an explicit validate step) is what `validate_run` becomes, and it is the first rung of M7, so an agent gets the dry run for free. |
+| Does the GUI ever read engine state synchronously? (redline D4) | No, and the framework strengthens the answer. M4: "fire-and-forget plus a later broadcast signal is a GUI pattern; it does not survive contact with a request/response tool call." So the proxy's commands return a `request_id` and the verdict is the framework's `ActionVerdict` (Phase 2 step 1), consumed by GUI and gateway alike. §3.4. |
+| eLab scope and trigger | Not this plan's. Framework §5 defers the eLab publishing track to `archive/session-management-layer.md` Part B: an ELN adapter contract, an offline-first publisher "never in the tick path", `ElnLink` scaffolding already in `session/models.py`. The thread only makes "never in the tick path" structural. |
+| Result access | Framework Phase 2 step 3: `core/data_reader.py` as a standalone sibling of `data_manager.py` with its own contract, for completed and probe runs. What remains open is the run in progress (decision 6). |
+| Agent transport | Framework Phases 4 and 5 plus the audit document's D4, reconciled in §3.5: in-process gateway on the GUI thread, then a request spool or `QLocalServer`, then an out-of-process MCP adapter. No decision left; only the wording change at Phase 2. |
+
+The framework's own four decisions (§6: envelope binds the human,
+recovery versus run-control classification, units on decorator or config,
+embedded-agent cost) are untouched by this plan and stay with it.
+
+### 8.2 Still open
+
+Recommendation first in each. Decisions 1 to 3 block Phase 0, 4 and 5
+block Phase 1, 6 and 7 can wait until Phase 2.
+
+**1 — Does `state_changed` carry a reason?** *(redline D1; blocks 0.2,
+0.3, 0.4)* Today `pyqtSignal(str)`. Five IDLE transitions do not chain, so
+`"idle"` alone cannot distinguish a clean finish from a quench
+acknowledgement. Once an agent subscribes, and once it is a cross-thread
+payload contract, this is much harder to change.
 (A, recommended) Widen it now with a cause, as a typed frozen `StateChange`
-payload, and set the payload standard while there is one consumer.
-+0.5 d. (B) A second richer signal beside it: cheaper, two channels to
-keep consistent forever. (C) Leave it, and accept that no out-of-process
-client may ever decide to advance.
+payload living in `core/events.py` beside `ErrorEvent` and the framework's
+coming `ActionVerdict`, so the three share one payload standard. +0.5 d.
+(B) A second richer signal beside it: two channels to keep consistent
+forever. (C) Leave it, and accept that no out-of-process client may ever
+decide to advance.
 
-**2 — Is a queued run validated when added or when started?** *(blocks
-0.2)* Today Add to queue constructs the procedure immediately, so a bad
-parameter set is refused while the operator is at the form; a queue of
-specs would surface the same refusal an hour later, mid-batch. Verified:
-`BaseProcedure.__init__` touches no hardware and claims nothing, so
-building twice is safe.
-(A, recommended now) Build and discard at add time, build for real at
-start. Today's behaviour exactly, one throwaway construction. (B) Split
-`__init__` into validate and build: cleanest, touches every procedure, and
-the only option that gives an agent a dry-run check; do it when the gateway
-needs it. (C) Accept late failure with a "checked at start" queue state.
+**2 — Where does the run queue live?** *(redline D3; blocks 0.2, 0.5)*
+The redline recommended `core/run_queue.py` as the smallest move. The
+framework changes the weight: `validate_run()` lives on the
+`SessionManager` and the gateway lives in `cryosoft/session/gateway/`, and
+contract C12 forbids `core` from importing `session`, so a queue in `core`
+could not validate its own entries without the validator being injected.
+(B, recommended, reversing the redline) `session/run_queue.py` owns order
+and validation; the engine gets the `next_procedure()` callback injected
+from `main.py`, which C11 and C12 both permit. Pulling `QueueItemState`
+persistence out of `gui/form_autosave.py` into the same module can follow
+as a second step. (A) `core/run_queue.py` for order only, with validation
+done by the caller before enqueue.
 
-**3 — Where does the run queue live?** *(blocks 0.2, 0.5; sets C16's
-wording)* It must sit below the GUI for an agent to drive it. Today queue
-persistence is a GUI concern (`QueueItemState` in `gui/form_autosave.py`).
-(A, recommended) `core/run_queue.py` owns order only; persistence stays
-the caller's; the engine never imports it, the callback is injected.
-(B) `session/run_queue.py` owns order and persistence, pulling
-`QueueItemState` out of the GUI: better long-term home, larger diff.
-
-**4 — Does the GUI ever read engine state synchronously?** *(blocks 0.4)*
-(A, recommended, and assumed by every section above) No synchronous path;
-local mirror plus request-and-verdict; the front panel's Check becomes a
-request. (B) A blocking invoke with timeout: nearly mechanical, but it
-reintroduces the freeze whenever the engine is inside `measure()`.
-
-**5 — Do `@monitored` channels gain units and descriptions now?** *(blocks
-0.6 only)* Channel keys are written into on-disk trend history.
-(A, recommended) Metadata as a sidecar, keys untouched, additive across
-every VI. (B) Restructure keys and migrate history files.
-
-**6 — Merge scope.** (A, recommended) All five commits including the
+**3 — Merge scope.** (A, recommended) All five commits including the
 621-line audit document, indexed as an audit that informs the framework
-roadmap, its §8 corrections folded into the framework plan in a follow-up.
-(B) Only the four code commits.
+roadmap, its §8 corrections folded into the framework plan in a follow-up
+commit. (B) Only the four code commits.
 
-**7 — Abort and pause latency inside `measure()`.** (A, recommended for
-this plan) A command lands after the current `measure()` returns, as today.
-(B) Additionally give measurement VIs a cooperative cancellation check
-between readings so Abort interrupts a datapoint: real VI-layer work (the
-RTM2's single `(n+1) × averaging_time_s` sleep would need splitting) and a
-new standard; its own plan if wanted.
+**4 — Abort, pause and emergency latency inside `measure()`.** *(blocks
+Phase 1; sharpened by the audit document)* The audit's Phase 0 step 5 asks
+for an unconditional S0 path, `Orchestrator.emergency_standby(reason)`,
+executing "on the caller's stack". With the engine on its own thread a GUI
+caller has no shared stack: the request is queued and lands when
+`measure()` returns, up to a full datapoint later. That is exactly today's
+latency (today the click cannot even be received), but it must be stated,
+because the S0 path's wording assumes otherwise.
+(A, recommended for this plan) Accept the datapoint bound, document it on
+`emergency_standby()`, and make the GUI show "emergency requested" the
+instant the click lands. (B) Additionally give measurement VIs a
+cooperative cancellation check between readings, via a flag the engine
+sets and `measure()` polls (a flag, not a bus access, so single-writer
+holds). Real VI-layer work and a new standard; the RTM2's single
+`(n+1) × averaging_time_s` sleep would need splitting. Its own plan if
+wanted, and the natural companion to the framework's Phase 3
+`safe_shutdown()`.
 
-**8 — Keep `inline` mode after Phase 2?** (A, recommended) Keep it for one
-release as the hardware escape hatch and the mode the fast GUI tests run
-in; decide again after a month of `threaded` on real hardware. (B) Delete
-it at Phase 2 and run every GUI test threaded.
+**5 — Keep `inline` mode after Phase 2?** (A, recommended) Keep it for
+one release as the hardware escape hatch and the mode the fast GUI tests
+run in; decide again after a month of `threaded` on real hardware.
+(B) Delete it at Phase 2 and run every GUI test threaded.
 
-**9 — Live analysis data source.** (A, recommended) An in-memory
-`RunBuffer` on the GUI thread fed by the existing `measurement_ready`
-signal, which already carries every datapoint: zero file contention.
-(B) HDF5 SWMR on the open file (h5py is not safe for one file across two
-threads without it, and it is a format-level commitment). (C) Analysis only
-on completed runs.
+**6 — Analysis of the run in progress.** `data_reader` covers completed
+and probe runs. For the run being written, the instrument thread holds the
+HDF5 file open and h5py is not safe for one file across two threads.
+(A, recommended) An in-memory `RunBuffer` on the GUI thread fed by the
+existing `measurement_ready` signal, which already carries every
+datapoint, exposed through the same column and summary vocabulary as
+`data_reader` so an agent sees one API. (B) HDF5 SWMR on the open file: a
+format-level commitment. (C) No mid-run analysis; probe runs plus completed
+runs are enough. Defer until the gateway's first consumer needs it.
 
-**10 — eLab scope.** Which system (elabFTW assumed), and which trigger:
-automatic on `run_finished`, a manual "export to eLab" action, or both.
-Not needed to start Phases 0–2.
-
-**11 — The standard's wording.** Approve rewriting the `CLAUDE.md`
+**7 — The standard's wording.** Approve rewriting the `CLAUDE.md`
 "Single-threaded cooperative scheduling" paragraph as the single hardware
-thread standard (§3.1) at Phase 2. Until then the existing wording stands
-and Phase 0 complies with it literally.
+thread standard (§3.1) at Phase 2, and retiring "the one sanctioned
+thread" from the framework's Phase 5. Until then the existing wording
+stands and Phase 0 complies with it literally.
