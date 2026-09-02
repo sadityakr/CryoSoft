@@ -65,7 +65,11 @@ from cryosoft.core.decorators import (
     get_control_specs,
     get_monitored_methods,
 )
-from cryosoft.core.exceptions import CryoSoftCommunicationError, CryoSoftSafetyError
+from cryosoft.core.exceptions import (
+    CryoSoftCommunicationError,
+    CryoSoftInstrumentError,
+    CryoSoftSafetyError,
+)
 from cryosoft.core.operation import (
     STEP_KINDS,
     OperationBase,
@@ -1896,6 +1900,114 @@ def test_measurement_vi_round_trip(vi_cls: type) -> None:
         assert error >= 0.0 or math.isnan(error), (
             f"{vi_cls.__name__}.take_reading()['{base_name}_error'] must be "
             f">= 0 (or NaN, when zero samples are valid), got {error!r}"
+        )
+
+
+def _measurement_defaults(vi_cls: type) -> dict:
+    """The declared default for every one of a measurement VI's parameters."""
+    return {name: spec.default for name, spec in vi_cls.measurement_parameters.items()}
+
+
+def _held_driver_ids(vi_cls: type, drivers: dict[str, object]) -> set[int]:
+    """Identities of the driver instances *vi_cls* actually keeps.
+
+    Every measurement VI is handed the same superset dict, so ``_drivers``
+    cannot say which instruments a VI really uses. What it keeps for itself
+    can: each VI stores its own (``self._source``, ``self._meter``,
+    ``self._main``…), so the instances found among its attributes are exactly
+    the ones it will drive — discovered generically, with no per-class table
+    to keep in step.
+    """
+    vi = vi_cls(drivers)
+    return {
+        id(value)
+        for value in vars(vi).values()
+        if any(value is driver for driver in drivers.values())
+    }
+
+
+def _shared_instrument_vi_pairs() -> list[tuple[type, type]]:
+    """Ordered (first, second) measurement-VI pairs that drive a common instrument."""
+    drivers = _build_sim_measurement_drivers()
+    held = {cls: _held_driver_ids(cls, drivers) for cls in _all_measurement_vi_classes()}
+    return [
+        (first, second)
+        for first in held
+        for second in held
+        if first is not second and held[first] & held[second]
+    ]
+
+
+@pytest.mark.parametrize(
+    ("first_cls", "second_cls"),
+    _shared_instrument_vi_pairs(),
+    ids=lambda c: c.__name__,
+)
+def test_measurement_vi_arms_after_a_shared_instrument_was_left_in_another_mode(
+    first_cls: type, second_cls: type
+) -> None:
+    """A VI must never assume it found its shared instrument idle.
+
+    The **shared-instrument mode discipline** standard (see
+    ``virtual_instruments/measurement/README.md``): two measurement VIs can
+    be wired to the same physical instrument — the two 6221 DC methods and
+    delta mode all are — so the second one to arm meets whatever the first
+    left behind. This test arms the first VI and then, with **no**
+    ``standby()`` in between (the abandoned run: a crash, a kill, an agent
+    that stopped answering), arms the second on the same driver objects.
+
+    Exactly two outcomes are acceptable, and this is the whole standard:
+    either the second VI re-asserts its own mode first and goes on to
+    produce the readings it declares, or the instrument refuses and the
+    driver says so as a typed ``CryoSoftInstrumentError`` carrying the
+    instrument's own code. What is never acceptable is the third outcome —
+    the one that actually happened on hardware in the ``-221`` incident —
+    where the write is silently rejected, the VI believes it armed, and
+    every number after that is fiction.
+    """
+    drivers = _build_sim_measurement_drivers()
+
+    first_vi = first_cls(drivers)
+    first_vi.initiate_measurement(**_measurement_defaults(first_cls))
+
+    second_vi = second_cls(drivers)
+    second_defaults = _measurement_defaults(second_cls)
+    try:
+        second_vi.initiate_measurement(**second_defaults)
+    except CryoSoftInstrumentError as exc:
+        # The other permitted outcome: the instrument refuses, and the driver
+        # says so in the instrument's own words. Anything less specific — a
+        # bare Exception, or a plain communication error — is not caught here
+        # and fails the test, because it does not tell the caller that the
+        # instrument REFUSED rather than that the link broke.
+        assert exc.code, (
+            f"{second_cls.__name__} was refused by the shared instrument "
+            f"after {first_cls.__name__}, but the error carries no "
+            f"instrument code (the driver error-reporting standard)"
+        )
+        assert exc.context, (
+            f"{second_cls.__name__}'s refusal names no driver call in its "
+            f"context — the half the instrument cannot know"
+        )
+        return
+
+    data = second_vi.take_reading()
+    expected_keys = (
+        set(second_cls.measurement_data_keys)
+        | set(second_cls.measurement_scalar_columns)
+        | set(second_cls.measurement_raw_blocks)
+    )
+    assert set(data) == expected_keys, (
+        f"{second_cls.__name__} armed after {first_cls.__name__} left the "
+        f"shared instrument in another mode, but take_reading() returned "
+        f"{sorted(data)} instead of {sorted(expected_keys)}"
+    )
+    for name, length in second_vi.data_arrays(second_defaults).items():
+        assert len(data[name]) == length, (
+            f"{second_cls.__name__}.take_reading()['{name}'] has length "
+            f"{len(data[name])} after arming behind {first_cls.__name__}, "
+            f"but data_arrays declared {length} — the stale shared state "
+            f"changed what the measurement produced"
         )
 
 
