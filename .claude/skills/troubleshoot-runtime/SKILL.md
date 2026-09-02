@@ -20,15 +20,34 @@ which diagnoses instruments with the app CLOSED.
 ## The one command
 
 ```
-python -m cryosoft.troubleshoot status          # plain-English digest
-python -m cryosoft.troubleshoot status --json    # structured, for you to parse
-python -m cryosoft.troubleshoot status --last 20 # widen the trend window
+python -m cryosoft.troubleshoot status --max-age 30           # plain-English digest
+python -m cryosoft.troubleshoot status --max-age 30 --json    # structured, for you to parse
+python -m cryosoft.troubleshoot status --max-age 30 --last 20 # widen the trend window
 ```
 
 It reads the tail of `status.jsonl` and prints: the orchestrator state and how
 long it has been in it, the overall verdict, any stall alerts, and per
 instrument `value -> target (gap, ramp_status, trend, ETA) [code]`. Exit code is
 0 only when a log exists and the verdict is `OK`, so you can gate on it.
+
+**Always pass `--max-age`.** Without it the command tells you what the log
+says, not whether the app is still running: a log left behind by a process
+that died three days ago parses into a confident "RAMPING, ~1400 s to target"
+and exits 0. `--max-age SECONDS` fails the command unless the newest record is
+younger than that. Use a few tick intervals — 30 seconds at the default 3 s
+tick, more if the setup's `monitor.tick_interval_ms` is longer. A record is
+written on every tick whether monitoring is on or off, so a stale log means
+the process is not ticking, not that the operator paused monitoring.
+
+If it exits non-zero with a `stale:` line, do **not** report the state it
+printed as the current one. Say the app does not appear to be running (or has
+wedged so hard it stopped ticking) and give the record's age; the digest's
+`--json` output carries `ts`, `age_s` and `stale_reason` for that.
+
+Each record also carries `run_id` and `setup`, so you can say which run and
+which setup you are describing, and `seq`, a per-process counter that
+increases by one per tick — a gap in it means records were lost, not that the
+app paused.
 
 ## How to answer the common questions
 

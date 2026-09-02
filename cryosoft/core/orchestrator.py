@@ -259,6 +259,9 @@ class Orchestrator(QObject):
         self._scanner_vi_name: str | None = switch_names[0] if switch_names else None
 
         # Operational-status reporting (runtime troubleshooting signal).
+        # The setup name is resolved once here, from the fully built Station,
+        # for the record standard's ``setup`` field.
+        self._setup_name: str | None = station.setup_name()
         self._state_entered_at = time.time()
         self._prev_gaps: dict[str, float] = {}
         self._operational_status: dict = {}
@@ -1790,11 +1793,27 @@ class Orchestrator(QObject):
     def _update_operational_status(self, state: dict) -> None:
         """Build this tick's operational-status record, emit it, and log it.
 
+        Called on EVERY tick, monitoring on or off, so that a gap in
+        ``status.jsonl`` means the process stopped ticking and nothing else.
+        Nothing is polled while the machine is quiet (monitoring off AND
+        IDLE) — the same guard `_publish_ramps()` uses, for the same reason:
+        a freshly launched app polls no instrument until its instruments are
+        initiated, and reporting must not be the one thing that breaks that
+        silence. A quiet tick therefore carries an empty instrument payload
+        (``vis``; ``conditions`` reports whatever the registry last held,
+        since nothing re-evaluated it) while every header field of the record
+        standard is written as usual — see `cryosoft.core.operational_status`.
+
         Guarded: operational-status reporting is non-critical, so a failure here
         must never degrade a running procedure to ERROR via the tick boundary.
+
+        Args:
+            state: This tick's station state snapshot, or ``{}`` on a tick
+                that polled nothing.
         """
         try:
-            ramp_info = self._ramp_info()
+            quiet = not self._monitoring and self._state == OrchestratorState.IDLE
+            ramp_info: dict[str, dict] = {} if quiet else self._ramp_info()
             wait_target = self._current_wait_time if self._wait_started else None
             wait_elapsed = (
                 time.time() - self._wait_start_time if self._wait_started else None
@@ -1817,6 +1836,7 @@ class Orchestrator(QObject):
                     envelope_conditions(self._session_envelope.check_state(state), time.time())
                 )
             conditions.sort(key=lambda c: c.key)
+            manifest = self._active_run_manifest or {}
             record, self._prev_gaps = build_operational_status(
                 orch_state=self._state.value,
                 elapsed_in_state_s=time.time() - self._state_entered_at,
@@ -1831,6 +1851,8 @@ class Orchestrator(QObject):
                 # initiation/reading gates can ever be "active" across ticks.
                 active_gates=[g.name for g in self._pending_gates],
                 conditions=conditions,
+                run_id=manifest.get("run_id"),
+                setup=self._setup_name,
             )
             record, self._stall_state = apply_stall_verdict(
                 record, self._stall_state, self._stall_config
@@ -2044,6 +2066,7 @@ class Orchestrator(QObject):
         # stop_monitoring() is refused outside IDLE/ERROR, so the stall
         # detector and stale detection below are guaranteed to run whenever
         # a procedure is active.
+        state: dict = {}
         if self._monitoring:
             state = self._station.get_state()
             self.states_updated.emit(state)
@@ -2060,11 +2083,17 @@ class Orchestrator(QObject):
                     parts.append(f"{vi_name}: {kv}")
             logger.debug("Monitor: %s", " | ".join(parts))
 
-            # Operational-status record (runtime troubleshooting signal): assembled
-            # from this tick's snapshot, emitted, and appended to the resolved
-            # log directory's status.jsonl (see cryosoft.core.paths.log_directory()).
-            self._update_operational_status(state)
+        # Operational-status record (runtime troubleshooting signal): assembled
+        # from this tick's snapshot (empty while monitoring is off, which polls
+        # nothing), emitted, and appended to the resolved log directory's
+        # status.jsonl (see cryosoft.core.paths.log_directory()). Written on
+        # EVERY tick, outside the monitoring branch above, so that silence in
+        # that log unambiguously means the process is not ticking — an agent
+        # gating on `troubleshoot status --max-age` can then tell a live run
+        # from a log left behind by a process that died.
+        self._update_operational_status(state)
 
+        if self._monitoring:
             # Tiered trend-history sample: non-fatal, mirrors the
             # operational-status guard above — a logging failure here must
             # never fail the tick. record() is itself internally
