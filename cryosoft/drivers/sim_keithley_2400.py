@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import random
 
 from cryosoft.core.exceptions import CryoSoftCommunicationError
+
+log = logging.getLogger(__name__)
 
 
 class SimKeithley2400:
@@ -97,6 +100,24 @@ class SimKeithley2400:
         """Return the instrument identification string."""
         self._check_error()
         return "KEITHLEY,2400,SIM,1.0"
+
+    # ------------------------------------------------------------------
+    # Safe state (the safe-shutdown standard)
+    # ------------------------------------------------------------------
+
+    def safe_shutdown(self) -> None:
+        """Zero the sourced current; idempotent, never raises.
+
+        Safe idle for a source-measure unit is sourcing nothing. The
+        compliance limit and the measurement range are left alone — they
+        drive nothing on their own and are the operator's settings.
+        """
+        log.info("SimKeithley2400: safe shutdown — source current to zero.")
+        self._current = 0.0
+
+    def _is_in_safe_state(self) -> bool:
+        """Return True when the SMU sources no current."""
+        return self._current == 0.0
 
     # ------------------------------------------------------------------
     # Connection lifecycle (the connection-lifecycle standard)

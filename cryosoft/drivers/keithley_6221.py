@@ -7,9 +7,49 @@ import time
 
 import pyvisa
 
-from cryosoft.core.exceptions import CryoSoftCommunicationError
+from cryosoft.core.exceptions import (
+    CryoSoftCommunicationError,
+    CryoSoftInstrumentError,
+)
 
 log = logging.getLogger(__name__)
+
+
+# Cap on :SYST:ERR? reads when draining the queue. The 622x queue holds at
+# most a handful of entries; the cap only guarantees termination if an
+# instrument answers nonsense forever.
+_ERROR_QUEUE_DRAIN_LIMIT = 32
+
+
+def _parse_scpi_error(reply: str) -> tuple[str, str] | None:
+    """Split a SCPI ``:SYST:ERR?`` reply into (code, message), or None if clean.
+
+    A clean queue answers ``0,"No error"``. Anything else is a refusal the
+    instrument recorded and nobody would otherwise see (the driver
+    error-reporting standard, ``drivers/README.md``).
+
+    Args:
+        reply: The stripped instrument reply, e.g. ``'-221,"Settings conflict"'``.
+
+    Returns:
+        ``(code, message)`` with the code kept verbatim as a string and the
+        message unquoted, or ``None`` when the queue reports no error. An
+        unparseable reply is reported as an error with an empty code rather
+        than assumed clean — the standard never guesses in the instrument's
+        favour.
+    """
+    text = reply.strip()
+    if not text:
+        return None
+    code, _, message = text.partition(",")
+    code = code.strip()
+    message = message.strip().strip('"')
+    try:
+        if int(code) == 0:
+            return None
+    except ValueError:
+        return ("", text)
+    return (code, message)
 
 
 class Keithley6221:
@@ -72,8 +112,14 @@ class Keithley6221:
 
         Args:
             enabled: True to turn the output on.
+
+        Raises:
+            CryoSoftInstrumentError: If the 6221 queues an error (the driver
+                error-reporting standard) — enabling the output is refused
+                with -221 while a measurement engine holds the source.
         """
         self._write("OUTP " + ("ON" if enabled else "OFF"))
+        self._check_error_queue(f"set_source_enabled({enabled!r})")
 
     def get_current(self) -> float:
         """Return the configured source current in Amperes."""
@@ -290,6 +336,47 @@ class Keithley6221:
                 self._write(cmd)
             except CryoSoftCommunicationError:
                 pass
+        # Errors queued by the delta sequence being abandoned belong to that
+        # sequence, not to whatever runs next: drop them here so they cannot
+        # surface later against an innocent command.
+        self._drain_error_queue()
+
+    # ------------------------------------------------------------------
+    # Safe state (the safe-shutdown standard)
+    # ------------------------------------------------------------------
+
+    def safe_shutdown(self) -> None:
+        """Unconditionally put the source in its safe idle state.
+
+        The 6221's half of the **safe-shutdown standard** (see
+        ``drivers/README.md``): idempotent, callable from any leftover
+        state, and it never raises — a caller reaching for this is already
+        handling a failure and must not be handed a second one.
+
+        Safe idle for this instrument means: no measurement engine running
+        (``:SOUR:SWE:ABOR``, which also disarms delta mode), autorange back
+        on so the *next* caller's current is not silently rejected by a
+        leftover fixed range (``:SOUR:CURR:RANG:AUTO ON`` — the -221
+        incident recorded in :meth:`set_current`), zero source current, and
+        the output off. Finally the error queue is drained, so nothing the
+        abandoned sequence queued is charged to the next command.
+
+        Recovers from: a running or armed delta/sweep engine, a fixed
+        current range left by delta mode, a non-zero source current, and an
+        enabled output.
+        """
+        log.info("Keithley 6221: safe shutdown — aborting engines, output off.")
+        for cmd in (
+            ":SOUR:SWE:ABOR",
+            ":SOUR:CURR:RANG:AUTO ON",
+            ":SOUR:CURR 0.000000000e+00",
+            "OUTP OFF",
+        ):
+            try:
+                self._write(cmd)
+            except CryoSoftCommunicationError as exc:
+                log.warning("Keithley 6221: safe shutdown could not send %r: %s", cmd, exc)
+        self._drain_error_queue()
 
     # ------------------------------------------------------------------
     # Private SCPI helpers
@@ -405,6 +492,16 @@ class Keithley6221:
         self._write(f'{relay}":SENS1:VOLT:LPAS 1"')
         self._write(f'{relay}":SENS1:VOLT:NPLC 2"')
 
+        # The driver error-reporting standard (drivers/README.md): this is
+        # the longest, most fragile write sequence in the file and, until
+        # this check existed, the only place a queued rejection could go
+        # unseen for a whole run. One poll after the sequence surfaces the
+        # first command the instrument refused, with its own code and words.
+        self._check_error_queue(
+            f"_program_delta_mode(high_current={high_current!r}, "
+            f"compliance={compliance!r}, range_2182a={range_2182a!r})"
+        )
+
         log.debug(
             "K6221 delta configured: I=±%.3e A, N=%d, delay=%.4f s, "
             "compliance=%.3f V, 2182A range=%.4f V",
@@ -416,14 +513,24 @@ class Keithley6221:
 
         Ported from start_delta() in simple_delta_tk_logic.py.
         Extends the timeout to 15 s during the init sequence.
+
+        Arming is the command that fails when the source is in a state delta
+        mode cannot use, so the error queue is polled after ARM and again
+        after INIT (the driver error-reporting standard).
+
+        Raises:
+            CryoSoftInstrumentError: If the 6221 refuses to arm or initiate
+                (e.g. -221 "Settings conflict").
         """
         orig = self._instr.timeout
         self._instr.timeout = 15_000
         try:
             self._write(":SOUR:DELT:ARM")
             time.sleep(1.0)
+            self._check_error_queue("_arm_and_start(:SOUR:DELT:ARM)")
             self._write(":INIT:IMM")
             time.sleep(2.0)
+            self._check_error_queue("_arm_and_start(:INIT:IMM)")
             log.info("Keithley 6221 delta mode armed and running.")
         finally:
             self._instr.timeout = orig
@@ -548,10 +655,22 @@ class Keithley6221:
             ) from exc
 
     def set_range(self, range_v: float) -> None:
-        """Set the 2182A measurement range via the serial relay."""
+        """Set the 2182A measurement range via the serial relay.
+
+        Args:
+            range_v: Full-scale voltage range in Volts.
+
+        Raises:
+            CryoSoftInstrumentError: If the 6221 queues an error for the
+                relay write (the driver error-reporting standard). Note the
+                check covers the 6221's own acceptance of the relay command,
+                not the 2182A's acceptance of the forwarded string — the
+                relay is one-way for errors.
+        """
         self._ensure_serial_relay_configured()
         self._write(f':SYST:COMM:SER:SEND ":SENS1:VOLT:RANG {range_v:.4e}"')
         time.sleep(0.15)
+        self._check_error_queue(f"set_range({range_v!r})")
 
     def get_range(self) -> float:
         """Return the current 2182A voltage range via the serial relay."""
@@ -604,26 +723,61 @@ class Keithley6221:
             ) from exc
 
     def _check_error_queue(self, context: str) -> None:
-        """Poll the error queue and log any SCPI error the last command queued.
+        """Poll ``:SYST:ERR?`` and raise if the last command was refused.
 
-        A rejected SCPI command (e.g. "-221,Settings conflict") is never
-        raised by ``_write()`` — the 622x accepts the write over GPIB and
-        queues the error internally without complaint, so a conflicting
-        command has historically been invisible to CryoSoft, showing only on
-        the instrument's own front panel (live commissioning, 2026-07-22:
-        DC-mode current-source calls were being silently rejected on real
-        hardware with no trace in ``cryosoft.log``). Logs a WARNING tagged
-        with what was just attempted instead of raising, so a single rejected
-        point does not abort an otherwise-recoverable run — this is
-        diagnostic visibility, not a new correctness guarantee.
+        The 6221's half of the **driver error-reporting standard** (see
+        ``drivers/README.md``). A rejected SCPI command (e.g.
+        ``-221,"Settings conflict"``) is never raised by ``_write()`` — the
+        622x accepts the write over GPIB and queues the error internally
+        without complaint, so a conflicting command was invisible to
+        CryoSoft, showing only on the instrument's own front panel (live
+        commissioning, 2026-07-22: DC-mode current-source calls were being
+        silently rejected on real hardware with no trace in
+        ``cryosoft.log``). Polling the queue after every command that
+        programs a mode or a setpoint turns that silence into a typed error
+        carrying the instrument's own code and words.
+
+        A bus failure while reading the queue is deliberately swallowed: the
+        checker must never turn a working call into a failure of its own.
 
         Args:
             context: Human-readable description of the command just sent,
                 e.g. ``"set_current(0.0001)"``.
+
+        Raises:
+            CryoSoftInstrumentError: If the error queue is non-empty, with
+                ``code`` and ``instrument_message`` taken verbatim from the
+                instrument's reply.
         """
         try:
             reply = self._query(":SYST:ERR?").strip()
         except CryoSoftCommunicationError:
             return
-        if not reply.startswith("0,"):
-            log.warning("Keithley 6221: SCPI error after %s: %s", context, reply)
+        error = _parse_scpi_error(reply)
+        if error is None:
+            return
+        code, message = error
+        log.error("Keithley 6221: SCPI error after %s: %s", context, reply)
+        raise CryoSoftInstrumentError(
+            f"Keithley 6221 refused {context}: {code},{message!r}",
+            code=code,
+            instrument_message=message,
+            context=context,
+            vi_name="Keithley6221",
+        )
+
+    def _drain_error_queue(self) -> None:
+        """Read the error queue empty, discarding whatever it holds.
+
+        Used by recovery paths (:meth:`safe_shutdown`, :meth:`stop_delta_mode`)
+        so errors queued by the sequence being abandoned cannot surface later
+        against an unrelated, innocent command. Never raises.
+        """
+        for _ in range(_ERROR_QUEUE_DRAIN_LIMIT):
+            try:
+                reply = self._query(":SYST:ERR?").strip()
+            except CryoSoftCommunicationError:
+                return
+            if _parse_scpi_error(reply) is None:
+                return
+            log.debug("Keithley 6221: discarded queued SCPI error %s", reply)

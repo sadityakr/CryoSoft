@@ -1001,6 +1001,9 @@ class TestLakeshore335SampleTemperatureControllerVI:
 
     def test_set_curve_control(self, lakeshore_driver):
         vi = self._make_vi(lakeshore_driver)
+        # Slot 21 is a USER slot; the sim refuses assigning an empty one, so
+        # load it first (see test_l0_lakeshore_335.py).
+        lakeshore_driver._loaded_user_curves.add(21)
         vi.set_curve(21)
         assert vi.curve() == 21
         assert lakeshore_driver.get_sensor_curve("A") == 21

@@ -7,7 +7,11 @@ import time
 
 import pyvisa
 
-from cryosoft.core.exceptions import CryoSoftCommunicationError, CryoSoftSafetyError
+from cryosoft.core.exceptions import (
+    CryoSoftCommunicationError,
+    CryoSoftInstrumentError,
+    CryoSoftSafetyError,
+)
 
 log = logging.getLogger(__name__)
 
@@ -247,6 +251,37 @@ class OxfordMercuryiPS:
             log.debug("Mercury iPS: error closing VISA session: %s", exc)
 
     # ------------------------------------------------------------------
+    # Safe state (the safe-shutdown standard)
+    # ------------------------------------------------------------------
+
+    def safe_shutdown(self) -> None:
+        """Freeze the magnet where it is (ACTN:HOLD); never raises.
+
+        The Mercury's half of the **safe-shutdown standard** (see
+        ``drivers/README.md``): idempotent, callable from any leftover state.
+
+        Safe idle for a superconducting magnet is **HOLD, not zero field**.
+        The hazard this method exists to remove is an autonomous ramp
+        continuing after whatever was steering it has gone away — the PSU
+        keeps ramping to its last setpoint entirely on its own — so HOLD
+        removes exactly that. Ramping down is a slow, deliberate, supervised
+        operation (the magnet VI's ``standby()`` sequences it), never a
+        cleanup step: a fast dump is how magnets quench, and an unattended
+        one is worse than a magnet sitting at field.
+
+        The switch heater is left alone for the same reason: changing it is
+        what quenches a persistent magnet whose PSU and coil currents have
+        drifted apart.
+
+        Recovers from: a ramp in progress toward any setpoint.
+        """
+        log.info("Mercury iPS: safe shutdown — HOLD (magnet stays at field).")
+        try:
+            self.hold()
+        except Exception as exc:  # noqa: BLE001 — safe shutdown must never raise
+            log.warning("Mercury iPS: safe shutdown could not send HOLD: %s", exc)
+
+    # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
 
@@ -278,14 +313,27 @@ class OxfordMercuryiPS:
             ) from exc
 
     def _write(self, cmd: str) -> None:
-        """Write a SET: command and drain its STAT: acknowledgment reply.
+        """Write a SET: command and check its STAT: acknowledgment reply.
 
-        Every SET: command on this instrument is answered with a STAT: line
-        (mirroring the READ: query protocol); leaving it unread desyncs every
-        later query, which then receives this stale reply instead of its own
-        answer. A ``DENIED`` acknowledgment (the instrument refusing the
-        action, e.g. ACTN:RTOS while clamped) is raised immediately rather
-        than surfacing later as a confusing parse failure elsewhere.
+        The Mercury's half of the **driver error-reporting standard** (see
+        ``drivers/README.md``): its verification method is the **protocol
+        acknowledgement**, which is the strongest of the three because it
+        comes back on every single command. Every SET: command on this
+        instrument is answered with a STAT: line (mirroring the READ: query
+        protocol); leaving it unread desyncs every later query, which then
+        receives this stale reply instead of its own answer, and the reply
+        itself says whether the PSU carried the command out. ``DENIED`` (the
+        instrument refusing the action, e.g. ACTN:RTOS while clamped) and
+        ``INVALID`` (a command or value it will not accept) both become the
+        typed error immediately, rather than surfacing later as a confusing
+        parse failure somewhere innocent.
+
+        Args:
+            cmd: The full SET: command string.
+
+        Raises:
+            CryoSoftCommunicationError: If the bus transaction fails.
+            CryoSoftInstrumentError: If the PSU answers DENIED or INVALID.
         """
         try:
             ack = self._instr.query(cmd).strip()
@@ -294,11 +342,16 @@ class OxfordMercuryiPS:
                 f"Mercury iPS write failed ({cmd!r}): {exc}",
                 vi_name="OxfordMercuryiPS",
             ) from exc
-        if ack.endswith("DENIED"):
-            raise CryoSoftCommunicationError(
-                f"Mercury iPS denied command {cmd!r}: {ack}",
-                vi_name="OxfordMercuryiPS",
-            )
+        for refusal in ("DENIED", "INVALID"):
+            if ack.endswith(refusal):
+                log.error("Mercury iPS: %s for %r (reply %r)", refusal, cmd, ack)
+                raise CryoSoftInstrumentError(
+                    f"Mercury iPS refused command {cmd!r}: {ack}",
+                    code=refusal,
+                    instrument_message=ack,
+                    context=f"_write({cmd!r})",
+                    vi_name="OxfordMercuryiPS",
+                )
 
     def _query(self, cmd: str) -> str:
         try:

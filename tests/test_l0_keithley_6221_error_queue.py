@@ -1,5 +1,8 @@
 from unittest.mock import MagicMock
 
+import pytest
+
+from cryosoft.core.exceptions import CryoSoftInstrumentError
 from cryosoft.drivers.keithley_6221 import Keithley6221
 
 
@@ -20,13 +23,20 @@ def _driver_with_fake_instr(query_side_effect):
     return driver
 
 
-def test_set_current_logs_warning_on_scpi_error(caplog):
-    """set_current() must log a WARNING when :SYST:ERR? reports a real error."""
+def test_set_current_raises_typed_error_on_scpi_error():
+    """set_current() must raise the typed error when :SYST:ERR? reports one.
+
+    The driver error-reporting standard: a queued refusal is a fact the
+    caller has to see, because the source did NOT take the value and every
+    reading taken afterwards is fiction. The instrument's own code and
+    message ride on the exception rather than being flattened into prose.
+    """
     driver = _driver_with_fake_instr(['-221,"Settings conflict"'])
-    with caplog.at_level("WARNING"):
+    with pytest.raises(CryoSoftInstrumentError) as excinfo:
         driver.set_current(1e-4)
-    assert any("-221" in rec.message for rec in caplog.records)
-    assert any("set_current" in rec.message for rec in caplog.records)
+    assert excinfo.value.code == "-221"
+    assert excinfo.value.instrument_message == "Settings conflict"
+    assert "set_current" in excinfo.value.context
 
 
 def test_set_current_silent_when_error_queue_clean(caplog):
@@ -37,13 +47,13 @@ def test_set_current_silent_when_error_queue_clean(caplog):
     assert caplog.records == []
 
 
-def test_set_compliance_logs_warning_on_scpi_error(caplog):
-    """set_compliance() must also surface a queued SCPI error."""
+def test_set_compliance_raises_typed_error_on_scpi_error():
+    """set_compliance() must also surface a queued SCPI error as the typed error."""
     driver = _driver_with_fake_instr(['-221,"Settings conflict"'])
-    with caplog.at_level("WARNING"):
+    with pytest.raises(CryoSoftInstrumentError) as excinfo:
         driver.set_compliance(10.0)
-    assert any("-221" in rec.message for rec in caplog.records)
-    assert any("set_compliance" in rec.message for rec in caplog.records)
+    assert excinfo.value.code == "-221"
+    assert "set_compliance" in excinfo.value.context
 
 
 def test_set_compliance_silent_when_error_queue_clean(caplog):

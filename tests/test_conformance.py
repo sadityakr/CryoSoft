@@ -266,6 +266,93 @@ def test_driver_has_close(module_name: str) -> None:
     )
 
 
+@pytest.mark.parametrize("module_name", _driver_module_names())
+def test_driver_has_safe_shutdown(module_name: str) -> None:
+    """Every driver exposes safe_shutdown() taking no arguments.
+
+    The **safe-shutdown standard** (see ``drivers/README.md``): one
+    guaranteed, idempotent "leave it safe" per instrument, so anything that
+    has to abandon a sequence — a failed procedure, an emergency stop, an
+    agent that stopped answering — has one call to make on every driver
+    without knowing which instrument it is talking to. Duck-typed like
+    ``get_idn()``/``close()``: there is no DriverBase, so this test is the
+    contract.
+    """
+    module = importlib.import_module(f"cryosoft.drivers.{module_name}")
+    (cls,) = _public_classes(module)
+    method = getattr(cls, "safe_shutdown", None)
+    assert callable(method), (
+        f"{cls.__name__} lacks safe_shutdown() — every driver must offer one "
+        f"idempotent, never-raising way to leave its instrument safe "
+        f"(the safe-shutdown standard)"
+    )
+    required = [
+        p
+        for p in inspect.signature(method).parameters.values()
+        if p.name != "self"
+        and p.default is inspect.Parameter.empty
+        and p.kind not in (p.VAR_POSITIONAL, p.VAR_KEYWORD)
+    ]
+    assert not required, (
+        f"{cls.__name__}.safe_shutdown() must take no required arguments "
+        f"(the caller cannot know instrument-specific parameters), "
+        f"got {[p.name for p in required]}"
+    )
+
+
+# Sim attributes that legitimately change on every call because they track
+# wall-clock time, and so are excluded from the "second call is a no-op"
+# comparison below. Everything else must be untouched by a repeat call.
+_TIME_TRACKING_SIM_ATTRS = frozenset({"_last_update"})
+
+
+@pytest.mark.parametrize(
+    "module_name",
+    [m for m in _driver_module_names() if m.startswith("sim_")],
+)
+def test_sim_driver_safe_shutdown_reaches_a_declared_safe_state(module_name: str) -> None:
+    """A sim's safe_shutdown() is idempotent and lands in its declared safe state.
+
+    The sim half of the **safe-shutdown standard**. Each sim declares what
+    safe means for its instrument in ``_is_in_safe_state()`` — private, so
+    the real/sim public-API parity contract stays intact, and documented in
+    the sim's own docstring (a magnet's safe state is HOLD, not zero field; a
+    level meter's is pulsed refresh, not off). This test asserts the three
+    properties the standard promises: the call works from the sim's
+    as-constructed state, it leaves the instrument in that declared state,
+    and calling it a second time changes nothing at all.
+    """
+    module = importlib.import_module(f"cryosoft.drivers.{module_name}")
+    (cls,) = _public_classes(module)
+    driver = cls("SIM::CONFORMANCE")
+
+    predicate = getattr(driver, "_is_in_safe_state", None)
+    assert callable(predicate), (
+        f"{cls.__name__} lacks _is_in_safe_state() — every sim must declare, "
+        f"as an executable predicate, what safe state its safe_shutdown() "
+        f"leaves the instrument in (the safe-shutdown standard)"
+    )
+
+    driver.safe_shutdown()
+    assert predicate(), (
+        f"{cls.__name__}.safe_shutdown() did not leave the sim in the state "
+        f"its own _is_in_safe_state() declares as safe"
+    )
+
+    before = {
+        k: v for k, v in vars(driver).items() if k not in _TIME_TRACKING_SIM_ATTRS
+    }
+    driver.safe_shutdown()
+    after = {
+        k: v for k, v in vars(driver).items() if k not in _TIME_TRACKING_SIM_ATTRS
+    }
+    assert after == before, (
+        f"{cls.__name__}.safe_shutdown() is not idempotent — a second call "
+        f"changed {sorted(k for k in after if after[k] != before.get(k))}"
+    )
+    assert predicate()
+
+
 @pytest.mark.parametrize(
     "module_name",
     [m for m in _driver_module_names() if m.startswith("sim_")],

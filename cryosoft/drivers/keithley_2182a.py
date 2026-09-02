@@ -6,9 +6,49 @@ import logging
 
 import pyvisa
 
-from cryosoft.core.exceptions import CryoSoftCommunicationError
+from cryosoft.core.exceptions import (
+    CryoSoftCommunicationError,
+    CryoSoftInstrumentError,
+)
 
 log = logging.getLogger(__name__)
+
+
+# Cap on :SYST:ERR? reads when draining the queue. The 622x queue holds at
+# most a handful of entries; the cap only guarantees termination if an
+# instrument answers nonsense forever.
+_ERROR_QUEUE_DRAIN_LIMIT = 32
+
+
+def _parse_scpi_error(reply: str) -> tuple[str, str] | None:
+    """Split a SCPI ``:SYST:ERR?`` reply into (code, message), or None if clean.
+
+    A clean queue answers ``0,"No error"``. Anything else is a refusal the
+    instrument recorded and nobody would otherwise see (the driver
+    error-reporting standard, ``drivers/README.md``).
+
+    Args:
+        reply: The stripped instrument reply, e.g. ``'-221,"Settings conflict"'``.
+
+    Returns:
+        ``(code, message)`` with the code kept verbatim as a string and the
+        message unquoted, or ``None`` when the queue reports no error. An
+        unparseable reply is reported as an error with an empty code rather
+        than assumed clean — the standard never guesses in the instrument's
+        favour.
+    """
+    text = reply.strip()
+    if not text:
+        return None
+    code, _, message = text.partition(",")
+    code = code.strip()
+    message = message.strip().strip('"')
+    try:
+        if int(code) == 0:
+            return None
+    except ValueError:
+        return ("", text)
+    return (code, message)
 
 
 class Keithley2182A:
@@ -73,8 +113,13 @@ class Keithley2182A:
         Args:
             enabled: True to leave the instrument free-running, False (what
                 every CryoSoft reading path wants) for single-shot.
+
+        Raises:
+            CryoSoftInstrumentError: If the 2182A queues an error for the
+                write (the driver error-reporting standard).
         """
         self._write(":INIT:CONT " + ("ON" if enabled else "OFF"))
+        self._check_error_queue(f"set_continuous_initiation({enabled!r})")
 
     def get_voltage(self) -> float:
         """Trigger and return a single DC voltage reading in Volts.
@@ -103,8 +148,16 @@ class Keithley2182A:
         Args:
             range_v: Full-scale voltage range in Volts
                      (e.g. 0.01 for 10 mV, 0.1 for 100 mV).
+
+        Raises:
+            CryoSoftInstrumentError: If the 2182A refuses the range (e.g.
+                ``-222 "Parameter data out of range"`` above the channel's
+                full scale) — the driver error-reporting standard. Without
+                this poll the instrument silently keeps its previous range
+                and every later reading is taken on the wrong scale.
         """
         self._write(f":SENS:VOLT:CHAN1:RANG {range_v:.4e}")
+        self._check_error_queue(f"set_range({range_v!r})")
 
     def get_range(self) -> float:
         """Return the current DC voltage range setting in Volts."""
@@ -145,8 +198,84 @@ class Keithley2182A:
             log.debug("Keithley 2182A: error closing VISA session: %s", exc)
 
     # ------------------------------------------------------------------
+    # Safe state (the safe-shutdown standard)
+    # ------------------------------------------------------------------
+
+    def safe_shutdown(self) -> None:
+        """Unconditionally put the voltmeter in its safe idle state.
+
+        The 2182A's half of the **safe-shutdown standard** (see
+        ``drivers/README.md``): idempotent, callable from any leftover state,
+        never raises.
+
+        The 2182A sources nothing, so "safe" here means *quiet*: single-shot
+        instead of free-running (``:INIT:CONT OFF``), so it is not
+        continuously triggering conversions and filling its error queue with
+        ``-213 "Init ignored"`` against the next client of the bus. The
+        measurement range is deliberately left alone — it is a measurement
+        setting, not a hazard, and clobbering it would surprise an operator
+        who set it from the front panel.
+
+        Recovers from: a free-running instrument left mid-acquisition, and a
+        non-empty error queue.
+        """
+        log.info("Keithley 2182A: safe shutdown — returning to single-shot.")
+        try:
+            self._write(":INIT:CONT OFF")
+        except CryoSoftCommunicationError as exc:
+            log.warning("Keithley 2182A: safe shutdown could not send :INIT:CONT OFF: %s", exc)
+        self._drain_error_queue()
+
+    # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    def _check_error_queue(self, context: str) -> None:
+        """Poll ``:SYST:ERR?`` and raise if the last command was refused.
+
+        The 2182A's half of the **driver error-reporting standard** (see
+        ``drivers/README.md``). Like every SCPI instrument here, the 2182A
+        accepts a write it cannot execute and records the reason in its own
+        error queue instead of failing the bus transaction, so without this
+        poll a refused range change is invisible and every later reading is
+        taken on a scale nobody chose.
+
+        A bus failure while reading the queue is swallowed: the checker must
+        never turn a working call into a failure of its own.
+
+        Args:
+            context: Human-readable description of the command just sent.
+
+        Raises:
+            CryoSoftInstrumentError: If the error queue is non-empty.
+        """
+        try:
+            reply = self._query(":SYST:ERR?").strip()
+        except CryoSoftCommunicationError:
+            return
+        error = _parse_scpi_error(reply)
+        if error is None:
+            return
+        code, message = error
+        log.error("Keithley 2182A: SCPI error after %s: %s", context, reply)
+        raise CryoSoftInstrumentError(
+            f"Keithley 2182A refused {context}: {code},{message!r}",
+            code=code,
+            instrument_message=message,
+            context=context,
+            vi_name="Keithley2182A",
+        )
+
+    def _drain_error_queue(self) -> None:
+        """Read the error queue empty, discarding whatever it holds. Never raises."""
+        for _ in range(_ERROR_QUEUE_DRAIN_LIMIT):
+            try:
+                reply = self._query(":SYST:ERR?").strip()
+            except CryoSoftCommunicationError:
+                return
+            if _parse_scpi_error(reply) is None:
+                return
+            log.debug("Keithley 2182A: discarded queued SCPI error %s", reply)
 
     def _write(self, cmd: str) -> None:
         try:

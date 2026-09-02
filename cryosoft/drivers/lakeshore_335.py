@@ -6,9 +6,27 @@ import logging
 
 import pyvisa
 
-from cryosoft.core.exceptions import CryoSoftCommunicationError
+from cryosoft.core.exceptions import (
+    CryoSoftCommunicationError,
+    CryoSoftInstrumentError,
+)
 
 log = logging.getLogger(__name__)
+
+# Standard Event Status Register bits (IEEE-488.2 ``*ESR?``, which the 335
+# implements as its common interface). The 335 has no ``:SYST:ERR?`` queue,
+# so this register IS its error reporting: a command it could not parse or
+# could not carry out sets a bit here and nothing else on the bus changes.
+# Reading the register clears it, which makes each check self-draining.
+_ESR_QUERY_ERROR = 0x04
+_ESR_EXECUTION_ERROR = 0x10
+_ESR_COMMAND_ERROR = 0x20
+_ESR_FAULT_BITS = _ESR_QUERY_ERROR | _ESR_EXECUTION_ERROR | _ESR_COMMAND_ERROR
+_ESR_BIT_MEANINGS = (
+    (_ESR_COMMAND_ERROR, "Command error"),
+    (_ESR_EXECUTION_ERROR, "Execution error"),
+    (_ESR_QUERY_ERROR, "Query error"),
+)
 
 
 class Lakeshore335:
@@ -95,6 +113,7 @@ class Lakeshore335:
         self._write(f"SETP 1,{setpoint:.4f}")
         import time
         time.sleep(0.05)  # Allow instrument to process setpoint update
+        self._check_event_status(f"set_setpoint({setpoint!r})")
 
     def get_heater_output(self) -> float:
         """Return the heater output for output 1 as a percentage (0–100 %).
@@ -143,6 +162,7 @@ class Lakeshore335:
         """
         clamped = max(0.0, min(99.9, output))
         self._write(f"MOUT 1,{clamped:.2f}")
+        self._check_event_status(f"set_heater_output({output!r})")
 
     def get_heater_mode(self) -> str:
         """Return the heater control mode ('MANUAL' or 'AUTO')."""
@@ -192,6 +212,7 @@ class Lakeshore335:
         self._write(f"OUTMODE 1,{target_mode},{input_ch},{powerup}")
         import time
         time.sleep(0.2)  # Allow control loop to reinitialize and settle
+        self._check_event_status(f"set_heater_mode({mode!r})")
 
     def get_heater_range(self) -> str:
         """Return the heater range for output 1 ('OFF', 'LOW', 'MEDIUM', or 'HIGH').
@@ -233,6 +254,7 @@ class Lakeshore335:
                 f"Heater range must be one of {sorted(mapping)}, got {range_setting!r}"
             )
         self._write(f"RANGE 1,{mapping[range_setting]}")
+        self._check_event_status(f"set_heater_range({range_setting!r})")
 
     def get_proportional_band(self) -> float:
         """Return the proportional band (P value) for output 1."""
@@ -262,6 +284,7 @@ class Lakeshore335:
                 vi_name="Lakeshore335",
             ) from exc
         self._write(f"PID 1,{pb_clamped:.1f},{i_val:.1f},{d_val:.1f}")
+        self._check_event_status(f"set_proportional_band({pb!r})")
 
     def get_integral_action_time(self) -> float:
         """Return the integral action time (I value) for output 1."""
@@ -291,6 +314,7 @@ class Lakeshore335:
                 vi_name="Lakeshore335",
             ) from exc
         self._write(f"PID 1,{p_val:.1f},{iat_clamped:.1f},{d_val:.1f}")
+        self._check_event_status(f"set_integral_action_time({iat!r})")
 
     def get_derivative_action_time(self) -> float:
         """Return the derivative action time (D value) for output 1."""
@@ -320,6 +344,7 @@ class Lakeshore335:
                 vi_name="Lakeshore335",
             ) from exc
         self._write(f"PID 1,{p_val:.1f},{i_val:.1f},{dat_clamped:.1f}")
+        self._check_event_status(f"set_derivative_action_time({dat!r})")
 
     def get_auto_pid(self) -> bool:
         """Return whether Autotuning is active on output 1."""
@@ -340,6 +365,7 @@ class Lakeshore335:
         else:
             raw = self._query("OUTMODE? 1")
             self._write(f"OUTMODE 1,{raw}")
+        self._check_event_status(f"set_auto_pid({enabled!r})")
 
     def get_sensor_curve(self, sensor_input: str = "A") -> int:
         """Return the curve number assigned to the sensor input.
@@ -375,10 +401,92 @@ class Lakeshore335:
         if not (0 <= curve <= 59):
             raise ValueError(f"Curve number must be in [0, 59], got {curve}")
         self._write(f"INCRV {ch},{curve}")
+        self._check_event_status(f"set_sensor_curve({curve!r}, {sensor_input!r})")
+
+    # ------------------------------------------------------------------
+    # Safe state (the safe-shutdown standard)
+    # ------------------------------------------------------------------
+
+    def safe_shutdown(self) -> None:
+        """Unconditionally take the heater off; never raises.
+
+        The 335's half of the **safe-shutdown standard** (see
+        ``drivers/README.md``): idempotent, callable from any leftover state.
+
+        Safe idle for this instrument is *no power to the heater*. The heater
+        RANGE is what actually gates the output — even in closed-loop mode
+        with a live setpoint, range ``OFF`` delivers nothing — so the range
+        goes to ``OFF`` first, and the manual output value is zeroed behind
+        it so a later range change cannot resume heating at whatever
+        percentage was left commanded. The SETPOINT is deliberately left
+        alone: it is the operator's stated intent, it heats nothing while the
+        range is off, and clobbering it would lose information without
+        making anything safer.
+
+        Recovers from: an energised heater in either control mode, and a
+        non-zero manual output left commanded.
+        """
+        log.info("Lakeshore 335: safe shutdown — heater range OFF, output 0 %%.")
+        for cmd in ("RANGE 1,0", "MOUT 1,0.00"):
+            try:
+                self._write(cmd)
+            except CryoSoftCommunicationError as exc:
+                log.warning("Lakeshore 335: safe shutdown could not send %r: %s", cmd, exc)
+        # Clear whatever the abandoned sequence flagged so it is not charged
+        # to the next command (reading *ESR? clears it).
+        try:
+            self._query("*ESR?")
+        except CryoSoftCommunicationError:
+            pass
 
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    def _check_event_status(self, context: str) -> None:
+        """Read ``*ESR?`` and raise if the 335 flagged the last command.
+
+        The 335's half of the **driver error-reporting standard** (see
+        ``drivers/README.md``). This instrument has no SCPI error queue, so
+        its verification is the **status byte** the standard names as the
+        alternative: the IEEE-488.2 Standard Event Status Register, where a
+        command the instrument could not parse (command error) or could not
+        carry out (execution error) sets a bit and nothing else on the bus
+        changes. Reading the register clears it, so each check leaves a clean
+        slate for the next command.
+
+        A bus failure while reading the register is swallowed: the checker
+        must never turn a working call into a failure of its own.
+
+        Args:
+            context: Human-readable description of the command just sent.
+
+        Raises:
+            CryoSoftInstrumentError: If a command/execution/query-error bit is
+                set, with ``code`` naming the raw register value.
+        """
+        try:
+            raw = self._query("*ESR?").strip()
+        except CryoSoftCommunicationError:
+            return
+        try:
+            bits = int(raw)
+        except ValueError:
+            log.warning("Lakeshore 335: unparseable *ESR? reply %r after %s", raw, context)
+            return
+        flagged = bits & _ESR_FAULT_BITS
+        if not flagged:
+            return
+        names = ", ".join(name for bit, name in _ESR_BIT_MEANINGS if flagged & bit)
+        code = f"ESR:0x{flagged:02X}"
+        log.error("Lakeshore 335: %s after %s (*ESR? = %s)", names, context, raw)
+        raise CryoSoftInstrumentError(
+            f"Lakeshore 335 refused {context}: {names} ({code})",
+            code=code,
+            instrument_message=names,
+            context=context,
+            vi_name="Lakeshore335",
+        )
 
     def _write(self, cmd: str) -> None:
         try:

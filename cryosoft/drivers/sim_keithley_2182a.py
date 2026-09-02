@@ -1,8 +1,19 @@
 """Simulated Keithley 2182A Nanovoltmeter driver."""
 
+import logging
 import random
 
-from cryosoft.core.exceptions import CryoSoftCommunicationError
+from cryosoft.core.exceptions import (
+    CryoSoftCommunicationError,
+    CryoSoftInstrumentError,
+)
+
+log = logging.getLogger(__name__)
+
+# Full scale of the 2182A's largest channel-1 DC voltage range, plus the
+# instrument's over-range headroom. A requested range above this is refused
+# outright — see set_range().
+_MAX_RANGE_V = 120.0
 
 
 class SimKeithley2182A:
@@ -53,9 +64,32 @@ class SimKeithley2182A:
     def set_range(self, range_v: float) -> None:
         """Set the measurement voltage range.
 
+        Models the instrument-error half of the driver error-reporting
+        standard: a range above the largest the channel has is refused with
+        ``-222 "Parameter data out of range"`` and the instrument keeps its
+        previous range — silently, on real hardware, which is exactly why the
+        real driver polls its error queue after this write.
+
         Args:
             range_v: Full-scale voltage range in Volts.
+
+        Raises:
+            CryoSoftInstrumentError: ``-222`` if *range_v* exceeds the
+                channel's largest range.
         """
+        self._check_error()
+        if abs(float(range_v)) > _MAX_RANGE_V:
+            # The stored range deliberately does NOT change.
+            context = f"set_range({range_v!r})"
+            raise CryoSoftInstrumentError(
+                f"Simulated Keithley 2182A refused {context}: "
+                f'-222,"Parameter data out of range" '
+                f"({range_v!r} V is above the {_MAX_RANGE_V} V channel maximum)",
+                code="-222",
+                instrument_message="Parameter data out of range",
+                context=context,
+                vi_name="SimKeithley2182A",
+            )
         self._range = float(range_v)
 
     def get_range(self) -> float:
@@ -81,6 +115,24 @@ class SimKeithley2182A:
         """Return simulated *IDN? response string."""
         self._check_error()
         return "KEITHLEY,2182A,SIM,1.0"
+
+    # ------------------------------------------------------------------
+    # Safe state (the safe-shutdown standard)
+    # ------------------------------------------------------------------
+
+    def safe_shutdown(self) -> None:
+        """Put the simulated voltmeter in its safe idle state; never raises.
+
+        Safe idle for a nanovoltmeter is *quiet*, not off: single-shot rather
+        than free-running. The measurement range is deliberately left alone
+        (a setting, not a hazard) — see the real driver's docstring.
+        """
+        log.info("SimKeithley2182A: safe shutdown — returning to single-shot.")
+        self._continuous_initiation = False
+
+    def _is_in_safe_state(self) -> bool:
+        """Return True when the sim is idle (not free-running)."""
+        return not self._continuous_initiation
 
     # ------------------------------------------------------------------
     # Connection lifecycle (the connection-lifecycle standard)
