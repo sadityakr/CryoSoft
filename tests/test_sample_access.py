@@ -127,7 +127,7 @@ def test_constructs_from_defaults(op_cls, station):
     """The conformance suite's own check, made explicit: station alone suffices."""
     op = op_cls(station)
     assert op.name == op_cls.name
-    assert op.tolerated_safety_flags == frozenset()
+    assert op.tolerated_safety_flags == frozenset({"helium_low"})
 
 
 @pytest.mark.parametrize("op_cls", _OPERATION_CLASSES, ids=_OPERATION_IDS)

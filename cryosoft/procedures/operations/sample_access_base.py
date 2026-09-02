@@ -82,10 +82,13 @@ class _SampleAccessOperationBase(OperationBase):
     every readiness condition holds, since for this operation "ready" means
     "you may open the cryostat now" — true well before Finish.
 
-    ``tolerated_safety_flags`` is deliberately left at the ``OperationBase``
-    default (empty): neither loading nor unloading a sample has any business
-    running under an active safety condition — unlike the helium fill,
-    nothing about opening the cryostat *fixes* a tripped flag.
+    ``tolerated_safety_flags = frozenset({"helium_low"})``: unlike the
+    helium fill, loading or unloading a sample does nothing to *fix* a
+    helium-low condition, but an operator who needs a sample in or out
+    should not be locked out of doing so just because the reservoir is
+    also running low — the two are independent operational needs. A
+    non-tolerated flag (e.g. ``quench``) still aborts the run exactly like
+    any other operation.
 
     The step sequence
     -------------------------------------------------------------------
@@ -136,6 +139,10 @@ class _SampleAccessOperationBase(OperationBase):
     #: Hold-phase operation: the ready banner may show mid-run, not only after
     #: Finish — see ``OperationBase.hold_for_operator``'s docstring.
     hold_for_operator = True
+
+    #: Sample access does not fix a helium-low condition, but it should not
+    #: be blocked by one either — see the class docstring.
+    tolerated_safety_flags = frozenset({"helium_low"})
 
     #: Declared pre-run toggles: {config key: human-readable checkbox label}.
     #: Unlike operator_confirmations (shown only while running, one-way,
