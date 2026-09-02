@@ -5,7 +5,12 @@ Written to answer three questions: what threading work already exists on
 the remote branches, how it should be merged, and what CryoSoft must become
 so that agent operation, live analysis, and eLab export can run *while a
 measurement is running*, with the operator-visible behaviour of `main`
-preserved. The decisions this document needs are collected in §8.
+preserved. It folds in the 2026-08-08 redline from the session that
+produced the groundwork branch (its shipped steps, its withdrawn step, and
+its five open decisions), verifies that redline's code claims against
+today's `main`, and adds the design of the thread move itself, which the
+redline left as a single 3–4 day line. The decisions this document needs
+are collected in §8.
 
 The one-sentence design: **the invariant worth keeping is "exactly one
 thread touches instruments", not "the process has exactly one thread".**
@@ -13,22 +18,20 @@ Move the whole hardware stack (Orchestrator, Station, VIs, drivers, data
 manager) onto one dedicated *instrument thread*, leave the GUI, the session
 layer, the agent gateway, analysis and network I/O on the main thread, and
 let the two sides speak only through Qt queued signals and one proxy object.
-The Orchestrator's logic, the tick, the claims, the pause boundary and the
-1,900-test suite that drives `_tick()` synchronously do not change.
+The Orchestrator's logic, the tick, the claims, the pause boundary, the
+scheduler and the test suite that drives `_tick()` synchronously do not
+change.
 
 ---
 
 ## 1. Audit: what exists on the branches
 
-### 1.1 The named branch holds no threading work
+### 1.1 The branch first named holds no threading work
 
-`claude/unified-offline-instrument-tags-pylahd` (tip `f4b4bd2`, "Make the
-availability policy table enforce what it claims") was merged into `main`
-as PR #13 on 2026-07-28. It is a strict ancestor of `main`, 49 commits
-behind it, and its subject is the Availability standard and the
-connection-lifecycle standard: offline instrument tags, `not_responding`,
-the `TAG_POLICY` table. Nothing on it concerns threads. There is nothing to
-merge from it.
+`claude/unified-offline-instrument-tags-pylahd` (tip `f4b4bd2`) was merged
+into `main` as PR #13 on 2026-07-28. It is a strict ancestor of `main` and
+its subject is the Availability standard and the connection-lifecycle
+standard. Nothing on it concerns threads; there is nothing to merge from it.
 
 ### 1.2 No branch anywhere contains a thread
 
@@ -38,52 +41,81 @@ All 32 remote branches were scanned for `QThread`, `QThreadPool`,
 codebase is, today, exactly what `CLAUDE.md` says it is: one `QTimer` on
 the GUI thread drives everything.
 
-### 1.3 The groundwork that does exist: `claude/monitor-responsiveness-procedures-w9o7bv`
+### 1.3 The groundwork: `claude/monitor-responsiveness-procedures-w9o7bv`
 
-This is almost certainly the branch the request had in mind. Four commits,
-dated 2026-08-08, six commits behind `origin/main`. Its second commit's
-message states the intent outright: *"This is a prerequisite for moving the
-Orchestrator off the GUI thread rather than a cosmetic fix. A marshalled
-cross-thread call cannot return a value, so the emitted verdict becomes the
-only evidence a caller ever gets that its request was seen."*
+Confirmed as the intended branch. Four commits, dated 2026-08-08, based on
+`0d88757`, six commits behind `origin/main`. The session that produced it
+set out to implement "Phase 0" of a thread-move plan and, by its own
+redline, spent most of its value proving a third of that Phase 0 wrong
+(§1.4). What shipped:
 
 | Commit | What it does | Verdict |
 |---|---|---|
-| `6fe4862` Reject both path separators in experiment folder names on every platform | Bug fix in `session/manager.py`: `"a\b"` was accepted as a folder name on Linux and rejected on Windows. Fixes a failing test on Linux. | **Merge.** Independent of threading, correct, tested. |
-| `bc017c0` Stop restating the layer-contract count in CLAUDE.md | `CLAUDE.md` said "C1–C12"; `pyproject.toml` holds 15. Names `pyproject.toml` as the only source of truth. | **Merge.** Trivial and currently true. |
-| `c252291` Extract the headless procedure factory as `core/run_builder.py` | One `build_procedure()` replacing two near-identical constructors in `ProcedureWindow` and `QueuePanel`; imports no Qt; `PROCEDURE_BUILD_ERRORS` names the refusal exceptions. Also fixes a latent crash: `QueuePanel` caught `(TypeError, ValueError)` but a refusing procedure raises `CryoSoftConfigError`, which is not a `ValueError`, so a stale queue entry took the window down on session restore. 171 lines of tests. | **Merge.** This is the first brick of agent operation: a run can be built from a script or a remote client. It is also exactly what the framework plan's Phase 4 gateway needs. |
-| `de817f7` Give every refused lifecycle action an explicit verdict | `pause_procedure`, `resume_procedure`, `recover_from_error`, `abort_procedure` (during EMERGENCY) and `set_scanner_enabled` emitted nothing when they refused. Each now emits `action_blocked` with the reason, reusing the channel `submit_vi_action` already uses. 68 lines of tests. | **Merge, with a two-hunk manual resolution.** Conflicts with `main`'s pause-boundary rewrite (`6261da2`, `ca1f790`), see §1.5. The behaviour it adds is a *precondition* for the instrument thread: once a call is marshalled across threads, a silent refusal is undiagnosable. |
+| `c252291` Step 0.1 — `core/run_builder.py`, the headless factory | One `build_procedure()` replacing two widget-bound constructors in `ProcedureWindow` and `QueuePanel`; imports no Qt (asserted by a test that greps its own source); refuses by raising, never by returning `None`; `PROCEDURE_BUILD_ERRORS` names the refusal tuple. Also fixes a latent crash: `QueuePanel` caught `(TypeError, ValueError)` but a refusing procedure raises `CryoSoftConfigError`, which is not a `ValueError`, so a stale queue entry took the window down on session restore. | **Merge.** A run can now be built with no `QApplication` in the process. First brick of agent operation. |
+| `de817f7` Step 0.4a — every refused action gets a verdict | Six entry points refused work silently: pause with no run, pause from a disallowed state, resume outside PAUSED, recover outside ERROR, abort during EMERGENCY, scanner toggle with no switch. Each now emits `action_blocked` naming the state it refused from. | **Merge, with a two-hunk manual resolution** (§1.5). Today a UX repair; after the thread move it is structural: a marshalled call returns before the engine has looked at it, so the emitted verdict is the only evidence the caller ever gets. |
+| `6fe4862` Fix-along — path separators rejected on every platform | `a\b` was rejected on Windows and accepted on Linux. A real portability bug, not a test artefact: a folder written on the Linux rig splits into a nested path when opened on a Windows analysis machine. | **Merge.** Also the one test failing on `main` today (§1.6). |
+| `bc017c0` Fix-along — `CLAUDE.md` stops counting the contracts | "C1–C12" while `pyproject.toml` held fifteen; the count had rotted twice and misled planning into proposing taken numbers. | **Merge.** The next contract is C16. |
 
 `claude/agent-instrument-framework-audit-4vdfci` is the same four commits
 plus `0568f4f`, a 621-line `agent-operative-architecture-audit.md` (under
-`docs/plans/` on that branch) that audits the architecture against an external agent-to-instrument
-protocol. Its §4 D4 ("No thread. Ever.") and its §8 (corrections to
-`agentic-instrumentation-framework.md`) bear directly on this plan; see
-§3.4 for how they reconcile with an instrument thread.
+`docs/plans/` on that branch) auditing the architecture against an external
+agent-to-instrument protocol. Its D4 ("No thread. Ever.") and its §8
+(corrections to `agentic-instrumentation-framework.md`) bear on this plan;
+§3.5 reconciles them.
 
-### 1.4 What the groundwork does *not* do
+### 1.4 What the redline withdrew, and what it corrected
 
-Neither branch moves anything off the GUI thread, adds a proxy, snapshots
-Station metadata for the GUI, or removes the GUI's private access to the
-Orchestrator's queue. Those are the actual threading work and they are
-specified in §4 of this document. The branch is groundwork, correctly
-sequenced, about ten percent of the way.
+**Step 0.3 as planned is withdrawn.** It would have deleted the engine's
+`_procedure_queue` and moved the advance decision into the GUI: the queue
+watches `state_changed`, sees `"idle"`, starts the next run. An adversarial
+review returned 33 blockers; three kill the step outright, and each is
+verified against today's `main`:
+
+1. *Operations starve.* `run_queue()` drains `_operation_queue` before
+   procedures (the "queue-jumping, not preemption" rule). Deleting its call
+   sites (`orchestrator.py:848`, `:2637`) means a queued operation never
+   starts. The plan also missed the third caller: the GUI's own Run Queue
+   button (`queue_panel.py:163`).
+2. *The advance is re-entrant.* `_change_state()` emits `state_changed`
+   synchronously (`orchestrator.py:1763`), so a GUI queue reacting to
+   `"idle"` would start the next run *inside that emit*, ahead of the
+   engine's own `run_queue()`.
+3. *It is safety-relevant.* Five transitions to IDLE on `main`
+   (`recover_from_error`, `_fail_run_for_fault`, the emergency
+   acknowledge, a completed manual ramp, and the abort path) deliberately
+   do not chain. `state_changed` carries only the state name, so an external
+   listener cannot tell a clean finish from a quench acknowledgement, and
+   would auto-start a queued procedure straight after an emergency.
+
+**The replacement inverts the dependency instead of relocating the
+scheduler.** `run_queue()` stays, all three call sites stay, operations
+still drain first, the five no-chain transitions stay no-chain. The engine
+gains a `next_procedure()` callback that a headless `RunQueue` supplies:
+the GUI holds specs, the engine holds the one live object, and the engine
+keeps sole authority over *when* a run starts. This supersedes the earlier
+draft of this document, which proposed public `replace_queue()` /
+`clear_queue()` methods; the pull seam is the better answer because it
+removes the shared mutable queue entirely instead of wrapping it.
+
+"Refuse if busy" (the GUI declining commands while the engine works) is
+dropped outright, not rescheduled: never needed to reshape the seam, and
+the same quench-acknowledgement hole applies to it.
+
+**Two corrected claims.** `Station.get_state()` is not free of ownership
+work: it mutates `_error_counts` and pops the condition registry via
+`clear_fault()`, structures the GUI reads. And the verdict path was not
+already complete, which is where 0.4a came from.
 
 ### 1.5 Trial merge
 
 A trial merge of the audit branch onto `origin/main` was performed in a
-scratch worktree (never pushed). Result:
+scratch worktree (never pushed). Everything merges automatically except
+`core/orchestrator.py`, which conflicts in exactly two hunks, both inside
+`pause_procedure()` / `resume_procedure()`, because `main` restructured
+those methods around `_enter_paused()` and the deferred pause request
+(`6261da2`, `ca1f790`) after the branch was cut.
 
-- `session/manager.py`, `gui/procedure_window.py`, `gui/queue_panel.py`,
-  `core/run_builder.py`, `core/README.md`, `CLAUDE.md`, both test files and
-  the audit document merge automatically.
-- `core/orchestrator.py` conflicts in exactly two hunks, both inside
-  `pause_procedure()` / `resume_procedure()`, because `main` restructured
-  those methods around `_enter_paused()` and the deferred pause request
-  after the branch was cut.
-
-Resolution, verified by the full suite in the trial worktree (results in
-§1.6):
+Resolution, verified by the full suite in the trial worktree (§1.6):
 
 - `pause_procedure()`: keep `main`'s structure (defer from `MEASURING`,
   `_enter_paused()` from the pausable states) and add the branch's verdict
@@ -110,17 +142,19 @@ Run on Linux, Python 3.11, `QT_QPA_PLATFORM=offscreen`, a fresh `.venv`.
 
 The one failure on `main` is
 `test_session_layer.py::test_start_experiment_rejects_separator_or_dot_dirname[a\\b]`,
-exactly the Linux-only bug `6fe4862` fixes. So `main` is red on Linux today
-and the groundwork merge turns it green, adding sixteen tests.
+exactly the Linux-only bug `6fe4862` fixes. `main` is red on Linux today and
+the groundwork merge turns it green. (The redline reported 2304 passing on
+its own base; the difference is what `main` gained since.)
 
 ---
 
 ## 2. Where the GUI actually freezes today
 
-The freeze is structural, not a bug. Every tick runs on the GUI thread
-inside a `QTimer` slot (`core/orchestrator.py`, `_tick()`), so for the
-duration of one tick no paint, click or keypress is processed. Two phases of
-the tick are long:
+The redline's diagnosis, confirmed: the freeze is one blocked event loop,
+not paused monitoring. `_tick_body()` calls `self._procedure.measure()`
+inline, so the Qt event loop gets no cycles for the whole reading grid;
+nothing repaints because nothing is asked to draw, and the OS paints "Not
+responding". Two phases of the tick are long:
 
 **The monitor poll.** `Station.get_state()` calls `vi.get_state()` on every
 VI in sequence, and each `@monitored` method is one bus round-trip. On the
@@ -131,9 +165,8 @@ bus; a full pyvisa timeout (3 to 15 s, per driver) each on an unhealthy one.
 A single unresponsive instrument therefore freezes the whole GUI for its
 timeout on every tick until the Station marks it disconnected.
 
-**The measurement.** In `MEASURING` the tick calls `self._procedure.measure()`
-synchronously. Inside it, by design and documented as "the tick's
-designated blocking phase":
+**The measurement.** Inside `measure()`, by design and documented as "the
+tick's designated blocking phase":
 
 - `SwitchMatrixVI.select_route()` sleeps `settle_time_s` (1.0 s on
   `12t-cryo`) per route change;
@@ -144,14 +177,19 @@ designated blocking phase":
 - the reading loop multiplies all of that by every `loop1 × loop2` value
   (routes × excitation currents) per datapoint.
 
-A datapoint routinely takes tens of seconds; the GUI is frozen for all of
-it, and so is every future agent, analysis or export feature that would
-share that thread.
-
-Nothing in the repository mitigates this: there is no
+A datapoint routinely takes 10 to 60 s; the GUI is frozen for all of it,
+and so is every future agent, analysis or export feature that would share
+that thread. Nothing in the repository mitigates this: there is no
 `QApplication.processEvents()` in `cryosoft/` (correctly; it would make the
-tick re-entrant), and the only `time.sleep` calls outside drivers are the
-three measurement sleeps above.
+tick re-entrant).
+
+The fix is a thread boundary, and the boundary has preconditions. Two
+things harmless in a single-threaded program stop working the moment the
+engine is elsewhere, and both were repaired on the branch before the move:
+a marshalled call returns nothing (hence 0.4a), and construction lived on a
+widget (hence 0.1). Two more are identified below and are not yet done:
+synchronous reads of engine state (§3.3, step 0.4) and a shared mutable
+queue (§1.4, steps 0.2 + 0.3).
 
 ---
 
@@ -176,234 +214,198 @@ as the **single hardware thread standard**:
 > to the instrument thread and reading a snapshot it published. There is
 > never a second hardware writer and never a lock around a bus.
 
-Everything below follows from taking that sentence seriously.
-
 ### 3.2 Two threads, one direction of ownership
 
 ```
 GUI thread (main)                          Instrument thread
 ─────────────────────────────              ─────────────────────────────
 QApplication, every widget                 QTimer tick
-ExperimentManager (L6)                     Orchestrator (L3)
-CryogenicsRecorder, TrendCheckRunner*      Station (L2), VIs (L1), drivers (L0)
-OrchestratorProxy  ──queued requests──►    DataManager (L5), procedure (L4)
-StationInfo (frozen)                       TieredTrendLogger, status.jsonl
+ExperimentManager (L6)                     Orchestrator (L3), the scheduler
+CryogenicsRecorder                         Station (L2), VIs (L1), drivers (L0)
+RunQueue (specs) ◄──next_procedure()──     DataManager (L5), procedure (L4)
+OrchestratorProxy  ──queued requests──►    TieredTrendLogger, status.jsonl
+StationInfo (frozen)                       TrendCheckRunner (holds Station)
 StatusSnapshot (frozen, latest)  ◄──queued signals──
 future: agent gateway, analysis
         buffer, eLab client
 ```
 
-`*` `TrendCheckRunner` holds a `Station` and calls
-`Station.publish_conditions()`; it must move to the instrument thread with
-the Station (it is a `QObject` with its own timer, so this is a
-`moveToThread` at construction).
-
 Ownership is one-directional. The instrument thread never calls into the
-GUI; it emits. The GUI thread never holds a reference to a VI, a driver or
-the live `Station` after Phase 2 below; it holds a proxy and two frozen
-snapshot types.
+GUI except through the injected `next_procedure()` callback, which is a
+pure function over specs and builds via `build_procedure()` on the engine's
+thread. The GUI thread never holds a reference to a VI, a driver or the
+live `Station` after step 0.4; it holds a proxy and two frozen snapshot
+types. `TrendCheckRunner` holds a `Station` and publishes conditions into
+it, so it moves with the Station.
 
-### 3.3 The three new pieces
+### 3.3 No synchronous reads (redline D4, option A)
 
-**`InstrumentHost`** (proposed `cryosoft/core/instrument_host.py`, or
-`cryosoft/runtime.py` as a leaf beside `main.py`; decision D2). Owns the
-`QThread`. Builds the Station *inside* the thread so every pyvisa
-`ResourceManager` and serial port is opened by the thread that will use it
-(VISA sessions are thread-affine in practice even where the spec says
-otherwise). Constructs the Orchestrator there, starts and stops its
-`QTimer` through queued slots (Qt refuses to start a timer from a foreign
-thread), and on shutdown calls `Orchestrator.shutdown()`, quits the thread
-and joins it with a bounded wait so a wedged VISA read cannot hang app exit
-forever. Runs in two modes: `threaded` and `inline`. In `inline` mode there
-is no thread; everything is constructed on the caller's thread exactly as
-today. Both modes share one code path in the GUI, which is what lets the
-whole GUI test suite run unchanged in `inline` mode and a dedicated suite
-run in `threaded` mode.
+The largest behavioural change in Phase 0, and the one this document's
+design depends on. Today the GUI has around 21 getter call sites into the
+engine, six dynamic Station reads, three read-then-act pairs
+(`procedure_window.py:458`, `:467`, `:480` check `active_run_kind()` and
+act on the answer, a time-of-check race the instant the engine is
+elsewhere), three direct writes to `orchestrator._procedure_queue`
+(`queue_panel.py`), and one real hardware call from the GUI thread:
+`instrument_front_panel.py:93` calls `self._vi.ping()`.
 
-**`OrchestratorProxy`** (GUI-side `QObject`). Mirrors all 39 public
-Orchestrator methods, split by kind:
+The alternative, a blocking cross-thread invoke with a timeout, is rejected
+because it reintroduces exactly the freeze this plan exists to remove: the
+engine may be forty seconds deep in `measure()`.
+
+So: the GUI reads only its local mirror, every action is a request answered
+by a verdict, every GUI guard clause becomes advisory rather than
+authoritative ("ask, and let the engine refuse"), and the front panel's
+Check button becomes a request whose result arrives as a signal.
+
+### 3.4 The pieces
+
+**`OrchestratorProxy`** (GUI-side `QObject`). Mirrors the public Orchestrator
+surface (39 methods today), split by kind:
 
 - *Commands* (`run_procedure`, `pause_procedure`, `submit_vi_action`,
-  `acknowledge`, `connect_instrument`, ...): forwarded as queued
-  invocations to the Orchestrator's thread. They return `None`. Their
-  outcome arrives on the existing `action_succeeded` / `action_failed` /
-  `action_blocked` / `state_changed` signals, which is precisely why the
-  branch's verdict commit is a prerequisite.
+  `acknowledge`, `connect_instrument`, ...) are forwarded as queued
+  invocations. They return `None`; the outcome arrives on the existing
+  `action_succeeded` / `action_failed` / `action_blocked` / `state_changed`
+  signals. This is why 0.4a is a prerequisite.
 - *Queries* (`state`, `availability`, `vi_faults`, `held_vi_names`,
   `override_active`, `manual_override_expires_at`, `active_run_kind`,
   `scanner_enabled`, `offline_reason`, `pause_pending`, `active_ramps`,
-  `get_operational_status`, `is_monitoring`): answered from the latest
-  `StatusSnapshot`, never by a cross-thread call. Most of these have no
-  signal today; §4 Phase 1 adds one.
-- *Signals*: re-exposed 1:1, so `orchestrator.states_updated.connect(...)`
-  in a widget becomes `proxy.states_updated.connect(...)` and nothing else
-  changes. Qt's auto-connection picks a queued connection whenever the
-  emitter and receiver live on different threads, so every existing GUI
-  slot keeps working; it just runs one event-loop hop later.
+  `get_operational_status`, `is_monitoring`) are answered from the latest
+  `StatusSnapshot`, never by a cross-thread call.
+- *Signals* are re-exposed 1:1, so `orchestrator.states_updated.connect(...)`
+  in a widget becomes `proxy.states_updated.connect(...)`. Qt's
+  auto-connection picks a queued connection whenever emitter and receiver
+  live on different threads, so every existing GUI slot keeps working one
+  event-loop hop later.
 
-A conformance test asserts the proxy mirrors every public method of
-`Orchestrator` with the same signature, so a method added to one cannot be
-forgotten on the other.
+A conformance test asserts the proxy mirrors every public `Orchestrator`
+method with the same signature.
 
-**`StatusSnapshot`** and **`StationInfo`** (frozen dataclasses). The first
-is emitted by the Orchestrator once per tick and on every state change and
-carries everything a query above needs. The second is captured by the
-Station once at build (VI names, types, offline registry, monitored and
-control method metadata, `ParamSpec`s) and re-emitted whenever
-`connect_instrument` / `disconnect_instrument` changes it. The GUI's
-`InstrumentPanel` and `MonitorWindow` build their controls from
-`StationInfo`, not from `Station.get_vi()`.
+**`StatusSnapshot`** (frozen dataclass), emitted once per tick and on every
+`_change_state()`, carrying every query above. **`StateChange`** payload on
+`state_changed`: the redline's D1 asks whether `state_changed` should carry
+a *cause*; this plan recommends yes (option A), and recommends the cause be
+part of one typed, frozen payload standard shared with `StatusSnapshot`
+rather than a bare `dict`, so the cross-thread payload contract is set once
+while there is a single consumer to migrate.
 
-### 3.4 Reconciling with the two agent-architecture documents
+**`StationInfo`** (frozen dataclass), captured by the Station once at build
+(VI names, types, offline registry, monitored and control metadata,
+`ParamSpec`s) and re-emitted on `connect_instrument` /
+`disconnect_instrument`. Widgets build from it, never from
+`Station.get_vi()`. `control_param_specs()` must become a pure read of
+config and cached state (the audit document's D1 already asks; the
+Lakeshore VI reads hardware there today), enforced by a conformance test.
 
-`agentic-instrumentation-framework.md` Phase 5 calls the MCP transport
-"the one sanctioned thread" and warns it is the riskiest change in the
-programme because it would be *the* second thread. The audit document's D4
-answers "no thread, ever" and proposes a request spool drained by the tick,
-a `QLocalServer` slot on the event loop, and an out-of-process MCP adapter.
+**`RunQueue`** (headless, holds specs) and the **`next_procedure()`** pull
+seam (§1.4). `QueueEntry.proc` is dropped; the queue holds
+`(cls, params, sample_info, data_dir, file_prefix)` and the engine calls
+`build_procedure()` when `run_queue()` decides it is time. Where it lives is
+redline D3; when a spec is validated is redline D2.
 
-Both were reasoning about a thread that would *talk to the Station*. The
-instrument thread is the opposite move: it takes the hardware *away* from
-the thread everything else runs on. Once it exists, D4's three rungs still
-hold verbatim, they just run on the GUI thread as clients of
-`OrchestratorProxy`, and the "transport thread" question dissolves: an MCP
-adapter can be a separate process (D4 rung 3) or an asyncio server on the
-GUI thread's event loop; neither is a hardware thread. The wording of D4
-should become "no second hardware thread", and Phase 5's "one sanctioned
-thread" should be retired as a concept. §8 of the audit document (the
-corrections to the framework plan) is independent of this and should be
-folded in regardless (decision D3).
+**`InstrumentHost`** (`cryosoft/core/instrument_host.py`). Owns the
+`QThread`. Builds the Station *inside* the thread so every pyvisa
+`ResourceManager` and serial port is opened by the thread that will use it.
+Constructs the Orchestrator there, starts and stops its `QTimer` through
+queued slots (Qt refuses to start a timer from a foreign thread), and on
+shutdown calls `Orchestrator.shutdown()`, quits the thread and joins it
+with a bounded wait so a wedged VISA read cannot hang app exit. Two modes,
+`threaded` and `inline`; in `inline` mode there is no thread and everything
+is constructed on the caller's thread exactly as today. One GUI code path
+serves both, which is what lets the whole GUI test suite run unchanged in
+`inline` mode and a dedicated suite exercise `threaded` mode.
 
-### 3.5 What is preserved from `main`, and the one thing that changes
+**Signal payload rule.** Every `dict` the Orchestrator emits is a fresh copy
+the emitter never touches again. `Station.get_state()` returns a fresh outer
+dict but shares the inner per-VI dicts with `_last_known_state`; copy at the
+emit boundary. Frozen dataclasses for the new types.
 
-Preserved, by construction:
+### 3.5 Reconciling with the two agent-architecture documents
 
-- Every hardware write still flows through the Orchestrator's tick and
-  drain gate; `_manual_action_admissible()` is still evaluated at drain.
-- The pause boundary, the claims, the ramp scope, the condition pipeline,
-  stall detection: untouched code.
-- A GUI click still lands *between ticks*. Today the click's slot runs on
-  the GUI thread between two timer slots; after the move, the queued
-  invocation runs on the instrument thread's event loop between two timer
-  slots. Same ordering, same code path.
-- Every one of the 56 `_tick()` call sites across 5 test files keeps
-  driving a plain `Orchestrator` synchronously. The Orchestrator does not
-  learn about threads; the host does.
+`agentic-instrumentation-framework.md` Phase 5 calls the MCP transport "the
+one sanctioned thread" and the riskiest change in the programme. The audit
+document's D4 answers "no thread, ever" and proposes a request spool drained
+by the tick, a `QLocalServer` slot on the event loop, and an out-of-process
+MCP adapter. Both were reasoning about a thread that would *talk to the
+Station*. The instrument thread is the opposite move: it takes the hardware
+away from the thread everything else runs on. D4's three rungs hold
+verbatim; they run on the GUI thread as clients of `OrchestratorProxy`, and
+the "transport thread" question dissolves. D4's wording should become "no
+second hardware thread"; Phase 5's "one sanctioned thread" is retired. The
+audit's §8 corrections to the framework plan are independent of this and
+should be folded in regardless.
 
-The one observable change: **GUI queries read the last published snapshot,
-not live state.** A getter can be one event-loop hop stale. For the status
-bar, availability badges and fault lists this is invisible. For the queue
-panel it forces a real fix: it currently reaches into
-`Orchestrator._procedure_queue` directly (three sites in
-`gui/queue_panel.py`), which is unsafe cross-thread and must become public
-`replace_queue()` / `clear_queue()` methods plus a `queue_changed` signal.
+### 3.6 What is preserved from `main`, and what changes
 
-Command latency is *not* changed, but it becomes visible in a new way.
-Today a Pause or Abort click during a 20 s `measure()` cannot even be
-received until `measure()` returns. After the move the click is received
-and acknowledged instantly (the button responds, the status line can say
-"pause requested"), but the request still executes only when `measure()`
-returns, because the instrument thread is inside it. The GUI is responsive;
-the hardware is exactly as responsive as before. Making Abort faster would
-require VIs to poll a cancellation flag between readings (decision D5).
+Preserved, by construction: every hardware write still flows through the
+tick and the drain gate; the pause boundary, the claims, the ramp scope,
+the condition pipeline, stall detection, the scheduler and its
+operations-first rule are untouched; a GUI click still lands *between
+ticks* (today between two timer slots on the GUI thread, afterwards between
+two timer slots on the instrument thread's event loop); every `_tick()` call
+site in the tests keeps driving a plain `Orchestrator` synchronously.
+
+Changed: GUI queries read the last published snapshot, one event-loop hop
+stale; GUI guards are advisory; a queued run is validated per redline D2.
+
+Command latency is *not* changed, but becomes visible differently. Today a
+Pause or Abort click during a 20 s `measure()` cannot even be received
+until it returns. Afterwards the click is received and acknowledged
+instantly but still executes when `measure()` returns, because the
+instrument thread is inside it. The GUI is responsive; the hardware is
+exactly as responsive as before. Faster Abort would need VIs to poll a
+cancellation flag between readings (decision 7).
 
 ---
 
 ## 4. Merge and build plan
 
-Each phase ends with `make check` green and is independently mergeable.
-Nothing in phases 0 to 2 changes behaviour on `main`.
+Numbering follows the redline so the two documents can be read together.
+Each step ends with `make check` green and is independently mergeable.
+Nothing before Phase 1 changes behaviour on `main`.
 
-### Phase 0 — Merge the groundwork *(hours)*
+### Phase 0 — the seam, no thread yet
 
-1. Merge `claude/agent-instrument-framework-audit-4vdfci` (or cherry-pick
-   its five commits) onto `main`, resolving the two `orchestrator.py` hunks
-   exactly as §1.5 and adjusting the one pause-verdict test.
-2. Index `agent-operative-architecture-audit.md` in `docs/plans/README.md`
-   as an audit that informs the framework roadmap (decision D3 decides
-   whether its §8 corrections are folded into the framework plan in the
-   same commit or later).
-3. Update `core/README.md`'s `run_builder.py` row (the branch added it) and
-   check the GLOSSARY needs nothing.
+| Step | What | Status / estimate |
+|---|---|---|
+| **Merge** | Merge `claude/agent-instrument-framework-audit-4vdfci` (five commits) onto `main` with the §1.5 resolution; index the audit document in `docs/plans/README.md`; update `core/README.md`'s `run_builder.py` row. | hours |
+| 0.1 | Headless `build_procedure()` | shipped |
+| 0.4a | Verdicts on six refusal paths | shipped |
+| 0.2 | Queue as data: `RunQueue` of specs, drop `QueueEntry.proc`, remove the three direct writes to `_procedure_queue`. Validation timing per decision 2; home per decision 3. | 1 d |
+| 0.3 | `next_procedure()` pull seam on the engine; `run_queue()` and all three call sites kept. Coupled to 0.2; land as one change. | 1 d |
+| 0.4 | Engine mirror: `StatusSnapshot`, `StateChange` cause (decision 1), `StationInfo`, pure `control_param_specs()`, the payload copy rule, and the removal of every synchronous read listed in §3.3 including the front panel's `ping()`. | 2–3 d |
+| 0.5 | Contract **C16**: `cryosoft.gui` may not import `cryosoft.core.station` except under `TYPE_CHECKING`; plus the signal-payload standard written into `core/README.md` and `GLOSSARY.md`. Conformance tests: proxy mirrors every public method; no `time.sleep` under `gui/`; no plan citations in code. | 0.5 d |
+| 0.6 | Capability manifest with two renderers (GUI panels and agent tool schema); channel metadata per decision 5. **Off the thread's critical path**: needed for the agent gateway, not for the move. | 1–1.5 d, schedulable later |
 
-### Phase 1 — Complete the public API, no thread yet *(2–3 days)*
+### Phase 1 — the thread move
 
-Behaviour unchanged; every item is a prerequisite for a safe proxy.
+| Step | What | Estimate |
+|---|---|---|
+| 1.1 | `OrchestratorProxy` and `InstrumentHost(mode="inline")`. `main.py` builds the host and hands the proxy and `StationInfo` to the GUI; `ExperimentManager.set_experiment_envelope` and the recorder go through the proxy. Every widget takes the proxy. The GUI test suite runs unchanged in `inline` mode: the proof the proxy is transparent. | 2 d |
+| 1.2 | `InstrumentHost(mode="threaded")`: `QThread`, Station built in-thread, timer start/stop via queued slots, bounded shutdown join, a thread-level exception boundary (the tick's own boundary degrades to `ERROR`; the thread must additionally never die silently: `CRITICAL` log, emit, keep the event loop alive so `shutdown()` can still reach it). `TrendCheckRunner` moves with the Station. | 2 d |
+| 1.3 | `tests/test_instrument_thread.py`: sim station, real `QThread`, `qtbot.waitSignal` on every command's verdict, a frozen-GUI detector (a 50 ms GUI-thread timer must keep firing while a sim `measure()` sleeps 2 s), shutdown with a hung VI, the pause boundary end-to-end across the thread, and the redline's quench-then-queued-procedure scenario proving nothing auto-starts after an emergency acknowledge. | 1 d |
+| 1.4 | Selection via `monitor.yaml` (`instrument_thread: true|false`) with `CRYOSOFT_INSTRUMENT_THREAD` as the CI override. Default `false`. Soak on `sim_real_cryostat` (1 s tick) under a scripted click storm for a multi-hour sim run; then on hardware. | 1–2 d + soak |
 
-1. `StatusSnapshot` frozen dataclass and a `status_snapshot` signal emitted
-   per tick and on every `_change_state()`; every GUI query listed in §3.3
-   has a field in it.
-2. `StationInfo` frozen dataclass, built by `Station` once and re-emitted on
-   connect/disconnect. `InstrumentPanel`, `MonitorWindow`,
-   `ProcedureWindow` and `QueuePanel` build from it. `control_param_specs()`
-   becomes a pure read of config and cached state (the audit's D1 already
-   asks for this; the Lakeshore VI reads hardware there today), enforced by
-   a conformance test.
-3. Public `replace_queue()` / `clear_queue()` / `queue_changed`; delete the
-   three private accesses in `gui/queue_panel.py`.
-4. Signal payload rule: every `dict` the Orchestrator emits is a fresh copy
-   the emitter never touches again. `Station.get_state()` already returns a
-   fresh outer dict but shares the inner per-VI dicts with
-   `_last_known_state`; copy at the emit boundary.
-5. Conformance tests: no module under `cryosoft/gui/` imports
-   `cryosoft.core.station.Station` for anything but the type; no `time.sleep`
-   under `cryosoft/gui/`; every public `Orchestrator` method appears in the
-   proxy (test written now against a stub, activated in Phase 2).
+### Phase 2 — default on, and the standard
 
-### Phase 2 — Proxy and host in `inline` mode *(2–3 days)*
-
-1. `OrchestratorProxy` and `InstrumentHost(mode="inline")`.
-2. `main.py` constructs the host and hands the proxy and `StationInfo` to
-   the GUI. `ExperimentManager.set_experiment_envelope` and the recorder
-   connect through the proxy.
-3. Every widget takes the proxy. The GUI test suite runs unchanged in
-   `inline` mode; this is the proof that the proxy is transparent.
-
-### Phase 3 — `threaded` mode behind a flag *(1 week including soak)*
-
-1. `InstrumentHost(mode="threaded")`: `QThread`, Station built in-thread,
-   timer start/stop via queued slots, bounded shutdown join, thread-level
-   exception boundary (the tick's own boundary degrades to `ERROR`; the
-   thread must additionally never die silently: log `CRITICAL`, emit, and
-   keep the event loop alive so `shutdown()` can still reach it).
-2. `TrendCheckRunner` moved to the instrument thread with the Station.
-3. A `tests/test_instrument_thread.py` suite: sim station, real `QThread`,
-   `qtbot.waitSignal` on every command's verdict, a frozen-GUI detector
-   (a 50 ms GUI-thread timer must keep firing while a sim `measure()`
-   sleeps 2 s), shutdown-with-hung-VI, and the pause-boundary scenario
-   end-to-end across the thread boundary.
-4. Selection via `monitor.yaml` (`instrument_thread: true|false`) with the
-   environment override `CRYOSOFT_INSTRUMENT_THREAD` for CI matrices.
-   Default `false` until soak is done.
-5. Soak on `sim_real_cryostat` (1 s tick) for a full multi-hour sim run
-   with the GUI driven by a scripted click storm; then on hardware.
-
-### Phase 4 — Default on, and the standard *(1 day)*
-
-1. Flip the default. Decide whether `inline` mode stays (decision D4).
-2. Rewrite the `CLAUDE.md` paragraph per §3.1; add **Instrument thread**,
-   **Orchestrator proxy**, **Status snapshot**, **Station info** to
-   `GLOSSARY.md`; update `core/README.md`, `gui/README.md`.
-3. Update `agentic-instrumentation-framework.md` Phase 5 and the audit
-   document's D4 wording per §3.4.
+Flip the default; decide whether `inline` mode stays (decision 8); rewrite
+the `CLAUDE.md` paragraph per §3.1; add **Instrument thread**, **Orchestrator
+proxy**, **Status snapshot**, **Station info**, **Run queue** to
+`GLOSSARY.md`; update `core/README.md`, `gui/README.md`; correct
+`agentic-instrumentation-framework.md` Phase 5 and the audit document's D4
+per §3.5. One day.
 
 ### After this plan: the features it exists for
 
-Each is its own plan; listed so the ordering is explicit.
-
 - **Agent operation**: framework plan Phases 0–4 unchanged; the gateway is
-  a GUI-thread client of the proxy; the live write path is D4 rung 1 or 2
-  on the GUI thread; MCP is an out-of-process adapter (decision D7).
+  a GUI-thread client of the proxy; the live write path is D4 rung 1 or 2;
+  MCP is an out-of-process adapter. 0.6's manifest feeds the tool schema.
 - **Live analysis**: needs a data source that is not the HDF5 file the
-  instrument thread is writing (h5py is not safe for one file across two
-  threads, and SWMR mode is a format-level commitment). Recommended: an
-  in-memory `RunBuffer` on the GUI thread fed by the existing
-  `measurement_ready` signal, which already carries every datapoint
-  (decision D6).
+  instrument thread is writing (decision 9).
 - **eLab export**: network I/O on the GUI thread via `QNetworkAccessManager`
-  (asynchronous, never blocks) or a dedicated network worker; triggered from
-  `run_finished` with the run manifest; belongs to the session layer (L6).
-  Which eLab system and which trigger is decision D8.
+  or a network worker, triggered from `run_finished` with the run manifest;
+  a session-layer (L6) feature (decision 10).
 
 ---
 
@@ -411,22 +413,27 @@ Each is its own plan; listed so the ordering is explicit.
 
 | Risk | Bound |
 |---|---|
-| A widget keeps a live `Station`/VI reference and calls it from the GUI thread (a bus write from the wrong thread, the exact race the design forbids). | Phase 1 conformance tests; `StationInfo` replaces every such use; in `threaded` mode the host can hand the GUI a `Station` wrapper whose every method raises. |
-| pyvisa/NI-VISA or a serial port opened on one thread and used on another. | Station is built inside the instrument thread (Phase 3 step 1). `connect_instrument()` already rebuilds a driver session; it runs on the instrument thread by construction. |
+| A widget keeps a live `Station`/VI reference and calls it from the GUI thread (a bus write from the wrong thread). | Step 0.4 removes every such call; C16 forbids the import; in `threaded` mode the host can hand the GUI a `Station` wrapper whose every method raises. |
+| A GUI-side advance re-enters the engine or auto-starts after an emergency. | The scheduler never leaves the engine (§1.4); `state_changed` carries a cause (decision 1); test 1.3's quench scenario. |
+| Time-of-check races on `active_run_kind()` and friends. | No synchronous reads (§3.3); guards become advisory and the engine refuses. |
+| pyvisa/NI-VISA or a serial port opened on one thread and used on another. | Station is built inside the instrument thread; `connect_instrument()` already rebuilds a driver session and runs there by construction. |
 | A hung VISA read blocks `shutdown()`. | Bounded join; `CRITICAL` log; the GUI exits. The instrument is left where it is, exactly as a process kill leaves it today. |
-| Cross-thread mutation of an emitted payload. | Phase 1 step 4 copy rule plus frozen dataclasses for the two new types. |
-| The GUI test suite silently stops covering the real wiring. | Every GUI test runs through the proxy in `inline` mode (Phase 2); the `threaded` suite covers the boundary itself. |
-| Test-time flakiness from real threads under pytest-qt. | The `threaded` suite is the only one that starts a `QThread`; it uses `waitSignal` with explicit timeouts and a sim station; it is marked so CI can retry it in isolation. |
-| Doubling the GUI test matrix forever if `inline` mode is kept. | Decision D4. |
+| Cross-thread mutation of an emitted payload. | Copy rule plus frozen dataclasses (step 0.4). |
+| The GUI test suite silently stops covering the real wiring. | Every GUI test runs through the proxy in `inline` mode; the `threaded` suite covers the boundary itself. |
+| Flakiness from real threads under pytest-qt. | Only `test_instrument_thread.py` starts a `QThread`; explicit `waitSignal` timeouts; sim station; marked for isolated retry in CI. |
+| Doubling the GUI test matrix forever if `inline` mode is kept. | Decision 8. |
 
 ---
 
 ## 6. Estimate
 
-Phase 0: hours. Phases 1–2: about one week. Phase 3: about one week
-including soak. Phase 4: one day. Roughly three weeks to a threaded default
-with behaviour parity, before any agent, analysis or eLab feature is
-started. The groundwork branch covers Phase 0 and a small part of Phase 1.
+Merge: hours. Phase 0 remaining (0.2 through 0.5): 4.5 to 5.5 days; 0.6 is
+1 to 1.5 days more when the agent gateway needs it. Phase 1: 6 to 7 days
+plus soak. Phase 2: one day. Roughly three weeks to a threaded default with
+behaviour parity, before any agent, analysis or eLab feature starts. The
+redline's own tally (9–12 days for Phase 0 plus its 3–4 day Phase 1) was
+about a week short because the thread move was a single line; §4 Phase 1
+is what that line expands to.
 
 ---
 
@@ -434,66 +441,100 @@ started. The groundwork branch covers Phase 0 and a small part of Phase 1.
 
 - It does not parallelise instrument I/O (no per-instrument threads, no
   thread pool). One bus, one writer.
-- It does not make `measure()` cooperative or interruptible (decision D5).
+- It does not move the scheduler out of the engine (§1.4).
+- It does not make `measure()` cooperative or interruptible (decision 7).
 - It does not change tick semantics, the state machine, procedures, VIs or
   drivers.
-- It does not touch the import-linter contracts. The proxy lives in `core`
-  beside the Orchestrator (or in a leaf runtime module) and imports
-  downward only; a new contract may be *added* to forbid `cryosoft.gui`
-  from importing `cryosoft.core.station` except for typing.
+- It does not edit or weaken an import contract; C16 is an addition.
+
+Noticed, not changed, and out of scope here: `procedure_window.py:452` and
+`:475` still cite `operation-concurrency-and-error-scoping.md §2` in
+docstrings, and nine sites in `main.py`, `gui/` and `session/` cite
+`docs/plans/session-tier-and-terminology.md`. Both violate the
+code-reference standard; the concept each names is already in the same
+sentence, so the fix is to drop the citation. Step 0.5's conformance test
+would catch these, so they must be cleaned before it lands.
 
 ---
 
-## 8. Decisions needed before Phase 1
+## 8. Decisions needed
 
-The recommendation is stated first in each.
+Recommendation first in each. Decisions 1 to 5 are the redline's, carried
+over unchanged in substance; they block Phase 0. Decisions 6 to 11 come
+from this audit; 6 blocks the merge, 7 and 8 block Phase 1, and 9 to 11 can
+wait until Phase 2.
 
-**D1 — Architecture.** One instrument thread hosting Orchestrator + Station
-+ drivers + data manager (recommended), versus keeping the Orchestrator on
-the GUI thread and offloading only I/O (rejected: it creates a second
-hardware writer and needs locks around every bus), versus a separate
-process (heavier, no Qt signals, and it forecloses the in-process gateway
-the framework plan is built on).
+**1 — Does `state_changed` carry a reason?** *(blocks 0.2, 0.3, 0.4)*
+Today `pyqtSignal(str)`. Five IDLE transitions do not chain, so `"idle"`
+alone cannot distinguish a clean finish from a quench acknowledgement. Once
+an agent or scheduler subscribes, and once it is a cross-thread payload
+contract, this is much harder to change.
+(A, recommended) Widen it now with a cause, as a typed frozen `StateChange`
+payload, and set the payload standard while there is one consumer.
++0.5 d. (B) A second richer signal beside it: cheaper, two channels to
+keep consistent forever. (C) Leave it, and accept that no out-of-process
+client may ever decide to advance.
 
-**D2 — Where the host lives.** `cryosoft/core/instrument_host.py` beside
-the Orchestrator (recommended; it is L3 hosting) versus a new leaf
-`cryosoft/runtime.py` beside `main.py`.
+**2 — Is a queued run validated when added or when started?** *(blocks
+0.2)* Today Add to queue constructs the procedure immediately, so a bad
+parameter set is refused while the operator is at the form; a queue of
+specs would surface the same refusal an hour later, mid-batch. Verified:
+`BaseProcedure.__init__` touches no hardware and claims nothing, so
+building twice is safe.
+(A, recommended now) Build and discard at add time, build for real at
+start. Today's behaviour exactly, one throwaway construction. (B) Split
+`__init__` into validate and build: cleanest, touches every procedure, and
+the only option that gives an agent a dry-run check; do it when the gateway
+needs it. (C) Accept late failure with a "checked at start" queue state.
 
-**D3 — Groundwork merge scope.** Merge all five commits including the
-621-line audit document and index it (recommended), versus merging only the
-four code commits. And: fold the audit's §8 corrections into the framework
-plan in the same commit, or later.
+**3 — Where does the run queue live?** *(blocks 0.2, 0.5; sets C16's
+wording)* It must sit below the GUI for an agent to drive it. Today queue
+persistence is a GUI concern (`QueueItemState` in `gui/form_autosave.py`).
+(A, recommended) `core/run_queue.py` owns order only; persistence stays
+the caller's; the engine never imports it, the callback is injected.
+(B) `session/run_queue.py` owns order and persistence, pulling
+`QueueItemState` out of the GUI: better long-term home, larger diff.
 
-**D4 — Keep `inline` mode after Phase 4?** Keep it (recommended for one
-release: it is the escape hatch on hardware and the mode the fast GUI tests
-run in), then decide again once `threaded` has soaked on real hardware for
-a month. Or delete it at Phase 4 and run every GUI test threaded.
+**4 — Does the GUI ever read engine state synchronously?** *(blocks 0.4)*
+(A, recommended, and assumed by every section above) No synchronous path;
+local mirror plus request-and-verdict; the front panel's Check becomes a
+request. (B) A blocking invoke with timeout: nearly mechanical, but it
+reintroduces the freeze whenever the engine is inside `measure()`.
 
-**D5 — Abort/Pause latency inside `measure()`.** Accept that a command
-lands after the current `measure()` returns, as today (recommended for this
-plan), or additionally give measurement VIs a cooperative cancellation
-check between readings so Abort interrupts a datapoint. The second is real
-VI-layer work (the RTM2's single `(n+1) × averaging_time_s` sleep would
-need splitting) and a new standard; it should be its own plan if wanted.
+**5 — Do `@monitored` channels gain units and descriptions now?** *(blocks
+0.6 only)* Channel keys are written into on-disk trend history.
+(A, recommended) Metadata as a sidecar, keys untouched, additive across
+every VI. (B) Restructure keys and migrate history files.
 
-**D6 — Live analysis data source.** In-memory `RunBuffer` on the GUI
-thread fed by `measurement_ready` (recommended: zero file contention,
-already carries every datapoint), versus HDF5 SWMR on the open file, versus
-analysis only on completed runs.
+**6 — Merge scope.** (A, recommended) All five commits including the
+621-line audit document, indexed as an audit that informs the framework
+roadmap, its §8 corrections folded into the framework plan in a follow-up.
+(B) Only the four code commits.
 
-**D7 — Agent transport.** Confirm the framework plan's sequence with the
-audit's D4 rungs (in-process gateway on the GUI thread, then a request
-spool or `QLocalServer`, then an out-of-process MCP adapter). This plan
-removes the "one sanctioned thread" from that roadmap; confirm that the
-MCP server never runs in-process on a thread of its own.
+**7 — Abort and pause latency inside `measure()`.** (A, recommended for
+this plan) A command lands after the current `measure()` returns, as today.
+(B) Additionally give measurement VIs a cooperative cancellation check
+between readings so Abort interrupts a datapoint: real VI-layer work (the
+RTM2's single `(n+1) × averaging_time_s` sleep would need splitting) and a
+new standard; its own plan if wanted.
 
-**D8 — eLab scope.** Which system (elabFTW is assumed), and which trigger:
-automatic on `run_finished` with the run manifest and data path, or a
-manual "export to eLab" action, or both. This decides whether it is a
-session-layer feature with a network client, and it is not needed to start
-Phases 0–4.
+**8 — Keep `inline` mode after Phase 2?** (A, recommended) Keep it for one
+release as the hardware escape hatch and the mode the fast GUI tests run
+in; decide again after a month of `threaded` on real hardware. (B) Delete
+it at Phase 2 and run every GUI test threaded.
 
-**D9 — The standard's wording.** Approve rewriting the `CLAUDE.md`
+**9 — Live analysis data source.** (A, recommended) An in-memory
+`RunBuffer` on the GUI thread fed by the existing `measurement_ready`
+signal, which already carries every datapoint: zero file contention.
+(B) HDF5 SWMR on the open file (h5py is not safe for one file across two
+threads without it, and it is a format-level commitment). (C) Analysis only
+on completed runs.
+
+**10 — eLab scope.** Which system (elabFTW assumed), and which trigger:
+automatic on `run_finished`, a manual "export to eLab" action, or both.
+Not needed to start Phases 0–2.
+
+**11 — The standard's wording.** Approve rewriting the `CLAUDE.md`
 "Single-threaded cooperative scheduling" paragraph as the single hardware
-thread standard in §3.1 at Phase 4. Until then the existing wording stands
-and Phases 0–2 comply with it literally.
+thread standard (§3.1) at Phase 2. Until then the existing wording stands
+and Phase 0 complies with it literally.
