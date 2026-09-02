@@ -1,6 +1,6 @@
 import pytest
 import time
-from cryosoft.core.exceptions import CryoSoftCommunicationError
+from cryosoft.core.exceptions import CryoSoftCommunicationError, CryoSoftSafetyError
 
 # Assuming we have valid sim drivers from L0 test phase
 from cryosoft.drivers.sim_oxford_ips120 import SimOxfordIPS120
@@ -74,6 +74,55 @@ def test_control_specs_must_be_paramspec_instances():
             @control(params={"power_W": {"type": float, "default": 0.0}})
             def set_heater_power(self, power_W: float = 0.0):
                 return power_W
+
+
+class LimitedVI(BaseVirtualInstrument):
+    """A VI declaring one control limit, for the limit-wrapper tests below."""
+
+    vi_type = "limited"
+    control_limits = {"set_current": {"current_A": "max_current"}}
+
+    def __init__(self):
+        super().__init__({})
+        self._limits["max_current"] = (-1e-3, 1e-3)
+
+    @control
+    def set_current(self, current_A):
+        return current_A
+
+
+def test_limit_wrapper_allows_a_value_inside_the_declared_range():
+    """A control call within its declared limit reaches the method untouched."""
+    vi = LimitedVI()
+    vi.vi_name = "source"
+
+    assert vi.set_current(5e-4) == 5e-4
+
+
+def test_limit_wrapper_refusal_carries_structured_fields():
+    """An out-of-range control call is refused with fields AND the same prose.
+
+    Two assertions, deliberately together: a verdict is built from the
+    structured fields, never by parsing the message, and the message itself is
+    the operator's banner, so it must not drift when the fields are added.
+    """
+    vi = LimitedVI()
+    vi.vi_name = "source"
+
+    with pytest.raises(CryoSoftSafetyError) as excinfo:
+        vi.set_current(0.05)
+    err = excinfo.value
+
+    assert str(err) == (
+        "source.set_current: current_A=0.05 is outside the allowed range "
+        "[-0.001, 0.001] for this setup (limit 'max_current' from the station "
+        "config). Command refused."
+    )
+    assert err.param == "current_A"
+    assert err.value == 0.05
+    assert err.lo == -1e-3
+    assert err.hi == 1e-3
+    assert err.limit_name == "max_current"
 
 
 def test_base_vi_error_pass_through():

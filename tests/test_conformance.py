@@ -38,12 +38,14 @@ import-linter, see pyproject.toml [tool.importlinter]):
 
 from __future__ import annotations
 
+import dataclasses
 import importlib
 import inspect
 import json
 import math
 import pkgutil
 import typing
+from enum import Enum
 from pathlib import Path
 
 import pytest
@@ -58,6 +60,25 @@ from cryosoft.core.availability import (
     TAG_PRECEDENCE,
 )
 from cryosoft.core.conditions import SEVERITIES
+from cryosoft.core.events import (
+    OPERATOR,
+    Actor,
+    ActorKind,
+    Command,
+    CommandName,
+    Datapoint,
+    Event,
+    QueueChanged,
+    Readings,
+    RunFinished,
+    RunStarted,
+    StateChange,
+    StationInfo,
+    StatusSnapshot,
+    Verdict,
+    VerdictCode,
+    event_from_json,
+)
 from cryosoft.core.decorators import (
     VALID_CONTROL_SCOPES,
     get_control_panel,
@@ -2171,3 +2192,320 @@ def test_declared_trend_checks_name_derivable_state_keys(config_dir: Path) -> No
                 f"{key!r}, which no VI in this config's devices.yaml can "
                 f"produce ({sorted(derivable_keys)})"
             )
+
+
+# ══════════════════════════════════════════════════════════════════════
+# The control contract (core/events.py)
+# ══════════════════════════════════════════════════════════════════════
+#
+# The contract is the typed currency between the engine and its two
+# clients, the GUI and the agent. Two properties make it a contract rather
+# than a convention, and both are checked here: every message survives a
+# JSON round trip unchanged, and the command enumeration is exactly the
+# Orchestrator's public command surface — no client can offer an action the
+# engine does not have, and no engine command is invisible to a client.
+
+
+def _contract_specimens() -> dict[str, object]:
+    """Build one representative instance of every control-contract type.
+
+    Representative means every field is populated with a non-default value
+    of its declared kind — a nested actor, a populated mapping, a tuple
+    field, an enum, a float — so the round trip below exercises the actual
+    coercions rather than a tower of defaults.
+
+    Returns:
+        ``{type name: instance}`` covering every contract type. The keys
+        double as the parametrisation ids.
+    """
+    agent = Actor(kind=ActorKind.AGENT, id="drift-watch", role="operator")
+    return {
+        "Actor": agent,
+        "Command": Command(
+            name=CommandName.SUBMIT_VI_ACTION,
+            actor=agent,
+            args={"vi_name": "magnet_z", "method_name": "start_ramp", "target": 1.5},
+            request_id="req-1",
+            issued_at=1_700_000_000.5,
+        ),
+        "Verdict": Verdict(
+            request_id="req-1",
+            command=CommandName.SUBMIT_VI_ACTION,
+            code=VerdictCode.BLOCKED_LIMIT,
+            actor=agent,
+            reason="target outside the allowed range",
+            detail={
+                "param": "target",
+                "value": 1.5,
+                "lo": -1.0,
+                "hi": 1.0,
+                "limit_name": "max_field_T",
+            },
+            result=None,
+            seq=7,
+            ts=1_700_000_001.0,
+        ),
+        "StateChange": StateChange(
+            state="RAMPING",
+            previous="IDLE",
+            cause="run_started",
+            actor=agent,
+            request_id="req-1",
+            seq=8,
+            ts=1_700_000_002.0,
+        ),
+        "StatusSnapshot": StatusSnapshot(
+            state="RAMPING",
+            run={"run_id": "r-1", "kind": "procedure", "progress": 0.25},
+            instruments={"magnet_z": {"availability": "live", "held": False}},
+            seq=9,
+            ts=1_700_000_003.0,
+        ),
+        "StationInfo": StationInfo(
+            instruments=(
+                {"name": "magnet_z", "vi_type": "magnet", "monitored": ["field_T"]},
+                {"name": "level_meter", "vi_type": "level_meter", "monitored": []},
+            ),
+            seq=10,
+            ts=1_700_000_004.0,
+        ),
+        "Readings": Readings(
+            values={"magnet_z": {"field_T": 0.5}, "level_meter": {"helium_pct": 61.0}},
+            seq=11,
+            ts=1_700_000_005.0,
+        ),
+        "Datapoint": Datapoint(
+            run_id="r-1",
+            index=3,
+            values={"field_T": 0.5, "resistance_ohm": 12.75},
+            seq=12,
+            ts=1_700_000_006.0,
+        ),
+        "RunStarted": RunStarted(
+            run_id="r-1",
+            manifest={"procedure": "FieldSweep", "points": 40},
+            actor=agent,
+            request_id="req-2",
+            seq=13,
+            ts=1_700_000_007.0,
+        ),
+        "RunFinished": RunFinished(
+            run_id="r-1",
+            status="aborted",
+            reason="operator abort",
+            manifest={"procedure": "FieldSweep", "points": 40},
+            seq=14,
+            ts=1_700_000_008.0,
+        ),
+        "QueueChanged": QueueChanged(
+            entries=({"run_id": "r-2", "procedure": "TimeSeries"},),
+            actor=agent,
+            request_id="req-3",
+            seq=15,
+            ts=1_700_000_009.0,
+        ),
+    }
+
+
+_CONTRACT_SPECIMENS = _contract_specimens()
+
+
+@pytest.mark.parametrize(
+    "specimen", _CONTRACT_SPECIMENS.values(), ids=list(_CONTRACT_SPECIMENS)
+)
+def test_contract_type_round_trips_through_json(specimen) -> None:
+    """Every control-contract type survives a real JSON round trip unchanged.
+
+    ``to_json()`` → ``json.dumps`` → ``json.loads`` → ``from_json()`` must
+    return an equal value. This is what lets the same declaration cross a
+    thread boundary today and a process boundary later with no second
+    contract; a field that is not JSON-safe, or a coercion that does not
+    round trip (a tuple that comes back a list, an enum that comes back a
+    bare string), fails here rather than at the boundary.
+    """
+    payload = specimen.to_json()
+    wire = json.loads(json.dumps(payload))
+    assert type(specimen).from_json(wire) == specimen
+
+
+@pytest.mark.parametrize(
+    "specimen", _CONTRACT_SPECIMENS.values(), ids=list(_CONTRACT_SPECIMENS)
+)
+def test_contract_type_is_frozen(specimen) -> None:
+    """Every control-contract type is immutable once built.
+
+    A message that crosses a boundary must not be editable by either side —
+    the receiver holds a value, not a handle on the sender's state.
+    """
+    assert dataclasses.is_dataclass(specimen)
+    assert dataclasses.fields(specimen) is not None
+    field_name = dataclasses.fields(specimen)[0].name
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        setattr(specimen, field_name, None)
+
+
+@pytest.mark.parametrize(
+    "specimen", _CONTRACT_SPECIMENS.values(), ids=list(_CONTRACT_SPECIMENS)
+)
+def test_contract_type_renders_only_json_scalars(specimen) -> None:
+    """``to_json()`` bottoms out in JSON scalars — no enum, tuple, or object.
+
+    ``json.dumps`` would accept a ``str`` enum silently, so this checks the
+    rendering itself rather than trusting the encoder.
+    """
+
+    def check(value, path: str) -> None:
+        assert not isinstance(value, Enum), f"{path} is an enum, not its value"
+        if isinstance(value, dict):
+            for key, item in value.items():
+                assert isinstance(key, str), f"{path}: key {key!r} is not a str"
+                check(item, f"{path}.{key}")
+        elif isinstance(value, list):
+            for index, item in enumerate(value):
+                check(item, f"{path}[{index}]")
+        else:
+            assert value is None or isinstance(value, (str, int, float, bool)), (
+                f"{path} is {type(value).__name__}, not a JSON scalar"
+            )
+
+    check(specimen.to_json(), type(specimen).__name__)
+
+
+def test_every_event_type_is_dispatchable_from_its_kind() -> None:
+    """``event_from_json()`` rebuilds the right type from the ``kind`` tag.
+
+    The union is tagged so a client can hold one event channel and still
+    know what it received. A new event type that forgets to register its
+    kind fails here.
+    """
+    events = [
+        specimen
+        for specimen in _CONTRACT_SPECIMENS.values()
+        if isinstance(specimen, typing.get_args(Event))
+    ]
+    assert len(events) == len(typing.get_args(Event)), (
+        "every member of the Event union needs a specimen above"
+    )
+    for event in events:
+        wire = json.loads(json.dumps(event.to_json()))
+        assert "kind" in wire, f"{type(event).__name__} emits no kind discriminator"
+        assert event_from_json(wire) == event
+
+
+def test_operator_sentinel_is_the_human_at_the_gui() -> None:
+    """``OPERATOR`` is the default actor every public entry point assumes."""
+    assert OPERATOR.kind is ActorKind.OPERATOR
+    assert Command(name=CommandName.ACKNOWLEDGE).actor == OPERATOR
+
+
+def test_verdict_ok_is_derived_from_its_code() -> None:
+    """No verdict can report success and a blocking code at the same time."""
+    request = Command(name=CommandName.STOP_RAMP)
+    assert Verdict(
+        request_id=request.request_id, command=request.name, code=VerdictCode.OK
+    ).ok
+    assert not Verdict(
+        request_id=request.request_id,
+        command=request.name,
+        code=VerdictCode.BLOCKED_CLAIM,
+    ).ok
+
+
+# Public ``Orchestrator`` methods that are deliberately NOT commands. Every
+# entry needs a one-line rationale: an unexplained exemption is how a command
+# goes missing from one client's surface.
+#
+# The two public properties (`state`, `pause_pending`) need no entry — a
+# command is a call, not an attribute read, so properties are excluded by
+# construction and are reads answered from the client's `StatusSnapshot`.
+ORCHESTRATOR_NON_COMMANDS: dict[str, str] = {
+    # ── Reads: answered from the client's StatusSnapshot mirror, never by
+    #    calling into the engine, so they are not part of the command half.
+    "is_monitoring": "read: whether the monitor tick is polling",
+    "get_operational_status": "read: the latest per-tick status record",
+    "active_ramps": "read: the RampRecord list for the ramp tracker",
+    "active_run_kind": "read: which kind of run is in flight, if any",
+    "availability": "read: one VI's availability",
+    "availabilities": "read: every VI's availability",
+    "held_vi_names": "read: which VIs a hold-severity condition holds",
+    "manual_override_expires_at": "read: when the manual override lapses",
+    "offline_reason": "read: why one VI is offline",
+    "override_active": "read: whether a manual override is in force",
+    "scanner_enabled": "read: whether the scanner is enabled",
+    "vi_faults": "read: the current FaultRecord per VI",
+    # ── Process lifecycle: owned by main.py and test teardown, not by a
+    #    client. A client that could stop the tick timer could strand a ramp.
+    "shutdown": "lifecycle: stops the tick timer at application exit",
+}
+
+
+def _orchestrator_public_methods() -> set[str]:
+    """Return every public method defined on ``Orchestrator``.
+
+    Only functions defined on the class itself: Qt signals are class
+    attributes, properties are descriptors, and inherited ``QObject``
+    machinery is not ours to enumerate, so ``inspect.isfunction`` over
+    ``vars()`` is exactly the public method surface.
+
+    Returns:
+        The set of method names with no leading underscore.
+    """
+    from cryosoft.core.orchestrator import Orchestrator
+
+    return {
+        name
+        for name, value in vars(Orchestrator).items()
+        if not name.startswith("_") and inspect.isfunction(value)
+    }
+
+
+def test_command_name_covers_every_public_orchestrator_command() -> None:
+    """``CommandName`` and the Orchestrator's command surface match exactly.
+
+    Diffed in both directions, because both failures are real. A public
+    command missing from the enum is an action the agent cannot take and the
+    GUI cannot render from the contract; an enum member with no method behind
+    it is a tool that dispatches nowhere. Reads and process lifecycle are
+    exempt by name in ``ORCHESTRATOR_NON_COMMANDS`` above, each with its
+    rationale.
+
+    If this fails on a method you just added: add it to ``CommandName`` if a
+    client may call it, or to the exemption table with a reason if it is a
+    read or lifecycle plumbing.
+    """
+    public_methods = _orchestrator_public_methods()
+    exempt = set(ORCHESTRATOR_NON_COMMANDS)
+
+    stale_exemptions = exempt - public_methods
+    assert not stale_exemptions, (
+        f"ORCHESTRATOR_NON_COMMANDS names methods the Orchestrator no longer "
+        f"has: {sorted(stale_exemptions)}"
+    )
+
+    commands = public_methods - exempt
+    declared = {member.value for member in CommandName}
+
+    assert commands - declared == set(), (
+        f"public Orchestrator commands missing from CommandName: "
+        f"{sorted(commands - declared)}"
+    )
+    assert declared - commands == set(), (
+        f"CommandName members with no public Orchestrator method behind them: "
+        f"{sorted(declared - commands)}"
+    )
+
+
+def test_command_name_values_are_the_method_names() -> None:
+    """Each ``CommandName`` value names the method that implements it.
+
+    Dispatch is then a lookup rather than a hand-maintained table, which is
+    what keeps the two clients' surfaces from drifting apart.
+    """
+    from cryosoft.core.orchestrator import Orchestrator
+
+    for member in CommandName:
+        method = getattr(Orchestrator, member.value, None)
+        assert inspect.isfunction(method), (
+            f"CommandName.{member.name} = {member.value!r} is not a public "
+            f"Orchestrator method"
+        )

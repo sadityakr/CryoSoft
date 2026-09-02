@@ -30,8 +30,50 @@ class CryoSoftCommunicationError(CryoSoftError):
 
 
 class CryoSoftSafetyError(CryoSoftError):
-    """Raised when a safety condition is violated."""
-    pass
+    """Raised when a safety condition is violated.
+
+    The control-validation standard's refusal: raised by the ``@control``
+    limit wrapper before any hardware call, and by VIs and the Orchestrator
+    for the interlocks they own. The optional keyword fields carry the
+    *structured* form of a rejected control parameter so a caller building a
+    verdict never has to parse the message prose. They default to ``None``,
+    so every raise site that only has a sentence keeps working unchanged.
+
+    Attributes:
+        param: Name of the rejected control parameter, or ``None``.
+        value: The value that was rejected, in SI units.
+        lo: Lower bound of the allowed range, ``None`` for unbounded below.
+        hi: Upper bound of the allowed range, ``None`` for unbounded above.
+        limit_name: The ``control_limits`` limit that rejected it — the key
+            the station config populates — or ``None``.
+    """
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        param: str | None = None,
+        value: float | None = None,
+        lo: float | None = None,
+        hi: float | None = None,
+        limit_name: str | None = None,
+    ):
+        """Store the optional structured fields and the message.
+
+        Args:
+            message: Human-readable description, suitable for a GUI banner.
+            param: Name of the rejected control parameter.
+            value: The rejected value, in SI units.
+            lo: Lower bound of the allowed range, or ``None``.
+            hi: Upper bound of the allowed range, or ``None``.
+            limit_name: The ``control_limits`` limit that rejected it.
+        """
+        self.param = param
+        self.value = value
+        self.lo = lo
+        self.hi = hi
+        self.limit_name = limit_name
+        super().__init__(message)
 
 
 class CryoSoftConfigError(CryoSoftError):
