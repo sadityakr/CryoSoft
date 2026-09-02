@@ -1,6 +1,7 @@
 # The instrument thread: a responsive GUI without a second hardware writer
 
-**Status: audit complete, proposal awaiting decisions (2026-09-02).**
+**Status: audit complete, proposal awaiting decisions (2026-09-02; §3.4
+added the same day after the two-client goal was stated).**
 Written to answer three questions: what threading work already exists on
 the remote branches, how it should be merged, and what CryoSoft must become
 so that agent operation, live analysis, and eLab export can run *while a
@@ -67,7 +68,7 @@ plus `0568f4f`, a 621-line `agent-operative-architecture-audit.md` (under
 `docs/plans/` on that branch) auditing the architecture against an external
 agent-to-instrument protocol. Its D4 ("No thread. Ever.") and its §8
 (corrections to `agentic-instrumentation-framework.md`) bear on this plan;
-§3.5 reconciles them.
+§3.6 reconciles them.
 
 ### 1.4 What the redline withdrew, and what it corrected
 
@@ -264,10 +265,64 @@ by a verdict, every GUI guard clause becomes advisory rather than
 authoritative ("ask, and let the engine refuse"), and the front panel's
 Check button becomes a request whose result arrives as a signal.
 
-### 3.4 The pieces
+### 3.4 One contract, two clients
 
-**`OrchestratorProxy`** (GUI-side `QObject`). Mirrors the public Orchestrator
-surface (39 methods today), split by kind:
+The Orchestrator has exactly two clients: the GUI and the agent. Each must
+see the same system and be seen doing the same things. So the boundary is
+not "a proxy for the GUI plus a gateway for agents"; it is one **control
+contract** with two adapters, and the GUI reflects what the agent does for
+free, because agent actions arrive on the same event stream as the
+operator's, labelled with who did them.
+
+**The contract** is three frozen, JSON-serialisable message families in
+`core/events.py`, beside `ErrorEvent`:
+
+- `Command`: `request_id`, `actor` (`kind` operator | agent | system, `id`,
+  `role`), `name` (an enum of every public Orchestrator command), `args`
+  (JSON-safe, shaped by `ParamSpec`), `issued_at`.
+- `Verdict`: the framework's `ActionVerdict`, plus the `actor` of the
+  command it answers.
+- `Event`: a tagged union: `StateChange`, `StatusSnapshot`, `StationInfo`,
+  `Readings`, `Datapoint`, `RunStarted`, `RunFinished`, `QueueChanged`.
+  Every event carries `seq` and `ts`; one caused by a command also carries
+  its `request_id` and `actor`.
+
+**The port.** The engine exposes `submit(Command) -> request_id` and one
+`event` signal. The 39 public methods stay, as the implementation
+`submit()` dispatches to and as the surface the tests drive; each gains an
+`actor` keyword defaulting to the operator sentinel, which the audit
+document's Phase 4 already proposes, so no call site or test changes.
+
+**Translatable** means the contract is declared once and rendered three
+ways. `OrchestratorProxy` renders it for widgets: one typed Python method
+per `Command.name`, one Qt signal per event type. The agent gateway renders
+the same declarations as JSON tool schemas through the framework's M1
+manifest machinery and speaks JSON in and out, in-process today and over a
+socket later with no second contract. The GUI's action buttons and the
+agent's tool list are generated from the same enumeration, so neither
+client can offer an action the other cannot see.
+
+**Reflection.** Because every event names its actor, the status bar can
+read "Paused by agent: drift on sample thermometer", the queue panel shows
+who queued each run, the instrument panel can flag the control an agent
+just used, and the framework's Phase 6 agent panel is a filter of the same
+stream where `actor.kind == "agent"`. Symmetrically the agent sees operator
+actions and does not fight the human. The gateway adds only what the GUI
+does not need: roles and action classes, attendance, the envelope, the kill
+switch, and the `agent_actions.jsonl` feed. It adds nothing the GUI cannot
+do, because both end at the same `submit()` and the same drain gate.
+
+**Conformance.** Every public command method appears in `Command.name`;
+every `Command.name` is exposed by the proxy and by the gateway's tool
+list; every contract type round-trips through JSON; no widget imports
+anything but the proxy and the contract types. The mirroring test proposed
+in the first draft of this document becomes this stronger three-way test.
+
+### 3.5 The pieces
+
+**`OrchestratorProxy`** (GUI-side `QObject`). The GUI's adapter of the
+control contract (§3.4): one typed method per `Command.name`, one Qt signal
+per event type. Its methods fall into three kinds:
 
 - *Commands* (`run_procedure`, `pause_procedure`, `submit_vi_action`,
   `acknowledge`, `connect_instrument`, ...) are forwarded as queued
@@ -293,8 +348,8 @@ surface (39 methods today), split by kind:
   live on different threads, so every existing GUI slot keeps working one
   event-loop hop later.
 
-A conformance test asserts the proxy mirrors every public `Orchestrator`
-method with the same signature.
+The three-way conformance test in §3.4 replaces a proxy-only mirroring
+test: proxy, gateway and engine expose the same command enumeration.
 
 **`StatusSnapshot`** (frozen dataclass), emitted once per tick and on every
 `_change_state()`, carrying every query above. **`StateChange`** payload on
@@ -336,7 +391,7 @@ the emitter never touches again. `Station.get_state()` returns a fresh outer
 dict but shares the inner per-VI dicts with `_last_known_state`; copy at the
 emit boundary. Frozen dataclasses for the new types.
 
-### 3.5 Reconciling with the two agent-architecture documents
+### 3.6 Reconciling with the two agent-architecture documents
 
 `agentic-instrumentation-framework.md` Phase 5 calls the MCP transport "the
 one sanctioned thread" and the riskiest change in the programme. The audit
@@ -351,7 +406,7 @@ second hardware thread"; Phase 5's "one sanctioned thread" is retired. The
 audit's §8 corrections to the framework plan are independent of this and
 should be folded in regardless.
 
-### 3.6 What is preserved from `main`, and what changes
+### 3.7 What is preserved from `main`, and what changes
 
 Preserved, by construction: every hardware write still flows through the
 tick and the drain gate; the pause boundary, the claims, the ramp scope,
@@ -389,8 +444,8 @@ Nothing before Phase 1 changes behaviour on `main`.
 | 0.4a | Verdicts on six refusal paths | shipped |
 | 0.2 | Queue as data: `RunQueue` of specs, drop `QueueEntry.proc`, remove the three direct writes to `_procedure_queue`. Validated at add time through the framework's `validate_run()` (§8, settled); home per decision 2. | 1 d |
 | 0.3 | `next_procedure()` pull seam on the engine; `run_queue()` and all three call sites kept. Coupled to 0.2; land as one change. | 1 d |
-| 0.4 | Engine mirror: `StatusSnapshot`, `StateChange` cause (decision 1), `StationInfo`, pure `control_param_specs()`, the payload copy rule, and the removal of every synchronous read listed in §3.3 including the front panel's `ping()`. Also close the silent refusals the audit document's §8 says 0.4a left (`acknowledge_fault` with no fault, `acknowledge()` with nothing held, `submit_global_action` with an unknown action), so the completeness rule holds before it becomes a conformance test. | 2–3 d |
-| 0.5 | A new contract: `cryosoft.gui` may not import `cryosoft.core.station` except under `TYPE_CHECKING`. Numbered from `pyproject.toml` at the time (the audit document's §8 notes the framework's proposed C13 for `data_reader` is already taken and the next free number was C16 as of 2026-08-08); plus the signal-payload standard written into `core/README.md` and `GLOSSARY.md`. Conformance tests: proxy mirrors every public method; no `time.sleep` under `gui/`; no plan citations in code. | 0.5 d |
+| 0.4 | The control contract (§3.4): `Command` with `actor`, `Verdict`, the `Event` union with `StatusSnapshot`, `StateChange` (carrying cause and actor), `StationInfo`; `submit()` on the engine; pure `control_param_specs()`; the payload copy rule; and the removal of every synchronous read listed in §3.3 including the front panel's `ping()`. Also close the silent refusals the audit document's §8 says 0.4a left (`acknowledge_fault` with no fault, `acknowledge()` with nothing held, `submit_global_action` with an unknown action), so the completeness rule holds before it becomes a conformance test. | 3–4 d |
+| 0.5 | A new contract: `cryosoft.gui` may not import `cryosoft.core.station` except under `TYPE_CHECKING`. Numbered from `pyproject.toml` at the time (the audit document's §8 notes the framework's proposed C13 for `data_reader` is already taken and the next free number was C16 as of 2026-08-08); plus the signal-payload standard written into `core/README.md` and `GLOSSARY.md`. Conformance tests: every public command is in `Command.name`, every `Command.name` is exposed by proxy and gateway tool list, every contract type round-trips through JSON; no `time.sleep` under `gui/`; no plan citations in code. | 0.5 d |
 | 0.6 | Capability manifest with two renderers (GUI panels and agent tool schema). **This is the framework plan's Phase 1, not this plan's work**: `@monitored` gains `unit=` / `description=` on the decorator with keys untouched, `core/capability_manifest.py` is built from a live Station, and a conformance test demands complete descriptions. Off the thread's critical path; listed so the two documents agree it exists once. | framework Phase 1, ~2 d |
 
 ### Phase 1 — the thread move
@@ -405,11 +460,11 @@ Nothing before Phase 1 changes behaviour on `main`.
 ### Phase 2 — default on, and the standard
 
 Flip the default; decide whether `inline` mode stays (decision 5); rewrite
-the `CLAUDE.md` paragraph per §3.1; add **Instrument thread**, **Orchestrator
-proxy**, **Status snapshot**, **Station info**, **Run queue** to
-`GLOSSARY.md`; update `core/README.md`, `gui/README.md`; correct
+the `CLAUDE.md` paragraph per §3.1; add **Instrument thread**, **Control contract**, **Actor**,
+**Orchestrator proxy**, **Status snapshot**, **Station info**, **Run
+queue** to `GLOSSARY.md`; update `core/README.md`, `gui/README.md`; correct
 `agentic-instrumentation-framework.md` Phase 5 and the audit document's D4
-per §3.5. One day.
+per §3.6. One day.
 
 ### After this plan: the features it exists for
 
@@ -446,13 +501,14 @@ per §3.5. One day.
 | Cross-thread mutation of an emitted payload. | Copy rule plus frozen dataclasses (step 0.4). |
 | The GUI test suite silently stops covering the real wiring. | Every GUI test runs through the proxy in `inline` mode; the `threaded` suite covers the boundary itself. |
 | Flakiness from real threads under pytest-qt. | Only `test_instrument_thread.py` starts a `QThread`; explicit `waitSignal` timeouts; sim station; marked for isolated retry in CI. |
+| The two clients drift: a GUI button with no agent tool, or a tool the GUI cannot show. | Both are rendered from `Command.name`; the three-way conformance test in §3.4 fails the moment either side is missing one. |
 | Doubling the GUI test matrix forever if `inline` mode is kept. | Decision 5. |
 
 ---
 
 ## 6. Estimate
 
-Merge: hours. Phase 0 remaining (0.2 through 0.5): 4.5 to 5.5 days; 0.6 is
+Merge: hours. Phase 0 remaining (0.2 through 0.5): 5.5 to 6.5 days; 0.6 is
 1 to 1.5 days more when the agent gateway needs it. Phase 1: 6 to 7 days
 plus soak. Phase 2: one day. Roughly three weeks to a threaded default with
 behaviour parity, before any agent, analysis or eLab feature starts. The
@@ -497,7 +553,7 @@ them and narrows two more. Recorded here so they are not asked again.
 | Does the GUI ever read engine state synchronously? (redline D4) | No, and the framework strengthens the answer. M4: "fire-and-forget plus a later broadcast signal is a GUI pattern; it does not survive contact with a request/response tool call." So the proxy's commands return a `request_id` and the verdict is the framework's `ActionVerdict` (Phase 2 step 1), consumed by GUI and gateway alike. §3.4. |
 | eLab scope and trigger | Not this plan's. Framework §5 defers the eLab publishing track to `archive/session-management-layer.md` Part B: an ELN adapter contract, an offline-first publisher "never in the tick path", `ElnLink` scaffolding already in `session/models.py`. The thread only makes "never in the tick path" structural. |
 | Result access | Framework Phase 2 step 3: `core/data_reader.py` as a standalone sibling of `data_manager.py` with its own contract, for completed and probe runs. What remains open is the run in progress (decision 6). |
-| Agent transport | Framework Phases 4 and 5 plus the audit document's D4, reconciled in §3.5: in-process gateway on the GUI thread, then a request spool or `QLocalServer`, then an out-of-process MCP adapter. No decision left; only the wording change at Phase 2. |
+| Agent transport | Framework Phases 4 and 5 plus the audit document's D4, reconciled in §3.6: in-process gateway on the GUI thread, then a request spool or `QLocalServer`, then an out-of-process MCP adapter. No decision left; only the wording change at Phase 2. |
 
 The framework's own four decisions (§6: envelope binds the human,
 recovery versus run-control classification, units on decorator or config,
@@ -505,11 +561,15 @@ embedded-agent cost) are untouched by this plan and stay with it.
 
 ### 8.2 Still open
 
-Recommendation first in each. Decisions 1 to 3 block Phase 0, 4 and 5
-block Phase 1, 6 and 7 can wait until Phase 2.
+Recommendation first in each. Decision 1 is resolved and kept for its
+reasoning; 2 and 3 block Phase 0, 4 and 5 block Phase 1, 6 and 7 can wait
+until Phase 2.
 
 **1 — Does `state_changed` carry a reason?** *(redline D1; blocks 0.2,
-0.3, 0.4)* Today `pyqtSignal(str)`. Five IDLE transitions do not chain, so
+0.3, 0.4)* **Resolved 2026-09-02 by the two-client goal: option A.** Every
+event in the control contract carries `actor` and, when caused by a
+command, `request_id`; `StateChange` carries `cause` as part of that.
+Recorded here for the reasoning. Today `pyqtSignal(str)`. Five IDLE transitions do not chain, so
 `"idle"` alone cannot distinguish a clean finish from a quench
 acknowledgement. Once an agent subscribes, and once it is a cross-thread
 payload contract, this is much harder to change.
