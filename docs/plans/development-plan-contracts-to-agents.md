@@ -11,7 +11,7 @@ goes there, and a reader who wants the order stays here.
 | `instrument-thread-and-responsive-gui.md` | the control contract, the instrument thread, the proxy, the pull seam, the status mirror |
 | `control-ui-groups.md` | titled UI groups on `@monitored` / `@control`, grouped front panels, the group half of the manifest |
 | `archive/session-management-layer.md` Part B | the ELN adapter contract and the offline-first publisher |
-| `agent-operative-architecture-audit.md` (on the audit branch until Phase A merges it) | closing the direct write path, actor and accountability, observability corrections |
+| `agent-operative-architecture-audit.md` | closing the direct write path, actor and accountability, observability corrections |
 
 The ordering principle is the one the request stated: **contracts and
 structure first.** Nothing that moves data across a thread, a process or a
