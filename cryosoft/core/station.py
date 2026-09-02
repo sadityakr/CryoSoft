@@ -189,6 +189,10 @@ class Station:
     """
 
     def __init__(self) -> None:
+        # Setup identity: the name of the config directory this Station was
+        # built from (`build_station()` sets it). None for a Station assembled
+        # in-process without a config folder, e.g. in a unit test.
+        self._setup_name: str | None = None
         self._vi_registry: dict[str, str] = {}            # {vi_name: vi_type}
         self._virtual_instruments: dict[str, BaseVirtualInstrument] = {}
         self._last_known_state: dict[str, dict] = {}       # Stale value cache
@@ -234,6 +238,20 @@ class Station:
         self._virtual_instruments[vi_name] = vi
         self._error_counts[vi_name] = 0
         logger.info("Registered VI '%s' (type=%s)", vi_name, vi_type)
+
+    def setup_name(self) -> str | None:
+        """Return the setup name this Station was built from.
+
+        The setup's identity is its config directory's name (the same string
+        the app stores as the active config and an `ExperimentRecord` stores
+        as ``config_name``) — a setup property, so it comes from the config
+        rather than from anything in code.
+
+        Returns:
+            The config directory's name, or None for a Station built without
+            one (constructed directly rather than through `build_station()`).
+        """
+        return self._setup_name
 
     def get_vi_names(self) -> list[str]:
         """Return a list of all registered VI names."""
@@ -1810,6 +1828,9 @@ def build_station(config_path: str) -> Station:
         monitor_config: dict = dict(yaml.load(f))
 
     station = Station()
+    # Setup identity for anything that reports which setup it is running
+    # (the operational-status record's ``setup`` field).
+    station._setup_name = config_dir.name
 
     # Apply monitor config
     mon = monitor_config.get("monitor", {})

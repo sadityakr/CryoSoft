@@ -9,7 +9,13 @@ the JSONL record format, not on ``cryosoft.core``.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+
+# Bytes read per backward step when tailing. One tick's record is a few
+# hundred bytes to a few kB, so a 64 kB step reaches the default five-record
+# window in a single read on any realistic station.
+_TAIL_CHUNK = 65536
 
 # Plain-English meaning + first thing to check, per runtime fault code. Keyed by
 # the string code as it appears in status.jsonl (the log is the contract), so
@@ -44,17 +50,86 @@ CODE_HELP: dict[str, str] = {
 }
 
 
+def tail_lines(path: Path, count: int) -> list[str]:
+    """Return the last *count* complete lines of a file, reading from the end.
+
+    status.jsonl is append-only and grows for as long as the app ticks, while
+    every question this module answers ("what is it doing right now?") needs
+    only its last few records. Reading the whole file to keep five lines makes
+    the cheap question cost O(file), which on a long run is tens of MB per
+    invocation. So seek to the end and step backwards in `_TAIL_CHUNK` blocks
+    until enough newlines are in hand.
+
+    Two fragments are dropped, both of which would otherwise parse as
+    corrupt records:
+
+    * a partial FINAL line — the writer is mid-append (a record is one
+      `write()` of one line, but nothing guarantees the reader observes it
+      whole), so a file not ending in a newline has an incomplete last line
+      that is not a record yet;
+    * a partial FIRST line — the backward window almost always begins in the
+      middle of some earlier record; that fragment is only kept when the walk
+      reached the start of the file, where it is a whole line.
+
+    Args:
+        path: The file to tail.
+        count: Number of complete trailing lines wanted (must be positive).
+
+    Returns:
+        Up to *count* complete lines, oldest first, blank lines dropped.
+    """
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        position = handle.tell()
+        chunks: list[bytes] = []
+        newlines = 0
+        # One more newline than records wanted: it proves the window's first
+        # line is complete rather than a fragment of an earlier record.
+        while position > 0 and newlines <= count:
+            step = min(_TAIL_CHUNK, position)
+            position -= step
+            handle.seek(position)
+            chunk = handle.read(step)
+            newlines += chunk.count(b"\n")
+            chunks.insert(0, chunk)
+        blob = b"".join(chunks)
+
+    ends_complete = blob.endswith(b"\n")
+    # errors="replace" cannot corrupt a returned line: the only place a
+    # multi-byte character can be split is the window's leading edge, which
+    # is either dropped below or the true start of the file.
+    lines = blob.decode("utf-8", errors="replace").splitlines()
+    if lines and not ends_complete:
+        lines.pop()
+    if lines and position > 0:
+        lines.pop(0)
+    return [line for line in lines if line.strip()][-count:]
+
+
 def read_records(log_path: str | Path, last: int | None = None) -> list[dict]:
     """Return parsed JSONL records from status.jsonl (the last *last* if given).
 
     Missing file → empty list. Unparseable lines are skipped, not fatal.
+
+    Args:
+        log_path: Path to status.jsonl.
+        last: Number of trailing records wanted. A positive value is read by
+            tailing from the end of the file (`tail_lines`) rather than
+            parsing the whole log; None (or a non-positive value, kept for
+            callers relying on Python's slice semantics) reads it all.
+
+    Returns:
+        The parsed records, oldest first.
     """
     path = Path(log_path)
     if not path.exists():
         return []
-    lines = [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
-    if last is not None:
-        lines = lines[-last:]
+    if last is not None and last > 0:
+        lines = tail_lines(path, last)
+    else:
+        lines = [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        if last is not None:
+            lines = lines[-last:]
     records: list[dict] = []
     for ln in lines:
         try:
@@ -81,10 +156,25 @@ def summarize(records: list[dict]) -> dict:
     ``conditions`` is read from the latest record and defaults to ``[]`` when
     absent — status.jsonl written before the System-Condition standard was
     carried into it stays readable, never an error (the log is the contract).
+    The record standard's header fields (``schema``, ``ts``, ``seq``,
+    ``run_id``, ``experiment_id``, ``setup``) are carried through the same
+    way; ``schema`` defaults to 1 (records predating the field) and the rest
+    to None.
+
+    Args:
+        records: The window of parsed records, oldest first.
+
+    Returns:
+        The digest dict rendered by `render_text` and printed by
+        ``troubleshoot status --json``.
     """
     if not records:
         return {"available": False}
     latest = records[-1]
+    # Header fields of the record standard (see
+    # cryosoft.core.operational_status). `.get` throughout: a schema-1 log,
+    # written before these existed, must stay readable and simply reports
+    # them as None — the log is the contract, and old logs are part of it.
     gaps: dict[str, list[float]] = {}
     for rec in records:
         for vi in rec.get("vis", []):
@@ -93,6 +183,12 @@ def summarize(records: list[dict]) -> dict:
                 gaps.setdefault(vi["vi_name"], []).append(g)
     return {
         "available": True,
+        "schema": latest.get("schema", 1),
+        "ts": latest.get("ts"),
+        "seq": latest.get("seq"),
+        "run_id": latest.get("run_id"),
+        "experiment_id": latest.get("experiment_id"),
+        "setup": latest.get("setup"),
         "orch_state": latest.get("orch_state"),
         "elapsed_in_state_s": latest.get("elapsed_in_state_s"),
         "verdict": latest.get("verdict"),

@@ -427,6 +427,43 @@ def _add_target_args(parser: argparse.ArgumentParser) -> None:
     _add_config_arg(parser)
 
 
+def _judge_freshness(
+    digest: dict[str, Any], max_age_s: float
+) -> tuple[float | None, str | None]:
+    """Judge a status digest against a ``--max-age`` freshness limit.
+
+    Freshness is judged from the newest record's own ``ts``, never from the
+    file's mtime: a log rotation or a file copy moves the mtime without a
+    single new record being written, and the question here is whether the app
+    is still *ticking*. Mirrors `engine.check_trend_store_live`, which asks
+    the same question of the trend-history store.
+
+    Args:
+        digest: The `status_reader.summarize()` digest to judge.
+        max_age_s: Maximum tolerated age, in seconds, of the newest record.
+
+    Returns:
+        ``(age_s, reason)`` — the newest record's age in seconds where that
+        can be computed, and a one-line operator-readable reason the log
+        fails the gate, or None when it is fresh.
+    """
+    if not digest.get("available"):
+        return None, "no operational-status record: the app has not written one here."
+    ts = digest.get("ts")
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)):
+        return None, (
+            "the newest record carries no timestamp (schema 1 log), so its age "
+            "cannot be checked — treat it as stale."
+        )
+    age_s = time.time() - float(ts)
+    if age_s > max_age_s:
+        return age_s, (
+            f"the newest record is {age_s:.0f}s old (limit {max_age_s:.0f}s) — "
+            "the app is not ticking, so this state is history, not live."
+        )
+    return age_s, None
+
+
 def _cmd_status(args: argparse.Namespace) -> tuple[bool, dict[str, Any]]:
     """Summarize the running app's operational-status log (works while it runs).
 
@@ -437,16 +474,31 @@ def _cmd_status(args: argparse.Namespace) -> tuple[bool, dict[str, Any]]:
     exists and its verdict is OK, so an agent can gate on the exit code.
     This is the one troubleshoot command that reads the LIVE app rather than
     opening instruments with the app closed.
+
+    With ``--max-age`` the exit code also gates on freshness. Without it, a
+    log left behind by a process that died days ago still reads as a
+    confident "RAMPING, ~1400 s to target" and exits 0, so anything gating on
+    the exit code should pass ``--max-age``.
     """
     log_path = args.log or (_transcript_dir() / "status.jsonl")
     records = status_reader.read_records(log_path, last=args.last)
     digest = status_reader.summarize(records)
+    stale_reason: str | None = None
+    if args.max_age is not None:
+        age_s, stale_reason = _judge_freshness(digest, args.max_age)
+        digest["max_age_s"] = args.max_age
+        digest["age_s"] = None if age_s is None else round(age_s, 1)
+        digest["stale"] = stale_reason is not None
+        if stale_reason:
+            digest["stale_reason"] = stale_reason
     if args.json:
         _print_json(digest)
     else:
         print(status_reader.render_text(digest))
+        if stale_reason:
+            print(f"stale: {stale_reason}", file=sys.stderr)
     ok = bool(digest.get("available")) and digest.get("verdict") == "OK"
-    return ok, digest
+    return ok and stale_reason is None, digest
 
 
 _WINDOW_UNITS = {"s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0, "": 1.0}
@@ -625,6 +677,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--last", type=int, default=5,
                    help="recent records to fold in for the gap trend (default 5)")
+    p.add_argument(
+        "--max-age", type=float, default=None, metavar="SECONDS",
+        help="fail (exit 1) unless the newest record is younger than this. "
+        "A few tick intervals is the useful value — 30 at the default 3 s "
+        "tick. Off by default; pass it whenever you gate on the exit code, "
+        "or a log from a process that died days ago reads as a live run",
+    )
     p.set_defaults(func=_cmd_status)
 
     p = sub.add_parser("trends", parents=[common],

@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
 from cryosoft.core.conditions import Condition
-from cryosoft.core.operational_status import RunFaultCode, build_operational_status
+from cryosoft.core.operational_status import (
+    SCHEMA_VERSION,
+    RunFaultCode,
+    build_operational_status,
+    next_sequence_number,
+)
 
 
 def test_normal_ramp_reports_gap_eta_and_ok():
@@ -183,3 +189,72 @@ def test_conditions_are_json_serializable():
         conditions=[condition],
     )
     json.dumps(record)  # must not raise
+
+
+# ── The record standard's header fields (schema 2) ────────────────────────────
+
+
+def _minimal_record(**kwargs):
+    """Build one record from an empty station snapshot, for header assertions."""
+    record, _ = build_operational_status(
+        orch_state="IDLE", elapsed_in_state_s=0.0, state={}, ramp_info={},
+        prev_gaps={}, **kwargs,
+    )
+    return record
+
+
+def test_header_fields_are_always_present_and_typed():
+    """Every header field of the record standard is present on every record."""
+    record = _minimal_record()
+    assert record["schema"] == SCHEMA_VERSION
+    assert isinstance(record["ts"], float)
+    assert record["ts"] == pytest.approx(time.time(), abs=60.0)
+    assert isinstance(record["seq"], int)
+    assert record["seq"] >= 1
+
+
+def test_unknown_header_values_are_null_never_missing():
+    """A value the caller does not know is None — a reader never sees a gap."""
+    record = _minimal_record()
+    for field in ("run_id", "experiment_id", "setup"):
+        assert field in record
+        assert record[field] is None
+
+
+def test_header_values_are_carried_through_when_supplied():
+    record = _minimal_record(
+        run_id="20260902_120000_001_mock_sweep",
+        experiment_id="exp-7",
+        setup="sim_cryostat",
+    )
+    assert record["run_id"] == "20260902_120000_001_mock_sweep"
+    assert record["experiment_id"] == "exp-7"
+    assert record["setup"] == "sim_cryostat"
+
+
+def test_seq_strictly_increases_across_records():
+    """Consecutive records carry strictly increasing sequence numbers."""
+    seqs = [_minimal_record()["seq"] for _ in range(5)]
+    assert all(later > earlier for earlier, later in zip(seqs, seqs[1:]))
+
+
+def test_next_sequence_number_is_process_wide_and_starts_at_one():
+    first = next_sequence_number()
+    assert first >= 1
+    assert next_sequence_number() == first + 1
+
+
+def test_explicit_ts_and_seq_override_the_defaults():
+    """Callers may stamp their own identity (replaying a log, say)."""
+    record = _minimal_record(ts=1_000_000.5, seq=42)
+    assert record["ts"] == pytest.approx(1_000_000.5)
+    assert record["seq"] == 42
+
+
+def test_record_is_json_serialisable_with_the_header():
+    """The record is written as one JSON line, so it must serialise as-is."""
+    record = _minimal_record(run_id="r1", setup="sim_cryostat")
+    round_tripped = json.loads(json.dumps(record))
+    assert round_tripped["schema"] == SCHEMA_VERSION
+    assert round_tripped["run_id"] == "r1"
+    assert round_tripped["experiment_id"] is None

@@ -6,6 +6,7 @@ from typing import ClassVar
 import pytest
 
 
+from cryosoft.core.operational_status import SCHEMA_VERSION
 from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 from cryosoft.core.plan import Command, PhasePlan, StepPlan, Target
 from cryosoft.core.station import Station, build_station
@@ -301,6 +302,118 @@ def test_operational_status_carries_active_safety_condition(orchestrator, statio
     condition = hold_conditions[0]
     assert condition["kind"] == "helium_low"
     assert "magnet_z" in condition["affected"]
+
+
+# ── The operational-status record standard's header (core/operational_status) ──
+
+
+class _StatusLogCollector(logging.Handler):
+    """Collect the JSON lines the Orchestrator writes to ``cryosoft.status``.
+
+    Attached directly to the logger rather than read through ``caplog``: the
+    real handler is installed with ``propagate=False`` by ``setup_logging()``,
+    so whether the records reach the root logger depends on whether some other
+    test configured logging first.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.messages.append(record.getMessage())
+
+
+def _collect_status_lines(orch, ticks: int) -> list[dict]:
+    """Tick *orch* *ticks* times and return the status records it logged.
+
+    The logger's level is forced to INFO for the duration: under pytest the
+    root logger keeps its default WARNING (the runner installs its own
+    handlers, so ``basicConfig`` is a no-op), which would otherwise filter the
+    records out before any handler sees them.
+    """
+    handler = _StatusLogCollector()
+    status_logger = logging.getLogger("cryosoft.status")
+    previous_level = status_logger.level
+    status_logger.setLevel(logging.INFO)
+    status_logger.addHandler(handler)
+    try:
+        for _ in range(ticks):
+            orch._tick()
+    finally:
+        status_logger.removeHandler(handler)
+        status_logger.setLevel(previous_level)
+    return [json.loads(message) for message in handler.messages]
+
+
+def test_operational_status_carries_the_record_standard_header(orchestrator, qtbot):
+    """A sim-station tick stamps every header field, correctly typed."""
+    orchestrator._tick()
+    status = orchestrator.get_operational_status()
+    assert status["schema"] == SCHEMA_VERSION
+    assert isinstance(status["ts"], float)
+    assert status["ts"] == pytest.approx(time.time(), abs=60.0)
+    assert isinstance(status["seq"], int)
+    assert status["seq"] >= 1
+    # The setup is the config directory the Station was built from.
+    assert status["setup"] == "sim_cryostat"
+    # Unknown values are null, never a missing key: no run is active, and the
+    # session layer has no push-down for the experiment id.
+    assert status["run_id"] is None
+    assert status["experiment_id"] is None
+
+
+def test_operational_status_seq_strictly_increases_across_ticks(orchestrator, qtbot):
+    """Consecutive ticks are distinguishable and orderable by ``seq``."""
+    seqs = []
+    for _ in range(4):
+        orchestrator._tick()
+        seqs.append(orchestrator.get_operational_status()["seq"])
+    assert all(later > earlier for earlier, later in zip(seqs, seqs[1:]))
+
+
+def test_operational_status_carries_run_id_during_a_run(orchestrator, station, qtbot):
+    """While a run is active the record joins to its manifest by ``run_id``."""
+    _fast_magnet(station)
+    orchestrator.run_procedure(MockProcedure(station))
+    _tick_until(orchestrator, lambda: orchestrator._active_run_manifest is not None)
+    run_id = orchestrator._active_run_manifest["run_id"]
+    orchestrator._tick()
+    assert orchestrator.get_operational_status()["run_id"] == run_id
+
+
+def test_operational_status_written_with_monitoring_off(station, qtbot):
+    """One record per tick reaches status.jsonl even with monitoring off.
+
+    Silence in the log must mean "the process is not ticking" and nothing
+    else, otherwise an agent cannot tell a quiet app from a dead one. The
+    quiet tick still polls nothing, so the instrument payload is empty while
+    every header field is written as usual.
+    """
+    orch = Orchestrator(station, tick_interval_ms=10)
+    try:
+        assert orch.is_monitoring() is False
+        records = _collect_status_lines(orch, 3)
+    finally:
+        orch.shutdown()
+
+    assert len(records) == 3
+    seqs = [record["seq"] for record in records]
+    assert all(later > earlier for earlier, later in zip(seqs, seqs[1:]))
+    for record in records:
+        assert record["schema"] == SCHEMA_VERSION
+        assert record["orch_state"] == "IDLE"
+        assert record["setup"] == "sim_cryostat"
+        assert isinstance(record["ts"], float)
+        assert record["vis"] == []  # nothing polled while quiet
+        assert record["verdict"] == "OK"
+
+
+def test_operational_status_written_every_monitored_tick(orchestrator, qtbot):
+    """The same one-record-per-tick guarantee holds with monitoring on."""
+    records = _collect_status_lines(orchestrator, 3)
+    assert len(records) == 3
+    assert all(record["vis"] for record in records), "expected polled instruments"
 
 
 def test_tick_emits_raw_trend_record(orchestrator, station, qtbot):
@@ -1600,9 +1713,22 @@ def _spy_get_state(station, monkeypatch):
 
 
 def test_monitoring_off_by_default_polls_nothing(station, qtbot, monkeypatch):
-    """A fresh Orchestrator neither polls the station nor emits states_updated."""
+    """A fresh Orchestrator neither polls the station nor emits states_updated.
+
+    The per-tick operational-status record is written anyway (see
+    test_operational_status_written_with_monitoring_off) — it must not be the
+    one thing that breaks the quiet, so its instrument payload stays empty and
+    neither get_state() nor get_ramp_status() is called.
+    """
     orch = Orchestrator(station, tick_interval_ms=10)
     calls = _spy_get_state(station, monkeypatch)
+    ramp_calls: list[int] = []
+    real_get_ramp_status = station.get_ramp_status
+    monkeypatch.setattr(
+        station,
+        "get_ramp_status",
+        lambda: (ramp_calls.append(1), real_get_ramp_status())[1],
+    )
     emitted: list[dict] = []
     orch.states_updated.connect(emitted.append)
 
@@ -1610,8 +1736,9 @@ def test_monitoring_off_by_default_polls_nothing(station, qtbot, monkeypatch):
     for _ in range(3):
         orch._tick()
     assert calls == []
+    assert ramp_calls == []
     assert emitted == []
-    assert orch.get_operational_status() == {}
+    assert orch.get_operational_status()["vis"] == []
     orch.shutdown()
 
 
