@@ -1,7 +1,8 @@
 # The instrument thread: a responsive GUI without a second hardware writer
 
-**Status: audit complete, proposal awaiting decisions (2026-09-02; §3.4
-added the same day after the two-client goal was stated).**
+**Status: Phases 0–2 implemented (2026-09-03). `threaded` is the default;
+`inline` is kept for one release.** (Proposed 2026-09-02; §3.4 added the same
+day after the two-client goal was stated.)
 Written to answer three questions: what threading work already exists on
 the remote branches, how it should be merged, and what CryoSoft must become
 so that agent operation, live analysis, and eLab export can run *while a

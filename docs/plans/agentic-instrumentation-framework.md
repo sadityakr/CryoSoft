@@ -528,14 +528,18 @@ argument for this ordering.
 
 ### Phase 5 — MCP transport
 
-*The one sanctioned thread, landing alone.*
+*A second front door, landing alone.*
+
+The "one sanctioned thread" this phase was named for is retired: the single
+hardware thread standard (`instrument-thread-and-responsive-gui.md` §3) has
+since made the instrument thread the one thread, and every transport is an
+ordinary client of it on the main thread.
 
 Streamable HTTP MCP on `127.0.0.1` with a bearer token minted at startup
-into a runtime file. A transport thread owns only the socket and MCP
-framing and never touches Station, Orchestrator, or any VI; every decoded
-call crosses to the main thread by Qt queued connection, executes on the
-tick thread through the normal single-writer path, and the result crosses
-back. Written into the gateway README as a standard with a conformance test
+into a runtime file. The transport owns only the socket and MCP framing and
+never touches Station, Orchestrator, or any VI; every decoded call is
+submitted through the gateway on the main thread, executes on the instrument
+thread through the normal single-writer path, and the result crosses back. Written into the gateway README as a standard with a conformance test
 asserting no hardware imports in transport modules.
 
 Because Phase 4 already validated the whole tool surface in-process, this

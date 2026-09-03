@@ -264,6 +264,10 @@ thread standard. GLOSSARY: **Instrument thread**, **Orchestrator proxy**,
 **Status snapshot**, **Station info**. Update `core/README.md`,
 `gui/README.md`; retire "the one sanctioned thread" from the framework's
 Phase 5 and reword the audit's D4. `inline` stays for one release.
+*Done 2026-09-03: threaded is the default (the two real setups carry an
+explicit `false` until their hardware soak), CI's second leg is
+`CRYOSOFT_INSTRUMENT_THREAD=0`, and the **Inline mode** row records the
+one-release removal criterion.*
 
 **Phase C exit.** The Monitor and Procedure windows repaint and accept
 clicks during a twenty-second sim datapoint; a Pause click is acknowledged

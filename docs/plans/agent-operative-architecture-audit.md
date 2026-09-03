@@ -237,11 +237,13 @@ wrapper, the interlock guards, the capability-scope refusal, the envelope check,
 the availability policy. **The enumeration is the deliverable**; the enum is
 just its shape.
 
-### D4 — No thread. Ever.
+### D4 — No thread in the transport; the instrument thread is the one thread, per the single hardware thread standard
 
 The existing plan calls the MCP transport thread "the single riskiest change in
-this entire programme", and it is right — it would be the only sanctioned thread
-in a codebase whose answer to GPIB races is that there is exactly one. But the
+this entire programme", and it is right — it would put a second thread on the
+bus, which the single hardware thread standard
+(`instrument-thread-and-responsive-gui.md` §3) forbids: the instrument thread
+owns every driver, and a transport is a client of it like any other. But the
 risk is a property of the proposed design, not of the requirement.
 
 **Decide:** a three-rung ladder of monotonically decreasing risk, none of which
