@@ -19,6 +19,8 @@ from cryosoft.core.plan import (
     ParamGroup,
     ParamSpec,
     PhasePlan,
+    ProbeSpec,
+    StepCost,
     StepPlan,
     Target,
 )
@@ -144,10 +146,10 @@ class BaseProcedure:
     requires_measurement_vi: bool = False
 
     # What kind of run this procedure execution is, recorded in the
-    # Orchestrator's run manifests: "run" for a normal science run. The session
-    # layer's future probe runs (a miniature pre-flight execution of the same
-    # procedure) will override this with "probe" so probe data files and run
-    # records are never confused with science data.
+    # Orchestrator's run manifests and in the data file's /metadata.run_kind:
+    # "run" for a normal science run. ``apply_probe()`` sets it to "probe" on
+    # the one reduced instance it builds (see ProbeSpec's reduction rules), so
+    # probe data files and run records are never confused with science data.
     run_kind: str = "run"
 
     def __init_subclass__(cls, **kwargs: object) -> None:
@@ -472,6 +474,130 @@ class BaseProcedure:
             ``{vi_name: [setpoint, ...]}`` in SI units, in dispatch order.
         """
         return {}
+
+    # ------------------------------------------------------------------
+    # Probe runs and duration estimates — see ProbeSpec / StepCost
+    # ------------------------------------------------------------------
+
+    def apply_probe(self, spec: ProbeSpec) -> None:
+        """Reduce this built run, in place, to the cheap probe *spec* describes.
+
+        The one entry point of the **probe standard**, whose reduction rules
+        are written in ``ProbeSpec``'s docstring: subsample the sweep to at
+        most ``spec.n_points`` points keeping first and last, cap every
+        declared seconds-valued parameter at ``spec.max_wait_s``, record the
+        spec as the ``probe_spec`` parameter, and declare ``run_kind =
+        "probe"`` so the manifest, the run record and the data file all say
+        what this is. Averaging is reduced by the generic sweep procedure,
+        which is the layer that knows the measurement VI (see
+        ``SweepMeasureProcedure.apply_probe``).
+
+        Called by ``run_builder.build_procedure()`` on the freshly built
+        instance — never mid-run: it rewrites the sweep the run is about to
+        walk.
+
+        Args:
+            spec: The reduction to apply.
+
+        Raises:
+            TypeError: If *spec* is not a ``ProbeSpec``.
+        """
+        if not isinstance(spec, ProbeSpec):
+            raise TypeError(f"apply_probe expects a ProbeSpec, got {spec!r}")
+        self._sweep = self._probe_subsample(self._sweep, spec.n_points)
+        capped = self._probe_cap_waits(
+            type(self).parameters, self._params, spec.max_wait_s
+        )
+        self._params["probe_spec"] = spec.to_json()
+        self.run_kind = "probe"
+        logger.info(
+            "%s: probe run — %d sweep points, waits capped at %g s%s",
+            type(self).__name__,
+            len(self._sweep),
+            spec.max_wait_s,
+            f" ({', '.join(capped)})" if capped else "",
+        )
+
+    @staticmethod
+    def _probe_subsample(values: list, n_points: int) -> list:
+        """Return at most *n_points* of *values*, keeping the first and last.
+
+        Args:
+            values: The full sweep array.
+            n_points: Maximum points to keep (``>= 1``).
+
+        Returns:
+            A new list of evenly spaced points including ``values[0]`` and
+            ``values[-1]``; *values* itself (copied) when it is already short
+            enough, and ``[]`` when it is empty.
+        """
+        total = len(values)
+        if total <= n_points:
+            return list(values)
+        if n_points == 1:
+            return [values[0]]
+        return [
+            values[round(i * (total - 1) / (n_points - 1))] for i in range(n_points)
+        ]
+
+    @staticmethod
+    def _probe_cap_waits(
+        specs: Mapping[str, ParamSpec], params: dict[str, Any], max_wait_s: float
+    ) -> list[str]:
+        """Cap every seconds-valued declared parameter in *params*, in place.
+
+        The declaration test behind the probe standard's wait rule: a
+        parameter whose ``ParamSpec`` carries the unit ``"s"`` is a wait, so a
+        new procedure's settle knob is reduced with no new code.
+
+        Args:
+            specs: The declarations to read the unit from.
+            params: The run's parameter values, mutated in place.
+            max_wait_s: The cap, in seconds.
+
+        Returns:
+            The names actually lowered, in declaration order.
+        """
+        capped: list[str] = []
+        for name, spec in specs.items():
+            if spec.unit != "s" or spec.type not in (int, float):
+                continue
+            value = params.get(name)
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                continue
+            if value <= max_wait_s:
+                continue
+            params[name] = type(value)(max_wait_s) if spec.type is int else max_wait_s
+            capped.append(name)
+        return capped
+
+    def estimate_step_seconds(self) -> StepCost:
+        """Return this run's per-point cost model, apart from its ramps.
+
+        The one hook a procedure contributes to the **duration-estimate
+        standard**: ``core.estimates.estimate_duration()`` adds the ramp time
+        it derives from ``planned_targets()`` and the setup's nominal ramp
+        rates, and needs from the run only what the run itself knows — how
+        many points it will take, how long it waits, and how long a
+        measurement lasts. Purely declarative: it touches no instrument and
+        changes nothing about the run.
+
+        The default is honest rather than optimistic: the built sweep's length
+        and no waits at all, with the omission recorded as an assumption. A
+        procedure with settle waits overrides this (see
+        ``SweepMeasureProcedure``), which is why every generic sweep procedure
+        gets a real estimate for free.
+
+        Returns:
+            The ``StepCost`` for one run of this instance.
+        """
+        return StepCost(
+            points=len(self._sweep),
+            assumptions=(
+                f"{type(self).__name__} declares no settle or measurement "
+                f"time, so only its ramps are estimated",
+            ),
+        )
 
     def _claim_initiate_commands(self) -> tuple[Command, ...]:
         """Build an ``initiate()`` command for every VI this procedure claims.
@@ -1503,6 +1629,149 @@ class SweepMeasureProcedure(BaseProcedure):
                 planned.setdefault(vi_name, []).append(float(target.target))
         return planned
 
+    # ------------------------------------------------------------------
+    # Probe runs and duration estimates — the measurement-VI half
+    # ------------------------------------------------------------------
+
+    def apply_probe(self, spec: ProbeSpec) -> None:
+        """Reduce this run to a probe, measurement parameters included.
+
+        Extends ``BaseProcedure.apply_probe()`` (sweep length, declared waits,
+        ``run_kind``) with the two reductions that need the selected
+        measurement VI: its own seconds-valued parameters (inter-reading
+        delays, time constants) are capped at ``spec.max_wait_s``, and every
+        repeat count is capped at ``spec.averaging`` — identified by
+        declaration rather than by name, as the parameter whose value shortens
+        one of the VI's declared ``data_arrays()`` lengths, so a new
+        measurement VI's averaging knob is reduced with no new code here.
+
+        Args:
+            spec: The reduction to apply.
+
+        Raises:
+            TypeError: If *spec* is not a ``ProbeSpec``.
+        """
+        super().apply_probe(spec)
+        vi = self._station.get_vi(self._measurement_vi)
+        capped = self._probe_cap_waits(
+            vi.measurement_parameters, self._measurement_params, spec.max_wait_s
+        )
+        capped += self._probe_cap_averaging(vi, spec.averaging)
+        # The resolved measurement values are mirrored into _params (that is
+        # what the HDF5 metadata and the run manifest record), so the mirror
+        # must follow the reduction.
+        self._params.update(self._measurement_params)
+        if capped:
+            logger.info(
+                "%s: probe reduced measurement parameters %s",
+                type(self).__name__,
+                ", ".join(capped),
+            )
+
+    def _probe_cap_averaging(self, vi: Any, averaging: int) -> list[str]:
+        """Cap every declared repeat count of *vi* at *averaging*, in place.
+
+        Args:
+            vi: The selected measurement VI.
+            averaging: The maximum repeat count a probe keeps.
+
+        Returns:
+            The measurement parameter names actually lowered.
+        """
+        current = self._declared_array_lengths(vi, self._measurement_params)
+        if not current:
+            return []
+        reduced: list[str] = []
+        for name, value in list(self._measurement_params.items()):
+            if isinstance(value, bool) or not isinstance(value, int):
+                continue
+            if value <= averaging:
+                continue
+            trial = dict(self._measurement_params)
+            trial[name] = averaging
+            lengths = self._declared_array_lengths(vi, trial)
+            if any(lengths.get(key, length) < length for key, length in current.items()):
+                self._measurement_params[name] = averaging
+                current = lengths
+                reduced.append(name)
+        return reduced
+
+    @staticmethod
+    def _declared_array_lengths(vi: Any, params: Mapping[str, Any]) -> dict[str, int]:
+        """Return the VI's declared per-array sample counts for *params*.
+
+        Args:
+            vi: The measurement VI.
+            params: The measurement parameter values to declare against.
+
+        Returns:
+            ``{array_name: length}``, or ``{}`` when the VI refuses these
+            values — a declaration read must never raise at its caller, which
+            is estimating or reducing, not measuring.
+        """
+        try:
+            return {str(key): int(value) for key, value in vi.data_arrays(params).items()}
+        except Exception:  # noqa: BLE001 — a declaration read never raises out
+            logger.debug("data_arrays() refused %r", dict(params), exc_info=True)
+            return {}
+
+    def estimate_step_seconds(self) -> StepCost:
+        """Return this sweep's per-point cost: its declared waits and readings.
+
+        Derived from the same hooks the run itself uses — ``_initiate_wait_s()``
+        and ``_step_wait_s()`` for the waits, ``_loop_shape`` for how many
+        readings one datapoint takes — so the estimate cannot drift from what
+        the tick loop will actually wait for. The measurement time is modelled
+        from the selected VI's own declarations: its declared sample count
+        (``data_arrays()``) times the sum of its seconds-valued measurement
+        parameters (inter-reading delay, time constant), which is a lower
+        bound — instrument conversion and transfer time are not modelled, and
+        the returned assumptions say so.
+
+        Returns:
+            The ``StepCost`` for one run of this instance.
+        """
+        vi = self._station.get_vi(self._measurement_vi)
+        readings = self._loop_shape[0] * self._loop_shape[1]
+        samples = max(
+            self._declared_array_lengths(vi, self._measurement_params).values(),
+            default=1,
+        )
+        delays = {
+            name: float(self._measurement_params[name])
+            for name, spec in vi.measurement_parameters.items()
+            if spec.unit == "s"
+            and spec.type in (int, float)
+            and isinstance(self._measurement_params.get(name), (int, float))
+            and not isinstance(self._measurement_params.get(name), bool)
+        }
+        per_sample_s = sum(delays.values())
+        assumptions = [
+            f"settle times are this run's declared waits: "
+            f"{self._initiate_wait_s():g} s before the first point, "
+            f"{self._step_wait_s():g} s before each later one",
+        ]
+        if per_sample_s > 0:
+            assumptions.append(
+                f"measurement time is {samples} sample(s) x "
+                f"{per_sample_s:g} s of declared delay "
+                f"({', '.join(sorted(delays))}) x {readings} reading(s) per "
+                f"point; instrument conversion and transfer time are not "
+                f"modelled"
+            )
+        else:
+            assumptions.append(
+                f"{self._measurement_vi} declares no per-sample delay, so no "
+                f"measurement time is counted"
+            )
+        return StepCost(
+            points=len(self._sweep),
+            setup_s=float(self._initiate_wait_s()),
+            settle_s=float(self._step_wait_s()),
+            measure_s=float(readings * samples * per_sample_s),
+            assumptions=tuple(assumptions),
+        )
+
     def initiate(self) -> PhasePlan:
         """Ramp to the first sweep point, arm the selected VI, open the file.
 
@@ -1569,6 +1838,10 @@ class SweepMeasureProcedure(BaseProcedure):
             data_config=data_config,
             n_sweep_points=len(self._sweep),
             experiment_info=self._experiment_info,
+            # A probe writes a real file, tagged as a probe (see ProbeSpec):
+            # the run's own kind travels into /metadata.run_kind so a reader
+            # can never mistake a reduced probe for science data.
+            run_kind=self.run_kind,
         )
 
         logger.info(

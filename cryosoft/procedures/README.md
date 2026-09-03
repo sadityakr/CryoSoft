@@ -91,6 +91,25 @@ axis hooks.
   state (heater switched to MANUAL, say) is always reset to standard before
   this run's own targets/commands assume it.
 
+- `planned_targets() -> dict[str, list[float]]` (`BaseProcedure`): every system
+  setpoint the built run would command, per VI, so a queued run is validated
+  before anything reaches hardware. `SweepMeasureProcedure` derives it from the
+  same target hooks its plans are built from, so it cannot drift.
+- `apply_probe(ProbeSpec)` and `estimate_step_seconds() -> StepCost`
+  (`BaseProcedure`) are the two run-economics hooks, and a procedure normally
+  inherits both. `apply_probe()` reduces a *built* run in place to a **probe
+  run** (GLOSSARY.md) — the sweep subsampled keeping first and last, declared
+  seconds-valued parameters capped, averaging cut, `run_kind = "probe"` — by
+  the rules written in `ProbeSpec`'s docstring; `estimate_step_seconds()`
+  reports the points, waits and measurement time behind a **duration
+  estimate**, defaulting to the built sweep length with the omission named as
+  an assumption. `SweepMeasureProcedure` implements both fully from the hooks
+  the tick loop already uses (`_initiate_wait_s()`, `_step_wait_s()`,
+  `_loop_shape`, the selected VI's `data_arrays()`), so an axis procedure that
+  supplies only its axis hooks gets a probe and an estimate for free. Override
+  `estimate_step_seconds()` only when the run's cost does not come from those
+  hooks; override `apply_probe()` only to reduce something the base cannot see.
+
 ### Generic sweep and the reading loop (owned by the base, no per-procedure code)
 
 `SweepMeasureProcedure` runs ANY measurement VI the station exposes, chosen in

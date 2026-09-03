@@ -18,9 +18,12 @@ __all__ = [
     "ParamGroup",
     "UIGroup",
     "DataSchema",
+    "DurationEstimate",
     "EnvelopeBound",
     "EnvelopeVariable",
     "ExperimentEnvelope",
+    "ProbeSpec",
+    "StepCost",
     "SETPOINT_PARAM_PREFIX",
 ]
 
@@ -1153,3 +1156,288 @@ class ExperimentEnvelope:
                     f"session envelope: {vi_name} {bound.state_key} {message}"
                 )
         return violations
+
+
+@dataclass(frozen=True)
+class ProbeSpec:
+    """How a cheap **probe run** is derived from a requested run.
+
+    A probe is the same procedure class driving the same instruments through
+    the same code path, reduced until it costs minutes instead of hours: it
+    answers "would this run actually work, and does the signal look sane?"
+    before the full run is committed to. It is never science data — the run it
+    produces declares ``run_kind = "probe"``, which travels into the run
+    manifest, the session layer's run record, and the data file's
+    ``/metadata.run_kind``, so a probe file can never be mistaken for the real
+    thing.
+
+    **The reduction rules** (the standard; applied by
+    ``BaseProcedure.apply_probe()`` to an already-built run, so a probe is
+    only ever a reduction of a run that was built and validated as requested):
+
+    1. **Sweep length.** The built sweep array is subsampled to at most
+       ``n_points`` points, evenly spaced and ALWAYS keeping the first and the
+       last — a probe must exercise the extremes the full run would ramp to,
+       because that is where a limit, a quench or a lost lock shows up.
+       ``n_points=3`` therefore means first/middle/last. A sweep already at or
+       below ``n_points`` is left alone.
+    2. **Waits.** Every declared parameter whose ``ParamSpec`` carries the
+       unit ``"s"`` — settle waits, inter-reading delays — is capped at
+       ``max_wait_s``. Values already below the cap are left alone; a probe
+       never raises a wait.
+    3. **Averaging.** Every declared repeat count is capped at ``averaging``.
+       A repeat count is identified by declaration, never by name: it is a
+       measurement parameter whose value sets the length of one of the
+       measurement VI's declared data arrays (``data_arrays()``), so a new
+       measurement VI's averaging knob is reduced with no new code.
+    4. **Kind and provenance.** The reduced run declares ``run_kind =
+       "probe"`` and records this spec as its ``probe_spec`` parameter, so the
+       file says which reduction produced it. The sweep-shape parameters keep
+       the values that were requested (``field_steps`` still reads 101); the
+       saved point count and ``probe_spec`` together are what say what ran.
+
+    Nothing else changes: same procedure class, same targets, same measurement
+    VI, same claim, and the same setup limits and session envelope apply.
+
+    Attributes:
+        n_points: Maximum number of sweep points the probe keeps. Must be
+            ``>= 1``; the default 3 gives first/middle/last.
+        averaging: Maximum repeat count per measurement point. Must be
+            ``>= 1``.
+        max_wait_s: Upper bound, in seconds, on every declared wait. Must be
+            ``>= 0``.
+    """
+
+    n_points: int = 3
+    averaging: int = 1
+    max_wait_s: float = 5.0
+
+    def __post_init__(self) -> None:
+        """Validate the three reduction bounds.
+
+        Raises:
+            TypeError: If a field is not a real number (``bool`` rejected).
+            ValueError: If ``n_points``/``averaging`` is below 1, or
+                ``max_wait_s`` is negative or non-finite.
+        """
+        for name in ("n_points", "averaging"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"ProbeSpec.{name} must be an int, got {value!r}")
+            if value < 1:
+                raise ValueError(f"ProbeSpec.{name} must be >= 1, got {value!r}")
+        if not _is_real_number(self.max_wait_s):
+            raise TypeError(
+                f"ProbeSpec.max_wait_s must be a real number, got {self.max_wait_s!r}"
+            )
+        if not math.isfinite(self.max_wait_s) or self.max_wait_s < 0:
+            raise ValueError(
+                f"ProbeSpec.max_wait_s must be finite and >= 0, "
+                f"got {self.max_wait_s!r}"
+            )
+        object.__setattr__(self, "max_wait_s", float(self.max_wait_s))
+
+    def to_json(self) -> dict[str, Any]:
+        """Render this spec as a JSON-safe dict.
+
+        Returns:
+            ``{"n_points": int, "averaging": int, "max_wait_s": float}``.
+        """
+        return {
+            "n_points": self.n_points,
+            "averaging": self.averaging,
+            "max_wait_s": self.max_wait_s,
+        }
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> ProbeSpec:
+        """Rebuild a spec from its dict form.
+
+        The form a JSON-speaking client sends: every key optional, unknown
+        keys ignored so a newer producer never breaks an older consumer.
+
+        Args:
+            data: A mapping as produced by ``to_json()``.
+
+        Returns:
+            The typed spec.
+
+        Raises:
+            TypeError: If *data* is not a mapping, or a value has the wrong
+                type.
+            ValueError: If a value is out of range (see ``__post_init__``).
+        """
+        if not isinstance(data, Mapping):
+            raise TypeError(f"ProbeSpec.from_json expects a mapping, got {data!r}")
+        declared = {"n_points", "averaging", "max_wait_s"}
+        return cls(**{k: v for k, v in data.items() if k in declared})
+
+
+@dataclass(frozen=True)
+class StepCost:
+    """What one run costs per point, apart from the ramps.
+
+    The currency of the **duration-estimate standard**: the one thing a run
+    contributes to its own estimate, returned by
+    ``BaseProcedure.estimate_step_seconds()``. The estimator
+    (``core/estimates.py``) supplies the other half — the ramp time, which it
+    derives from the run's declared targets and the setup's nominal ramp
+    rates — so a procedure never has to know how fast its magnet moves.
+
+    Every number is seconds and every unknown is an assumption string rather
+    than a silent zero.
+
+    Attributes:
+        points: How many measurement points the run will take.
+        setup_s: One-off settle time before the first point (the initiate
+            wait).
+        settle_s: Settle time paid before every point after the first.
+        measure_s: Time one measurement at one point takes, averaging
+            included.
+        assumptions: Human-readable statements about what this cost model
+            could not derive and assumed instead.
+    """
+
+    points: int = 0
+    setup_s: float = 0.0
+    settle_s: float = 0.0
+    measure_s: float = 0.0
+    assumptions: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Validate the counts and freeze ``assumptions``.
+
+        Raises:
+            TypeError: If a numeric field is not a real number, or an
+                assumption is not a string.
+            ValueError: If any value is negative or non-finite.
+        """
+        if isinstance(self.points, bool) or not isinstance(self.points, int):
+            raise TypeError(f"StepCost.points must be an int, got {self.points!r}")
+        if self.points < 0:
+            raise ValueError(f"StepCost.points must be >= 0, got {self.points!r}")
+        for name in ("setup_s", "settle_s", "measure_s"):
+            value = getattr(self, name)
+            if not _is_real_number(value):
+                raise TypeError(f"StepCost.{name} must be a real number, got {value!r}")
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(
+                    f"StepCost.{name} must be finite and >= 0, got {value!r}"
+                )
+            object.__setattr__(self, name, float(value))
+        assumptions = tuple(self.assumptions)
+        for assumption in assumptions:
+            if not isinstance(assumption, str):
+                raise TypeError(
+                    f"StepCost.assumptions must hold strings, got {assumption!r}"
+                )
+        object.__setattr__(self, "assumptions", assumptions)
+
+
+@dataclass(frozen=True)
+class DurationEstimate:
+    """How long a run is expected to take, and what that answer assumed.
+
+    Frozen and JSON-safe, so the same value serves ``RunValidation``, the
+    verdict a client renders, and a stored session record. Deliberately
+    carries its own assumptions: an estimate a client cannot qualify is worse
+    than no estimate at all, so anything the model could not derive — a VI
+    with no declared ramp rate, a measurement whose duration nothing declares
+    — is named here instead of being silently counted as zero.
+
+    Attributes:
+        total_s: Expected wall-clock duration, in seconds. The sum of
+            ``phases``.
+        phases: Seconds per phase, e.g. ``{"setup": .., "ramp": ..,
+            "settle": .., "measure": ..}``. Phase keys are whatever the
+            estimator produced; a client renders them, never switches on them.
+        assumptions: One statement per thing the estimate assumed, in
+            discovery order. Never empty for a real estimate: at minimum it
+            names the rate model used.
+    """
+
+    total_s: float = 0.0
+    phases: dict[str, float] = field(default_factory=dict)
+    assumptions: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Validate and freeze copies of the phase map and assumptions.
+
+        Raises:
+            TypeError: If ``total_s`` or a phase value is not a real number,
+                ``phases`` is not a mapping, or an assumption is not a string.
+            ValueError: If a duration is negative or non-finite.
+        """
+        if not _is_real_number(self.total_s):
+            raise TypeError(
+                f"DurationEstimate.total_s must be a real number, got {self.total_s!r}"
+            )
+        if not math.isfinite(self.total_s) or self.total_s < 0:
+            raise ValueError(
+                f"DurationEstimate.total_s must be finite and >= 0, "
+                f"got {self.total_s!r}"
+            )
+        object.__setattr__(self, "total_s", float(self.total_s))
+        if not isinstance(self.phases, Mapping):
+            raise TypeError("DurationEstimate.phases must be a mapping")
+        phases: dict[str, float] = {}
+        for name, value in self.phases.items():
+            if not _is_real_number(value):
+                raise TypeError(
+                    f"DurationEstimate.phases[{name!r}] must be a real number, "
+                    f"got {value!r}"
+                )
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(
+                    f"DurationEstimate.phases[{name!r}] must be finite and >= 0, "
+                    f"got {value!r}"
+                )
+            phases[str(name)] = float(value)
+        object.__setattr__(self, "phases", phases)
+        assumptions = tuple(self.assumptions)
+        for assumption in assumptions:
+            if not isinstance(assumption, str):
+                raise TypeError(
+                    f"DurationEstimate.assumptions must hold strings, "
+                    f"got {assumption!r}"
+                )
+        object.__setattr__(self, "assumptions", assumptions)
+
+    def to_json(self) -> dict[str, Any]:
+        """Render this estimate as a JSON-safe dict.
+
+        Returns:
+            ``{"total_s": float, "phases": {str: float},
+            "assumptions": [str, ...]}``.
+        """
+        return {
+            "total_s": self.total_s,
+            "phases": dict(self.phases),
+            "assumptions": list(self.assumptions),
+        }
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> DurationEstimate:
+        """Rebuild an estimate from its ``to_json()`` dict.
+
+        Args:
+            data: A mapping as produced by ``to_json()``; unknown keys are
+                ignored.
+
+        Returns:
+            The typed estimate.
+
+        Raises:
+            TypeError: If *data* is not a mapping or a field has the wrong
+                type.
+            ValueError: If a duration is negative or non-finite.
+        """
+        if not isinstance(data, Mapping):
+            raise TypeError(
+                f"DurationEstimate.from_json expects a mapping, got {data!r}"
+            )
+        return cls(
+            total_s=data.get("total_s", 0.0),
+            phases=dict(data.get("phases") or {}),
+            assumptions=tuple(data.get("assumptions") or ()),
+        )

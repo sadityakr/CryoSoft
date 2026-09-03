@@ -494,10 +494,15 @@ def test_read_metadata_answers_every_canonical_key(run):
 
 
 def test_read_metadata_leaves_the_engines_keys_empty(run):
-    """A file does not carry the run manifest, and says so with empties."""
+    """A file does not carry the run manifest, and says so with empties.
+
+    ``run_kind`` is the one exception: the writer records it on the file
+    (``/metadata.run_kind``), so a **probe run**'s file identifies itself as
+    a probe to whoever opens it later.
+    """
     metadata = run.read_metadata()
-    assert (metadata["run_id"], metadata["run_kind"]) == ("", "")
-    assert (metadata["status"], metadata["reason"]) == ("", "")
+    assert (metadata["run_id"], metadata["status"], metadata["reason"]) == ("", "", "")
+    assert metadata["run_kind"] == "run"
 
 
 def test_read_metadata_raw_carries_the_uncanonical_attributes(run):
