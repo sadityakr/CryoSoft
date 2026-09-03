@@ -112,6 +112,12 @@ class QueuePanel(QGroupBox):
         # The rendered rows: every pending spec the queue holds, plus the
         # running/finished ones it no longer does.
         self._queue: list[QueueEntry] = []
+        # The entry a reorder wants to stay selected. Held across the
+        # rebuild rather than applied once, because the QueueChanged that
+        # rebuilds the list can arrive after the reorder call has
+        # returned — which is what happens with the engine on the
+        # instrument thread.
+        self._keep_selected: str | None = None
         # True while a queued run is executing, so notify_finished advances
         # the queue's per-item status.
         self._queue_running = False
@@ -276,6 +282,9 @@ class QueuePanel(QGroupBox):
         ]
         self._queue = history + pending
         self._refresh_queue_list()
+        if self._keep_selected is not None:
+            self._select_spec(self._keep_selected)
+            self._keep_selected = None
 
     def _on_run_queue(self) -> None:
         """Start the queue run, marking the first pending item as running.
@@ -343,19 +352,34 @@ class QueuePanel(QGroupBox):
 
     def _queue_move_up(self) -> None:
         """Move the selected queue item up by one position."""
-        entry = self._selected_pending()
-        if entry is None:
-            return
-        if self._host.move(entry.spec.spec_id, -1):
-            self._select_spec(entry.spec.spec_id)
+        self._move_selected(-1)
 
     def _queue_move_down(self) -> None:
         """Move the selected queue item down by one position."""
+        self._move_selected(1)
+
+    def _move_selected(self, offset: int) -> None:
+        """Move the selected pending entry and keep the selection on it.
+
+        The selection is restored twice on purpose. Once here, for a client
+        whose ``QueueChanged`` came back inside ``move()`` and has already
+        rebuilt the list; and once from ``_sync_from_queue()`` when it comes
+        back later instead — which is what happens with the engine on the
+        instrument thread, where the rebuild lands after this method has
+        returned and would otherwise clear the selection the operator was
+        working with.
+
+        Args:
+            offset: ``-1`` to move up, ``+1`` to move down.
+        """
         entry = self._selected_pending()
         if entry is None:
             return
-        if self._host.move(entry.spec.spec_id, 1):
+        self._keep_selected = entry.spec.spec_id
+        if self._host.move(entry.spec.spec_id, offset):
             self._select_spec(entry.spec.spec_id)
+        else:
+            self._keep_selected = None
 
     def _queue_remove(self) -> None:
         """Remove the selected item from the queue."""

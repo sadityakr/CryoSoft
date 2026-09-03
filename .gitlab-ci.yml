@@ -30,4 +30,5 @@ checks:
     - make lint
     - make contracts
     - make test
+    - make test-instrument-thread
     - make typecheck || true # advisory, never fails the pipeline

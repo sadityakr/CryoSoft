@@ -44,6 +44,9 @@ jobs:
       - name: Tests (pytest)
         run: make test
 
+      - name: GUI tests with the instrument thread
+        run: make test-instrument-thread
+
       - name: Type check (mypy, advisory)
         run: make typecheck
         continue-on-error: true

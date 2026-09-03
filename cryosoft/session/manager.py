@@ -139,7 +139,16 @@ class ExperimentManager(QObject):
 
         orchestrator.run_started.connect(self._on_run_started)
         orchestrator.run_finished.connect(self._on_run_finished)
-        orchestrator.event_emitted.connect(self._on_engine_event)
+        # The one event stream, under whichever name this client carries it:
+        # an `OrchestratorProxy` (what the application actually holds) renames
+        # the engine's `event_emitted` to `event`, the same way it renames
+        # `verdict_emitted` to `verdict`. The engine's name is tried FIRST,
+        # because `event` is also `QObject`'s own virtual event handler and
+        # every QObject therefore answers to it.
+        event_stream = getattr(orchestrator, "event_emitted", None)
+        if event_stream is None:
+            event_stream = orchestrator.event
+        event_stream.connect(self._on_engine_event)
 
         self._resume_active_experiment()
 

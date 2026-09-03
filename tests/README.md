@@ -47,6 +47,21 @@ Tests requiring physical instruments must be marked `@pytest.mark.hardware`;
 `make test` and CI exclude them. Everything else must pass on a bare machine.
 Shared fixtures belong in `conftest.py`.
 
+`instrument_modes.py` (not itself a test file) is what lets one suite run in
+both instrument modes. `CRYOSOFT_INSTRUMENT_THREAD=1` moves the Station and
+the Orchestrator onto their own thread (GLOSSARY.md's **Instrument thread**);
+`tests/test_gui.py`'s fixtures build through an `InstrumentHost` in whichever
+mode is selected and hand the windows the `OrchestratorProxy` the application
+hands them, so the same 190-odd assertions are checked both ways
+(`make test-instrument-thread`, which CI runs after `make test`). It carries
+the **tick helper** family a test needs once it is behind the client boundary:
+`on_engine()` runs a call where the engine lives and waits for it,
+`set_on_engine()` forces one engine attribute, `tick_engine()` replaces a bare
+`orchestrator._tick()`, `ticks_paused()` holds the tick timer while a test
+forces a state the next tick would undo, and `settled()` waits out the round
+trip a GUI action makes — all no-ops or direct calls inline, so a test reads
+the same either way.
+
 `scenarios.py` (not itself a test file) names the sim-driver state-injection
 recipes every hazard/fault test needs — helium low, quench, a disconnected
 instrument, a measurement instrument erroring instead of returning data, a
@@ -125,7 +140,8 @@ config also has automatic `test_conformance.py` coverage on top of these.
 
 ## Files
 
-- `conftest.py` — shared fixtures (logging setup).
+- `conftest.py` — shared fixtures (logging setup, an isolated measurement root).
+- `instrument_modes.py` — building a host in the session's instrument mode, and the tick helpers a test needs to reach the engine across the boundary (see above).
 - `mocks/` — shared mock objects, including `bus_spy.py`: recording shims over a
   live driver's public methods, for proving a path issues no instrument traffic
   (an empty call log, rather than trust).

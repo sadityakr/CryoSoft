@@ -55,8 +55,33 @@ every `configs/<name>/` directory:
   measured. It is a property of the setup, so it lives here, never in the VI.
 
 `monitor.yaml` structure: a `monitor:` block with `tick_interval_ms` (the single
-QTimer tick period) and `max_vi_errors` (consecutive VI-error tolerance before
-escalation). Optionally a `panels:` block — see next section.
+QTimer tick period), `max_vi_errors` (consecutive VI-error tolerance before
+escalation) and the optional `instrument_thread` (see below). Optionally a
+`panels:` block — see the section after that.
+
+### `instrument_thread:` — does the instrument stack get its own thread?
+
+`instrument_thread: true` moves the Station, the Orchestrator, every driver
+and the data manager onto a dedicated thread (GLOSSARY.md's **Instrument
+thread**), so a slow instrument read can no longer freeze the window. Default
+`false`, which keeps everything on the GUI's thread exactly as before.
+
+It lives here because it is a property of the setup, not of the code: how
+patient this rack's instruments are, and whether this machine's VISA layer has
+been exercised under a second thread. Nothing a window shows or does changes
+with it — the same client adapter, the same events — so the only reason to
+turn it on is a rig whose reads are slow enough to be felt, and the only
+reason to turn it back off is a VISA layer that misbehaves under it.
+
+`CRYOSOFT_INSTRUMENT_THREAD=1` (or `=0`) overrides this file for one launch,
+which is how CI runs the same GUI suite both ways.
+
+```yaml
+monitor:
+  tick_interval_ms: 1000
+  max_vi_errors: 3
+  instrument_thread: false
+```
 
 ### `panels:` — which controls a VI's monitor card shows
 
