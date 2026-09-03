@@ -80,9 +80,9 @@ class Orchestrator(QObject):
         state_changed (str): Emitted when orchestrator state changes. Not
             run-scoped — fires regardless of run kind.
         procedure_progress (float): 0.0 to 1.0 progress of the current run.
-            PROCEDURE-EXCLUSIVE (plan operation-concurrency-and-error-
-            scoping.md §2's hard status separation): never fires while an
-            operation is the active run — see ``operation_progress``.
+            PROCEDURE-EXCLUSIVE (the hard status separation, see
+            ``GLOSSARY.md``): never fires while an operation is the active
+            run — see ``operation_progress``.
         procedure_finished (): Emitted when a PROCEDURE run ends cleanly.
             PROCEDURE-EXCLUSIVE: never emitted for an operation run (the
             Procedure window must stay blind to operation completions).
@@ -1248,8 +1248,8 @@ class Orchestrator(QObject):
         """Return the active run's kind, or ``None`` if no run is active.
 
         The public, duck-type-free accessor GUI code uses to tell a
-        procedure run from an operation run (hard status separation, plan
-        operation-concurrency-and-error-scoping.md §2) without reaching into
+        procedure run from an operation run (the hard status separation, see
+        ``GLOSSARY.md``) without reaching into
         ``self._procedure`` or importing ``OperationBase``/``BaseProcedure``
         (contracts C5/C8).
 
@@ -2557,8 +2557,9 @@ class Orchestrator(QObject):
                     self._emit_status(self._ramp_status_line(step_plan.targets))
         elif self._state == OrchestratorState.STANDBY:
             if self._is_operation_active():
-                # Immediate finish (plan operation-concurrency-and-error-
-                # scoping.md §2): no waiting phase at all — see
+                # Immediate finish — the operation contract has no blocking
+                # postcondition sub-phase and no postcondition timeout, so
+                # there is no waiting phase at all; see
                 # _standby_operation_immediate()'s docstring.
                 self._standby_operation_immediate()
             elif not self._standby_dispatched:

@@ -7,9 +7,7 @@ which per-experiment safety bounds (**ExperimentRecord** + **session
 envelope**), and which runs were produced (**RunRecord**, recorded
 automatically from the Orchestrator's run manifests). This is the layer the
 eLab publishing track (`session/eln/`, planned) and the Agent Gateway
-(`session/gateway/`, planned) will build on — see
-`docs/plans/archive/session-management-layer.md` and
-`docs/plans/archive/agent-native-architecture.md`.
+(`session/gateway/`, planned) will build on.
 
 Also hosts the **Servicing Log** framework (`servicing_log.py`): per-setup,
 typed, human-editable logs of servicing events (**log kind**, e.g. the
@@ -17,13 +15,11 @@ legacy **cryogenics log**, now unifying into the flat **servicing** kind —
 see below), the machine-recorded **helium record**, the `CryogenicsRecorder`
 automatic writer, and (Phase 1 of the unification) a pure legacy-migration
 routine — independent of experiments, what technical staff consult and
-maintain. See `docs/plans/archive/cryogenics-logbook.md` §3/§6,
-`docs/plans/archive/unified-servicing-log-and-run-recording.md` §2 (the unification),
-and the **Servicing log** / **Log kind** / **Cryogenics log** / **Entry
-revision** / **Helium record** / **Recording** entries in `GLOSSARY.md`.
+maintain. See the **Servicing log** / **Log kind** / **Cryogenics log** /
+**Entry revision** / **Helium record** / **Recording** entries in
+`GLOSSARY.md`.
 
-**Unification** (`docs/plans/archive/unified-servicing-log-and-run-recording.md`):
-the legacy `cryogenics` (editable, one entry per fill) and `operations`
+**Unification:** the legacy `cryogenics` (editable, one entry per fill) and `operations`
 (machine-only audit trail) kinds are superseded by ONE flat `servicing`
 kind — every entry, regardless of what happened (`entry_kind`:
 `"helium_fill"` / `"sample_load"` / `"sample_unload"` / a future
@@ -215,14 +211,15 @@ file-format change, not a routine edit.
   `delete_entry`; only `append_machine_entry` may write it.
 - **Log kinds are declarations.** Adding a servicing log for a new setup is
   one `LogKindSpec` in `DECLARED_LOG_KINDS`, never new store or GUI code —
-  see `LogKindSpec`'s docstring and `docs/plans/archive/cryogenics-logbook.md` §6.1.
-- **Operation data hand-off without a file** (docs/plans/operation-
-  concurrency-and-error-scoping.md §4): `CryogenicsRecorder.on_run_finished`
-  reads the duck-typed `run_summary()` result off the Orchestrator's
-  `run_finished` manifest (`manifest["summary"]`) and, when it carries a
-  well-formed generic `"recording"` key (docs/plans/unified-servicing-log-
-  and-run-recording.md §3 — `{"unix_time": [...], "channels": {"<vi>.
-  <value>": [...], ...}}`), writes it as `recordings/<run_id>.json` and
+  see `LogKindSpec`'s docstring.
+- **Operation data hand-off without a file.** An operation's run-manifest
+  `data_file` may stay empty — the data file is optional on `OperationBase`,
+  so the series travels through the manifest instead:
+  `CryogenicsRecorder.on_run_finished` reads the duck-typed `run_summary()`
+  result off the Orchestrator's `run_finished` manifest
+  (`manifest["summary"]`) and, when it carries a well-formed generic
+  `"recording"` key (GLOSSARY.md's **Recording** — `{"unix_time": [...],
+  "channels": {"<vi>.<value>": [...], ...}}`), writes it as `recordings/<run_id>.json` and
   stamps that filename into the `servicing` entry's `recording` field — e.g.
   `HeliumFillOperation`'s bounded in-memory level curve, with no HDF5 file
   involved. Adding a new field to an existing kind is backward-compatible by
@@ -242,7 +239,7 @@ file-format change, not a routine edit.
    conformance coverage is necessary but not sufficient.
 4. The planned sub-packages live here too: `session/eln/` (ELN adapters —
    every real adapter with a `sim_` twin) and `session/gateway/` (agent MCP
-   API). Follow their plans in `docs/plans/`.
+   API).
 5. **New servicing-log kind:** add one `LogKindSpec` to `DECLARED_LOG_KINDS`
    in `servicing_log.py` (fields as `ParamSpec`s, every one with a usable
    default) — storage, revision handling, and (once Phase 5 lands) the GUI

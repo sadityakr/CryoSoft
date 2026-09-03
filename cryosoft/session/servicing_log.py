@@ -219,8 +219,8 @@ _CRYOGENICS_KIND = LogKindSpec(
     editable=True,
 )
 
-# The non-editable audit trail every operation appends to on finish (plan
-# §6.3): "who warmed the VTI last night?". Machine source only.
+# The non-editable audit trail every operation appends to on finish — "who
+# warmed the VTI last night?". Machine source only.
 _OPERATIONS_KIND = LogKindSpec(
     key="operations",
     title="Operations",

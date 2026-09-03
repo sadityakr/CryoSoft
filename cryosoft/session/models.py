@@ -528,8 +528,8 @@ class Session:
 
     A named, resumable, per-user folder holding multiple experiments —
     ``<measurement_root>/sessions/<user_id>/<session_id>/``, one level above
-    ``<experiment_id>/`` (see ``docs/plans/session-tier-and-terminology.md``,
-    "Filesystem layout"). One user can own several sessions; a session is not
+    ``<experiment_id>/`` (the filesystem layout in ``GLOSSARY.md``'s
+    **Session**). One user can own several sessions; a session is not
     identified by its owner alone. Persisted as ``session.json`` by
     ``SessionStore``.
 

@@ -80,9 +80,8 @@ axis hooks.
   selected VI's own `measurement_parameters`, and, when anything is loopable,
   the Reading loop slot group (see below).
 - SI units everywhere: tesla, kelvin, amperes, volts, seconds.
-- `claimed_vi_names() -> set[str] | None` (`BaseProcedure`, docs/plans/
-  operation-concurrency-and-error-scoping.md §1's **Claim** — see
-  GLOSSARY.md): declares which VIs a running procedure exclusively owns, so
+- `claimed_vi_names() -> set[str] | None` (`BaseProcedure`; the **Claim**
+  standard — see GLOSSARY.md): declares which VIs a running procedure exclusively owns, so
   the Orchestrator knows what a manual front-panel action may touch while
   it runs. Default `None` (claim everything) — procedures stay exclusive in
   this iteration; only `TimeSeries` narrows it (see below). The same
@@ -171,8 +170,8 @@ driven by the same Orchestrator tick loop — but carries operation-scope
 command access, tolerated safety flags, a verified `postcondition_gates()`
 phase, and higher submission priority; it is never returned among the
 measurement procedures discovered from this folder. See
-`docs/plans/archive/cryogenics-logbook.md` §2/§4 for the design and
-`procedures/operations/README.md` for its own entry/exit/interface contract.
+`procedures/operations/README.md` for its own entry/exit/interface contract,
+and GLOSSARY.md's **Operation**.
 
 ## How to add a new module
 

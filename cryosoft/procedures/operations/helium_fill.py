@@ -101,7 +101,7 @@ class HeliumFillOperation(OperationBase):
             person: Who is performing the fill (recorded via
                 ``get_params()``; the servicing-log recorder reads
                 ``params["person"]`` from the run manifest).
-            **config: Plan §9 ``cryogenics:`` keys — ``level_vi``,
+            **config: The config's ``cryogenics:`` block keys — ``level_vi``,
                 ``fill_target_pct``, ``fill_zero_field_window_s``,
                 ``fill_complete_window_s``,
                 ``max_fill_duration_s``, ``sample_period_s``,
@@ -157,8 +157,8 @@ class HeliumFillOperation(OperationBase):
         # unmet. Reset to None on any rise (see sample()).
         self._stable_since: float | None = None
         # The level curve itself lives in OperationBase's shared recorder
-        # (_record_sample()/_recording_dict(), plan unified-servicing-log-
-        # and-run-recording.md §3) — reset by initiate() via
+        # (_record_sample()/_recording_dict(), in the generic "recording"
+        # shape — see GLOSSARY.md's Recording) — reset by initiate() via
         # _reset_recording(), appended to by sample().
 
     # ------------------------------------------------------------------

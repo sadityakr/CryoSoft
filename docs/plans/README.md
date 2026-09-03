@@ -48,9 +48,14 @@ Three tiers:
    added one, leaving 41 dangling docstring references for three days. All
    four were restored from `70c910a^` on 2026-07-25 and the references were
    removed from code entirely, which is the durable fix: a citation that
-   cannot exist cannot dangle. Check 1 above is what keeps it that way, and
-   belongs in `tests/test_conformance.py` so it is enforced rather than
-   remembered.
+   cannot exist cannot dangle. Check 1 above is now enforced rather than
+   remembered: `tests/test_conformance.py`'s
+   `test_no_plan_document_citation_under_cryosoft` walks every `.py` file and
+   every folder `README.md` under `cryosoft/` and fails on any plan-document
+   citation, naming the file and line. Its allowlist is empty and
+   `test_plan_citation_allowlist_is_empty` keeps it empty. Check 2 still has
+   to be run by hand. (Check 1's grep now reports `tests/test_conformance.py`
+   itself, which necessarily spells out the citation patterns it forbids.)
 
 ## Active
 

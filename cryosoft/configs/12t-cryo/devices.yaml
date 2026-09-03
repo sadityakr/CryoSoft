@@ -205,8 +205,8 @@ virtual_instruments:
       configured_externally: true
 
 # Cryogenics: the helium-fill operation, the consumption display, and the
-# automatic level recorder are all built around level_vi (docs/plans/
-# cryogenics-logbook.md §9).
+# automatic level recorder are all built around level_vi (see GLOSSARY.md's
+# Cryogenics log).
 cryogenics:
   level_vi: level_meter
   # Advisory "a fill is coming due" level. Must sit ABOVE the level VI's
@@ -225,7 +225,7 @@ cryogenics:
 servicing_logs:                  # which declared log kinds this setup keeps
   - servicing
 
-# Cryostat-servicing operations (docs/plans/archive/cryogenics-logbook.md §9). Each
+# Cryostat-servicing operations (see GLOSSARY.md's Operation). Each
 # named sub-block configures one OperationBase subclass; a setup that omits
 # an operation's block still gets that operation's class-level defaults.
 operations:

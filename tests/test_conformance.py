@@ -38,6 +38,14 @@ import-linter, see pyproject.toml [tool.importlinter]):
 * Configs: every ``cryosoft/configs/<name>/`` directory has a loadable
   devices.yaml + monitor.yaml whose classes import and whose driver references
   resolve.
+* The code-reference standard (see CLAUDE.md): no source file or folder
+  README under ``cryosoft/`` cites a document in ``docs/plans/``. Plans are
+  dated proposals that get implemented, superseded and archived, so a
+  citation rots silently; the code and its READMEs must present the complete
+  picture on their own. Vendor manual sections are the deliberate exception
+  and are not flagged.
+* The responsive-GUI rule (see gui/README.md): nothing under ``cryosoft/gui/``
+  blocks the Qt event loop with ``time.sleep``.
 """
 
 from __future__ import annotations
@@ -48,6 +56,7 @@ import inspect
 import json
 import math
 import pkgutil
+import re
 import typing
 from enum import Enum
 from pathlib import Path
@@ -3647,3 +3656,196 @@ def test_manifest_group_index_matches_the_vis_ui_groups(vi_cls: type) -> None:
     declared_names = [item["name"] for item in entry["monitored"]]
     declared_names += [item["name"] for item in entry["controls"]]
     assert sorted(indexed) == sorted(declared_names)
+
+
+# ---------------------------------------------------------------------------
+# Repository hygiene: the code-reference standard and the responsive-GUI rule
+# ---------------------------------------------------------------------------
+
+PACKAGE_DIR = Path(cryosoft.__file__).parent
+
+# Files under cryosoft/ exempted from the code-reference standard.
+#
+# Empty by construction, and kept empty by
+# ``test_plan_citation_allowlist_is_empty``. A plan document is a dated
+# proposal: it gets implemented, superseded, and moved to docs/plans/archive/,
+# and a docstring pointing at it rots silently — it says nothing at all to a
+# reader who has only the repository checked out. The durable fix is that a
+# citation which cannot exist cannot dangle, so there is nothing to exempt:
+# name the concept (and, if a pointer helps, the GLOSSARY term, the folder
+# README, or the owning base class) instead.
+PLAN_CITATION_ALLOWLIST: frozenset[str] = frozenset()
+
+# The plan-document citation forms, each paired with the wording used in the
+# failure message.
+#
+# Deliberately narrow: they match a citation of a *plan document* only. A
+# vendor manual's section number ("vendor doc §3.11", "manual §5.2", or a bare
+# "§3.11" beside a model number) is a stable external reference that belongs in
+# the driver implementing it, and must never trip these — which is why every
+# section-number rule requires the word "plan" or a ".md" filename next to the
+# "§", never the "§" alone.
+_PLAN_CITATION_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("a docs/plans path", re.compile(r"docs/plans", re.IGNORECASE)),
+    ("a plan section number", re.compile(r"\bplans?\s+§", re.IGNORECASE)),
+    ("a plan section word", re.compile(r"\bplans?\s+sections?\b", re.IGNORECASE)),
+    ("a parenthetical plan citation", re.compile(r"\(\s*plans?\s", re.IGNORECASE)),
+    ("a markdown document's section number", re.compile(r"\.md\s*§")),
+)
+
+# Comment markers, bullets, and table pipes a wrapped continuation line starts
+# with, stripped before the line is joined to its predecessor for matching.
+_CONTINUATION_PREFIX = re.compile(r"^[\s#*>|-]*")
+
+# Blocking sleeps: the direct call and the ``from time import sleep`` alias
+# that would hide it.
+_BLOCKING_SLEEP = re.compile(
+    r"\btime\.sleep\s*\(|\bfrom\s+time\s+import\s+[^\n]*\bsleep\b"
+)
+
+
+def _plan_citations(text: str) -> list[tuple[int, str, str]]:
+    """Find every plan-document citation in ``text``.
+
+    A citation is regularly broken across two lines by the wrap width
+    (``...operation-concurrency-and-error-`` / ``scoping.md §2``), so each line
+    is matched together with the following one, stripped of its comment or
+    bullet prefix. A match is attributed to the line it starts on; a match that
+    starts inside the continuation is left to that line's own turn, so nothing
+    is reported twice.
+
+    Args:
+        text: The full contents of one source file or README.
+
+    Returns:
+        One ``(line_number, rule, excerpt)`` tuple per citation, line numbers
+        1-based, in file order.
+    """
+    lines = text.splitlines()
+    citations: list[tuple[int, str, str]] = []
+    for index, line in enumerate(lines):
+        following = lines[index + 1] if index + 1 < len(lines) else ""
+        window = line + " " + _CONTINUATION_PREFIX.sub("", following)
+        for rule, pattern in _PLAN_CITATION_RULES:
+            for match in pattern.finditer(window):
+                if match.start() >= len(line):
+                    continue
+                excerpt = window[max(0, match.start() - 20) : match.end() + 40]
+                citations.append((index + 1, rule, excerpt.strip()))
+    return citations
+
+
+def _standard_scanned_files() -> list[Path]:
+    """Return every source file and folder README the standard covers."""
+    return sorted({*PACKAGE_DIR.rglob("*.py"), *PACKAGE_DIR.rglob("README.md")})
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "See ``docs/plans/session-tier-and-terminology.md``, 'Startup wiring'.",
+        "the hard status separation (plan §2)",
+        "the readiness contract, described in plan section 12",
+        "# Immediate finish (plan operation-concurrency-and-error-scoping.md §2)",
+        "operation-concurrency-and-error-scoping.md §2's hard status separation",
+        "the shared recorder (plan unified-servicing-log-\nand-run-recording.md §3)",
+        "the concurrency-scope hook, plan\n§1's Claim",
+    ],
+    ids=[
+        "docs-plans-path",
+        "plan-section-sign",
+        "plan-section-word",
+        "parenthetical-plan",
+        "markdown-section-sign",
+        "wrapped-filename",
+        "wrapped-section-sign",
+    ],
+)
+def test_plan_citation_matcher_flags_a_plan_citation(text: str) -> None:
+    """Every shape a plan citation has taken in this repository is caught."""
+    assert _plan_citations(text), text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Ramp-rate table from the vendor doc §3.11.",
+        "Model 6221 manual §5.2 forbids this command sequence.",
+        "§3.11 of the SR830 manual describes the reserve modes.",
+        "See ``GLOSSARY.md``'s **Session** for the tier and its layout.",
+        "See ``cryosoft/core/README.md`` for the module rows.",
+        "The Orchestrator dispatches the PhasePlan the procedure returns.",
+        "Ramps are generators that yield one step per tick; plan ahead.",
+        "self._plan_steps holds the StepPlans already dispatched.",
+    ],
+    ids=[
+        "vendor-doc",
+        "manual-section",
+        "bare-section-sign",
+        "glossary-pointer",
+        "readme-pointer",
+        "phaseplan-word",
+        "plan-as-a-verb",
+        "plan-in-an-identifier",
+    ],
+)
+def test_plan_citation_matcher_ignores_a_non_plan_reference(text: str) -> None:
+    """Vendor manual sections and ordinary prose are not citations."""
+    assert not _plan_citations(text), text
+
+
+def test_plan_citation_allowlist_is_empty() -> None:
+    """The code-reference standard ships with no exemptions, by construction."""
+    assert PLAN_CITATION_ALLOWLIST == frozenset(), (
+        "The code-reference standard has no allowlist — a docstring, comment, "
+        "or README row that needs a plan document to be understood must be "
+        "rewritten to carry the reasoning itself, not exempted."
+    )
+
+
+def test_no_plan_document_citation_under_cryosoft() -> None:
+    """No source file or folder README cites a document in docs/plans/.
+
+    Plans are dated proposals that get implemented, superseded, and archived;
+    a code comment citing one is a pointer that rots silently and says nothing
+    to a reader who does not fetch the document. Name the concept instead, and
+    point at GLOSSARY.md, the folder README, or the owning base class.
+    """
+    offenders: list[str] = []
+    for path in _standard_scanned_files():
+        relative = path.relative_to(PACKAGE_DIR.parent).as_posix()
+        if relative in PLAN_CITATION_ALLOWLIST:
+            continue
+        for line_number, rule, excerpt in _plan_citations(
+            path.read_text(encoding="utf-8")
+        ):
+            offenders.append(f"{relative}:{line_number}: {rule} — {excerpt}")
+
+    assert not offenders, (
+        "Plan-document citation(s) under cryosoft/ — replace each with the "
+        "concept it names, pointing at GLOSSARY.md, the folder README, or the "
+        "owning base class:\n" + "\n".join(offenders)
+    )
+
+
+def test_no_blocking_sleep_in_gui_sources() -> None:
+    """Nothing under cryosoft/gui/ blocks the Qt event loop with ``time.sleep``.
+
+    The GUI is driven by one QTimer tick on a single thread, so a sleep in a
+    widget freezes the window, the tick loop, and every ramp with it. Waiting
+    is expressed as a tick-driven state, never as a blocked call.
+    """
+    offenders: list[str] = []
+    for path in sorted((PACKAGE_DIR / "gui").rglob("*.py")):
+        relative = path.relative_to(PACKAGE_DIR.parent).as_posix()
+        for line_number, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), start=1
+        ):
+            if _BLOCKING_SLEEP.search(line):
+                offenders.append(f"{relative}:{line_number}: {line.strip()}")
+
+    assert not offenders, (
+        "Blocking sleep(s) under cryosoft/gui/ — the GUI shares its one thread "
+        "with the tick loop, so express the wait as a tick-driven state "
+        "instead:\n" + "\n".join(offenders)
+    )
