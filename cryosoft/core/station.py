@@ -3003,21 +3003,25 @@ def read_instrument_thread(config_path: str) -> bool:
     ``core/instrument_host.py``'s ``resolve_mode()`` turns it into a mode, and
     lets ``CRYOSOFT_INSTRUMENT_THREAD`` override it for one launch.
 
+    Defaulted to ``True``: the instrument thread is the standard, so a setup
+    that says nothing inherits it, and a setup that wants the temporary
+    ``inline`` mode back says ``instrument_thread: false`` deliberately.
+
     Args:
         config_path: Path to the config directory containing ``monitor.yaml``.
 
     Returns:
-        ``True`` when the setup asks for the instrument thread; ``False`` when
-        it does not, or when the file is missing, unreadable, or omits the key
-        — never raises.
+        ``False`` only when the file says so explicitly; ``True`` when it asks
+        for the thread, omits the key, or is missing or unreadable — never
+        raises.
     """
     monitor_config = _load_monitor_yaml(config_path)
     if monitor_config is None:
-        return False
+        return True
     mon = monitor_config.get("monitor")
     if not isinstance(mon, dict):
-        return False
-    return bool(mon.get("instrument_thread", False))
+        return True
+    return bool(mon.get("instrument_thread", True))
 
 
 def read_panels_config(config_path: str) -> dict[str, list[str]]:

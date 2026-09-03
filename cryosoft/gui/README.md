@@ -163,9 +163,11 @@ is alive and not mid-tick.
   engine and passed in; a widget given none takes the one its client already
   carries (`StatusMirror.of()`), building a fresh one only for a bare engine,
   which is the inline construction path tests use.
-- **A click's effect may arrive one event-loop hop later.** With the
-  **Instrument thread** enabled (`monitor.yaml`'s `instrument_thread`), the
-  engine lives on its own thread: a command is POSTED to it and the event that
+- **A click's effect arrives one event-loop hop later.** The engine lives on
+  the **Instrument thread** — the default for every setup that does not
+  explicitly refuse it (`monitor.yaml`'s `instrument_thread: false`, or
+  `CRYOSOFT_INSTRUMENT_THREAD=0` for one launch, both of which select the
+  temporary **Inline mode**): a command is POSTED to it and the event that
   proves it happened comes back queued. Nothing about a widget's wiring
   changes — the same proxy, the same signals — but two habits stop being safe.
   A handler must never assume the mirror already reflects the command it just
@@ -175,8 +177,9 @@ is alive and not mid-tick.
   that caused it returned — which is why `queue_panel.py` remembers the entry a
   reorder selected and re-applies it when the list is rebuilt, instead of
   selecting once and trusting the order. `tests/test_gui.py` runs in both
-  modes (`tests/instrument_modes.py`, `make test-instrument-thread`), which is
-  what keeps that true.
+  modes (`tests/instrument_modes.py`: threaded by default,
+  `make test-instrument-inline` for the other leg), which is what keeps that
+  true. Write every handler for the threaded default; inline only forgives.
 - **`operations_panel.py`'s `OperationCard` is the single per-operation card
   standard.** It contains no per-operation logic — every visible
   detail (checklist rows, next-due line, status line, ready banner,

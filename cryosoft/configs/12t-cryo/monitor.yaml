@@ -1,3 +1,7 @@
 monitor:
   tick_interval_ms: 2000   # 1 s per tick — matches switch_heater_warmup/cooldown_s in devices.yaml
   max_vi_errors: 3
+  # The instrument thread is the default (see configs/README.md); this real
+  # setup stays on the caller's thread until its rack has had a day of
+  # hardware soak with it on, then this line goes.
+  instrument_thread: false

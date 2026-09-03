@@ -59,29 +59,39 @@ QTimer tick period), `max_vi_errors` (consecutive VI-error tolerance before
 escalation) and the optional `instrument_thread` (see below). Optionally a
 `panels:` block — see the section after that.
 
-### `instrument_thread:` — does the instrument stack get its own thread?
+### `instrument_thread:` — the way back to one thread
 
-`instrument_thread: true` moves the Station, the Orchestrator, every driver
-and the data manager onto a dedicated thread (GLOSSARY.md's **Instrument
-thread**), so a slow instrument read can no longer freeze the window. Default
-`false`, which keeps everything on the GUI's thread exactly as before.
+**The default is `true`, and a config that says nothing gets it.** The
+Station, the Orchestrator, every driver and the data manager live on the
+instrument thread (GLOSSARY.md's **Instrument thread**), which is the single
+hardware thread standard `CLAUDE.md` states: a slow instrument read cannot
+freeze the window, and there is still exactly one writer on the bus.
 
-It lives here because it is a property of the setup, not of the code: how
-patient this rack's instruments are, and whether this machine's VISA layer has
-been exercised under a second thread. Nothing a window shows or does changes
-with it — the same client adapter, the same events — so the only reason to
-turn it on is a rig whose reads are slow enough to be felt, and the only
-reason to turn it back off is a VISA layer that misbehaves under it.
+`instrument_thread: false` asks for the temporary `inline` mode instead —
+the same design with the engine on the GUI's own thread (GLOSSARY.md's
+**Inline mode**). It lives here because it is a property of the setup, not of
+the code: whether this machine's VISA layer has been exercised under a second
+thread. Nothing a window shows or does changes with it — the same client
+adapter, the same events — so the only reason to write it is a rack whose
+drivers misbehave when the thread that opened their sessions is not the GUI's,
+and the line is expected to go once that rack has had a day of hardware soak
+with the thread on. `inline` itself is kept for one release after the flip and
+is then removed.
 
-`CRYOSOFT_INSTRUMENT_THREAD=1` (or `=0`) overrides this file for one launch,
+`CRYOSOFT_INSTRUMENT_THREAD=0` (or `=1`) overrides this file for one launch,
 which is how CI runs the same GUI suite both ways.
 
 ```yaml
 monitor:
   tick_interval_ms: 1000
   max_vi_errors: 3
+  # Omit the line to inherit the instrument thread; write it only to refuse.
   instrument_thread: false
 ```
+
+The shipped configs stand as: both sims inherit the thread, and the two real
+setups (`12t-cryo`, `a-sample-real-cryostat`) carry an explicit `false` with
+the reason, until their rack has been soaked on hardware with it on.
 
 ### `panels:` — which controls a VI's monitor card shows
 

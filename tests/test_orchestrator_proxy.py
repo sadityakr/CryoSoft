@@ -74,7 +74,7 @@ def test_inline_mode_has_no_bridge_to_cross(host):
     [
         (False, None, "inline"),
         (True, None, "threaded"),
-        (None, None, "inline"),
+        (None, None, "threaded"),  # silence inherits the standard
         (False, "1", "threaded"),
         (True, "0", "inline"),
         (True, "off", "inline"),
@@ -85,7 +85,11 @@ def test_inline_mode_has_no_bridge_to_cross(host):
 def test_the_mode_is_the_config_unless_the_environment_overrides_it(
     configured, override, expected, monkeypatch
 ):
-    """The instrument-thread flag: config first, environment last."""
+    """The instrument-thread flag: config first, environment last.
+
+    ``threaded`` is the default, so only an explicit refusal — in the config
+    or in the environment — takes a launch back to the temporary inline mode.
+    """
     monkeypatch.delenv(THREAD_ENV_VAR, raising=False)
     if override is not None:
         monkeypatch.setenv(THREAD_ENV_VAR, override)
