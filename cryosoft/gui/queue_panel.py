@@ -20,6 +20,7 @@ import qtawesome as qta
 from PyQt6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
+    QLabel,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
@@ -30,6 +31,7 @@ from PyQt6.QtWidgets import (
 
 from cryosoft.core.events import QueueChanged
 from cryosoft.core.orchestrator_proxy import OrchestratorProxy
+from cryosoft.core.plan import ProbeSpec
 from cryosoft.core.procedure import BaseProcedure
 from cryosoft.gui.form_autosave import (
     STATUS_DONE,
@@ -39,7 +41,12 @@ from cryosoft.gui.form_autosave import (
     QueueItemState,
 )
 from cryosoft.gui.theme import BTN_CLASS_PRIMARY, TEXT_ON_ACCENT, TEXT_PRIMARY
-from cryosoft.session.run_queue import KIND_PROCEDURE, RunQueueHost, RunSpec
+from cryosoft.session.run_queue import (
+    KIND_PROCEDURE,
+    RunQueueHost,
+    RunSpec,
+    RunValidation,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -48,6 +55,16 @@ if TYPE_CHECKING:
     from cryosoft.core.station import Station
 
 logger = logging.getLogger(__name__)
+
+#: The reduction a "Probe first" click asks for. The **Probe run** standard's
+#: own defaults (first/middle/last, no averaging, waits capped) — a probe the
+#: operator did not have to design is a probe they will actually run.
+DEFAULT_PROBE_SPEC = ProbeSpec()
+
+#: The filename prefix a probe queued from here carries, so its file is
+#: recognisable on disk before anything is opened. The run itself also
+#: declares ``run_kind = "probe"``, which is the authoritative marker.
+PROBE_FILE_PREFIX = "probe"
 
 
 @dataclass
@@ -69,10 +86,21 @@ class QueueEntry:
 
 
 class QueuePanel(QGroupBox):
-    """The Queue group box: list, reorder/remove buttons, and Run Queue.
+    """The Queue group box: list, per-item actions, and Run Queue.
+
+    Per-item actions act on the selected waiting row: reorder, remove, and
+    **Probe first**, which queues a cheap **probe run** of that row ahead of
+    it — the same procedure and the same instruments, reduced to minutes, so
+    an hours-long run is committed to only after something has answered
+    "would this actually work". A probe goes through the same
+    ``RunQueueHost`` add every other run does, so the setup's limits and the
+    open experiment's envelope judge it identically, and what validation said
+    about it — its findings and its **Duration estimate** — is shown inline
+    and hung on the row as a tooltip.
 
     ObjectNames (``queue_list``, ``queue_up_btn``, ``queue_down_btn``,
-    ``queue_remove_btn``, ``run_queue_btn``) are preserved API.
+    ``queue_remove_btn``, ``queue_probe_btn``, ``queue_probe_label``,
+    ``run_queue_btn``) are preserved API.
 
     Args:
         station: The active Station instance (needed to validate and build a
@@ -121,6 +149,11 @@ class QueuePanel(QGroupBox):
         # True while a queued run is executing, so notify_finished advances
         # the queue's per-item status.
         self._queue_running = False
+        # ``{spec_id: what validation said about it}`` — the findings and the
+        # duration estimate a "Probe first" click produced, hung on the row
+        # as its tooltip so the caveat stays attached to the run it is about
+        # across every rebuild of the list.
+        self._spec_notes: dict[str, str] = {}
 
         # The engine's one event stream, under whichever name this client
         # offers it. A client CONSUMES the stream rather than relaying it, so
@@ -157,6 +190,15 @@ class QueuePanel(QGroupBox):
         remove_btn.setIcon(qta.icon("fa5s.trash", color=TEXT_PRIMARY))
         remove_btn.setToolTip("Remove the selected item from the queue")
         remove_btn.clicked.connect(self._queue_remove)
+        probe_btn = QPushButton("Probe first")
+        probe_btn.setObjectName("queue_probe_btn")
+        probe_btn.setIcon(qta.icon("fa5s.vial", color=TEXT_PRIMARY))
+        probe_btn.setToolTip(
+            "Queue a cheap probe of the selected run — same procedure, same "
+            "instruments, reduced to minutes — ahead of it, so you find out "
+            "whether it works before committing the hours."
+        )
+        probe_btn.clicked.connect(self._queue_probe_first)
         run_queue_btn = QPushButton("Run Queue")
         run_queue_btn.setObjectName("run_queue_btn")
         run_queue_btn.setProperty("class", BTN_CLASS_PRIMARY)
@@ -166,9 +208,21 @@ class QueuePanel(QGroupBox):
         btn_row.addWidget(up_btn)
         btn_row.addWidget(down_btn)
         btn_row.addWidget(remove_btn)
+        btn_row.addWidget(probe_btn)
         btn_row.addStretch()
         btn_row.addWidget(run_queue_btn)
         vlay.addLayout(btn_row)
+
+        # What the last probe was told about itself: the validation's
+        # findings and its **Duration estimate**, shown inline rather than in
+        # a modal, because a caveat is something to read beside the queue
+        # rather than dismiss to get back to it.
+        self._probe_label = QLabel("")
+        self._probe_label.setObjectName("queue_probe_label")
+        self._probe_label.setProperty("class", "secondary_label")
+        self._probe_label.setWordWrap(True)
+        self._probe_label.setVisible(False)
+        vlay.addWidget(self._probe_label)
 
         self._sync_from_queue()
 
@@ -381,6 +435,120 @@ class QueuePanel(QGroupBox):
         else:
             self._keep_selected = None
 
+    def _queue_probe_first(self) -> None:
+        """Queue a **probe run** of the selected item, ahead of the item.
+
+        The whole point of a probe is that it comes FIRST: the same procedure
+        class driving the same instruments through the same code path,
+        reduced until it costs minutes, so an hours-long run is committed to
+        only once something has already answered "would this actually work".
+        So the probe is validated and queued through the ``RunQueueHost``
+        exactly as any other run — the setup's limits and the open
+        experiment's envelope judge it identically — and then moved to sit
+        immediately before the run it probes.
+
+        A refusal is a modal, like every other refusal that answers a direct
+        click. What validation said about an accepted probe — its caveats and
+        its **Duration estimate** — is shown inline and hung on the row as a
+        tooltip instead, because it is something to read beside the queue
+        rather than dismiss to get back to it.
+        """
+        entry = self._selected_pending()
+        if entry is None:
+            return
+        spec = entry.spec
+        if spec.kind != KIND_PROCEDURE:
+            QMessageBox.warning(
+                self,
+                "Cannot Probe This Item",
+                "Only a procedure can be probed — an operation is a servicing "
+                "action, not a measurement to reduce.",
+            )
+            return
+        run_class = self._classes.get(spec.run_class)
+        if run_class is None:
+            QMessageBox.warning(
+                self,
+                "Cannot Probe This Item",
+                f"{spec.run_class} is not among the procedures this window "
+                "discovered, so there is nothing to build a probe from.",
+            )
+            return
+        probe, validation = self._host.add(
+            run_class,
+            spec.params,
+            kind=spec.kind,
+            sample_info=spec.sample_info,
+            data_directory=spec.data_directory,
+            file_prefix=spec.file_prefix or PROBE_FILE_PREFIX,
+            probe_spec=DEFAULT_PROBE_SPEC.to_json(),
+        )
+        if probe is None:
+            logger.warning(
+                "Refused to queue a probe of %s: %s",
+                spec.run_class,
+                "; ".join(validation.messages()),
+            )
+            QMessageBox.warning(
+                self, "Cannot Queue Probe", "\n".join(validation.messages())
+            )
+            return
+        self._move_before(probe.spec_id, spec.spec_id)
+        self._spec_notes[probe.spec_id] = self._probe_note(validation)
+        self._keep_selected = probe.spec_id
+        self._sync_from_queue()
+        self._show_probe_note(self._spec_notes[probe.spec_id])
+
+    def _move_before(self, spec_id: str, target_id: str) -> None:
+        """Move one waiting run to sit immediately before another.
+
+        The queue's own ``move()`` takes an offset within a bucket, which is
+        what a reorder button needs; this is the position-based move a probe
+        needs, expressed in terms of it.
+
+        Args:
+            spec_id: The entry to move (a probe, freshly appended).
+            target_id: The entry it must end up in front of.
+        """
+        order = [waiting.spec_id for waiting in self._host.snapshot()]
+        if spec_id not in order or target_id not in order:
+            return
+        offset = order.index(target_id) - order.index(spec_id)
+        if offset:
+            self._host.move(spec_id, offset)
+
+    @staticmethod
+    def _probe_note(validation: RunValidation) -> str:
+        """Render what validation said about a probe, for the row's tooltip.
+
+        Args:
+            validation: The ``RunValidation`` the host answered with.
+
+        Returns:
+            One line naming the estimate (with the first of its assumptions,
+            since an estimate a client cannot qualify is worse than none) and
+            every finding, or a plain statement that there was nothing to
+            report.
+        """
+        parts: list[str] = []
+        seconds = validation.duration_estimate_s
+        if seconds is not None:
+            parts.append(f"probe ≈ {seconds / 60:.1f} min")
+            assumptions = validation.estimate.assumptions if validation.estimate else ()
+            if assumptions:
+                parts.append(f"assuming {assumptions[0]}")
+        parts.extend(validation.messages())
+        return " · ".join(parts) if parts else "probe queued — nothing to report"
+
+    def _show_probe_note(self, note: str) -> None:
+        """Show one probe's findings inline under the queue.
+
+        Args:
+            note: The line ``_probe_note()`` produced.
+        """
+        self._probe_label.setText(note)
+        self._probe_label.setVisible(bool(note))
+
     def _queue_remove(self) -> None:
         """Remove the selected item from the queue."""
         entry = self._selected_pending()
@@ -405,6 +573,9 @@ class QueuePanel(QGroupBox):
         cls = self._classes.get(spec.run_class)
         name = getattr(cls, "name", "") or spec.run_class
         label = f"[{spec.file_prefix}] {name}" if spec.file_prefix else name
+        if spec.probe_spec:
+            # A probe is never science data, so it says so in the queue too.
+            label = f"{label} (probe)"
         if cls is None:
             return label
         summary_parts = self._queue_summary_parts(cls, spec.params)
@@ -417,7 +588,11 @@ class QueuePanel(QGroupBox):
             label = f"{idx + 1}. {self._entry_summary(entry)}"
             if entry.status != STATUS_PENDING:
                 label = f"{label}  — {entry.status}"
-            self._queue_list.addItem(QListWidgetItem(label))
+            item = QListWidgetItem(label)
+            note = self._spec_notes.get(entry.spec.spec_id)
+            if note:
+                item.setToolTip(note)
+            self._queue_list.addItem(item)
 
     @staticmethod
     def _queue_summary_parts(cls: type[BaseProcedure], params: dict) -> list[str]:
@@ -527,5 +702,7 @@ class QueuePanel(QGroupBox):
         """Clear the queue (rows and specs) and stop status tracking."""
         self._host.clear()
         self._queue.clear()
+        self._spec_notes.clear()
         self._queue_running = False
+        self._probe_label.setVisible(False)
         self._refresh_queue_list()

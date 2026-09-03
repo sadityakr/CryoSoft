@@ -2694,6 +2694,90 @@ def test_blank_file_prefix_omitted_from_queue_label(procedure_win, qtbot):
     assert queued_cls.name in procedure_win._queue_panel._queue_list.item(procedure_win._queue_panel._queue_list.count() - 1).text()
 
 
+def test_probe_first_queues_a_reduced_run_ahead_of_the_item(procedure_win, qtbot):
+    """A probe of the selected run goes in FRONT of it, validated like any run."""
+    from cryosoft.gui.queue_panel import DEFAULT_PROBE_SPEC
+
+    panel = procedure_win._queue_panel
+    procedure_win._on_add_to_queue()
+    settled(procedure_win._orchestrator)
+    queued = panel._host.snapshot()[-1]
+    panel._select_spec(queued.spec_id)
+
+    procedure_win.findChild(QPushButton, "queue_probe_btn").click()
+    settled(procedure_win._orchestrator)
+
+    order = panel._host.snapshot()
+    assert [spec.probe_spec != {} for spec in order[-2:]] == [True, False], (
+        "the probe comes first — that is the whole point of probing"
+    )
+    probe = order[-2]
+    assert probe.run_class == queued.run_class and probe.params == queued.params
+    assert probe.probe_spec == DEFAULT_PROBE_SPEC.to_json()
+
+    row = panel._queue_list.item(panel._queue_list.count() - 2)
+    assert "(probe)" in row.text(), "a probe is never science data and says so"
+    assert "probe" in row.toolTip()
+    assert panel._probe_label.isVisible()
+    assert "probe" in panel._probe_label.text()
+
+
+def test_probe_first_shows_the_estimate_and_the_findings(procedure_win, qtbot):
+    """The caveats travel with the probe: inline, and on the row's tooltip."""
+    panel = procedure_win._queue_panel
+    procedure_win._on_add_to_queue()
+    settled(procedure_win._orchestrator)
+    panel._select_spec(panel._host.snapshot()[-1].spec_id)
+
+    procedure_win.findChild(QPushButton, "queue_probe_btn").click()
+    settled(procedure_win._orchestrator)
+
+    note = panel._probe_label.text()
+    probe = panel._host.snapshot()[-2]
+    assert panel._spec_notes[probe.spec_id] == note
+    # An estimate is never shown bare: it is qualified by what it assumed.
+    if "≈" in note:
+        assert "assuming" in note
+
+
+def test_probe_first_does_nothing_without_a_selected_waiting_row(procedure_win):
+    """Nothing selected, nothing queued — the action is per-row."""
+    panel = procedure_win._queue_panel
+    procedure_win._on_add_to_queue()
+    settled(procedure_win._orchestrator)
+    before = len(panel._host.snapshot())
+    panel._queue_list.setCurrentRow(-1)
+
+    procedure_win.findChild(QPushButton, "queue_probe_btn").click()
+    settled(procedure_win._orchestrator)
+
+    assert len(panel._host.snapshot()) == before
+    assert not panel._probe_label.isVisible()
+
+
+def test_probe_first_refuses_an_operation_row(procedure_win, monkeypatch):
+    """An operation is a servicing action, not a measurement to reduce."""
+    from cryosoft.session.run_queue import KIND_OPERATION, RunSpec
+
+    panel = procedure_win._queue_panel
+    spec = panel._host.add_spec(
+        RunSpec(kind=KIND_OPERATION, run_class="HeliumFillOperation", params={})
+    )
+    settled(procedure_win._orchestrator)
+    panel._sync_from_queue()
+    panel._select_spec(spec.spec_id)
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox, "warning", lambda *args, **kwargs: warnings.append(args[2])
+    )
+
+    procedure_win.findChild(QPushButton, "queue_probe_btn").click()
+    settled(procedure_win._orchestrator)
+
+    assert warnings and "operation" in warnings[0]
+    assert len(panel._host.snapshot()) == 1, "nothing was queued"
+
+
 def test_run_now_passes_file_prefix_to_procedure_instance(procedure_win, qtbot):
     """Run Now builds a procedure carrying the current file-prefix field value."""
     procedure_win._params_panel._file_prefix_input.setText("live_run")
