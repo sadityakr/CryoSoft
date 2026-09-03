@@ -264,10 +264,14 @@ class AgentPanel(QWidget):
     """The bottom-right quadrant's Agents sub-panel.
 
     ObjectNames (API for tests and muscle memory): the panel is
-    ``agent_panel``, its scroll area ``agent_panel_scroll``, the empty-state
-    label ``agent_panel_empty_label``, the system filter
-    ``agent_panel_system_checkbox``, each row ``agent_row_<n>`` and each
-    pending draft's button ``agent_approve_<run_id>``.
+    ``agent_panel``, its scroll area ``agent_panel_scroll``, the widget
+    holding the rows ``agent_panel_rows``, the empty-state label
+    ``agent_panel_empty_label``, the system filter
+    ``agent_panel_system_checkbox``, and each pending draft's button
+    ``agent_approve_<run_id>``. Rows themselves are not named: they are
+    rebuilt whenever the filter changes, so an index-based name would point
+    at a different action after every toggle. ``row_texts()`` is what a
+    reader of the rows asks instead.
 
     Args:
         session_manager: The L6 ``ExperimentManager``, used for three things
