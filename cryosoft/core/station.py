@@ -235,6 +235,11 @@ class Station:
         self._virtual_instruments: dict[str, BaseVirtualInstrument] = {}
         self._last_known_state: dict[str, dict] = {}       # Stale value cache
         self._error_counts: dict[str, int] = {}
+        # The read currently in flight, for the shutdown diagnostic: the name
+        # of the VI `get_state()` is inside, or None between polls. Written
+        # only by the thread that owns this Station and read by whoever has to
+        # report a wedged instrument (see `polling_vi()`).
+        self._polling_vi: str | None = None
         self._max_errors: int = 3
         self._scanner_enabled: bool = False
         # Degraded-build support: VIs whose hardware failed to connect at
@@ -1059,6 +1064,7 @@ class Station:
         full_state: dict[str, dict] = {}
 
         for vi_name, vi in self._virtual_instruments.items():
+            self._polling_vi = vi_name
             try:
                 state = vi.get_state()
                 self._error_counts[vi_name] = 0
@@ -1089,8 +1095,24 @@ class Station:
                     )
                     self._record_comm_condition(vi_name, "stale", str(exc))
                 full_state[vi_name] = stale
+            finally:
+                self._polling_vi = None
 
         return full_state
+
+    def polling_vi(self) -> str | None:
+        """Return the VI whose read is in flight right now, or ``None``.
+
+        A diagnostic, not a state: it names the one instrument ``get_state()``
+        is waiting on, so a read that never returns can be reported by name
+        rather than as an anonymous hang. Read by
+        ``core/instrument_host.py`` when a bounded shutdown join expires.
+
+        Returns:
+            The VI's configured name while a poll is in progress, else
+            ``None``.
+        """
+        return self._polling_vi
 
     # ------------------------------------------------------------------
     # Unified condition registry — the System-Condition standard's
@@ -2929,6 +2951,33 @@ def read_tick_interval_ms(config_path: str) -> int:
         return int(mon.get("tick_interval_ms", _DEFAULT_TICK_INTERVAL_MS))
     except (TypeError, ValueError):
         return _DEFAULT_TICK_INTERVAL_MS
+
+
+def read_instrument_thread(config_path: str) -> bool:
+    """Read ``monitor.yaml``'s ``instrument_thread`` flag, GUI-safe, defaulted.
+
+    The setup's own answer to "does the instrument stack get its own thread?"
+    — a property of the machine (how patient its instruments are, whether its
+    VISA layer has been exercised under a second thread), so it lives in the
+    config like every other setup property.
+    ``core/instrument_host.py``'s ``resolve_mode()`` turns it into a mode, and
+    lets ``CRYOSOFT_INSTRUMENT_THREAD`` override it for one launch.
+
+    Args:
+        config_path: Path to the config directory containing ``monitor.yaml``.
+
+    Returns:
+        ``True`` when the setup asks for the instrument thread; ``False`` when
+        it does not, or when the file is missing, unreadable, or omits the key
+        — never raises.
+    """
+    monitor_config = _load_monitor_yaml(config_path)
+    if monitor_config is None:
+        return False
+    mon = monitor_config.get("monitor")
+    if not isinstance(mon, dict):
+        return False
+    return bool(mon.get("instrument_thread", False))
 
 
 def read_panels_config(config_path: str) -> dict[str, list[str]]:

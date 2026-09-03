@@ -654,6 +654,40 @@ class ExperimentManager(QObject):
         """
         return self._queue_host.next_run()
 
+    def take_next_spec(self) -> Any:
+        """Pop the next waiting spec, without building it.
+
+        The client-thread half of the pull seam when the engine lives on the
+        instrument thread: popping mutates this layer's queue, so it happens
+        here, and what crosses to the engine is a frozen ``RunSpec``. See
+        ``RunQueueHost.take_next_spec()``.
+
+        Returns:
+            The spec that just left the queue, or ``None`` when nothing is
+            waiting.
+        """
+        return self._queue_host.take_next_spec()
+
+    def build_spec(self, spec: Any) -> Any:
+        """Build the live run a popped spec describes.
+
+        The engine-thread half of the pull seam: it touches the Station, so it
+        runs wherever the Station does. See ``RunQueueHost.build_spec()``.
+
+        Args:
+            spec: A spec ``take_next_spec()`` returned.
+
+        Returns:
+            A ready procedure or operation.
+
+        Raises:
+            KeyError: If the run catalog holds no class of the spec's name.
+            CryoSoftError: If the run refuses to be built.
+            TypeError: If the stored parameters no longer fit the signature.
+            ValueError: If a parameter value is invalid.
+        """
+        return self._queue_host.build_spec(spec)
+
     def _current_envelope(self) -> ExperimentEnvelope | None:
         """Return the open experiment's envelope, or ``None`` when none is open."""
         if self._experiment is None:

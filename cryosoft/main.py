@@ -12,13 +12,14 @@ from PyQt6.QtCore import QProcess
 from PyQt6.QtWidgets import QApplication
 
 from cryosoft.core.config_catalog import ConfigCatalog
-from cryosoft.core.instrument_host import InstrumentHost
+from cryosoft.core.instrument_host import InstrumentHost, resolve_mode
 from cryosoft.core.logging_config import setup_logging
 from cryosoft.core.paths import measurement_root
 from cryosoft.core.station import (
     Station,
     build_station_with_fallback,
     read_cryogenics_config,
+    read_instrument_thread,
     read_operations_config,
     read_panels_config,
     read_safety_config,
@@ -205,10 +206,41 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
             "run_catalog": run_catalog,
         }
 
+    # The instrument-thread flag. Read from the config the app is ABOUT to
+    # load rather than the one it ends up with, because which thread owns the
+    # stack has to be decided before anything is built; a fallback to another
+    # config does not change the mode. `CRYOSOFT_INSTRUMENT_THREAD` overrides
+    # it for one launch, which is how CI runs the GUI suite in both modes.
+    mode = resolve_mode(read_instrument_thread(_startup_candidates()[0]))
+
+    # Trend-check standard (core/trend_checks.py, GLOSSARY.md's **Trend
+    # check**): a small, single-purpose scheduler independent of the
+    # Orchestrator — it holds only a Station, never an Orchestrator — that
+    # evaluates this setup's declared checks on its own slow timer and
+    # publishes failing ones as advisory-severity conditions. It is a STATION
+    # COMPANION: it holds the Station, so the host builds it wherever the
+    # Station lives and stops it there too.
+    def _build_trend_check_runner(station: Station) -> TrendCheckRunner:
+        """Build the trend-check scheduler beside the Station it publishes into."""
+        trends_config = read_trends_config(build["used_path"])
+        return TrendCheckRunner(
+            station,
+            declared_checks(trends_config),
+            refresh_interval_s=trends_config["refresh_interval_s"],
+        )
+
     app.instrument_host = InstrumentHost(
-        _build_station, orchestrator_options=_orchestrator_options
+        _build_station,
+        mode=mode,
+        orchestrator_options=_orchestrator_options,
+        station_companions=(_build_trend_check_runner,),
     )
     app.instrument_host.start()
+    # Process lifecycle, owned here: the host stops the tick timer on the
+    # thread that owns it and, in threaded mode, joins the instrument thread
+    # with a bounded wait, so a wedged instrument read can never leave the
+    # application unexitable.
+    app.aboutToQuit.connect(app.instrument_host.shutdown)
     station = app.instrument_host.station
     used_path = build["used_path"]
     warnings = build["warnings"]
@@ -234,21 +266,6 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
     # thread. Nothing above this line hands the engine itself to anyone.
     orchestrator = app.instrument_host.build_proxy()
     mirror = orchestrator.status
-
-    # Trend-check standard (core/trend_checks.py, GLOSSARY.md's **Trend
-    # check**): a small, single-purpose scheduler independent of the
-    # Orchestrator — it holds only a Station, never an Orchestrator — that
-    # evaluates this setup's declared checks on its own slow timer and
-    # publishes failing ones as advisory-severity conditions. Attached to
-    # `app` (rather than left as a bare local) so its ownership is explicit:
-    # a QObject with no Python reference is eligible for GC regardless of
-    # Qt-side parenting, and `app` outlives everything else built in main().
-    trends_config = read_trends_config(used_path)
-    app.trend_check_runner = TrendCheckRunner(
-        station,
-        declared_checks(trends_config),
-        refresh_interval_s=trends_config["refresh_interval_s"],
-    )
 
     # Session layer (L6 + the Session tier above it). measurement_root() is
     # the fixed, machine-level, admin-set root (never derived from the Data
@@ -293,8 +310,12 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
     # cannot exist before the engine it broadcasts through, and the engine
     # must not import the session layer (contract C12). It is installed
     # through the proxy, like every other call a client makes here.
-    orchestrator.next_procedure = session_manager.next_run
-    orchestrator.queue_snapshot = session_manager.queue_entries
+    orchestrator.install_run_queue(
+        next_run=session_manager.next_run,
+        queue_entries=session_manager.queue_entries,
+        take_next_spec=session_manager.take_next_spec,
+        build_spec=session_manager.build_spec,
+    )
 
     # ELN publishing (cryosoft/session/eln/): entirely opt-in and entirely
     # GUI-side. With no user-level settings file — the default — the
@@ -303,8 +324,7 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
     # a setup that has no notebook carries no footprint. The timer lives HERE,
     # in the application entry point, rather than in the Orchestrator, for the
     # same reason all network I/O does: it must never share the tick that
-    # writes to hardware. Attached to `app` (like trend_check_runner) so its
-    # ownership is explicit — a QObject with no Python reference is eligible
+    # writes to hardware. Attached to `app` so its ownership is explicit — a QObject with no Python reference is eligible
     # for GC regardless of Qt-side parenting.
     app.eln_publisher = ElnPublisher(session_manager, load_eln_settings())
     orchestrator.run_finished.connect(app.eln_publisher.on_run_finished)

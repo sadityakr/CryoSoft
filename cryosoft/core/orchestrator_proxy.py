@@ -32,6 +32,21 @@ is JSON and cannot carry an object. ``publish_queue`` and the two pull-seam
 attributes are the queue's other half of this surface: not commands, and
 documented as such where they are defined.
 
+**Crossing the instrument thread.** When the
+:class:`~cryosoft.core.instrument_host.InstrumentHost` runs in ``threaded``
+mode it hands this proxy a ``ThreadBridge``, and that is the ONLY difference
+between the two modes on this side of the boundary. Every command is *posted*
+onto the engine's event loop and returns immediately with the ``request_id``
+the client generated itself, so a client never waits on an engine that is
+forty seconds deep inside ``measure()``. Every engine signal comes back the
+other way through Qt's auto connection, which is a queued connection exactly
+because emitter and receiver live on different threads — the payload is
+delivered on the client's own event loop, one hop later, never inside the
+engine's emit. Reads need no crossing at all: they are answered from the
+mirror. The run queue's two seams are the one place the engine reaches back
+into client-owned data, and ``install_run_queue()`` documents how each of them
+crosses.
+
 **Why this is core and not GUI.** Its clients are the GUI *and* the session
 layer — ``ExperimentManager`` holds one for ``envelope_variables()`` and
 ``set_experiment_envelope()`` — and import contract C11 forbids the session
@@ -43,6 +58,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from PyQt6.QtCore import QObject, pyqtSignal
@@ -51,7 +67,7 @@ from cryosoft.core import events as ev
 from cryosoft.core.status_mirror import StatusMirror
 
 if TYPE_CHECKING:
-    from cryosoft.core.instrument_host import InstrumentHost
+    from cryosoft.core.instrument_host import InstrumentHost, ThreadBridge
     from cryosoft.core.plan import ExperimentEnvelope
 
 logger = logging.getLogger(__name__)
@@ -83,6 +99,35 @@ _PASSTHROUGH_SIGNALS: tuple[str, ...] = (
 )
 
 
+class _QueueSnapshotCache:
+    """The waiting queue as the engine sees it: pushed, never pulled.
+
+    In ``threaded`` mode the engine must never call into the session layer to
+    read the queue, so the client PUSHES the entries here — on its own thread,
+    from its own data — every time it asks for a ``QueueChanged`` broadcast,
+    and the engine's ``queue_snapshot`` seam reads them back with no crossing
+    at all. The entries are immutable JSON dicts and the engine needs no
+    answer, which is exactly when a push beats a marshalled question.
+    """
+
+    def __init__(self) -> None:
+        self._entries: tuple[dict[str, Any], ...] = ()
+
+    def push(self, entries: Sequence[Mapping[str, Any]]) -> None:
+        """Replace the cached entries. Client thread only.
+
+        Args:
+            entries: The waiting entries as JSON-safe mappings. Copied, and
+                installed as one whole immutable tuple, so a reader on the
+                other thread can only ever see a complete queue.
+        """
+        self._entries = tuple(dict(entry) for entry in entries)
+
+    def __call__(self) -> tuple[dict[str, Any], ...]:
+        """Return the last pushed entries. Engine thread."""
+        return self._entries
+
+
 class OrchestratorProxy(QObject):
     """The control contract, rendered for a Python client.
 
@@ -112,6 +157,9 @@ class OrchestratorProxy(QObject):
             path; a threaded host primes its own and passes it in, because
             the priming reads must happen on the engine's thread.
         parent: Optional Qt parent.
+        bridge: How calls reach the engine when it lives on the instrument
+            thread (``InstrumentHost.bridge``). ``None`` — the default —
+            means the engine is on this thread and every call is direct.
     """
 
     verdict = pyqtSignal(object)  # events.Verdict
@@ -167,16 +215,50 @@ class OrchestratorProxy(QObject):
         engine: Any,
         mirror: StatusMirror | None = None,
         parent: QObject | None = None,
+        bridge: ThreadBridge | None = None,
     ) -> None:
         super().__init__(parent)
         self._engine = engine
+        self._bridge = bridge
+        self._queue_cache: _QueueSnapshotCache | None = None
+        self._queue_entries: Callable[[], Sequence[Mapping[str, Any]]] | None = None
         self._mirror = (
             mirror if mirror is not None else StatusMirror.for_engine(engine)
         )
-        engine.verdict_emitted.connect(self.verdict)
+        # Auto connections, deliberately. Qt decides the type at every emit by
+        # comparing the RECEIVER's thread with the emitting one, so these are
+        # direct in inline mode and queued in threaded mode without a second
+        # wiring path — and a queued delivery is what puts the payload on the
+        # client's event loop instead of inside the engine's emit.
+        # Every connection lands on a CALLABLE, never on this proxy's own
+        # signal. A signal-to-signal connection is special-cased by Qt and
+        # cannot be delivered across a queued hop, so an engine on the
+        # instrument thread would fail to re-emit anything through one; the
+        # relays below are ordinary slots and cross like any other payload.
+        self._relays: list[Any] = []
+        engine.verdict_emitted.connect(self._relay("verdict"))
         engine.event_emitted.connect(self._on_event)
         for name in _PASSTHROUGH_SIGNALS:
-            getattr(engine, name).connect(getattr(self, name))
+            getattr(engine, name).connect(self._relay(name))
+
+    def _relay(self, name: str) -> Callable[..., None]:
+        """Return a slot that re-emits one of this proxy's signals.
+
+        Args:
+            name: The proxy signal to re-emit under.
+
+        Returns:
+            A callable taking the engine signal's arguments. Kept alive by
+            this proxy, because a connected plain callable that nothing else
+            references may otherwise be collected.
+        """
+        signal = getattr(self, name)
+
+        def _forward_signal(*args: Any) -> None:
+            signal.emit(*args)
+
+        self._relays.append(_forward_signal)
+        return _forward_signal
 
     @classmethod
     def for_host(
@@ -199,7 +281,7 @@ class OrchestratorProxy(QObject):
         mirror = StatusMirror(parent=parent)
         mirror.prime(*host.client_state())
         mirror.attach(host.orchestrator)
-        return cls(host.orchestrator, mirror, parent=parent)
+        return cls(host.orchestrator, mirror, parent=parent, bridge=host.bridge)
 
     # ------------------------------------------------------------------
     # Event plumbing
@@ -339,8 +421,19 @@ class OrchestratorProxy(QObject):
     # Commands — one per CommandName
     # ------------------------------------------------------------------
 
+    @property
+    def bridge(self) -> ThreadBridge | None:
+        """How this proxy's calls reach the engine, or ``None`` when direct."""
+        return self._bridge
+
     def _submit(self, name: ev.CommandName, **args: Any) -> str:
         """Build one operator ``Command`` and hand it to the engine.
+
+        The ``request_id`` is generated HERE, on the caller's thread, by
+        ``Command``'s own constructor — which is what lets this return
+        synchronously even when the engine is on the instrument thread and the
+        submission itself is only queued. The verdict carrying that id arrives
+        later, on the event stream, exactly as it does inline.
 
         Args:
             name: Which command.
@@ -349,9 +442,11 @@ class OrchestratorProxy(QObject):
         Returns:
             The ``request_id`` the answering ``Verdict`` carries.
         """
-        return self._engine.submit(
-            ev.Command(name=name, actor=ev.OPERATOR, args=args)
-        )
+        command = ev.Command(name=name, actor=ev.OPERATOR, args=args)
+        if self._bridge is None:
+            return self._engine.submit(command)
+        self._bridge.post(lambda: self._engine.submit(command))
+        return command.request_id
 
     def _forward(self, name: ev.CommandName, **kwargs: Any) -> str:
         """Call an engine command whose arguments the contract cannot carry.
@@ -384,7 +479,11 @@ class OrchestratorProxy(QObject):
             shape even though this one has no verdict to correlate it with.
         """
         command = ev.Command(name=name, actor=ev.OPERATOR)
-        getattr(self._engine, name.value)(actor=ev.OPERATOR, **kwargs)
+        call = getattr(self._engine, name.value)
+        if self._bridge is None:
+            call(actor=ev.OPERATOR, **kwargs)
+        else:
+            self._bridge.post(lambda: call(actor=ev.OPERATOR, **kwargs))
         return command.request_id
 
     # ── Runs and the queue ─────────────────────────────────────────────
@@ -449,6 +548,76 @@ class OrchestratorProxy(QObject):
     # them is an action the engine can refuse — installing a callable is
     # wiring, and a broadcast starts nothing.
 
+    def install_run_queue(
+        self,
+        *,
+        next_run: Callable[[], Any],
+        queue_entries: Callable[[], Sequence[Mapping[str, Any]]],
+        take_next_spec: Callable[[], Any] | None = None,
+        build_spec: Callable[[Any], Any] | None = None,
+    ) -> None:
+        """Wire the client's run queue to the engine's two pull seams.
+
+        The **queue-crossing rule**, and the one place the engine reaches back
+        into data a client owns. The two seams cross the instrument thread
+        differently, because they need different things:
+
+        * ``queue_snapshot`` is a *snapshot push*. The waiting entries are
+          immutable JSON dicts and the engine needs no answer, so the client
+          pushes them across on its own thread every time it asks for a
+          broadcast (``publish_queue()``), and the engine reads them from a
+          local cache with no crossing at all. A pull would have made every
+          ``QueueChanged`` a blocking question about data the client had
+          already finished changing.
+        * ``next_procedure`` is *marshalled with a result*, and split in two.
+          Popping the next spec mutates the client's queue, so it happens on
+          the client's thread and returns a frozen ``RunSpec``; BUILDING the
+          run touches the Station, so it happens on the engine's thread. That
+          split is what keeps both halves on the thread that owns the data
+          they touch, instead of choosing which race to accept.
+
+        In ``inline`` mode both seams are installed unchanged and *next_run*
+        is used whole, so nothing about the single-threaded path moves.
+
+        Args:
+            next_run: Pops the next spec and builds it — the whole seam, used
+                as-is in ``inline`` mode.
+            queue_entries: The waiting entries as JSON-safe mappings.
+            take_next_spec: Pops the next spec and returns it without
+                building. Required in ``threaded`` mode.
+            build_spec: Builds one popped spec into a live run. Required in
+                ``threaded`` mode.
+
+        Raises:
+            ValueError: In ``threaded`` mode, if the split halves are missing
+                — there is no safe way to run the whole seam on one thread.
+        """
+        if self._bridge is None:
+            self._engine.next_procedure = next_run
+            self._engine.queue_snapshot = queue_entries
+            return
+        if take_next_spec is None or build_spec is None:
+            raise ValueError(
+                "install_run_queue() needs take_next_spec and build_spec when "
+                "the engine runs on the instrument thread: popping a spec and "
+                "building a run belong to different threads"
+            )
+        bridge = self._bridge
+        cache = _QueueSnapshotCache()
+        cache.push(queue_entries())
+        self._queue_cache = cache
+        self._queue_entries = queue_entries
+        self._engine.queue_snapshot = cache
+
+        def _pull_next_run() -> Any:
+            """Take one spec on the client thread, build it on this one."""
+            spec = bridge.ask(take_next_spec)
+            if spec is None:
+                return None
+            return build_spec(spec)
+
+        self._engine.next_procedure = _pull_next_run
+
     def publish_queue(self, *, actor: ev.Actor = ev.OPERATOR) -> None:
         """Ask the engine to broadcast the queue as the client now holds it.
 
@@ -456,17 +625,35 @@ class OrchestratorProxy(QObject):
         a removal or a reorder happen; whoever changed it calls this and the
         resulting ``QueueChanged`` goes out on the one event stream.
 
+        This is also where the queue's snapshot crosses the instrument thread
+        (see ``install_run_queue()``): the entries are read on the caller's
+        own thread and pushed into the engine's cache before the broadcast is
+        posted, so the ``QueueChanged`` the engine builds describes the queue
+        as the client had it when it asked.
+
         Args:
             actor: Who made the change, defaulting to the operator sentinel.
         """
-        self._engine.publish_queue(actor=actor)
+        if self._bridge is None:
+            self._engine.publish_queue(actor=actor)
+            return
+        if (
+            self._queue_cache is not None
+            and self._queue_entries is not None
+            and not self._bridge.on_engine_thread()
+        ):
+            self._queue_cache.push(self._queue_entries())
+        self._bridge.post(lambda: self._engine.publish_queue(actor=actor))
 
     @property
     def next_procedure(self) -> Any:
         """The engine's **pull seam**: what it asks for the next run.
 
         ``None`` until a client installs one, which is how a caller can tell
-        that nobody has claimed the seam yet.
+        that nobody has claimed the seam yet. Assigning here installs the
+        callable unchanged, which is right for a client on the engine's own
+        thread; a client across the instrument thread installs both halves
+        through ``install_run_queue()`` instead.
         """
         return self._engine.next_procedure
 
@@ -476,7 +663,12 @@ class OrchestratorProxy(QObject):
 
     @property
     def queue_snapshot(self) -> Any:
-        """The callable the engine reads the waiting entries from."""
+        """The callable the engine reads the waiting entries from.
+
+        Assigned directly by a client on the engine's own thread; across the
+        instrument thread the entries are pushed instead (see
+        ``install_run_queue()``).
+        """
         return self._engine.queue_snapshot
 
     @queue_snapshot.setter

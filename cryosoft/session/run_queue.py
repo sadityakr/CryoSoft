@@ -1012,8 +1012,65 @@ class RunQueueHost:
         """
         return self._changed(self._queue.clear(), actor)
 
+    def take_next_spec(self) -> RunSpec | None:
+        """Pop the next waiting spec and broadcast the shortened queue.
+
+        The first half of ``next_run()``, exposed on its own because the two
+        halves belong to different threads once the engine lives on the
+        instrument thread: popping mutates THIS layer's queue and so must
+        happen wherever the queue is edited, while building touches the
+        Station and so must happen wherever the Station is. What crosses
+        between them is a frozen ``RunSpec``, which is safe to hand anywhere.
+        Callers on one thread use ``next_run()``, which is both halves.
+
+        Returns:
+            The spec that just left the queue, or ``None`` when nothing is
+            waiting or this host has no Station/catalog to build with.
+        """
+        if self._station is None or not self._run_catalog:
+            return None
+        spec = self._queue.pop_next()
+        if spec is None:
+            return None
+        # The spec has left the queue; a build that later refuses must not
+        # leave clients rendering an entry that is gone.
+        self._broadcast(spec.actor)
+        return spec
+
+    def build_spec(self, spec: RunSpec) -> Any:
+        """Build the one live run a popped spec describes.
+
+        The second half of ``take_next_spec()`` (see its docstring). Runs on
+        whichever thread owns the Station.
+
+        Args:
+            spec: A spec this host has already popped.
+
+        Returns:
+            A ready procedure or operation.
+
+        Raises:
+            KeyError: If the catalog holds no class of the spec's name.
+            CryoSoftError: If the run refuses to be built.
+            TypeError: If the stored parameters no longer fit the signature.
+            ValueError: If a parameter value is invalid.
+        """
+        return build_run(
+            spec,
+            station=self._station,
+            run_catalog=self._run_catalog,
+            experiment_info=(
+                self._experiment_info() if self._experiment_info else None
+            ),
+        )
+
     def next_run(self) -> Any:
         """Build and return the run the engine should start next.
+
+        Both halves at once, for a client on the engine's own thread. A client
+        across the instrument thread calls ``take_next_spec()`` and
+        ``build_spec()`` separately, each on the thread that owns what it
+        touches.
 
         Returns:
             A ready procedure or operation, or ``None`` when the queue is

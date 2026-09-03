@@ -3351,7 +3351,7 @@ class Orchestrator(QObject):
                 record, self._stall_state, self._stall_config
             )
             self._operational_status = record
-            self.operational_status.emit(record)
+            self.operational_status.emit(dict(record))  # the signal payload rule
             self._status_logger.info(json.dumps(record))
         except Exception:
             logger.exception("operational-status update failed (non-fatal)")
@@ -3562,7 +3562,14 @@ class Orchestrator(QObject):
         state: dict = {}
         if self._monitoring:
             state = self._station.get_state()
-            self.states_updated.emit(state)
+            # The signal payload rule: what leaves the engine is a copy the
+            # engine never touches again. Station.get_state() returns a fresh
+            # outer dict but shares the inner per-VI dicts with its stale-value
+            # cache, and a client on another thread must not be handed a
+            # container the engine still holds.
+            self.states_updated.emit(
+                {name: dict(values) for name, values in state.items()}
+            )
             self._emit_event(
                 ev.Readings(values=_json_safe(state), seq=self._next_seq())
             )

@@ -11,7 +11,12 @@ the status mirror the host primed.
 import pytest
 
 from cryosoft.core import events as ev
-from cryosoft.core.instrument_host import MODES, InstrumentHost
+from cryosoft.core.instrument_host import (
+    MODES,
+    THREAD_ENV_VAR,
+    InstrumentHost,
+    resolve_mode,
+)
 from cryosoft.core.orchestrator_proxy import OrchestratorProxy
 from cryosoft.core.station import build_station
 from cryosoft.core.status_mirror import StatusMirror
@@ -53,15 +58,38 @@ def test_start_is_idempotent(host):
     assert host.orchestrator is engine
 
 
-def test_threaded_mode_refuses_and_names_the_flag():
-    """C1 lands the thread; until then the refusal says which flag selects it."""
-    assert "threaded" in MODES
-    instrument_host = InstrumentHost(
-        lambda: build_station(CONFIG_PATH), mode="threaded"
-    )
-    with pytest.raises(NotImplementedError) as refusal:
-        instrument_host.start()
-    assert "instrument_thread" in str(refusal.value)
+def test_inline_mode_has_no_bridge_to_cross(host):
+    """No thread, no crossing: every call is direct and every read is local.
+
+    The threaded half of both modes lives in ``tests/test_instrument_thread.py``.
+    """
+    assert set(MODES) == {"inline", "threaded"}
+    assert host.bridge is None
+    assert host.thread_object is None
+    assert host.build_proxy().bridge is None
+
+
+@pytest.mark.parametrize(
+    ("configured", "override", "expected"),
+    [
+        (False, None, "inline"),
+        (True, None, "threaded"),
+        (None, None, "inline"),
+        (False, "1", "threaded"),
+        (True, "0", "inline"),
+        (True, "off", "inline"),
+        (False, "TRUE", "threaded"),
+        (True, "nonsense", "threaded"),  # unreadable override is ignored
+    ],
+)
+def test_the_mode_is_the_config_unless_the_environment_overrides_it(
+    configured, override, expected, monkeypatch
+):
+    """The instrument-thread flag: config first, environment last."""
+    monkeypatch.delenv(THREAD_ENV_VAR, raising=False)
+    if override is not None:
+        monkeypatch.setenv(THREAD_ENV_VAR, override)
+    assert resolve_mode(configured) == expected
 
 
 def test_an_unknown_mode_is_refused_at_construction():
