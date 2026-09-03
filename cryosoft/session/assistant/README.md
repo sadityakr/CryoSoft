@@ -116,13 +116,15 @@ quote it, not treat it as a fault and retry it in a different shape.
   by what it holds, not by a convention about what it does.
 - Everything else happens in the slot that receives that answer: the loop,
   every `Gateway.call_tool()`, every transcript write, every signal. In the
-  application that slot runs on the GUI thread, which is the thread that drives
-  the tick.
-- **The engine's single-hardware-thread invariant is untouched.** An assistant
-  that called into the gateway from a pool thread would be a second writer to
-  the instrument bus, which is precisely the GPIB race the tick design exists
-  to prevent. `tests/test_assistant.py` asserts both halves: the client's
-  thread differs from the caller's, and the gateway's does not.
+  application that slot runs on the GUI thread, and the `Gateway` it calls
+  holds the **Orchestrator proxy**, so every command it submits is posted to
+  the instrument thread exactly as a widget's is.
+- **The single hardware thread standard is untouched.** An assistant that
+  called into the gateway from a pool thread would put a third thread on that
+  path — the GPIB race the standard exists to prevent — so the pool worker
+  holds nothing that can reach the engine. `tests/test_assistant.py` asserts
+  both halves: the client's thread differs from the caller's, and the
+  gateway's does not.
 - The chat window never blocks. `ask()` returns immediately; the answer arrives
   as a signal.
 

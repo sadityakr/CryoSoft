@@ -656,3 +656,120 @@ def test_the_app_stops_the_server_when_it_quits():
     ]
 
     assert wired, "main() must stop the Gateway server when the app quits"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# The application's own wiring, across the instrument thread
+# ══════════════════════════════════════════════════════════════════════════
+
+
+@pytest.fixture
+def app_wired_server(qtbot, tmp_path):
+    """The server ``main()`` builds: over the proxy, engine on its own thread.
+
+    Exercises ``cryosoft.main._build_gateway_server()`` itself rather than a
+    hand-assembled equivalent, because the wiring IS what is under test: the
+    object handed to the server is the **Orchestrator proxy**, never the
+    engine, and under the single hardware thread standard the engine is on
+    the instrument thread while the server is on this one.
+    """
+    from cryosoft.core.instrument_host import InstrumentHost
+    from cryosoft.core.station import read_gateway_config
+    from cryosoft.main import _build_gateway_server
+
+    host = InstrumentHost(
+        lambda: build_station(CONFIG_PATH),
+        mode="threaded",
+        orchestrator_options={
+            "tick_interval_ms": 50,
+            "run_catalog": {"FieldSweep": FieldSweep},
+        },
+    )
+    host.start()
+    proxy = host.build_proxy()
+
+    roster = UserRoster(tmp_path / "users.json")
+    roster.add(User(user_id="jdoe", name="J. Doe", email="jdoe@example.org"))
+    manager = ExperimentManager(
+        store=ExperimentStore(tmp_path / "experiments"),
+        roster=roster,
+        orchestrator=proxy,
+        config_name="sim_cryostat",
+        station=host.station,
+        run_catalog={"FieldSweep": FieldSweep},
+    )
+    manager.start_experiment("Transport", "jdoe", dict(SAMPLE_INFO))
+
+    # The setup's own answer, read the way main() reads it.
+    (tmp_path / "monitor.yaml").write_text(
+        "monitor:\n"
+        "  tick_interval_ms: 1000\n"
+        "  gateway_server: true\n"
+        "  gateway_max_role: session\n"
+    )
+    server = _build_gateway_server(
+        proxy,
+        read_gateway_config(str(tmp_path)),
+        station_info=host.station.station_info,
+        tool_context=ToolContext(
+            experiments=manager, run_catalog={"FieldSweep": FieldSweep}
+        ),
+        feed=lambda: None,
+        socket_name=str(tmp_path / "gateway.sock"),
+        descriptor=tmp_path / "gateway.json",
+        token=TOKEN,
+    )
+    yield server, host, proxy
+    server.stop()
+    host.shutdown()
+
+
+def test_the_app_wiring_serves_a_client_with_the_engine_on_its_own_thread(
+    qtbot, app_wired_server
+):
+    """The wiring main() uses builds a listening server and answers a client.
+
+    The regression this pins: the server was built over an object whose two
+    contract streams are named ``verdict``/``event``, and connecting to
+    ``verdict_emitted``/``event_emitted`` raised at construction — a failure
+    no test saw, because nothing built the server through ``main()``. One
+    ``tools/list`` over the real socket is the proof that the whole path
+    holds: config gate, proxy, handshake, rendered surface.
+    """
+    server, host, proxy = app_wired_server
+
+    assert server is not None
+    assert server.isListening()
+    # The engine really is elsewhere; the server really is here.
+    assert host.thread_object is not None
+    assert host.orchestrator.thread() is host.thread_object
+    assert proxy.bridge is not None
+
+    client = SocketClient(qtbot, server.socket_name)
+    assert "error" not in client.hello(Role.SESSION, "agent-1")
+
+    tools = client.result("tools/list")["tools"]
+
+    assert tools, "the wired server rendered no tools"
+    assert {"start_monitoring", "pause_procedure"} <= {
+        tool["name"] for tool in tools
+    }
+
+
+def test_a_setup_that_does_not_ask_for_a_server_gets_none(tmp_path):
+    """The config gate, in the wiring function: silence opens no socket."""
+    from cryosoft.core.station import read_gateway_config
+    from cryosoft.main import _build_gateway_server
+
+    (tmp_path / "monitor.yaml").write_text("monitor:\n  tick_interval_ms: 1000\n")
+
+    assert (
+        _build_gateway_server(
+            object(),
+            read_gateway_config(str(tmp_path)),
+            station_info=lambda: None,
+            tool_context=ToolContext(),
+            feed=lambda: None,
+        )
+        is None
+    )

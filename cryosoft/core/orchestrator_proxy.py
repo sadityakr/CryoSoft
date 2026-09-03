@@ -7,7 +7,9 @@ first rendering: a ``QObject`` with
 
 * one typed method per ``CommandName``, each building a ``Command`` with the
   operator actor and handing it to ``Orchestrator.submit()``, returning the
-  ``request_id`` the answering ``Verdict`` will carry;
+  ``request_id`` the answering ``Verdict`` will carry, plus the engine's own
+  ``submit(Command)`` port for a client that stamps its own actor (the agent
+  gateway's ``EngineClient``, which this surface satisfies);
 * one signal per event type, plus ``verdict`` and the union ``event``;
 * the engine's existing per-purpose signals re-exposed under their own names,
   so a widget written against the Orchestrator keeps working when it is handed
@@ -431,6 +433,28 @@ class OrchestratorProxy(QObject):
         """How this proxy's calls reach the engine, or ``None`` when direct."""
         return self._bridge
 
+    def submit(self, command: ev.Command) -> str:
+        """Carry one already-built ``Command`` across to the engine.
+
+        The engine's own port, offered unchanged to a client that speaks the
+        control contract directly and stamps its own actor — the **Agent
+        gateway**, whose ``EngineClient`` this method and the ``verdict`` /
+        ``event`` signals satisfy. A gateway on the GUI thread therefore
+        attaches to this proxy rather than to the engine, and its commands
+        cross the instrument thread exactly as a widget's do.
+
+        Args:
+            command: The command to carry out, actor already stamped.
+
+        Returns:
+            The ``request_id`` the answering ``Verdict`` carries — the
+            command's own, so it is the same id inline and threaded.
+        """
+        if self._bridge is None:
+            return self._engine.submit(command)
+        self._bridge.post(lambda: self._engine.submit(command))
+        return command.request_id
+
     def _submit(self, name: ev.CommandName, **args: Any) -> str:
         """Build one operator ``Command`` and hand it to the engine.
 
@@ -447,11 +471,7 @@ class OrchestratorProxy(QObject):
         Returns:
             The ``request_id`` the answering ``Verdict`` carries.
         """
-        command = ev.Command(name=name, actor=ev.OPERATOR, args=args)
-        if self._bridge is None:
-            return self._engine.submit(command)
-        self._bridge.post(lambda: self._engine.submit(command))
-        return command.request_id
+        return self.submit(ev.Command(name=name, actor=ev.OPERATOR, args=args))
 
     def _forward(self, name: ev.CommandName, **kwargs: Any) -> str:
         """Call an engine command whose arguments the contract cannot carry.
