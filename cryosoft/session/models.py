@@ -272,6 +272,13 @@ class RunRecord:
         procedure: The procedure's display name.
         kind: ``"run"`` for science runs; probe runs will carry ``"probe"``.
         params: Merged parameter values the run executed with.
+        params_digest: The **Params digest** of ``params``, stamped when the
+            run was opened (``core.plan.params_digest``). Stored rather than
+            recomputed on read, so it fixes what the run actually started
+            with even if the record is later amended, and so a confirmation
+            record carrying the same digest proves the two agree without
+            either holding a copy of the other's parameters. Empty on a
+            record written before digests were stamped.
         data_file: Absolute path of the run's HDF5 file.
         actor: Who started the run, taken from the ``RunStarted`` event's
             own actor — so an agent-started run is distinguishable from the
@@ -298,6 +305,7 @@ class RunRecord:
     procedure: str = ""
     kind: str = "run"
     params: dict[str, Any] = field(default_factory=dict)
+    params_digest: str = ""
     data_file: str = ""
     actor: Actor = OPERATOR
     actor_legacy: bool = False
@@ -315,6 +323,7 @@ class RunRecord:
             "procedure": self.procedure,
             "kind": self.kind,
             "params": dict(self.params),
+            "params_digest": self.params_digest,
             "data_file": self.data_file,
             "actor": self.actor.to_json(),
             "actor_legacy": self.actor_legacy,
@@ -348,6 +357,7 @@ class RunRecord:
             procedure=_as_str(data.get("procedure")),
             kind=_as_str(data.get("kind"), "run"),
             params=_as_dict(data.get("params")),
+            params_digest=_as_str(data.get("params_digest")),
             data_file=_as_str(data.get("data_file")),
             actor=actor,
             actor_legacy=actor_legacy or _as_bool(data.get("actor_legacy"), False),

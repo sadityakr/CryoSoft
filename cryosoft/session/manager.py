@@ -11,7 +11,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 
 from cryosoft.core.events import OPERATOR, Actor, RunStarted
 from cryosoft.core.orchestrator import Orchestrator
-from cryosoft.core.plan import EnvelopeVariable, ExperimentEnvelope
+from cryosoft.core.plan import EnvelopeVariable, ExperimentEnvelope, params_digest
 from cryosoft.core.station import Station, read_instrument_metadata
 from cryosoft.session.models import (
     EXPERIMENT_STATUS_CLOSED,
@@ -682,6 +682,11 @@ class ExperimentManager(QObject):
 
         Runs outside an experiment are not recorded — there is no record to
         attach them to (their HDF5 file still exists, unstamped).
+
+        The **Params digest** is stamped here, from the manifest's own
+        parameters, so what the run started with is fixed at the moment it
+        started rather than recomputed from a record that may since have been
+        amended.
         """
         if self._experiment is None:
             return
@@ -691,11 +696,13 @@ class ExperimentManager(QObject):
             if raw_data_file
             else ""
         )
+        params = dict(manifest.get("params") or {})
         run = RunRecord(
             run_id=str(manifest.get("run_id", "")),
             procedure=str(manifest.get("procedure", "")),
             kind=str(manifest.get("kind", "run")),
-            params=dict(manifest.get("params") or {}),
+            params=params,
+            params_digest=params_digest(params),
             data_file=data_file,
             started_utc=str(manifest.get("started_utc", "")),
             status=RUN_STATUS_RUNNING,

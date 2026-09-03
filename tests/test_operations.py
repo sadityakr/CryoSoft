@@ -2,6 +2,7 @@ import time
 
 import pytest
 
+from cryosoft.core import events as ev
 from cryosoft.core.exceptions import CryoSoftSafetyError
 from cryosoft.core.gates import Gate
 from cryosoft.core.operation import OperationBase
@@ -576,6 +577,54 @@ def test_confirm_operation_rejected_key_is_a_verdict_not_a_crash(
     orchestrator.confirm_operation("not_a_declared_key")  # must not raise
     assert blocked
     assert "not_a_declared_key" in blocked[0]
+
+    orchestrator.finish_operation()
+    qtbot.waitUntil(lambda: orchestrator._procedure is None, timeout=2000)
+
+
+def test_confirm_operation_names_the_actor_when_the_operation_declares_one(
+    orchestrator, station, qtbot
+):
+    """The attestation reaches an operation that asked who is attesting."""
+
+    class AttestingOperation(SimpleOperation):
+        def __init__(self, station) -> None:
+            super().__init__(station)
+            self.attested: list[tuple[str, ev.Actor]] = []
+
+        def confirm(self, key: str, *, actor: ev.Actor = ev.OPERATOR) -> None:
+            self.attested.append((key, actor))
+
+    agent = ev.Actor(kind=ev.ActorKind.AGENT, id="runner-7", role="session")
+    op = AttestingOperation(station)
+    orchestrator.run_operation(op)
+
+    orchestrator.confirm_operation("needle_valve", actor=agent)
+    assert op.attested == [("needle_valve", agent)]
+
+    orchestrator.finish_operation()
+    qtbot.waitUntil(lambda: orchestrator._procedure is None, timeout=2000)
+
+
+def test_confirm_operation_still_reaches_an_operation_that_names_no_actor(
+    orchestrator, station, qtbot
+):
+    """The duck-typed fallback: a bare ``confirm(key)`` is called with the key alone.
+
+    An operation written before attestations named an actor — or a test
+    double implementing only the two-argument form — must not have its
+    confirmation refused over an argument it never asked for.
+    """
+    agent = ev.Actor(kind=ev.ActorKind.AGENT, id="runner-7", role="session")
+    op = SimpleOperation(station)  # confirm(self, key) — no actor parameter
+    orchestrator.run_operation(op)
+
+    blocked: list[str] = []
+    orchestrator.action_blocked.connect(blocked.append)
+    orchestrator.confirm_operation("needle_valve", actor=agent)
+
+    assert op.confirmed("needle_valve")
+    assert not blocked
 
     orchestrator.finish_operation()
     qtbot.waitUntil(lambda: orchestrator._procedure is None, timeout=2000)

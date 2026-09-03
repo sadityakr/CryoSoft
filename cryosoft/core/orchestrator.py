@@ -136,6 +136,32 @@ def command(method: Callable[..., Any]) -> Callable[..., Any]:
     return wrapper
 
 
+def _attest(method: Callable[..., Any], key: str, actor: ev.Actor) -> None:
+    """Call an operation's confirm/skip method, naming the actor when it can.
+
+    Both are duck-typed (contract C5 keeps this module from importing
+    ``OperationBase``), so the actor cannot simply be passed: an operation
+    written before attestations named one, or a test double implementing the
+    bare ``confirm(key)``, would raise ``TypeError``. The signature decides,
+    once per call, which is cheap next to the human decision it records — and
+    a callable whose signature cannot be read at all falls back to the bare
+    call rather than failing an attestation over introspection.
+
+    Args:
+        method: The operation's ``confirm``/``skip_step``.
+        key: The step key, passed positionally either way.
+        actor: Who is attesting, passed only when the method declares it.
+    """
+    try:
+        accepts_actor = "actor" in inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        accepts_actor = False
+    if accepts_actor:
+        method(key, actor=actor)
+    else:
+        method(key)
+
+
 def _json_safe(value: Any) -> Any:
     """Render an arbitrary runtime value as something the contract can carry.
 
@@ -1776,6 +1802,12 @@ class Orchestrator(QObject):
         active (a duck-typed procedure without ``command_scope ==
         "operation"`` does not count).
 
+        The acting ``Actor`` is forwarded alongside the key when the
+        operation's ``confirm()`` declares one (see ``_attest()``), so the
+        ``StepRecord`` can tell an autonomous client's self-confirmation of a
+        physical step from the physicist's. An operation that predates the
+        actor — or a duck-typed test double — is called with the key alone.
+
         Args:
             key: The confirmation key (e.g. ``"needle_valve"``), forwarded
                 verbatim to the operation's ``confirm()``.
@@ -1791,7 +1823,7 @@ class Orchestrator(QObject):
             # unhandled exception in a Qt slot would abort the process. An
             # undeclared key is refused with a verdict, never raised.
             try:
-                confirm(key)
+                _attest(confirm, key, self._current_actor())
             except Exception as exc:  # noqa: BLE001 — verdict, not crash
                 logger.error("confirm_operation(%r) rejected: %s", key, exc)
                 self._action_blocked(
@@ -1822,6 +1854,9 @@ class Orchestrator(QObject):
         reached. Doing it there rather than here keeps every hardware write
         on the tick, which is the single-writer rule.
 
+        The acting ``Actor`` is forwarded exactly as ``confirm_operation()``
+        forwards it: a skip is an override, and the record names who took it.
+
         Args:
             key: The step key, forwarded verbatim to the operation's
                 ``skip_step()``.
@@ -1837,7 +1872,7 @@ class Orchestrator(QObject):
             # a Qt slot, so an undeclared or unskippable key becomes a
             # verdict, never an unhandled exception in the GUI thread.
             try:
-                skip_step(key)
+                _attest(skip_step, key, self._current_actor())
             except Exception as exc:  # noqa: BLE001 — verdict, not crash
                 logger.error("skip_operation_step(%r) rejected: %s", key, exc)
                 self._action_blocked(

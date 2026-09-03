@@ -6,7 +6,7 @@ import pytest
 
 from cryosoft.core import events as ev
 from cryosoft.core.orchestrator import Orchestrator
-from cryosoft.core.plan import EnvelopeBound, ExperimentEnvelope
+from cryosoft.core.plan import EnvelopeBound, ExperimentEnvelope, params_digest
 from cryosoft.core.station import build_station
 from cryosoft.procedures.field_sweep import FieldSweep
 from cryosoft.session.manager import ExperimentManager
@@ -1038,6 +1038,48 @@ def test_an_unreadable_actor_field_degrades_to_legacy():
     """Junk in the actor field never raises, and never claims the operator acted."""
     assert RunRecord.from_dict({"actor": {"kind": "wizard", "id": "x"}}).actor_legacy
     assert RunRecord.from_dict({"actor": "jdoe"}).actor_legacy
+
+
+# ── Accountability: what the run was started with ───────────────────────────
+
+
+def test_a_run_record_digests_the_parameters_it_started_with(
+    manager, orchestrator, store
+):
+    """The Params digest is stamped when the run opens, from the manifest itself."""
+    record = manager.start_experiment("X", "jdoe", SAMPLE_INFO)
+    params = {"start_T": 0.0, "stop_T": 1.0, "points": 11}
+
+    orchestrator.run_started.emit(
+        {"run_id": "r1", "procedure": "Field Sweep", "params": params}
+    )
+
+    run = store.load(record.experiment_id).find_run("r1")
+    assert run.params_digest == params_digest(params)
+    assert run.params == params
+
+
+def test_the_run_digest_is_stored_not_recomputed_on_read(manager, store):
+    """It fixes what the run started with, so an amended record cannot rewrite it."""
+    record = manager.start_experiment("X", "jdoe", SAMPLE_INFO)
+    path = store.root / record.experiment_id / "experiment.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["runs"] = [
+        {"run_id": "r1", "params": {"start_T": 9.9}, "params_digest": "abc123"}
+    ]
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert store.load(record.experiment_id).find_run("r1").params_digest == "abc123"
+
+
+def test_a_run_written_before_digests_reads_as_no_digest():
+    """An old record has no digest, and never a wrong one invented on read."""
+    assert RunRecord.from_dict({"run_id": "old", "params": {"a": 1}}).params_digest == ""
+
+
+def test_the_run_digest_round_trips_through_the_record():
+    run = RunRecord(run_id="r1", params={"b": 2, "a": 1}, params_digest=params_digest({"a": 1, "b": 2}))
+    assert RunRecord.from_dict(run.to_dict()).params_digest == run.params_digest
 
 
 # ── End-to-end: a real run recorded and cross-checked against HDF5 ───────────

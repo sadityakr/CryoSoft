@@ -5,6 +5,7 @@ import time
 
 import pytest
 
+from cryosoft.core import events as ev
 from cryosoft.core.exceptions import CryoSoftConfigError
 from cryosoft.core.operation import (
     STEP_KIND_AUTO_RAMP,
@@ -13,7 +14,7 @@ from cryosoft.core.operation import (
     STEP_STATUS_SKIPPED,
 )
 from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
-from cryosoft.core.plan import PhasePlan, Target
+from cryosoft.core.plan import PhasePlan, Target, params_digest
 from cryosoft.core.station import build_station
 from cryosoft.procedures.operations.sample_load import SampleLoadOperation
 from cryosoft.procedures.operations.sample_unload import SampleUnloadOperation
@@ -27,6 +28,9 @@ from cryosoft.session.servicing_log import (
 # every test in this file is parametrized over the pair rather than duplicated.
 _OPERATION_CLASSES = [SampleLoadOperation, SampleUnloadOperation]
 _OPERATION_IDS = ["load", "unload"]
+
+# One autonomous actor, reused wherever a test needs "not the physicist".
+_AGENT = ev.Actor(kind=ev.ActorKind.AGENT, id="runner-7", role="session")
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -742,3 +746,100 @@ def test_refused_while_procedure_runs(op_cls, orchestrator, station, qtbot):
     assert orchestrator._procedure is proc  # untouched
 
     orchestrator.abort_procedure()
+
+
+# ── Who attested a step, and to what ─────────────────────────────────────────
+#
+# A step record is a claim about the physical world that the software can
+# neither perform nor verify, so it is only evidence if it says WHOSE claim it
+# is and WHICH parameters were in force. These tests hold both halves: the
+# actor, end to end from a contract Command through the engine, and the
+# Params digest of the operation's own parameters.
+
+
+@pytest.mark.parametrize("op_cls", _OPERATION_CLASSES, ids=_OPERATION_IDS)
+def test_a_direct_confirmation_is_the_physicists(op_cls, station):
+    """No actor named means the human at the window — a GUI click has no other sender."""
+    op = op_cls(station)
+    op.confirm("close_needle_valve")
+
+    record = op.step_records()["close_needle_valve"]
+    assert record.actor == ev.OPERATOR
+    assert record.actor.kind is ev.ActorKind.OPERATOR
+
+
+@pytest.mark.parametrize("op_cls", _OPERATION_CLASSES, ids=_OPERATION_IDS)
+def test_an_agents_confirmation_is_never_the_physicists(op_cls, station):
+    """The whole point of the field: a self-confirmation is distinguishable."""
+    op = op_cls(station)
+    op.confirm("close_needle_valve", actor=_AGENT)
+    op.skip_step("load_unload_sample", actor=_AGENT)
+
+    records = op.step_records()
+    assert records["close_needle_valve"].actor.kind is ev.ActorKind.AGENT
+    assert records["close_needle_valve"].actor.id == "runner-7"
+    # A skip is an override, and the record names who took it.
+    assert records["load_unload_sample"].actor.kind is ev.ActorKind.AGENT
+
+
+@pytest.mark.parametrize("op_cls", _OPERATION_CLASSES, ids=_OPERATION_IDS)
+def test_a_step_record_digests_the_parameters_in_force(op_cls, station):
+    """The record says what was confirmed, not what the parameters say later."""
+    op = _make_op(op_cls, station, target_temperature_K=290.0)
+    op.confirm("close_needle_valve")
+
+    record = op.step_records()["close_needle_valve"]
+    assert record.params_digest == params_digest(op.get_params())
+    assert len(record.params_digest) == 64
+
+    # A later operation started with different parameters is a different claim.
+    other = _make_op(op_cls, station, target_temperature_K=250.0)
+    other.confirm("close_needle_valve")
+    assert other.step_records()["close_needle_valve"].params_digest != record.params_digest
+
+
+@pytest.mark.parametrize("op_cls", _OPERATION_CLASSES, ids=_OPERATION_IDS)
+def test_the_summary_carries_the_attestation_into_the_run_manifest(op_cls, station):
+    """steps_summary() is how the actor and digest reach the session record."""
+    op = _make_op(op_cls, station)
+    op.confirm("warm_vti", actor=_AGENT)
+
+    summary = {row["key"]: row for row in op.steps_summary()}
+    assert summary["warm_vti"]["actor"]["kind"] == "agent"
+    assert summary["warm_vti"]["params_digest"] == params_digest(op.get_params())
+    # Nobody has attested anything about a pending step.
+    assert summary["load_unload_sample"]["actor"] is None
+    assert summary["load_unload_sample"]["params_digest"] == ""
+    json.dumps(op.steps_summary())  # still JSON-plain
+
+
+@pytest.mark.parametrize("op_cls", _OPERATION_CLASSES, ids=_OPERATION_IDS)
+def test_an_agent_command_through_the_engine_is_recorded_as_the_agents(
+    op_cls, orchestrator, station, qtbot
+):
+    """End to end: a contract Command carries its actor onto the step record."""
+    _fast_magnets(station)
+    _fast_vti(station)
+    op = _make_op(op_cls, station)
+    orchestrator.run_operation(op)
+    assert orchestrator._procedure is op
+
+    verdicts: list[ev.Verdict] = []
+    orchestrator.verdict_emitted.connect(verdicts.append)
+    request_id = orchestrator.submit(
+        ev.Command(
+            name=ev.CommandName.CONFIRM_OPERATION,
+            actor=_AGENT,
+            args={"key": "close_needle_valve"},
+        )
+    )
+
+    assert [v.code for v in verdicts] == [ev.VerdictCode.OK]
+    assert verdicts[0].request_id == request_id
+    record = op.step_records()["close_needle_valve"]
+    assert record.actor.kind is ev.ActorKind.AGENT
+    assert record.actor.id == "runner-7"
+    assert record.params_digest == params_digest(op.get_params())
+
+    orchestrator.abort_procedure()
+    _tick_until(orchestrator, lambda: orchestrator._procedure is None, max_ticks=2000)
