@@ -98,10 +98,6 @@ from cryosoft.core.decorators import (
 from cryosoft.core.exceptions import (
     CryoSoftCommunicationError,
     CryoSoftInstrumentError,
-    CryoSoftSafetyError,
-)
-from cryosoft.core.exceptions import (
-    CryoSoftCommunicationError,
     CryoSoftPrivateActionError,
     CryoSoftSafetyError,
     CryoSoftUndeclaredActionError,
