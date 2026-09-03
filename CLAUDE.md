@@ -21,14 +21,22 @@ L3  Orchestrator          single tick loop and state machine; sole writer to har
 L4  Procedures            measurement recipes driven by the Orchestrator
 L5  Data manager          HDF5 output (lives in core/)
 L6  Session manager       experiments, runs, users; envelope + run records
-GUI                       PyQt6 windows; talks only to the Orchestrator's public API
+GUI                       PyQt6 windows; hold an Orchestrator proxy, never the engine
 ```
 
-- **Single-threaded cooperative scheduling.** One QTimer tick drives
-  everything; ramps are generators that yield one step per tick. There is no
-  second thread and no concurrent bus access, which is the design's answer
-  to GPIB race conditions. Never add a thread or a blocking call in the tick
-  path.
+- **The single hardware thread standard.** Exactly one thread — the
+  *instrument thread* — ever touches the Orchestrator, the Station, a VI, a
+  driver or the DataManager. Inside it nothing has changed: one QTimer tick
+  drives everything and ramps are generators that yield one step per tick.
+  The GUI, the session layer, the agent gateway, analysis and every network
+  call live on the main thread, and the two sides meet only through the
+  control contract — a `Command` in, one `Verdict` and the `Event` stream
+  back — over queued Qt connections carrying copies. Never a second thread on
+  the bus and never a lock around it; never a blocking call on the GUI side
+  waiting for the engine (a read is answered from the status mirror, a
+  command is posted and answered by its verdict later); never a blocking call
+  in the tick path. `inline` mode is the same design collapsed onto one
+  thread and is temporary — one release, then it goes.
 - **The Orchestrator is a state machine** with states IDLE, INITIATING,
   RAMPING, MEASURING, SWEEPING, STANDBY, PAUSED, ERROR, EMERGENCY. All
   hardware writes flow through it; the GUI and procedures submit requests,
@@ -60,6 +68,15 @@ it automatically. Existing standards include:
 - **VI contract**: `__init__(self, drivers, **init_params)`; capabilities
   exposed via the `@monitored` and `@control` decorators; safety interlocks
   via `evaluate_safety()`.
+- **Control contract**: `core/events.py`'s frozen, JSON-safe `Command` /
+  `Verdict` / `Event` families, declared once and rendered for both clients —
+  a client sends a `Command`, gets exactly one `Verdict`, and sees every
+  consequence as an `Event`, so neither client can offer an action the other
+  cannot see.
+- **Single hardware thread**: one thread owns every instrument and the tick;
+  everything else is a client of it over the control contract. Whoever
+  decides which thread is `core/instrument_host.py`; the full text is the
+  paragraph above and `GLOSSARY.md`'s **Instrument thread**.
 - **Control-validation standard**: every `@control` method declares its
   limited parameters in the `control_limits` class attribute; limit values
   come from config `init_params`; the base class enforces them before any
