@@ -45,6 +45,17 @@ Three invariants, load-bearing for agent use:
    separate subcommands (`read` vs `write`) so the permission harness can
    gate them differently.
 
+**This toolbox is for a setup, not for a running experiment.** Its sibling
+entry point `python -m cryosoft.ctl` (`cryosoft/ctl/`, the **Reference
+client**) is the one that speaks to the *engine*: it drives the instrument
+through the agent gateway's tool surface, with roles, verdicts and the agent
+feed, either against a simulated station (`--offline`) or against a running
+application through the **Request spool**. The split is the same one that
+runs through this package: open an instrument here only while the app is
+closed; ask the app itself for anything about a live run. `ctl` reuses
+`resolve_config()` from this CLI, so `--offline` accepts a shipped config
+name exactly as `--config` does here.
+
 The engine relies on the driver contract's `get_idn()` (enforced by
 `tests/test_conformance.py::test_driver_has_get_idn`) as the universal
 identify probe, and on the optional `expect_idn` key in a config's
