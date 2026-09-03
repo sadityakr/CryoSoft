@@ -504,3 +504,63 @@ def test_a_queue_changed_event_names_the_actor_who_queued_it(host, proxy, qtbot,
     # Drain it so the engine is left IDLE with an empty queue for teardown.
     proxy.run_queue()
     qtbot.waitUntil(lambda: proxy.state == "IDLE", timeout=WAIT_MS)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 4. Two runs back to back: two files, two records, two run ids
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_two_runs_back_to_back_produce_two_distinct_files_and_records(
+    host, proxy, qtbot, tmp_path
+):
+    """A second run started right after the first gets its own everything."""
+    store = ExperimentStore(tmp_path / "experiments")
+    roster = UserRoster(tmp_path / "users.json")
+    roster.add(User(user_id="jdoe", name="J. Doe", email="jdoe@example.org"))
+    manager = ExperimentManager(
+        store=store,
+        roster=roster,
+        orchestrator=proxy,
+        config_name="sim_cryostat",
+        station=host.station,
+        run_catalog=RUN_CATALOG,
+    )
+    record = manager.start_experiment("Two runs", "jdoe", SAMPLE_INFO)
+
+    seen_run_ids: list[str] = []
+    proxy.status_snapshot_event.connect(
+        lambda s: seen_run_ids.append(s.run["id"]) if s.run is not None else None
+    )
+
+    def _run_once(prefix: str) -> tuple[str, str]:
+        procedure = _build(
+            host.station,
+            FieldSweep,
+            FIELD_SWEEP_PARAMS,
+            tmp_path,
+            file_prefix=prefix,
+            experiment_info=manager.experiment_context(),
+        )
+        events, started = _run_to_completion(proxy, qtbot, procedure)
+        finished = next(e for e in events if isinstance(e, ev.RunFinished))
+        return finished.manifest["data_file"], started[0].run_id
+
+    file1, run_id1 = _run_once("first")
+    file2, run_id2 = _run_once("second")
+
+    assert file1 != file2
+    from pathlib import Path
+
+    assert Path(file1).exists()
+    assert Path(file2).exists()
+
+    assert run_id1 != run_id2
+    assert run_id1 in seen_run_ids
+    assert run_id2 in seen_run_ids
+
+    stored = store.load(record.experiment_id)
+    assert len(stored.runs) == 2
+    assert {r.status for r in stored.runs} == {RUN_STATUS_DONE}
+    assert {r.data_file for r in stored.runs} == {file1, file2}
+    assert {r.run_id for r in stored.runs} == {run_id1, run_id2}
