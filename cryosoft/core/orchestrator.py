@@ -2099,9 +2099,12 @@ class Orchestrator(QObject):
                 switch_names = self._station.switch_vi_names()
                 self._scanner_vi_name = switch_names[0] if switch_names else None
             logger.info("Connect succeeded for '%s'", vi_name)
-            self.instrument_reconnected.emit(vi_name)
-            # What the station IS has changed: re-declare it.
+            # What the station IS has changed: re-declare it BEFORE the
+            # per-VI notification, because a client rebuilds that
+            # instrument's panel from the declaration when it hears the
+            # notification and must not rebuild it from the previous one.
             self._emit_station_info()
+            self.instrument_reconnected.emit(vi_name)
             self._action_succeeded(vi_name, "connect", result=message)
         else:
             logger.warning("Connect failed for '%s': %s", vi_name, message)
@@ -2147,13 +2150,63 @@ class Orchestrator(QObject):
             if self._scanner_vi_name == vi_name:
                 self._scanner_vi_name = None
             logger.info("Instrument '%s' disconnected by the operator", vi_name)
-            self.instrument_disconnected.emit(vi_name)
-            # What the station IS has changed: re-declare it.
+            # Re-declared before the per-VI notification, for the reason
+            # ``connect_instrument()`` gives.
             self._emit_station_info()
+            self.instrument_disconnected.emit(vi_name)
             self._action_succeeded(vi_name, "disconnect", result=message)
         else:
             logger.warning("Disconnect failed for '%s': %s", vi_name, message)
             self._action_failed(vi_name, "disconnect", message)
+
+    @command
+    def ping_instrument(self, vi_name: str) -> None:
+        """Send one instrument's identity query and report whether it answered.
+
+        The connection check of the connection-lifecycle standard, at the
+        Orchestrator's public API. ``BaseVirtualInstrument.ping()`` is
+        harmless by construction — an identity query changes nothing — but it
+        is still bus traffic, so it belongs to the engine, the sole writer,
+        rather than to the client that asks for it. A client (the instrument
+        front panel's "Check connection" button) submits this command and
+        reads the answer off the verdict and the action signals; it never
+        touches the VI.
+
+        Runs synchronously rather than through the GUI action queue, for the
+        reason ``connect_instrument()`` gives: the queue dispatches declared
+        capabilities, and ``ping()`` is not one — it is the lifecycle probe
+        that exists precisely for an instrument whose capabilities may not be
+        reachable.
+
+        Reports ``action_succeeded(vi_name, "ping")`` with ``result=True``
+        when every driver answered, and ``action_failed(vi_name, "ping",
+        reason)`` when one did not, when the query raised, or when no live VI
+        of that name is registered.
+
+        Args:
+            vi_name: Name of the live VI to probe.
+        """
+        try:
+            vi = self._station.get_vi(vi_name)
+        except KeyError:
+            message = f"Cannot check {vi_name}: no live instrument of that name"
+            logger.info("Blocked ping_instrument: %s", message)
+            self._action_failed(vi_name, "ping", message)
+            return
+        try:
+            reachable = bool(vi.ping())
+        except Exception as exc:  # noqa: BLE001 — any failure means "not reachable"
+            logger.warning("Connection check for '%s' raised: %s", vi_name, exc)
+            self._action_failed(vi_name, "ping", str(exc) or repr(exc), error=exc)
+            return
+        if reachable:
+            logger.info("Connection check for '%s' succeeded", vi_name)
+            self._action_succeeded(vi_name, "ping", result=True)
+        else:
+            logger.info("Connection check for '%s' found it unreachable", vi_name)
+            self._action_failed(
+                vi_name, "ping", f"{vi_name} did not answer an identity query"
+            )
 
     def offline_reason(self, vi_name: str) -> str:
         """Return the current failure reason for an offline VI, GUI-safe.
@@ -2661,6 +2714,39 @@ class Orchestrator(QObject):
             logger.exception("station_info() failed (non-fatal)")
             return
         self._emit_event(event)
+
+    def station_info(self) -> ev.StationInfo:
+        """Return the station's declaration snapshot as last published.
+
+        The **priming read** of the status-mirror standard (GLOSSARY.md's
+        *Status mirror*): a client's mirror is fed by the event stream, which
+        broadcasts a ``StationInfo`` at construction and after every connect
+        and disconnect — all of them emitted before a client that attaches
+        later exists. So whoever builds the engine takes this read once, on
+        the engine's own thread, to prime the mirror it hands the client;
+        no client ever calls it, and no client ever needs to.
+
+        Returns:
+            The Station's current declaration, re-stamped with the event
+            stream's ``seq`` exactly as the emitted one is.
+        """
+        return dataclasses.replace(
+            self._station.station_info(), seq=self._next_seq()
+        )
+
+    def status_snapshot(self) -> ev.StatusSnapshot:
+        """Return this moment's status snapshot.
+
+        The second **priming read** of the status-mirror standard, and the
+        counterpart of ``station_info()`` above: the live half of the picture,
+        taken once when a client's mirror is built so it starts on the state
+        the engine is already in rather than on a default. Every later value
+        arrives on the event stream.
+
+        Returns:
+            The snapshot ``StatusSnapshot`` the next tick would emit.
+        """
+        return self._status_snapshot()
 
     def _run_status(self) -> dict[str, Any] | None:
         """Return the active run's summary for a ``StatusSnapshot``.

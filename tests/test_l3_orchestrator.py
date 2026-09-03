@@ -3486,6 +3486,87 @@ def test_station_info_is_emitted_at_construction_and_on_disconnect(station, qtbo
         orch.shutdown()
 
 
+def test_station_info_is_re_declared_before_the_per_vi_notification(station, qtbot):
+    """A client rebuilding a card on ``instrument_disconnected`` sees the NEW station.
+
+    The order matters: a client hears the per-VI notification and rebuilds
+    that instrument's panel from the declaration it holds, so the declaration
+    must already be the one that includes the change.
+    """
+    seen: list[str] = []
+    orch = Orchestrator(station, tick_interval_ms=10)
+    try:
+        orch.event_emitted.connect(
+            lambda e: seen.append("station_info")
+            if isinstance(e, ev.StationInfo)
+            else None
+        )
+        orch.instrument_disconnected.connect(lambda _n: seen.append("notified"))
+        seen.clear()
+        orch.disconnect_instrument("magnet_z")
+        assert seen == ["station_info", "notified"]
+    finally:
+        orch.shutdown()
+
+
+def test_the_priming_reads_answer_what_the_event_stream_broadcasts(port):
+    """``station_info()`` / ``status_snapshot()`` are the mirror's two priming reads."""
+    orch, recorder, _tmp_path = port
+    orch._emit_station_info()  # the recorder attached after construction
+
+    declared = orch.station_info()
+    assert isinstance(declared, ev.StationInfo)
+    broadcast = recorder.of_type(ev.StationInfo)[-1]
+    assert {i.name for i in declared.instruments} == {
+        i.name for i in broadcast.instruments
+    }
+    assert declared.seq > broadcast.seq, "each read is stamped on the one stream"
+
+    snapshot = orch.status_snapshot()
+    assert isinstance(snapshot, ev.StatusSnapshot)
+    assert snapshot.state == orch.state
+    assert snapshot.is_monitoring is orch.is_monitoring()
+
+
+def test_ping_instrument_answers_reachable_and_unreachable(port):
+    """The connection check is a command whose result arrives as a verdict."""
+    orch, recorder, _tmp_path = port
+    succeeded: list[tuple[str, str]] = []
+    failed: list[tuple[str, str, str]] = []
+    orch.action_succeeded.connect(lambda v, m: succeeded.append((v, m)))
+    orch.action_failed.connect(lambda v, m, r: failed.append((v, m, r)))
+
+    request = orch.submit(
+        ev.Command(
+            name=ev.CommandName.PING_INSTRUMENT, args={"vi_name": "magnet_z"}
+        )
+    )
+    verdict = [v for v in recorder.verdicts if v.request_id == request][-1]
+    assert verdict.code is ev.VerdictCode.OK
+    assert verdict.result is True
+    assert succeeded == [("magnet_z", "ping")]
+
+    orch._station.get_vi("magnet_z").ping = lambda: False
+    orch.submit(
+        ev.Command(
+            name=ev.CommandName.PING_INSTRUMENT, args={"vi_name": "magnet_z"}
+        )
+    )
+    assert failed and failed[-1][:2] == ("magnet_z", "ping")
+    assert recorder.verdicts[-1].code is ev.VerdictCode.FAILED
+
+
+def test_ping_instrument_refuses_an_unknown_instrument(port):
+    """An instrument that is not live is refused with a reason, never silently."""
+    orch, recorder, _tmp_path = port
+    orch.submit(
+        ev.Command(name=ev.CommandName.PING_INSTRUMENT, args={"vi_name": "nope"})
+    )
+    verdict = recorder.verdicts[-1]
+    assert verdict.code is ev.VerdictCode.FAILED
+    assert "no live instrument" in verdict.reason
+
+
 def test_a_failing_station_info_is_logged_not_raised(port, caplog):
     """Reporting never disrupts a run: a broken declaration is logged and skipped."""
     orch, recorder, _tmp_path = port

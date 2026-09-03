@@ -3585,6 +3585,12 @@ ORCHESTRATOR_NON_COMMANDS: dict[str, str] = {
     "override_active": "read: whether a manual override is in force",
     "scanner_enabled": "read: whether the scanner is enabled",
     "vi_faults": "read: the current FaultRecord per VI",
+    # ── The status mirror's two priming reads: taken once, by whoever
+    #    BUILDS the engine, on the engine's own thread, to prime the client
+    #    mirror it hands over. Every later value arrives on the event
+    #    stream, so no client ever calls either of these.
+    "station_info": "read: the station declaration, the mirror's priming read",
+    "status_snapshot": "read: this moment's status, the mirror's priming read",
     # ── Process lifecycle: owned by main.py and test teardown, not by a
     #    client. A client that could stop the tick timer could strand a ramp.
     "shutdown": "lifecycle: stops the tick timer at application exit",
@@ -3684,6 +3690,10 @@ SNAPSHOT_UNANSWERED_READS: dict[str, str] = {
     # The per-tick troubleshooting record has its own stream (the
     # ``operational_status`` signal and status.jsonl), not the status mirror.
     "get_operational_status": "carried by the operational-status stream",
+    # The mirror's two priming reads are what a client is primed WITH; they
+    # are the snapshot and the declaration, not fields inside one.
+    "status_snapshot": "IS the snapshot — the mirror's priming read",
+    "station_info": "the declaration event, primed and then re-emitted",
 }
 
 

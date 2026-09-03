@@ -308,6 +308,7 @@ class CommandName(str, Enum):
     STOP_RAMP = "stop_ramp"
     CONNECT_INSTRUMENT = "connect_instrument"
     DISCONNECT_INSTRUMENT = "disconnect_instrument"
+    PING_INSTRUMENT = "ping_instrument"
 
     # Faults, safety and recovery
     EMERGENCY_STANDBY = "emergency_standby"
