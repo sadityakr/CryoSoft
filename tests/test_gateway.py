@@ -429,3 +429,23 @@ def test_a_gateway_refusal_orders_after_what_the_engine_said(engine):
     gateway.submit(ev.CommandName.RUN_QUEUE)
 
     assert recorder.verdicts[-1].seq > engine_seq
+
+
+# ── The ceiling ───────────────────────────────────────────────────────────
+
+
+def test_the_ceiling_is_read_off_the_matrix_not_a_second_ordering():
+    """A deployment's maximum role follows the table that already exists."""
+    from cryosoft.session.gateway import PERMISSION_MATRIX, role_within_ceiling
+
+    assert role_within_ceiling(Role.OBSERVER, Role.SESSION)
+    assert role_within_ceiling(Role.DEBUG, Role.SESSION)
+    assert role_within_ceiling(Role.SESSION, Role.SESSION)
+    assert not role_within_ceiling(Role.SESSION, Role.DEBUG)
+    assert not role_within_ceiling(Role.DEBUG, Role.OBSERVER)
+    # Every role is within itself, and observer — which grants read alone —
+    # is within every other, straight from the matrix's own cells.
+    for role in Role:
+        assert role_within_ceiling(role, role)
+        assert role_within_ceiling(Role.OBSERVER, role)
+    assert set(PERMISSION_MATRIX) == set(ActionClass)

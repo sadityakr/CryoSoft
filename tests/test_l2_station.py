@@ -1410,3 +1410,31 @@ def test_availability_failed_reconnect_of_operator_disconnected_vi_adds_connect_
     avail = station.availability("bad_vi")
     assert avail.state == "absent"
     assert avail.tags == frozenset({"operator", "connect_failed"})
+
+
+def test_read_gateway_config_reads_the_declared_values(tmp_path):
+    """A setup that opens itself to agents says so in its own monitor.yaml."""
+    from cryosoft.core.station import read_gateway_config
+
+    (tmp_path / "monitor.yaml").write_text(
+        "monitor:\n"
+        "  tick_interval_ms: 1000\n"
+        "  gateway_server: true\n"
+        "  gateway_max_role: session\n"
+    )
+    assert read_gateway_config(str(tmp_path)) == {
+        "gateway_server": True,
+        "gateway_max_role": "session",
+    }
+
+
+def test_read_gateway_config_defaults_to_the_closed_door(tmp_path):
+    """Absent, malformed or unreadable all mean off — never raises."""
+    from cryosoft.core.station import read_gateway_config
+
+    closed = {"gateway_server": False, "gateway_max_role": "observer"}
+    assert read_gateway_config(str(tmp_path / "nowhere")) == closed
+    (tmp_path / "monitor.yaml").write_text("monitor:\n  tick_interval_ms: 1000\n")
+    assert read_gateway_config(str(tmp_path)) == closed
+    (tmp_path / "monitor.yaml").write_text("monitor: not-a-mapping\n")
+    assert read_gateway_config(str(tmp_path)) == closed

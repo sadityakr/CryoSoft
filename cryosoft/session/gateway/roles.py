@@ -269,3 +269,39 @@ def authorize(
         {**detail, "rule": "role_matrix"},
         seq,
     )
+
+
+#: The order the three cells stand in, from "grants nothing" to "grants
+#: everything". Only ever used to compare two ROLES cell by cell — see
+#: ``role_within_ceiling()``; the matrix itself is read by identity, never by
+#: rank, so a cell added later has to declare its place here deliberately.
+_PERMISSION_RANK: dict[Permission, int] = {
+    Permission.REFUSED: 0,
+    Permission.UNATTENDED_ONLY: 1,
+    Permission.PERMITTED: 2,
+}
+
+
+def role_within_ceiling(role: Role, ceiling: Role) -> bool:
+    """Answer whether *role* grants no more authority than *ceiling* does.
+
+    **The ceiling standard.** A deployment that opens a connection point to
+    agents (the **Gateway server**) sets one role as the most authority it
+    will hand out, and a connection asking for more is refused at the
+    handshake rather than at its first write. What "more" means is read off
+    ``PERMISSION_MATRIX`` cell by cell — a role is within the ceiling when
+    for EVERY action class its cell grants no more than the ceiling's does —
+    so the ceiling follows the table automatically and no second ordering of
+    the roles has to be maintained beside it.
+
+    Args:
+        role: The role a connection declares for itself.
+        ceiling: The most authority the deployment permits.
+
+    Returns:
+        ``True`` when *role* may be granted under *ceiling*.
+    """
+    return all(
+        _PERMISSION_RANK[row[role]] <= _PERMISSION_RANK[row[ceiling]]
+        for row in PERMISSION_MATRIX.values()
+    )
