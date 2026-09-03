@@ -298,3 +298,66 @@ def test_field_sweep_run_record_completes_with_a_data_file_on_disk(
     from pathlib import Path
 
     assert Path(run.data_file).exists()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 2. TemperatureSweep and TimeSeries, the same way
+# ══════════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.parametrize(
+    "cls,params,axis_column,n_points",
+    [
+        pytest.param(
+            TemperatureSweep,
+            TEMPERATURE_SWEEP_PARAMS,
+            "temperature_K",
+            TEMPERATURE_SWEEP_PARAMS["temperature_steps"],
+            id="TemperatureSweep",
+        ),
+        pytest.param(
+            TimeSeries,
+            TIME_SERIES_PARAMS,
+            "elapsed_s",
+            3,  # 0.02 // 0.01 + 1
+            id="TimeSeries",
+        ),
+    ],
+)
+def test_other_procedures_run_to_completion_the_same_way(
+    host, proxy, qtbot, tmp_path, cls, params, axis_column, n_points
+):
+    """TemperatureSweep and TimeSeries, driven to completion the same way.
+
+    The same checks as the FieldSweep scenario, at each procedure's smallest
+    working parameter set: one RunStarted, one RunFinished("done"), the
+    datapoint count equal to the sweep length, the HDF5 file's axis column
+    and point count, and a final state of IDLE.
+    """
+    snapshots: list[ev.StatusSnapshot] = []
+    proxy.status_snapshot_event.connect(snapshots.append)
+    datapoints: list[ev.Datapoint] = []
+    proxy.datapoint_event.connect(datapoints.append)
+
+    procedure = _build(host.station, cls, params, tmp_path)
+    events, started = _run_to_completion(proxy, qtbot, procedure)
+
+    assert len(started) == 1
+    finished = [e for e in events if isinstance(e, ev.RunFinished)]
+    assert len(finished) == 1
+    assert finished[0].status == RUN_STATUS_DONE
+
+    assert len(datapoints) == n_points
+
+    data_file = finished[0].manifest["data_file"]
+    with open_run(data_file) as handle:
+        columns = {info.name for info in list_columns(handle)}
+        found_points = handle.n_points
+    assert {axis_column, "voltage_V"} <= columns
+    assert found_points == n_points
+
+    mid_run = [s for s in snapshots if s.seq >= started[0].seq and s.run is not None]
+    assert mid_run, "StatusSnapshot.run was never populated while the run was live"
+    assert snapshots[-1].run is None
+
+    assert proxy.state == "IDLE"
