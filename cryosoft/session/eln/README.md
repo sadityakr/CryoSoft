@@ -6,8 +6,10 @@ Publish what CryoSoft measured into an **electronic lab notebook**, without
 ever letting the notebook's availability affect a measurement. Three
 separable pieces: a backend-neutral **ELN adapter** standard (`adapter.py`)
 with an eLabFTW backend and an in-memory sim twin, deterministic **body
-renderers** that turn a run manifest into entry text (`templates.py`), and
-user-level settings holding the backend URL and API key (`settings.py`).
+renderers** that turn a run manifest into entry text (`templates.py`), an
+offline-first **outbox** that queues what to publish and retries it forever
+(`outbox.py`), and user-level settings holding the backend URL and API key
+(`settings.py`).
 
 ## Architecture layer
 
@@ -28,7 +30,10 @@ GUI-side drain, never from `core/`.
 - **Run manifests** (the Orchestrator's `run_finished` payload: `run_id`,
   `procedure`, `kind`, `params`, `data_file`, timestamps, terminal `status`,
   `reason`) plus the session layer's `experiment_context()`, rendered by
-  `templates.py`.
+  `templates.py` and queued by `outbox.py`.
+- **The experiment's own `outbox.jsonl`** (`ExperimentStore.outbox_path()`) —
+  read back on every drain, including after a restart or on a machine that
+  the experiment folder was copied to.
 
 ## Exit (what goes out)
 
@@ -38,6 +43,9 @@ GUI-side drain, never from `core/`.
   successful publish returns, sharing its field names with
   `cryosoft.session.models.ElnLink` so a persisted link is
   `ElnLink.from_dict(ref.to_dict())` away, with no translation layer.
+- **Appended `outbox.jsonl` lines** inside the experiment folder: one per
+  enqueue and one per state change, so the folder stays the complete,
+  portable record — copy it and its unpublished runs travel with it.
 
 ## Interface contract
 
@@ -50,7 +58,13 @@ GUI-side drain, never from `core/`.
   methods — `verify`, `list_templates`, `create_entry`, `update_entry`,
   `attach_file`, `attach_link` — so any adapter substitutes for any other.
 - **Adapters are stateless and synchronous** and raise exactly one exception
-  type, `ElnError`. Queuing, retry, and backoff are somebody else's job.
+  type, `ElnError`. Queuing, retry, and backoff belong to the outbox.
+- **Nothing publishes directly.** Work is rendered in full at enqueue time
+  and queued; the drain never re-renders against state that has since moved
+  on. `Outbox.drain()` attempts at most one job per call and never raises
+  into its caller — the caller is a GUI timer, and a notebook outage must not
+  take the event loop down with it. Jobs are idempotent by `job_id`, retried
+  forever under a persisted, capped exponential backoff, and never deleted.
 - **One sim twin for all backends** (`sim_eln.SimElnAdapter`). Because the
   contract fixes the public API *exactly*, every adapter's surface is
   identical, so one in-memory twin stands in for all of them — a backend's
@@ -75,9 +89,12 @@ GUI-side drain, never from `core/`.
    the moment the file exists, and no core code changes.
 2. **A new rendered section** is a function in `templates.py` — plain Python,
    no template-language dependency, deterministic, escaped.
-3. **Never** put queuing, retry, threading, or a network call outside an
-   adapter method into this package, and never call an adapter from `core/`.
-4. New behaviour needs its own tests in `tests/test_eln.py`; conformance
+3. **A new job kind** is a `kind` constant plus a branch in
+   `Outbox._publish()`; the journal, the dedup rule, and the backoff are
+   already generic.
+4. **Never** put threading, or a network call outside an adapter method, into
+   this package, and never call an adapter from `core/`.
+5. New behaviour needs its own tests in `tests/test_eln.py`; conformance
    coverage is necessary but not sufficient.
 
 ## Files
@@ -87,4 +104,5 @@ GUI-side drain, never from `core/`.
 | `adapter.py` | The ELN adapter standard: the abstract contract, its value types, and its one exception. | `ElnAdapter`, `ElnEntryRef`, `ElnTemplate`, `ElnCapabilities`, `ElnError` | `tests/test_conformance.py` |
 | `sim_eln.py` | The in-memory twin of the contract — the workhorse of every ELN test; models offline, transient failure, and refused uploads. | `SimElnAdapter` (`entries`, `uploads`, `links`, `calls`, `offline`) | `tests/test_eln.py` |
 | `settings.py` | User-level backend URL/key/policy: tolerant load, environment override, redaction. | `ElnSettings`, `load_eln_settings`, `eln_settings_path`, `API_KEY_ENV_VAR`, `SETTINGS_PATH_ENV_VAR` | `tests/test_eln.py` |
+| `outbox.py` | The offline-first publish journal: append-only JSONL, idempotent by `job_id`, persisted capped backoff, one job per drain, never raises. | `Outbox` (`enqueue`, `jobs`, `get`, `pending`, `drain`), `OutboxJob`, `DrainResult`, `JOB_*`/`DRAIN_*` constants | `tests/test_eln.py` |
 | `templates.py` | Run manifest → entry title, self-contained HTML body, and flat metadata. | `render_run_title`, `render_run_body`, `render_run_metadata` | `tests/test_eln.py` |

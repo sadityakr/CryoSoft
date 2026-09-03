@@ -17,6 +17,7 @@ _EXPERIMENT_FILENAME = "experiment.json"
 _SESSION_FILENAME = "session.json"
 _ACTIVE_FILENAME = "active.json"
 _GUI_STATE_FILENAME = "gui_state.json"
+_OUTBOX_FILENAME = "outbox.jsonl"
 _DATA_DIRNAME = "data"
 
 
@@ -179,6 +180,22 @@ class ExperimentStore:
             ``<root>/<experiment_id>/gui_state.json`` (may not exist yet).
         """
         return self._root / experiment_id / _GUI_STATE_FILENAME
+
+    def outbox_path(self, experiment_id: str) -> Path:
+        """Return the experiment's ELN publish-journal file path.
+
+        The **Outbox** lives inside the experiment folder, not in a global
+        queue, so the folder stays the complete, portable record: copy it and
+        its unpublished runs travel with it.
+
+        Args:
+            experiment_id: The store key.
+
+        Returns:
+            ``<root>/<experiment_id>/outbox.jsonl`` (may not exist yet —
+            nothing is written until a run is actually queued).
+        """
+        return self._root / experiment_id / _OUTBOX_FILENAME
 
     def relativize_data_file(self, experiment_id: str, path: str | Path) -> str:
         """Return ``path`` relative to the experiment's session folder, when inside it.

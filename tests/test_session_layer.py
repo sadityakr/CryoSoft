@@ -234,7 +234,10 @@ def test_store_load_warns_on_future_schema_version(store, caplog):
 def test_store_data_dir_and_gui_state_path(store):
     assert store.data_dir("exp1") == store.root / "exp1" / "data"
     assert store.gui_state_path("exp1") == store.root / "exp1" / "gui_state.json"
-    # Neither call creates anything on disk.
+    # The ELN outbox lives inside the experiment folder, so an experiment that
+    # is copied elsewhere takes its unpublished runs with it.
+    assert store.outbox_path("exp1") == store.root / "exp1" / "outbox.jsonl"
+    # None of these calls creates anything on disk.
     assert not store.root.exists()
 
 
