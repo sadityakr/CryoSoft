@@ -795,6 +795,30 @@ class TestExperimentEnvelope:
         message = env.check_target("magnet_z", 3.0)
         assert "session envelope" in message and "magnet_z" in message
 
+    def test_from_dict_builds_the_typed_envelope(self):
+        """The dict form a JSON-speaking client sends becomes the typed value."""
+        env = ExperimentEnvelope.from_dict(
+            {
+                "magnet_z": {"min_value": -2.0, "max_value": 2.0, "state_key": "field_T"},
+                "temperature_sample": {"max_value": 320.0},
+            }
+        )
+        assert env.bounds["magnet_z"] == EnvelopeBound(
+            min_value=-2.0, max_value=2.0, state_key="field_T"
+        )
+        assert env.bounds["temperature_sample"] == EnvelopeBound(max_value=320.0)
+
+    def test_from_dict_is_strict_about_malformed_input(self):
+        """A malformed envelope raises rather than silently narrowing to junk."""
+        with pytest.raises(TypeError):
+            ExperimentEnvelope.from_dict({"magnet_z": 2.0})
+        with pytest.raises(TypeError):
+            ExperimentEnvelope.from_dict("magnet_z")
+        with pytest.raises(ValueError):
+            ExperimentEnvelope.from_dict({})
+        with pytest.raises(ValueError):
+            ExperimentEnvelope.from_dict({"magnet_z": {}})  # no bound at all
+
     def test_check_state_uses_state_key_and_skips_missing(self):
         env = ExperimentEnvelope(
             bounds={

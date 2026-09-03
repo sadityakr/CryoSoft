@@ -3251,6 +3251,20 @@ def _contract_specimens() -> dict[str, object]:
             state="RAMPING",
             run={"run_id": "r-1", "kind": "procedure", "progress": 0.25},
             instruments={"magnet_z": {"availability": "live", "held": False}},
+            is_monitoring=True,
+            pause_pending=True,
+            active_run_kind="procedure",
+            scanner_enabled=True,
+            override_active=True,
+            manual_override_expires_at=1_700_000_300.0,
+            held_vi_names=("magnet_z",),
+            active_ramps=({"vi_name": "magnet_z", "label": "field", "unit": "T"},),
+            availabilities={"magnet_z": {"state": "live", "tags": []}},
+            vi_faults={"level_meter": {"kind": "stale", "acknowledged": False}},
+            offline_reason={"rotator": "no response at GPIB0::12::INSTR"},
+            envelope_variables={
+                "magnet_z": {"param_name": "target_T", "config_max": 9.0}
+            },
             seq=9,
             ts=1_700_000_003.0,
         ),
@@ -3567,13 +3581,16 @@ ORCHESTRATOR_NON_COMMANDS: dict[str, str] = {
     "held_vi_names": "read: which VIs a hold-severity condition holds",
     "manual_override_expires_at": "read: when the manual override lapses",
     "offline_reason": "read: why one VI is offline",
+    "envelope_variables": "read: each VI's enveloped quantity and setup bounds",
     "override_active": "read: whether a manual override is in force",
     "scanner_enabled": "read: whether the scanner is enabled",
     "vi_faults": "read: the current FaultRecord per VI",
-    "envelope_variables": "read: the variables an experiment envelope may bound",
     # ── Process lifecycle: owned by main.py and test teardown, not by a
     #    client. A client that could stop the tick timer could strand a ramp.
     "shutdown": "lifecycle: stops the tick timer at application exit",
+    # ── The port itself: submit(Command) dispatches to the commands below,
+    #    so it is the surface a command arrives through, never a command.
+    "submit": "port: the entry point every Command is dispatched through",
 }
 
 
@@ -3630,6 +3647,79 @@ def test_command_name_covers_every_public_orchestrator_command() -> None:
     assert declared - commands == set(), (
         f"CommandName members with no public Orchestrator method behind them: "
         f"{sorted(declared - commands)}"
+    )
+
+
+def test_every_command_method_takes_an_actor() -> None:
+    """Every command names who asked, defaulting to the operator sentinel.
+
+    The operator sentinel is what makes accountability a value rather than an
+    ambient fact, and what lets it be added without touching a single existing
+    call site. A command method that forgets it would silently attribute an
+    agent's action to the human at the GUI.
+    """
+    from cryosoft.core.orchestrator import Orchestrator
+
+    for member in CommandName:
+        method = getattr(Orchestrator, member.value)
+        parameter = inspect.signature(method).parameters.get("actor")
+        assert parameter is not None, (
+            f"Orchestrator.{member.value}() takes no actor keyword"
+        )
+        assert parameter.kind is inspect.Parameter.KEYWORD_ONLY, (
+            f"Orchestrator.{member.value}()'s actor must be keyword-only"
+        )
+        assert parameter.default == OPERATOR, (
+            f"Orchestrator.{member.value}()'s actor must default to OPERATOR"
+        )
+
+
+# Read accessors from ``ORCHESTRATOR_NON_COMMANDS`` (plus the two public
+# properties) that are NOT answered by a ``StatusSnapshot`` field of the same
+# name, each with the reason it is not.
+SNAPSHOT_UNANSWERED_READS: dict[str, str] = {
+    # Answered from the snapshot's ``availabilities`` map, which carries every
+    # VI: a per-VI accessor needs no per-VI field of its own.
+    "availability": "one VI's slice of the availabilities map",
+    # The per-tick troubleshooting record has its own stream (the
+    # ``operational_status`` signal and status.jsonl), not the status mirror.
+    "get_operational_status": "carried by the operational-status stream",
+}
+
+
+def test_status_snapshot_answers_every_engine_read() -> None:
+    """Every read the engine exposes has a ``StatusSnapshot`` field to answer it.
+
+    The verdict standard's other half: a client answers reads from its
+    snapshot mirror and never calls into the engine, which only works if the
+    snapshot actually carries every read. Diffed by name, so a new accessor
+    lands a field or an entry in ``SNAPSHOT_UNANSWERED_READS`` with a reason.
+    """
+    from cryosoft.core.orchestrator import Orchestrator
+
+    reads = {
+        name
+        for name, rationale in ORCHESTRATOR_NON_COMMANDS.items()
+        if rationale.startswith("read:")
+    }
+    reads |= {
+        name
+        for name, value in vars(Orchestrator).items()
+        if not name.startswith("_") and isinstance(value, property)
+    }
+    exempt = set(SNAPSHOT_UNANSWERED_READS)
+
+    stale = exempt - reads
+    assert not stale, (
+        f"SNAPSHOT_UNANSWERED_READS names reads the Orchestrator no longer "
+        f"has: {sorted(stale)}"
+    )
+
+    snapshot_fields = {f.name for f in dataclasses.fields(StatusSnapshot)}
+    missing = reads - exempt - snapshot_fields
+    assert not missing, (
+        f"engine reads with no StatusSnapshot field to answer them: "
+        f"{sorted(missing)}"
     )
 
 
