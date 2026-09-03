@@ -14,6 +14,7 @@ from cryosoft.session.eln.adapter import (
     ElnTemplate,
 )
 from cryosoft.session.eln.drafting import (
+    COST_FIELDS,
     DRAFT_SYSTEM_PROMPT,
     DRAFT_TAG,
     AnthropicDraftClient,
@@ -22,6 +23,7 @@ from cryosoft.session.eln.drafting import (
     DraftEntry,
     DraftRequest,
     FakeDraftClient,
+    cost_line,
     cost_usd,
     draft_entry,
     manifest_from_run,
@@ -110,10 +112,12 @@ __all__ = [
     "AnthropicDraftClient",
     "DRAFT_SYSTEM_PROMPT",
     "DRAFT_TAG",
+    "COST_FIELDS",
     "render_draft_prompt",
     "prompt_digest",
     "parse_completion",
     "manifest_from_run",
+    "cost_line",
     "cost_usd",
     "draft_entry",
 ]

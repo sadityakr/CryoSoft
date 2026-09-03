@@ -78,6 +78,11 @@ TITLE_MARKER = "TITLE:"
 #: Marker the completion puts its prose after.
 SUMMARY_MARKER = "SUMMARY:"
 
+#: The four fields a draft reports what it cost in — the **cost line**. One
+#: tuple, so ``DraftEntry.cost_line()`` and the **Agent feed** record of the
+#: tool call that produced it are provably the same four fields.
+COST_FIELDS: tuple[str, ...] = ("model", "input_tokens", "output_tokens", "cost_usd")
+
 #: The tag every drafted entry carries, so a notebook can find the entries
 #: that began as machine drafts however they were later edited.
 DRAFT_TAG = "draft"
@@ -266,12 +271,31 @@ class DraftEntry:
             ``{"model", "input_tokens", "output_tokens", "cost_usd"}`` — what
             an autonomous client spent, in the trail beside what it asked for.
         """
-        return {
-            "model": self.model,
-            "input_tokens": self.input_tokens,
-            "output_tokens": self.output_tokens,
-            "cost_usd": self.cost_usd,
-        }
+        return {field_name: getattr(self, field_name) for field_name in COST_FIELDS}
+
+
+def cost_line(result: object) -> dict[str, Any]:
+    """Return the cost line a tool result carries, or ``{}``.
+
+    The read side of ``DraftEntry.cost_line()``, for a caller holding the
+    JSON dict rather than the record — the **Agent gateway**, stamping what a
+    call spent into the **Agent feed** without having to know which tools
+    spend anything. A result that carries no cost fields costs nothing to
+    record, which is exactly the answer for every tool that spends no tokens.
+
+    Args:
+        result: Any tool result; anything but a mapping yields ``{}``.
+
+    Returns:
+        ``{"model", "input_tokens", "output_tokens", "cost_usd"}`` when the
+        result carries all four, else ``{}`` — never a partial line, which
+        would read as a cost of zero rather than as no cost at all.
+    """
+    if not isinstance(result, Mapping) or not all(
+        field_name in result for field_name in COST_FIELDS
+    ):
+        return {}
+    return {field_name: result[field_name] for field_name in COST_FIELDS}
 
 
 def _as_str(value: object, default: str = "") -> str:

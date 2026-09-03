@@ -34,10 +34,25 @@ on.
   schema before a command is ever built.
 * **Session tools** — hand-declared, because they are NOT commands: they read
   the experiment store, the run files, the operational log and the agent
-  feed, or they answer "may I run this, and how long will it take?" without
-  dispatching anything. Every one of them is ``ActionClass.READ`` except
-  ``probe_run``, which really is a ``run_procedure`` with a ``ProbeSpec`` and
-  is classified (and refused) as one.
+  feed, they answer "may I run this, and how long will it take?" without
+  dispatching anything, or they draft and publish this experiment's notebook
+  entries. Every one of them is ``ActionClass.READ`` except ``probe_run``,
+  which really is a ``run_procedure`` with a ``ProbeSpec`` and is classified
+  (and refused) as one, and ``publish_eln_entry``, which puts a permanent
+  record of this experiment into the outside world on the experiment's
+  behalf and is classified ``run_control`` for it.
+
+**Two tools reach the ELN track**, and they divide exactly where the money
+and the authority divide. ``draft_eln_entry`` renders one finished run's
+facts into the draft prompt, asks one model, and returns the **draft entry**
+AS DATA: it writes nothing, queues nothing, and is ``read`` because it
+changes no state — but it spends model tokens, so it declares ``recorded``
+and its cost line lands in the **Agent feed**. ``publish_eln_entry`` is the
+only one that reaches the **Outbox**, and in an ATTENDED experiment it
+refuses every agent by rule and parks the draft on the run record for a
+human instead. Neither renders an entry itself and neither touches a
+backend: the rendering is ``session/eln/``'s and the network is the
+publisher's drain, off the tick.
 
 **Arguments the engine translates.** ``Orchestrator.submit()`` documents four
 commands whose JSON ``args`` are not simply the method's parameters — a
@@ -78,6 +93,13 @@ from cryosoft.core.capability_manifest import build_manifest, validate_manifest
 from cryosoft.core.events import CommandName, StationInfo
 from cryosoft.core.orchestrator import Orchestrator
 from cryosoft.core.paths import log_directory
+from cryosoft.session.eln.adapter import ElnError
+from cryosoft.session.eln.drafting import (
+    DraftRequest,
+    draft_entry,
+    manifest_from_run,
+)
+from cryosoft.session.eln.settings import AssistantSettings
 from cryosoft.session.gateway.action_classes import (
     COMMAND_ACTION_CLASSES,
     ActionClass,
@@ -178,6 +200,15 @@ class ToolSpec:
             ``""`` for a command tool.
         instrument: The VI this capability tool targets, or ``""``.
         capability: The ``@control`` this capability tool calls, or ``""``.
+        recorded: Whether a call to this tool is written to the **Agent
+            feed**. A command tool never needs it — the feed already records
+            every command and its verdict — so this is how a SESSION tool,
+            answered inside the client where no verdict exists, still leaves
+            a trail. Declared per tool rather than derived from the action
+            class, because the two questions are different: a ``read`` tool
+            an agent polls every tick would drown the trail in observations,
+            while a ``read`` tool that spends model tokens is exactly what
+            the trail is for.
     """
 
     name: str
@@ -189,6 +220,7 @@ class ToolSpec:
     session_function: str = ""
     instrument: str = ""
     capability: str = ""
+    recorded: bool = False
 
     def __post_init__(self) -> None:
         """Validate the declaration and freeze copies of its mappings.
@@ -254,6 +286,7 @@ class ToolSpec:
                 "session_function": self.session_function,
                 "instrument": self.instrument,
                 "capability": self.capability,
+                "recorded": self.recorded,
             }
         )
         return payload
@@ -1004,6 +1037,66 @@ SESSION_TOOLS: tuple[ToolSpec, ...] = (
         },
     ),
     ToolSpec(
+        name="draft_eln_entry",
+        description=(
+            "Draft one finished run into an electronic-lab-notebook entry. "
+            "The run's own facts — procedure, parameters, per-column "
+            "statistics, the station it ran on and the engine's state at run "
+            "end — are rendered into a fixed prompt, one model is asked for "
+            "prose, and the entry comes back as data: a title, a body with "
+            "that prose above the same fact tables, tags, and what the draft "
+            "cost. Writes nothing and publishes nothing; publish_eln_entry "
+            "does that, and in an attended experiment a human approves it."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                **_RUN_SELECTOR,
+                "note": {
+                    "type": "string",
+                    "description": (
+                        "A note to the drafter, carried into the prompt "
+                        "verbatim — what to look at, or what is already known."
+                    ),
+                },
+            },
+            "required": ["run_id"],
+            "additionalProperties": False,
+        },
+        action_class=ActionClass.READ,
+        session_function="draft_eln_entry",
+        recorded=True,
+    ),
+    ToolSpec(
+        name="publish_eln_entry",
+        description=(
+            "Queue an approved draft entry for this experiment's electronic "
+            "lab notebook. The run must belong to the OPEN experiment. While "
+            "the experiment is attended this is refused for every agent and "
+            "the draft is parked on the run record instead, for the human to "
+            "approve; while it is unattended the entry is queued to the "
+            "outbox and uploaded by the application's own drain."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "run_id": {
+                    "type": "string",
+                    "description": "The run to publish, in the open experiment.",
+                },
+                "draft": {
+                    "type": "object",
+                    "description": "The draft entry, as draft_eln_entry returned it.",
+                },
+            },
+            "required": ["run_id", "draft"],
+            "additionalProperties": False,
+        },
+        action_class=ActionClass.RUN_CONTROL,
+        session_function="publish_eln_entry",
+        recorded=True,
+    ),
+    ToolSpec(
         name="probe_run",
         description=(
             "Run a procedure as a probe run: the same procedure driving the "
@@ -1144,6 +1237,19 @@ class ToolContext:
             ``StatusSnapshot``; the ``Gateway`` supplies its own mirror.
         station_source: Zero-argument callable returning the latest
             ``StationInfo``; the ``Gateway`` supplies its own mirror.
+        draft_client: The **Draft client** ``draft_eln_entry`` asks
+            (``complete(system, user, max_tokens)``), duck-typed so a test
+            passes ``FakeDraftClient`` and no test reaches a network.
+            ``None`` — the default — means this client cannot draft, and the
+            tool refuses by name rather than building a model client of its
+            own: whoever wires the gateway decides whether an LLM is in the
+            loop at all.
+        assistant_settings: The token cap and price table a draft is bounded
+            and costed by. ``None`` uses ``AssistantSettings()``'s defaults.
+        publisher: The ``ElnPublisher`` ``publish_eln_entry`` queues through
+            (``export_draft(run_id, draft)``), duck-typed so this package
+            imports neither it nor the Qt object that owns its drain timer.
+            ``None`` means nothing can be published from here.
     """
 
     experiments: Any | None = None
@@ -1151,6 +1257,9 @@ class ToolContext:
     status_log_path: Path | None = None
     status_source: Callable[[], Any] | None = None
     station_source: Callable[[], StationInfo] | None = None
+    draft_client: Any | None = None
+    assistant_settings: AssistantSettings | None = None
+    publisher: Any | None = None
 
     def require_experiments(self, tool_name: str) -> Any:
         """Return the experiment façade, or refuse by name.
@@ -1171,6 +1280,46 @@ class ToolContext:
                 {"rule": "missing_collaborator", "collaborator": "experiments"},
             )
         return self.experiments
+
+    def require_draft_client(self, tool_name: str) -> Any:
+        """Return the **Draft client**, or refuse by name.
+
+        Args:
+            tool_name: The tool asking, for the message.
+
+        Returns:
+            The draft client.
+
+        Raises:
+            ToolError: If this gateway was built without one.
+        """
+        if self.draft_client is None:
+            raise ToolError(
+                f"{tool_name} needs a draft client, and this gateway was built "
+                f"without one — drafting is off for this connection",
+                {"rule": "missing_collaborator", "collaborator": "draft_client"},
+            )
+        return self.draft_client
+
+    def require_publisher(self, tool_name: str) -> Any:
+        """Return the ELN publisher, or refuse by name.
+
+        Args:
+            tool_name: The tool asking, for the message.
+
+        Returns:
+            The publisher.
+
+        Raises:
+            ToolError: If this gateway was built without one.
+        """
+        if self.publisher is None:
+            raise ToolError(
+                f"{tool_name} needs the ELN publisher, and this gateway was "
+                f"built without one",
+                {"rule": "missing_collaborator", "collaborator": "publisher"},
+            )
+        return self.publisher
 
     def store(self, tool_name: str) -> Any:
         """Return the experiment store, or refuse by name.
@@ -1304,7 +1453,9 @@ def _run_record(context: ToolContext, tool_name: str, args: Mapping[str, Any]) -
             ``experiment_id``.
 
     Returns:
-        ``(experiment_id, RunRecord)``.
+        ``(experiment_id, ExperimentRecord, RunRecord)`` — the experiment as
+        well as the run, because a tool that renders one run (a draft, an
+        entry) needs the experiment's own title beside it.
 
     Raises:
         ToolError: If the experiment or the run cannot be found.
@@ -1323,7 +1474,7 @@ def _run_record(context: ToolContext, tool_name: str, args: Mapping[str, Any]) -
             f"experiment {experiment_id!r} has no run {run_id!r}",
             {"rule": "unknown_run", "experiment_id": experiment_id, "run_id": run_id},
         )
-    return experiment_id, run
+    return experiment_id, record, run
 
 
 def _open_run_file(context: ToolContext, tool_name: str, args: Mapping[str, Any]) -> Any:
@@ -1344,7 +1495,7 @@ def _open_run_file(context: ToolContext, tool_name: str, args: Mapping[str, Any]
     Raises:
         ToolError: If the run has no data file, or the file cannot be read.
     """
-    experiment_id, run = _run_record(context, tool_name, args)
+    experiment_id, _record, run = _run_record(context, tool_name, args)
     if not run.data_file:
         raise ToolError(
             f"run {run.run_id!r} recorded no data file",
@@ -1688,7 +1839,192 @@ def _tool_read_agent_feed(args: Mapping[str, Any], context: ToolContext) -> Any:
     }
 
 
-#: One implementation per read-class session tool, keyed by
+def _draft_stats(
+    context: ToolContext, args: Mapping[str, Any], run: Any
+) -> dict[str, dict[str, Any]]:
+    """Summarise every numeric column of one run, tolerating an unreadable file.
+
+    Deliberately best-effort, unlike ``read_run_stats``: a run that recorded
+    no data file, or whose file cannot be opened, still deserves a draft —
+    the prompt then says the statistics were unavailable and the model is
+    told to say so, which is a better answer than refusing to draft an
+    aborted run at all.
+
+    Args:
+        context: The tool context.
+        args: The call's arguments, naming the run.
+        run: The recorded run.
+
+    Returns:
+        ``{column: Stats.to_json()}``, empty when there was nothing to read.
+    """
+    if not getattr(run, "data_file", ""):
+        logger.info(
+            "Run %s recorded no data file — drafting without statistics",
+            getattr(run, "run_id", ""),
+        )
+        return {}
+    stats: dict[str, dict[str, Any]] = {}
+    try:
+        with _open_run_file(context, "draft_eln_entry", args) as handle:
+            for info in data_reader.list_columns(handle):
+                if info.dtype == "str":
+                    continue
+                try:
+                    stats[info.name] = data_reader.summary_stats(
+                        handle, info.name
+                    ).to_json()
+                except (KeyError, ValueError):
+                    logger.warning(
+                        "Column %r of run %s could not be summarised for the draft",
+                        info.name,
+                        getattr(run, "run_id", ""),
+                    )
+    except (ToolError, OSError, ValueError, RuntimeError) as error:
+        # Deliberately wider than `read_run_stats`'s refusal: a half-written or
+        # corrupt file (which the HDF5 layer reports as a RuntimeError) must
+        # cost the draft its statistics, never the whole draft.
+        logger.warning(
+            "Drafting run %s without statistics: %s",
+            getattr(run, "run_id", ""),
+            error,
+        )
+        return {}
+    return stats
+
+
+def _tool_draft_eln_entry(args: Mapping[str, Any], context: ToolContext) -> Any:
+    """Answer ``draft_eln_entry`` through the ELN track's drafting module.
+
+    Assembles the facts (the recorded run, its column statistics, the station
+    and status mirrors, the experiment and its setup) and hands them to
+    ``draft_entry()``. This function contains no prompt text and no rendering
+    of its own: the prompt is the draft prompt standard's, the body is
+    ``templates.py``'s, and what comes back is returned unchanged as data.
+
+    Args:
+        args: The call's arguments — the run, optionally its experiment, and
+            an optional note carried into the prompt.
+        context: The tool context.
+
+    Returns:
+        The **draft entry** as its JSON dict, cost line included.
+
+    Raises:
+        ToolError: If the run cannot be found, no draft client was wired in,
+            or the model could not be reached.
+    """
+    experiment_id, record, run = _run_record(context, "draft_eln_entry", args)
+    client = context.require_draft_client("draft_eln_entry")
+    experiments = context.require_experiments("draft_eln_entry")
+
+    station = context.station_source() if context.station_source else None
+    snapshot = context.status_source() if context.status_source else None
+    setup = experiments.experiment_context().get("setup") or {}
+    data_path = ""
+    if run.data_file:
+        data_path = str(
+            context.store("draft_eln_entry").resolve_data_file(
+                experiment_id, run.data_file
+            )
+        )
+    request = DraftRequest(
+        run_id=run.run_id,
+        experiment_id=experiment_id,
+        manifest=manifest_from_run(run),
+        stats=_draft_stats(context, args, run),
+        station=station.to_json() if station is not None else {},
+        status=snapshot.to_json() if snapshot is not None else {},
+        experiment_title=getattr(record, "title", ""),
+        setup=dict(setup),
+        data_path=data_path,
+        template_id=_template_id(context),
+        operator_note=str(args.get("note", "")),
+    )
+    try:
+        return draft_entry(request, client, context.assistant_settings).to_dict()
+    except ElnError as error:
+        raise ToolError(
+            f"the draft for run {run.run_id!r} could not be written: {error}",
+            {"rule": "draft_failed", "run_id": run.run_id},
+        ) from error
+
+
+def _template_id(context: ToolContext) -> str:
+    """Return the notebook template a published entry would be created from.
+
+    Args:
+        context: The tool context.
+
+    Returns:
+        The publisher's configured ``template_id``, or ``""`` when no
+        publisher is wired in — a fact about the entry, never a reason to
+        refuse a draft.
+    """
+    settings = getattr(context.publisher, "settings", None)
+    return str(getattr(settings, "template_id", "") or "")
+
+
+def _tool_publish_eln_entry(args: Mapping[str, Any], context: ToolContext) -> Any:
+    """Answer ``publish_eln_entry``, or refuse it because a human must approve.
+
+    The approval rule, and the one place it is enforced: while the open
+    experiment is ATTENDED an agent may draft but never publish, so the draft
+    is parked on the run record (through the manager, the single writer of
+    experiment state) and the call is refused with ``approval_required`` — a
+    refusal that leaves the work where the human will find it, rather than
+    discarding it. Unattended, the draft goes to the publisher's outbox,
+    which is the same journal a manual export uses.
+
+    Args:
+        args: The call's arguments — the run and the approved draft.
+        context: The tool context.
+
+    Returns:
+        ``{"run_id", "experiment_id", "job_id", "queued"}`` on success.
+
+    Raises:
+        ToolError: If the run is unknown, the experiment is attended, no
+            publisher was wired in, or nothing was queued.
+    """
+    experiment_id, record, run = _run_record(context, "publish_eln_entry", args)
+    experiments = context.require_experiments("publish_eln_entry")
+    draft = dict(args.get("draft") or {})
+
+    if getattr(record, "attended", False):
+        stored = bool(experiments.set_pending_eln_draft(run.run_id, draft))
+        raise ToolError(
+            f"experiment {experiment_id!r} is attended: a human approves an "
+            f"ELN entry before it is published. The draft for run "
+            f"{run.run_id!r} is "
+            + ("waiting on the run record for approval." if stored
+               else "NOT stored — it could not be parked on the run record."),
+            {
+                "rule": "approval_required",
+                "attended": True,
+                "experiment_id": experiment_id,
+                "run_id": run.run_id,
+                "pending": stored,
+            },
+        )
+
+    publisher = context.require_publisher("publish_eln_entry")
+    job_id = str(publisher.export_draft(run.run_id, draft) or "")
+    if not job_id:
+        raise ToolError(
+            f"nothing was queued for run {run.run_id!r}: ELN publishing is "
+            f"switched off, or the run is already queued",
+            {"rule": "not_queued", "run_id": run.run_id},
+        )
+    return {
+        "run_id": run.run_id,
+        "experiment_id": experiment_id,
+        "job_id": job_id,
+        "queued": True,
+    }
+
+
+#: One implementation per session tool answered here, keyed by
 #: ``ToolSpec.session_function``. ``probe_run`` is deliberately absent: it
 #: wraps ``run_procedure`` and is submitted like any other command.
 SESSION_TOOL_FUNCTIONS: dict[str, Callable[[Mapping[str, Any], ToolContext], Any]] = {
@@ -1704,6 +2040,8 @@ SESSION_TOOL_FUNCTIONS: dict[str, Callable[[Mapping[str, Any], ToolContext], Any
     "read_experiment": _tool_read_experiment,
     "read_operational_log": _tool_read_operational_log,
     "read_agent_feed": _tool_read_agent_feed,
+    "draft_eln_entry": _tool_draft_eln_entry,
+    "publish_eln_entry": _tool_publish_eln_entry,
 }
 
 

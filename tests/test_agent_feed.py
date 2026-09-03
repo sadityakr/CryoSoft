@@ -143,6 +143,7 @@ def test_every_record_carries_the_whole_standard(feed):
             "actor",
             "request_id",
             "command",
+            "tool",
             "args",
             "event",
             "detail",

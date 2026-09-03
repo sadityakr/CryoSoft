@@ -658,3 +658,334 @@ def test_the_two_log_tails_read_jsonl_and_tolerate_a_missing_file(
 
     feed.unlink()
     assert gateway.call_tool("read_agent_feed")["result"]["records"] == []
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# The two ELN tools: drafting an entry, and the approval gate on publishing
+# ══════════════════════════════════════════════════════════════════════════
+
+
+DRAFTED = "TITLE: Field sweep at 1.5 T\nSUMMARY:\nThe sweep completed cleanly."
+
+
+@pytest.fixture
+def eln_gateway(qtbot, tmp_path):
+    """A gateway that can draft and publish: sim notebook, fake model, real records.
+
+    The run is a real probe run over the sim station, written to a real HDF5
+    file, so the drafted body carries the statistics of columns that were
+    actually measured rather than of a fixture's invention.
+
+    Yields ``(build, manager, publisher, adapter, client, run_id)`` where
+    ``build(role)`` returns a gateway over the shared context, so one recorded
+    run serves every role and attendance combination.
+    """
+    from cryosoft.session.agent_feed import AgentFeed
+    from cryosoft.session.eln.drafting import FakeDraftClient
+    from cryosoft.session.eln.publisher import ElnPublisher
+    from cryosoft.session.eln.settings import AssistantSettings, ElnSettings
+    from cryosoft.session.eln.sim_eln import SimElnAdapter
+
+    station = build_station(CONFIG_PATH)
+    station.magnet_z._default_ramp_rate = 6000.0
+    station.magnet_z._ramp_segments = []
+    orch = Orchestrator(
+        station, tick_interval_ms=10, run_catalog={"FieldSweep": FieldSweep}
+    )
+    roster = UserRoster(tmp_path / "users.json")
+    roster.add(User(user_id="jdoe", name="J. Doe"))
+    store = ExperimentStore(tmp_path / "experiments")
+    manager = ExperimentManager(
+        store=store,
+        roster=roster,
+        orchestrator=orch,
+        config_name="sim_cryostat",
+        station=station,
+        run_catalog={"FieldSweep": FieldSweep},
+    )
+    experiment = manager.start_experiment("Notebook", "jdoe", dict(SAMPLE_INFO))
+
+    publisher = ElnPublisher(
+        manager,
+        ElnSettings(
+            enabled=True,
+            backend="sim_eln",
+            base_url="https://sim.example",
+            api_key="k",
+            tags=("cryosoft",),
+            retry_base_s=0.0,
+            retry_max_s=0.0,
+        ),
+        adapter=SimElnAdapter({}),
+    )
+    manager.attach_eln_publisher(publisher)
+    feed = AgentFeed(
+        store.agent_feed_path(experiment.experiment_id), experiment.experiment_id
+    )
+    client = FakeDraftClient(DRAFTED, model="m-1", input_tokens=2000, output_tokens=400)
+    context = ToolContext(
+        experiments=manager,
+        run_catalog={"FieldSweep": FieldSweep},
+        status_log_path=tmp_path / "status.jsonl",
+        draft_client=client,
+        assistant_settings=AssistantSettings(
+            model="m-1", prices={"m-1": {"input": 5.0, "output": 25.0}}
+        ),
+        publisher=publisher,
+    )
+
+    def build(role=Role.SESSION):
+        return Gateway(
+            orch,
+            role,
+            "runner-1",
+            station_info=station.station_info,
+            tool_context=context,
+            feed=feed,
+        )
+
+    # One real probe run, dispatched the way an agent would dispatch it, so the
+    # draft is written from a file the engine really wrote.
+    orch.start_monitoring()
+    assert build().call_tool(
+        "probe_run",
+        {
+            "procedure": "FieldSweep",
+            "params": {**FULL_PARAMS, "field_steps": 51},
+            "sample_info": dict(SAMPLE_INFO),
+            "data_directory": str(manager.current_data_dir()),
+            "file_prefix": "probe",
+            "probe_spec": {"n_points": 3, "averaging": 2, "max_wait_s": 0.0},
+        },
+    )["code"] == "OK"
+    _tick_until(orch, lambda: manager.current_experiment().runs[-1].status == "done")
+    run_id = manager.current_experiment().runs[-1].run_id
+
+    yield build, manager, publisher, publisher._adapter, client, run_id
+    publisher.stop()
+    orch.shutdown()
+
+
+def test_the_two_eln_tools_declare_their_class_and_their_recording(tools):
+    """Drafting changes nothing; publishing puts a record into the world."""
+    draft = tools["draft_eln_entry"]
+    publish = tools["publish_eln_entry"]
+
+    assert draft.action_class is ActionClass.READ
+    assert publish.action_class is ActionClass.RUN_CONTROL
+    assert draft.recorded is True and publish.recorded is True
+    assert draft.session_function == "draft_eln_entry"
+    assert all(
+        tool.recorded is False
+        for tool in tools.values()
+        if tool.name not in {"draft_eln_entry", "publish_eln_entry"}
+    ), "a tool an agent polls must not drown the accountability trail"
+
+
+def test_drafting_a_finished_run_returns_the_entry_as_data(eln_gateway):
+    """The headline: the facts of one run, drafted and returned, publishing nothing."""
+    build, manager, publisher, adapter, client, run_id = eln_gateway
+    gateway = build()
+
+    answer = gateway.call_tool(
+        "draft_eln_entry", {"run_id": run_id, "note": "check the drift"}
+    )
+
+    assert answer["ok"] is True, answer
+    draft = answer["result"]
+    assert draft["title"] == "Field sweep at 1.5 T"
+    for fact in ("The sweep completed cleanly.", "Field Sweep", "field_start", "-1.0"):
+        assert fact in draft["body_html"]
+    assert "voltage_V" in draft["body_html"], "the columns the run measured"
+    assert "sim_cryostat" in draft["body_html"], "the setup it ran on"
+    assert draft["model"] == "m-1"
+    assert draft["cost_usd"] > 0.0
+    assert len(draft["prompt_digest"]) == 64
+
+    prompt = client.calls[0][1]
+    assert "procedure: Field Sweep" in prompt
+    assert "setup: sim_cryostat" in prompt, "the station the run ran on"
+    assert "voltage_V: count=" in prompt, "the statistics of what was measured"
+    assert "check the drift" in prompt
+
+    assert publisher.pending_count() == 0, "drafting queues nothing"
+    assert not adapter.entries, "drafting publishes nothing"
+    assert manager.current_experiment().find_run(run_id).pending_eln_draft == {}
+
+
+def test_two_drafts_of_one_run_are_the_same_question(eln_gateway):
+    """A deterministic prompt means a reproducible digest."""
+    build, _manager, _publisher, _adapter, _client, run_id = eln_gateway
+    gateway = build()
+
+    first = gateway.call_tool("draft_eln_entry", {"run_id": run_id})
+    again = gateway.call_tool("draft_eln_entry", {"run_id": run_id})
+
+    assert first["result"]["prompt_digest"] == again["result"]["prompt_digest"]
+
+
+def test_a_draft_records_what_it_cost_in_the_agent_feed(eln_gateway):
+    """What an autonomous client spent, in the trail beside what it asked for."""
+    from cryosoft.session.agent_feed import RECORD_TOOL, read_feed
+
+    build, _manager, _publisher, _adapter, _client, run_id = eln_gateway
+    gateway = build()
+
+    gateway.call_tool("draft_eln_entry", {"run_id": run_id})
+
+    (record,) = [
+        entry
+        for entry in read_feed(gateway._feed.path)
+        if entry["record"] == RECORD_TOOL
+    ]
+    assert record["tool"] == "draft_eln_entry"
+    assert record["args"] == {"run_id": run_id}
+    assert record["actor"]["role"] == "session"
+    assert record["verdict"] == {"code": "OK", "reason": ""}
+    assert record["detail"]["model"] == "m-1"
+    assert record["detail"]["input_tokens"] == 2000
+    assert record["detail"]["output_tokens"] == 400
+    assert record["detail"]["cost_usd"] > 0.0
+
+
+def test_an_attended_experiment_refuses_the_agent_and_parks_the_draft(eln_gateway):
+    """Attended: the human approves. The refusal leaves the work where they find it."""
+    build, manager, publisher, adapter, _client, run_id = eln_gateway
+    manager.set_attended(True)
+    gateway = build()
+    draft = gateway.call_tool("draft_eln_entry", {"run_id": run_id})["result"]
+
+    answer = gateway.call_tool(
+        "publish_eln_entry", {"run_id": run_id, "draft": draft}
+    )
+
+    assert answer["ok"] is False
+    assert answer["detail"]["rule"] == "approval_required"
+    assert answer["detail"]["attended"] is True
+    assert answer["detail"]["pending"] is True
+    assert publisher.pending_count() == 0 and not adapter.entries
+
+    pending = manager.pending_eln_draft(run_id)
+    assert pending["title"] == "Field sweep at 1.5 T"
+
+    job_id = manager.approve_eln_draft(run_id)
+
+    assert job_id == f"publish_run:{run_id}"
+    assert publisher.pending_count() == 1, "exactly one job, and only once approved"
+    assert manager.pending_eln_draft(run_id) == {}
+
+
+def test_an_unattended_session_agent_publishes_straight_to_the_outbox(eln_gateway):
+    """Unattended, the session role is what the experiment is being run by."""
+    build, manager, publisher, adapter, _client, run_id = eln_gateway
+    manager.set_attended(False)
+    gateway = build(Role.SESSION)
+    draft = gateway.call_tool("draft_eln_entry", {"run_id": run_id})["result"]
+
+    answer = gateway.call_tool(
+        "publish_eln_entry", {"run_id": run_id, "draft": draft}
+    )
+
+    assert answer["ok"] is True, answer
+    assert answer["result"]["job_id"] == f"publish_run:{run_id}"
+    assert publisher.pending_count() == 1
+    assert manager.pending_eln_draft(run_id) == {}, "nothing waits on a human"
+
+    from cryosoft.session.eln.outbox import DRAIN_PUBLISHED
+
+    assert publisher.drain_once().state == DRAIN_PUBLISHED
+    (entry,) = adapter.entries.values()
+    assert entry["title"] == "Field sweep at 1.5 T"
+
+
+def test_publishing_is_refused_to_the_roles_that_do_not_run_the_experiment(
+    eln_gateway,
+):
+    """run_control is the session role's; a debug or observer agent reports instead."""
+    build, manager, publisher, _adapter, _client, run_id = eln_gateway
+    manager.set_attended(False)
+
+    for role in (Role.DEBUG, Role.OBSERVER):
+        gateway = build(role)
+        answer = gateway.call_tool(
+            "publish_eln_entry", {"run_id": run_id, "draft": {"title": "t"}}
+        )
+        assert answer["ok"] is False, role
+        assert answer["code"] == "BLOCKED_ROLE"
+        assert answer["detail"]["rule"] == "role_matrix"
+        assert answer["detail"]["action_class"] == "run_control"
+
+    assert publisher.pending_count() == 0
+
+
+def test_a_debug_agent_may_still_draft(eln_gateway):
+    """Drafting reads and changes nothing, so every role may ask for one."""
+    build, manager, _publisher, _adapter, _client, run_id = eln_gateway
+    manager.set_attended(False)
+
+    answer = build(Role.DEBUG).call_tool("draft_eln_entry", {"run_id": run_id})
+
+    assert answer["ok"] is True, answer
+
+
+def test_the_eln_tools_refuse_by_name_when_their_collaborator_is_absent(
+    station_info, tmp_path
+):
+    """A gateway wired without a model or a publisher says which one is missing."""
+    orch = Orchestrator(build_station(CONFIG_PATH), tick_interval_ms=10)
+    gateway = Gateway(orch, Role.SESSION, "runner-1", station_info=station_info)
+
+    for name, args in (
+        ("draft_eln_entry", {"run_id": "run-0001"}),
+        ("publish_eln_entry", {"run_id": "run-0001", "draft": {}}),
+    ):
+        answer = gateway.call_tool(name, args)
+        assert answer["ok"] is False
+        assert answer["detail"]["rule"] == "missing_collaborator"
+    orch.shutdown()
+
+
+def test_drafting_an_unknown_run_is_refused_by_name(eln_gateway):
+    """The run must be one this experiment recorded — no run, no draft."""
+    build, *_ = eln_gateway
+
+    answer = build().call_tool("draft_eln_entry", {"run_id": "ghost"})
+
+    assert answer["ok"] is False
+    assert answer["detail"]["rule"] == "unknown_run"
+
+
+def test_a_model_that_cannot_be_reached_is_one_named_refusal(eln_gateway):
+    """The draft client's one exception type becomes the tool's one refusal."""
+    build, _manager, _publisher, _adapter, client, run_id = eln_gateway
+    client.offline = True
+
+    answer = build().call_tool("draft_eln_entry", {"run_id": run_id})
+
+    assert answer["ok"] is False
+    assert answer["detail"]["rule"] == "draft_failed"
+
+
+def test_a_run_whose_file_cannot_be_read_is_still_drafted(eln_gateway):
+    """A corrupt file costs the draft its statistics, never the whole draft."""
+    build, manager, _publisher, _adapter, _client, _run_id = eln_gateway
+    orch = manager._orchestrator
+    broken = manager.current_data_dir() / "broken.h5"
+    broken.write_bytes(b"not an HDF5 file")
+    started = {
+        "run_id": "run-broken",
+        "procedure": "Field Sweep",
+        "kind": "run",
+        "params": {"field_start": -1.0},
+        "data_file": str(broken),
+        "started_utc": "2026-01-01T10:00:00+00:00",
+    }
+    orch.run_started.emit(started)
+    orch.run_finished.emit(
+        dict(started, finished_utc="2026-01-01T11:00:00+00:00", status="failed", reason="x")
+    )
+
+    answer = build().call_tool("draft_eln_entry", {"run_id": "run-broken"})
+
+    assert answer["ok"] is True, answer
+    assert "Field Sweep" in answer["result"]["body_html"]
