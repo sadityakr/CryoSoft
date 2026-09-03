@@ -61,8 +61,11 @@ DEFAULT_ASSISTANT_MODEL = "claude-opus-5"
 
 #: Largest number of tokens a single draft may generate. A drafted summary is
 #: a handful of paragraphs; the cap is what stops a runaway completion from
-#: costing an unbounded amount.
-DEFAULT_ASSISTANT_MAX_TOKENS = 2048
+#: costing an unbounded amount. Deliberately several times what the prose
+#: itself needs: on the current default model the vendor's reasoning is on by
+#: default and is generated — and billed — against this same cap, so a cap
+#: sized for the prose alone would truncate the draft rather than bound it.
+DEFAULT_ASSISTANT_MAX_TOKENS = 8192
 
 #: List price per one million tokens, per model, in US dollars — the source
 #: the reported ``cost_usd`` of a draft is computed from.
