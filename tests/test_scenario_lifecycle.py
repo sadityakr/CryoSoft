@@ -17,7 +17,7 @@ import time
 from typing import Any
 
 import pytest
-from PyQt6.QtCore import QThread, QTimer
+from PyQt6.QtCore import QTimer
 
 from cryosoft.core import events as ev
 from cryosoft.core.data_reader import list_columns, open_run
@@ -31,7 +31,7 @@ from cryosoft.procedures.time_series import TimeSeries
 from cryosoft.session.manager import ExperimentManager
 from cryosoft.session.models import RUN_STATUS_DONE
 from cryosoft.session.store import ExperimentStore, User, UserRoster
-from tests.instrument_modes import instrument_mode, shutdown_host
+from tests.instrument_modes import instrument_mode, on_engine, shutdown_host
 
 CONFIG_PATH = "cryosoft/configs/sim_cryostat"
 
@@ -170,19 +170,11 @@ def host(qtbot):
     )
     built.start()
 
-    def _fast_magnet(station: Any) -> None:
-        station.magnet_z._default_ramp_rate = 6000.0
-        station.magnet_z._ramp_segments = []
+    def _fast_magnet() -> None:
+        built.station.magnet_z._default_ramp_rate = 6000.0
+        built.station.magnet_z._ramp_segments = []
 
-    if built.bridge is not None and not built.bridge.on_engine_thread():
-        done = []
-        built.bridge.post(lambda: (done.append(1), _fast_magnet(built.station)))
-        for _ in range(200):
-            if done:
-                break
-            QThread.msleep(5)
-    else:
-        _fast_magnet(built.station)
+    on_engine(built, _fast_magnet, settle=False)
 
     yield built
     shutdown_host(built)
@@ -665,3 +657,110 @@ def test_the_gui_thread_stays_responsive_through_a_slow_datapoint(qtbot):
         qtbot.waitUntil(lambda: procedure.measured >= 1, timeout=WAIT_MS)
     finally:
         host.shutdown()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 6. A run changes no declaration; seq strictly increases; events round-trip
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_a_run_changes_no_declaration_and_every_event_round_trips_through_json(
+    host, proxy, qtbot, tmp_path
+):
+    """The declaration is static; the event stream is the only thing that moves.
+
+    A run neither adds nor removes an instrument, so ``StationInfo`` and the
+    capability manifest built from it (``core.capability_manifest.
+    build_manifest()``) must read identically before and after. Meanwhile
+    every ``StatusSnapshot`` emitted during the run carries a strictly
+    increasing ``seq`` (the engine's one monotonic counter, shared by every
+    event type), and every event on the stream — of every type, not just
+    ``StatusSnapshot`` — survives ``to_json()`` -> ``json.dumps`` ->
+    ``json.loads`` -> ``event_from_json()`` unchanged, which is the contract
+    that lets it cross a thread boundary today and a process boundary later.
+    """
+    from cryosoft.core.capability_manifest import build_manifest
+
+    def _declaration() -> tuple[dict[str, Any], dict[str, Any]]:
+        return on_engine(
+            proxy,
+            lambda: (
+                host.station.station_info().to_json(),
+                build_manifest(host.station),
+            ),
+        )
+
+    before_info, before_manifest = _declaration()
+
+    events: list[Any] = []
+    proxy.event.connect(events.append)
+
+    procedure = _build(host.station, FieldSweep, FIELD_SWEEP_PARAMS, tmp_path)
+    _run_to_completion(proxy, qtbot, procedure)
+
+    after_info, after_manifest = _declaration()
+    assert after_info == before_info
+    assert after_manifest == before_manifest
+
+    assert events, "no events were observed during the run"
+    snapshot_seqs = [e.seq for e in events if isinstance(e, ev.StatusSnapshot)]
+    assert len(snapshot_seqs) >= 2, "not enough StatusSnapshot events to check seq"
+    for earlier, later in zip(snapshot_seqs, snapshot_seqs[1:]):
+        assert later > earlier, "StatusSnapshot.seq did not strictly increase"
+
+    for event in events:
+        payload = json.loads(json.dumps(event.to_json()))
+        assert ev.event_from_json(payload) == event, (
+            f"{type(event).__name__} did not round-trip through JSON"
+        )
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 7. shutdown() after a completed run: no thread alive, the file reopens
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_shutdown_after_a_completed_run_leaves_no_thread_and_closes_the_file(
+    qtbot, tmp_path
+):
+    """The engine's own file handle and thread are both really gone.
+
+    Hardcoded to THREADED mode, like scenario 5 — ``thread_object`` is the
+    thing being asserted dead, so this is not a property the inline mode
+    (which has none) can stand in for. The procedure's own ``standby()``
+    closes the ``DataManager`` at the end of a normal run, so this is the
+    sanity check that ``shutdown()`` neither leaves a stray handle open nor
+    corrupts the file: reopening it read-only afterwards must simply work.
+    """
+    host = InstrumentHost(
+        lambda: build_station(CONFIG_PATH),
+        mode="threaded",
+        orchestrator_options={"tick_interval_ms": 10, "run_catalog": RUN_CATALOG},
+    )
+    host.start()
+    proxy = host.build_proxy()
+
+    def _fast_magnet() -> None:
+        host.station.magnet_z._default_ramp_rate = 6000.0
+        host.station.magnet_z._ramp_segments = []
+
+    on_engine(proxy, _fast_magnet, settle=False)
+
+    procedure = _build(host.station, FieldSweep, FIELD_SWEEP_PARAMS, tmp_path)
+    events, _started = _run_to_completion(proxy, qtbot, procedure)
+    finished = next(e for e in events if isinstance(e, ev.RunFinished))
+    data_file = finished.manifest["data_file"]
+
+    thread_object = host.thread_object
+    assert thread_object is not None
+    assert not thread_object.isFinished()
+
+    host.shutdown()
+
+    assert thread_object.isFinished(), "the instrument thread outlived shutdown()"
+
+    with open_run(data_file) as handle:
+        columns = {info.name for info in list_columns(handle)}
+        n_points = handle.n_points
+    assert {"field_T", "voltage_V"} <= columns
+    assert n_points == FIELD_SWEEP_PARAMS["field_steps"]
