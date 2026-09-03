@@ -1,8 +1,9 @@
-"""cryosoft.session.eln — ELN adapters, body renderers, outbox, publisher (L6).
+"""cryosoft.session.eln — ELN adapters, renderers, outbox, publisher, drafting (L6).
 
 See ``cryosoft/session/eln/README.md`` for the folder standard, ``adapter.py``
-for the ELN adapter standard itself, and ``GLOSSARY.md`` for the **ELN
-adapter** / **Outbox** vocabulary.
+for the ELN adapter standard itself, ``drafting.py`` for the draft prompt
+standard and the **Draft client** contract, and ``GLOSSARY.md`` for the **ELN
+adapter** / **Outbox** / **Draft entry** / **Draft client** vocabulary.
 """
 
 from cryosoft.session.eln.adapter import (
@@ -11,6 +12,22 @@ from cryosoft.session.eln.adapter import (
     ElnEntryRef,
     ElnError,
     ElnTemplate,
+)
+from cryosoft.session.eln.drafting import (
+    DRAFT_SYSTEM_PROMPT,
+    DRAFT_TAG,
+    AnthropicDraftClient,
+    CompletionResult,
+    DraftClient,
+    DraftEntry,
+    DraftRequest,
+    FakeDraftClient,
+    cost_usd,
+    draft_entry,
+    manifest_from_run,
+    parse_completion,
+    prompt_digest,
+    render_draft_prompt,
 )
 from cryosoft.session.eln.elabftw import (
     ElabFtwAdapter,
@@ -39,7 +56,11 @@ from cryosoft.session.eln.publisher import (
 )
 from cryosoft.session.eln.settings import (
     API_KEY_ENV_VAR,
+    ASSISTANT_API_KEY_ENV_VAR,
+    DEFAULT_ASSISTANT_MODEL,
+    DEFAULT_MODEL_PRICES,
     SETTINGS_PATH_ENV_VAR,
+    AssistantSettings,
     ElnSettings,
     eln_settings_path,
     load_eln_settings,
@@ -53,10 +74,14 @@ __all__ = [
     "ElnError",
     "ElnTemplate",
     "ElnSettings",
+    "AssistantSettings",
     "eln_settings_path",
     "load_eln_settings",
     "API_KEY_ENV_VAR",
+    "ASSISTANT_API_KEY_ENV_VAR",
     "SETTINGS_PATH_ENV_VAR",
+    "DEFAULT_ASSISTANT_MODEL",
+    "DEFAULT_MODEL_PRICES",
     "SimElnAdapter",
     "ElabFtwAdapter",
     "ElnHttpTransport",
@@ -77,4 +102,18 @@ __all__ = [
     "PUBLISH_PENDING",
     "PUBLISH_OFFLINE",
     "PUBLISH_DISABLED",
+    "DraftClient",
+    "DraftRequest",
+    "DraftEntry",
+    "CompletionResult",
+    "FakeDraftClient",
+    "AnthropicDraftClient",
+    "DRAFT_SYSTEM_PROMPT",
+    "DRAFT_TAG",
+    "render_draft_prompt",
+    "prompt_digest",
+    "parse_completion",
+    "manifest_from_run",
+    "cost_usd",
+    "draft_entry",
 ]

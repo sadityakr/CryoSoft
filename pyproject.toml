@@ -26,6 +26,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# LLM drafting of ELN entries (cryosoft/session/eln/drafting.py). Deliberately
+# OPTIONAL: the whole feature is off by default, the package is imported lazily
+# when a real draft client is constructed, and every test runs against
+# FakeDraftClient - so a setup that never drafts installs nothing extra, and a
+# checkout without this extra imports, lints, and tests unchanged. Only
+# `messages.create` is used, which both the 0.x and 1.x SDK lines provide.
+assistant = ["anthropic>=0.40"]
 dev = [
     "pytest>=7.4",
     "pytest-qt>=4.2",
