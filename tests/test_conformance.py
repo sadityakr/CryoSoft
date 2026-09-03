@@ -4161,13 +4161,6 @@ _ENGINE_SIGNALS = frozenset({
 #: Non-command engine attributes a named GUI module may still touch, each with
 #: the reason. Anything not listed is a violation, including a private one.
 _GUI_ENGINE_EXEMPTIONS: dict[str, dict[str, str]] = {
-    "cryosoft/gui/status_mirror.py": {
-        "station_info": "the mirror's priming read, taken once at attach",
-        "status_snapshot": "the mirror's priming read, taken once at attach",
-        "get_operational_status": (
-            "the mirror's priming read, taken once at attach"
-        ),
-    },
     "cryosoft/gui/queue_panel.py": {
         "_procedure_queue": (
             "the three direct writes the run-queue step removes when the "
@@ -4267,6 +4260,108 @@ def test_gui_never_reaches_into_the_station_for_a_vi() -> None:
         "StationInfo declaration the mirror carries instead:\n"
         + "\n".join(offenders)
     )
+
+
+def test_the_proxy_exposes_every_command_and_nothing_the_engine_lacks() -> None:
+    """The three-way contract check, two legs of it: ``CommandName`` ⊆ proxy
+    methods ⊆ Orchestrator commands.
+
+    The engine has two clients and the contract is declared once, so neither
+    can offer an action the other cannot see. The third leg — the agent
+    gateway's tool list — joins this test when the gateway lands; it will be
+    the same enumeration a third time.
+
+    If this fails on a command you just added: give the proxy a typed method
+    of that name, taking the arguments the engine method takes.
+    """
+    from cryosoft.core.orchestrator_proxy import OrchestratorProxy
+
+    declared = {member.value for member in CommandName}
+    proxy_methods = {
+        name
+        for name, value in vars(OrchestratorProxy).items()
+        if not name.startswith("_") and inspect.isfunction(value)
+    }
+    engine_methods = _orchestrator_public_methods()
+
+    assert declared - proxy_methods == set(), (
+        f"CommandName members the proxy does not expose: "
+        f"{sorted(declared - proxy_methods)}"
+    )
+    assert declared - engine_methods == set(), (
+        f"CommandName members with no Orchestrator method behind them: "
+        f"{sorted(declared - engine_methods)}"
+    )
+
+
+def test_every_proxy_command_takes_the_engine_methods_arguments() -> None:
+    """A widget swapping the engine for the proxy must not have to adapt.
+
+    Same names, same parameters, in the same order — which is what makes the
+    proxy transparent enough for the whole GUI to move behind it in one step
+    rather than widget by widget. The proxy returns a ``request_id`` where the
+    engine returns the call's own value, which is the one deliberate
+    difference: an answer that has to survive a thread boundary cannot be a
+    return value.
+    """
+    from cryosoft.core.orchestrator import Orchestrator
+    from cryosoft.core.orchestrator_proxy import OrchestratorProxy
+
+    mismatches: list[str] = []
+    for member in CommandName:
+        engine_params = [
+            name
+            for name in inspect.signature(
+                getattr(Orchestrator, member.value)
+            ).parameters
+            if name not in ("self", "actor")
+        ]
+        proxy_params = [
+            name
+            for name in inspect.signature(
+                getattr(OrchestratorProxy, member.value)
+            ).parameters
+            if name != "self"
+        ]
+        if engine_params != proxy_params:
+            mismatches.append(
+                f"{member.value}: engine{engine_params} != proxy{proxy_params}"
+            )
+
+    assert not mismatches, (
+        "Proxy methods whose parameters do not match the engine's:\n"
+        + "\n".join(mismatches)
+    )
+
+
+def test_the_proxy_re_exposes_every_engine_signal() -> None:
+    """Every Orchestrator signal a widget can connect to exists on the proxy.
+
+    The passthrough half of transparency: ``orchestrator.states_updated
+    .connect(...)`` in a widget becomes ``proxy.states_updated.connect(...)``
+    and nothing else moves. The two contract channels are deliberately
+    renamed — ``verdict_emitted``/``event_emitted`` become ``verdict``/
+    ``event`` — because a client consumes them, it does not relay them.
+    """
+    from PyQt6.QtCore import pyqtSignal
+
+    from cryosoft.core.orchestrator import Orchestrator
+    from cryosoft.core.orchestrator_proxy import OrchestratorProxy
+
+    renamed = {"verdict_emitted": "verdict", "event_emitted": "event"}
+    engine_signals = {
+        name
+        for name, value in vars(Orchestrator).items()
+        if isinstance(value, pyqtSignal)
+    }
+    proxy_signals = {
+        name
+        for name, value in vars(OrchestratorProxy).items()
+        if isinstance(value, pyqtSignal)
+    }
+    expected = {renamed.get(name, name) for name in engine_signals}
+    missing = expected - proxy_signals
+    assert not missing, f"Engine signals the proxy does not re-expose: {sorted(missing)}"
 
 
 #: GUI modules allowed to import ``cryosoft.core.station`` at RUNTIME, and

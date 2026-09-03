@@ -364,7 +364,7 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
-name = "C18: the GUI holds no Station — it builds from the StationInfo declaration, never from cryosoft.core.station"
+name = "C18: the GUI holds neither the Station nor the Orchestrator — it builds from the StationInfo declaration and acts through the OrchestratorProxy"
 type = "forbidden"
 source_modules = ["cryosoft.gui"]
 # Direct imports only: the GUI legitimately imports the Orchestrator, which
@@ -390,5 +390,13 @@ ignore_imports = [
     "cryosoft.gui.procedure_window -> cryosoft.core.station",
     "cryosoft.gui.queue_panel -> cryosoft.core.station",
     "cryosoft.gui.trends_quadrant -> cryosoft.core.station",
+    # The state-machine ENUM, not the engine: MonitorWindow names
+    # OrchestratorState's members to colour its status bar. Every other GUI
+    # module now imports cryosoft.core.orchestrator_proxy instead, and this
+    # last one goes when the state vocabulary moves into the contract.
+    "cryosoft.gui.monitor_window -> cryosoft.core.orchestrator",
 ]
-forbidden_modules = ["cryosoft.core.station"]
+forbidden_modules = [
+    "cryosoft.core.station",
+    "cryosoft.core.orchestrator",
+]
