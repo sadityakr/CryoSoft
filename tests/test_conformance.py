@@ -4210,3 +4210,132 @@ def test_run_source_conformance(source_cls: type) -> None:
         f"{source_cls.__name__}.n_points must be a property reporting how many "
         f"sweep points the source holds"
     )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# The agent gateway's permission model
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# The standard is `session/gateway/roles.py`'s module docstring (the matrix)
+# and `session/gateway/action_classes.py`'s (the classification). Authority is
+# granted by a table row, never by a branch, so these tests check that the
+# tables are complete in both directions: nothing an agent can ask for is
+# unclassified, and no row names something that no longer exists.
+
+
+def _configured_control_actions() -> set[tuple[str, str]]:
+    """(VI kind, @control name) for every control every shipped config declares.
+
+    Read from the configs' `virtual_instruments` blocks by importing each
+    named class — a pure import, no Station and no driver — so the real
+    (hardware-only) configs are covered exactly like the sim ones.
+
+    Returns:
+        The set of `(InstrumentInfo.kind, method_name)` keys the gateway's
+        classification table must cover.
+    """
+    actions: set[tuple[str, str]] = set()
+    for config_dir in _config_dirs():
+        devices = _load_yaml(config_dir / "devices.yaml")
+        for vi_cfg in (devices.get("virtual_instruments") or {}).values():
+            vi_cls = _import_class(vi_cfg["class"])
+            kind = str(getattr(vi_cls, "vi_type", ""))
+            for method_name in _control_methods(vi_cls):
+                actions.add((kind, method_name))
+    return actions
+
+
+@pytest.mark.parametrize("config_dir", _config_dirs(), ids=lambda p: p.name)
+def test_every_configured_control_has_an_action_class(config_dir: Path) -> None:
+    """Every control this config's manifest declares is classified.
+
+    A control with no row is refused at runtime rather than defaulted, so an
+    unclassified capability is an instrument an agent simply cannot reach.
+    Adding a VI or a `@control` therefore means adding a row to
+    `CONTROL_ACTION_CLASSES` with its one-line rationale, in the same commit.
+    """
+    from cryosoft.session.gateway import CONTROL_ACTION_CLASSES
+
+    devices = _load_yaml(config_dir / "devices.yaml")
+    missing: list[str] = []
+    for vi_name, vi_cfg in (devices.get("virtual_instruments") or {}).items():
+        vi_cls = _import_class(vi_cfg["class"])
+        kind = str(getattr(vi_cls, "vi_type", ""))
+        for method_name in _control_methods(vi_cls):
+            if (kind, method_name) not in CONTROL_ACTION_CLASSES:
+                missing.append(f"({kind!r}, {method_name!r})  # {vi_name}")
+    assert not missing, (
+        f"{config_dir.name} declares controls with no row in the gateway's "
+        f"CONTROL_ACTION_CLASSES table:\n  " + "\n  ".join(sorted(missing))
+    )
+
+
+def test_no_stale_control_action_classes() -> None:
+    """No classification row names a capability no shipped config declares.
+
+    A stale row is a rationale nobody can check against a real instrument;
+    the physicist reviewing the table must be reviewing what the station
+    actually offers.
+    """
+    from cryosoft.session.gateway import CONTROL_ACTION_CLASSES
+
+    stale = set(CONTROL_ACTION_CLASSES) - _configured_control_actions()
+    assert not stale, (
+        f"CONTROL_ACTION_CLASSES rows that no shipped config declares: "
+        f"{sorted(stale)}"
+    )
+
+
+def test_every_control_action_class_carries_a_rationale() -> None:
+    """Each row says WHY, because that is what the physicist reviews."""
+    from cryosoft.session.gateway import (
+        COMMAND_ACTION_CLASSES,
+        CONTROL_ACTION_CLASSES,
+        LIFECYCLE_ACTION_CLASSES,
+    )
+
+    rows: dict[str, object] = {}
+    rows.update({f"command {k.value}": v for k, v in COMMAND_ACTION_CLASSES.items()})
+    rows.update({f"control {k}": v for k, v in CONTROL_ACTION_CLASSES.items()})
+    rows.update({f"lifecycle {k}": v for k, v in LIFECYCLE_ACTION_CLASSES.items()})
+    for label, classified in rows.items():
+        rationale = classified.rationale  # type: ignore[attr-defined]
+        assert rationale and rationale.strip(), f"{label} has no rationale"
+
+
+def test_every_command_name_has_an_action_class() -> None:
+    """`CommandName` and the gateway's command table match exactly.
+
+    Diffed both ways: a command with no class is an action no role can be
+    granted, and a row with no command behind it is a rule about nothing.
+    `SUBMIT_VI_ACTION` is the one deliberate absence — its class depends on
+    the capability it targets, so it is resolved per-control instead.
+    """
+    from cryosoft.session.gateway import COMMAND_ACTION_CLASSES
+
+    declared = {member for member in CommandName} - {CommandName.SUBMIT_VI_ACTION}
+    classified = set(COMMAND_ACTION_CLASSES)
+
+    assert declared - classified == set(), (
+        f"CommandName members with no gateway action class: "
+        f"{sorted(m.value for m in declared - classified)}"
+    )
+    assert classified - declared == set(), (
+        f"gateway action-class rows with no CommandName behind them: "
+        f"{sorted(m.value for m in classified - declared)}"
+    )
+
+
+def test_permission_matrix_has_a_cell_for_every_class_and_role() -> None:
+    """Authority is never absent by omission — every (class, role) pair decided."""
+    from cryosoft.session.gateway import PERMISSION_MATRIX, ActionClass, Role
+
+    assert set(PERMISSION_MATRIX) == set(ActionClass), (
+        f"PERMISSION_MATRIX rows do not match ActionClass: "
+        f"{sorted(c.value for c in set(PERMISSION_MATRIX) ^ set(ActionClass))}"
+    )
+    for action_class, row in PERMISSION_MATRIX.items():
+        assert set(row) == set(Role), (
+            f"PERMISSION_MATRIX[{action_class.value}] does not decide every "
+            f"role: {sorted(r.value for r in set(row) ^ set(Role))}"
+        )

@@ -366,9 +366,13 @@ class ExperimentManager(QObject):
     def set_attended(self, attended: bool) -> None:
         """Set the attendance flag. No-op when no experiment is open.
 
-        Attended/unattended governs how much autonomy debug agents get (the
-        agent-native plan): recovery actions are reserved for unattended
-        sessions. Recorded here so the flag survives a restart.
+        **Attendance** is an input to the agent gateway's permission matrix
+        (GLOSSARY.md, and ``session/gateway/README.md``): a ``debug`` role
+        may take **Action class** ``recovery`` only while UNATTENDED; with a
+        human present it diagnoses and reports instead. Recorded here so the
+        flag survives a restart, and pushed down into the engine as a value
+        by ``Orchestrator.set_attendance()``, since contract C12 stops the
+        enforcement point from reading this record.
 
         Args:
             attended: ``True`` when a human is present at the setup.

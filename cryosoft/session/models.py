@@ -340,8 +340,9 @@ class ExperimentRecord:
         closed_utc: ISO 8601 close time; empty while open.
         status: ``open`` or ``closed``.
         attended: The attendance flag — ``True`` when a human is present.
-            Governs how much autonomy debug agents get (recovery actions are
-            reserved for unattended sessions; see the agent-native plan).
+            An input to the agent gateway's permission matrix (GLOSSARY.md's
+            **Attendance**): a ``debug`` role may take ``recovery`` actions
+            only while unattended.
         envelope: The session envelope in its JSON form
             (``envelope_to_dict()``); ``{}`` means no envelope.
         runs: The experiment's runs, oldest first.

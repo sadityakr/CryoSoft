@@ -237,7 +237,8 @@ class Orchestrator(QObject):
     call; ``detail`` carries ``param``/``value``/``lo``/``hi``/``limit_name``
     when the refusal names them), ``BLOCKED_ENVELOPE`` (the active experiment
     envelope forbids the value), ``BLOCKED_ROLE`` (the capability is outside
-    the caller's scope) or ``FAILED`` (attempted, and it failed — including
+    the caller's scope, or the kill switch is closed against the submitting
+    agent) or ``FAILED`` (attempted, and it failed — including
     an unknown command name or arguments that do not fit the method, neither
     of which ever raises at the caller).
 
@@ -574,6 +575,16 @@ class Orchestrator(QObject):
         # writer (GUI and agents alike). None = no envelope active.
         self._session_envelope: ExperimentEnvelope | None = None
 
+        # Attendance and the kill switch: two session-owned policy VALUES
+        # pushed down here for the same reason the envelope is, and enforced
+        # at the same single choke point. Contract C12 forbids the engine
+        # from reading the session layer, so a policy the session owns has to
+        # arrive as a value or it cannot be enforced where every writer
+        # passes. Attendance defaults to "a human is watching" (the
+        # restrictive reading for an agent) and the gate to ACTIVE.
+        self._attended: bool = True
+        self._agent_gate: ev.AgentGate = ev.AgentGate.ACTIVE
+
         # Active run manifest: captured at run_started (the data file path is
         # gone by the time the run ends) and re-emitted once on run_finished.
         self._active_run_manifest: dict[str, Any] | None = None
@@ -693,6 +704,15 @@ class Orchestrator(QObject):
         * Every other command's ``args`` are the method's own keyword
           arguments.
 
+        **The kill switch.** Before anything is dispatched, a command whose
+        actor is an ``agent`` is checked against the gate
+        ``set_agent_gate()`` installed: unless the gate is ``ACTIVE`` the
+        command is answered ``BLOCKED_ROLE`` with the gate named in
+        ``detail``, and nothing runs. ``EMERGENCY_STANDBY`` is exempt at
+        every setting, and an ``operator`` or ``system`` actor is never
+        checked at all — a kill switch that could lock the human out of
+        their own instrument would be a hazard rather than a safeguard.
+
         Args:
             command: The client's request.
 
@@ -705,6 +725,14 @@ class Orchestrator(QObject):
         )
         previous, self._pending = self._pending, pending
         try:
+            gate_refusal = self._agent_gate_refusal(command)
+            if gate_refusal is not None:
+                reason, detail = gate_refusal
+                logger.info("Blocked by the agent gate: %s", reason)
+                self._emit_verdict(
+                    ev.VerdictCode.BLOCKED_ROLE, reason=reason, detail=detail
+                )
+                return command.request_id
             method_name = ev.CommandName(command.name).value
             method = getattr(self, method_name, None)
             if not callable(method):
@@ -723,6 +751,41 @@ class Orchestrator(QObject):
                 self._emit_verdict(ev.VerdictCode.OK)
             self._pending = previous
         return command.request_id
+
+    def _agent_gate_refusal(
+        self, command: ev.Command
+    ) -> tuple[str, dict[str, Any]] | None:
+        """Decide whether the kill switch refuses this command before dispatch.
+
+        Gates ``agent`` actors only, and never ``emergency_standby``. The
+        engine is the enforcement point rather than the client that submitted
+        the command, so a client cannot reach the instruments by declining to
+        police itself.
+
+        Args:
+            command: The command about to be dispatched.
+
+        Returns:
+            ``(reason, detail)`` when the gate refuses it — *detail* naming
+            the ``gate`` and the ``actor_kind`` — or ``None`` when the
+            command may proceed to its method.
+        """
+        if command.actor.kind is not ev.ActorKind.AGENT:
+            return None
+        if self._agent_gate is ev.AgentGate.ACTIVE:
+            return None
+        if command.name is ev.CommandName.EMERGENCY_STANDBY:
+            return None
+        reason = (
+            f"Agent access is {self._agent_gate.value}: "
+            f"{command.name.value!r} from agent {command.actor.id!r} is refused. "
+            "Only emergency standby passes while the kill switch is closed."
+        )
+        return reason, {
+            "gate": self._agent_gate.value,
+            "actor_kind": command.actor.kind.value,
+            "actor_id": command.actor.id,
+        }
 
     def _command_arguments(self, command: ev.Command) -> dict[str, Any]:
         """Convert one command's JSON ``args`` into the method's arguments.
@@ -916,6 +979,62 @@ class Orchestrator(QObject):
             logger.info("Session envelope cleared")
         else:
             logger.info("Session envelope set: %r", envelope)
+
+    @command
+    def set_attendance(self, attended: bool) -> None:
+        """Record whether a human is watching the running experiment.
+
+        The second session-owned policy value pushed DOWN into the engine,
+        mirroring ``set_experiment_envelope()`` exactly and for the same
+        reason: contract C12 forbids anything below the GUI from importing
+        the session layer, so a policy the session record owns cannot be read
+        at the place it has to be enforced — it has to arrive as a value.
+        The session layer calls this from the experiment record's ``attended``
+        flag, and the GUI's takeover toggle calls it directly.
+
+        The engine itself does not restrict anything on attendance: it stores
+        the value and mirrors it on every ``StatusSnapshot``, which is what
+        lets a client's permission check (the agent gateway's role matrix)
+        read the same fact every other client sees, rather than each client
+        keeping a copy of its own. Defaults to ``True`` — assume a human is
+        present until told otherwise, which is the restrictive reading for an
+        agent asking to act alone.
+
+        Args:
+            attended: ``True`` when a human is watching, ``False`` when the
+                experiment is running unattended.
+        """
+        self._attended = bool(attended)
+        logger.info(
+            "Attendance set: %s", "attended" if self._attended else "unattended"
+        )
+        self._emit_status_snapshot()
+
+    @command
+    def set_agent_gate(self, state: ev.AgentGate | str) -> None:
+        """Set the kill switch: how much of the engine agents may reach.
+
+        Pushed down as a value like attendance and the session envelope, and
+        enforced HERE, in ``submit()``, before any command is dispatched —
+        the single choke point every writer passes. A gate enforced in the
+        client that submits the command would only bind a client that chose
+        to be bound.
+
+        The human path is never gated: only an ``agent`` actor is checked,
+        and ``emergency_standby`` passes at every setting, so flipping this
+        can never leave anyone — human or agent — unable to make the station
+        safe.
+
+        Args:
+            state: An ``events.AgentGate`` member or its string value
+                (``"active"``, ``"read_only"``, ``"revoked"``).
+
+        Raises:
+            ValueError: If *state* is not a known ``AgentGate``.
+        """
+        self._agent_gate = ev.AgentGate(state)
+        logger.info("Agent gate set: %s", self._agent_gate.value)
+        self._emit_status_snapshot()
 
     def envelope_variables(self) -> dict[str, EnvelopeVariable]:
         """Return each VI's enveloped quantity and the setup's bounds on it.
@@ -2944,6 +3063,8 @@ class Orchestrator(QObject):
                 name: _json_safe(dataclasses.asdict(variable))
                 for name, variable in self.envelope_variables().items()
             },
+            attended=self._attended,
+            agent_gate=self._agent_gate.value,
             seq=self._next_seq(),
         )
 

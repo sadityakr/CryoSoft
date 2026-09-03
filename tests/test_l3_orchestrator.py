@@ -3794,3 +3794,94 @@ def test_a_failing_queue_snapshot_is_logged_not_raised(port, station, caplog):
 
     assert recorder.of_type(ev.QueueChanged)[-1].entries == ()
     assert any("queue_snapshot() failed" in r.message for r in caplog.records)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Attendance and the kill switch — two session-owned values pushed down
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_attendance_defaults_to_attended_and_is_mirrored(port):
+    """The restrictive default, and the snapshot carries it for every client."""
+    orch, recorder, _tmp_path = port
+
+    orch.submit(ev.Command(name=ev.CommandName.SET_ATTENDANCE, args={"attended": False}))
+
+    snapshot = recorder.of_type(ev.StatusSnapshot)[-1]
+    assert snapshot.attended is False
+    assert recorder.verdicts[-1].code is ev.VerdictCode.OK
+
+    orch.submit(ev.Command(name=ev.CommandName.SET_ATTENDANCE, args={"attended": True}))
+    assert recorder.of_type(ev.StatusSnapshot)[-1].attended is True
+
+
+def test_agent_gate_defaults_to_active_and_is_mirrored(port):
+    """The gate travels on the same mirror every other read does."""
+    orch, recorder, _tmp_path = port
+
+    assert orch._status_snapshot().agent_gate == ev.AgentGate.ACTIVE.value
+
+    orch.submit(
+        ev.Command(name=ev.CommandName.SET_AGENT_GATE, args={"state": "revoked"})
+    )
+
+    assert recorder.of_type(ev.StatusSnapshot)[-1].agent_gate == "revoked"
+
+
+def test_an_unknown_gate_value_is_answered_failed(port):
+    """A typo in the gate name never silently opens or closes it."""
+    orch, recorder, _tmp_path = port
+
+    orch.submit(ev.Command(name=ev.CommandName.SET_AGENT_GATE, args={"state": "nope"}))
+
+    assert recorder.verdicts[-1].code is ev.VerdictCode.FAILED
+    assert orch._status_snapshot().agent_gate == ev.AgentGate.ACTIVE.value
+
+
+def test_a_closed_gate_refuses_an_agent_and_names_itself(port):
+    """BLOCKED_ROLE with the gate in the detail, and nothing dispatched."""
+    orch, recorder, _tmp_path = port
+    orch.set_agent_gate(ev.AgentGate.REVOKED)
+
+    request_id = orch.submit(
+        ev.Command(name=ev.CommandName.START_MONITORING, actor=AGENT)
+    )
+
+    verdict = recorder.verdicts[-1]
+    assert verdict.request_id == request_id
+    assert verdict.code is ev.VerdictCode.BLOCKED_ROLE
+    assert verdict.detail == {
+        "gate": "revoked",
+        "actor_kind": "agent",
+        "actor_id": AGENT.id,
+    }
+    assert "revoked" in verdict.reason
+
+
+def test_a_closed_gate_never_touches_the_operator_path(port):
+    """The same command from the human is carried out while agents are revoked."""
+    orch, recorder, _tmp_path = port
+    orch.set_agent_gate(ev.AgentGate.REVOKED)
+
+    orch.submit(
+        ev.Command(name=ev.CommandName.SET_SCANNER_ENABLED, args={"enabled": True})
+    )
+
+    assert recorder.verdicts[-1].code is not ev.VerdictCode.BLOCKED_ROLE
+
+
+def test_emergency_standby_passes_the_closed_gate(port):
+    """An actor that can see a problem is never unable to make the station safe."""
+    orch, recorder, _tmp_path = port
+    orch.set_agent_gate(ev.AgentGate.REVOKED)
+
+    orch.submit(
+        ev.Command(
+            name=ev.CommandName.EMERGENCY_STANDBY,
+            actor=AGENT,
+            args={"reason": "coil voltage climbing"},
+        )
+    )
+
+    assert recorder.verdicts[-1].code is ev.VerdictCode.OK
+    assert orch.state == OrchestratorState.EMERGENCY.value

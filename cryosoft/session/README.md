@@ -6,8 +6,8 @@ Manage complete experiments: who is measuring (**User**), which sample under
 which per-experiment safety bounds (**ExperimentRecord** + **session
 envelope**), and which runs were produced (**RunRecord**, recorded
 automatically from the Orchestrator's run manifests). This is the layer the
-eLab publishing track (`session/eln/` — see its own README) and the Agent
-Gateway (`session/gateway/`, planned) build on.
+eLab publishing track (`session/eln/` — see its own README) and the **Agent
+gateway** (`session/gateway/` — see its own README) build on.
 
 Also hosts the **Servicing Log** framework (`servicing_log.py`): per-setup,
 typed, human-editable logs of servicing events (**log kind**, e.g. the
@@ -55,6 +55,14 @@ before it may enter it. Headless and Qt-free — no widget, no Orchestrator —
 so a queue can be built, ordered and validated in a test, a script, or an
 agent gateway with no GUI at all. See the **Run queue** / **Run spec** /
 **Run validation** entries in `GLOSSARY.md`.
+
+Also hosts the **Agent gateway** (`gateway/`): the second adapter of the
+**Control contract**, letting an autonomous client submit the same
+`Command`s the GUI does under a declared **Role**, with every action's
+**Action class** decided by a declarative table and the human's
+**Attendance** and **Kill switch** as inputs. In-process only — no network,
+no thread. See `session/gateway/README.md` and the **Role** / **Action
+class** / **Agent gateway** entries in `GLOSSARY.md`.
 
 Not to be confused with `gui/form_autosave.py` (historically "the session
 model"): that is form persistence; this layer is experiment management.
@@ -275,7 +283,8 @@ file-format change, not a routine edit.
 4. The sub-packages live here too: `session/eln/` (the ELN adapter standard,
    the eLabFTW backend, the **Outbox**, and the publisher — see
    `session/eln/README.md`, which owns its own rules) and `session/gateway/`
-   (agent MCP API, planned).
+   (the **Agent gateway**: **Role**s, **Action class**es and the permission
+   matrix — see `session/gateway/README.md`, which owns its own rules).
 5. **New servicing-log kind:** add one `LogKindSpec` to `DECLARED_LOG_KINDS`
    in `servicing_log.py` (fields as `ParamSpec`s, every one with a usable
    default) — storage, revision handling, and (once Phase 5 lands) the GUI
@@ -292,4 +301,5 @@ file-format change, not a routine edit.
 | `store.py` | Disk persistence: per-user, per-session folders (`session.json` + machine-wide active pointer) via `SessionStore`, one level above per-experiment folders (`experiment.json`, `gui_state.json`, `data/`) + their own active pointer via `ExperimentStore`; user roster; bundle-relative data-path (de)resolution. | `SessionStore` (`list_sessions(user_id)`, `create_session`, `load(user_id, session_id)`, `save`, `get_active` → `tuple[str, str] \| None`, `set_active(user_id, session_id)`, `make_session_id`), `ExperimentStore` (`list_experiments`, `load`, `save`, `get_active`, `set_active`, `make_experiment_id`, `data_dir`, `gui_state_path`, `outbox_path`, `relativize_data_file`, `resolve_data_file`), `UserRoster` (`list_users`, `get`, `add`) | `tests/test_session_layer.py` |
 | `manager.py` | The L6 façade: experiment lifecycle (incl. switching between open experiments, the run queue, and a chosen experiment folder name), automatic run recording from manifests, envelope installation, HDF5 context, save-health surfacing, session experiment-index reconciliation, the single write path for published ELN links, and the run queue (validated adds, ordered mutations, and the engine's pull seam). | `ExperimentManager` (`start_experiment(..., envelope=None, experiment_dirname=None)`, `close_experiment`, `set_findings`, `set_attended`, `set_queue`, `switch_experiment`, `current_data_dir`, `current_gui_state_path`, `experiment_context`, `envelope_variables`, `current_experiment`, `set_run_eln_link`, `run_queue`, `queue_snapshot`, `queue_entries`, `validate_run`, `queue_run`, `dequeue_run`, `move_queued_run`, `clear_run_queue`, `next_run`; optional `session_store`/`station`/`run_catalog` constructor args; signals `experiment_changed`, `run_recorded`, `store_health_changed`) | `tests/test_session_layer.py` |
 | `run_queue.py` | The run queue as data: immutable **run specs**, their ordering (operations drain before procedures — queue-jumping, never preemption), the one construction path from a spec to the live object the engine starts, and the add-time **run validation** (declared `ParamSpec` bounds, the headless build, `control_limits` + the **session envelope**). Imports no Qt, no Orchestrator, and no `cryosoft.procedures` — the classes a spec names are resolved through an injected run catalog. | `RunSpec`, `RunQueue` (`add`, `remove`, `move`, `clear`, `snapshot`, `entries`, `pop_next`, `find`), `RunFinding`, `RunValidation`, `build_run`, `validate_run`, `KIND_PROCEDURE`, `KIND_OPERATION`, the `FINDING_*` codes | `tests/test_run_queue.py` |
+| `gateway/` | The **Agent gateway** (sub-package, own README): the permission model in front of the control contract — `Role` × `ActionClass` as one `PERMISSION_MATRIX`, the PROVISIONAL per-command and per-capability classification tables, `authorize()`, and the in-process `Gateway` client that stamps an agent identity onto every command and answers a refusal on the engine's own verdict stream. | `Gateway`, `EngineClient`, `Role`, `Permission`, `PERMISSION_MATRIX`, `authorize`, `ActionClass`, `ClassifiedAction`, `UnclassifiedActionError`, `COMMAND_ACTION_CLASSES`, `CONTROL_ACTION_CLASSES`, `LIFECYCLE_ACTION_CLASSES`, `classify_command`, `classify_control` | `tests/test_gateway.py` + conformance |
 | `servicing_log.py` | The Servicing Log framework: declared log kinds (incl. the unifying flat `servicing` kind, the only one the recorder writes as of Phase 2), revisioned per-kind storage, the hourly helium record, consumption fit, the automatic recorder, and legacy-log migration. | `LogKindSpec`, `DECLARED_LOG_KINDS`, `ServicingLogStore` (`add_entry`, `revise_entry`, `delete_entry`, `append_machine_entry`, `entries`, `revisions`, `recordings_path`, `migrate_legacy`), `HeliumRecordStore` (`append`, `samples`), `consumption_rate_pct_per_h`, `CryogenicsRecorder` (`on_states_updated`, `on_run_started`, `on_run_finished`; signal `cryo_warning`), `migrate_legacy_servicing_log` | `tests/test_servicing_log.py` + conformance |
