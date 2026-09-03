@@ -16,6 +16,7 @@ from cryosoft.core.events import OPERATOR, Actor, ActorKind
 from cryosoft.core.plan import EnvelopeBound, ExperimentEnvelope
 from cryosoft.core.station import build_station
 from cryosoft.procedures.field_sweep import FieldSweep
+from cryosoft.procedures.operations.helium_fill import HeliumFillOperation
 from cryosoft.session.run_queue import (
     FINDING_BUILD_REFUSED,
     FINDING_CONTROL_LIMIT,
@@ -26,6 +27,7 @@ from cryosoft.session.run_queue import (
     KIND_PROCEDURE,
     RunFinding,
     RunQueue,
+    RunQueueHost,
     RunSpec,
     RunValidation,
     build_run,
@@ -356,7 +358,7 @@ def test_a_procedure_that_refuses_the_run_becomes_a_finding(station, tmp_path):
 
 
 def test_validation_renders_as_json(station, tmp_path):
-    """Findings and the duration placeholder are both JSON-safe."""
+    """Findings and the duration estimate are both JSON-safe."""
     result = validate_run(
         FieldSweep,
         dict(FAST_PARAMS, field_end=50.0),
@@ -366,8 +368,25 @@ def test_validation_renders_as_json(station, tmp_path):
 
     payload = json.loads(json.dumps(result.to_json()))
     assert payload["ok"] is False
-    assert payload["duration_estimate_s"] is None
     assert payload["findings"][0]["code"] == FINDING_CONTROL_LIMIT
+    # The run still built, so it still has an estimate — and the headline
+    # number is the breakdown's own total, never a second stored copy.
+    assert payload["duration_estimate_s"] == payload["estimate"]["total_s"]
+    assert payload["estimate"]["assumptions"]
+
+
+def test_a_refused_build_has_no_estimate(station, tmp_path):
+    """Nothing was built, so there is nothing to estimate — and it says so."""
+    result = validate_run(
+        FieldSweep,
+        dict(FAST_PARAMS, measurement_vi="no_such_vi"),
+        station=station,
+        data_directory=str(tmp_path),
+    )
+
+    assert [f.code for f in result.findings] == [FINDING_BUILD_REFUSED]
+    assert result.estimate is None
+    assert result.duration_estimate_s is None
 
 
 def test_run_validation_rejects_a_bare_string_finding():
@@ -420,3 +439,137 @@ def test_a_run_that_declares_no_targets_is_validated_on_its_parameters_alone(
     )
 
     assert result.ok
+
+
+# ── Probe runs: a reduced variant, queued and built like any other ───────────
+
+def test_a_spec_carries_its_probe_reduction_through_a_json_round_trip():
+    """A probe entry stays JSON-safe end to end, like every other spec field."""
+    spec = RunSpec(
+        kind=KIND_PROCEDURE,
+        run_class="FieldSweep",
+        params=FAST_PARAMS,
+        probe_spec={"n_points": 2, "averaging": 1, "max_wait_s": 0.0},
+    )
+
+    restored = RunSpec.from_json(json.loads(json.dumps(spec.to_json())))
+
+    assert restored.probe_spec == spec.probe_spec
+
+
+def test_a_spec_refuses_a_malformed_probe_reduction():
+    """A reduction that could not describe a run is refused when it is queued."""
+    with pytest.raises((TypeError, ValueError)):
+        RunSpec(
+            kind=KIND_PROCEDURE, run_class="FieldSweep", probe_spec={"n_points": 0}
+        )
+
+
+def test_an_operation_may_not_carry_a_probe_reduction():
+    """"A few points" means nothing for a servicing operation."""
+    with pytest.raises(ValueError, match="probe_spec"):
+        RunSpec(
+            kind=KIND_OPERATION,
+            run_class="HeliumFillOperation",
+            probe_spec={"n_points": 2},
+        )
+
+
+def test_build_run_reduces_a_probe_spec_to_the_cheap_variant(station, tmp_path):
+    """The pull seam builds the probe the spec asked for, not the full run."""
+    spec = RunSpec(
+        kind=KIND_PROCEDURE,
+        run_class="FieldSweep",
+        params={**FAST_PARAMS, "field_steps": 21},
+        sample_info=SAMPLE_INFO,
+        data_directory=str(tmp_path),
+        probe_spec={"n_points": 3},
+    )
+
+    run = build_run(spec, station=station, run_catalog={"FieldSweep": FieldSweep})
+
+    assert run.run_kind == "probe"
+    assert len(run.get_sweep_array()) == 3
+
+
+def test_validate_run_checks_the_probe_variant_when_one_is_asked_for(
+    station, tmp_path
+):
+    """A probe is validated as what would actually run — the reduced run."""
+    result = validate_run(
+        FieldSweep,
+        {**FAST_PARAMS, "field_steps": 21},
+        station=station,
+        data_directory=str(tmp_path),
+        probe_spec={"n_points": 3, "max_wait_s": 0.0},
+    )
+
+    assert result.ok
+
+
+def test_queueing_a_probe_stores_its_reduction_on_the_spec(station, tmp_path):
+    """What waits in the queue is the probe itself, reduction and all."""
+    host = RunQueueHost(
+        station=station, run_catalog={"FieldSweep": FieldSweep}
+    )
+
+    spec, validation = host.add(
+        FieldSweep,
+        FAST_PARAMS,
+        sample_info=SAMPLE_INFO,
+        data_directory=str(tmp_path),
+        probe_spec={"n_points": 2},
+    )
+
+    assert validation.ok
+    assert spec is not None and spec.probe_spec == {
+        "n_points": 2,
+        "averaging": 1,
+        "max_wait_s": 5.0,
+    }
+    assert host.next_run().run_kind == "probe"
+
+
+# ── Operations build headlessly too ──────────────────────────────────────────
+
+def test_an_operation_builds_headlessly_and_validates(station):
+    """Validation covers both run kinds: an operation is built and thrown away."""
+    result = validate_run(
+        HeliumFillOperation,
+        {"person": "AK"},
+        station=station,
+        kind=KIND_OPERATION,
+    )
+
+    assert result.ok
+
+
+def test_an_operation_this_station_cannot_honour_is_refused(station):
+    """The build itself is the check — an operation refuses what it cannot do."""
+    result = validate_run(
+        HeliumFillOperation,
+        {"level_vi": "no_such_vi"},
+        station=station,
+        kind=KIND_OPERATION,
+    )
+
+    assert not result.ok
+    assert [f.code for f in result.findings] == [FINDING_BUILD_REFUSED]
+    assert "no_such_vi" in result.findings[0].message
+
+
+def test_build_run_constructs_the_operation_the_spec_names(station):
+    """The operation half of the pull seam: one live operation, from data."""
+    spec = RunSpec(
+        kind=KIND_OPERATION,
+        run_class="HeliumFillOperation",
+        params={"person": "AK"},
+    )
+
+    run = build_run(
+        spec, station=station, run_catalog={"HeliumFillOperation": HeliumFillOperation}
+    )
+
+    assert isinstance(run, HeliumFillOperation)
+    assert run.run_kind == "operation"
+    assert run.get_params()["person"] == "AK"

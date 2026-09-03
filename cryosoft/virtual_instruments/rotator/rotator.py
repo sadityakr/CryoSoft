@@ -166,6 +166,20 @@ class RotatorVI(RotatorBase, RampableVI):
             return None
         return self._rate_deg_per_min
 
+    def nominal_ramp_rate(self) -> float | None:
+        """Return the rate a rotation would use right now, in degrees/min.
+
+        The declared rate a **duration estimate** is built from (see
+        ``RampableVI.nominal_ramp_rate``): the stage's current rate setting,
+        which starts at the setup's ``default_rate_deg_per_min`` and follows
+        ``set_rate_sample_angle()``. Pure read — no bus traffic, no active
+        ramp required.
+
+        Returns:
+            The nominal rotation rate in degrees/min.
+        """
+        return self._rate_deg_per_min
+
     def ramp_setpoint(self) -> float | None:
         """Return the setpoint last commanded to the stage, in degrees.
 

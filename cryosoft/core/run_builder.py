@@ -1,9 +1,14 @@
-"""Headless construction of a procedure instance from plain values.
+"""Headless construction of a run — a procedure or an operation — from plain values.
 
-The one place a ``BaseProcedure`` is instantiated. Every caller — the
-Procedure window's run-now and add-to-queue flows, the queue's session
-restore, and any future non-GUI client — routes through ``build_procedure``
-so a run is assembled identically no matter who asked for it.
+The one place a ``BaseProcedure`` or an ``OperationBase`` is instantiated.
+Every caller — the Procedure window's run-now and add-to-queue flows, the
+Operations panel, the queue's session restore, the engine port's dict
+payloads, and any future non-GUI client — routes through ``build_procedure``
+or ``build_operation`` so a run is assembled identically no matter who asked
+for it. The two shapes differ only in their constructor signature, which is
+exactly why each has its own function: a procedure takes the run's data
+context (sample, directory, prefix, experiment) as keywords, an operation
+takes the Station positionally and nothing else but its config values.
 
 Headless by contract: this module imports no Qt and touches no widget, so a
 procedure can be built in a test, from a script, or from a client that has no
@@ -27,6 +32,9 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from cryosoft.core.exceptions import CryoSoftError
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from collections.abc import Mapping
+
+    from cryosoft.core.plan import ProbeSpec
     from cryosoft.core.station import Station
 
 #: The run class being built, so the caller gets back exactly the type it
@@ -62,6 +70,7 @@ def build_procedure(
     data_directory: str,
     file_prefix: str = "",
     experiment_info: dict[str, Any] | None = None,
+    probe: ProbeSpec | None = None,
 ) -> RunT:
     """Instantiate *cls* from plain values.
 
@@ -77,17 +86,23 @@ def build_procedure(
         experiment_info: Experiment context stamped onto the run, or ``None``
             when no experiment is open. Forwarded as-is; ``BaseProcedure``
             already records ``None`` as ``{}``.
+        probe: Reduce the built run to a **probe run** (see ``ProbeSpec``'s
+            reduction rules). ``None`` — the default — builds the run as
+            requested. The reduction is applied AFTER construction, on the
+            instance, so a probe is only ever a reduction of a run the
+            procedure already accepted.
 
     Returns:
-        A ready instance of *cls*.
+        A ready instance of *cls*, reduced to a probe when *probe* was given.
 
     Raises:
         CryoSoftError: If the procedure refuses the run — the station cannot
             honour it, or a value violates a setup limit.
         TypeError: If *params* does not match the procedure's signature.
-        ValueError: If a parameter value is invalid.
+        ValueError: If *probe* was given and *cls* has no ``apply_probe()``
+            (it is not a ``BaseProcedure``), or a parameter value is invalid.
     """
-    return cls(
+    run = cls(
         station=station,
         sample_info=sample_info,
         data_directory=data_directory,
@@ -95,3 +110,50 @@ def build_procedure(
         experiment_info=experiment_info,
         **params,
     )
+    if probe is not None:
+        apply_probe = getattr(run, "apply_probe", None)
+        if not callable(apply_probe):
+            raise ValueError(
+                f"{cls.__name__} cannot be probed: it declares no "
+                f"apply_probe() (see BaseProcedure)"
+            )
+        apply_probe(probe)
+    return run
+
+
+def build_operation(
+    cls: type[RunT],
+    *,
+    station: Station,
+    params: Mapping[str, Any] | None = None,
+) -> RunT:
+    """Instantiate an operation *cls* from plain values.
+
+    The operation half of the headless construction path, and the one place
+    the operation constructor shape is written down: ``cls(station,
+    **params)`` — the Station positionally, its config block as keywords.
+    Having it here rather than inline at each call site is what lets the
+    queue, the engine port and a headless client (an agent asking to validate
+    a servicing operation before proposing it) all build the same instance,
+    and what lets ``validate_run()`` cover operations at all.
+
+    An operation records no sample, directory, prefix or experiment context —
+    it writes no HDF5 file of its own by default — which is why it takes none
+    of ``build_procedure``'s data-context keywords.
+
+    Args:
+        cls: The concrete ``OperationBase`` subclass to build.
+        station: The Station the operation will drive.
+        params: The operation's own config values, passed as keyword
+            arguments. ``None`` means "the class defaults alone".
+
+    Returns:
+        A ready instance of *cls*.
+
+    Raises:
+        CryoSoftError: If the operation refuses the run — the station cannot
+            honour it (a missing VI, say).
+        TypeError: If *params* does not match the operation's signature.
+        ValueError: If a parameter value is invalid.
+    """
+    return cls(station, **dict(params or {}))

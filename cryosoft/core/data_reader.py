@@ -778,10 +778,14 @@ class RunHandle:
         """Return the run's metadata under the canonical keys.
 
         The writer stores each ``/metadata`` attribute as JSON, so every
-        structured attribute is decoded here. ``run_id``/``run_kind``/
-        ``status``/``reason`` come back empty: they belong to the run manifest
-        the engine emits, and the file does not carry them — a live
-        ``RunBuffer`` answers them from the manifest it was started with.
+        structured attribute is decoded here. ``run_kind`` comes from the
+        file's own ``/metadata.run_kind`` — the one manifest field the writer
+        does record, so a **probe run**'s file identifies itself as a probe to
+        whoever opens it later; a file written before that attribute existed
+        answers ``""``. ``run_id``/``status``/``reason`` do come back empty:
+        they belong to the run manifest the engine emits, and the file does
+        not carry them — a live ``RunBuffer`` answers them from the manifest
+        it was started with.
 
         Returns:
             A dict carrying exactly ``RUN_METADATA_KEYS``. ``raw`` holds every
@@ -800,7 +804,7 @@ class RunHandle:
         return {
             "source": "file",
             "run_id": "",
-            "run_kind": "",
+            "run_kind": str(raw.get("run_kind", "")),
             "procedure": str(raw.get("procedure_name", "")),
             "params": params if isinstance(params, dict) else {},
             "sample": raw.get("sample_info") or {},

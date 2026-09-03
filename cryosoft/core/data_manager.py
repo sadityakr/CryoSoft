@@ -42,6 +42,7 @@ class DataManager:
         n_sweep_points: int,
         file_prefix: str = "",
         experiment_info: dict | None = None,
+        run_kind: str = "run",
     ) -> None:
         """Create the HDF5 file and write all metadata.
 
@@ -99,11 +100,21 @@ class DataManager:
             session layer — experiment id/title, user identity, ELN link. Stored
             as ``/metadata/experiment_info``; ``None`` is recorded as ``{}`` so
             the attribute always exists.
+        run_kind:
+            What kind of run wrote this file — ``"run"`` for a science run,
+            ``"probe"`` for a **probe run** (the cheap reduced variant; see
+            ``core/plan.py``'s ``ProbeSpec``), ``"operation"`` for a servicing
+            operation. Stored as ``/metadata/run_kind`` and returned by
+            ``data_reader.read_metadata()``, so a probe file can never be
+            mistaken for science data by whoever opens it later. Written by the
+            run itself from its own ``run_kind`` attribute; the default keeps
+            every existing caller writing a science run.
         """
         if n_sweep_points < 1:
             raise ValueError(f"n_sweep_points must be >= 1, got {n_sweep_points}")
 
         self._procedure_name = procedure_name
+        self._run_kind = str(run_kind or "run")
         self._n_sweep_points = n_sweep_points
         self._data_config = data_config
         self._last_saved_index: int = _SENTINEL
@@ -174,6 +185,7 @@ class DataManager:
         """Write all metadata to `/metadata/` as JSON-encoded HDF5 attributes."""
         meta = self._file.require_group("metadata")
         meta.attrs["procedure_name"] = self._procedure_name
+        meta.attrs["run_kind"] = self._run_kind
         meta.attrs["procedure_params"] = json.dumps(procedure_params)
         meta.attrs["sample_info"] = json.dumps(sample_info)
         meta.attrs["experiment_info"] = json.dumps(experiment_info)

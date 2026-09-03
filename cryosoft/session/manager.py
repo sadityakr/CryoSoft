@@ -509,6 +509,7 @@ class ExperimentManager(QObject):
         sample_info: Mapping[str, Any] | None = None,
         data_directory: str = "",
         file_prefix: str = "",
+        probe_spec: Mapping[str, Any] | None = None,
     ) -> RunValidation:
         """Decide whether a proposed run may be queued — free, and with no effect.
 
@@ -528,6 +529,8 @@ class ExperimentManager(QObject):
             data_directory: Directory the run would write into. Never created
                 or written here.
             file_prefix: Filename prefix the run would use.
+            probe_spec: A ``ProbeSpec``'s dict form to check the **probe
+                run** variant instead of the full run.
 
         Returns:
             A ``RunValidation``; ``ok`` is True exactly when nothing was found.
@@ -543,6 +546,7 @@ class ExperimentManager(QObject):
             sample_info=sample_info,
             data_directory=data_directory,
             file_prefix=file_prefix,
+            probe_spec=probe_spec,
         )
 
     def queue_run(
@@ -554,6 +558,7 @@ class ExperimentManager(QObject):
         sample_info: Mapping[str, Any] | None = None,
         data_directory: str = "",
         file_prefix: str = "",
+        probe_spec: Mapping[str, Any] | None = None,
         actor: Actor = OPERATOR,
     ) -> tuple[RunSpec | None, RunValidation]:
         """Validate a proposed run and, if it passes, queue it.
@@ -569,6 +574,8 @@ class ExperimentManager(QObject):
             sample_info: Sample metadata to record with the run.
             data_directory: Directory the run writes into.
             file_prefix: Optional filename prefix.
+            probe_spec: A ``ProbeSpec``'s dict form to queue the **probe
+                run** variant of this run.
             actor: Who is queueing it.
 
         Returns:
@@ -583,6 +590,7 @@ class ExperimentManager(QObject):
             sample_info=sample_info,
             data_directory=data_directory,
             file_prefix=file_prefix,
+            probe_spec=probe_spec,
             actor=actor,
         )
 

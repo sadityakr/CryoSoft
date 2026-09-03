@@ -38,10 +38,11 @@ from cryosoft.core.plan import (
     Command,
     EnvelopeVariable,
     ExperimentEnvelope,
+    ProbeSpec,
     Target,
 )
 from cryosoft.core.ramps import RampRecord, build_ramp_records
-from cryosoft.core.run_builder import build_procedure
+from cryosoft.core.run_builder import build_operation, build_procedure
 from cryosoft.core.stall_detection import StallConfig, StallState, apply_stall_verdict
 from cryosoft.core.station import FaultRecord, Station
 from cryosoft.core.tiered_trend_logger import TieredTrendLogger
@@ -287,7 +288,8 @@ class Orchestrator(QObject):
             procedure's/operation's ``initiate()`` succeeded and its plan was
             dispatched. Keys: ``run_id``, ``procedure`` (display name),
             ``kind`` ("run" for a procedure, "probe" for a probe run, and
-            "operation" for an operation — its ``run_kind`` class attribute),
+            "operation" for an operation — the run's own ``run_kind``
+            attribute; ``apply_probe()`` is what sets it to "probe"),
             ``params`` (merged parameter values), ``data_file`` (HDF5 path,
             captured here because the procedure closes its file before the
             run ends; empty for a dataset-less operation), and
@@ -688,11 +690,17 @@ class Orchestrator(QObject):
           class name, resolved through the ``run_catalog`` given at
           construction), plus ``params``, ``sample_info``, ``data_directory``,
           ``file_prefix`` and ``experiment_info`` — the arguments
-          ``run_builder.build_procedure()`` assembles a run from.
+          ``run_builder.build_procedure()`` assembles a run from — and the
+          optional ``probe_spec`` (``{"n_points": .., "averaging": ..,
+          "max_wait_s": ..}``, any key optional), which reduces the same run
+          to a **probe run**: the same class and the same instruments, cut
+          down to a few points so it costs minutes instead of hours. The run
+          it starts declares ``kind == "probe"`` in its manifest, its
+          ``RunStarted`` event and its data file.
         * ``RUN_OPERATION`` / ``QUEUE_OPERATION`` take ``operation`` (the
-          class name) plus ``params``; an operation is built as
-          ``cls(station, **params)``, the constructor shape every operation
-          declares.
+          class name) plus ``params``; an operation is built by
+          ``run_builder.build_operation()``, the constructor shape every
+          operation declares.
         * ``SET_EXPERIMENT_ENVELOPE`` takes ``envelope``: the
           ``{vi_name: {min_value, max_value, state_key}}`` mapping
           ``ExperimentEnvelope.from_dict()`` reads, or ``null`` to clear it.
@@ -829,21 +837,24 @@ class Orchestrator(QObject):
 
         The engine may not import ``cryosoft.procedures`` (contract C5), so a
         class name is resolved through the ``run_catalog`` whoever owns
-        discovery handed the constructor. A procedure is assembled by
-        ``run_builder.build_procedure()`` — the one headless construction path
-        — and an operation by its own ``cls(station, **params)`` constructor
-        shape.
+        discovery handed the constructor. Both kinds are assembled by
+        ``core.run_builder`` — ``build_procedure()`` and ``build_operation()``,
+        the two headless construction paths — so a run submitted as JSON is
+        the same object the GUI and the queue build.
 
         Args:
             kind: ``"procedure"`` or ``"operation"``; also the args key
                 carrying the class name.
-            args: The command's arguments.
+            args: The command's arguments. A procedure payload may carry
+                ``probe_spec``, which reduces the built run to a probe (see
+                ``ProbeSpec``).
 
         Returns:
             The ready procedure or operation instance.
 
         Raises:
-            ValueError: If no class of that name is in the run catalog.
+            ValueError: If no class of that name is in the run catalog, or a
+                ``probe_spec`` is malformed.
             CryoSoftError: If the run refuses to be built (see
                 ``run_builder.PROCEDURE_BUILD_ERRORS``).
         """
@@ -856,7 +867,8 @@ class Orchestrator(QObject):
             )
         params = dict(args.get("params") or {})
         if kind == "operation":
-            return run_class(self._station, **params)
+            return build_operation(run_class, station=self._station, params=params)
+        probe_spec = args.get("probe_spec")
         return build_procedure(
             run_class,
             station=self._station,
@@ -865,6 +877,7 @@ class Orchestrator(QObject):
             data_directory=str(args.get("data_directory") or ""),
             file_prefix=str(args.get("file_prefix") or ""),
             experiment_info=args.get("experiment_info"),
+            probe=ProbeSpec.from_json(probe_spec) if probe_spec else None,
         )
 
     # ------------------------------------------------------------------

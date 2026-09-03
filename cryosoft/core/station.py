@@ -1633,6 +1633,36 @@ class Station:
                 }
         return result
 
+    def nominal_ramp_rates(self) -> dict[str, float]:
+        """Return each system VI's declared ramp rate, in user units per minute.
+
+        The declaration counterpart of ``get_ramp_status()``: what every
+        ramping VI WOULD ramp at, read from config alone (see
+        ``RampableVI.nominal_ramp_rate``) rather than from an active ramp, so
+        it can be answered before any run exists and without touching the bus.
+        The **duration estimate** (``core/estimates.py``) turns a proposed
+        run's declared setpoints into a time with exactly this mapping; a VI
+        that declares no rate is simply absent, which the estimate then
+        reports as an explicit assumption instead of counting as instant.
+
+        Returns:
+            ``{vi_name: rate_per_minute}`` for every system VI that declares
+            one — tesla/min, kelvin/min, degrees/min, matching each VI's own
+            ``ramp_target()`` units.
+        """
+        rates: dict[str, float] = {}
+        for vi_name, vi_type in self._vi_registry.items():
+            if vi_type != "system":
+                continue
+            vi = self._virtual_instruments[vi_name]
+            if not isinstance(vi, RampableVI):
+                continue
+            rate = vi.nominal_ramp_rate()
+            if rate is None or rate <= 0:
+                continue
+            rates[vi_name] = float(rate)
+        return rates
+
     # ------------------------------------------------------------------
     # Safety
     # ------------------------------------------------------------------
