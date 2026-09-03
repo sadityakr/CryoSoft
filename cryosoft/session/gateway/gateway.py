@@ -424,8 +424,9 @@ class Gateway:
     def tool_schemas(self) -> list[dict[str, Any]]:
         """Return the tool list in the shape a tool-use API expects.
 
-        The one rendering every client publishes, so E4's CLI and a later MCP
-        adapter offer the same surface with no code of their own.
+        The one rendering every client publishes, so a terminal client and a
+        later tool-use adapter offer the same surface with no code of their
+        own.
 
         Returns:
             One ``{"name", "description", "input_schema"}`` dict per tool.

@@ -86,8 +86,9 @@ from cryosoft.session.gateway.action_classes import (
 
 logger = logging.getLogger(__name__)
 
-#: Name of the per-experiment agent action feed (**E3**'s JSONL sink). Read
-#: through ``ExperimentStore.agent_feed_path()`` where that exists, and from
+#: Name of the per-experiment agent action feed: the append-only JSONL record
+#: of what an agent asked for and what it was answered. Read through
+#: ``ExperimentStore.agent_feed_path()`` where that exists, and from
 #: ``<experiment folder>/agent_actions.jsonl`` otherwise — the layout the
 #: store's own docstring documents.
 AGENT_FEED_FILENAME = "agent_actions.jsonl"
@@ -150,8 +151,8 @@ class ToolSpec:
 
     Frozen and JSON-safe: ``to_json()`` renders the whole declaration and
     ``to_schema()`` renders the ``{name, description, input_schema}`` shape a
-    tool-use API expects, so E4's CLI and a later MCP adapter publish the same
-    list with no rendering code of their own.
+    tool-use API expects, so a terminal client and a later tool-use adapter
+    publish the same list with no rendering code of their own.
 
     Exactly one of ``command`` and ``session_function`` is set: a tool either
     wraps a ``CommandName`` (and is submitted, authorized and answered by a
