@@ -296,6 +296,7 @@ class CommandName(str, Enum):
     DISCONNECT_INSTRUMENT = "disconnect_instrument"
 
     # Faults, safety and recovery
+    EMERGENCY_STANDBY = "emergency_standby"
     ACKNOWLEDGE = "acknowledge"
     ACKNOWLEDGE_FAULT = "acknowledge_fault"
     RETRY_FAULT = "retry_fault"
@@ -498,16 +499,37 @@ class StatusSnapshot(_ContractMessage):
     """Everything a client needs to answer a read without calling the engine.
 
     Emitted once per tick and on every state change; a client's mirror of it
-    is what makes every read local. The shape here is the minimal one the
-    contract needs — state, the run in flight, and a per-instrument mapping —
-    and is meant to be extended field by field as the engine's queries move
-    onto it; ``instruments`` carries the live half (availability, faults,
-    holds) of what ``StationInfo`` declares statically.
+    is what makes every read local. Its fields are the engine's whole read
+    surface: the state machine, the run in flight, and one field per
+    read-only accessor the Orchestrator exposes — named after that accessor,
+    so "which snapshot field answers ``held_vi_names()``?" never needs a
+    lookup table. ``tests/test_conformance.py`` diffs the two surfaces, so an
+    accessor added to the engine without a field here fails the harness.
+
+    ``instruments`` is the per-VI merge of the same information (availability,
+    fault, offline reason, hold, override) for a client that renders one panel
+    per instrument rather than one table per concern; it carries the live half
+    of what ``StationInfo`` declares statically.
 
     Attributes:
         state: The engine's current state name.
-        run: The active run's summary, or ``None`` when idle. JSON-safe.
+        run: The active run's summary (``run_id``, ``kind``, ``name``,
+            ``progress``, ``step`` where available), or ``None`` when idle.
         instruments: ``{vi_name: {...}}`` of live per-instrument status.
+        is_monitoring: Whether the per-tick monitoring cycle is polling.
+        pause_pending: Whether a pause is waiting for the current datapoint.
+        active_run_kind: ``"procedure"``/``"operation"``, or ``None``.
+        scanner_enabled: Whether scanner-sensitive procedures may use it.
+        override_active: Whether the EMERGENCY manual override is unlocked
+            (the ``override_active(None)`` answer; the per-VI answers live in
+            ``instruments[vi_name]["override_active"]``).
+        manual_override_expires_at: Soonest-expiring override, or ``None``.
+        held_vi_names: Every VI under a hold-severity condition.
+        active_ramps: One JSON dict per ramp running as of the last tick.
+        availabilities: ``{vi_name: availability dict}`` for every VI.
+        vi_faults: ``{vi_name: fault dict}`` for every faulted VI.
+        offline_reason: ``{vi_name: reason}`` for every offline VI.
+        envelope_variables: ``{vi_name: envelope-variable dict}``.
         seq: Monotonic sequence number.
         ts: Unix time the snapshot was taken.
     """
@@ -517,18 +539,63 @@ class StatusSnapshot(_ContractMessage):
     state: str
     run: dict[str, Any] | None = None
     instruments: dict[str, Any] = field(default_factory=dict)
+    is_monitoring: bool = False
+    pause_pending: bool = False
+    active_run_kind: str | None = None
+    scanner_enabled: bool = False
+    override_active: bool = False
+    manual_override_expires_at: float | None = None
+    held_vi_names: tuple[str, ...] = ()
+    active_ramps: tuple[dict[str, Any], ...] = ()
+    availabilities: dict[str, Any] = field(default_factory=dict)
+    vi_faults: dict[str, Any] = field(default_factory=dict)
+    offline_reason: dict[str, str] = field(default_factory=dict)
+    envelope_variables: dict[str, Any] = field(default_factory=dict)
     seq: int = 0
     ts: float = field(default_factory=time.time)
 
     def __post_init__(self) -> None:
-        """Defensively copy and JSON-check the two mapping fields.
+        """Defensively copy and JSON-check every collection field.
 
         Raises:
-            TypeError: If either field is not a mapping of JSON-safe values.
+            TypeError: If a mapping field is not a mapping of JSON-safe
+                values, if a sequence field is not a sequence, or if a scalar
+                field carries the wrong type.
         """
         if self.run is not None:
             object.__setattr__(self, "run", _checked_mapping(self.run))
-        object.__setattr__(self, "instruments", _checked_mapping(self.instruments))
+        for name in (
+            "instruments",
+            "availabilities",
+            "vi_faults",
+            "offline_reason",
+            "envelope_variables",
+        ):
+            object.__setattr__(self, name, _checked_mapping(getattr(self, name)))
+        for name in ("is_monitoring", "pause_pending", "scanner_enabled",
+                     "override_active"):
+            if not isinstance(getattr(self, name), bool):
+                raise TypeError(f"StatusSnapshot.{name} must be a bool")
+        if self.active_run_kind is not None and not isinstance(self.active_run_kind, str):
+            raise TypeError("StatusSnapshot.active_run_kind must be a str or None")
+        if self.manual_override_expires_at is not None and not isinstance(
+            self.manual_override_expires_at, (int, float)
+        ):
+            raise TypeError(
+                "StatusSnapshot.manual_override_expires_at must be a number or None"
+            )
+        if isinstance(self.held_vi_names, (str, Mapping)):
+            raise TypeError("StatusSnapshot.held_vi_names must be a sequence of names")
+        object.__setattr__(
+            self, "held_vi_names", tuple(str(name) for name in self.held_vi_names)
+        )
+        if isinstance(self.active_ramps, (str, Mapping)):
+            raise TypeError("StatusSnapshot.active_ramps must be a sequence of dicts")
+        object.__setattr__(
+            self,
+            "active_ramps",
+            tuple(_checked_mapping(entry) for entry in self.active_ramps),
+        )
 
 
 @dataclass(frozen=True)
