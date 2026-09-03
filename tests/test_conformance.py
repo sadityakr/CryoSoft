@@ -54,6 +54,7 @@ from pathlib import Path
 
 import pytest
 
+import cryosoft.core
 import cryosoft.drivers
 import cryosoft.procedures
 import cryosoft.virtual_instruments
@@ -3310,3 +3311,63 @@ def test_command_name_values_are_the_method_names() -> None:
             f"CommandName.{member.name} = {member.value!r} is not a public "
             f"Orchestrator method"
         )
+
+
+# ── Run-source contract ───────────────────────────────────────────────────────
+# The "one vocabulary for live and stored runs" standard (core/data_reader.py's
+# module docstring, GLOSSARY.md's **Run source**). Implementations are found by
+# having the vocabulary's methods rather than by being named, so a third source
+# added later — a probe-run view, a remote reader — is held to the same shape
+# the moment its file exists.
+
+_RUN_SOURCE_METHODS = ("list_columns", "read_slice", "summary_stats", "read_metadata")
+
+
+def _run_source_classes() -> list[type]:
+    """Every class in cryosoft.core answering the run-source vocabulary."""
+    from cryosoft.core.data_reader import RunSource
+
+    found: list[type] = []
+    for mod_info in pkgutil.iter_modules(cryosoft.core.__path__):
+        module = importlib.import_module(f"cryosoft.core.{mod_info.name}")
+        found.extend(
+            cls
+            for cls in _public_classes(module)
+            if cls is not RunSource
+            and all(callable(getattr(cls, name, None)) for name in _RUN_SOURCE_METHODS)
+        )
+    return found
+
+
+def test_run_source_implementations_are_discovered() -> None:
+    """Both known run sources are found, so the check below is not vacuous."""
+    assert {"RunHandle", "RunBuffer"} <= {cls.__name__ for cls in _run_source_classes()}
+
+
+@pytest.mark.parametrize(
+    "source_cls", _run_source_classes(), ids=lambda cls: cls.__name__
+)
+def test_run_source_conformance(source_cls: type) -> None:
+    """Every run source answers the vocabulary with the declared signatures.
+
+    A consumer written against `RunSource` must be able to hold either source
+    without adapting, which means matching signatures — not merely matching
+    method names — plus the `n_points` counter every source reports.
+    """
+    from cryosoft.core.data_reader import RunSource
+
+    declared = _public_api(RunSource)
+    actual = _public_api(source_cls)
+    for name in _RUN_SOURCE_METHODS:
+        assert name in actual, f"{source_cls.__name__} is missing {name}()"
+        assert list(actual[name].parameters) == list(declared[name].parameters), (
+            f"{source_cls.__name__}.{name}{actual[name]} does not take the "
+            f"run-source vocabulary's parameters {name}{declared[name]}"
+        )
+        assert actual[name].return_annotation is not inspect.Signature.empty, (
+            f"{source_cls.__name__}.{name}() must declare what it returns"
+        )
+    assert isinstance(getattr(source_cls, "n_points", None), property), (
+        f"{source_cls.__name__}.n_points must be a property reporting how many "
+        f"sweep points the source holds"
+    )
