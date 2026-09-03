@@ -205,12 +205,17 @@ class QueuePanel(QGroupBox):
         run_queue_btn.setIcon(qta.icon("fa5s.forward", color=TEXT_ON_ACCENT))
         run_queue_btn.setToolTip("Run all queued procedures in order")
         run_queue_btn.clicked.connect(self._on_run_queue)
+        # Two rows, not one: the per-item actions (which act on the selected
+        # waiting run) on the first, and Run Queue (which starts the whole
+        # queue) on the second. Keeping all five on one row pushed this group
+        # box's minimum width past what the window's 50/50 split can give it
+        # at 1280 px, which took the width back out of the parameter form and
+        # put a horizontal scrollbar under it.
         btn_row.addWidget(up_btn)
         btn_row.addWidget(down_btn)
         btn_row.addWidget(remove_btn)
         btn_row.addWidget(probe_btn)
         btn_row.addStretch()
-        btn_row.addWidget(run_queue_btn)
         vlay.addLayout(btn_row)
 
         # What the last probe was told about itself: the validation's
@@ -223,6 +228,11 @@ class QueuePanel(QGroupBox):
         self._probe_label.setWordWrap(True)
         self._probe_label.setVisible(False)
         vlay.addWidget(self._probe_label)
+
+        run_row = QHBoxLayout()
+        run_row.addStretch()
+        run_row.addWidget(run_queue_btn)
+        vlay.addLayout(run_row)
 
         self._sync_from_queue()
 
