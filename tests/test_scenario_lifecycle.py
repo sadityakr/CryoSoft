@@ -13,16 +13,15 @@
 from __future__ import annotations
 
 import json
-import time
 from typing import Any
 
 import pytest
-from PyQt6.QtCore import QThread, QTimer
+from PyQt6.QtCore import QThread
 
 from cryosoft.core import events as ev
-from cryosoft.core.data_reader import list_columns, open_run, read_metadata
+from cryosoft.core.data_reader import list_columns, open_run
 from cryosoft.core.instrument_host import InstrumentHost
-from cryosoft.core.plan import PhasePlan, StepPlan, Target
+from cryosoft.core.plan import PhasePlan, StepPlan
 from cryosoft.core.run_builder import build_procedure
 from cryosoft.core.station import build_station
 from cryosoft.procedures.field_sweep import FieldSweep
@@ -31,7 +30,7 @@ from cryosoft.procedures.time_series import TimeSeries
 from cryosoft.session.manager import ExperimentManager
 from cryosoft.session.models import RUN_STATUS_DONE
 from cryosoft.session.store import ExperimentStore, User, UserRoster
-from tests.instrument_modes import build_host, instrument_mode, shutdown_host
+from tests.instrument_modes import instrument_mode, shutdown_host
 
 CONFIG_PATH = "cryosoft/configs/sim_cryostat"
 
@@ -80,10 +79,65 @@ TIME_SERIES_PARAMS: dict[str, Any] = {
     "readings_per_point": 5,
 }
 
+class _QueueRun:
+    """A single-point, no-target run: instant, and keyword-buildable.
+
+    Minimal on purpose (deliberately not a ``FieldSweep``): what scenario 3
+    tests is the queue's ordering and chaining, never a procedure's own
+    behaviour, so this commands no hardware at all — no ramp, no wait — and
+    finishes on the very first tick that reaches MEASURING. Accepts
+    ``build_procedure()``'s keyword contract (``station``, ``sample_info``,
+    ``data_directory``, ``file_prefix``, ``experiment_info``, ``**params``)
+    so it can be queued either as a live object or as a dict payload resolved
+    through the run catalog.
+    """
+
+    command_scope = "measurement"
+
+    def __init__(
+        self,
+        station: Any,
+        name: str = "Queue Run",
+        sample_info: Any = None,
+        data_directory: str = "",
+        file_prefix: str = "",
+        experiment_info: Any = None,
+        **params: Any,
+    ) -> None:
+        self.name = name
+        self._done = False
+
+    def initiate(self) -> PhasePlan:
+        return PhasePlan(targets={}, commands=(), wait_s=0.0)
+
+    def change_sweep_step(self) -> StepPlan | None:
+        if self._done:
+            return None
+        self._done = True
+        return StepPlan(targets={}, wait_s=0.0)
+
+    def measure(self) -> None:
+        pass
+
+    def standby(self) -> PhasePlan:
+        return PhasePlan(targets={}, commands=(), wait_s=0.0)
+
+    def get_progress(self) -> float:
+        return 1.0 if self._done else 0.0
+
+
+class _QueueOperation(_QueueRun):
+    """The same instant run, but scoped as an operation for the queue rule."""
+
+    command_scope = "operation"
+
+
 RUN_CATALOG: dict[str, type] = {
     "FieldSweep": FieldSweep,
     "TemperatureSweep": TemperatureSweep,
     "TimeSeries": TimeSeries,
+    "_QueueRun": _QueueRun,
+    "_QueueOperation": _QueueOperation,
 }
 
 #: A queued hop costs one event-loop turn; this bounds every wait generously
@@ -361,3 +415,92 @@ def test_other_procedures_run_to_completion_the_same_way(
     assert snapshots[-1].run is None
 
     assert proxy.state == "IDLE"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 3. The queue: operations-first, chained via next_procedure, then empty
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_a_queued_operation_starts_ahead_of_two_queued_procedures_and_chains(
+    host, proxy, qtbot
+):
+    """Operations-first and chaining, both survive the client boundary.
+
+    Two procedures are queued first, then one operation; the operation
+    starts FIRST regardless, and each finish pulls the next run via the
+    engine's own ``run_queue()`` chain (``_finish_run()`` -> IDLE ->
+    ``run_queue()``) with no client re-queueing anything. A final
+    ``run_queue()`` on the now-empty queue starts nothing.
+    """
+    changes: list[ev.QueueChanged] = []
+    started: list[str] = []
+    finished: list[str] = []
+    proxy.queue_changed_event.connect(changes.append)
+    proxy.run_started.connect(lambda m: started.append(m["procedure"]))
+    proxy.run_finished.connect(lambda m: finished.append(m["procedure"]))
+
+    proxy.queue_procedure(_QueueRun(host.station, name="Proc B"))
+    proxy.queue_procedure(_QueueRun(host.station, name="Proc C"))
+    proxy.queue_operation(_QueueOperation(host.station, name="Op A"))
+    qtbot.waitUntil(lambda: len(changes) >= 3, timeout=WAIT_MS)
+    assert [e["run_class"] for e in changes[-1].entries] == [
+        "_QueueOperation",
+        "_QueueRun",
+        "_QueueRun",
+    ], "the queue must list operations ahead of procedures"
+
+    proxy.run_queue()
+    qtbot.waitUntil(lambda: len(finished) == 3, timeout=WAIT_MS)
+    qtbot.waitUntil(lambda: proxy.state == "IDLE", timeout=WAIT_MS)
+
+    assert started == ["Op A", "Proc B", "Proc C"]
+    assert finished == ["Op A", "Proc B", "Proc C"]
+    assert all(c.actor.kind is ev.ActorKind.OPERATOR for c in changes)
+
+    # Nothing left to pull: run_queue() on an empty queue starts nothing.
+    blocked: list[str] = []
+    proxy.action_blocked.connect(blocked.append)
+    before_started, before_finished = list(started), list(finished)
+    proxy.run_queue()
+    qtbot.wait(300)
+    assert started == before_started
+    assert finished == before_finished
+    assert blocked == [], "an empty queue is not a refusal"
+
+
+def test_a_queue_changed_event_names_the_actor_who_queued_it(host, proxy, qtbot, tmp_path):
+    """Accountability crosses the boundary: the queue shows who queued a run.
+
+    Queued as a JSON command (the only way to attach a non-operator actor
+    from a client, per ``proxy.queue_procedure()``'s own docstring), through
+    the run catalog, exactly as an agent gateway would.
+    """
+    changes: list[ev.QueueChanged] = []
+    proxy.queue_changed_event.connect(changes.append)
+    agent = ev.Actor(kind=ev.ActorKind.AGENT, id="scenario-queue-agent", role="operator")
+
+    command = ev.Command(
+        name=ev.CommandName.QUEUE_PROCEDURE,
+        actor=agent,
+        args={
+            "procedure": "FieldSweep",
+            "params": dict(FIELD_SWEEP_PARAMS),
+            "sample_info": SAMPLE_INFO,
+            "data_directory": str(tmp_path),
+        },
+    )
+    request_id = proxy.submit(command)
+    qtbot.waitUntil(lambda: bool(changes), timeout=WAIT_MS)
+
+    event = changes[-1]
+    assert event.actor.kind is ev.ActorKind.AGENT
+    assert event.actor.id == agent.id
+    assert event.request_id == request_id
+    assert event.entries[0]["run_class"] == "FieldSweep"
+    assert event.entries[0]["actor"]["id"] == agent.id
+    assert json.loads(json.dumps(event.to_json()))  # JSON-safe end to end
+
+    # Drain it so the engine is left IDLE with an empty queue for teardown.
+    proxy.run_queue()
+    qtbot.waitUntil(lambda: proxy.state == "IDLE", timeout=WAIT_MS)
