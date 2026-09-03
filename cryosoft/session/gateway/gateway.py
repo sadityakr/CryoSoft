@@ -32,8 +32,9 @@ notice the difference.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import replace
-from typing import Any, Mapping, Protocol, runtime_checkable
+from typing import Any, Protocol
 
 from cryosoft.core.events import (
     Actor,
@@ -50,7 +51,6 @@ from cryosoft.session.gateway.roles import Role, authorize
 logger = logging.getLogger(__name__)
 
 
-@runtime_checkable
 class EngineClient(Protocol):
     """The engine surface a gateway needs — the control contract, nothing more.
 

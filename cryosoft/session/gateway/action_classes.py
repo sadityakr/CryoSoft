@@ -53,9 +53,9 @@ the normal path.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
-from typing import Mapping
 
 from cryosoft.core.events import Command, CommandName, StationInfo
 
