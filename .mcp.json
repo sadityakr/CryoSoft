@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "cryosoft": {
+      "command": "python",
+      "args": ["-m", "cryosoft.mcp"],
+      "env": {
+        "CRYOSOFT_MCP_ROLE": "observer",
+        "CRYOSOFT_MCP_ACTOR_ID": "claude-code"
+      }
+    }
+  }
+}
