@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -79,6 +80,7 @@ TIME_SERIES_PARAMS: dict[str, Any] = {
     "voltmeter_range_V": 0.1,
     "readings_per_point": 5,
 }
+
 
 class _QueueRun:
     """A single-point, no-target run: instant, and keyword-buildable.
@@ -342,8 +344,6 @@ def test_field_sweep_run_record_completes_with_a_data_file_on_disk(
     run = stored.runs[0]
     assert run.status == RUN_STATUS_DONE
     assert run.data_file
-    from pathlib import Path
-
     assert Path(run.data_file).exists()
 
 
@@ -543,8 +543,6 @@ def test_two_runs_back_to_back_produce_two_distinct_files_and_records(
     file2, run_id2 = _run_once("second")
 
     assert file1 != file2
-    from pathlib import Path
-
     assert Path(file1).exists()
     assert Path(file2).exists()
 
