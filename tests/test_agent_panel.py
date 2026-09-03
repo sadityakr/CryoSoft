@@ -529,3 +529,126 @@ def test_a_panel_without_a_session_layer_is_a_pure_view(qtbot):
 
     assert len(panel.row_texts()) == 1
     assert panel.active_agent_count() == 1
+
+
+# ── The envelope editor in the experiment header ──────────────────────────────
+
+
+def test_the_experiment_header_hides_the_envelope_until_one_is_open(window):
+    """An envelope with no experiment to bound is a control that does nothing."""
+    panel = window._session_info
+
+    assert panel._envelope_editor is not None, "the sim setup has an enveloped VI"
+    assert not panel._envelope_editor.isVisible()
+    assert not panel._envelope_apply_btn.isVisible()
+
+
+def test_the_header_editor_is_prefilled_and_applies_through_the_manager(
+    window, session_manager, orchestrator, station
+):
+    """Narrowing at the header reaches the record AND the engine's enforcement."""
+    session_manager.start_experiment("Hall bar A3", "jdoe", {})
+    settled(orchestrator)
+    panel = window._session_info
+    editor = panel._envelope_editor
+
+    assert editor.isVisible() and panel._envelope_apply_btn.isVisible()
+    lo, hi = station.get_vi("magnet_z").limit_bounds("field_T")
+    assert float(editor._rows["magnet_z"][1].text()) == hi, "pre-filled, not blank"
+    # This experiment was opened with no envelope, so the editor is switched
+    # off: it shows the setup's limits as the starting point, and nothing is
+    # bounding the experiment until the operator says so.
+    assert not editor._enabled_checkbox.isChecked()
+
+    editor._enabled_checkbox.setChecked(True)
+    editor._rows["magnet_z"][1].setText("2")
+    panel._envelope_apply_btn.click()
+    settled(orchestrator)
+
+    stored = session_manager.current_experiment().envelope["magnet_z"]
+    assert stored["max_value"] == 2.0
+    assert panel._envelope_verdict_label.property("severity") == "ok"
+
+    # The engine is the enforcement point, and it now holds the narrowed
+    # bound: a target the SETUP still allows is refused by the experiment.
+    blocked: list[str] = []
+    orchestrator.action_blocked.connect(blocked.append)
+    orchestrator.submit_vi_action("magnet_z", "set_field", target_T=hi)
+    settled(orchestrator)
+    assert blocked and "envelope" in blocked[0].lower()
+
+    # Switching the editor off and applying again clears the envelope.
+    panel._envelope_editor._enabled_checkbox.setChecked(False)
+    panel._envelope_apply_btn.click()
+    settled(orchestrator)
+    assert session_manager.current_experiment().envelope == {}
+
+
+def test_the_header_editor_shows_the_envelope_already_in_force(
+    window, session_manager, orchestrator
+):
+    """Reopening the panel on an experiment shows ITS bounds, not the setup's."""
+    from cryosoft.core.plan import EnvelopeBound, ExperimentEnvelope
+
+    session_manager.start_experiment(
+        "Hall bar A3",
+        "jdoe",
+        {},
+        envelope=ExperimentEnvelope(
+            bounds={"magnet_z": EnvelopeBound(min_value=-1.0, max_value=1.0)}
+        ),
+    )
+    settled(orchestrator)
+
+    editor = window._session_info._envelope_editor
+    assert editor._rows["magnet_z"][1].text() == "1"
+
+
+def test_a_refused_envelope_shows_a_verdict_badge(
+    window, session_manager, orchestrator, station
+):
+    """A bound that would WIDEN the setup's limit is refused, with the reason."""
+    session_manager.start_experiment("Hall bar A3", "jdoe", {})
+    settled(orchestrator)
+    panel = window._session_info
+    _lo, hi = station.get_vi("magnet_z").limit_bounds("field_T")
+
+    panel._envelope_editor._enabled_checkbox.setChecked(True)
+    panel._envelope_editor._rows["magnet_z"][1].setText(f"{hi + 1:g}")
+
+    assert panel._envelope_verdict_label.isVisible()
+    assert panel._envelope_verdict_label.property("severity") == "error"
+    assert "narrows the setup's limits" in panel._envelope_verdict_label.text()
+    assert not panel._envelope_apply_btn.isEnabled(), "Apply cannot send a refusal"
+
+
+def test_the_engines_own_refusal_reaches_the_badge(window, session_manager, orchestrator):
+    """The verdict answering THIS panel's Apply is what the badge renders."""
+    session_manager.start_experiment("Hall bar A3", "jdoe", {})
+    settled(orchestrator)
+    panel = window._session_info
+    panel._pending_envelope_request = "req-42"
+
+    panel.on_verdict(
+        ev.Verdict(
+            request_id="req-42",
+            command=ev.CommandName.SET_EXPERIMENT_ENVELOPE,
+            code=ev.VerdictCode.FAILED,
+            reason="the envelope could not be installed",
+        )
+    )
+
+    assert panel._envelope_verdict_label.property("severity") == "error"
+    assert "could not be installed" in panel._envelope_verdict_label.text()
+
+    # Somebody else's verdict is not this panel's business.
+    panel._pending_envelope_request = "req-43"
+    panel.on_verdict(
+        ev.Verdict(
+            request_id="other",
+            command=ev.CommandName.SET_EXPERIMENT_ENVELOPE,
+            code=ev.VerdictCode.FAILED,
+            reason="not mine",
+        )
+    )
+    assert "not mine" not in panel._envelope_verdict_label.text()

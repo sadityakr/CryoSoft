@@ -368,6 +368,43 @@ class ExperimentManager(QObject):
         self._experiment = None
         self.experiment_changed.emit({})
 
+    def set_experiment_envelope(
+        self, envelope: ExperimentEnvelope | None
+    ) -> str:
+        """Replace the open experiment's **Session envelope**. No-op when none.
+
+        The write side of the envelope, and the counterpart to
+        ``envelope_variables()``: the operator narrows the setup's limits at
+        the experiment header, and the new bounds have to reach two places —
+        the record (so they survive a restart and describe what this
+        experiment was actually bounded by) and the Orchestrator (which is
+        the only enforcement point). Both go through here for the same
+        reason ``set_attended()`` does: this layer is the single writer for
+        the record, and the engine cannot read it.
+
+        Args:
+            envelope: The new envelope, or ``None`` to clear it.
+
+        Returns:
+            The engine command's request id, or ``""`` when no experiment is
+            open (nothing to bound, and nothing written).
+        """
+        if self._experiment is None:
+            logger.warning("No experiment is open — the envelope was not applied")
+            return ""
+        self._experiment.envelope = envelope_to_dict(envelope)
+        self._save_current()
+        request_id = str(
+            self._orchestrator.set_experiment_envelope(envelope) or ""
+        )
+        logger.info(
+            "Experiment %s envelope %s",
+            self._experiment.experiment_id,
+            "cleared" if envelope is None else "updated",
+        )
+        self.experiment_changed.emit(self._experiment.to_dict())
+        return request_id
+
     def set_findings(self, text: str) -> None:
         """Replace the experiment's free-text findings. No-op when none open.
 

@@ -1623,13 +1623,17 @@ class MonitorWindow(QMainWindow):
         )
 
     def _on_verdict_for_agents(self, verdict: object) -> None:
-        """Forward one verdict to the Agent panel.
+        """Forward one verdict to the panels that render verdicts.
+
+        Two of them, for opposite halves of the same contract: the Agent
+        panel keeps the non-operator ones, and the experiment header keeps
+        the one answering its own Apply click.
 
         Args:
-            verdict: Anything off the client's ``verdict`` stream; the panel
-                keeps the non-operator ones and ignores the rest.
+            verdict: Anything off the client's ``verdict`` stream.
         """
         self._agent_panel.on_verdict(verdict)
+        self._session_info.on_verdict(verdict)
 
     def _on_event_for_agents(self, event: object) -> None:
         """Forward one event to the Agent panel.
