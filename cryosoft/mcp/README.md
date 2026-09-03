@@ -170,9 +170,18 @@ fails if it creeps into the test environment.
 
 `.mcp.json` at the repository root already declares this server for a Claude
 Code session; `.claude/skills/measure-session/SKILL.md` describes how such a
-session drives a measurement. The application must be running with
-`gateway_server: true` in its `monitor.yaml`, and it will hand out at most
-the role that file's `gateway_max_role` names.
+session drives a measurement.
+
+Two things the session cannot arrange for itself:
+
+- **The application must be running** with `gateway_server: true` in its
+  `monitor.yaml`, and it will hand out at most the role that file's
+  `gateway_max_role` names. Both default closed — opening a station to
+  autonomous clients is a setup decision, like every limit.
+- **`python` must be the project's interpreter.** `.mcp.json` names
+  `python` rather than a path, because a path in a checked-in file is one
+  machine's path; start the session from the activated `.venv`, or point
+  the declaration's `command` at that interpreter locally.
 
 ## Files
 
