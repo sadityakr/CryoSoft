@@ -57,6 +57,7 @@ from cryosoft.gui.theme import (
     TEXT_PRIMARY,
 )
 from cryosoft.gui.trends_quadrant import TrendsQuadrant
+from cryosoft.gui.widget_lifecycle import hold_window, release_window, retire_widget
 from cryosoft.session.manager import ExperimentManager
 from cryosoft.session.models import GUEST_USER_ID
 from cryosoft.session.store import SessionStore
@@ -344,6 +345,12 @@ class MonitorWindow(QMainWindow):
             self._banner.show_message(
                 " | ".join(startup_notes), BANNER_SEVERITY_WARNING
             )
+
+        # The window-liveness standard (gui/widget_lifecycle.py): this window
+        # owns the reference that keeps it alive, so no garbage-collection
+        # pass can destroy it — and the pyqtgraph scenes in its Trends
+        # quadrant — while it is on screen. Released in closeEvent().
+        hold_window(self)
 
     # ------------------------------------------------------------------
     # Menu bar
@@ -810,10 +817,18 @@ class MonitorWindow(QMainWindow):
     def _on_instrument_reconnected(self, vi_name: str) -> None:
         """Swap an offline card for a live InstrumentPanel in place.
 
+        The card that leaves goes out through ``retire_widget()`` (the
+        card-retirement standard, gui/widget_lifecycle.py): hidden and out of
+        the grid before its deferred delete, so it cannot paint over its
+        replacement in the meantime.
+
         Args:
             vi_name: The VI just brought live by
                 Orchestrator.connect_instrument().
         """
+        # Popped before the replacement is built: the pop is what makes a
+        # re-entrant reconnect signal (a second emission while this one is
+        # still running) a no-op instead of a second swap.
         card = self._offline_cards.pop(vi_name, None)
         if card is None:
             return
@@ -823,7 +838,7 @@ class MonitorWindow(QMainWindow):
         self._instruments_grid.replaceWidget(card, panel)
         panel.show()
         card.close_details()
-        card.deleteLater()
+        retire_widget(card, self._instruments_grid)
         logger.info("Offline card for '%s' replaced by live panel", vi_name)
 
     def _on_instrument_disconnected(self, vi_name: str) -> None:
@@ -837,6 +852,11 @@ class MonitorWindow(QMainWindow):
         longer holds; showing them greyed out would invite clicks that can
         only be refused.
 
+        The panel that leaves goes out through ``retire_widget()`` (the
+        card-retirement standard, gui/widget_lifecycle.py) — deferred, because
+        this runs inside the click signal of the Disconnect button on the very
+        card being retired.
+
         Args:
             vi_name: The VI just released by
                 Orchestrator.disconnect_instrument().
@@ -844,6 +864,10 @@ class MonitorWindow(QMainWindow):
         panel = next((p for p in self._panels if p.vi_name == vi_name), None)
         if panel is None:
             return
+        # Dropped from the panel list before the replacement is built, the
+        # mirror of the pop in _on_instrument_reconnected(): a re-entrant
+        # disconnect signal then finds no panel and returns.
+        self._panels.remove(panel)
         tag_by_type = {"measurement": "Measurement", "switch": "Scanner"}
         card = OfflineInstrumentPanel(
             vi_name,
@@ -854,11 +878,10 @@ class MonitorWindow(QMainWindow):
         )
         card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._offline_cards[vi_name] = card
-        self._panels.remove(panel)
         self._instruments_grid.replaceWidget(panel, card)
         card.show()
         panel.close_front_panel()
-        panel.deleteLater()
+        retire_widget(panel, self._instruments_grid)
         logger.info("Live panel for '%s' replaced by offline card", vi_name)
 
     def _build_scanner_enable_checkbox(self, vi_name: str) -> QCheckBox:
@@ -1663,6 +1686,9 @@ class MonitorWindow(QMainWindow):
 
         Detaching the log handler prevents it from writing to the destroyed
         ``QTextEdit`` after the window is gone (RuntimeError on a dead widget).
+        Accepting the close is also what releases this window's own strong
+        reference (the window-liveness standard, gui/widget_lifecycle.py): a
+        closed window paints nothing, so it is safe to collect from here on.
         Splitter proportions and trend selections are saved automatically
         here (no separate "Save layout" action, unlike the old dock-state
         save/restore) — there is nothing else for the user to arrange since
@@ -1690,6 +1716,8 @@ class MonitorWindow(QMainWindow):
         )
         self._trends.save_settings()
         super().closeEvent(event)
+        if event.isAccepted():
+            release_window(self)
 
     def _restore_splitter_state(self) -> None:
         """Restore each quadrant splitter's saved proportions, defensively.

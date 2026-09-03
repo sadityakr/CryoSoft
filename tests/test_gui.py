@@ -19,11 +19,13 @@ helper** family (``on_engine()``, ``set_on_engine()``, ``tick_engine()``)
 rather than touching the engine from this thread.
 """
 
+import gc
 import logging
 from pathlib import Path
 
 import pytest
-from PyQt6.QtCore import Qt, QSettings
+from PyQt6 import sip
+from PyQt6.QtCore import Qt, QEvent, QSettings
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -67,6 +69,7 @@ from cryosoft.gui.theme import (
     build_stylesheet,
 )
 from cryosoft.gui.trend_plot_panel import TrendPlotPanel
+from cryosoft.gui import widget_lifecycle
 from cryosoft.virtual_instruments.base import BaseVirtualInstrument
 from tests.instrument_modes import (
     build_host,
@@ -4111,4 +4114,110 @@ def test_disconnect_is_blocked_while_a_run_is_active(qtbot):
         assert "magnet_z" in win._banner._label.text()
     finally:
         orch._state = OrchestratorState.IDLE
+        orch.shutdown()
+
+
+# ── Widget-lifetime standards: window liveness + card retirement ─────────────
+# See cryosoft/gui/widget_lifecycle.py. A shown window whose creator kept no
+# reference used to be destroyed by whichever generational garbage-collection
+# pass happened to reach it — including one triggered by an allocation inside
+# that same window's paintEvent, which destroyed the paint device mid-paint and
+# segfaulted the process on a half-freed pyqtgraph scene.
+
+
+def _build_and_forget_a_monitor_window() -> None:
+    """Show a MonitorWindow while deliberately keeping no reference to it.
+
+    The station, the Orchestrator and the window are all locals here, so once
+    this returns the only thing that can keep the still-shown window alive is
+    the window-liveness hold it takes on itself. The Orchestrator is shut down
+    before returning so no tick outlives these locals either.
+    """
+    station = build_station(CONFIG_PATH)
+    orch = Orchestrator(station, tick_interval_ms=50)
+    win = MonitorWindow(station, orch)
+    win.show()
+    orch.shutdown()
+
+
+def test_a_shown_window_survives_a_collection_that_frees_its_creator(qtbot):
+    """A shown window outlives a GC pass that finds no other reference to it."""
+    _build_and_forget_a_monitor_window()
+
+    gc.collect()
+
+    shown = [
+        w
+        for w in QApplication.topLevelWidgets()
+        if isinstance(w, MonitorWindow) and w.isVisible()
+    ]
+    assert shown, "a shown window must not be garbage-collected"
+    win = shown[-1]
+    qtbot.addWidget(win)
+    plot = win.findChild(QWidget, "trend_plot_trend_0")
+    assert plot is not None
+
+    # The paint that used to run into a freed AxisItem and segfault.
+    QApplication.processEvents()
+
+    assert not sip.isdeleted(plot)
+    assert plot.isVisible()
+    win.close()
+    assert not any(w is win for w in widget_lifecycle.held_windows())
+
+
+def test_closing_a_window_releases_its_liveness_hold(qtbot):
+    """The hold is not a leak: closing the window drops it again."""
+    station, orch, win = _sim_monitor(qtbot)
+    try:
+        assert any(w is win for w in widget_lifecycle.held_windows())
+
+        win.close()
+
+        assert not any(w is win for w in widget_lifecycle.held_windows())
+    finally:
+        orch.shutdown()
+
+
+def test_repeated_card_swaps_retire_every_replaced_card(qtbot):
+    """Twenty Disconnect/Connect round trips leave nothing painting behind.
+
+    The card-retirement standard end to end: every replaced card is hidden and
+    out of the instrument grid before its deferred delete, the grid never grows
+    a slot, and every retired card is really destroyed once the deferred
+    deletes are delivered.
+    """
+    station, orch, win = _sim_monitor(qtbot)
+    try:
+        grid = win._instruments_grid
+        slots = grid.count()
+        retired = []
+
+        for _ in range(20):
+            live = next(p for p in win._panels if p.vi_name == "magnet_z")
+            live.findChild(QPushButton, "magnet_z_disconnect_btn").click()
+            QApplication.processEvents()
+            assert live.isHidden()
+            assert grid.indexOf(live) == -1
+            assert grid.count() == slots
+            retired.append(live)
+
+            offline = win._offline_cards["magnet_z"]
+            offline.findChild(QPushButton, "magnet_z_connect_btn").click()
+            QApplication.processEvents()
+            assert offline.isHidden()
+            assert grid.indexOf(offline) == -1
+            assert grid.count() == slots
+            retired.append(offline)
+
+        assert station.has_vi("magnet_z") is True
+        assert win._offline_cards == {}
+        assert sum(p.vi_name == "magnet_z" for p in win._panels) == 1
+
+        # deleteLater() is deferred, and pytest-qt never runs an event loop
+        # that would deliver it, so ask for those events explicitly: every
+        # retired card must then be gone, not merely hidden.
+        QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        assert all(sip.isdeleted(card) for card in retired)
+    finally:
         orch.shutdown()
