@@ -23,6 +23,14 @@ Three jobs:
   calls into the engine for them. **Attendance** and the **Kill switch**
   come off that same mirror, which is what makes an agent's permission check
   read the same fact every other client sees.
+* **Offer the rendered surface.** ``tools()`` / ``tool_schemas()`` publish
+  the **Tool surface** ``tools.py`` renders from the same declarations, and
+  ``call_tool()`` is the one entry point that validates a call against its
+  **Tool spec**'s schema and then routes it — a command tool through
+  ``submit()``, a session tool to its function. It never raises at its
+  caller: an unknown tool, a schema violation and a missing collaborator are
+  all answered with the same ``FAILED``-shaped dict, so an agent gets an
+  answer to every call exactly as it gets a verdict for every command.
 
 The engine is duck-typed on purpose (see ``EngineClient``): today it is the
 Orchestrator, tomorrow a proxy over a transport, and this file will not
@@ -45,8 +53,23 @@ from cryosoft.core.events import (
     StationInfo,
     StatusSnapshot,
     Verdict,
+    VerdictCode,
 )
-from cryosoft.session.gateway.roles import Role, authorize
+from cryosoft.session.gateway.action_classes import ActionClass
+from cryosoft.session.gateway.roles import (
+    PERMISSION_MATRIX,
+    Permission,
+    Role,
+    authorize,
+)
+from cryosoft.session.gateway.tools import (
+    ToolContext,
+    ToolError,
+    ToolSpec,
+    call_session_tool,
+    render_tools,
+    validate_tool_args,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +111,7 @@ class Gateway:
         actor_id: str,
         *,
         station_info: StationInfo | Any | None = None,
+        tool_context: ToolContext | None = None,
     ) -> None:
         """Attach to an engine under a declared role.
 
@@ -106,6 +130,11 @@ class Gateway:
                 from every ``StationInfo`` the engine broadcasts. It is needed
                 because a ``submit_vi_action``'s action class depends on the
                 VI kind of the instrument it targets.
+            tool_context: The collaborators the session tools read through —
+                the experiment layer and the run catalog. Optional: without
+                it every command tool still works and the three
+                declaration-reading tools still answer from the mirror, while
+                a tool whose collaborator is absent is refused by name.
 
         Raises:
             ValueError: If *role* is not a known ``Role``.
@@ -124,6 +153,19 @@ class Gateway:
         # ordered before something that happened earlier.
         self._engine_seq = self._station_info.seq
         self._local_seq = self._engine_seq
+
+        # The rendered tool surface, rebuilt whenever the mirrored
+        # declaration is replaced (a connect or a disconnect rebuilds it), and
+        # the one verdict a tool call is waiting on.
+        self._tools: dict[str, ToolSpec] = {}
+        self._tools_rendered_from: StationInfo | None = None
+        self._awaiting_verdict = False
+        self._awaited_verdict: Verdict | None = None
+        self._tool_context = replace(
+            tool_context or ToolContext(),
+            status_source=self.status,
+            station_source=self.station,
+        )
 
         engine.event_emitted.connect(self._observe_event)
         engine.verdict_emitted.connect(self._observe_verdict)
@@ -187,6 +229,8 @@ class Gateway:
         """
         try:
             self._engine_seq = max(self._engine_seq, int(verdict.seq))
+            if self._awaiting_verdict:
+                self._awaited_verdict = verdict
         except Exception:  # noqa: BLE001 — mirroring must never disrupt the engine
             logger.exception("gateway verdict mirror update failed (non-fatal)")
 
@@ -357,3 +401,260 @@ class Gateway:
             self._engine.verdict_emitted.emit(verdict)
         except Exception:  # noqa: BLE001 — a signal failure must not raise at the client
             logger.exception("gateway verdict emit failed")
+
+    # ── The tool surface ──────────────────────────────────────────────
+
+    def tools(self) -> tuple[ToolSpec, ...]:
+        """Return the **Tool surface** rendered for the station being mirrored.
+
+        Re-rendered whenever the engine broadcasts a new declaration snapshot
+        — a connect or a disconnect rebuilds it — so an instrument that
+        appears brings its capability tools with it and nothing has to be
+        told twice.
+
+        Returns:
+            Every command tool, capability tool and session tool, in render
+            order.
+        """
+        if self._tools_rendered_from is not self._station_info:
+            self._tools_rendered_from = self._station_info
+            self._tools = {tool.name: tool for tool in render_tools(self._station_info)}
+        return tuple(self._tools.values())
+
+    def tool_schemas(self) -> list[dict[str, Any]]:
+        """Return the tool list in the shape a tool-use API expects.
+
+        The one rendering every client publishes, so E4's CLI and a later MCP
+        adapter offer the same surface with no code of their own.
+
+        Returns:
+            One ``{"name", "description", "input_schema"}`` dict per tool.
+        """
+        return [tool.to_schema() for tool in self.tools()]
+
+    def tool(self, name: str) -> ToolSpec | None:
+        """Return one tool by name, or ``None`` when this surface has no such tool.
+
+        Args:
+            name: The tool's name.
+
+        Returns:
+            Its ``ToolSpec``, or ``None``.
+        """
+        self.tools()
+        return self._tools.get(name)
+
+    def call_tool(
+        self, name: str, args: Mapping[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Call one tool by name and answer it, always.
+
+        Three steps, in this order: the tool must exist, the arguments must
+        satisfy its schema, and only then is it routed — a command tool
+        through ``submit()`` (where the role matrix, the kill switch and the
+        engine's own admission rules judge it) and a session tool to its
+        function. Nothing raises at the caller: an unknown tool, a schema
+        violation, an absent collaborator and an unexpected failure are all
+        answered with a ``FAILED``-shaped dict whose ``detail`` names the rule
+        that refused.
+
+        Args:
+            name: The tool's name, as published by ``tool_schemas()``.
+            args: Its arguments, JSON-safe.
+
+        Returns:
+            A JSON-safe dict carrying ``tool``, ``ok`` and ``code``; a read
+            tool adds ``result``, a command tool adds ``request_id`` and, once
+            its verdict has arrived, ``verdict`` with the ``reason`` and
+            ``detail`` the engine gave.
+        """
+        call_args = dict(args or {})
+        tool = self.tool(name)
+        if tool is None:
+            return self._tool_failure(
+                name,
+                f"no tool named {name!r}; this station offers "
+                f"{len(self._tools)} tools",
+                {"rule": "unknown_tool"},
+            )
+
+        errors = validate_tool_args(call_args, tool.input_schema)
+        if errors:
+            return self._tool_failure(
+                name,
+                f"{name} refused: " + "; ".join(errors),
+                {"rule": "schema", "errors": list(errors)},
+            )
+
+        if tool.is_command:
+            return self._call_command_tool(tool, call_args)
+        return self._call_session_tool(tool, call_args)
+
+    def _call_command_tool(
+        self, tool: ToolSpec, args: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Submit one command tool and report the verdict that answered it.
+
+        Args:
+            tool: The tool being called.
+            args: Its validated arguments.
+
+        Returns:
+            The answer dict, carrying the request id and — since the engine
+            answers synchronously on the submitting call — the verdict.
+        """
+        payload = {**tool.fixed_args, **args}
+        self._awaiting_verdict = True
+        self._awaited_verdict = None
+        try:
+            request_id = self.submit(tool.command, payload)
+        finally:
+            self._awaiting_verdict = False
+        verdict = self._awaited_verdict
+        self._awaited_verdict = None
+
+        answer: dict[str, Any] = {"tool": tool.name, "request_id": request_id}
+        if verdict is None or verdict.request_id != request_id:
+            answer.update(
+                {
+                    "ok": False,
+                    "code": "PENDING",
+                    "reason": (
+                        "the command was accepted and its verdict will arrive on "
+                        "the engine's verdict stream"
+                    ),
+                    "detail": {},
+                }
+            )
+            return answer
+        answer.update(
+            {
+                "ok": verdict.ok,
+                "code": verdict.code.value,
+                "reason": verdict.reason,
+                "detail": dict(verdict.detail or {}),
+                "result": verdict.result,
+                "verdict": verdict.to_json(),
+            }
+        )
+        return answer
+
+    def _call_session_tool(
+        self, tool: ToolSpec, args: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Answer one session tool here, after the same authority checks.
+
+        A session tool is not a command, so no ``Verdict`` answers it — but it
+        is still an action of a declared **Action class**, so the kill switch
+        and the permission matrix decide it exactly as they decide a command.
+
+        Args:
+            tool: The tool being called.
+            args: Its validated arguments.
+
+        Returns:
+            The answer dict, carrying ``result`` on success.
+        """
+        refusal = self._authorize_session_tool(tool)
+        if refusal is not None:
+            return refusal
+        try:
+            result = call_session_tool(tool, args, self._tool_context)
+        except ToolError as error:
+            return self._tool_failure(tool.name, str(error), error.detail)
+        except Exception as error:  # noqa: BLE001 — a tool never raises at its caller
+            logger.exception("call_tool(%s) failed", tool.name)
+            return self._tool_failure(
+                tool.name,
+                f"{tool.name} failed: {error}",
+                {"rule": "unexpected_error", "error": type(error).__name__},
+            )
+        return {
+            "tool": tool.name,
+            "ok": True,
+            "code": VerdictCode.OK.value,
+            "reason": "",
+            "detail": {},
+            "result": result,
+        }
+
+    def _authorize_session_tool(self, tool: ToolSpec) -> dict[str, Any] | None:
+        """Judge one session tool by the same table a command is judged by.
+
+        Args:
+            tool: The tool being called.
+
+        Returns:
+            ``None`` when it may run, else the ``BLOCKED_ROLE``-shaped answer
+            that refuses it.
+        """
+        gate = self.agent_gate()
+        if gate is AgentGate.REVOKED or (
+            gate is AgentGate.READ_ONLY and tool.action_class is not ActionClass.READ
+        ):
+            return self._tool_refusal(
+                tool,
+                f"Agent access is {gate.value}: {tool.name!r} is a "
+                f"{tool.action_class.value} tool and is refused.",
+                {"rule": "kill_switch", "gate": gate.value},
+            )
+        permission = PERMISSION_MATRIX[tool.action_class][self.role]
+        if permission is Permission.PERMITTED:
+            return None
+        if permission is Permission.UNATTENDED_ONLY and not self.attended():
+            return None
+        return self._tool_refusal(
+            tool,
+            f"The {self.role.value!r} role does not grant "
+            f"{tool.action_class.value} actions, so {tool.name!r} is refused.",
+            {"rule": "role_matrix"},
+        )
+
+    def _tool_refusal(
+        self, tool: ToolSpec, reason: str, detail: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Build the ``BLOCKED_ROLE``-shaped answer refusing one session tool.
+
+        Args:
+            tool: The tool refused.
+            reason: The human-readable explanation.
+            detail: The structured half; the role and action class are added.
+
+        Returns:
+            The answer dict.
+        """
+        logger.info("Gateway tool refusal: %s", reason)
+        return {
+            "tool": tool.name,
+            "ok": False,
+            "code": VerdictCode.BLOCKED_ROLE.value,
+            "reason": reason,
+            "detail": {
+                **dict(detail),
+                "role": self.role.value,
+                "action_class": tool.action_class.value,
+            },
+        }
+
+    @staticmethod
+    def _tool_failure(
+        name: str, reason: str, detail: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Build the one failure shape ``call_tool()`` ever answers with.
+
+        Args:
+            name: The tool that was called.
+            reason: The human-readable explanation.
+            detail: The structured half, naming the rule that refused.
+
+        Returns:
+            The answer dict.
+        """
+        logger.info("Gateway tool failure: %s", reason)
+        return {
+            "tool": name,
+            "ok": False,
+            "code": VerdictCode.FAILED.value,
+            "reason": reason,
+            "detail": dict(detail),
+        }
