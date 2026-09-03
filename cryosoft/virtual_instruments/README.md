@@ -52,7 +52,12 @@ a `drivers` dict of role → driver instance (e.g. `{"main": ...}`,
   `stop_ramp` generator API the Orchestrator drives each tick, plus the
   optional **ramp-introspection standard** — `ramp_value()` /
   `ramp_setpoint()` / `ramp_target()` / `ramp_rate()` / `ramp_phase()`, each
-  with a safe `None` default. Implementing them is what puts a VI on the
+  with a safe `None` default — and its declaration-only sibling
+  `nominal_ramp_rate()`: the rate a ramp from rest WOULD use, in the same
+  user units per minute, read from config with no bus traffic and no active
+  ramp, so a **duration estimate** can be computed before any run exists
+  (`Station.nominal_ramp_rates()` aggregates it; a VI whose rate varies along
+  the ramp reports its slowest, so the estimate is never optimistic). Implementing them is what puts a VI on the
   Monitor window's Ramps sub-panel (current value, next setpoint, end
   setpoint, rate) and into the operational-status record; no GUI or
   Orchestrator code changes for a new rampable VI. `ramp_setpoint()` in

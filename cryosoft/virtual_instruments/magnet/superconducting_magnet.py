@@ -196,6 +196,29 @@ class SuperconductingMagnetVI(MagnetBase, RampableVI):
         direction = 1 if target_A >= curr_A else -1
         return self._get_segment_rate(curr_A, direction) / self._amperes_per_tesla
 
+    def nominal_ramp_rate(self) -> float | None:
+        """Return the slowest configured ramp rate, in tesla/min.
+
+        The declared rate a **duration estimate** is built from (see
+        ``RampableVI.nominal_ramp_rate``): read from the configured ramp
+        segments alone — no bus traffic, no active ramp — and reported as the
+        SLOWEST of them, because a sweep crossing into a high-current segment
+        pays that rate and an estimate must never be optimistic. A magnet
+        configured without segments reports its ``default_ramp_rate``.
+        Converted from the internal amperes/min to tesla/min for consistency
+        with ``ramp_target()``.
+
+        Returns:
+            The nominal field ramp rate in tesla/min.
+        """
+        rates = [
+            float(segment["rate_A_per_min"])
+            for segment in self._ramp_segments
+            if "rate_A_per_min" in segment
+        ]
+        slowest_A_per_min = min(rates) if rates else self._default_ramp_rate
+        return slowest_A_per_min / self._amperes_per_tesla
+
     def ramp_setpoint(self) -> float | None:
         """Return the setpoint last commanded to the PSU, in tesla.
 

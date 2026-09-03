@@ -194,6 +194,19 @@ class SampleTemperatureControllerVI(TemperatureControllerBase, RampableVI):
         """Return the active temperature target in kelvin, or ``None`` when idle."""
         return self._ramp_target
 
+    def nominal_ramp_rate(self) -> float | None:
+        """Return the configured default ramp rate, in kelvin/min.
+
+        The declared rate a **duration estimate** is built from (see
+        ``RampableVI.nominal_ramp_rate``): the setup's ``default_ramp_rate``,
+        which is what a ramp started without an explicit rate uses. Pure read
+        — no bus traffic, no active ramp required.
+
+        Returns:
+            The nominal temperature ramp rate in kelvin/min.
+        """
+        return self._default_ramp_rate
+
     def ramp_rate(self) -> float | None:
         """Return the active ramp rate in kelvin/min, or ``None`` when idle."""
         return self._ramp_rate

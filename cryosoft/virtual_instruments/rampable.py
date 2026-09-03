@@ -89,6 +89,28 @@ class RampableVI:
         """
         return None
 
+    def nominal_ramp_rate(self) -> float | None:
+        """Return the rate a ramp from rest would use, or ``None`` if undeclared.
+
+        The DECLARED sibling of ``ramp_rate()``, in the same user units per
+        minute (tesla/min, kelvin/min, degrees/min): what this VI would ramp
+        at if asked right now, read from its configured rate alone — no bus
+        traffic, no active ramp needed. That is what makes it answerable
+        before a run exists, which is what the **duration estimate**
+        (`core/estimates.py`) needs to turn a run's declared setpoints into a
+        time (``Station.nominal_ramp_rates()`` is the aggregation point).
+
+        A VI whose rate varies along the ramp (a magnet's current-dependent
+        segments) reports its SLOWEST configured rate, so an estimate built
+        from it is never optimistic. The default returns ``None`` — "this VI
+        declares no rate" — which the estimator reports as an explicit
+        assumption rather than counting as instant.
+
+        Returns:
+            The nominal rate in user units per minute, or ``None``.
+        """
+        return None
+
     def ramp_setpoint(self) -> float | None:
         """Return the setpoint currently commanded to hardware, or ``None``.
 

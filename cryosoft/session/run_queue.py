@@ -39,8 +39,9 @@ import uuid
 from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Any
 
+from cryosoft.core.estimates import estimate_duration
 from cryosoft.core.events import OPERATOR, Actor
-from cryosoft.core.plan import ProbeSpec
+from cryosoft.core.plan import DurationEstimate, ProbeSpec
 from cryosoft.core.run_builder import (
     PROCEDURE_BUILD_ERRORS,
     build_operation,
@@ -262,21 +263,22 @@ class RunValidation:
     Attributes:
         findings: Every problem found, in discovery order. Empty means the run
             is accepted.
-        duration_estimate_s: How long the run is expected to take, or ``None``
-            when no estimate is available. A placeholder for now: the estimate
-            needs the sweep length and the per-step settle model, which the
-            duration-estimate work will supply; the field exists so clients can
-            already render it.
+        estimate: The **duration estimate** for the run that was built — its
+            total, its per-phase breakdown and the assumptions behind it — or
+            ``None`` when there was no run to estimate (the build was
+            refused). Always qualified: a client renders the assumptions
+            beside the number, never the number alone.
     """
 
     findings: tuple[RunFinding, ...] = ()
-    duration_estimate_s: float | None = None
+    estimate: DurationEstimate | None = None
 
     def __post_init__(self) -> None:
-        """Freeze ``findings`` into a tuple.
+        """Freeze ``findings`` into a tuple and check the estimate's type.
 
         Raises:
-            TypeError: If a finding is not a ``RunFinding``.
+            TypeError: If a finding is not a ``RunFinding``, or ``estimate``
+                is neither a ``DurationEstimate`` nor ``None``.
         """
         findings = tuple(self.findings)
         for finding in findings:
@@ -285,11 +287,25 @@ class RunValidation:
                     f"RunValidation.findings must hold RunFindings, got {finding!r}"
                 )
         object.__setattr__(self, "findings", findings)
+        if self.estimate is not None and not isinstance(self.estimate, DurationEstimate):
+            raise TypeError(
+                f"RunValidation.estimate must be a DurationEstimate or None, "
+                f"got {self.estimate!r}"
+            )
 
     @property
     def ok(self) -> bool:
         """True when nothing was found against the run."""
         return not self.findings
+
+    @property
+    def duration_estimate_s(self) -> float | None:
+        """How long the run is expected to take, or ``None`` without an estimate.
+
+        Derived from ``estimate`` rather than stored, so the headline number
+        and the breakdown it came from can never disagree.
+        """
+        return None if self.estimate is None else self.estimate.total_s
 
     def messages(self) -> tuple[str, ...]:
         """Return each finding's message, for a log line or a dialog body."""
@@ -301,6 +317,7 @@ class RunValidation:
             "ok": self.ok,
             "findings": [finding.to_json() for finding in self.findings],
             "duration_estimate_s": self.duration_estimate_s,
+            "estimate": None if self.estimate is None else self.estimate.to_json(),
         }
 
 
@@ -696,7 +713,10 @@ def validate_run(
     checks, in order — the declared ``ParamSpec`` bounds, the build itself
     (a procedure legitimately refuses a run this station cannot honour), and
     the setpoints the built run declares it would command, against the setup's
-    ``control_limits`` and the open experiment's envelope.
+    ``control_limits`` and the open experiment's envelope. The same build then
+    yields the **duration estimate** (``core.estimates.estimate_duration()``
+    over the setup's nominal ramp rates), so "may I run this?" and "how long
+    will it take?" are answered by one call and from one object.
 
     ``ExperimentManager.validate_run()`` is the L6 entry point that supplies
     the station and the open experiment's envelope; this function is what it
@@ -719,7 +739,8 @@ def validate_run(
         envelope: The open experiment's envelope, or ``None`` for none.
 
     Returns:
-        A ``RunValidation``; ``ok`` is True exactly when nothing was found.
+        A ``RunValidation``; ``ok`` is True exactly when nothing was found,
+        and ``estimate`` carries the duration estimate whenever the run built.
     """
     findings = _declared_param_findings(run_class, params)
 
@@ -750,10 +771,14 @@ def validate_run(
             )
         )
 
+    estimate: DurationEstimate | None = None
     if run is not None:
         findings.extend(_target_findings(run, station=station, envelope=envelope))
+        # The estimate is of the run that was actually built — a probe's
+        # estimate is the probe's, not the full run's.
+        estimate = estimate_duration(run, station.nominal_ramp_rates())
 
-    return RunValidation(findings=tuple(findings), duration_estimate_s=None)
+    return RunValidation(findings=tuple(findings), estimate=estimate)
 
 
 class RunQueueHost:

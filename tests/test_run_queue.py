@@ -358,7 +358,7 @@ def test_a_procedure_that_refuses_the_run_becomes_a_finding(station, tmp_path):
 
 
 def test_validation_renders_as_json(station, tmp_path):
-    """Findings and the duration placeholder are both JSON-safe."""
+    """Findings and the duration estimate are both JSON-safe."""
     result = validate_run(
         FieldSweep,
         dict(FAST_PARAMS, field_end=50.0),
@@ -368,8 +368,25 @@ def test_validation_renders_as_json(station, tmp_path):
 
     payload = json.loads(json.dumps(result.to_json()))
     assert payload["ok"] is False
-    assert payload["duration_estimate_s"] is None
     assert payload["findings"][0]["code"] == FINDING_CONTROL_LIMIT
+    # The run still built, so it still has an estimate — and the headline
+    # number is the breakdown's own total, never a second stored copy.
+    assert payload["duration_estimate_s"] == payload["estimate"]["total_s"]
+    assert payload["estimate"]["assumptions"]
+
+
+def test_a_refused_build_has_no_estimate(station, tmp_path):
+    """Nothing was built, so there is nothing to estimate — and it says so."""
+    result = validate_run(
+        FieldSweep,
+        dict(FAST_PARAMS, measurement_vi="no_such_vi"),
+        station=station,
+        data_directory=str(tmp_path),
+    )
+
+    assert [f.code for f in result.findings] == [FINDING_BUILD_REFUSED]
+    assert result.estimate is None
+    assert result.duration_estimate_s is None
 
 
 def test_run_validation_rejects_a_bare_string_finding():

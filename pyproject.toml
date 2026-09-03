@@ -343,6 +343,7 @@ forbidden_modules = [
     "cryosoft.core.config_catalog",
     "cryosoft.core.data_manager",
     "cryosoft.core.decorators",
+    "cryosoft.core.estimates",
     "cryosoft.core.gates",
     "cryosoft.core.logging_config",
     "cryosoft.core.operation",
@@ -361,4 +362,22 @@ forbidden_modules = [
     "cryosoft.core.trend_check_runner",
     "cryosoft.core.trend_checks",
     "cryosoft.core.trend_history",
+]
+
+[[tool.importlinter.contracts]]
+name = "C18: cryosoft.core.estimates is pure policy — the typed vocabulary and stdlib only"
+type = "forbidden"
+source_modules = ["cryosoft.core.estimates"]
+forbidden_modules = [
+    "cryosoft.drivers",
+    "cryosoft.virtual_instruments",
+    "cryosoft.procedures",
+    "cryosoft.gui",
+    "cryosoft.main",
+    "cryosoft.session",
+    "cryosoft.core.station",
+    "cryosoft.core.orchestrator",
+    "cryosoft.core.procedure",
+    "cryosoft.core.operation",
+    "cryosoft.core.data_manager",
 ]
