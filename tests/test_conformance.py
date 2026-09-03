@@ -4672,3 +4672,156 @@ def test_permission_matrix_has_a_cell_for_every_class_and_role() -> None:
             f"PERMISSION_MATRIX[{action_class.value}] does not decide every "
             f"role: {sorted(r.value for r in set(row) ^ set(Role))}"
         )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# The agent gateway's tool surface
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# The standard is `session/gateway/tools.py`'s module docstring: a tool is
+# rendered from a declaration, never hand-written. These are the third leg of
+# the three-way test — the contract (`CommandName`), the engine (the
+# Orchestrator's methods) and the tool surface must name the same actions, and
+# the station's declared capabilities and the capability tools must name the
+# same instruments. Each is diffed in BOTH directions, because both failures
+# are real: a missing tool is an action no agent can take, and a tool with no
+# declaration behind it dispatches nowhere.
+
+
+def test_every_command_name_has_a_tool() -> None:
+    """`CommandName` and the rendered command tools match exactly.
+
+    The third leg. `test_command_name_covers_every_public_orchestrator_command`
+    ties the contract to the engine; this ties the contract to what an agent
+    is offered, so an action cannot exist on one surface and not the other.
+    `SUBMIT_VI_ACTION` is the one deliberate absence — it is rendered once per
+    capability instead, which is what the check below diffs.
+    """
+    from cryosoft.session.gateway import render_command_tools
+
+    rendered = {tool.name for tool in render_command_tools()}
+    declared = {
+        member.value
+        for member in CommandName
+        if member is not CommandName.SUBMIT_VI_ACTION
+    }
+
+    assert declared - rendered == set(), (
+        f"CommandName members with no tool to call them: "
+        f"{sorted(declared - rendered)}"
+    )
+    assert rendered - declared == set(), (
+        f"command tools with no CommandName behind them: "
+        f"{sorted(rendered - declared)}"
+    )
+
+
+def test_every_command_tool_wraps_its_own_command() -> None:
+    """A command tool's name IS its command's value, so routing is a lookup."""
+    from cryosoft.session.gateway import render_command_tools
+
+    for tool in render_command_tools():
+        assert tool.command is not None, f"{tool.name} is not a command tool"
+        assert tool.name == tool.command.value, (
+            f"tool {tool.name!r} wraps {tool.command.value!r}; a command "
+            f"tool is named for the command it submits"
+        )
+        assert tool.description.strip(), f"{tool.name} renders no description"
+
+
+@pytest.mark.parametrize("config_dir", _sim_config_dirs(), ids=lambda p: p.name)
+def test_every_manifest_control_has_a_tool(config_dir: Path) -> None:
+    """Every capability the manifest declares is callable, and nothing else is.
+
+    Diffed both ways against the capability manifest — the document a client
+    builds its instrument surface from — so the two renderings of the same
+    declaration can never disagree. A control in the manifest with no tool is
+    an instrument an agent can see but not use; a tool with no manifest entry
+    is a call into something the station does not declare.
+    """
+    from cryosoft.session.gateway import capability_tool_name, render_tools
+
+    station = build_station(str(config_dir))
+    declared = {
+        capability_tool_name(instrument["name"], control["name"])
+        for instrument in build_manifest(station)["instruments"]
+        for control in instrument["controls"]
+    }
+    rendered = {
+        tool.name
+        for tool in render_tools(station.station_info())
+        if tool.instrument and tool.capability
+    }
+
+    assert declared - rendered == set(), (
+        f"{config_dir.name} declares capabilities with no tool to call them: "
+        f"{sorted(declared - rendered)}"
+    )
+    assert rendered - declared == set(), (
+        f"{config_dir.name} renders capability tools the manifest does not "
+        f"declare: {sorted(rendered - declared)}"
+    )
+
+
+@pytest.mark.parametrize("config_dir", _sim_config_dirs(), ids=lambda p: p.name)
+def test_every_tool_publishes_a_closed_json_safe_schema(config_dir: Path) -> None:
+    """Every tool survives JSON, names itself once, and refuses surprise keys.
+
+    A tool list is published to a client that speaks JSON and nothing else, so
+    an unserialisable schema is a surface that cannot be offered at all; and a
+    schema left open would silently drop an argument an agent believed it had
+    supplied.
+    """
+    from cryosoft.session.gateway import render_tools
+
+    tools = render_tools(build_station(str(config_dir)).station_info())
+    names = [tool.name for tool in tools]
+    assert len(set(names)) == len(names), (
+        f"{config_dir.name} renders two tools under one name: "
+        f"{sorted({n for n in names if names.count(n) > 1})}"
+    )
+
+    for tool in tools:
+        schema = tool.to_schema()
+        assert set(schema) == {"name", "description", "input_schema"}, (
+            f"{tool.name} publishes {sorted(schema)}, not the three keys a "
+            f"tool-use API reads"
+        )
+        assert json.loads(json.dumps(schema)) == schema, (
+            f"{tool.name}'s schema does not survive a JSON round trip"
+        )
+        input_schema = schema["input_schema"]
+        assert input_schema["type"] == "object", f"{tool.name} is not an object"
+        assert input_schema["additionalProperties"] is False, (
+            f"{tool.name}'s schema is open; an unexpected argument would be "
+            f"dropped rather than refused"
+        )
+        assert set(input_schema["required"]) <= set(input_schema["properties"]), (
+            f"{tool.name} requires an argument it does not declare"
+        )
+
+
+def test_every_session_tool_has_an_implementation_and_a_class() -> None:
+    """No session tool is offered that nothing answers, and none without a class.
+
+    Diffed both ways against the implementation table: an unimplemented tool
+    is a promise the surface cannot keep, and an orphan implementation is dead
+    code nobody can reach.
+    """
+    from cryosoft.session.gateway import SESSION_TOOLS, ActionClass
+    from cryosoft.session.gateway.tools import SESSION_TOOL_FUNCTIONS
+
+    declared = {tool.session_function for tool in SESSION_TOOLS if not tool.is_command}
+    implemented = set(SESSION_TOOL_FUNCTIONS)
+
+    assert declared - implemented == set(), (
+        f"session tools with no implementation: {sorted(declared - implemented)}"
+    )
+    assert implemented - declared == set(), (
+        f"session-tool implementations no tool offers: "
+        f"{sorted(implemented - declared)}"
+    )
+    for tool in SESSION_TOOLS:
+        assert isinstance(tool.action_class, ActionClass), (
+            f"{tool.name} carries no action class, so no role can be granted it"
+        )
