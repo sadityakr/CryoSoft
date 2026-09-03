@@ -13,6 +13,12 @@
 !/GLOSSARY.md
 !/CLAUDE.md
 
+# The MCP server declaration: it names `python -m cryosoft.mcp` and nothing
+# machine-specific, so every checkout gets the same wiring. The adapter finds
+# the running application through the descriptor that application publishes,
+# never through a path written here.
+!/.mcp.json
+
 # CI configuration (GitHub Actions now; .gitlab-ci.yml is ready for the GitLab migration)
 !/.github/
 !/.gitlab-ci.yml

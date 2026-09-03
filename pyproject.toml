@@ -33,6 +33,14 @@ dev = [
     "import-linter>=2.0",
     "ruff>=0.4",
 ]
+# The MCP adapter's optional stdio framing. `python -m cryosoft.mcp` serves a
+# complete session without it — cryosoft/mcp/shim.py is the reference backend
+# and the one the tests exercise — so this extra buys the framing from the
+# package that owns the protocol and nothing else. Never make the test suite
+# need it: a transport the tests cannot run is a transport nobody checks.
+mcp = [
+    "mcp>=2.0",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -438,4 +446,57 @@ forbidden_modules = [
     "cryosoft.main",
     "cryosoft.drivers",
     "cryosoft.virtual_instruments",
+]
+
+[[tool.importlinter.contracts]]
+name = "C21: the MCP adapter is a separate process that cannot reach an instrument — it imports only stdlib and cryosoft.core.events"
+type = "forbidden"
+# The whole argument for putting the transport out of process is that the
+# module speaking to the outside world CANNOT touch the Station, the
+# Orchestrator or the session layer — mechanically, not by convention. The
+# allowlist is exactly `cryosoft.core.events`, the pure contract; everything
+# else in the package is enumerated below, because import-linter only matches a
+# forbidden module that is not an ancestor of the source (naming `cryosoft` or
+# `cryosoft.core` here would silently match nothing). A module added to the
+# package later is caught by test_mcp_adapter.py's import-allowlist test, which
+# reads the adapter's own imports rather than a list that has to be maintained.
+source_modules = ["cryosoft.mcp"]
+forbidden_modules = [
+    "cryosoft.drivers",
+    "cryosoft.virtual_instruments",
+    "cryosoft.procedures",
+    "cryosoft.gui",
+    "cryosoft.main",
+    "cryosoft.session",
+    "cryosoft.troubleshoot",
+    "cryosoft.core.availability",
+    "cryosoft.core.capability_manifest",
+    "cryosoft.core.conditions",
+    "cryosoft.core.config_catalog",
+    "cryosoft.core.data_manager",
+    "cryosoft.core.data_reader",
+    "cryosoft.core.decorators",
+    "cryosoft.core.estimates",
+    "cryosoft.core.exceptions",
+    "cryosoft.core.gates",
+    "cryosoft.core.instrument_host",
+    "cryosoft.core.logging_config",
+    "cryosoft.core.operation",
+    "cryosoft.core.operational_status",
+    "cryosoft.core.orchestrator",
+    "cryosoft.core.orchestrator_proxy",
+    "cryosoft.core.paths",
+    "cryosoft.core.plan",
+    "cryosoft.core.procedure",
+    "cryosoft.core.ramps",
+    "cryosoft.core.run_buffer",
+    "cryosoft.core.run_builder",
+    "cryosoft.core.stall_detection",
+    "cryosoft.core.station",
+    "cryosoft.core.status_mirror",
+    "cryosoft.core.sweep_builder",
+    "cryosoft.core.tiered_trend_logger",
+    "cryosoft.core.trend_check_runner",
+    "cryosoft.core.trend_checks",
+    "cryosoft.core.trend_history",
 ]

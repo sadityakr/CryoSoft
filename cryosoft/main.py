@@ -20,6 +20,7 @@ from cryosoft.core.station import (
     Station,
     build_station_with_fallback,
     read_cryogenics_config,
+    read_gateway_config,
     read_operations_config,
     read_panels_config,
     read_request_spool_config,
@@ -33,9 +34,11 @@ from cryosoft.gui import app_settings
 from cryosoft.gui.monitor_window import MonitorWindow
 from cryosoft.gui.procedure_discovery import discover_operations, discover_procedures
 from cryosoft.gui.theme import PLOT_AXIS, PLOT_BG, build_stylesheet
+from cryosoft.session.agent_feed import AgentFeed
 from cryosoft.session.eln.publisher import ElnPublisher
 from cryosoft.session.gateway import authorize_spooled
 from cryosoft.session.eln.settings import load_eln_settings
+from cryosoft.session.gateway import GatewayServer, ToolContext
 from cryosoft.session.manager import ExperimentManager
 from cryosoft.session.models import GUEST_USER_ID, GUEST_USER_NAME, User
 from cryosoft.session.servicing_log import (
@@ -126,6 +129,31 @@ def _resolve_active_session(store: SessionStore) -> tuple[str, str]:
     session = store.create_session(name=user_id, user_id=user_id)
     store.set_active(user_id, session.session_id)
     return user_id, session.session_id
+
+
+def _open_experiment_feed(manager: ExperimentManager) -> AgentFeed | None:
+    """Return the **Agent feed** of whichever experiment is open right now.
+
+    Resolved on demand rather than once at startup, so a client that
+    connects after the physicist opened a new experiment leaves its trail in
+    that experiment's folder — the feed belongs to the experiment, not to
+    the process.
+
+    Args:
+        manager: The session layer's experiment façade.
+
+    Returns:
+        The feed for the open experiment, or ``None`` when none is open (in
+        which case a connection records nothing rather than inventing a
+        folder to record into).
+    """
+    experiment = manager.current_experiment()
+    if experiment is None:
+        return None
+    return AgentFeed(
+        manager.store.agent_feed_path(experiment.experiment_id),
+        experiment.experiment_id,
+    )
 
 
 def _restart_application() -> None:
@@ -312,6 +340,48 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
     # through the proxy, like every other call a client makes here.
     orchestrator.next_procedure = session_manager.next_run
     orchestrator.queue_snapshot = session_manager.queue_entries
+
+    # The Gateway server (cryosoft/session/gateway/local_server.py,
+    # GLOSSARY.md's **Gateway server**): a local socket carrying the same
+    # Gateway an in-process client holds, one per connection, so an agent in
+    # its own process is authorised, fed and seen exactly as an in-process
+    # one. Off unless this setup's monitor.yaml turns it on, and never
+    # handing out more than the role that file names — opening a station to
+    # autonomous clients is a setup decision, so it lives in the config like
+    # every limit. It is a QLocalServer on THIS event loop, the one that
+    # drives the tick, so a frame is parsed in a slot that cannot run beside
+    # the tick: no thread, and no second writer to the bus. Wired here
+    # because this is the one place that owns both the proxy and the session
+    # layer; attached to `app` so its ownership is explicit, like every other
+    # QObject built in main().
+    gateway_config = read_gateway_config(used_path)
+    app.gateway_server = None
+    if gateway_config["gateway_server"]:
+        try:
+            app.gateway_server = GatewayServer(
+                orchestrator,
+                max_role=gateway_config["gateway_max_role"],
+                station_info=station.station_info,
+                tool_context=ToolContext(
+                    experiments=session_manager, run_catalog=run_catalog
+                ),
+                feed=lambda: _open_experiment_feed(session_manager),
+            )
+        except ValueError:
+            logger.exception(
+                "Gateway server not started: monitor.yaml declares the unknown "
+                "gateway_max_role %r",
+                gateway_config["gateway_max_role"],
+            )
+        else:
+            app.gateway_server.start()
+            # Stopping on quit is what keeps the descriptor honest: a
+            # gateway.json left behind names a socket that is gone and a
+            # token that means nothing, and an adapter reading it reports
+            # "cannot connect" instead of "the app is not running". The
+            # socket itself is reclaimed either way — start() removes a
+            # stale one — so this exists for the descriptor's sake.
+            app.aboutToQuit.connect(app.gateway_server.stop)
 
     # ELN publishing (cryosoft/session/eln/): entirely opt-in and entirely
     # GUI-side. With no user-level settings file — the default — the

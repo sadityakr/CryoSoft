@@ -3013,6 +3013,56 @@ def read_panels_config(config_path: str) -> dict[str, list[str]]:
     return result
 
 
+#: The **Gateway server**'s defaults: off, and — when a setup does switch it
+#: on — handing out no more than the role that reads and changes nothing.
+#: Both are deliberately the most restrictive value: opening a process to
+#: autonomous clients is a decision a setup makes explicitly, in its config,
+#: exactly like every safety limit.
+_GATEWAY_DEFAULTS: dict[str, Any] = {
+    "gateway_server": False,
+    "gateway_max_role": "observer",
+}
+
+
+def read_gateway_config(config_path: str) -> dict[str, Any]:
+    """Read ``monitor.yaml``'s gateway keys, GUI-safe, always defaulted.
+
+    Whether this setup accepts out-of-process clients, and how much authority
+    it hands one, is a property of the setup rather than of the code — the
+    same rule every limit follows — so both live in the config beside the
+    tick interval. Like ``read_safety_config()``, an absent block means "use
+    the defaults", and the defaults are the closed door.
+
+    Expected shape::
+
+        monitor:
+          tick_interval_ms: 3000
+          gateway_server: true
+          gateway_max_role: session
+
+    Args:
+        config_path: Path to the config directory containing ``monitor.yaml``.
+
+    Returns:
+        ``_GATEWAY_DEFAULTS`` with any declared override merged in:
+        ``gateway_server`` as a bool and ``gateway_max_role`` as a string.
+        Falls back to the defaults untouched if the file or YAML is
+        unreadable or the keys are absent — never raises.
+    """
+    merged = dict(_GATEWAY_DEFAULTS)
+    monitor_config = _load_monitor_yaml(config_path)
+    if monitor_config is None:
+        return merged
+    block = monitor_config.get("monitor")
+    if not isinstance(block, dict):
+        return merged
+    if "gateway_server" in block:
+        merged["gateway_server"] = bool(block["gateway_server"])
+    if "gateway_max_role" in block:
+        merged["gateway_max_role"] = str(block["gateway_max_role"])
+    return merged
+
+
 def read_cryogenics_config(config_path: str) -> dict[str, Any]:
     """Read the optional ``cryogenics:`` block, GUI-safe, with defaults applied.
 

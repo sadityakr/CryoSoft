@@ -26,8 +26,23 @@ the CONFIG's limit as the bound. Only the session tools — the reads over the
 experiment store, the run files and the two audit trails — are declared by
 hand, because they are not commands.
 
-In-process only: no network, no thread, no socket. A transport is a later,
-separate concern that will feed this same `submit()`.
+The folder's third job is the **transport**. `local_server.py`'s
+`GatewayServer` is a `QLocalServer` on the GUI thread's own event loop — the
+loop that drives the tick — that hands each accepted connection exactly one
+`Gateway`, built with the `Role` and actor id that connection declared at its
+handshake. That is the whole of it: an out-of-process client is authorised by
+the same matrix, recorded in the same feed and seen in the same event stream
+as an in-process one, because it *is* an in-process one with a wire in front
+of it. No thread is added and no blocking call enters the tick path: a frame
+arrives in an ordinary slot that cannot run beside the tick.
+
+That transport is where this folder stops. Everything an external protocol
+needs — MCP's framing, its handshakes, its resource URIs — lives in the
+**MCP adapter** (`cryosoft/mcp/`, a SEPARATE process with its own README),
+which translates that protocol into the wire above and can import nothing
+from this layer at all (import contract C21). The rule is the same one the
+socket follows: a second protocol is a translation in front of the one
+client, never a second client.
 
 ## Architecture layer
 
@@ -64,6 +79,10 @@ is.
   which one.
 - **Tool calls**: `call_tool(name, args)`, where `args` is JSON and `name` is
   a name from `tool_schemas()`.
+- **Local-socket connections** (the transport): newline-delimited JSON-RPC
+  2.0 frames on `QLocalServer`, each connection opening with a `hello`
+  carrying a `role`, an `actor_id` and the per-launch `token` from
+  `gateway.json`.
 
 ## Exit (what goes out)
 
@@ -89,6 +108,16 @@ is.
   gives the `{name, description, input_schema}` list a tool-use API reads.
   Re-rendered whenever the mirrored declaration is replaced, so an instrument
   that connects brings its capability tools with it.
+- **The descriptor**, `gateway.json` beside the socket, written with
+  owner-only permissions while the server listens and removed when it stops:
+  the socket name, the owning pid, the schema version, the deployment's
+  ceiling and the token. It is how a client in another process finds the
+  running app without being told where it is.
+- **JSON-RPC answers and notifications** on each connection: one response per
+  request (the gateway's own answer dict, verbatim, for `tools/call`), and —
+  for a connection that asked with `events/subscribe` — an `event`
+  notification per `StateChange`/`StatusSnapshot` and a `verdict`
+  notification per `Verdict`, each carrying the contract's own `to_json()`.
 - **One answer per tool call.** `call_tool()` never raises at its caller: an
   unknown tool, a schema violation, an absent collaborator and an unexpected
   failure are all one `FAILED`-shaped dict whose `detail` names the `rule`
@@ -135,6 +164,42 @@ is.
   Conformance asserts every control every shipped config declares has a row,
   so that refusal is a bug report about an un-updated table, never a normal
   outcome.
+
+### The transport carries the client; it is not a second one
+
+- **One connection, one `Gateway`.** The server builds nothing else and
+  reaches past nothing: every request is answered by calling the method an
+  in-process client calls. A rule that had to be written twice — once for the
+  in-process client and once for the socket — would be the signal that the
+  transport had grown an API of its own.
+- **The handshake is the identity.** A connection is nothing until it says
+  `hello`; every other method is refused with `NOT_AUTHENTICATED` until then,
+  and a second `hello` is refused rather than re-identifying a live
+  connection.
+- **Two independent bounds on what a connection may claim.** The token (a
+  per-launch random secret in `gateway.json`, compared with
+  `hmac.compare_digest`) says *whether* a client may connect; the ceiling
+  (`monitor.yaml`'s `gateway_max_role`) says *how much* it may claim.
+  `role_within_ceiling()` reads the ceiling cell by cell off
+  `PERMISSION_MATRIX`, so the roles are ordered by the table that already
+  exists and never by a second list beside it.
+- **Off by default, and a setup property when on.** `gateway_server:
+  false` is the default in `monitor.yaml`, and `gateway_max_role` defaults to
+  `observer`. Opening a station to autonomous clients is a decision a setup
+  makes explicitly, in its config, exactly like a safety limit.
+- **Nothing a client writes may raise into the event loop.** A partial read
+  is buffered until its newline; a frame past `MAX_FRAME_BYTES` ends the
+  connection (an unbounded buffer on the GUI thread is a hazard to the
+  measurement, not merely a bad request); malformed JSON, a non-object
+  request, an unknown method, bad params and an unexpected failure are all
+  JSON-RPC error responses on the offending connection. The engine never
+  learns any of it happened.
+- **Codes are declared once.** JSON-RPC's own `-32700`/`-32600`/`-32601`/
+  `-32602`/`-32603` for protocol failures, and this server's own
+  `BAD_TOKEN` / `ROLE_REFUSED` / `NOT_AUTHENTICATED` /
+  `ALREADY_AUTHENTICATED` / `FRAME_TOO_LARGE` outside JSON-RPC's reserved
+  band, so a client never has to guess whether a code is the protocol's or
+  ours.
 
 ### The tool surface is rendered, never written
 
@@ -224,9 +289,20 @@ The default rule the rows were derived from:
    genuinely non-command read is added to `SESSION_TOOLS`, and then its
    implementation goes in `SESSION_TOOL_FUNCTIONS` under the same key, which
    conformance diffs both ways.
-5. New behavior needs its own tests in `tests/test_gateway.py` (the
-   permission model) or `tests/test_gateway_tools.py` (the tool surface);
-   conformance coverage is necessary but not sufficient.
+5. **A new wire method routes, it does not decide.** A method added to
+   `local_server.py` may call a `Gateway` method and shape its answer as
+   JSON, and nothing else. If it needs a permission check of its own, the
+   check belongs in `roles.py` or `gateway.py` where the other one already
+   is, not beside the socket.
+6. **A new protocol is an adapter in its own process, not a module here.**
+   The socket above is the one wire this folder owns. Anything that speaks
+   another protocol translates into it from outside, the way `cryosoft/mcp/`
+   does, so the thing facing the outside world cannot reach an instrument
+   even by mistake.
+7. New behavior needs its own tests in `tests/test_gateway.py` (the
+   permission model), `tests/test_gateway_tools.py` (the tool surface) or
+   `tests/test_gateway_server.py` (the transport); conformance coverage is
+   necessary but not sufficient.
 
 ## Files
 
@@ -234,5 +310,6 @@ The default rule the rows were derived from:
 |------|----------------|----------------|-------------|
 | `action_classes.py` | What an action IS, as declarative tables: one row per `CommandName`, one per `(VI kind, @control name)`, and the two lifecycle actions — each with the rationale a physicist reviews. **PROVISIONAL.** Resolves a `submit_vi_action` to its target's class through the station's declaration snapshot; refuses by name rather than defaulting. | `ActionClass`, `ClassifiedAction`, `UnclassifiedActionError`, `COMMAND_ACTION_CLASSES`, `CONTROL_ACTION_CLASSES`, `LIFECYCLE_ACTION_CLASSES`, `classify_command()`, `classify_control()` | `tests/test_gateway.py` + conformance |
 | `gateway.py` | The in-process client an agent holds: one connection, one `Role`, one actor id. Stamps `Actor(kind="agent", ...)` on every command, runs `authorize()`, and either forwards to the engine or answers the request itself with a `BLOCKED_ROLE` verdict on the engine's OWN `verdict_emitted` stream. Mirrors the latest `StatusSnapshot`/`StationInfo` so every read — attendance and the gate included — is answered locally. Duck-typed on `EngineClient`, so it holds the Orchestrator today and a transport proxy later without noticing. No Qt import, no network, no thread. Also publishes the rendered surface: `tools()` / `tool_schemas()` re-render whenever the mirrored declaration is replaced, and `call_tool()` validates a call against its schema before routing it — a command tool through `submit()`, a session tool to its function after the same kill-switch and matrix checks. It answers every call and raises at none. | `Gateway` (`submit(name, args)`, `permits(name, args)`, optional `feed=` (the **Agent feed** every submitted command is written to before it is forwarded or refused), `call_tool(name, args)`, `tools()`, `tool_schemas()`, `tool(name)`, `status()`, `station()`, `state()`, `attended()`, `agent_gate()`, `role`, `actor`), `EngineClient` | `tests/test_gateway.py`, `tests/test_gateway_tools.py` |
+| `local_server.py` | The **Gateway server**: a `QLocalServer` on the GUI thread's event loop that accepts local-socket connections and gives each one its own `Gateway`, built with the role and actor id its `hello` declared. Speaks newline-delimited JSON-RPC 2.0 (`hello`, `tools/list`, `tools/call`, `status`, `station`, `events/subscribe`, plus `event`/`verdict` notifications), publishes `gateway.json` with the socket name, pid, schema version and per-launch token at 0600, and refuses a bad token, an unknown role or a role above the deployment's ceiling at the handshake. Buffers partial reads, caps a frame, and answers every malformed thing as a JSON-RPC error rather than raising into the loop. No thread. | `GatewayServer` (`start()`, `stop()`, `socket_name`, `descriptor`, `token`, `max_role`), `SCHEMA_VERSION`, `MAX_FRAME_BYTES`, `descriptor_path()`, `default_socket_name()` | `tests/test_gateway_server.py` |
 | `roles.py` | Who may take an action of a given class: the `Role` enum, the `Permission` cell values, the one `PERMISSION_MATRIX` table that is the standard, and `authorize()` — the ordered checks (emergency standby, actor kind, role validity, classification, kill switch, matrix) that answer with `None` or one `BLOCKED_ROLE` verdict. `authorize_spooled()` is the same model with the **Request spool**'s role cap in front of it, injected into `core.request_spool` as its permission hook. | `Role`, `Permission`, `PERMISSION_MATRIX`, `ROLE_LADDER`, `authorize()`, `authorize_spooled()` | `tests/test_gateway.py`, `tests/test_request_spool.py` + conformance |
 | `tools.py` | The **Tool surface**, rendered not written: one command tool per `CommandName` (description from the Orchestrator method's docstring, schema from its signature or its `COMMAND_ARG_SCHEMAS` entry), one capability tool per `(instrument, @control)` the station declares (schema from the `ParamSpec`s, bounds from the config), and the hand-declared session tools that read the store, the run files and the two audit trails. Validates a call against its schema and names the bound it violated. | `ToolSpec`, `ToolContext`, `ToolError`, `SESSION_TOOLS`, `COMMAND_ARG_SCHEMAS`, `render_tools()`, `render_command_tools()`, `render_capability_tools()`, `capability_tool_name()`, `validate_tool_args()`, `call_session_tool()` | `tests/test_gateway_tools.py` + conformance |
