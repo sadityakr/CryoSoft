@@ -1993,12 +1993,15 @@ def _tool_publish_eln_entry(args: Mapping[str, Any], context: ToolContext) -> An
 
     if getattr(record, "attended", False):
         stored = bool(experiments.set_pending_eln_draft(run.run_id, draft))
+        whereabouts = (
+            "It is waiting on the run record for approval."
+            if stored
+            else "It could NOT be parked on the run record, and is lost."
+        )
         raise ToolError(
             f"experiment {experiment_id!r} is attended: a human approves an "
-            f"ELN entry before it is published. The draft for run "
-            f"{run.run_id!r} is "
-            + ("waiting on the run record for approval." if stored
-               else "NOT stored — it could not be parked on the run record."),
+            f"ELN entry before it is published, so the draft for run "
+            f"{run.run_id!r} was not queued. {whereabouts}",
             {
                 "rule": "approval_required",
                 "attended": True,
