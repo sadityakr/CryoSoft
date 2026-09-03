@@ -140,7 +140,16 @@ class ExperimentManager(QObject):
 
         orchestrator.run_started.connect(self._on_run_started)
         orchestrator.run_finished.connect(self._on_run_finished)
-        orchestrator.event_emitted.connect(self._on_engine_event)
+        # The one event stream, under whichever name this client carries it:
+        # an `OrchestratorProxy` (what the application actually holds) renames
+        # the engine's `event_emitted` to `event`, the same way it renames
+        # `verdict_emitted` to `verdict`. The engine's name is tried FIRST,
+        # because `event` is also `QObject`'s own virtual event handler and
+        # every QObject therefore answers to it.
+        event_stream = getattr(orchestrator, "event_emitted", None)
+        if event_stream is None:
+            event_stream = orchestrator.event
+        event_stream.connect(self._on_engine_event)
 
         self._resume_active_experiment()
 
@@ -654,6 +663,40 @@ class ExperimentManager(QObject):
             ValueError: If a parameter value is invalid.
         """
         return self._queue_host.next_run()
+
+    def take_next_spec(self) -> Any:
+        """Pop the next waiting spec, without building it.
+
+        The client-thread half of the pull seam when the engine lives on the
+        instrument thread: popping mutates this layer's queue, so it happens
+        here, and what crosses to the engine is a frozen ``RunSpec``. See
+        ``RunQueueHost.take_next_spec()``.
+
+        Returns:
+            The spec that just left the queue, or ``None`` when nothing is
+            waiting.
+        """
+        return self._queue_host.take_next_spec()
+
+    def build_spec(self, spec: Any) -> Any:
+        """Build the live run a popped spec describes.
+
+        The engine-thread half of the pull seam: it touches the Station, so it
+        runs wherever the Station does. See ``RunQueueHost.build_spec()``.
+
+        Args:
+            spec: A spec ``take_next_spec()`` returned.
+
+        Returns:
+            A ready procedure or operation.
+
+        Raises:
+            KeyError: If the run catalog holds no class of the spec's name.
+            CryoSoftError: If the run refuses to be built.
+            TypeError: If the stored parameters no longer fit the signature.
+            ValueError: If a parameter value is invalid.
+        """
+        return self._queue_host.build_spec(spec)
 
     def _current_envelope(self) -> ExperimentEnvelope | None:
         """Return the open experiment's envelope, or ``None`` when none is open."""

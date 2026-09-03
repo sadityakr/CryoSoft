@@ -1,7 +1,22 @@
 """GUI smoke tests — Layer 6.
 
 These tests use pytest-qt (qtbot fixture). They run against the sim_cryostat
-config with no hardware. All 121 prior tests must pass before this file is run.
+config with no hardware.
+
+They run in BOTH instrument modes. The shared fixtures build the engine
+through an ``InstrumentHost`` whose mode comes from
+``CRYOSOFT_INSTRUMENT_THREAD`` (``tests/instrument_modes.py``), and the
+``orchestrator`` fixture hands the windows an ``OrchestratorProxy`` — which is
+what ``main.py`` hands them — so the same 190-odd assertions hold with the
+engine on this thread and with it on its own:
+
+    pytest tests/test_gui.py
+    CRYOSOFT_INSTRUMENT_THREAD=1 pytest tests/test_gui.py
+
+A test that reaches past the client boundary — forcing a state, setting a
+private the engine only writes inside a tick — goes through the **tick
+helper** family (``on_engine()``, ``set_on_engine()``, ``tick_engine()``)
+rather than touching the engine from this thread.
 """
 
 import logging
@@ -53,6 +68,15 @@ from cryosoft.gui.theme import (
 )
 from cryosoft.gui.trend_plot_panel import TrendPlotPanel
 from cryosoft.virtual_instruments.base import BaseVirtualInstrument
+from tests.instrument_modes import (
+    build_host,
+    engine_of,
+    on_engine,
+    set_on_engine,
+    settled,
+    shutdown_host,
+    ticks_paused,
+)
 
 
 CONFIG_PATH = "cryosoft/configs/sim_cryostat"
@@ -98,24 +122,40 @@ def isolated_settings(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def station():
-    """Real simulated station from sim_cryostat config."""
-    return build_station(CONFIG_PATH)
+def instrument_host(qtbot):
+    """A started host over the sim station, in this session's instrument mode.
+
+    The one place the mode enters this suite: ``inline`` builds the stack on
+    the test's own thread, ``threaded`` builds it inside a ``QThread``, and
+    every fixture below is written so nothing else in the file can tell.
+
+    The teardown stops the tick timer and cuts the engine's connections
+    before qtbot destroys the widget tree — a tick or a queued delivery
+    landing in a half-destroyed tree is the historical source of the rare
+    RuntimeError/segfault flakes.
+    """
+    host = build_host(CONFIG_PATH, tick_interval_ms=50)
+    yield host
+    shutdown_host(host)
 
 
 @pytest.fixture
-def orchestrator(station, qtbot):
-    """Orchestrator with a short tick for fast tests.
+def station(instrument_host):
+    """The simulated station the host built."""
+    return instrument_host.station
 
-    Monitoring stays OFF (the production launch state): GUI tests drive
-    updates by emitting Orchestrator signals directly, so they need no real
-    polling ticks. The teardown stops the tick timer entirely, so a tick can
-    never fire into the half-destroyed widget tree while qtbot tears the
-    windows down (the historical source of rare RuntimeError/segfault flakes).
+
+@pytest.fixture
+def orchestrator(instrument_host):
+    """The client adapter the windows are handed, as ``main.py`` hands it.
+
+    An ``OrchestratorProxy``: one typed method per command, the engine's
+    signals re-exposed, and every read answered from the status mirror.
+    Monitoring stays OFF (the production launch state) — these tests drive
+    updates by emitting the proxy's signals directly, so they need no real
+    polling ticks.
     """
-    orch = Orchestrator(station, tick_interval_ms=50)
-    yield orch
-    orch.shutdown()
+    return instrument_host.build_proxy()
 
 
 @pytest.fixture
@@ -168,7 +208,8 @@ def _publish_state(orchestrator, state):
         orchestrator: The engine to publish from.
         state: The ``{vi_name: {field: value}}`` snapshot to emit.
     """
-    orchestrator._emit_status_snapshot()
+    engine = engine_of(orchestrator)
+    on_engine(orchestrator, engine._emit_status_snapshot)
     orchestrator.states_updated.emit(state)
 
 
@@ -194,7 +235,21 @@ def _mock_mirror(orchestrator, vi_name, vi):
 
     declaring = Station()
     declaring.register_vi(vi_name, vi, "measurement")
-    mirror = StatusMirror.for_engine(orchestrator)
+    engine = engine_of(orchestrator)
+    # The priming reads happen where the engine is; the mirror itself is
+    # built here, so its own connections deliver on this thread.
+    mirror = StatusMirror()
+    mirror.prime(
+        *on_engine(
+            orchestrator,
+            lambda: (
+                engine.station_info(),
+                engine.status_snapshot(),
+                engine.get_operational_status(),
+            ),
+        )
+    )
+    mirror.attach(engine)
     mirror.prime(station_info=declaring.station_info())
     return mirror
 
@@ -347,6 +402,7 @@ def test_instrument_panel_fault_row_disables_controls_and_wires_ack_retry(
     assert retry_btn is not None
 
     ack_btn.click()
+    settled(orchestrator)
     assert station.vi_faults()[vi_name].acknowledged is True
     # Re-emit the same tick's snapshot: the Acknowledge button reflects the
     # now-acknowledged fault (disabled — nothing left to acknowledge).
@@ -1813,9 +1869,11 @@ def test_started_experiment_installs_the_dialog_envelope(
     monitor_win_session._session_info._start_close_btn.click()
 
     assert session_manager.current_experiment() is not None
+    settled(orchestrator)  # the envelope command has to land before the action
     blocked = []
     orchestrator.action_blocked.connect(blocked.append)
     orchestrator.submit_vi_action("magnet_z", "set_field", target_T=2.0)
+    settled(orchestrator)
     assert blocked and "session envelope" in blocked[0]
 
 
@@ -1835,7 +1893,11 @@ def test_start_dialog_is_offered_the_setups_envelope_variables(
     monitor_win_session._session_info._start_close_btn.click()
 
     assert seen and "magnet_z" in seen[0]
-    assert seen[0]["magnet_z"].param_name == "target_T"
+    # What the panel hands on is what the CLIENT's mirror answers — the
+    # JSON-safe dict form of each envelope variable, not the typed record the
+    # engine holds. This suite asserts the production shape because the panel
+    # is now given the proxy the application gives it.
+    assert seen[0]["magnet_z"]["param_name"] == "target_T"
 
 
 # ── Setup tier: login and instrument info (User / Config menus) ───────────────
@@ -2438,7 +2500,14 @@ def test_ack_button_visible_when_window_opened_after_emergency_already_active(
     without an explicit sync at construction time the button stayed hidden
     — the operator had no way to acknowledge from a freshly opened window.
     """
-    orchestrator._state = OrchestratorState.EMERGENCY  # simulate a pre-existing emergency
+    # Forced through the tick helper: `orchestrator` is the client adapter,
+    # so a bare assignment would set an attribute on the proxy and change
+    # nothing at all — and the engine may be on its own thread. The snapshot
+    # that follows is what carries the forced state into the client's mirror,
+    # which is what a window opened afterwards reads.
+    engine = engine_of(orchestrator)
+    set_on_engine(orchestrator, "_state", OrchestratorState.EMERGENCY)
+    on_engine(orchestrator, engine._emit_status_snapshot)
 
     win = MonitorWindow(station, orchestrator)
     qtbot.addWidget(win)
@@ -2519,6 +2588,9 @@ def test_add_to_queue_appends_item(procedure_win, qtbot):
         procedure_win.findChild(QPushButton, "add_to_queue_btn"),
         __import__("PyQt6.QtCore", fromlist=["Qt"]).Qt.MouseButton.LeftButton,
     )
+    # The panel is a VIEW of the queue: what redraws it is the QueueChanged
+    # the engine broadcasts, so the round trip has to complete first.
+    settled(procedure_win._orchestrator)
     assert procedure_win._queue_panel._queue_list.count() == initial_count + 1
 
 
@@ -2532,6 +2604,7 @@ def test_add_to_queue_captures_current_file_prefix(procedure_win, qtbot):
 
     procedure_win._params_panel._file_prefix_input.setText("run_b")
     qtbot.mouseClick(add_btn, Qt.MouseButton.LeftButton)
+    settled(procedure_win._orchestrator)
 
     prefixes = [entry.spec.file_prefix for entry in procedure_win._queue_panel._queue]
     assert prefixes[-2:] == ["run_a", "run_b"]
@@ -2546,6 +2619,7 @@ def test_blank_file_prefix_omitted_from_queue_label(procedure_win, qtbot):
 
     procedure_win._params_panel._file_prefix_input.setText("")
     qtbot.mouseClick(add_btn, Qt.MouseButton.LeftButton)
+    settled(procedure_win._orchestrator)
 
     entry = procedure_win._queue_panel._queue[-1]
     assert entry.spec.file_prefix == ""
@@ -2703,6 +2777,7 @@ def test_monitor_switch_card_has_scanner_toggle_and_live_route(monitor_win, stat
     assert chk is not None
     assert chk.isChecked() is False
     chk.setChecked(True)
+    settled(orchestrator)
     assert monitor_win._orchestrator.scanner_enabled() is True
     chk.setChecked(False)
 
@@ -2891,11 +2966,12 @@ class _StubOperation:
 def test_status_log_stays_empty_while_operation_runs(procedure_win, orchestrator):
     """_emit_status() routes to operation_status, never status_message, for an operation run."""
     status_log = procedure_win.findChild(QTextEdit, "status_log")
-    orchestrator._procedure = _StubOperation()
+    engine = engine_of(orchestrator)
+    set_on_engine(orchestrator, "_procedure", _StubOperation())
     try:
-        orchestrator._emit_status("Ramping magnet_z to 0 T")
+        on_engine(orchestrator, lambda: engine._emit_status("Ramping magnet_z to 0 T"))
     finally:
-        orchestrator._procedure = None
+        set_on_engine(orchestrator, "_procedure", None)
     assert status_log.toPlainText() == ""
 
 
@@ -2903,13 +2979,16 @@ def test_abort_button_does_not_act_while_operation_runs(procedure_win, orchestra
     """The Abort button no-ops (no confirmation dialog, no abort_procedure()) for an operation."""
     called = []
     monkeypatch.setattr(orchestrator, "abort_procedure", lambda: called.append(True))
-    orchestrator._procedure = _StubOperation()
-    orchestrator._emit_status_snapshot()  # the window reads the run kind off its mirror
+    engine = engine_of(orchestrator)
+    set_on_engine(orchestrator, "_procedure", _StubOperation())
+    # The window reads the run kind off its mirror, so the snapshot has to
+    # have crossed back before the click.
+    on_engine(orchestrator, engine._emit_status_snapshot)
     try:
         procedure_win._on_abort()
     finally:
-        orchestrator._procedure = None
-        orchestrator._emit_status_snapshot()
+        set_on_engine(orchestrator, "_procedure", None)
+        on_engine(orchestrator, engine._emit_status_snapshot)
     assert called == []
 
 
@@ -2919,14 +2998,15 @@ def test_pause_resume_do_not_act_while_operation_runs(procedure_win, orchestrato
     resume_calls = []
     monkeypatch.setattr(orchestrator, "pause_procedure", lambda: pause_calls.append(True))
     monkeypatch.setattr(orchestrator, "resume_procedure", lambda: resume_calls.append(True))
-    orchestrator._procedure = _StubOperation()
-    orchestrator._emit_status_snapshot()  # the window reads the run kind off its mirror
+    engine = engine_of(orchestrator)
+    set_on_engine(orchestrator, "_procedure", _StubOperation())
+    on_engine(orchestrator, engine._emit_status_snapshot)
     try:
         procedure_win._on_pause_clicked()
         procedure_win._on_resume_clicked()
     finally:
-        orchestrator._procedure = None
-        orchestrator._emit_status_snapshot()
+        set_on_engine(orchestrator, "_procedure", None)
+        on_engine(orchestrator, engine._emit_status_snapshot)
     assert pause_calls == []
     assert resume_calls == []
 
@@ -3003,8 +3083,12 @@ def test_closing_window_aborts_active_run(monitor_win, orchestrator):
     """
     # Through _change_state, not a bare assignment: the window reads state
     # off its status mirror, which is fed by the engine's event stream.
-    orchestrator._change_state(OrchestratorState.SWEEPING)
+    engine = engine_of(orchestrator)
+    on_engine(
+        orchestrator, lambda: engine._change_state(OrchestratorState.SWEEPING)
+    )
     monitor_win.close()
+    settled(orchestrator)
     assert orchestrator.state == OrchestratorState.IDLE.value
 
 
@@ -3272,6 +3356,7 @@ def test_procedure_window_exports_and_restores_queue(station, orchestrator, qtbo
     win = ProcedureWindow(station, orchestrator, info, ddir)
     qtbot.addWidget(win)
     win._on_add_to_queue()
+    settled(orchestrator)
     assert win._queue_panel._queue_list.count() == 1, "default form params should be valid to queue"
 
     state = session_store.FormAutosaveState()
@@ -3280,6 +3365,7 @@ def test_procedure_window_exports_and_restores_queue(station, orchestrator, qtbo
 
     win2 = ProcedureWindow(station, orchestrator, info, ddir, initial_session=state)
     qtbot.addWidget(win2)
+    settled(orchestrator)
     assert win2._queue_panel._queue_list.count() == 1
     # The queue is data in the session layer, not procedures in the engine.
     assert len(win2._queue_panel._host.snapshot()) == 1
@@ -3303,19 +3389,23 @@ def test_run_queue_marks_running_then_done(station, orchestrator, qtbot, monkeyp
     qtbot.addWidget(win)
     win._on_add_to_queue()
     win._on_add_to_queue()
+    settled(orchestrator)
     assert [e.status for e in win._queue_panel._queue] == ["pending", "pending"]
 
     # Stub the actual run: exercise only the GUI's per-item status logic.
     monkeypatch.setattr(orchestrator, "run_queue", lambda: None)
     win._queue_panel._on_run_queue()
+    settled(orchestrator)
     assert win._queue_panel._queue[0].status == "running"
     assert win._queue_panel._queue_running is True
 
     orchestrator.procedure_finished.emit()
+    settled(orchestrator)
     assert win._queue_panel._queue[0].status == "done"
     assert win._queue_panel._queue[1].status == "running"
 
     orchestrator.procedure_finished.emit()
+    settled(orchestrator)
     assert win._queue_panel._queue[1].status == "done"
     assert win._queue_panel._queue_running is False
 
@@ -3327,15 +3417,18 @@ def test_abort_marks_running_item_failed(station, orchestrator, qtbot, monkeypat
     qtbot.addWidget(win)
     win._on_add_to_queue()
     win._on_add_to_queue()
+    settled(orchestrator)
     monkeypatch.setattr(orchestrator, "run_queue", lambda: None)
     monkeypatch.setattr(orchestrator, "abort_procedure", lambda: None)
     win._queue_panel._on_run_queue()
+    settled(orchestrator)
     assert win._queue_panel._queue[0].status == "running"
 
     monkeypatch.setattr(
         QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes
     )
     win._on_abort()
+    settled(orchestrator)
     assert win._queue_panel._queue[0].status == "failed"
     assert win._queue_panel._queue[1].status == "running"
 
@@ -3346,6 +3439,7 @@ def test_queue_holds_specs_not_procedures(station, orchestrator, qtbot):
     win = ProcedureWindow(station, orchestrator, info, ddir)
     qtbot.addWidget(win)
     win._on_add_to_queue()
+    settled(orchestrator)
 
     entry = win._queue_panel._queue[0]
     assert not hasattr(entry, "proc")
@@ -3386,6 +3480,7 @@ def test_the_panel_renders_a_run_queued_by_someone_else(station, orchestrator, q
     win._queue_panel._host.add(
         cls, params, sample_info=sample_info, data_directory=data_dir
     )
+    settled(orchestrator)
 
     assert win._queue_panel._queue_list.count() == 1
 
@@ -3399,9 +3494,11 @@ def test_reordering_moves_the_spec_in_the_run_queue(station, orchestrator, qtbot
     win._on_add_to_queue()
     win._params_panel._file_prefix_input.setText("second")
     win._on_add_to_queue()
+    settled(orchestrator)
 
     win._queue_panel._queue_list.setCurrentRow(1)
     win._queue_panel._queue_move_up()
+    settled(orchestrator)
 
     assert [
         spec.file_prefix for spec in win._queue_panel._host.snapshot()
@@ -3416,10 +3513,12 @@ def test_queue_remove_drops_the_spec_from_the_run_queue(station, orchestrator, q
     qtbot.addWidget(win)
     win._on_add_to_queue()
     win._on_add_to_queue()
+    settled(orchestrator)
     assert len(win._queue_panel._host.snapshot()) == 2
     removed = win._queue_panel._queue[0].spec.spec_id
     win._queue_panel._queue_list.setCurrentRow(0)
     win._queue_panel._queue_remove()
+    settled(orchestrator)
     assert win._queue_panel._queue_list.count() == 1
     assert [s.spec_id for s in win._queue_panel._host.snapshot()] != [removed]
     assert len(win._queue_panel._host.snapshot()) == 1
@@ -3543,11 +3642,13 @@ def test_monitoring_button_starts_and_stops_monitoring(monitor_win, orchestrator
     assert btn.text() == "Start Monitoring"
 
     btn.click()
+    settled(orchestrator)
     assert orchestrator.is_monitoring() is True
     assert btn.isChecked()
     assert btn.text() == "Stop Monitoring"
 
     btn.click()  # IDLE, so the stop is allowed
+    settled(orchestrator)
     assert orchestrator.is_monitoring() is False
     assert btn.text() == "Start Monitoring"
 
@@ -3556,23 +3657,29 @@ def test_monitoring_button_mirrors_orchestrator_state(monitor_win, orchestrator)
     """Starting monitoring on the Orchestrator directly updates the toggle."""
     btn = monitor_win.findChild(QPushButton, "monitoring_btn")
     orchestrator.start_monitoring()
+    settled(orchestrator)
     assert btn.isChecked()
     assert btn.text() == "Stop Monitoring"
 
 
-def test_monitoring_button_snaps_back_when_stop_refused(monitor_win, orchestrator):
+def test_monitoring_button_snaps_back_when_stop_refused(
+    monitor_win, orchestrator, qtbot
+):
     """A refused stop (non-IDLE state) re-syncs the button and warns via banner."""
     btn = monitor_win.findChild(QPushButton, "monitoring_btn")
     orchestrator.start_monitoring()
-    # Force a non-IDLE state so stop_monitoring() is refused.
-    orchestrator._state = OrchestratorState.RAMPING
+    qtbot.waitUntil(lambda: btn.isChecked(), timeout=2000)
 
-    btn.click()  # attempt to stop
-
-    assert orchestrator.is_monitoring() is True
-    assert btn.isChecked(), "button must snap back to the confirmed state"
-    assert monitor_win._banner.isVisible()
-    orchestrator._state = OrchestratorState.IDLE
+    # Force a non-IDLE state so stop_monitoring() is refused — with the tick
+    # held, since the very next tick would put the state machine back in IDLE
+    # and the refusal would never happen.
+    with ticks_paused(orchestrator):
+        set_on_engine(orchestrator, "_state", OrchestratorState.RAMPING)
+        btn.click()  # attempt to stop
+        qtbot.waitUntil(lambda: monitor_win._banner.isVisible(), timeout=2000)
+        assert orchestrator.is_monitoring() is True
+        assert btn.isChecked(), "button must snap back to the confirmed state"
+        set_on_engine(orchestrator, "_state", OrchestratorState.IDLE)
 
 
 # ── DiagnosticsWindow tests ─────────────────────────────────────────────────────────
@@ -3663,8 +3770,14 @@ def test_diagnostics_window_seeds_from_existing_status(orchestrator, qtbot):
     # A raw signal emit does not update Orchestrator's stored record — only a
     # real tick does that (_update_operational_status). Setting the private
     # field directly is the same forcing pattern other GUI tests use for
-    # Orchestrator internals (e.g. `orchestrator._state = ...`).
-    orchestrator._operational_status = _STALLED_RECORD
+    # Orchestrator internals (e.g. `set_on_engine(orchestrator, "_state", ...)`),
+    # and the emit that follows is what carries it into the client's mirror,
+    # which is what a window opened later actually reads.
+    engine = engine_of(orchestrator)
+    set_on_engine(orchestrator, "_operational_status", _STALLED_RECORD)
+    on_engine(
+        orchestrator, lambda: engine.operational_status.emit(dict(_STALLED_RECORD))
+    )
     win = DiagnosticsWindow(orchestrator)
     qtbot.addWidget(win)
     win.show()

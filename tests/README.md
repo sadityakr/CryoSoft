@@ -47,6 +47,21 @@ Tests requiring physical instruments must be marked `@pytest.mark.hardware`;
 `make test` and CI exclude them. Everything else must pass on a bare machine.
 Shared fixtures belong in `conftest.py`.
 
+`instrument_modes.py` (not itself a test file) is what lets one suite run in
+both instrument modes. `CRYOSOFT_INSTRUMENT_THREAD=1` moves the Station and
+the Orchestrator onto their own thread (GLOSSARY.md's **Instrument thread**);
+`tests/test_gui.py`'s fixtures build through an `InstrumentHost` in whichever
+mode is selected and hand the windows the `OrchestratorProxy` the application
+hands them, so the same 190-odd assertions are checked both ways
+(`make test-instrument-thread`, which CI runs after `make test`). It carries
+the **tick helper** family a test needs once it is behind the client boundary:
+`on_engine()` runs a call where the engine lives and waits for it,
+`set_on_engine()` forces one engine attribute, `tick_engine()` replaces a bare
+`orchestrator._tick()`, `ticks_paused()` holds the tick timer while a test
+forces a state the next tick would undo, and `settled()` waits out the round
+trip a GUI action makes — all no-ops or direct calls inline, so a test reads
+the same either way.
+
 `scenarios.py` (not itself a test file) names the sim-driver state-injection
 recipes every hazard/fault test needs — helium low, quench, a disconnected
 instrument, a measurement instrument erroring instead of returning data, a
@@ -102,6 +117,7 @@ config also has automatic `test_conformance.py` coverage on top of these.
 | `cryosoft/virtual_instruments/*` | `tests/test_l1_virtual_instruments.py`, `tests/test_l1_new_vis.py`, `tests/test_l1_switch_vi.py`, `tests/test_measurement_dc_vi.py` |
 | `cryosoft/core/station.py`, config loading | `tests/test_l2_station.py`, `tests/test_config_validation.py`, `tests/test_config_catalog.py`, `tests/test_direct_action_path.py` (`execute_vi_action()`'s refusals) |
 | `cryosoft/core/orchestrator.py` | `tests/test_l3_orchestrator.py`, `tests/test_operations.py`, `tests/test_direct_action_path.py` |
+| `cryosoft/core/instrument_host.py`, `orchestrator_proxy.py`, `status_mirror.py` | `tests/test_orchestrator_proxy.py` (inline mode), `tests/test_instrument_thread.py` (threaded mode), `tests/test_status_mirror.py` |
 | `cryosoft/core/operation.py` | `tests/test_operations.py` |
 | `cryosoft/core/procedure.py`, `cryosoft/procedures/*` | `tests/test_l4_procedure.py`, `tests/test_new_procedures.py`, `tests/test_field_voltage_procedure.py` |
 | `cryosoft/procedures/operations/*` (concrete operations) | `tests/test_helium_fill.py`, `tests/test_sample_access.py` |
@@ -124,7 +140,8 @@ config also has automatic `test_conformance.py` coverage on top of these.
 
 ## Files
 
-- `conftest.py` — shared fixtures (logging setup).
+- `conftest.py` — shared fixtures (logging setup, an isolated measurement root).
+- `instrument_modes.py` — building a host in the session's instrument mode, and the tick helpers a test needs to reach the engine across the boundary (see above).
 - `mocks/` — shared mock objects, including `bus_spy.py`: recording shims over a
   live driver's public methods, for proving a path issues no instrument traffic
   (an empty call log, rather than trust).
@@ -133,6 +150,7 @@ config also has automatic `test_conformance.py` coverage on top of these.
 - **L0 drivers:** `test_l0_simulated.py`, `test_l0_new_drivers.py`, `test_l0_switch_driver.py`.
 - **L1 virtual instruments:** `test_l1_virtual_instruments.py`, `test_l1_new_vis.py`, `test_l1_switch_vi.py`, `test_measurement_dc_vi.py`, `test_switch_heater.py`.
 - **L2 station + config:** `test_l2_station.py`, `test_config_validation.py`, `test_config_catalog.py`, `test_capability_manifest.py` (the **Station info** declaration snapshot and its **Capability manifest** rendering: declared order, group resolution, the offline branch, the JSON Schema and its validator, and the `python -m cryosoft.core.capability_manifest` entry point).
+- **The client boundary:** `test_orchestrator_proxy.py` (the `OrchestratorProxy` and the `InstrumentHost` in `inline` mode); `test_instrument_thread.py` (the same seam across a real `QThread` — GLOSSARY.md's **Instrument thread**: thread affinity, one verdict per command posted across the boundary, the frozen-GUI detector, payload ownership, the run queue's two crossings, the pause boundary and a quench end to end, and a bounded shutdown over a read that never returns). A test that used to call `orchestrator._tick()` directly must not do so across the boundary: `test_instrument_thread.py`'s `_tick_on_engine()` is the **tick helper** — it runs the tick where the engine lives and waits for it, so the caller still gets the synchronous "that tick has happened" it relied on.
 - **L3 orchestrator:** `test_l3_orchestrator.py`; `test_direct_action_path.py` (the direct action path: the five refusals a manual action can meet — private name, non-capability, out-of-scope capability, out-of-limit value, out-of-envelope setpoint — plus `emergency_standby()` from every state).
 - **L3/L4 operations:** `test_operations.py` (`OperationBase`, `run_operation`/`queue_operation`/`finish_operation`, tolerated safety flags, postcondition gates, capability-scope dispatch); `test_operation_readiness.py` (the readiness/next-due contract — `ReadinessCondition`/`NextDue`, `OperationBase` defaults, `HeliumFillOperation`'s and the shared `_SampleAccessOperationBase`'s (via `SampleLoadOperation`/`SampleUnloadOperation`) concrete `readiness_conditions()`/`next_due()`, Qt-free); `test_helium_fill.py` (`HeliumFillOperation` end-to-end against a real Orchestrator + `sim_cryostat`, including the `CryogenicsRecorder` wiring); `test_sample_access.py` (`SampleLoadOperation`/`SampleUnloadOperation` end-to-end against a real Orchestrator + `sim_cryostat`, parametrized over both, including `confirm_operation()`'s operator-confirmation gate and postcondition timeout).
 - **L4 procedures + planning:** `test_l4_procedure.py`, `test_new_procedures.py`, `test_field_voltage_procedure.py`, `test_plan.py`, `test_sweep_builder.py`.

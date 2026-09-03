@@ -61,6 +61,36 @@ def orchestrator(station, qtbot):
     return Orchestrator(station, tick_interval_ms=10)
 
 
+def test_the_manager_wires_to_the_proxy_the_application_hands_it(
+    store, roster, station, qtbot
+):
+    """The session layer is built against the client adapter, not the engine.
+
+    ``main.py`` hands ``ExperimentManager`` an ``OrchestratorProxy``, which
+    renames the engine's two contract channels (``event_emitted`` → ``event``,
+    ``verdict_emitted`` → ``verdict``) because a client consumes them. Nothing
+    else in this suite passes one, so without this the wiring is only
+    exercised at launch — where a mismatch is a crash before the first window
+    appears rather than a red test.
+    """
+    from cryosoft.core.instrument_host import InstrumentHost
+
+    host = InstrumentHost(
+        lambda: station, orchestrator_options={"tick_interval_ms": 50}
+    )
+    host.start()
+    try:
+        manager = ExperimentManager(
+            store=store,
+            roster=roster,
+            orchestrator=host.build_proxy(),
+            config_name="sim_cryostat",
+        )
+        assert manager.current_experiment() is None
+    finally:
+        host.shutdown()
+
+
 @pytest.fixture
 def store(tmp_path):
     return ExperimentStore(tmp_path / "experiments")
