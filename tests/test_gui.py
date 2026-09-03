@@ -2716,10 +2716,32 @@ def test_probe_first_queues_a_reduced_run_ahead_of_the_item(procedure_win, qtbot
     assert probe.probe_spec == DEFAULT_PROBE_SPEC.to_json()
 
     row = panel._queue_list.item(panel._queue_list.count() - 2)
-    assert "(probe)" in row.text(), "a probe is never science data and says so"
+    assert "probe" in row.text(), "a probe is never science data and says so"
     assert "probe" in row.toolTip()
     assert panel._probe_label.isVisible()
     assert "probe" in panel._probe_label.text()
+
+
+def test_a_probe_row_says_so_once(procedure_win):
+    """The label names the probe once — a prefix that already says it is enough."""
+    import dataclasses
+
+    from cryosoft.gui.queue_panel import QueueEntry
+
+    panel = procedure_win._queue_panel
+    procedure_win._on_add_to_queue()
+    settled(procedure_win._orchestrator)
+    queued = panel._host.snapshot()[-1]
+    reduction = {"n_points": 3, "averaging": 1, "max_wait_s": 5.0}
+    prefixed = dataclasses.replace(
+        queued, file_prefix="probe", probe_spec=reduction, spec_id="p1"
+    )
+    plain = dataclasses.replace(
+        queued, file_prefix="", probe_spec=reduction, spec_id="p2"
+    )
+
+    assert panel._entry_summary(QueueEntry(spec=prefixed)).count("probe") == 1
+    assert "(probe)" in panel._entry_summary(QueueEntry(spec=plain))
 
 
 def test_probe_first_shows_the_estimate_and_the_findings(procedure_win, qtbot):

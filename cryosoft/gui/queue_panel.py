@@ -573,8 +573,10 @@ class QueuePanel(QGroupBox):
         cls = self._classes.get(spec.run_class)
         name = getattr(cls, "name", "") or spec.run_class
         label = f"[{spec.file_prefix}] {name}" if spec.file_prefix else name
-        if spec.probe_spec:
-            # A probe is never science data, so it says so in the queue too.
+        if spec.probe_spec and PROBE_FILE_PREFIX not in spec.file_prefix:
+            # A probe is never science data, so it says so in the queue too —
+            # once: a spec whose own file prefix already says "probe" is not
+            # made clearer by saying it twice.
             label = f"{label} (probe)"
         if cls is None:
             return label

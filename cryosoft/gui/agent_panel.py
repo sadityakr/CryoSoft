@@ -323,7 +323,13 @@ class AgentPanel(QWidget):
         self._scroll.setObjectName("agent_panel_scroll")
         self._scroll.setWidgetResizable(True)
         self._scroll.setWidget(self._rows_host)
-        self._scroll.verticalScrollBar().valueChanged.connect(self._on_scrolled)
+        bar = self._scroll.verticalScrollBar()
+        bar.valueChanged.connect(self._on_scrolled)
+        # A row added this instant has not been laid out yet, so the
+        # scrollbar's maximum is still the one from before it existed.
+        # Following the tail therefore hangs off the RANGE changing, which is
+        # Qt telling us the new row has been measured.
+        bar.rangeChanged.connect(self._on_range_changed)
         root.addWidget(self._scroll, stretch=1)
 
         if self._session_manager is not None:
@@ -578,9 +584,13 @@ class AgentPanel(QWidget):
         label.setTextFormat(Qt.TextFormat.PlainText)
         label.setProperty("class", "agent_row")
         label.setProperty("outcome", action.outcome)
-        label.setWordWrap(True)
-        label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        label.setToolTip(action.reason or action.text())
+        # One row per action, one line per row: a wrapped label has a
+        # one-line minimum height, so a short quadrant would compress the
+        # rows into each other instead of scrolling. The full line is the
+        # tooltip, and the scroll area scrolls sideways for the rest.
+        label.setWordWrap(False)
+        label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        label.setToolTip(action.text())
         layout.addWidget(label, stretch=1)
         return row
 
@@ -643,10 +653,28 @@ class AgentPanel(QWidget):
         bar = self._scroll.verticalScrollBar()
         self._follow_tail = value >= bar.maximum()
 
+    def _on_range_changed(self, _minimum: int, maximum: int) -> None:
+        """Keep the newest row in view as the list grows.
+
+        Args:
+            _minimum: The scrollbar's new minimum (always 0 here).
+            maximum: Its new maximum, which is where the tail now is.
+        """
+        if self._follow_tail:
+            self._scroll.verticalScrollBar().setValue(maximum)
+
     def _scroll_to_bottom(self) -> None:
-        """Put the newest row in view."""
-        bar = self._scroll.verticalScrollBar()
-        bar.setValue(bar.maximum())
+        """Put the newest row in view.
+
+        Guarded against a panel destroyed between the deferred call being
+        scheduled and delivered: a view that is gone has nothing to scroll,
+        and must not raise into Qt's event loop for it.
+        """
+        try:
+            bar = self._scroll.verticalScrollBar()
+            bar.setValue(bar.maximum())
+        except RuntimeError:
+            logger.debug("Agent panel: scroll skipped, the view is gone")
 
     # ------------------------------------------------------------------
     # The "agents active" ledger

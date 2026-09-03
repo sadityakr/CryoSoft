@@ -73,13 +73,23 @@ class ExperimentInfoPanel(QWidget):
         outer.setSpacing(4)
         outer.addWidget(QLabel("<b>Experiment</b>"))
         outer.addLayout(self._build_experiment_row())
-        self._build_envelope_editor(outer)
-        outer.addWidget(QLabel("<b>Sample Info</b>"))
+
+        # One scrolled region for everything below the experiment row: the
+        # envelope editor is one row per enveloped quantity, and a setup with
+        # five of them would otherwise push the sample fields off the bottom
+        # of the quadrant.
+        scrolled = QWidget()
+        scrolled_layout = QVBoxLayout(scrolled)
+        scrolled_layout.setContentsMargins(0, 0, 0, 0)
+        scrolled_layout.setSpacing(4)
+        self._build_envelope_editor(scrolled_layout)
+        scrolled_layout.addWidget(QLabel("<b>Sample Info</b>"))
+        scrolled_layout.addWidget(self._build_form())
 
         scroll = QScrollArea()
         scroll.setObjectName("session_info_scroll")
         scroll.setWidgetResizable(True)
-        scroll.setWidget(self._build_form())
+        scroll.setWidget(scrolled)
         outer.addWidget(scroll)
 
         outer.addWidget(QLabel("<b>eLab</b>"))
@@ -166,6 +176,7 @@ class ExperimentInfoPanel(QWidget):
         self._envelope_verdict_label.setWordWrap(True)
         self._envelope_verdict_label.setVisible(False)
         row.addWidget(self._envelope_verdict_label, 1)
+        row.addStretch()
         self._envelope_apply_btn = QPushButton("Apply envelope")
         self._envelope_apply_btn.setObjectName("envelope_apply_btn")
         self._envelope_apply_btn.setToolTip(
@@ -193,15 +204,17 @@ class ExperimentInfoPanel(QWidget):
             self._envelope_verdict_label.setVisible(False)
 
     def _on_envelope_changed(self) -> None:
-        """Reflect the editor's own validation verdict, live as it is typed."""
+        """Keep Apply available exactly while the entry could be sent.
+
+        The editor shows its own refusal on its own badge, so this does not
+        repeat it — saying the same sentence twice, six pixels apart, reads
+        as two different problems. What is left for the panel is the half the
+        editor cannot know: whether the value may be sent at all.
+        """
         if self._envelope_editor is None:
             return
-        error = self._envelope_editor.error()
-        self._envelope_apply_btn.setEnabled(not error)
-        if error:
-            self._show_envelope_verdict(error, "error")
-        else:
-            self._envelope_verdict_label.setVisible(False)
+        self._envelope_apply_btn.setEnabled(not self._envelope_editor.error())
+        self._envelope_verdict_label.setVisible(False)
 
     def _on_apply_envelope(self) -> None:
         """Install the edited envelope on the open experiment.
@@ -211,9 +224,9 @@ class ExperimentInfoPanel(QWidget):
         """
         if self._envelope_editor is None or self._session_manager is None:
             return
-        error = self._envelope_editor.error()
-        if error:
-            self._show_envelope_verdict(error, "error")
+        if self._envelope_editor.error():
+            # Belt and braces: the button is disabled while the entry is
+            # unusable, and the editor is already showing why.
             return
         self._pending_envelope_request = self._session_manager.set_experiment_envelope(
             self._envelope_editor.envelope()
@@ -248,6 +261,9 @@ class ExperimentInfoPanel(QWidget):
 
     def _show_envelope_verdict(self, text: str, severity: str) -> None:
         """Show one line on the envelope's verdict badge.
+
+        Only ever the ENGINE's answer to an Apply — the editor owns the
+        refusals it can decide itself.
 
         Args:
             text: What to say.

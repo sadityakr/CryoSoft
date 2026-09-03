@@ -121,8 +121,8 @@ _BOTTOM_RIGHT_STRETCH = (1, 2)
 # verdict, reason — and a third column would wrap every one of them. The
 # minimum is what keeps two rows and the filter visible at the smallest drag.
 _AGENTS_MIN_HEIGHT = 90
-_BOTTOM_RIGHT_VERTICAL_SIZES = [260, 180]
-_BOTTOM_RIGHT_VERTICAL_STRETCH = (3, 2)
+_BOTTOM_RIGHT_VERTICAL_SIZES = [220, 220]
+_BOTTOM_RIGHT_VERTICAL_STRETCH = (1, 1)
 
 # Orchestrator state names that colour the status bar (dynamic 'level' property).
 _ACTIVE_STATES = frozenset({
@@ -607,7 +607,10 @@ class MonitorWindow(QMainWindow):
         self._right_splitter.setChildrenCollapsible(False)
         self._right_splitter.addWidget(self._trends)
         self._right_splitter.addWidget(bottom_right)
-        self._right_splitter.setSizes([750, 250])
+        # The bottom-right quadrant carries three things now (ramps,
+        # operations, agents), so it starts with a little more of the column
+        # than it did when it carried two.
+        self._right_splitter.setSizes([700, 300])
 
         self._main_splitter = QSplitter(Qt.Orientation.Horizontal)
         self._main_splitter.setObjectName("main_splitter")

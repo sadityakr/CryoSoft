@@ -616,9 +616,12 @@ def test_a_refused_envelope_shows_a_verdict_badge(
     panel._envelope_editor._enabled_checkbox.setChecked(True)
     panel._envelope_editor._rows["magnet_z"][1].setText(f"{hi + 1:g}")
 
-    assert panel._envelope_verdict_label.isVisible()
-    assert panel._envelope_verdict_label.property("severity") == "error"
-    assert "narrows the setup's limits" in panel._envelope_verdict_label.text()
+    # The editor owns the refusals it can decide itself, on its own badge —
+    # the panel does not repeat the sentence six pixels lower.
+    error_label = panel._envelope_editor._error_label
+    assert error_label.isVisible()
+    assert "narrows the setup's limits" in error_label.text()
+    assert not panel._envelope_verdict_label.isVisible()
     assert not panel._envelope_apply_btn.isEnabled(), "Apply cannot send a refusal"
 
 
