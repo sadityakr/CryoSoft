@@ -13,10 +13,11 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 import pytest
-from PyQt6.QtCore import QThread
+from PyQt6.QtCore import QThread, QTimer
 
 from cryosoft.core import events as ev
 from cryosoft.core.data_reader import list_columns, open_run
@@ -564,3 +565,103 @@ def test_two_runs_back_to_back_produce_two_distinct_files_and_records(
     assert {r.status for r in stored.runs} == {RUN_STATUS_DONE}
     assert {r.data_file for r in stored.runs} == {file1, file2}
     assert {r.run_id for r in stored.runs} == {run_id1, run_id2}
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 5. Responsiveness: the GUI thread keeps firing through a slow measurement
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class _SlowMeasureProcedure:
+    """A single-point run whose ``measure()`` blocks the instrument thread.
+
+    No system targets at all (like ``TimeSeries``): ``initiate()``/
+    ``standby()`` ramp nothing, so the whole run is exactly one slow
+    ``measure()`` and nothing else — the minimum shape needed to put a
+    KNOWN, long, synchronous call on the instrument thread while a client-
+    side timer is watched.
+    """
+
+    name = "Slow Measure"
+    command_scope = "measurement"
+
+    def __init__(self, station: Any, measure_seconds: float = 2.0) -> None:
+        self._measure_seconds = float(measure_seconds)
+        self._done = False
+        self.measuring = False
+        self.measured = 0
+
+    def initiate(self) -> PhasePlan:
+        return PhasePlan(targets={}, commands=(), wait_s=0.0)
+
+    def change_sweep_step(self) -> StepPlan | None:
+        if self._done:
+            return None
+        self._done = True
+        return StepPlan(targets={}, wait_s=0.0)
+
+    def measure(self) -> None:
+        self.measuring = True
+        time.sleep(self._measure_seconds)
+        self.measured += 1
+
+    def standby(self) -> PhasePlan:
+        return PhasePlan(targets={}, commands=(), wait_s=0.0)
+
+    def get_progress(self) -> float:
+        return 1.0 if self._done else 0.0
+
+
+def test_the_gui_thread_stays_responsive_through_a_slow_datapoint(qtbot):
+    """The exit criterion of the whole change, hardcoded to THREADED mode.
+
+    Regardless of which mode this test session runs in, this scenario is
+    specifically about the instrument thread: a fresh ``InstrumentHost``
+    built here with ``mode="threaded"``, exactly like
+    ``tests/test_instrument_thread.py``'s own fixtures always do. A 50 ms
+    ``QTimer`` on THIS (the GUI) thread must keep firing at least 20 times
+    in 2 s while the sim's ``measure()`` blocks the instrument thread for
+    that whole 2 s — the frozen-window symptom the thread was built to fix.
+    """
+    host = InstrumentHost(
+        lambda: build_station(CONFIG_PATH),
+        mode="threaded",
+        orchestrator_options={"tick_interval_ms": 20},
+    )
+    host.start()
+    try:
+        proxy = host.build_proxy()
+        procedure = _SlowMeasureProcedure(host.station, measure_seconds=2.0)
+        proxy.start_monitoring()
+        proxy.run_procedure(procedure)
+
+        ticks: list[float] = []
+        heartbeat = QTimer()
+        heartbeat.setInterval(50)
+        heartbeat.timeout.connect(lambda: ticks.append(time.monotonic()))
+        heartbeat.start()
+        try:
+            qtbot.waitUntil(lambda: procedure.measuring, timeout=WAIT_MS)
+            ticks.clear()
+            started = time.monotonic()
+            qtbot.wait(2000)
+            elapsed = time.monotonic() - started
+
+            assert len(ticks) >= 20, (
+                f"the GUI thread fired {len(ticks)} times in {elapsed:.2f} s — "
+                "it is being blocked by the engine"
+            )
+            gaps = [b - a for a, b in zip(ticks, ticks[1:])]
+            assert not gaps or max(gaps) < 0.5, (
+                f"the GUI thread stalled for {max(gaps):.2f} s"
+            )
+            # Still ACCEPTING work, not merely repainting: a command posted
+            # mid-measurement returns at once, answered later.
+            request_id = proxy.pause_procedure()
+            assert request_id
+        finally:
+            heartbeat.stop()
+
+        qtbot.waitUntil(lambda: procedure.measured >= 1, timeout=WAIT_MS)
+    finally:
+        host.shutdown()
