@@ -11,8 +11,9 @@ Two consequences follow, and they are the point of the design:
 
 * **The engine pulls.** ``Orchestrator.run_queue()`` asks its injected
   ``next_procedure()`` callback for the next run and starts it itself. A
-  client that instead watched ``state_changed`` for ``"idle"`` and started the
-  next run would advance re-entrantly inside the engine's own emit, would
+  client that instead watched ``state_changed`` for the IDLE state and
+  started the next run would advance re-entrantly inside the engine's own emit,
+  would
   starve queued operations (which jump ahead of procedures — queue-jumping,
   never preemption), and could not tell a clean finish from a hold
   acknowledge, so it would auto-start a run straight after an emergency

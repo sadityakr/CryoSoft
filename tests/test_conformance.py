@@ -3591,6 +3591,11 @@ ORCHESTRATOR_NON_COMMANDS: dict[str, str] = {
     # ── The port itself: submit(Command) dispatches to the commands below,
     #    so it is the surface a command arrives through, never a command.
     "submit": "port: the entry point every Command is dispatched through",
+    # ── Broadcast: the run queue lives outside the engine (session/
+    #    run_queue.py), so the engine cannot see a client add, remove or
+    #    reorder an entry. This asks it to re-emit QueueChanged; it changes
+    #    nothing and starts nothing, so it is not an action a client takes.
+    "publish_queue": "broadcast: re-emits QueueChanged after a client-side queue change",
 }
 
 

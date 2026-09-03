@@ -357,10 +357,12 @@ class Orchestrator(QObject):
             ``StatusSnapshot`` (once per tick and on every state change),
             ``StationInfo`` (at construction and after connect/disconnect),
             ``Readings`` (each monitored poll), ``Datapoint`` (each measured
-            point) and ``RunStarted``/``RunFinished``. Every payload is a
-            copy, every event carries a monotonic ``seq`` shared with the
-            verdicts, and the existing per-purpose signals keep emitting
-            unchanged alongside it.
+            point), ``RunStarted``/``RunFinished`` and ``QueueChanged``
+            (after every queue mutation, carrying the whole queue as
+            JSON-safe entries and the actor behind the change). Every
+            payload is a copy, every event carries a monotonic ``seq``
+            shared with the verdicts, and the existing per-purpose signals
+            keep emitting unchanged alongside it.
     """
 
     verdict_emitted = pyqtSignal(object)  # events.Verdict — one per submitted Command
@@ -395,6 +397,8 @@ class Orchestrator(QObject):
         hold_enforcement_interval_s: float = 10.0,
         hold_enforcement_max_attempts: int = 3,
         run_catalog: Mapping[str, type] | None = None,
+        next_procedure: Callable[[], Any] | None = None,
+        queue_snapshot: Callable[[], Sequence[Mapping[str, Any]]] | None = None,
     ) -> None:
         """Build the engine over a Station.
 
@@ -418,12 +422,32 @@ class Orchestrator(QObject):
                 verdict naming the missing class; passing a run object to
                 ``run_procedure()``/``run_operation()`` directly needs no
                 catalog at all.
+            next_procedure: The **pull seam**: a callable returning the next
+                run to start (a built procedure or operation), or ``None``
+                when nothing is waiting. ``run_queue()`` calls it once the
+                engine's own handed-over runs are exhausted, so a client can
+                hold the queue as data while the engine keeps sole authority
+                over *when* a run starts (``session/run_queue.py``). Also
+                settable afterwards as a plain attribute, which is what
+                ``main.py`` does — the queue is built after the engine is.
+            queue_snapshot: A callable returning that queue's waiting entries
+                as JSON-safe dicts, merged into every ``QueueChanged`` event
+                so one snapshot describes the whole queue. Also a settable
+                attribute.
         """
         super().__init__()
         self._station = station
         self._state = OrchestratorState.IDLE
         self._procedure: Any = None
         self._run_catalog: dict[str, type] = dict(run_catalog or {})
+        #: The pull seam (see the constructor): the engine ASKS for the next
+        #: run rather than being pushed one. Public and settable, because the
+        #: queue that supplies it is built after the engine.
+        self.next_procedure: Callable[[], Any] | None = next_procedure
+        #: That queue's waiting entries, as JSON-safe dicts, for QueueChanged.
+        self.queue_snapshot: Callable[[], Sequence[Mapping[str, Any]]] | None = (
+            queue_snapshot
+        )
 
         # The control contract's bookkeeping (see the verdict standard in the
         # class docstring). _pending is the verdict owed for the command
@@ -446,6 +470,11 @@ class Orchestrator(QObject):
         # queue_operation()/run_queue() and the "queue-jumping, not
         # preemption".
         self._operation_queue: list[Any] = []
+        # Who queued each run handed over as a live object, keyed by id() —
+        # the two queues hold the objects themselves (callers index into
+        # them), so the actor rides alongside rather than inside. Entries are
+        # dropped the moment their run leaves the queue.
+        self._queued_actors: dict[int, ev.Actor] = {}
         self._gui_action_queue: list[dict[str, Any]] = []
         self._active_system_vis: set[str] = set()
 
@@ -1183,8 +1212,14 @@ class Orchestrator(QObject):
 
     @command
     def queue_procedure(self, procedure: Any) -> None:
-        """Add procedure to queue."""
+        """Queue a built procedure to run once the Orchestrator returns to IDLE.
+
+        Args:
+            procedure: The ready procedure instance to queue.
+        """
         self._procedure_queue.append(procedure)
+        self._queued_actors[id(procedure)] = self._current_actor()
+        self._emit_queue_changed()
 
     @command
     def queue_operation(self, operation: Any) -> None:
@@ -1193,16 +1228,84 @@ class Orchestrator(QObject):
         Operations queue separately from procedures and always drain first
         (see ``run_queue()``) — the queueing half of "queue-jumping, not
         preemption".
+
+        Args:
+            operation: The ready operation instance to queue.
         """
         self._operation_queue.append(operation)
+        self._queued_actors[id(operation)] = self._current_actor()
+        self._emit_queue_changed()
+
+    def _take_queued(self, queue: list[Any]) -> Any:
+        """Pop the front of *queue*, forgetting who queued it.
+
+        Args:
+            queue: ``_operation_queue`` or ``_procedure_queue``.
+
+        Returns:
+            The run that was waiting at the front.
+        """
+        run = queue.pop(0)
+        self._queued_actors.pop(id(run), None)
+        return run
+
+    def _pull_next_run(self) -> Any:
+        """Ask the injected pull seam for the next run, or ``None``.
+
+        Guarded: the queue lives outside the engine, so a client whose
+        ``next_procedure()`` raises (a stale spec, a procedure that refuses
+        the run, a catalog miss) must leave the engine IDLE and reportable,
+        never degrade it to ERROR.
+
+        Returns:
+            A built procedure or operation, or ``None`` when nothing is
+            waiting or the callback failed.
+        """
+        if self.next_procedure is None:
+            return None
+        try:
+            return self.next_procedure()
+        except Exception as exc:  # noqa: BLE001 — a client queue never kills the engine
+            logger.exception("next_procedure() failed; queue not advanced")
+            self._action_blocked(f"Could not start the next queued run: {exc}")
+            return None
 
     @command
     def run_queue(self) -> None:
         """Run the next queued operation, else the next queued procedure, if IDLE.
 
-        Operations always drain before procedures. Refused outside IDLE with a
-        reason; an empty queue is NOT a refusal — the queue simply ran to
-        completion — so it returns quietly and the command is accepted.
+        **The engine pulls.** Runs handed over directly (``queue_procedure()``
+        / ``queue_operation()``) drain first, then the injected
+        ``next_procedure()`` seam is asked for one; a queue held as data
+        outside the engine (``session/run_queue.py``) supplies it, already
+        ordered operations-first. Either way the engine, not the client,
+        decides *when* a run starts — a client that watched ``state_changed``
+        for the IDLE state and started the next run itself would advance
+        re-entrantly inside that emit, would starve queued operations, and,
+        seeing only a state name, could not tell a clean finish from a hold
+        acknowledge.
+
+        That last point is why this is called from exactly two places inside
+        the engine, and never from the transition itself. Six transitions
+        reach IDLE; only two chain:
+
+        * ``abort_procedure()`` — chains. The operator ended THIS run, not
+          the queue.
+        * ``_finish_run()`` when the run's end state is IDLE — chains. The
+          run completed, so the next one is due; this is also what drains a
+          queued operation ahead of a queued procedure.
+        * ``recover_from_error()`` — no chain. After an error the queue's
+          assumptions may no longer hold; the operator restarts explicitly.
+        * ``_acknowledge_emergency()`` — no chain. Acknowledging a quench is
+          not a request to carry on measuring.
+        * ``_fail_run_for_fault()`` — no chain. A run that failed for an
+          instrument fault or a safety hold must not silently auto-continue.
+        * ``_tick_body()``'s RAMPING branch when a MANUAL ramp completes — no
+          chain. Nobody asked for a run; the operator was driving by hand.
+
+        Refused outside IDLE with a reason; an empty queue is NOT a refusal —
+        the queue simply ran to completion — so it returns quietly and the
+        command is accepted.
         """
         if self._state != OrchestratorState.IDLE:
             message = (
@@ -1213,10 +1316,92 @@ class Orchestrator(QObject):
             self._action_blocked(message)
             return
         if self._operation_queue:
-            self.run_operation(self._operation_queue.pop(0))
+            operation = self._take_queued(self._operation_queue)
+            self._emit_queue_changed()
+            self.run_operation(operation)
             return
         if self._procedure_queue:
-            self.run_procedure(self._procedure_queue.pop(0))
+            procedure = self._take_queued(self._procedure_queue)
+            self._emit_queue_changed()
+            self.run_procedure(procedure)
+            return
+        run = self._pull_next_run()
+        if run is None:
+            return
+        self._emit_queue_changed()
+        if getattr(run, "command_scope", "measurement") == "operation":
+            self.run_operation(run)
+        else:
+            self.run_procedure(run)
+
+    def publish_queue(self) -> None:
+        """Broadcast the run queue after a client changed it.
+
+        The queue lives outside the engine, so the engine cannot see an add,
+        a removal or a reorder happen; whoever made the change calls this and
+        the resulting ``QueueChanged`` goes out on the one event stream,
+        naming the actor in flight, exactly like a change the engine made
+        itself. Nothing else about the engine is touched.
+        """
+        self._emit_queue_changed()
+
+    def _queue_entry(self, run: Any, kind: str) -> dict[str, Any]:
+        """Render one directly-handed-over run as a queue entry.
+
+        Shaped like ``session/run_queue.py``'s ``RunSpec.to_json()`` so one
+        ``QueueChanged`` describes both halves of the queue in the same
+        vocabulary. A run handed over as a live object carries no spec, so
+        its ``spec_id`` is empty and the fields only a spec knows are blank.
+
+        Args:
+            run: The queued procedure or operation.
+            kind: ``"procedure"`` or ``"operation"``.
+
+        Returns:
+            A JSON-safe dict.
+        """
+        actor = self._queued_actors.get(id(run), ev.OPERATOR)
+        return {
+            "spec_id": "",
+            "kind": kind,
+            "run_class": type(run).__name__,
+            "params": {},
+            "sample_info": {},
+            "data_directory": "",
+            "file_prefix": "",
+            "actor": actor.to_json(),
+            "queued_at": 0.0,
+        }
+
+    def _queue_entries(self) -> tuple[dict[str, Any], ...]:
+        """Return every waiting run, in the order they will start.
+
+        Operations first (the queue-jumping rule), then procedures, then
+        whatever the injected ``queue_snapshot()`` reports — which is itself
+        already ordered operations-first.
+
+        Returns:
+            JSON-safe dicts, one per waiting run.
+        """
+        entries = [self._queue_entry(run, "operation") for run in self._operation_queue]
+        entries += [self._queue_entry(run, "procedure") for run in self._procedure_queue]
+        if self.queue_snapshot is not None:
+            try:
+                entries += [dict(entry) for entry in self.queue_snapshot()]
+            except Exception:  # noqa: BLE001 — reporting must never disrupt a run
+                logger.exception("queue_snapshot() failed (non-fatal)")
+        return tuple(entries)
+
+    def _emit_queue_changed(self) -> None:
+        """Broadcast the queue as it now stands, naming the actor in flight."""
+        self._emit_event(
+            ev.QueueChanged(
+                entries=self._queue_entries(),
+                actor=self._current_actor(),
+                request_id=self._pending.request_id if self._pending else "",
+                seq=self._next_seq(),
+            )
+        )
 
     @property
     def pause_pending(self) -> bool:
