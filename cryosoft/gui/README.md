@@ -186,6 +186,31 @@ is alive and not mid-tick.
   new rampable VI appears here for free the moment it implements the
   ramp-introspection standard (`virtual_instruments/README.md`); this file
   never changes.
+- **`widget_lifecycle.py` owns both widget-lifetime standards.** Widgets are
+  destroyed by two different mechanisms — Qt's deferred delete and PyQt's
+  "the C++ object dies with its last Python reference" — and mixing them up
+  segfaults the process, so both rules live in one module.
+  - The **window-liveness standard**: every top-level window calls
+    `hold_window(self)` at the end of its `__init__` and `release_window(self)`
+    from its `closeEvent` (once the close is accepted). A shown window whose
+    creator kept no reference is otherwise destroyed by whichever generational
+    garbage-collection pass reaches it first — including one triggered by an
+    allocation inside that same window's `paintEvent`, which destroys the paint
+    device mid-paint ("Cannot destroy paint device that is being painted") and
+    leaves Qt painting a freed pyqtgraph `AxisItem`. A window that holds itself
+    can only be destroyed where the code says so.
+  - The **card-retirement standard** (GLOSSARY.md's **Card retirement**): a
+    widget swapped out of a live layout leaves through
+    `retire_widget(widget, layout)`, which hides it, takes it out of the
+    layout, closes any pyqtgraph plot it owns, and only then calls
+    `deleteLater()`. Never call `deleteLater()` on a card directly: a widget
+    merely dropped from a layout stays a visible child of its parent and paints
+    over its replacement until the deferred delete lands — which, in a test run
+    with no event loop, is never. The retired widget keeps its Qt parent on
+    purpose; retirement runs inside a signal emitted by one of the widget's own
+    children (the Disconnect button on the card being swapped away), so its
+    destruction has to stay deferred. Used by both instrument-card swaps in
+    `monitor_window.py`.
 - **`param_form.py` is the single ParamSpec-to-Qt-widget mapping.** It is the
   only module that names widget classes for procedure parameters
   (`choices` -> `QComboBox`, `bool` -> `QCheckBox`, else `QLineEdit`). All
@@ -232,6 +257,7 @@ is alive and not mid-tick.
 | `monitor_history.py` | Qt-free ring-buffer of time-series readings, one bounded deque per flat key. Two entry points: `record()` (live path, flattens nested state dicts like `Station.last_state_flat()`, includes measurement VIs) and `record_flat()` (replay path for disk-persisted trend history, takes an already-flat dict, excludes measurement VIs — the accepted asymmetry, see class docstring). Feeds the trend plots. | `MonitorHistory`, `record`, `record_flat`, `series`, `keys` | `tests/test_monitor_history.py` |
 | `trend_plot_panel.py` | Reusable trend plot: one variable vs wall-clock time (`DateAxisItem`), reading from a shared `MonitorHistory`; Y-variable + time-window selectors and a remove button. `TIME_WINDOWS` runs 15 min through 1 y; windows up to 24 h read `MonitorHistory` in RAM as before, "7 d"/"1 y" read the disk-backed tiered trend-history store via `cryosoft.core.trend_history.read_window()` (tier choice stays in that module, not here — see GLOSSARY.md's **Trend tier**), synchronously (no thread — single-threaded cooperative scheduling). A disk read failure/emptiness renders an empty curve, never raises — including the deliberate measurement-VI asymmetry, where a measurement VI's key is present in the live in-RAM history but never in the disk tiers, so a disk-backed window on it comes back empty. | `TrendPlotPanel`, `refresh`, `remove_requested` signal, `TIME_WINDOWS` | `tests/test_trend_plot_panel.py`, `tests/test_gui.py` |
 | `window_geometry.py` | Shared window-geometry persistence: restore a saved geometry (rejecting one that landed off-screen), fall back to a centered screen-fraction default, save on close. Used by both windows. | `restore_or_center`, `save_geometry`, `geometry_on_screen` | `tests/test_gui.py` |
+| `widget_lifecycle.py` | The two widget-lifetime standards (see "Interface contract" above): `hold_window`/`release_window` keep a shown top-level window out of the garbage collector's reach between its `__init__` and its `closeEvent`, and `retire_widget` takes a swapped-out card out of a live layout in the order Qt needs — hide, remove from the layout, close any pyqtgraph plot, then `deleteLater()`. Qt-only: it takes widgets, never CryoSoft objects. | `hold_window`, `release_window`, `held_windows`, `retire_widget` | `tests/test_gui.py` |
 | `log_panel.py` | The read-only real-time log view (`log_panel`) plus `QtLogHandler`, the coloured-HTML logging handler it owns; `attach()`/`detach()` manage the handler's lifetime on the shared "cryosoft" logger. | `LogPanel`, `QtLogHandler` | `tests/test_gui.py` |
 | `experiment_info_panel.py` | The GUI surface for the Experiment tier: an experiment status/Start-Close control (ExperimentManager, optional), sample name/ID/comments and the derived-but-editable data-directory field with Browse (forced to the open experiment's own `data/` folder on open/switch, restored to its pre-experiment text on close; a plain `data_dir_note` label is live typing feedback whenever the field points outside the experiment folder), and an eLab status line (reflects `ElnLink`; publish controls land with Track B). Containment is hard: `_on_browse_dir()` refuses a selection outside the open experiment's folder outright, and `is_data_dir_contained()` is the read `MonitorWindow.get_data_dir_for_run()` enforces before a run is allowed to start. Setup-tier concerns (config identity, instrument metadata, user login) live in the menu bar instead — see `monitor_window.py`/`setup_dialogs.py`. Sample fields stay free-editable per run regardless of experiment state; whatever they hold at "Start Experiment" time is snapshotted onto the `ExperimentRecord`. | `ExperimentInfoPanel`, `get_sample_info`, `get_data_dir`, `is_data_dir_contained`, `apply_session` | `tests/test_gui.py` |
 | `experiment_dialogs.py` | Modal dialogs for the experiment lifecycle: `StartExperimentDialog` (title, an optional Folder name override for the experiment's directory — auto-filled from the title until hand-edited, same pattern as `AddUserDialog`'s id field — user picker with inline "New user…", attendance checkbox, and the `EnvelopeEditorWidget`) and `CloseExperimentDialog` (findings text), plus the shared `UserPickerWidget` (roster combo + inline "New user…" → `AddUserDialog`) reused by `setup_dialogs.LoginDialog`. The envelope editor renders one min/max row per enveloped quantity (`ExperimentManager.envelope_variables()`), PRE-FILLED with the setup's own `control_limits` bounds so the operator narrows rather than composes; it refuses a bound that would widen a setup limit or is not a number, showing the reason on `envelope_error_label` (the validated `verdict_badge` QSS class) and keeping OK disabled. Opened only by `ExperimentInfoPanel`; every `ExperimentManager` mutation happens in the panel after a dialog accepts. | `StartExperimentDialog` (`result_values()`, `envelope()`), `EnvelopeEditorWidget`, `CloseExperimentDialog`, `AddUserDialog`, `UserPickerWidget` | `tests/test_gui.py` |

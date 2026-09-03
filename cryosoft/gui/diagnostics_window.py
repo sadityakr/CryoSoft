@@ -25,6 +25,7 @@ from cryosoft.core.orchestrator_proxy import OrchestratorProxy
 from cryosoft.gui import window_geometry
 from cryosoft.core.status_mirror import StatusMirror
 from cryosoft.gui.theme import BTN_CLASS_SECONDARY, STATUS_ERROR, STATUS_OK, STATUS_WARN
+from cryosoft.gui.widget_lifecycle import hold_window, release_window
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +115,11 @@ class DiagnosticsWindow(QMainWindow):
         seed = self._mirror.get_operational_status()
         if seed:
             self._on_operational_status(seed)
+
+        # The window-liveness standard (gui/widget_lifecycle.py): the window
+        # holds its own reference from here until closeEvent(), so its
+        # lifetime never depends on the caller keeping one.
+        hold_window(self)
 
     # ------------------------------------------------------------------
     # UI construction
@@ -287,3 +293,5 @@ class DiagnosticsWindow(QMainWindow):
         """Persist geometry before closing."""
         window_geometry.save_geometry(self, _GEOMETRY_KEY)
         super().closeEvent(event)
+        if event.isAccepted():
+            release_window(self)

@@ -34,6 +34,7 @@ from cryosoft.gui.form_autosave import FormAutosaveState
 from cryosoft.gui.procedure_discovery import discover_procedures
 from cryosoft.gui.procedure_params_panel import ProcedureParamsPanel
 from cryosoft.gui.queue_panel import QueuePanel
+from cryosoft.gui.widget_lifecycle import hold_window, release_window
 from cryosoft.core.status_mirror import StatusMirror
 from cryosoft.session.run_queue import RunQueueHost
 
@@ -145,6 +146,12 @@ class ProcedureWindow(QMainWindow):
 
         if initial_session is not None:
             self._restore_session(initial_session)
+
+        # The window-liveness standard (gui/widget_lifecycle.py): this window
+        # owns the reference that keeps it alive, so no garbage-collection
+        # pass can destroy it — and the pyqtgraph scenes in its two live-plot
+        # panels — while it is on screen. Released in closeEvent().
+        hold_window(self)
 
     # ------------------------------------------------------------------
     # UI construction
@@ -657,3 +664,5 @@ class ProcedureWindow(QMainWindow):
         """
         window_geometry.save_geometry(self, _GEOMETRY_KEY)
         super().closeEvent(event)
+        if event.isAccepted():
+            release_window(self)
