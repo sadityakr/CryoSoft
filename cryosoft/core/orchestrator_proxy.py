@@ -59,6 +59,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 from collections.abc import Callable, Mapping, Sequence
+from types import MethodType
 from typing import TYPE_CHECKING, Any
 
 from PyQt6.QtCore import QObject, pyqtSignal
@@ -235,7 +236,6 @@ class OrchestratorProxy(QObject):
         # cannot be delivered across a queued hop, so an engine on the
         # instrument thread would fail to re-emit anything through one; the
         # relays below are ordinary slots and cross like any other payload.
-        self._relays: list[Any] = []
         engine.verdict_emitted.connect(self._relay("verdict"))
         engine.event_emitted.connect(self._on_event)
         for name in _PASSTHROUGH_SIGNALS:
@@ -244,21 +244,26 @@ class OrchestratorProxy(QObject):
     def _relay(self, name: str) -> Callable[..., None]:
         """Return a slot that re-emits one of this proxy's signals.
 
+        A BOUND METHOD of this proxy, deliberately, and the closure captures
+        only the signal's *name*. That is what makes the connection follow
+        this object's lifetime: Qt holds the receiver weakly and drops the
+        connection when the proxy is destroyed, and any delivery already
+        posted to it is discarded with it. A plain closure holding the bound
+        signal would instead outlive the proxy and re-emit through a deleted
+        object — which across the instrument thread, where every delivery is
+        queued and therefore late, is not a theoretical window.
+
         Args:
             name: The proxy signal to re-emit under.
 
         Returns:
-            A callable taking the engine signal's arguments. Kept alive by
-            this proxy, because a connected plain callable that nothing else
-            references may otherwise be collected.
+            A bound method taking the engine signal's arguments.
         """
-        signal = getattr(self, name)
 
-        def _forward_signal(*args: Any) -> None:
-            signal.emit(*args)
+        def _forward_signal(proxy: OrchestratorProxy, *args: Any) -> None:
+            getattr(proxy, name).emit(*args)
 
-        self._relays.append(_forward_signal)
-        return _forward_signal
+        return MethodType(_forward_signal, self)
 
     @classmethod
     def for_host(

@@ -4825,3 +4825,76 @@ def test_every_session_tool_has_an_implementation_and_a_class() -> None:
         assert isinstance(tool.action_class, ActionClass), (
             f"{tool.name} carries no action class, so no role can be granted it"
         )
+
+
+#: What a client above the boundary may still call on the ``Station``, and why
+#: each is safe once the Station lives on the **Instrument thread**. Every one
+#: is a pure DECLARATION read: it answers from the config and the registry, it
+#: touches no instrument and starts no bus traffic, so a client reading it
+#: cannot race the engine's tick into a driver. A RATCHET, not a budget — the
+#: list only ever gets shorter, as each remaining reader moves onto the
+#: **Station info** declaration snapshot the mirror already carries.
+_CLIENT_STATION_READS: dict[str, str] = {
+    "get_vi_names": "the registry's names, from config",
+    "get_vi_type": "a registered VI's kind, from config",
+    "has_vi": "whether a name is registered, from config",
+    "offline_vi_names": "the offline registry's names, from the build",
+    "station_info": "the declaration snapshot itself",
+    "envelope_variables": "the declared envelope variables, from config",
+    "nominal_ramp_rates": "the declared ramp rates, from config",
+    "last_state_flat": (
+        "the monitor-tick cache's numeric keys, read once at panel build to "
+        "learn which keys EXIST; the values themselves come off the event "
+        "stream"
+    ),
+}
+
+
+def test_clients_call_only_pure_declaration_reads_on_the_station() -> None:
+    """``gui/`` and ``session/`` touch no instrument through the Station.
+
+    Import contract C19 and
+    ``test_gui_imports_the_station_only_for_typing_or_config_helpers`` already
+    keep the GUI from IMPORTING the Station, and
+    ``test_gui_never_reaches_into_the_station_for_a_vi`` keeps it out of
+    ``get_vi()``. Neither says anything about the Station object both layers
+    are still HANDED at construction, and once that object lives on the
+    **Instrument thread** the question is no longer layering but data races:
+    a client calling a polling method would be reading a driver from the
+    wrong thread.
+
+    So this enumerates what those layers actually call on a Station and holds
+    it to the declaration reads named in ``_CLIENT_STATION_READS``. If it
+    fails on a call you just added: read it off the ``StationInfo``
+    declaration or the **Status mirror** instead. Adding a name here is a
+    decision about the thread boundary, not a formality.
+    """
+    offenders: list[str] = []
+    for folder in ("gui", "session"):
+        for path in sorted((PACKAGE_DIR / folder).rglob("*.py")):
+            relative = path.relative_to(PACKAGE_DIR.parent).as_posix()
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if not (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Attribute | ast.Name)
+                ):
+                    continue
+                receiver = node.func.value
+                name = (
+                    receiver.attr
+                    if isinstance(receiver, ast.Attribute)
+                    else receiver.id
+                )
+                if name not in ("station", "_station"):
+                    continue
+                if node.func.attr in _CLIENT_STATION_READS:
+                    continue
+                offenders.append(f"{relative}:{node.lineno}: {node.func.attr}()")
+
+    assert not offenders, (
+        "Station call(s) from cryosoft/gui/ or cryosoft/session/ that are not "
+        "pure declaration reads — the Station lives on the instrument thread, "
+        "so read this off the StationInfo declaration or the StatusMirror "
+        "instead:\n" + "\n".join(offenders)
+    )
