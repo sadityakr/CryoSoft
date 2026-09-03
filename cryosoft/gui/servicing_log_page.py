@@ -1069,8 +1069,8 @@ class ServicingLogPage(QWidget):
         # the unified "servicing" kind is NOT declared (a not-yet-migrated
         # setup): post-migration the operations file is .bak-renamed, so the
         # table would sit permanently empty under the unified timeline —
-        # against the one-timeline goal (plan unified-servicing-log-and-run-
-        # recording.md §4).
+        # against the servicing log's one-chronological-timeline goal (see
+        # GLOSSARY.md's Servicing log).
         if servicing_store is not None and not any(
             spec.key == "servicing" for spec in kind_specs
         ):

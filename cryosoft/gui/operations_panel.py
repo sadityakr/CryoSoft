@@ -222,9 +222,9 @@ class OperationCard(QGroupBox):
         self._next_due_label.hide()
         details_layout.addWidget(self._next_due_label)
 
-        # Live status line (design doc operation-concurrency-and-error-
-        # scoping.md §2's hard status separation): shows this operation's own
-        # operation_status milestones while it is the active run — never the
+        # Live status line (the hard status separation, see GLOSSARY.md):
+        # shows this operation's own operation_status milestones while it is
+        # the active run — never the
         # Procedure window. Elided (single line) rather than word-wrapped —
         # a status line grows unboundedly less than a checklist detail.
         self._status_label = QLabel("")

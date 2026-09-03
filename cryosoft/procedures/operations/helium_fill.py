@@ -157,8 +157,8 @@ class HeliumFillOperation(OperationBase):
         # unmet. Reset to None on any rise (see sample()).
         self._stable_since: float | None = None
         # The level curve itself lives in OperationBase's shared recorder
-        # (_record_sample()/_recording_dict(), plan unified-servicing-log-
-        # and-run-recording.md §3) — reset by initiate() via
+        # (_record_sample()/_recording_dict(), in the generic "recording"
+        # shape — see GLOSSARY.md's Recording) — reset by initiate() via
         # _reset_recording(), appended to by sample().
 
     # ------------------------------------------------------------------

@@ -274,8 +274,8 @@ class SessionStore:
     """One-folder-per-session store rooted at ``<measurement_root>/sessions``.
 
     The tier above ``ExperimentStore``: a session is a named, resumable,
-    per-user folder holding multiple experiments (see
-    ``docs/plans/session-tier-and-terminology.md``, "Filesystem layout").
+    per-user folder holding multiple experiments (see ``GLOSSARY.md``'s
+    **Session** for the tier and its filesystem layout).
     Sessions nest one level deeper than the store's own root, under their
     owner's ``user_id`` — ownership is structural (a directory), not just a
     field inside ``session.json`` that has to be read to be known. Each

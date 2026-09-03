@@ -149,10 +149,10 @@ class MonitorWindow(QMainWindow):
         session_store: Optional SessionStore (the L6 Session tier above
             ``session_manager``), used by the User menu's "Resume Session…"
             action to list/create sessions and persist the active one.
-            Switching takes effect on the next launch (see
-            ``docs/plans/session-tier-and-terminology.md``, "Startup
-            wiring") — ``session_manager``'s own ``ExperimentStore`` is
-            never rebound live.
+            Switching is deferred-until-restart and takes effect on the
+            next launch (see ``GLOSSARY.md``'s **Session**) —
+            ``session_manager``'s own ``ExperimentStore`` is never rebound
+            live.
         cryogenics_config: The active config's resolved ``cryogenics:``
             block (``Station.read_cryogenics_config()``), or None/empty when
             the setup has no such block. Optional — every existing
@@ -1025,10 +1025,10 @@ class MonitorWindow(QMainWindow):
     def get_data_dir_for_run(self) -> str | None:
         """Return the data dir, enforcing hard containment before a run starts.
 
-        The commit-point enforcement the Enforcement rule requires (see
-        ``docs/plans/session-tier-and-terminology.md``): when an experiment
-        is open and the configured Data Dir resolves outside that
-        experiment's folder, the run is refused rather than merely noted.
+        Experiment-directory containment is hard, not a warning (see
+        ``GLOSSARY.md``'s **Session**): when an experiment is open and the
+        configured Data Dir resolves outside that experiment's folder, the
+        run is refused rather than merely noted.
         No experiment open is unaffected (session-less legacy state).
 
         Returns:
@@ -1179,7 +1179,7 @@ class MonitorWindow(QMainWindow):
         Deferred-until-restart, same precedent the old sessions-root relocate
         action used: ``session_manager``'s own ``ExperimentStore`` stays fixed
         for the rest of this run regardless of what is picked here (see
-        ``docs/plans/session-tier-and-terminology.md``, "Startup wiring").
+        ``GLOSSARY.md``'s **Session**).
         """
         if self._session_store is None:
             QMessageBox.information(

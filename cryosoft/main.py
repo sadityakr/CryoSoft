@@ -99,8 +99,8 @@ def _resolve_active_session(store: SessionStore) -> tuple[str, str]:
     """Return the active ``(user_id, session_id)``, auto-creating a bootstrap session if needed.
 
     The app must never fail to start for lack of an explicit session choice
-    (see ``docs/plans/session-tier-and-terminology.md``, "Startup wiring
-    (decided)"): when the store's active pointer is unset, points at a
+    (the startup-wiring rule behind the Session tier — see ``GLOSSARY.md``'s
+    **Session**): when the store's active pointer is unset, points at a
     session record that fails to load, or is in the pre-per-user-nesting
     shape (first-ever launch, a corrupt pointer, or an older install), a
     bootstrap session is created and activated on the spot, owned by
@@ -214,10 +214,11 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
     # two levels deeper, inside that one active session's own folder —
     # switching sessions (User menu, Resume Session…) only updates
     # SessionStore's active pointer and takes effect on the next launch;
-    # ExperimentManager keeps this ExperimentStore for the process lifetime
-    # (see "Startup wiring (decided)" in
-    # docs/plans/session-tier-and-terminology.md). The user roster relocates
-    # to measurement_root()/"users.json", alongside "sessions/" and
+    # ExperimentManager keeps this ExperimentStore for the process lifetime:
+    # it is always constructed with one real, already-resolved
+    # ExperimentStore and grows no live rebind machinery (GLOSSARY.md's
+    # Session). The user roster relocates to
+    # measurement_root()/"users.json", alongside "sessions/" and
     # "servicing/".
     roster = UserRoster(measurement_root() / "users.json")
     _ensure_guest_user_registered(roster)

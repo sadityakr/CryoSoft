@@ -72,8 +72,9 @@ class ProcedureWindow(QMainWindow):
         get_sample_info: Callable returning ``{sample_name, sample_id, comments}``.
         get_data_dir: Callable returning the data directory path string, or
             ``None`` when the caller rejected it (e.g. MonitorWindow's hard
-            containment check against the open experiment's folder — see
-            ``docs/plans/session-tier-and-terminology.md``, "Enforcement");
+            containment check against the open experiment's folder, which
+            refuses outright rather than merely warning — see
+            ``GLOSSARY.md``'s **Session**);
             a warning is expected to already have been shown to the operator
             in that case, so ``_collect_params`` just aborts quietly.
         parent: Optional Qt parent widget.
@@ -451,11 +452,10 @@ class ProcedureWindow(QMainWindow):
     def _on_pause_clicked(self) -> None:
         """Pause the running procedure — a no-op while an operation is active.
 
-        This window is operation-blind (design doc operation-concurrency-
-        and-error-scoping.md §2's hard status separation): its Pause button
-        must never arm because an operation (e.g. a helium fill) happens to
-        be RAMPING. Operation control lives on the Operations panel's
-        OperationCard exclusively.
+        This window is operation-blind (the hard status separation — see
+        ``GLOSSARY.md``): its Pause button must never arm because an
+        operation (e.g. a helium fill) happens to be RAMPING. Operation
+        control lives on the Operations panel's OperationCard exclusively.
         """
         if self._orchestrator.active_run_kind() == "operation":
             return
@@ -474,8 +474,8 @@ class ProcedureWindow(QMainWindow):
         """Ask for confirmation, then abort the running procedure.
 
         A no-op while an operation is active — this window is operation-
-        blind (design doc operation-concurrency-and-error-scoping.md §2):
-        its Abort button must never act on a running operation (e.g. a
+        blind (the hard status separation — see ``GLOSSARY.md``): its Abort
+        button must never act on a running operation (e.g. a
         helium fill mid-RAMPING). An operation ends via its own OperationCard
         "Finish" control, never from here.
         """
