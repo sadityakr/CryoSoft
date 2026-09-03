@@ -734,11 +734,14 @@ class ControlInfo(_ContractMessage):
         group: The key of the ``GroupInfo`` this action belongs to, or
             ``""`` when it belongs to none.
         params: One JSON-rendered ``ParamSpec`` per signature parameter, in
-            signature order. Each carries ``name``, ``kind`` (the scalar
-            type name), ``unit``, ``description``, ``default``, ``min``,
-            ``max`` and ``choices`` (``None`` when the parameter is not
-            enumerated). Flat scalars only: a group never crosses the
-            boundary as a value.
+            signature order. Each carries ``name``, ``declared`` (whether a
+            ``ParamSpec`` is behind the rest, as opposed to only the
+            signature — a renderer needs it to tell "declared nothing" from
+            "declared none of it"), ``kind`` (the scalar type name),
+            ``unit``, ``description``, ``default``, ``min``, ``max`` and
+            ``choices`` (``None`` when the parameter is not enumerated).
+            Flat scalars only: a group never crosses the boundary as a
+            value.
     """
 
     name: str

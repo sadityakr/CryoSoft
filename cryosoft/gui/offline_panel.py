@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import (
 )
 
 from cryosoft.core.orchestrator import Orchestrator
-from cryosoft.core.station import OfflineInstrument
+from cryosoft.gui.status_mirror import StatusMirror
 from cryosoft.gui.lifecycle_toggle import ConnectionButton
 from cryosoft.gui.theme import TEXT_PRIMARY
 
@@ -46,7 +46,7 @@ _RECONNECT_FAILED_HINT_TEXT = (
 class _OfflineWording:
     """The card/detail-window wording one offline availability tag set selects.
 
-    ``OfflineInstrument.tags`` (the Availability standard's closed vocabulary,
+    the Availability record's ``tags`` (that standard's closed vocabulary,
     ``cryosoft.core.availability``) can hold ``"connect_failed"``,
     ``"operator"``, or both at once — an operator-released VI whose reconnect
     then failed on hardware. Each combination gets its own row so the
@@ -105,9 +105,9 @@ def _wording_for(tags: frozenset[str]) -> _OfflineWording:
     """Return the `_OfflineWording` an offline VI's tag set selects.
 
     Args:
-        tags: An `OfflineInstrument.tags` value — a non-empty subset of the
-            Availability standard's absence tags, ``{"connect_failed",
-            "operator"}`` (`cryosoft.core.availability`).
+        tags: An Availability record's ``tags`` value — a non-empty subset
+            of the Availability standard's absence tags,
+            ``{"connect_failed", "operator"}`` (`cryosoft.core.availability`).
 
     Returns:
         The exact-match wording for `tags`; falls back to the
@@ -135,9 +135,10 @@ class OfflineInstrumentPanel(QGroupBox):
 
     Args:
         vi_name: The VI's configured name.
-        info: The Station's offline record (reason shown verbatim; ``tags``
-            selects the wording).
         orchestrator: Orchestrator handling the connect request.
+        mirror: The status mirror this card reads its tags and its offline
+            reason from; built from the engine when none is given (the
+            inline construction path).
         parent: Optional Qt parent widget.
         type_tag: Optional role label ("Measurement", "Scanner"), mirroring
             the live cards so the grid stays recognisable.
@@ -146,17 +147,20 @@ class OfflineInstrumentPanel(QGroupBox):
     def __init__(
         self,
         vi_name: str,
-        info: OfflineInstrument,
         orchestrator: Orchestrator,
+        mirror: StatusMirror | None = None,
         parent: QWidget | None = None,
         type_tag: str | None = None,
     ) -> None:
         super().__init__(parent)
         self._vi_name = vi_name
         self._orchestrator = orchestrator
+        self._mirror = (
+            mirror if mirror is not None else StatusMirror.for_engine(orchestrator)
+        )
         self._details: OfflineFrontPanel | None = None  # lazily created
-        self._tags = info.tags
-        wording = _wording_for(info.tags)
+        self._tags = self._mirror.availability_tags(vi_name)
+        wording = _wording_for(self._tags)
         self.setObjectName(f"{vi_name}_offline_card")
 
         outer = QVBoxLayout()
@@ -185,7 +189,7 @@ class OfflineInstrumentPanel(QGroupBox):
         header_row.addWidget(details_btn)
         outer.addLayout(header_row)
 
-        reason_lbl = QLabel(info.reason)
+        reason_lbl = QLabel(self._mirror.offline_reason(vi_name))
         reason_lbl.setObjectName(f"{vi_name}_offline_reason")
         reason_lbl.setProperty("class", "secondary_label")
         reason_lbl.setWordWrap(True)
@@ -251,7 +255,7 @@ class OfflineInstrumentPanel(QGroupBox):
 
     def _refresh_wording(self) -> None:
         """Re-select badge/note from the offline registry's current tags."""
-        self._tags = self._orchestrator.availability(self._vi_name).tags
+        self._tags = self._mirror.availability_tags(self._vi_name)
         wording = _wording_for(self._tags)
         self._name_label.setText(f"<b>{self._vi_name}</b>  {wording.badge}")
         self._note_lbl.setText(wording.note)
@@ -262,6 +266,7 @@ class OfflineInstrumentPanel(QGroupBox):
             self._details = OfflineFrontPanel(
                 self._vi_name,
                 self._orchestrator,
+                mirror=self._mirror,
                 parent=self.window(),
                 tags=self._tags,
             )
@@ -287,8 +292,9 @@ class OfflineFrontPanel(QWidget):
 
     Args:
         vi_name: The offline VI's configured name.
-        orchestrator: Orchestrator handling the connect request; its
-            station's offline registry provides the live failure reason.
+        orchestrator: Orchestrator handling the connect request.
+        mirror: The status mirror the live failure reason and the tags are
+            read from; built from the engine when none is given.
         parent: The owning widget (parented, but flagged as a real window).
         tags: The offline VI's Availability tags (`cryosoft.core.availability`
             — a subset of ``{"connect_failed", "operator"}``), selecting the
@@ -300,12 +306,16 @@ class OfflineFrontPanel(QWidget):
         self,
         vi_name: str,
         orchestrator: Orchestrator,
+        mirror: StatusMirror | None = None,
         parent: QWidget | None = None,
         tags: frozenset[str] = frozenset({"connect_failed"}),
     ) -> None:
         super().__init__(parent, Qt.WindowType.Window)
         self._vi_name = vi_name
         self._orchestrator = orchestrator
+        self._mirror = (
+            mirror if mirror is not None else StatusMirror.for_engine(orchestrator)
+        )
         wording = _wording_for(tags)
         self.setObjectName(f"{vi_name}_offline_front_panel")
         self.setWindowTitle(wording.window_title.format(vi_name=vi_name))
@@ -355,7 +365,7 @@ class OfflineFrontPanel(QWidget):
 
     def _refresh_reason(self) -> None:
         """Show the offline registry's current reason."""
-        self._reason_lbl.setText(self._orchestrator.offline_reason(self._vi_name))
+        self._reason_lbl.setText(self._mirror.offline_reason(self._vi_name))
 
     def _on_connect_clicked(self) -> None:
         """Submit the connect request; the verdict arrives via signals."""
@@ -384,7 +394,7 @@ class OfflineFrontPanel(QWidget):
 
     def _refresh_wording(self) -> None:
         """Re-select title/header/hint from the offline registry's current tags."""
-        tags = self._orchestrator.availability(self._vi_name).tags
+        tags = self._mirror.availability_tags(self._vi_name)
         wording = _wording_for(tags)
         self.setWindowTitle(wording.window_title.format(vi_name=self._vi_name))
         self._header_lbl.setText(wording.header.format(vi_name=self._vi_name))

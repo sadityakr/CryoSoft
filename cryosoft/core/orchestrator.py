@@ -811,6 +811,10 @@ class Orchestrator(QObject):
         self._monitoring = True
         logger.info("Monitoring started")
         self._emit_status("Monitoring started")
+        # A client reads is_monitoring() off its mirror, and this is not a
+        # state change, so refresh the snapshot here or the toggle shows the
+        # old answer until the next tick.
+        self._emit_status_snapshot()
         self.monitoring_changed.emit(True)
         return True
 
@@ -846,6 +850,7 @@ class Orchestrator(QObject):
         self._monitoring = False
         logger.info("Monitoring stopped")
         self._emit_status("Monitoring stopped")
+        self._emit_status_snapshot()  # see start_monitoring()
         self.monitoring_changed.emit(False)
         return True
 
@@ -1597,6 +1602,10 @@ class Orchestrator(QObject):
         if self._state == OrchestratorState.EMERGENCY:
             self._emergency_override_until = now + self._manual_override_timeout_s
             self._acknowledge_emergency()
+            # The override window is a snapshot field and a hold-only
+            # acknowledge changes no state, so refresh the mirror here or the
+            # countdown label reads blank until the next tick.
+            self._emit_status_snapshot()
             return
         held = self._held_vis()
         if not held:
@@ -1614,6 +1623,7 @@ class Orchestrator(QObject):
             "Holds acknowledged — manual control unlocked for "
             f"{self._manual_override_timeout_s:.0f}s: {', '.join(sorted(held))}"
         )
+        self._emit_status_snapshot()  # see the EMERGENCY branch above
 
     def _acknowledge_emergency(self) -> None:
         """Acknowledge an EMERGENCY: unlock manual control, or return to IDLE.
@@ -2092,6 +2102,15 @@ class Orchestrator(QObject):
             self._action_blocked(msg)
             return
         ok, message = self._station.connect_instrument(vi_name)
+        # Either outcome moves the station's offline registry — a success
+        # takes the instrument out of it, a failure re-tags it — so both the
+        # declaration and the live snapshot are republished FIRST, before any
+        # per-VI notification: a client rebuilds that instrument's card when
+        # it hears the notification and must not rebuild it from the previous
+        # picture. Neither is a state change, so nothing else would refresh
+        # them until the next tick.
+        self._emit_station_info()
+        self._emit_status_snapshot()
         if ok:
             # A reconnected switch VI must be adoptable as the scanner —
             # re-run the same first-switch resolution done at construction.
@@ -2099,11 +2118,6 @@ class Orchestrator(QObject):
                 switch_names = self._station.switch_vi_names()
                 self._scanner_vi_name = switch_names[0] if switch_names else None
             logger.info("Connect succeeded for '%s'", vi_name)
-            # What the station IS has changed: re-declare it BEFORE the
-            # per-VI notification, because a client rebuilds that
-            # instrument's panel from the declaration when it hears the
-            # notification and must not rebuild it from the previous one.
-            self._emit_station_info()
             self.instrument_reconnected.emit(vi_name)
             self._action_succeeded(vi_name, "connect", result=message)
         else:
@@ -2144,15 +2158,16 @@ class Orchestrator(QObject):
             self._action_blocked(msg)
             return
         ok, message = self._station.disconnect_instrument(vi_name)
+        # Re-declared, and the snapshot refreshed with it, before any per-VI
+        # notification — for the reasons ``connect_instrument()`` gives.
+        self._emit_station_info()
+        self._emit_status_snapshot()
         if ok:
             # The scanner slot must not keep naming a VI that is gone; the
             # next connect re-resolves it (see connect_instrument()).
             if self._scanner_vi_name == vi_name:
                 self._scanner_vi_name = None
             logger.info("Instrument '%s' disconnected by the operator", vi_name)
-            # Re-declared before the per-VI notification, for the reason
-            # ``connect_instrument()`` gives.
-            self._emit_station_info()
             self.instrument_disconnected.emit(vi_name)
             self._action_succeeded(vi_name, "disconnect", result=message)
         else:
@@ -2358,6 +2373,7 @@ class Orchestrator(QObject):
             )
             return
         self._station.set_scanner_enabled(bool(enabled))
+        self._emit_status_snapshot()  # not a state change; see start_monitoring()
 
     def scanner_enabled(self) -> bool:
         """Return whether scanner-sensitive procedures may use the switch VI."""

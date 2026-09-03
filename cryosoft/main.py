@@ -29,6 +29,7 @@ from cryosoft.core.trend_check_runner import TrendCheckRunner
 from cryosoft.core.trend_checks import declared_checks
 from cryosoft.gui import app_settings
 from cryosoft.gui.monitor_window import MonitorWindow
+from cryosoft.gui.status_mirror import StatusMirror
 from cryosoft.gui.theme import PLOT_AXIS, PLOT_BG, build_stylesheet
 from cryosoft.session.eln.publisher import ElnPublisher
 from cryosoft.session.eln.settings import load_eln_settings
@@ -186,6 +187,14 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
         hold_enforcement_max_attempts=safety_config["hold_enforcement_max_attempts"],
     )
 
+    # The status-mirror standard (GLOSSARY.md's **Status mirror**): the GUI
+    # answers every read from this mirror and never calls into the engine.
+    # Built and primed HERE, next to the engine, because the event stream is
+    # a broadcast — the declaration emitted at construction is already gone
+    # by the time a widget exists — and because the priming reads must be
+    # taken on the engine's own thread.
+    mirror = StatusMirror.for_engine(orchestrator)
+
     # Trend-check standard (core/trend_checks.py, GLOSSARY.md's **Trend
     # check**): a small, single-purpose scheduler independent of the
     # Orchestrator — it holds only a Station, never an Orchestrator — that
@@ -313,6 +322,7 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
         servicing_log_kinds=servicing_log_kinds,
         cryogenics_recorder=cryogenics_recorder,
         panels_config=read_panels_config(used_path),
+        mirror=mirror,
     )
     monitor.show()
 

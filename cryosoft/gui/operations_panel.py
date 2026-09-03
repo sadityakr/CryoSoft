@@ -26,7 +26,6 @@ from PyQt6.QtWidgets import (
 )
 
 from cryosoft.core.orchestrator import Orchestrator
-from cryosoft.core.station import Station
 from cryosoft.gui.procedure_discovery import discover_operations
 from cryosoft.core.operation import STEP_STATUS_SKIPPED
 from cryosoft.gui.theme import (
@@ -43,6 +42,8 @@ from cryosoft.session.servicing_log import consumption_rate_pct_per_h
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from cryosoft.core.station import Station
 
     from cryosoft.core.operation import OperationBase
     from cryosoft.session.servicing_log import HeliumRecordStore, ServicingLogStore

@@ -20,7 +20,6 @@ from PyQt6.QtWidgets import (
 from cryosoft.core.orchestrator import Orchestrator
 from cryosoft.core.procedure import BaseProcedure
 from cryosoft.core.run_builder import PROCEDURE_BUILD_ERRORS, build_procedure
-from cryosoft.core.station import Station
 from cryosoft.gui.form_autosave import (
     STATUS_DONE,
     STATUS_FAILED,
@@ -32,6 +31,8 @@ from cryosoft.gui.theme import BTN_CLASS_PRIMARY, TEXT_ON_ACCENT, TEXT_PRIMARY
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from cryosoft.core.station import Station
 
 logger = logging.getLogger(__name__)
 

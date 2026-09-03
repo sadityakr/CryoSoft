@@ -2237,12 +2237,19 @@ def _param_json(
             (``type``, ``default``), used only when there is no spec.
 
     Returns:
-        A JSON-safe dict carrying ``name``, ``kind``, ``unit``,
+        A JSON-safe dict carrying ``name``, ``declared``, ``kind``, ``unit``,
         ``description``, ``default``, ``min``, ``max`` and ``choices``.
+        ``declared`` says whether a ``ParamSpec`` is behind the rest: a
+        parameter known only from its signature reports the same empty unit
+        and absent bounds a spec that declares none would, so a renderer
+        needs the flag to tell "declared nothing" from "declared none of it"
+        — and only a declared parameter can be rendered as the typed widget
+        (or the tool schema) its spec describes.
     """
     if spec is not None:
         return {
             "name": param_name,
+            "declared": True,
             "kind": spec.type.__name__,
             "unit": spec.unit,
             "description": spec.description,
@@ -2254,6 +2261,7 @@ def _param_json(
     info = signature_info or {}
     return {
         "name": param_name,
+        "declared": False,
         "kind": _type_name(info.get("type")),
         "unit": "",
         "description": "",

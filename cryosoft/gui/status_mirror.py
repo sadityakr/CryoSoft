@@ -21,11 +21,13 @@ what crossed the boundary, never a live object from the other side of it.
 
 The stream is a broadcast, so a mirror built after the engine missed the
 ``StationInfo`` emitted at construction. Whoever BUILDS the engine therefore
-primes the mirror through ``prime()`` — with ``Orchestrator.station_info()``
-and ``Orchestrator.status_snapshot()``, taken once on the engine's own thread
-— and hands the GUI a mirror that already knows what the machine is doing.
-``for_engine()`` is that same wiring for a caller holding an engine on its own
-thread (tests, and the inline construction path).
+primes the mirror through ``prime()`` — with ``Orchestrator.station_info()``,
+``status_snapshot()`` and ``get_operational_status()``, taken once on the
+engine's own thread — and hands the GUI a mirror that already knows what the
+machine is doing. ``for_engine()`` is that same wiring for a caller holding an
+engine on its own thread (tests, and the inline construction path). Those
+three reads are the ONLY calls this module makes into the engine, and the only
+ones anywhere under ``gui/``; a conformance test keeps it that way.
 """
 
 from __future__ import annotations
@@ -50,8 +52,8 @@ class EventSource(Protocol):
 
     Structural rather than nominal so the mirror never imports the
     Orchestrator: anything that broadcasts the control contract's events and
-    can answer the two priming reads can feed one — the engine itself today,
-    the instrument host's proxy tomorrow.
+    can answer the three priming reads can feed one — the engine itself
+    today, the instrument host's proxy tomorrow.
     """
 
     event_emitted: Any
@@ -63,6 +65,10 @@ class EventSource(Protocol):
 
     def status_snapshot(self) -> StatusSnapshot:
         """Return this moment's status snapshot (a priming read)."""
+        ...
+
+    def get_operational_status(self) -> dict[str, Any]:
+        """Return the latest operational-status record (a priming read)."""
         ...
 
 
@@ -108,7 +114,7 @@ class StatusMirror(QObject):
     ) -> StatusMirror:
         """Build a mirror primed from *engine* and connected to its streams.
 
-        The two priming reads are taken here, so this must run on the thread
+        The priming reads are taken here, so this must run on the thread
         the engine lives on — in production that is the instrument host,
         inside the engine's own thread, before the mirror is handed to the
         GUI. A caller that already holds a primed mirror passes it down
@@ -122,7 +128,11 @@ class StatusMirror(QObject):
             The primed, connected mirror.
         """
         mirror = cls(parent=parent)
-        mirror.prime(engine.station_info(), engine.status_snapshot())
+        mirror.prime(
+            engine.station_info(),
+            engine.status_snapshot(),
+            engine.get_operational_status(),
+        )
         mirror.attach(engine)
         return mirror
 
@@ -140,6 +150,7 @@ class StatusMirror(QObject):
         self,
         station_info: StationInfo | None = None,
         snapshot: StatusSnapshot | None = None,
+        operational_status: dict[str, Any] | None = None,
     ) -> None:
         """Seed the mirror with what the engine already broadcast.
 
@@ -148,11 +159,15 @@ class StatusMirror(QObject):
                 current one in place.
             snapshot: This moment's status, or ``None`` to leave the current
                 one in place.
+            operational_status: The latest per-tick troubleshooting record,
+                or ``None`` to leave the current one in place.
         """
         if station_info is not None:
             self._station = station_info
         if snapshot is not None:
             self._snapshot = snapshot
+        if operational_status is not None:
+            self._operational_status = dict(operational_status)
 
     # ------------------------------------------------------------------
     # Feeds

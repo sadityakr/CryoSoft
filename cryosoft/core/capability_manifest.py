@@ -220,6 +220,7 @@ MANIFEST_SCHEMA: dict[str, Any] = {
             "description": "One @control parameter, from its ParamSpec.",
             "required": [
                 "name",
+                "declared",
                 "kind",
                 "unit",
                 "description",
@@ -231,6 +232,15 @@ MANIFEST_SCHEMA: dict[str, Any] = {
             "additionalProperties": False,
             "properties": {
                 "name": {"type": "string"},
+                "declared": {
+                    "type": "boolean",
+                    "description": (
+                        "Whether a ParamSpec declares this parameter. False "
+                        "means only the signature is known, so unit, "
+                        "description, bounds and choices are absent rather "
+                        "than declared empty."
+                    ),
+                },
                 "kind": {
                     "type": "string",
                     "description": "Scalar type name: float, int, str or bool.",
