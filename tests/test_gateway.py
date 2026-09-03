@@ -449,3 +449,76 @@ def test_the_ceiling_is_read_off_the_matrix_not_a_second_ordering():
         assert role_within_ceiling(role, role)
         assert role_within_ceiling(Role.OBSERVER, role)
     assert set(PERMISSION_MATRIX) == set(ActionClass)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# The engine client: the same gateway over the engine or over its proxy
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_the_two_contract_streams_are_found_under_either_name():
+    """``EngineClient`` is satisfied by the engine AND by a client adapter.
+
+    The engine declares ``verdict_emitted``/``event_emitted``; the
+    **Orchestrator proxy** consumes those two channels and re-exposes them
+    under the contract's own names, ``verdict``/``event``. A gateway must not
+    have to know which of the two it is holding — which it did, and building
+    the **Gateway server** over the proxy raised at construction because of
+    it.
+    """
+    from cryosoft.session.gateway.gateway import event_stream, verdict_stream
+
+    class _Engine:
+        verdict_emitted = "engine verdicts"
+        event_emitted = "engine events"
+
+    class _Client:
+        verdict = "client verdicts"
+        event = "client events"
+
+    assert verdict_stream(_Engine()) == "engine verdicts"
+    assert event_stream(_Engine()) == "engine events"
+    assert verdict_stream(_Client()) == "client verdicts"
+    assert event_stream(_Client()) == "client events"
+
+
+def test_an_object_that_is_not_an_engine_client_is_refused_by_name():
+    """Neither name means it is not a client at all — say so at the wiring."""
+    from cryosoft.session.gateway.gateway import event_stream, verdict_stream
+
+    with pytest.raises(AttributeError, match="verdict_emitted nor verdict"):
+        verdict_stream(object())
+    with pytest.raises(AttributeError, match="event_emitted nor event"):
+        event_stream(object())
+
+
+def test_a_gateway_over_the_proxy_submits_and_is_answered(qtbot, engine):
+    """The whole point of the duck typing: a gateway on the client side.
+
+    Inline here, so the answering verdict is synchronous; across the
+    instrument thread the same wiring is what ``tests/test_gateway_server.py``
+    drives over a real socket.
+    """
+    from cryosoft.core.orchestrator_proxy import OrchestratorProxy
+    from cryosoft.session.gateway import Gateway
+
+    orch, station = engine
+    proxy = OrchestratorProxy(orch)
+    verdicts: list[ev.Verdict] = []
+    proxy.verdict.connect(verdicts.append)
+    gateway = Gateway(proxy, Role.SESSION, "runner-7", station_info=station.station_info)
+
+    request_id = gateway.submit(ev.CommandName.START_MONITORING)
+
+    assert [v.request_id for v in verdicts] == [request_id]
+    assert verdicts[-1].code is ev.VerdictCode.OK
+    assert orch.is_monitoring()
+
+    # And a refusal, which the gateway itself puts on the same stream.
+    refused = Gateway(
+        proxy, Role.OBSERVER, "watcher", station_info=station.station_info
+    ).submit(ev.CommandName.STOP_MONITORING)
+
+    assert verdicts[-1].request_id == refused
+    assert verdicts[-1].code is ev.VerdictCode.BLOCKED_ROLE
+    assert orch.is_monitoring()

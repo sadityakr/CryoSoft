@@ -1,14 +1,14 @@
 """Running a GUI suite against either instrument mode.
 
 The **instrument-thread flag** decides whether the Station and the
-Orchestrator live on the caller's thread or on their own
+Orchestrator live on their own thread — the default — or on the caller's
 (``cryosoft.core.instrument_host``). Everything above the boundary is
 supposed not to care — same proxy, same primed mirror, same signals — and the
 only way to keep that true is to run the same GUI suite both ways. This module
 is what makes that a matter of an environment variable:
 
-    pytest tests/test_gui.py                          # inline
-    CRYOSOFT_INSTRUMENT_THREAD=1 pytest tests/test_gui.py   # threaded
+    pytest tests/test_gui.py                                # threaded
+    CRYOSOFT_INSTRUMENT_THREAD=0 pytest tests/test_gui.py   # inline
 
 Not a test file. It gives a suite three things:
 
@@ -56,6 +56,7 @@ def instrument_mode() -> str:
 
     Reads ``CRYOSOFT_INSTRUMENT_THREAD`` alone — a test session has no
     ``monitor.yaml`` to consult, and CI selects the mode by environment.
+    Unset means ``threaded``, exactly as it does for the application.
 
     Returns:
         ``"inline"`` or ``"threaded"``.

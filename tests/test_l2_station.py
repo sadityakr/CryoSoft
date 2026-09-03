@@ -1471,3 +1471,32 @@ def test_read_gateway_config_defaults_to_the_closed_door(tmp_path):
     assert read_gateway_config(str(tmp_path)) == closed
     (tmp_path / "monitor.yaml").write_text("monitor: not-a-mapping\n")
     assert read_gateway_config(str(tmp_path)) == closed
+
+
+def test_read_instrument_thread_defaults_to_the_thread(tmp_path):
+    """Silence means the instrument thread: it is the standard, not an opt-in.
+
+    Absent, malformed or unreadable all inherit it too — the fallback of a
+    file nobody can read must be the shape every other setup runs in.
+    """
+    from cryosoft.core.station import read_instrument_thread
+
+    assert read_instrument_thread(str(tmp_path / "nowhere")) is True
+    (tmp_path / "monitor.yaml").write_text("monitor:\n  tick_interval_ms: 1000\n")
+    assert read_instrument_thread(str(tmp_path)) is True
+    (tmp_path / "monitor.yaml").write_text("monitor: not-a-mapping\n")
+    assert read_instrument_thread(str(tmp_path)) is True
+
+
+def test_read_instrument_thread_honours_a_deliberate_refusal(tmp_path):
+    """A setup that wants the temporary inline mode back says so explicitly."""
+    from cryosoft.core.station import read_instrument_thread
+
+    (tmp_path / "monitor.yaml").write_text(
+        "monitor:\n  tick_interval_ms: 1000\n  instrument_thread: false\n"
+    )
+    assert read_instrument_thread(str(tmp_path)) is False
+    (tmp_path / "monitor.yaml").write_text(
+        "monitor:\n  tick_interval_ms: 1000\n  instrument_thread: true\n"
+    )
+    assert read_instrument_thread(str(tmp_path)) is True

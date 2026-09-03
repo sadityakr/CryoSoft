@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Callable
 
@@ -189,6 +190,74 @@ def _open_assistant_transcript(
         manager.store.assistant_transcript_path(experiment.experiment_id),
         experiment.experiment_id,
     )
+
+
+def _build_gateway_server(
+    engine: Any,
+    gateway_config: Mapping[str, Any],
+    *,
+    station_info: Callable[[], Any],
+    tool_context: ToolContext,
+    feed: Callable[[], AgentFeed | None],
+    socket_name: str | None = None,
+    descriptor: Path | str | None = None,
+    token: str | None = None,
+) -> GatewayServer | None:
+    """Build and start the **Gateway server**, if this setup asks for one.
+
+    Factored out of ``main()`` so the wiring itself is testable: the object
+    handed in is the **Orchestrator proxy**, not the engine, because this
+    server lives on the GUI thread and under the single hardware thread
+    standard the engine does not. The proxy satisfies the gateway's
+    ``EngineClient`` — ``submit()`` posts the command across, and the two
+    contract streams arrive queued under their client-side names.
+
+    Args:
+        engine: The engine client every connection's ``Gateway`` attaches to.
+        gateway_config: ``read_gateway_config()``'s answer for this setup —
+            ``gateway_server`` gates the whole thing, ``gateway_max_role``
+            caps what any connection may claim.
+        station_info: The station's declaration snapshot, or a callable
+            returning it.
+        tool_context: The collaborators the session tools read through.
+        feed: Resolves the open experiment's **Agent feed** at connection
+            time, so a client that connects later records into whichever
+            experiment is open then.
+        socket_name: The local-socket name to listen on; defaults to the
+            installation's.
+        descriptor: Where to write the descriptor file; defaults to the
+            installation's.
+        token: The secret to require in ``hello``; a fresh random one when
+            omitted, which is the production path.
+
+    Returns:
+        The listening server, or ``None`` when this setup does not ask for
+        one or names a ``gateway_max_role`` that is not a **Role** — an
+        unknown ceiling closes the door rather than guessing at it, and the
+        window opens regardless.
+    """
+    if not gateway_config["gateway_server"]:
+        return None
+    try:
+        server = GatewayServer(
+            engine,
+            max_role=gateway_config["gateway_max_role"],
+            station_info=station_info,
+            tool_context=tool_context,
+            feed=feed,
+            socket_name=socket_name,
+            descriptor=descriptor,
+            token=token,
+        )
+    except ValueError:
+        logger.exception(
+            "Gateway server not started: monitor.yaml declares the unknown "
+            "gateway_max_role %r",
+            gateway_config["gateway_max_role"],
+        )
+        return None
+    server.start()
+    return server
 
 
 def _restart_application() -> None:
@@ -403,40 +472,29 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
     # one. Off unless this setup's monitor.yaml turns it on, and never
     # handing out more than the role that file names — opening a station to
     # autonomous clients is a setup decision, so it lives in the config like
-    # every limit. It is a QLocalServer on THIS event loop, the one that
-    # drives the tick, so a frame is parsed in a slot that cannot run beside
-    # the tick: no thread, and no second writer to the bus. Wired here
-    # because this is the one place that owns both the proxy and the session
-    # layer; attached to `app` so its ownership is explicit, like every other
-    # QObject built in main().
+    # every limit. It is a QLocalServer on THIS event loop, and it is built
+    # over the PROXY: the server runs on the GUI thread while the engine runs
+    # on the instrument thread, so a frame is parsed in a slot that posts its
+    # command across like every other client — no thread of its own, and no
+    # second writer to the bus. Wired here because this is the one place that
+    # owns both the proxy and the session layer; attached to `app` so its
+    # ownership is explicit, like every other QObject built in main().
     gateway_config = read_gateway_config(used_path)
-    app.gateway_server = None
-    if gateway_config["gateway_server"]:
-        try:
-            app.gateway_server = GatewayServer(
-                orchestrator,
-                max_role=gateway_config["gateway_max_role"],
-                station_info=station.station_info,
-                tool_context=ToolContext(
-                    experiments=session_manager, run_catalog=run_catalog
-                ),
-                feed=lambda: _open_experiment_feed(session_manager),
-            )
-        except ValueError:
-            logger.exception(
-                "Gateway server not started: monitor.yaml declares the unknown "
-                "gateway_max_role %r",
-                gateway_config["gateway_max_role"],
-            )
-        else:
-            app.gateway_server.start()
-            # Stopping on quit is what keeps the descriptor honest: a
-            # gateway.json left behind names a socket that is gone and a
-            # token that means nothing, and an adapter reading it reports
-            # "cannot connect" instead of "the app is not running". The
-            # socket itself is reclaimed either way — start() removes a
-            # stale one — so this exists for the descriptor's sake.
-            app.aboutToQuit.connect(app.gateway_server.stop)
+    app.gateway_server = _build_gateway_server(
+        orchestrator,
+        gateway_config,
+        station_info=station.station_info,
+        tool_context=ToolContext(experiments=session_manager, run_catalog=run_catalog),
+        feed=lambda: _open_experiment_feed(session_manager),
+    )
+    if app.gateway_server is not None:
+        # Stopping on quit is what keeps the descriptor honest: a gateway.json
+        # left behind names a socket that is gone and a token that means
+        # nothing, and an adapter reading it reports "cannot connect" instead
+        # of "the app is not running". The socket itself is reclaimed either
+        # way — start() removes a stale one — so this exists for the
+        # descriptor's sake.
+        app.aboutToQuit.connect(app.gateway_server.stop)
 
     # The Embedded assistant (cryosoft/session/assistant/, GLOSSARY.md's
     # **Embedded assistant**): the physicist's chat client for this
@@ -446,10 +504,11 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
     # seen exactly as an agent in another process. Off unless this setup's
     # monitor.yaml says so, and never offering more authority than that file
     # names (falling back to the ceiling it already grants an out-of-process
-    # client, since the assistant is one). The Gateway is built over the
-    # ENGINE rather than the proxy because that is the object the control
-    # contract's client surface (EngineClient: submit + the two signals) is
-    # satisfied by; the window above still holds only the proxy.
+    # client, since the assistant is one). Its Gateway is built over the
+    # PROXY, like the gateway server's: the assistant runs on the GUI thread,
+    # and the proxy is what a client on this side of the instrument thread
+    # holds — it satisfies the control contract's client surface
+    # (EngineClient: submit + the two streams) exactly as the engine does.
     #
     # Two things are resolved at call time rather than once: the experiment's
     # Agent feed and its Assistant transcript, so a conversation had after the
@@ -459,7 +518,6 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
     assistant_max_role = (
         assistant_config["assistant_max_role"] or gateway_config["gateway_max_role"]
     )
-    engine = app.instrument_host.orchestrator
     # Read once and shared with the publisher below: the assistant's model,
     # key, token cap and price table live in the same user-level settings file
     # the notebook's do, and two reads could disagree.
@@ -468,7 +526,7 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
     def _assistant_gateway(role: str) -> Gateway:
         """Build the assistant's connection under one role."""
         return Gateway(
-            engine,
+            orchestrator,
             role,
             "assistant",
             station_info=station.station_info,

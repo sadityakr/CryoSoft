@@ -3,16 +3,24 @@
 One object owns the Station and the Orchestrator and decides which thread they
 are built on. Two modes:
 
-* ``inline`` — everything is constructed on the caller's thread, exactly as
-  the application has always done it. Behaviour is unchanged; what changes is
-  that the construction has a single home, and the client is handed a
-  ``StatusMirror``-primed ``OrchestratorProxy`` instead of the engine itself.
-* ``threaded`` — the instrument stack moves to its own ``QThread``, the
+* ``threaded`` — the default, and the one the single hardware thread standard
+  describes: the instrument stack lives on its own ``QThread``, the
   **instrument thread**, so a slow ``measure()`` can no longer freeze the
   window.
+* ``inline`` — the same design on one thread: everything is constructed on the
+  caller's thread, and the client is still handed a ``StatusMirror``-primed
+  ``OrchestratorProxy`` rather than the engine itself.
 
 ``inline`` and ``threaded`` differ in where ``start()`` runs, and in nothing
 the client can see: the same proxy, the same primed mirror, the same signals.
+
+**``inline`` is temporary.** It stays for one release after ``threaded``
+became the default, as the way back for a setup whose VISA layer misbehaves
+under a second thread (``CRYOSOFT_INSTRUMENT_THREAD=0``, or
+``instrument_thread: false`` in that setup's ``monitor.yaml``). It is removed
+one release after the flip if no hardware regression has been filed against
+the threaded default; until then every behaviour here holds in both modes and
+the GUI suite runs both ways.
 
 **The single hardware thread standard.** In ``threaded`` mode exactly one
 thread ever touches a driver, a VI, the Station, the Orchestrator or the
@@ -66,7 +74,8 @@ logger = logging.getLogger(__name__)
 MODES: tuple[str, ...] = ("inline", "threaded")
 
 #: The environment variable that overrides the config file's choice, for CI
-#: (which runs the GUI suite in both modes) and for a one-off launch.
+#: (which runs the suite in both modes, ``0`` being the explicit inline leg)
+#: and for a one-off launch.
 THREAD_ENV_VAR: str = "CRYOSOFT_INSTRUMENT_THREAD"
 
 #: The setting that selects the mode, named in log lines and refusals so an
@@ -100,11 +109,16 @@ def resolve_mode(configured: bool | None = None) -> str:
     is the setup's own choice (read with
     ``cryosoft.core.station.read_instrument_thread()``), and
     ``CRYOSOFT_INSTRUMENT_THREAD`` overrides it for one launch — which is how
-    CI runs the same GUI suite in both modes without editing a config.
+    CI runs the same suite in both modes without editing a config.
+
+    ``threaded`` is the default: a setup that says nothing gets the instrument
+    thread, and only an explicit ``false`` (or ``CRYOSOFT_INSTRUMENT_THREAD=0``)
+    asks for the temporary ``inline`` mode back.
 
     Args:
         configured: What the config file says, or ``None`` when it says
-            nothing. ``None`` and ``False`` both mean ``inline``.
+            nothing. ``None`` and ``True`` both mean ``threaded``; only
+            ``False`` means ``inline``.
 
     Returns:
         ``"threaded"`` or ``"inline"``.
@@ -122,7 +136,7 @@ def resolve_mode(configured: bool | None = None) -> str:
             override,
             sorted(_TRUE_VALUES | _FALSE_VALUES),
         )
-    return "threaded" if configured else "inline"
+    return "inline" if configured is False else "threaded"
 
 
 class _Ask:
@@ -330,7 +344,11 @@ class InstrumentHost(QObject):
         station_factory: Builds the Station. A callable rather than a built
             Station because in ``threaded`` mode it must run *inside* the
             thread that will own every instrument handle.
-        mode: ``"inline"`` (default) or ``"threaded"``.
+        mode: ``"inline"`` or ``"threaded"``. The application never relies
+            on this argument's default — ``resolve_mode()`` decides for it,
+            and answers ``threaded`` unless a setup or the environment asks
+            otherwise; the default here keeps a test that builds a host
+            directly on the thread it already runs on.
         orchestrator_options: Keyword arguments for the ``Orchestrator``
             constructor beyond the Station — tick interval, safety timings,
             the run catalog. May be a callable taking the built Station,

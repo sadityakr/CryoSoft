@@ -11,10 +11,13 @@ authority, and no method here knows what an instrument is.
 
 Three properties are the design:
 
-* **No thread.** ``QLocalServer`` and ``QLocalSocket`` are ordinary
-  ``QObject``s on the event loop that already drives the tick, so a frame is
-  parsed in a slot that cannot run concurrently with the tick. The single
-  bus writer stays single. Nothing in this file blocks, sleeps or waits.
+* **No thread of its own.** ``QLocalServer`` and ``QLocalSocket`` are
+  ordinary ``QObject``s on the GUI thread's event loop, and every command
+  they carry reaches the engine the way every other client's does — posted
+  through the **Orchestrator proxy** onto the instrument thread, answered by
+  a verdict that comes back queued. The single hardware thread standard
+  holds: this file adds no thread and touches no instrument. Nothing in it
+  blocks, sleeps or waits.
 * **Nothing raises into the loop.** A partial read, an oversized frame,
   malformed JSON, an unknown method, a bad argument and an unexpected
   failure are all answered as JSON-RPC errors on the connection that caused
@@ -79,7 +82,12 @@ from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from cryosoft.core.events import StateChange, StatusSnapshot, Verdict
 from cryosoft.core.paths import log_directory
 from cryosoft.session.agent_feed import AgentFeed
-from cryosoft.session.gateway.gateway import EngineClient, Gateway
+from cryosoft.session.gateway.gateway import (
+    EngineClient,
+    Gateway,
+    event_stream,
+    verdict_stream,
+)
 from cryosoft.session.gateway.roles import Role, role_within_ceiling
 from cryosoft.session.gateway.tools import ToolContext
 
@@ -178,10 +186,14 @@ class _Connection:
 class GatewayServer(QLocalServer):
     """A local-socket front door onto one ``Gateway`` per connection.
 
-    Lives on the GUI thread's event loop beside the engine it serves. It
-    holds no Station, no Orchestrator and no instrument: the only object it
-    builds is a ``Gateway``, and the only thing it does with one is call the
-    methods an in-process client calls.
+    Lives on the GUI thread's event loop, as a CLIENT of the engine rather
+    than beside it: under the single hardware thread standard the engine is on
+    the instrument thread, so what this server holds — and hands every
+    ``Gateway`` it builds — is the **Orchestrator proxy**, whose commands are
+    posted across and whose two contract streams arrive queued. It holds no
+    Station, no Orchestrator and no instrument: the only object it builds is a
+    ``Gateway``, and the only thing it does with one is call the methods an
+    in-process client calls.
 
     Attributes:
         token: The per-launch secret a client must present in ``hello``.
@@ -204,9 +216,11 @@ class GatewayServer(QLocalServer):
         """Build the server without listening yet.
 
         Args:
-            engine: The engine every connection's ``Gateway`` is attached to
-                — the **Orchestrator proxy** in the running app, anything
-                satisfying ``EngineClient`` in a test.
+            engine: The engine client every connection's ``Gateway`` is
+                attached to — the **Orchestrator proxy** in the running app,
+                because this server runs on the GUI thread and the engine may
+                be on the instrument thread; anything satisfying
+                ``EngineClient`` in a test.
             socket_name: The local-socket name to listen on; defaults to
                 ``default_socket_name()``.
             descriptor: Where to write the descriptor file; defaults to
@@ -242,8 +256,12 @@ class GatewayServer(QLocalServer):
         self._connections: dict[QLocalSocket, _Connection] = {}
 
         self.newConnection.connect(self._accept)
-        engine.event_emitted.connect(self._on_event)
-        engine.verdict_emitted.connect(self._on_verdict)
+        # Under whichever names this client offers them: the server lives on
+        # the GUI thread, so what it is handed is the **Orchestrator proxy**,
+        # whose already-queued deliveries carry the contract's two streams as
+        # `event` and `verdict`.
+        event_stream(engine).connect(self._on_event)
+        verdict_stream(engine).connect(self._on_verdict)
 
     # ── Lifecycle ─────────────────────────────────────────────────────
 

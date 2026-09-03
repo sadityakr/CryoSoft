@@ -37,9 +37,13 @@ Three jobs:
   all answered with the same ``FAILED``-shaped dict, so an agent gets an
   answer to every call exactly as it gets a verdict for every command.
 
-The engine is duck-typed on purpose (see ``EngineClient``): today it is the
-Orchestrator, tomorrow a proxy over a transport, and this file will not
-notice the difference.
+The engine is duck-typed on purpose (see ``EngineClient``): the Orchestrator
+itself when a caller is on the instrument thread, and the
+**Orchestrator proxy** when it is not — which, under the single hardware
+thread standard, is every caller on the GUI thread. ``verdict_stream()`` and
+``event_stream()`` are what make the two interchangeable: the engine declares
+``verdict_emitted``/``event_emitted`` and a client adapter consumes them under
+the contract's own names, ``verdict``/``event``.
 """
 
 from __future__ import annotations
@@ -85,14 +89,20 @@ class EngineClient(Protocol):
     """The engine surface a gateway needs — the control contract, nothing more.
 
     A ``Protocol`` rather than the Orchestrator itself, because the whole
-    point of the contract is that a second implementation (a proxy over a
-    transport) is a drop-in. Both signals are duck-typed as objects with
-    ``connect``/``emit``, so this module needs no Qt import.
+    point of the contract is that a second implementation (the
+    **Orchestrator proxy**, and a transport proxy later) is a drop-in. Both
+    signals are duck-typed as objects with ``connect``/``emit``, so this
+    module needs no Qt import, and both are reached through
+    ``verdict_stream()``/``event_stream()`` rather than by attribute, because
+    a client adapter consumes the two channels under the contract's own names
+    (``verdict``/``event``) while the engine declares them as
+    ``verdict_emitted``/``event_emitted``.
 
     Attributes:
         verdict_emitted: The stream carrying one ``Verdict`` per submitted
-            command.
-        event_emitted: The engine's one event stream.
+            command, named ``verdict`` on a client adapter.
+        event_emitted: The engine's one event stream, named ``event`` on a
+            client adapter.
     """
 
     verdict_emitted: Any
@@ -101,6 +111,67 @@ class EngineClient(Protocol):
     def submit(self, command: Command) -> str:
         """Carry out one command and answer it with one verdict."""
         ...
+
+
+#: The two names each contract stream answers to: what the engine declares,
+#: then what a client adapter re-exposes it as. Same idiom as
+#: ``StatusMirror.of()``'s lookup — ask for what the object offers rather
+#: than requiring every client to know which of the two it is holding.
+_STREAM_NAMES: dict[str, tuple[str, str]] = {
+    "verdict": ("verdict_emitted", "verdict"),
+    "event": ("event_emitted", "event"),
+}
+
+
+def _stream(engine: Any, channel: str) -> Any:
+    """Return one contract stream of *engine*, under whichever name it uses.
+
+    Args:
+        engine: Anything satisfying ``EngineClient`` — the Orchestrator, an
+            **Orchestrator proxy**, or a stand-in in a test.
+        channel: ``"verdict"`` or ``"event"``.
+
+    Returns:
+        The signal-like object with ``connect``/``emit``.
+
+    Raises:
+        AttributeError: If the object offers neither name, which means it is
+            not an engine client at all and would otherwise fail later, on a
+            connection nobody made.
+    """
+    for name in _STREAM_NAMES[channel]:
+        stream = getattr(engine, name, None)
+        if stream is not None:
+            return stream
+    raise AttributeError(
+        f"{type(engine).__name__} is not an engine client: it offers neither "
+        f"of the {channel} stream's names "
+        f"({' nor '.join(_STREAM_NAMES[channel])})"
+    )
+
+
+def verdict_stream(engine: Any) -> Any:
+    """Return *engine*'s verdict stream.
+
+    Args:
+        engine: Anything satisfying ``EngineClient``.
+
+    Returns:
+        ``verdict_emitted`` on an engine, ``verdict`` on a client adapter.
+    """
+    return _stream(engine, "verdict")
+
+
+def event_stream(engine: Any) -> Any:
+    """Return *engine*'s event stream.
+
+    Args:
+        engine: Anything satisfying ``EngineClient``.
+
+    Returns:
+        ``event_emitted`` on an engine, ``event`` on a client adapter.
+    """
+    return _stream(engine, "event")
 
 
 class Gateway:
@@ -124,8 +195,9 @@ class Gateway:
         """Attach to an engine under a declared role.
 
         Args:
-            engine: Anything satisfying ``EngineClient`` — the Orchestrator
-                today, a transport proxy later.
+            engine: Anything satisfying ``EngineClient`` — the
+                **Orchestrator proxy** for a caller on the GUI thread, the
+                Orchestrator itself for one on the instrument thread.
             role: The ``Role`` this connection acts under, as the enum member
                 or its string value.
             actor_id: A stable identifier for the client — an agent
@@ -183,8 +255,8 @@ class Gateway:
             station_source=self.station,
         )
 
-        engine.event_emitted.connect(self._observe_event)
-        engine.verdict_emitted.connect(self._observe_verdict)
+        event_stream(engine).connect(self._observe_event)
+        verdict_stream(engine).connect(self._observe_verdict)
         logger.info(
             "Gateway attached: actor %r under role %r", self.actor.id, self.role.value
         )
@@ -419,7 +491,13 @@ class Gateway:
         return replace(refusal, seq=self._next_seq())
 
     def _emit(self, verdict: Verdict) -> None:
-        """Put one locally decided verdict onto the engine's verdict stream.
+        """Put one locally decided verdict onto the verdict stream.
+
+        Whichever stream this gateway was attached to: the engine's own when
+        a caller holds the engine, the **Orchestrator proxy**'s when it holds
+        a proxy — which is the same broadcast every other client on that
+        thread is already listening to, so the human's window still sees the
+        refusal.
 
         Guarded: a listener that raises must not propagate back into the
         client that submitted the command.
@@ -428,7 +506,7 @@ class Gateway:
             verdict: The refusal to broadcast.
         """
         try:
-            self._engine.verdict_emitted.emit(verdict)
+            verdict_stream(self._engine).emit(verdict)
         except Exception:  # noqa: BLE001 — a signal failure must not raise at the client
             logger.exception("gateway verdict emit failed")
 
