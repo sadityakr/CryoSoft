@@ -11,7 +11,15 @@ The full test suite for CryoSoft. Two kinds of tests live here:
    checks. They iterate over the drivers, VI, procedures, and configs packages
    at runtime, so any *new* module is tested automatically the moment it
    exists. This is the safety net that lets coding agents add drivers and
-   procedures without silently breaking the system's contracts.
+   procedures without silently breaking the system's contracts. Two of them
+   check the tree itself rather than a package:
+   `test_no_plan_document_citation_under_cryosoft` (the code-reference
+   standard — no `.py` file and no folder `README.md` under `cryosoft/` cites
+   a document in `docs/plans/`; a vendor manual's section number is not a
+   citation and never trips it, and the allowlist is empty by construction,
+   held there by `test_plan_citation_allowlist_is_empty`) and
+   `test_no_blocking_sleep_in_gui_sources` (nothing under `cryosoft/gui/`
+   blocks the one shared thread with `time.sleep`).
 
 Layer *import* boundaries are not tested here — they are enforced by
 import-linter (`make contracts`, config in `pyproject.toml`).

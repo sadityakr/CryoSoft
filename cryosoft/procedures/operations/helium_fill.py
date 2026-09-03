@@ -101,7 +101,7 @@ class HeliumFillOperation(OperationBase):
             person: Who is performing the fill (recorded via
                 ``get_params()``; the servicing-log recorder reads
                 ``params["person"]`` from the run manifest).
-            **config: Plan §9 ``cryogenics:`` keys — ``level_vi``,
+            **config: The config's ``cryogenics:`` block keys — ``level_vi``,
                 ``fill_target_pct``, ``fill_zero_field_window_s``,
                 ``fill_complete_window_s``,
                 ``max_fill_duration_s``, ``sample_period_s``,
