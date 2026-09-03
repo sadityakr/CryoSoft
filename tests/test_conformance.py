@@ -50,6 +50,7 @@ import-linter, see pyproject.toml [tool.importlinter]):
 
 from __future__ import annotations
 
+import ast
 import dataclasses
 import importlib
 import inspect
@@ -4120,6 +4121,218 @@ def test_no_blocking_sleep_in_gui_sources() -> None:
         "with the tick loop, so express the wait as a tick-driven state "
         "instead:\n" + "\n".join(offenders)
     )
+
+
+# ── The GUI/engine boundary ───────────────────────────────────────────────────
+# The status-mirror standard (gui/README.md, GLOSSARY.md's **Status mirror**)
+# and the control contract's command half. A widget may SUBMIT commands and
+# CONNECT to signals; it may not read the engine, because a read is the one
+# thing that cannot cross to an engine that is deep inside one measure().
+# These two tests are what keep that true as widgets are added.
+
+#: Engine attributes a widget may touch, beyond the commands themselves: the
+#: Qt signals it connects to, and the port a client that speaks the control
+#: contract submits through.
+_ENGINE_SIGNALS = frozenset({
+    "verdict_emitted",
+    "event_emitted",
+    "states_updated",
+    "monitoring_changed",
+    "state_changed",
+    "procedure_progress",
+    "procedure_finished",
+    "run_started",
+    "run_finished",
+    "error_occurred",
+    "error_event",
+    "action_blocked",
+    "action_succeeded",
+    "action_failed",
+    "instrument_reconnected",
+    "instrument_disconnected",
+    "measurement_ready",
+    "operational_status",
+    "ramps_updated",
+    "status_message",
+    "operation_status",
+    "operation_progress",
+})
+
+#: Non-command engine attributes a named GUI module may still touch, each with
+#: the reason. Anything not listed is a violation, including a private one.
+_GUI_ENGINE_EXEMPTIONS: dict[str, dict[str, str]] = {
+    "cryosoft/gui/status_mirror.py": {
+        "station_info": "the mirror's priming read, taken once at attach",
+        "status_snapshot": "the mirror's priming read, taken once at attach",
+        "get_operational_status": (
+            "the mirror's priming read, taken once at attach"
+        ),
+    },
+    "cryosoft/gui/queue_panel.py": {
+        "_procedure_queue": (
+            "the three direct writes the run-queue step removes when the "
+            "queue becomes data the engine pulls from"
+        ),
+    },
+}
+
+
+def _engine_attribute_reads(source: str) -> list[tuple[int, str]]:
+    """Return every attribute taken off an engine-shaped name in *source*.
+
+    "Engine-shaped" is a name mentioning ``orch``, ``proxy`` or ``engine``:
+    the widgets hold the engine (and, later, its proxy) under exactly those
+    names, and matching on the name rather than on a type keeps this a pure
+    source scan that needs no imports and no Qt.
+
+    Args:
+        source: One module's source text.
+
+    Returns:
+        ``(line number, attribute name)`` for each access, in file order.
+    """
+    found: list[tuple[int, str]] = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Attribute):
+            continue
+        base = node.value
+        if isinstance(base, ast.Name):
+            owner = base.id
+        elif isinstance(base, ast.Attribute):
+            owner = base.attr
+        else:
+            continue
+        lowered = owner.lower()
+        if any(token in lowered for token in ("orch", "proxy", "engine")):
+            found.append((node.lineno, node.attr))
+    return found
+
+
+def test_gui_touches_the_engine_only_through_commands_and_signals() -> None:
+    """No read from ``gui/`` into the engine — the status-mirror standard.
+
+    Every widget answers reads from its ``StatusMirror`` and reaches the
+    engine only to submit a command (a ``CommandName``, which is exactly the
+    method set the proxy exposes) or to connect a signal. A read that slipped
+    back in would be a synchronous call into an engine the thread move puts
+    on the other side of a boundary, and it would block the window for as
+    long as the engine is inside one ``measure()``.
+
+    If this fails on a read you just added: answer it from the mirror. If the
+    mirror cannot answer it, the ``StatusSnapshot`` is missing a field.
+    """
+    allowed = {member.value for member in CommandName} | _ENGINE_SIGNALS | {"submit"}
+    offenders: list[str] = []
+    for path in sorted((PACKAGE_DIR / "gui").rglob("*.py")):
+        relative = path.relative_to(PACKAGE_DIR.parent).as_posix()
+        exempt = _GUI_ENGINE_EXEMPTIONS.get(relative, {})
+        for line_number, attribute in _engine_attribute_reads(
+            path.read_text(encoding="utf-8")
+        ):
+            if attribute in allowed or attribute in exempt:
+                continue
+            # OrchestratorState.IDLE and friends are the enum, not the engine.
+            if attribute.isupper():
+                continue
+            offenders.append(f"{relative}:{line_number}: .{attribute}")
+
+    assert not offenders, (
+        "GUI access to the engine outside the command set and the signals — "
+        "read it from the StatusMirror instead:\n" + "\n".join(sorted(offenders))
+    )
+
+
+def test_gui_never_reaches_into_the_station_for_a_vi() -> None:
+    """``Station.get_vi()`` is never called from ``gui/``.
+
+    A VI is an object on the engine's side of the boundary: holding one lets
+    a widget call hardware directly, and it cannot cross a thread. The panels
+    build from the **Station info** declaration snapshot instead, which says
+    everything about an instrument that a panel renders and nothing a client
+    cannot hold.
+    """
+    offenders: list[str] = []
+    for path in sorted((PACKAGE_DIR / "gui").rglob("*.py")):
+        relative = path.relative_to(PACKAGE_DIR.parent).as_posix()
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "get_vi"
+            ):
+                offenders.append(f"{relative}:{node.lineno}: get_vi()")
+
+    assert not offenders, (
+        "Station.get_vi() called from cryosoft/gui/ — build from the "
+        "StationInfo declaration the mirror carries instead:\n"
+        + "\n".join(offenders)
+    )
+
+
+#: GUI modules allowed to import ``cryosoft.core.station`` at RUNTIME, and
+#: what they take from it. Both are pure config-FILE readers that take no
+#: Station and touch no instrument; they are in that module for historical
+#: reasons and moving them is a separate change. Import contract C18 carries
+#: the matching ``ignore_imports`` entries.
+_RUNTIME_STATION_IMPORTS: dict[str, set[str]] = {
+    "cryosoft/gui/config_editor.py": {"validate_config_dir"},
+    "cryosoft/gui/monitor_window.py": {"read_instrument_metadata"},
+}
+
+
+def test_gui_imports_the_station_only_for_typing_or_config_helpers() -> None:
+    """C18's other half: a ``cryosoft.core.station`` import under ``gui/`` is
+    type-only, or one of the two named config-file helpers.
+
+    Import contract C18 forbids the dependency outright and lists the
+    existing modules in ``ignore_imports`` — import-linter counts an import
+    inside ``if TYPE_CHECKING:`` like any other, so the contract alone cannot
+    express "types are fine". This is the half that can: every ignored import
+    must be inside a type-checking guard, unless it is one of the two config
+    helpers named above.
+    """
+    offenders: list[str] = []
+    for path in sorted((PACKAGE_DIR / "gui").rglob("*.py")):
+        relative = path.relative_to(PACKAGE_DIR.parent).as_posix()
+        allowed_names = _RUNTIME_STATION_IMPORTS.get(relative, set())
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        guarded = {
+            node
+            for block in ast.walk(tree)
+            if isinstance(block, ast.If) and _is_type_checking_guard(block.test)
+            for node in ast.walk(block)
+        }
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            if node.module != "cryosoft.core.station":
+                continue
+            if node in guarded:
+                continue
+            for alias in node.names:
+                if alias.name not in allowed_names:
+                    offenders.append(f"{relative}:{node.lineno}: {alias.name}")
+
+    assert not offenders, (
+        "Runtime import(s) of cryosoft.core.station under cryosoft/gui/ — put "
+        "the name behind `if TYPE_CHECKING:` (the GUI holds a Station only as "
+        "a type), or add it to _RUNTIME_STATION_IMPORTS and C18's "
+        "ignore_imports with its reason:\n" + "\n".join(offenders)
+    )
+
+
+def _is_type_checking_guard(test: ast.expr) -> bool:
+    """Return whether an ``if`` test is a ``TYPE_CHECKING`` guard.
+
+    Args:
+        test: The ``If`` node's test expression.
+
+    Returns:
+        True for ``TYPE_CHECKING`` and ``typing.TYPE_CHECKING``.
+    """
+    if isinstance(test, ast.Name):
+        return test.id == "TYPE_CHECKING"
+    return isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"
 
 
 # ── Run-source contract ───────────────────────────────────────────────────────
