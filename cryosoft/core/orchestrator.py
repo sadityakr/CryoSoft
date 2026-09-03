@@ -2719,11 +2719,11 @@ class Orchestrator(QObject):
             name: _json_safe(dataclasses.asdict(record))
             for name, record in self.vi_faults().items()
         }
-        offline_reasons = {
-            name: self.offline_reason(name)
-            for name in availabilities
-            if self.offline_reason(name)
-        }
+        offline_reasons: dict[str, str] = {}
+        for name in availabilities:
+            reason = self.offline_reason(name)
+            if reason:
+                offline_reasons[name] = reason
         held = self.held_vi_names()
         instruments = {
             name: {
