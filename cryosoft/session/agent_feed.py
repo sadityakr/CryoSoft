@@ -29,14 +29,18 @@ Field                   Type           Meaning
 ``seq``                 int            Per-file counter, from 1, strictly increasing.
 ``experiment_id``       str            The owning experiment's store key.
 ``run_id``              str | null     The run in flight, when one is.
-``record``              str            ``"command"``, ``"verdict"`` or ``"event"``.
+``record``              str            ``"command"``, ``"verdict"``, ``"event"``
+                                       or ``"tool"``.
 ``actor``               obj            ``Actor.to_json()`` — kind, id, role.
 ``request_id``          str            The correlation id the two trails join on.
 ``command``             str | null     ``CommandName`` value; null on an event record.
-``args``                obj | null     The command's arguments; command records only.
+``tool``                str | null     The **Tool spec**'s name; tool records only.
+``args``                obj | null     The arguments; command and tool records only.
 ``event``               str | null     The event's ``kind``; event records only.
-``detail``              obj | null     The event's payload, or a verdict's ``detail``.
-``verdict``             obj | null     ``{"code", "reason"}``; verdict records only.
+``detail``              obj | null     The event's payload, or a verdict's or a
+                                       tool answer's ``detail``.
+``verdict``             obj | null     ``{"code", "reason"}``; verdict and tool
+                                       records only.
 ======================= ============== =========================================
 
 What is recorded, and by whom
@@ -45,6 +49,16 @@ What is recorded, and by whom
 * **Commands** are recorded by whoever submits them — the **Agent gateway**
   calls ``record_command()`` from its own ``submit()``, which is the only
   place the arguments are still in hand.
+* **Tool calls that spend or change something** are recorded by the gateway
+  as it answers them (``record_tool_call()``), because a session tool is
+  answered inside the client rather than by the engine and so has no verdict
+  record to be found under. WHICH calls those are is declared on the tool
+  itself (``ToolSpec.recorded``), never decided by a branch here: a ``read``
+  tool an agent polls every tick would drown the trail in observations,
+  while a tool that queues a notebook entry or spends model tokens is
+  exactly what this file exists to remember. A tool record carries no
+  ``request_id`` — there is no engine request to join to — and its
+  ``detail`` carries what the call cost when it cost anything.
 * **Verdicts** and **state changes** are recorded off the engine's own
   ``verdict_emitted`` / ``event_emitted`` streams (``attach()``), so an
   actor that reaches the engine WITHOUT passing through the gateway still
@@ -87,13 +101,17 @@ __all__ = [
     "RECORD_COMMAND",
     "RECORD_VERDICT",
     "RECORD_EVENT",
+    "RECORD_TOOL",
     "AgentFeed",
     "read_feed",
 ]
 
 #: Version of the record shape documented above. Bump it when the shape
 #: changes; adding a field is a bump, renaming or retyping one is forbidden.
-SCHEMA_VERSION = 1
+#: Version 2 added ``tool`` and the ``"tool"`` record kind; every version-1
+#: field kept its name and its type, so a version-1 reader still reads a
+#: version-2 file and simply meets a record kind it does not know.
+SCHEMA_VERSION = 2
 
 #: A command a non-operator actor submitted, with its arguments.
 RECORD_COMMAND = "command"
@@ -103,6 +121,9 @@ RECORD_VERDICT = "verdict"
 
 #: A state change an agent caused.
 RECORD_EVENT = "event"
+
+#: A **Tool spec** call the gateway answered itself, and what it answered.
+RECORD_TOOL = "tool"
 
 
 class _Signal(Protocol):
@@ -299,6 +320,46 @@ class AgentFeed:
         except Exception:  # noqa: BLE001 — recording must never disturb a client
             logger.exception("agent feed: recording a command failed (non-fatal)")
 
+    def record_tool_call(
+        self,
+        actor: Any,
+        tool: str,
+        args: dict[str, Any] | None = None,
+        detail: dict[str, Any] | None = None,
+        verdict: dict[str, Any] | None = None,
+    ) -> None:
+        """Record one tool call the gateway answered itself.
+
+        A no-op for an ``operator`` actor, like every other recording method
+        here. Called only for a tool that declares ``ToolSpec.recorded`` —
+        see the record standard at the top of this module for why that is a
+        declaration on the tool rather than a rule here.
+
+        Args:
+            actor: The ``Actor`` that called it.
+            tool: The tool's name, as published by the **Tool surface**.
+            args: The arguments it was called with.
+            detail: The structured half of the answer, including what the
+                call cost when it cost anything.
+            verdict: ``{"code", "reason"}`` — the answer, in the same two
+                fields a command's verdict is recorded under, so one reader
+                reads both.
+        """
+        try:
+            if getattr(actor, "kind", None) is ActorKind.OPERATOR:
+                return
+            self._append(
+                record=RECORD_TOOL,
+                actor=actor.to_json(),
+                request_id="",
+                tool=tool,
+                args=dict(args or {}),
+                detail=dict(detail) if detail else None,
+                verdict=dict(verdict) if verdict else None,
+            )
+        except Exception:  # noqa: BLE001 — recording must never disturb a client
+            logger.exception("agent feed: recording a tool call failed (non-fatal)")
+
     def record_verdict(self, verdict: Verdict) -> None:
         """Record the engine's answer to a non-operator actor's command.
 
@@ -368,6 +429,7 @@ class AgentFeed:
         actor: dict[str, Any],
         request_id: str,
         command: str | None = None,
+        tool: str | None = None,
         args: dict[str, Any] | None = None,
         event: str | None = None,
         detail: dict[str, Any] | None = None,
@@ -380,7 +442,8 @@ class AgentFeed:
             actor: The acting ``Actor``'s JSON form.
             request_id: The correlation id both trails join on.
             command: The ``CommandName`` value, where one applies.
-            args: The command's arguments, on a command record.
+            tool: The tool's name, on a tool record.
+            args: The arguments, on a command or a tool record.
             event: The event's ``kind``, on an event record.
             detail: The event's payload, or the verdict's ``detail``.
             verdict: ``{"code", "reason"}``, on a verdict record.
@@ -401,6 +464,7 @@ class AgentFeed:
                 "actor": actor,
                 "request_id": request_id,
                 "command": command,
+                "tool": tool,
                 "args": args,
                 "event": event,
                 "detail": detail,

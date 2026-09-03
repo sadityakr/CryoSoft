@@ -76,6 +76,7 @@ from cryosoft.session.gateway.tools import (
     validate_tool_args,
 )
 from cryosoft.session.agent_feed import AgentFeed
+from cryosoft.session.eln.drafting import cost_line
 
 logger = logging.getLogger(__name__)
 
@@ -598,26 +599,71 @@ class Gateway:
         """
         refusal = self._authorize_session_tool(tool)
         if refusal is not None:
-            return refusal
+            return self._record_tool_call(tool, args, refusal)
         try:
             result = call_session_tool(tool, args, self._tool_context)
         except ToolError as error:
-            return self._tool_failure(tool.name, str(error), error.detail)
+            return self._record_tool_call(
+                tool, args, self._tool_failure(tool.name, str(error), error.detail)
+            )
         except Exception as error:  # noqa: BLE001 — a tool never raises at its caller
             logger.exception("call_tool(%s) failed", tool.name)
-            return self._tool_failure(
-                tool.name,
-                f"{tool.name} failed: {error}",
-                {"rule": "unexpected_error", "error": type(error).__name__},
+            return self._record_tool_call(
+                tool,
+                args,
+                self._tool_failure(
+                    tool.name,
+                    f"{tool.name} failed: {error}",
+                    {"rule": "unexpected_error", "error": type(error).__name__},
+                ),
             )
-        return {
-            "tool": tool.name,
-            "ok": True,
-            "code": VerdictCode.OK.value,
-            "reason": "",
-            "detail": {},
-            "result": result,
-        }
+        return self._record_tool_call(
+            tool,
+            args,
+            {
+                "tool": tool.name,
+                "ok": True,
+                "code": VerdictCode.OK.value,
+                "reason": "",
+                "detail": {},
+                "result": result,
+            },
+        )
+
+    def _record_tool_call(
+        self, tool: ToolSpec, args: Mapping[str, Any], answer: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Write one answered session tool to the **Agent feed**, and pass it on.
+
+        Only for a tool that declares ``ToolSpec.recorded``, and only when a
+        feed was attached: a session tool is answered inside this client, so
+        no verdict record would otherwise name it, while a ``read`` tool an
+        agent polls every tick must not drown the trail (see the record
+        standard in ``session/agent_feed.py``). The recorded ``detail`` is the
+        answer's own, plus the cost line when the call spent model tokens —
+        what an autonomous client spent, beside what it asked for.
+
+        Args:
+            tool: The tool that was called.
+            args: The arguments it was called with.
+            answer: The answer about to be returned, refusal or success.
+
+        Returns:
+            *answer*, unchanged, so this sits on the return path.
+        """
+        if self._feed is None or not tool.recorded:
+            return answer
+        self._feed.record_tool_call(
+            self.actor,
+            tool.name,
+            dict(args),
+            detail={**dict(answer.get("detail") or {}), **cost_line(answer.get("result"))},
+            verdict={
+                "code": str(answer.get("code", "")),
+                "reason": str(answer.get("reason", "")),
+            },
+        )
+        return answer
 
     def _authorize_session_tool(self, tool: ToolSpec) -> dict[str, Any] | None:
         """Judge one session tool by the same table a command is judged by.

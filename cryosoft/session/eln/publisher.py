@@ -22,6 +22,12 @@ Three responsibilities, and deliberately no fourth:
 ever published for a run that belongs to no experiment: an ad-hoc run has no
 record to attach an entry to, and uploading it would be a surprise.
 
+**An approved draft is not a second write path.** ``export_draft()`` queues
+one ordinary outbox job whose title, body and tags come from an approved
+**draft entry** instead of from the renderers, stamping the model and prompt
+digest into the entry's metadata. It is the same journal, the same
+idempotency, the same drain — the draft is data, and only the text differs.
+
 **Backends are discovered, not listed.** ``discover_backends()`` walks the
 package for ``ElnAdapter`` subclasses and keys them by their declared
 ``backend``, so a new backend module is selectable from the settings file the
@@ -34,11 +40,13 @@ from __future__ import annotations
 import importlib
 import logging
 import pkgutil
+from collections.abc import Mapping
 from typing import Any
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
 from cryosoft.session.eln.adapter import ElnAdapter
+from cryosoft.session.eln.drafting import DraftEntry, manifest_from_run
 from cryosoft.session.eln.outbox import (
     DRAIN_IDLE,
     DRAIN_PUBLISHED,
@@ -263,8 +271,39 @@ class ElnPublisher(QObject):
             return ""
         return self._enqueue_run(run_id, None, data_path)
 
+    def export_draft(
+        self, run_id: str, draft: DraftEntry | Mapping[str, Any], data_path: str = ""
+    ) -> str:
+        """Queue one run under an approved **draft entry**'s own text.
+
+        The write half of the drafting track, and deliberately the SAME write
+        half everything else uses: a draft becomes an ordinary outbox job
+        whose title, body and tags come from the draft instead of from the
+        renderers, with the drafting provenance stamped into the entry's
+        metadata. It is idempotent by the same ``job_id``, so a run already
+        queued is not queued again under a draft.
+
+        Args:
+            run_id: The run to publish, in the open experiment.
+            draft: The approved draft — a ``DraftEntry``, or its JSON dict as
+                the run record stores it (tolerantly loaded).
+            data_path: Absolute path of the run's data file. ``""`` resolves
+                it from the recorded run through the store.
+
+        Returns:
+            The queued job's id, or ``""`` when nothing was queued.
+        """
+        if not self._settings.enabled:
+            return ""
+        entry = draft if isinstance(draft, DraftEntry) else DraftEntry.from_dict(draft)
+        return self._enqueue_run(run_id, None, data_path, draft=entry)
+
     def _enqueue_run(
-        self, run_id: str, manifest: dict[str, Any] | None, data_path: str
+        self,
+        run_id: str,
+        manifest: dict[str, Any] | None,
+        data_path: str,
+        draft: DraftEntry | None = None,
     ) -> str:
         """Render one run and append it to its experiment's outbox.
 
@@ -274,6 +313,8 @@ class ElnPublisher(QObject):
                 path), else ``None`` — the recorded ``RunRecord`` is then the
                 source of truth.
             data_path: Absolute data-file path, or ``""`` to resolve it.
+            draft: An approved **draft entry** whose title, body and tags
+                replace the rendered ones, or ``None`` for the rendered entry.
 
         Returns:
             The queued job's id, or ``""``.
@@ -295,23 +336,40 @@ class ElnPublisher(QObject):
             facts = {**self._manifest_from_record(run), **facts}
         resolved = data_path or self._resolve_data_path(experiment.experiment_id, run)
         context = self._manager.experiment_context()
+        metadata = render_run_metadata(facts, experiment.experiment_id, resolved)
+        if draft is not None:
+            # The drafting provenance travels with the entry, so the notebook
+            # itself says which model wrote the prose and from which prompt —
+            # the same accountability the Agent feed keeps locally.
+            metadata = {
+                **metadata,
+                "draft_model": draft.model,
+                "draft_prompt_digest": draft.prompt_digest,
+            }
         job = OutboxJob(
             job_id=f"{JOB_PUBLISH_RUN}:{run_id}",
             kind=JOB_PUBLISH_RUN,
             experiment_id=experiment.experiment_id,
             run_id=run_id,
-            title=render_run_title(facts, experiment.title),
-            body_html=render_run_body(
-                facts,
-                experiment_id=experiment.experiment_id,
-                experiment_title=experiment.title,
-                setup=context.get("setup"),
-                data_path=resolved,
-                findings=experiment.findings,
+            title=(draft.title if draft is not None and draft.title else None)
+            or render_run_title(facts, experiment.title),
+            body_html=(
+                draft.body_html
+                if draft is not None and draft.body_html
+                else render_run_body(
+                    facts,
+                    experiment_id=experiment.experiment_id,
+                    experiment_title=experiment.title,
+                    setup=context.get("setup"),
+                    data_path=resolved,
+                    findings=experiment.findings,
+                )
             ),
-            tags=list(self._settings.tags),
+            tags=sorted(
+                {*self._settings.tags, *(draft.tags if draft is not None else ())}
+            ),
             template_id=self._settings.template_id,
-            metadata=render_run_metadata(facts, experiment.experiment_id, resolved),
+            metadata=metadata,
             data_path=resolved,
             max_attachment_bytes=self._settings.max_attachment_bytes,
         )
@@ -325,7 +383,9 @@ class ElnPublisher(QObject):
         """Return a manifest-shaped dict built from a recorded run.
 
         Lets a manual export render exactly what auto-publish would, from the
-        record alone — the Orchestrator's manifest is long gone by then.
+        record alone — the Orchestrator's manifest is long gone by then. One
+        owner (``drafting.manifest_from_run()``), so a published run and a
+        drafted one describe a run in the same words.
 
         Args:
             run: The recorded run.
@@ -333,17 +393,7 @@ class ElnPublisher(QObject):
         Returns:
             The manifest-shaped facts.
         """
-        return {
-            "run_id": run.run_id,
-            "procedure": run.procedure,
-            "kind": run.kind,
-            "params": dict(run.params),
-            "data_file": run.data_file,
-            "started_utc": run.started_utc,
-            "finished_utc": run.finished_utc,
-            "status": run.status,
-            "reason": run.reason,
-        }
+        return manifest_from_run(run)
 
     def _resolve_data_path(self, experiment_id: str, run: RunRecord | None) -> str:
         """Return the absolute path of a run's data file, or ``""``.

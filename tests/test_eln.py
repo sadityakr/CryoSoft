@@ -894,3 +894,412 @@ def test_a_link_recorded_after_the_experiment_closed_still_lands(published_setup
 
     stored = manager.store.load(experiment_id).find_run("run-0001")
     assert stored.eln_link is not None and stored.published is True
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# LLM drafting (drafting.py) — the draft prompt standard and the Draft client
+# ══════════════════════════════════════════════════════════════════════════
+
+
+DRAFT_MANIFEST = {
+    "run_id": "run-0001",
+    "procedure": "Field Sweep",
+    "kind": "run",
+    "params": {"field_T": 1.5, "temperature_K": 4.2},
+    "started_utc": "2026-01-01T10:00:00+00:00",
+    "finished_utc": "2026-01-01T11:00:00+00:00",
+    "status": "done",
+    "reason": "",
+}
+
+DRAFT_STATS = {
+    "voltage_V": {
+        "column": "voltage_V",
+        "count": 51,
+        "min": -1.0,
+        "max": 1.0,
+        "mean": 0.0,
+        "std": 0.5,
+        "first": -1.0,
+        "last": 1.0,
+    }
+}
+
+DRAFT_STATION = {
+    "setup": "sim_cryostat",
+    "instruments": [
+        {"name": "magnet_z", "kind": "magnet", "vi_class": "SuperconductingMagnetVI"},
+        {"name": "sample_temp", "kind": "temperature", "vi_class": "TemperatureVI"},
+    ],
+}
+
+
+def _draft_request(**overrides):
+    """Build a DraftRequest over the sample facts above."""
+    from cryosoft.session.eln.drafting import DraftRequest
+
+    fields = {
+        "run_id": "run-0001",
+        "experiment_id": "20260101_sample_a",
+        "experiment_title": "Sample A",
+        "manifest": dict(DRAFT_MANIFEST),
+        "stats": {name: dict(row) for name, row in DRAFT_STATS.items()},
+        "station": dict(DRAFT_STATION),
+        "status": {"state": "IDLE", "vi_faults": {}, "held_vi_names": []},
+        "setup": {"config_name": "sim_cryostat", "instruments": {}},
+        "template_id": "tpl-7",
+    }
+    fields.update(overrides)
+    return DraftRequest(**fields)
+
+
+def test_the_draft_prompt_carries_every_fact_in_a_fixed_order():
+    """The prompt standard: run, parameters, statistics, station, state, note."""
+    from cryosoft.session.eln.drafting import render_draft_prompt
+
+    prompt = render_draft_prompt(_draft_request(operator_note="check the drift"))
+
+    headings = [line for line in prompt.splitlines() if line.isupper()]
+    assert headings == [
+        "RUN",
+        "PARAMETERS",
+        "COLUMN STATISTICS",
+        "STATION",
+        "STATE AT RUN END",
+        "OPERATOR NOTE",
+    ]
+    assert "procedure: Field Sweep" in prompt
+    assert "field_T: 1.5" in prompt
+    assert "voltage_V: count=51" in prompt
+    assert "setup: sim_cryostat" in prompt
+    assert "instrument: magnet_z" in prompt
+    assert "check the drift" in prompt
+
+
+def test_the_draft_prompt_is_deterministic_and_sorted():
+    """The same request renders byte-identical text, whatever the dict order."""
+    from cryosoft.session.eln.drafting import render_draft_prompt
+
+    shuffled = dict(DRAFT_MANIFEST)
+    shuffled["params"] = {"temperature_K": 4.2, "field_T": 1.5}
+
+    first = render_draft_prompt(_draft_request())
+    second = render_draft_prompt(_draft_request(manifest=shuffled))
+
+    assert first == second
+    assert first.index("field_T") < first.index("temperature_K")
+
+
+def test_a_draft_carries_the_facts_the_prose_is_checked_against():
+    """The body is the drafted prose ABOVE the run's own escaped fact tables."""
+    from cryosoft.session.eln.drafting import DRAFT_TAG, FakeDraftClient, draft_entry
+
+    client = FakeDraftClient(
+        "TITLE: Field sweep at 1.5 T\nSUMMARY:\nThe sweep completed cleanly."
+    )
+
+    draft = draft_entry(_draft_request(), client)
+
+    assert draft.title == "Field sweep at 1.5 T"
+    assert "The sweep completed cleanly." in draft.body_html
+    assert draft.body_html.index("The sweep completed cleanly.") < draft.body_html.index(
+        "Field Sweep"
+    ), "the prose is above the facts a reviewer checks it against"
+    for fact in ("Field Sweep", "field_T", "1.5", "voltage_V", "sim_cryostat"):
+        assert fact in draft.body_html
+    assert draft.tags == [DRAFT_TAG, "Field Sweep"]
+    assert client.calls[0][1].startswith("RUN\n"), "the client is asked the facts"
+
+
+def test_a_drafted_body_is_self_contained_and_escapes_the_model():
+    """Model output is a value, never markup — the entry pulls in nothing.
+
+    A URL the model mentions survives as inert text: escaping is what removes
+    every way it could be fetched or followed, so nothing in the body is ever
+    a live resource.
+    """
+    from cryosoft.session.eln.drafting import FakeDraftClient, draft_entry
+
+    client = FakeDraftClient(
+        "TITLE: <b>hi</b>\nSUMMARY:\n<script>alert(1)</script> see https://evil.example"
+    )
+
+    draft = draft_entry(_draft_request(), client)
+
+    lowered = draft.body_html.lower()
+    for forbidden in ("<script", "<link", "<img", "<iframe", "<a ", "href="):
+        assert forbidden not in lowered
+    assert "&lt;script&gt;" in draft.body_html
+    assert draft.title == "<b>hi</b>", "the title is plain text; backends escape it"
+
+
+def test_the_prompt_digest_is_stable_and_moves_with_the_facts():
+    """Two drafts of one run are provably the same question; a changed fact is visible."""
+    from cryosoft.session.eln.drafting import FakeDraftClient, draft_entry
+
+    first = draft_entry(_draft_request(), FakeDraftClient())
+    again = draft_entry(_draft_request(), FakeDraftClient())
+    changed = draft_entry(_draft_request(operator_note="something new"), FakeDraftClient())
+
+    assert first.prompt_digest == again.prompt_digest
+    assert len(first.prompt_digest) == 64
+    assert changed.prompt_digest != first.prompt_digest
+
+
+def test_a_completion_missing_its_markers_still_drafts():
+    """The marker shape parses tolerantly: no marker is a usable draft, not an error."""
+    from cryosoft.session.eln.drafting import FakeDraftClient, draft_entry
+
+    draft = draft_entry(_draft_request(), FakeDraftClient("Just some prose."))
+
+    assert draft.title == "Sample A — Field Sweep — 2026-01-01T10:00:00+00:00"
+    assert "Just some prose." in draft.body_html
+
+
+def test_a_draft_reports_what_it_cost_from_the_settings_price_table():
+    """cost_usd comes from the settings table, and an unpriced model reports 0.0."""
+    from cryosoft.session.eln.drafting import FakeDraftClient, draft_entry
+    from cryosoft.session.eln.settings import AssistantSettings
+
+    settings = AssistantSettings(prices={"m-1": {"input": 5.0, "output": 25.0}})
+    client = FakeDraftClient(model="m-1", input_tokens=1_000_000, output_tokens=100_000)
+
+    draft = draft_entry(_draft_request(), client, settings)
+
+    assert draft.model == "m-1"
+    assert draft.cost_usd == pytest.approx(5.0 + 2.5)
+    assert draft.cost_line() == {
+        "model": "m-1",
+        "input_tokens": 1_000_000,
+        "output_tokens": 100_000,
+        "cost_usd": pytest.approx(7.5),
+    }
+
+    unpriced = draft_entry(_draft_request(), FakeDraftClient(model="nope"), settings)
+    assert unpriced.cost_usd == 0.0
+
+
+def test_the_max_token_cap_reaches_the_client():
+    """A runaway completion is bounded by the settings, not by the model."""
+    from cryosoft.session.eln.drafting import FakeDraftClient, draft_entry
+    from cryosoft.session.eln.settings import AssistantSettings
+
+    client = FakeDraftClient()
+    draft_entry(_draft_request(), client, AssistantSettings(max_tokens=321))
+
+    assert client.calls[0][2] == 321
+
+
+def test_a_draft_client_failure_is_one_eln_error():
+    """One exception type out of the whole package, the model included."""
+    from cryosoft.session.eln.drafting import FakeDraftClient, draft_entry
+
+    with pytest.raises(ElnError):
+        draft_entry(_draft_request(), FakeDraftClient(offline=True))
+
+
+def test_the_anthropic_client_says_so_when_its_optional_sdk_is_absent():
+    """A missing optional extra is one clear ElnError, at construction only."""
+    from cryosoft.session.eln import drafting
+
+    # Importing the module, rendering prompts and drafting against the fake all
+    # work regardless; only building the real client needs the SDK.
+    assert drafting.render_draft_prompt(_draft_request())
+
+    try:
+        import anthropic  # noqa: F401
+    except ImportError:
+        with pytest.raises(ElnError, match="cryosoft\\[assistant\\]"):
+            drafting.AnthropicDraftClient()
+    else:  # pragma: no cover - only when the optional extra is installed
+        pytest.skip("the anthropic extra is installed; absence cannot be exercised")
+
+
+def test_the_assistant_settings_redact_the_key_and_carry_a_price_table(tmp_path):
+    """The assistant's key follows the ELN key's rule exactly: never logged."""
+    from cryosoft.session.eln.settings import (
+        ASSISTANT_API_KEY_ENV_VAR,
+        DEFAULT_MODEL_PRICES,
+        AssistantSettings,
+    )
+
+    settings = AssistantSettings(api_key="sk-secret")
+
+    assert "sk-secret" not in repr(settings)
+    assert settings.to_dict()["api_key"] == "***"
+    assert settings.to_dict(include_secret=True)["api_key"] == "sk-secret"
+    assert AssistantSettings().prices == DEFAULT_MODEL_PRICES
+
+    path = tmp_path / "eln.json"
+    path.write_text(
+        json.dumps({"assistant": {"enabled": True, "model": "m-2"}}), encoding="utf-8"
+    )
+    loaded = load_eln_settings(path)
+    assert loaded.assistant.enabled is True and loaded.assistant.model == "m-2"
+    assert loaded.assistant.prices == DEFAULT_MODEL_PRICES
+
+    import os
+
+    os.environ[ASSISTANT_API_KEY_ENV_VAR] = "sk-from-env"
+    try:
+        assert load_eln_settings(path).assistant.api_key == "sk-from-env"
+    finally:
+        del os.environ[ASSISTANT_API_KEY_ENV_VAR]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Publishing an approved draft (publisher.export_draft)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_an_approved_draft_is_queued_as_one_ordinary_job(published_setup):
+    """A draft is data: the same journal, the same drain, only the text differs."""
+    from cryosoft.session.eln.drafting import DraftEntry
+
+    manager, publisher, adapter, _manifest = published_setup
+
+    draft = DraftEntry(
+        title="Drafted title",
+        body_html="<p>Drafted prose over the facts.</p>",
+        tags=["draft", "Field Sweep"],
+        model="m-1",
+        input_tokens=1000,
+        output_tokens=200,
+        cost_usd=0.01,
+        prompt_digest="d" * 64,
+    )
+
+    job_id = publisher.export_draft("run-0001", draft)
+    assert job_id == "publish_run:run-0001"
+
+    assert publisher.drain_once().state == DRAIN_PUBLISHED
+    (entry,) = adapter.entries.values()
+    assert entry["title"] == "Drafted title"
+    assert "Drafted prose over the facts." in entry["body_html"]
+    # The notebook's own standing tags and the draft's own, merged and sorted.
+    assert entry["tags"] == ["Field Sweep", "cryosoft", "draft", "sim"]
+    assert entry["metadata"]["run_id"] == "run-0001"
+    assert entry["metadata"]["draft_model"] == "m-1"
+    assert entry["metadata"]["draft_prompt_digest"] == "d" * 64
+
+    run = manager.current_experiment().find_run("run-0001")
+    assert run.published is True and run.eln_link is not None
+
+
+def test_an_approved_draft_is_queued_from_its_json_dict(published_setup):
+    """The run record stores a draft as JSON; export_draft loads it tolerantly."""
+    _manager, publisher, adapter, _manifest = published_setup
+
+    job_id = publisher.export_draft(
+        "run-0001",
+        {"title": "From JSON", "body_html": "<p>x</p>", "tags": ["draft"]},
+    )
+
+    assert job_id == "publish_run:run-0001"
+    assert publisher.drain_once().state == DRAIN_PUBLISHED
+    (entry,) = adapter.entries.values()
+    assert entry["title"] == "From JSON"
+
+
+def test_an_approved_draft_does_not_publish_a_run_twice(published_setup):
+    """Idempotent by the same job_id: a queued run is not requeued under a draft."""
+    from cryosoft.session.eln.drafting import DraftEntry
+
+    manager, publisher, adapter, manifest = published_setup
+    manager._orchestrator.run_finished.emit(manifest)
+    assert publisher.pending_count() == 1
+
+    publisher.export_draft("run-0001", DraftEntry(title="Drafted", body_html="<p>y</p>"))
+
+    assert publisher.pending_count() == 1, "one run, one entry, however it was queued"
+
+
+def test_a_draft_is_never_queued_while_publishing_is_off(published_setup, tmp_path):
+    """The track's master switch binds the drafting path exactly as the rest."""
+    from cryosoft.session.eln.drafting import DraftEntry
+    from cryosoft.session.eln.publisher import ElnPublisher
+
+    manager, _publisher, adapter, _manifest = published_setup
+    off = ElnPublisher(manager, ElnSettings(enabled=False), adapter=adapter)
+
+    assert off.export_draft("run-0001", DraftEntry(title="t", body_html="<p>b</p>")) == ""
+    off.stop()
+
+
+def test_a_pending_draft_rides_on_the_run_record_and_survives_json():
+    """An unapproved draft is parked on the run record, JSON-safe and tolerant."""
+    from cryosoft.session.models import RunRecord
+
+    record = RunRecord(run_id="run-0001", pending_eln_draft={"title": "t", "tags": ["draft"]})
+
+    round_tripped = RunRecord.from_dict(json.loads(json.dumps(record.to_dict())))
+    assert round_tripped.pending_eln_draft == {"title": "t", "tags": ["draft"]}
+
+    assert RunRecord.from_dict({"run_id": "r"}).pending_eln_draft == {}
+    assert RunRecord.from_dict({"run_id": "r", "pending_eln_draft": 7}).pending_eln_draft == {}
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# The approval gate (ExperimentManager.approve_eln_draft)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_approving_a_pending_draft_queues_exactly_one_job(published_setup):
+    """The human's half of the gate: park, approve, one entry, nothing pending."""
+    manager, publisher, adapter, _manifest = published_setup
+    manager.attach_eln_publisher(publisher)
+
+    assert manager.set_pending_eln_draft(
+        "run-0001", {"title": "Awaiting a human", "body_html": "<p>prose</p>"}
+    )
+    assert manager.pending_eln_draft("run-0001")["title"] == "Awaiting a human"
+    assert publisher.pending_count() == 0, "a pending draft publishes nothing"
+
+    job_id = manager.approve_eln_draft("run-0001")
+
+    assert job_id == "publish_run:run-0001"
+    assert publisher.pending_count() == 1
+    assert manager.pending_eln_draft("run-0001") == {}, "an approved draft is spent"
+
+    assert publisher.drain_once().state == DRAIN_PUBLISHED
+    (entry,) = adapter.entries.values()
+    assert entry["title"] == "Awaiting a human"
+
+
+def test_a_pending_draft_survives_a_reload(published_setup):
+    """The proposal is on the record, not in memory: a restart still finds it."""
+    manager, _publisher, _adapter, _manifest = published_setup
+    experiment_id = manager.current_experiment().experiment_id
+
+    manager.set_pending_eln_draft("run-0001", {"title": "Later"})
+
+    stored = manager.store.load(experiment_id).find_run("run-0001")
+    assert stored.pending_eln_draft == {"title": "Later"}
+
+
+def test_an_unqueueable_draft_stays_pending(published_setup):
+    """A publisher that queued nothing leaves the proposal exactly where it was."""
+    manager, _publisher, adapter, _manifest = published_setup
+    from cryosoft.session.eln.publisher import ElnPublisher
+
+    off = ElnPublisher(manager, ElnSettings(enabled=False), adapter=adapter)
+    manager.attach_eln_publisher(off)
+    manager.set_pending_eln_draft("run-0001", {"title": "Still waiting"})
+
+    assert manager.approve_eln_draft("run-0001") == ""
+    assert manager.pending_eln_draft("run-0001") == {"title": "Still waiting"}
+    off.stop()
+
+
+def test_approval_without_a_draft_or_a_publisher_queues_nothing(published_setup):
+    """Every refusal is a logged "" — approval is a GUI action and never raises."""
+    manager, publisher, _adapter, _manifest = published_setup
+
+    assert manager.approve_eln_draft("run-0001") == "", "nothing is pending"
+
+    manager.set_pending_eln_draft("run-0001", {"title": "t"})
+    assert manager.approve_eln_draft("run-0001") == "", "no publisher is attached"
+
+    manager.attach_eln_publisher(publisher)
+    assert manager.approve_eln_draft("no-such-run") == ""
+    assert manager.set_pending_eln_draft("no-such-run", {"title": "t"}) is False
