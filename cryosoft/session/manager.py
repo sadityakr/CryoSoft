@@ -9,7 +9,7 @@ from typing import Any
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
-from cryosoft.core.orchestrator import Orchestrator
+from cryosoft.core.orchestrator_proxy import OrchestratorProxy
 from cryosoft.core.plan import EnvelopeVariable, ExperimentEnvelope
 from cryosoft.core.station import read_instrument_metadata
 from cryosoft.session.models import (
@@ -66,7 +66,7 @@ class ExperimentManager(QObject):
         self,
         store: ExperimentStore,
         roster: UserRoster,
-        orchestrator: Orchestrator,
+        orchestrator: OrchestratorProxy,
         config_name: str = "",
         config_path: str | None = None,
         session_store: SessionStore | None = None,

@@ -14,9 +14,9 @@ from PyQt6.QtWidgets import (
 )
 
 from cryosoft.core.events import InstrumentInfo
-from cryosoft.core.orchestrator import Orchestrator
+from cryosoft.core.orchestrator_proxy import OrchestratorProxy
 from cryosoft.gui.instrument_panel import InstrumentPanel
-from cryosoft.gui.status_mirror import StatusMirror
+from cryosoft.core.status_mirror import StatusMirror
 from cryosoft.gui.theme import TEXT_PRIMARY
 
 
@@ -30,7 +30,7 @@ class InstrumentFrontPanel(QWidget):
 
     Args:
         vi_name: The VI's registered name.
-        orchestrator: Orchestrator every action is submitted to.
+        orchestrator: OrchestratorProxy every action is submitted to.
         mirror: The status mirror the declaration is read from; built from
             the engine when none is given (the inline construction path).
         parent: The owning widget. The window is parented (so it is destroyed
@@ -41,7 +41,7 @@ class InstrumentFrontPanel(QWidget):
     def __init__(
         self,
         vi_name: str,
-        orchestrator: Orchestrator,
+        orchestrator: OrchestratorProxy,
         mirror: StatusMirror | None = None,
         parent: QWidget | None = None,
     ) -> None:
@@ -52,7 +52,7 @@ class InstrumentFrontPanel(QWidget):
         self._vi_name = vi_name
         self._orchestrator = orchestrator
         self._mirror = (
-            mirror if mirror is not None else StatusMirror.for_engine(orchestrator)
+            mirror if mirror is not None else StatusMirror.of(orchestrator)
         )
         info = self._mirror.instrument_info(vi_name) or InstrumentInfo(name=vi_name)
 

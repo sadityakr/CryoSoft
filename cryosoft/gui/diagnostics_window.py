@@ -21,9 +21,9 @@ from PyQt6.QtWidgets import (
 )
 
 from cryosoft.core.operational_status import RunFaultCode
-from cryosoft.core.orchestrator import Orchestrator
+from cryosoft.core.orchestrator_proxy import OrchestratorProxy
 from cryosoft.gui import window_geometry
-from cryosoft.gui.status_mirror import StatusMirror
+from cryosoft.core.status_mirror import StatusMirror
 from cryosoft.gui.theme import BTN_CLASS_SECONDARY, STATUS_ERROR, STATUS_OK, STATUS_WARN
 
 logger = logging.getLogger(__name__)
@@ -93,14 +93,14 @@ class DiagnosticsWindow(QMainWindow):
 
     def __init__(
         self,
-        orchestrator: Orchestrator,
+        orchestrator: OrchestratorProxy,
         mirror: StatusMirror | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._orchestrator = orchestrator
         self._mirror = (
-            mirror if mirror is not None else StatusMirror.for_engine(orchestrator)
+            mirror if mirror is not None else StatusMirror.of(orchestrator)
         )
         self._latest_record: dict = {}
         self._badge_severity = ""

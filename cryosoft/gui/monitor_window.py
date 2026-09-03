@@ -28,7 +28,8 @@ from PyQt6.QtWidgets import (
 )
 
 from cryosoft.core.events import ErrorEvent
-from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
+from cryosoft.core.orchestrator import OrchestratorState
+from cryosoft.core.orchestrator_proxy import OrchestratorProxy
 from cryosoft.core.station import read_instrument_metadata
 from cryosoft.gui import app_settings  # import the module (not the function) so tests can monkeypatch the factory
 from cryosoft.gui import form_autosave  # module import keeps save/load monkeypatchable
@@ -45,7 +46,7 @@ from cryosoft.gui.operations_panel import OperationsPanel
 from cryosoft.gui.ramp_tracker_panel import RampTrackerPanel
 from cryosoft.gui.servicing_log_page import ServicingLogPage
 from cryosoft.gui.session_dialogs import ResumeSessionDialog
-from cryosoft.gui.status_mirror import StatusMirror
+from cryosoft.core.status_mirror import StatusMirror
 from cryosoft.gui.setup_dialogs import InstrumentInfoDialog, LoginDialog
 from cryosoft.gui.theme import (
     BANNER_SEVERITY_ERROR,
@@ -180,7 +181,7 @@ class MonitorWindow(QMainWindow):
     def __init__(
         self,
         station: Station,
-        orchestrator: Orchestrator,
+        orchestrator: OrchestratorProxy,
         parent: QWidget | None = None,
         catalog: ConfigCatalog | None = None,
         active_config_path: str | None = None,

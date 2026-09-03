@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from cryosoft.core.orchestrator import Orchestrator
+from cryosoft.core.orchestrator_proxy import OrchestratorProxy
 from cryosoft.core.procedure import BaseProcedure
 from cryosoft.core.run_builder import PROCEDURE_BUILD_ERRORS, build_procedure
 from cryosoft.gui.form_autosave import (
@@ -74,7 +74,7 @@ class QueuePanel(QGroupBox):
     def __init__(
         self,
         station: Station,
-        orchestrator: Orchestrator,
+        orchestrator: OrchestratorProxy,
         parent: QWidget | None = None,
         get_experiment_info: Callable[[], dict[str, str]] | None = None,
     ) -> None:

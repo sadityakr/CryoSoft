@@ -15,8 +15,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from cryosoft.core.orchestrator import Orchestrator
-from cryosoft.gui.status_mirror import StatusMirror
+from cryosoft.core.orchestrator_proxy import OrchestratorProxy
+from cryosoft.core.status_mirror import StatusMirror
 from cryosoft.gui.lifecycle_toggle import ConnectionButton
 from cryosoft.gui.theme import TEXT_PRIMARY
 
@@ -135,7 +135,7 @@ class OfflineInstrumentPanel(QGroupBox):
 
     Args:
         vi_name: The VI's configured name.
-        orchestrator: Orchestrator handling the connect request.
+        orchestrator: OrchestratorProxy handling the connect request.
         mirror: The status mirror this card reads its tags and its offline
             reason from; built from the engine when none is given (the
             inline construction path).
@@ -147,7 +147,7 @@ class OfflineInstrumentPanel(QGroupBox):
     def __init__(
         self,
         vi_name: str,
-        orchestrator: Orchestrator,
+        orchestrator: OrchestratorProxy,
         mirror: StatusMirror | None = None,
         parent: QWidget | None = None,
         type_tag: str | None = None,
@@ -156,7 +156,7 @@ class OfflineInstrumentPanel(QGroupBox):
         self._vi_name = vi_name
         self._orchestrator = orchestrator
         self._mirror = (
-            mirror if mirror is not None else StatusMirror.for_engine(orchestrator)
+            mirror if mirror is not None else StatusMirror.of(orchestrator)
         )
         self._details: OfflineFrontPanel | None = None  # lazily created
         self._tags = self._mirror.availability_tags(vi_name)
@@ -292,7 +292,7 @@ class OfflineFrontPanel(QWidget):
 
     Args:
         vi_name: The offline VI's configured name.
-        orchestrator: Orchestrator handling the connect request.
+        orchestrator: OrchestratorProxy handling the connect request.
         mirror: The status mirror the live failure reason and the tags are
             read from; built from the engine when none is given.
         parent: The owning widget (parented, but flagged as a real window).
@@ -305,7 +305,7 @@ class OfflineFrontPanel(QWidget):
     def __init__(
         self,
         vi_name: str,
-        orchestrator: Orchestrator,
+        orchestrator: OrchestratorProxy,
         mirror: StatusMirror | None = None,
         parent: QWidget | None = None,
         tags: frozenset[str] = frozenset({"connect_failed"}),
@@ -314,7 +314,7 @@ class OfflineFrontPanel(QWidget):
         self._vi_name = vi_name
         self._orchestrator = orchestrator
         self._mirror = (
-            mirror if mirror is not None else StatusMirror.for_engine(orchestrator)
+            mirror if mirror is not None else StatusMirror.of(orchestrator)
         )
         wording = _wording_for(tags)
         self.setObjectName(f"{vi_name}_offline_front_panel")

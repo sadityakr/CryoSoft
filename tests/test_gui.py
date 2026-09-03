@@ -190,7 +190,7 @@ def _mock_mirror(orchestrator, vi_name, vi):
         The primed StatusMirror.
     """
     from cryosoft.core.station import Station
-    from cryosoft.gui.status_mirror import StatusMirror
+    from cryosoft.core.status_mirror import StatusMirror
 
     declaring = Station()
     declaring.register_vi(vi_name, vi, "measurement")

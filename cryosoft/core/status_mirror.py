@@ -136,6 +136,27 @@ class StatusMirror(QObject):
         mirror.attach(engine)
         return mirror
 
+    @classmethod
+    def of(cls, engine: Any, parent: QObject | None = None) -> StatusMirror:
+        """Return the mirror *engine* already carries, or build one for it.
+
+        The fallback a widget uses when it is handed a client but no mirror:
+        an ``OrchestratorProxy`` carries its own (primed by the host, on the
+        engine's thread), and a bare Orchestrator gets one built here, which
+        is the inline construction path tests take.
+
+        Args:
+            engine: An ``OrchestratorProxy``, or an engine to mirror.
+            parent: Optional Qt parent, used only when one is built.
+
+        Returns:
+            The mirror to read from.
+        """
+        carried = getattr(engine, "status", None)
+        if isinstance(carried, StatusMirror):
+            return carried
+        return cls.for_engine(engine, parent=parent)
+
     def attach(self, engine: EventSource) -> None:
         """Connect this mirror to an engine's two broadcast streams.
 

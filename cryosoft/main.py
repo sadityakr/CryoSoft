@@ -5,15 +5,15 @@ from __future__ import annotations
 import logging
 import sys
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import pyqtgraph as pg
 from PyQt6.QtCore import QProcess
 from PyQt6.QtWidgets import QApplication
 
 from cryosoft.core.config_catalog import ConfigCatalog
+from cryosoft.core.instrument_host import InstrumentHost
 from cryosoft.core.logging_config import setup_logging
-from cryosoft.core.orchestrator import Orchestrator
 from cryosoft.core.paths import measurement_root
 from cryosoft.core.station import (
     Station,
@@ -29,7 +29,6 @@ from cryosoft.core.trend_check_runner import TrendCheckRunner
 from cryosoft.core.trend_checks import declared_checks
 from cryosoft.gui import app_settings
 from cryosoft.gui.monitor_window import MonitorWindow
-from cryosoft.gui.status_mirror import StatusMirror
 from cryosoft.gui.theme import PLOT_AXIS, PLOT_BG, build_stylesheet
 from cryosoft.session.eln.publisher import ElnPublisher
 from cryosoft.session.eln.settings import load_eln_settings
@@ -159,9 +158,49 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
     catalog = ConfigCatalog(
         app_settings.shipped_config_dir(), app_settings.user_config_dir()
     )
-    station, used_path, warnings = build_station_with_fallback(_startup_candidates())
-    if on_station_built is not None:
-        on_station_built(station)
+
+    # The instrument stack is built by the InstrumentHost, not here: which
+    # THREAD owns the Station and the Orchestrator is the host's decision, and
+    # `inline` mode is exactly today's behaviour with that decision named. The
+    # station factory therefore carries the whole build — including the config
+    # fallback, whose resolved path the Orchestrator's own safety settings
+    # come from, which is why the options are a callable too.
+    build: dict[str, Any] = {}
+
+    def _build_station() -> Station:
+        """Build the Station from the first usable startup config."""
+        station, used_path, warnings = build_station_with_fallback(
+            _startup_candidates()
+        )
+        build["used_path"] = used_path
+        build["warnings"] = warnings
+        if on_station_built is not None:
+            on_station_built(station)
+        return station
+
+    def _orchestrator_options(_station: Station) -> dict[str, Any]:
+        """Read the engine's settings from the config the build resolved."""
+        safety_config = read_safety_config(build["used_path"])
+        return {
+            "tick_interval_ms": 3000,
+            "manual_override_timeout_s": safety_config["manual_override_timeout_s"],
+            "stall_seconds": safety_config["stall_seconds"],
+            "hold_enforcement_interval_s": safety_config[
+                "hold_enforcement_interval_s"
+            ],
+            "hold_enforcement_max_attempts": safety_config[
+                "hold_enforcement_max_attempts"
+            ],
+        }
+
+    app.instrument_host = InstrumentHost(
+        _build_station, orchestrator_options=_orchestrator_options
+    )
+    app.instrument_host.start()
+    station = app.instrument_host.station
+    used_path = build["used_path"]
+    warnings = build["warnings"]
+
     # Persist the config that actually loaded (by identity, not path) so the
     # next launch starts there even from a different clone/worktree.
     used_entry = catalog.get_by_path(used_path)
@@ -177,23 +216,12 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
             station.get_offline_info(offline_name).reason,
         )
 
-    safety_config = read_safety_config(used_path)
-    orchestrator = Orchestrator(
-        station,
-        tick_interval_ms=3000,
-        manual_override_timeout_s=safety_config["manual_override_timeout_s"],
-        stall_seconds=safety_config["stall_seconds"],
-        hold_enforcement_interval_s=safety_config["hold_enforcement_interval_s"],
-        hold_enforcement_max_attempts=safety_config["hold_enforcement_max_attempts"],
-    )
-
-    # The status-mirror standard (GLOSSARY.md's **Status mirror**): the GUI
-    # answers every read from this mirror and never calls into the engine.
-    # Built and primed HERE, next to the engine, because the event stream is
-    # a broadcast — the declaration emitted at construction is already gone
-    # by the time a widget exists — and because the priming reads must be
-    # taken on the engine's own thread.
-    mirror = StatusMirror.for_engine(orchestrator)
+    # The control contract, rendered for this process's clients: one typed
+    # method per command, the engine's signals re-exposed, and every read
+    # answered from a status mirror the host primed on the engine's own
+    # thread. Nothing above this line hands the engine itself to anyone.
+    orchestrator = app.instrument_host.build_proxy()
+    mirror = orchestrator.status
 
     # Trend-check standard (core/trend_checks.py, GLOSSARY.md's **Trend
     # check**): a small, single-purpose scheduler independent of the

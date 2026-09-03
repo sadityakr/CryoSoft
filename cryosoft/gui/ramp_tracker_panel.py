@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from cryosoft.core.orchestrator import Orchestrator
+from cryosoft.core.orchestrator_proxy import OrchestratorProxy
 from cryosoft.core.ramps import RampRecord
 from cryosoft.gui.theme import BTN_CLASS_DANGER, TEXT_PRIMARY
 
@@ -94,7 +94,7 @@ class RampRow(QGroupBox):
     def __init__(
         self,
         record: RampRecord,
-        orchestrator: Orchestrator,
+        orchestrator: OrchestratorProxy,
         parent: QWidget | None = None,
     ) -> None:
         # Title carries BOTH the setpoint label and the VI name: a two-magnet
@@ -229,7 +229,7 @@ class RampTrackerPanel(QWidget):
         parent: Optional Qt parent widget.
     """
 
-    def __init__(self, orchestrator: Orchestrator, parent: QWidget | None = None) -> None:
+    def __init__(self, orchestrator: OrchestratorProxy, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("ramp_tracker_panel")
         self._orchestrator = orchestrator

@@ -13,7 +13,7 @@ import pytest
 from cryosoft.core import events as ev
 from cryosoft.core.orchestrator import Orchestrator
 from cryosoft.core.station import build_station
-from cryosoft.gui.status_mirror import StatusMirror
+from cryosoft.core.status_mirror import StatusMirror
 
 CONFIG_PATH = "cryosoft/configs/sim_cryostat"
 

@@ -24,7 +24,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from cryosoft.core.orchestrator import Orchestrator
+from cryosoft.core.orchestrator_proxy import OrchestratorProxy
 from cryosoft.core.procedure import BaseProcedure
 from cryosoft.core.run_builder import PROCEDURE_BUILD_ERRORS, build_procedure
 from cryosoft.gui import window_geometry
@@ -34,7 +34,7 @@ from cryosoft.gui.form_autosave import STATUS_PENDING, FormAutosaveState
 from cryosoft.gui.procedure_discovery import discover_procedures
 from cryosoft.gui.procedure_params_panel import ProcedureParamsPanel
 from cryosoft.gui.queue_panel import QueueEntry, QueuePanel
-from cryosoft.gui.status_mirror import StatusMirror
+from cryosoft.core.status_mirror import StatusMirror
 if TYPE_CHECKING:  # the GUI holds a Station only as a type (contract C18)
     from cryosoft.core.station import Station
 
@@ -92,7 +92,7 @@ class ProcedureWindow(QMainWindow):
     def __init__(
         self,
         station: Station,
-        orchestrator: Orchestrator,
+        orchestrator: OrchestratorProxy,
         get_sample_info: Callable[[], dict[str, str]],
         get_data_dir: Callable[[], str | None],
         parent: QWidget | None = None,
@@ -107,7 +107,7 @@ class ProcedureWindow(QMainWindow):
         # standard, gui/README.md); the run-kind guards below are advisory,
         # and the engine remains the authority on what actually happens.
         self._mirror = (
-            mirror if mirror is not None else StatusMirror.for_engine(orchestrator)
+            mirror if mirror is not None else StatusMirror.of(orchestrator)
         )
         self._get_sample_info = get_sample_info
         self._get_data_dir = get_data_dir

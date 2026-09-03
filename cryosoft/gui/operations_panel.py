@@ -25,7 +25,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from cryosoft.core.orchestrator import Orchestrator
+from cryosoft.core.orchestrator_proxy import OrchestratorProxy
 from cryosoft.gui.procedure_discovery import discover_operations
 from cryosoft.core.operation import STEP_STATUS_SKIPPED
 from cryosoft.gui.theme import (
@@ -165,7 +165,7 @@ class OperationCard(QGroupBox):
 
     def __init__(
         self,
-        orchestrator: Orchestrator,
+        orchestrator: OrchestratorProxy,
         display_instance: OperationBase,
         factory: Callable[..., OperationBase],
         get_current_person: Callable[[], str] | None = None,
@@ -771,7 +771,7 @@ class OperationsPanel(QWidget):
     def __init__(
         self,
         station: Station,
-        orchestrator: Orchestrator,
+        orchestrator: OrchestratorProxy,
         cryogenics_config: dict[str, Any] | None,
         operations_config: dict[str, dict[str, Any]] | None,
         helium_store: HeliumRecordStore | None,

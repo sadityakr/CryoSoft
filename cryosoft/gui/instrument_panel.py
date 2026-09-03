@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
 )
 
 from cryosoft.core.events import ControlInfo, GroupInfo, InstrumentInfo
-from cryosoft.core.orchestrator import Orchestrator
+from cryosoft.core.orchestrator_proxy import OrchestratorProxy
 from cryosoft.core.plan import ParamSpec
 from cryosoft.gui.lifecycle_toggle import ConnectionButton, LifecycleToggleButton
 from cryosoft.gui.param_form import (
@@ -27,7 +27,7 @@ from cryosoft.gui.param_form import (
     build_param_widget,
     collect_value,
 )
-from cryosoft.gui.status_mirror import StatusMirror
+from cryosoft.core.status_mirror import StatusMirror
 from cryosoft.gui.theme import BTN_CLASS_DANGER, BTN_CLASS_SECONDARY, TEXT_PRIMARY
 
 logger = logging.getLogger(__name__)
@@ -93,7 +93,7 @@ class InstrumentPanel(QGroupBox):
 
     Args:
         vi_name: The VI's registered name (e.g. ``"magnet_z"``).
-        orchestrator: Orchestrator every action is submitted to, and whose
+        orchestrator: OrchestratorProxy every action is submitted to, and whose
             ``states_updated`` signal drives value updates.
         mirror: The status mirror this panel reads from — its declaration
             supplies the layout, its snapshot the fault row. Built from the
@@ -124,7 +124,7 @@ class InstrumentPanel(QGroupBox):
     def __init__(
         self,
         vi_name: str,
-        orchestrator: Orchestrator,
+        orchestrator: OrchestratorProxy,
         mirror: StatusMirror | None = None,
         parent: QWidget | None = None,
         panel_controls: list[str] | None = None,
@@ -140,7 +140,7 @@ class InstrumentPanel(QGroupBox):
         self._vi_name = vi_name
         self._orchestrator = orchestrator
         self._mirror = (
-            mirror if mirror is not None else StatusMirror.for_engine(orchestrator)
+            mirror if mirror is not None else StatusMirror.of(orchestrator)
         )
         # An instrument the declaration does not name renders as an empty
         # card rather than raising: a panel is a report, and reporting must

@@ -61,8 +61,8 @@ is alive and not mid-tick.
   instrument panels build from the **Station info** declaration snapshot
   (GLOSSARY.md), read off the `StatusMirror`, and `Station.get_vi()` is never
   called from here.
-- A `StatusMirror` (`status_mirror.py`), built and primed next to the engine
-  by `main.py` and passed down. It is the GUI's ONLY read surface: `state`,
+- A `StatusMirror` (`core/status_mirror.py`) — the proxy's own, reached as
+  `proxy.status` and passed down to every panel. It is the GUI's ONLY read surface: `state`,
   `is_monitoring()`, `active_run_kind()`, `held_vi_names()`,
   `manual_override_expires_at()`, `scanner_enabled()`, `availability_tags()`,
   `vi_faults()`, `offline_reason()`, `get_operational_status()` and
@@ -72,7 +72,12 @@ is alive and not mid-tick.
   `operational_status_updated`) are what a widget reacts to when a read it
   displays can change with no state transition behind it — the ACKNOWLEDGE
   button's held-VI set, for instance.
-- An `Orchestrator` instance. Signals the GUI connects to: `states_updated`,
+- An `OrchestratorProxy` (`core/orchestrator_proxy.py`), built by the
+  **Instrument host** and handed in where the `Orchestrator` itself used to
+  be. It exposes the engine's signals 1:1 and one typed method per command,
+  so every call site below reads the same as it always did; what changed is
+  that the object on the other side of it can live on another thread. Signals
+  the GUI connects to: `states_updated`,
   `state_changed`, `run_started`, `run_finished`, `error_occurred`,
   `error_event` (the structured `core.events.ErrorEvent` counterpart of the
   per-VI **Instrument fault** model, see GLOSSARY.md — MonitorWindow's banner
@@ -142,7 +147,7 @@ is alive and not mid-tick.
   Orchestrator action.
 - **Never** block the Qt event loop (no `time.sleep`, no synchronous I/O). Data
   arrives via Orchestrator signals; do not poll instruments.
-- **`status_mirror.py`'s `StatusMirror` is the single read surface** — the
+- **`core/status_mirror.py`'s `StatusMirror` is the single read surface** — the
   **status-mirror standard** (GLOSSARY.md's **Status mirror**). No widget calls
   a read on the engine; every widget answers `state`, `is_monitoring()`,
   `active_run_kind()`, `availability_tags()`, `vi_faults()`, `held_vi_names()`,
@@ -153,8 +158,9 @@ is alive and not mid-tick.
   authoritative: it may word a button or hide a control, but the engine is the
   only authority on whether an action happens — the client asks, and the engine
   refuses with a verdict. The mirror is built and primed by whoever builds the
-  engine and passed in; a widget given none builds one with
-  `StatusMirror.for_engine()`, which is the inline construction path tests use.
+  engine and passed in; a widget given none takes the one its client already
+  carries (`StatusMirror.of()`), building a fresh one only for a bare engine,
+  which is the inline construction path tests use.
 - **`operations_panel.py`'s `OperationCard` is the single per-operation card
   standard.** It contains no per-operation logic — every visible
   detail (checklist rows, next-due line, status line, ready banner,
@@ -213,7 +219,6 @@ is alive and not mid-tick.
 | `app_settings.py` | `QSettings` factory (a test seam) plus machine-level identity persisted through it: the per-user autosave-file path resolver, shipped/user config dirs, the active-config identity `(name, source)` (survives running from another clone/worktree), and who is currently logged in. The fixed measurement root L6 session/experiment folders live under is resolved by `cryosoft.core.paths.measurement_root()` instead — a machine-level, admin-set value, not GUI-editable through this module. | `get_settings`, `autosave_file_path`, `shipped_config_dir`, `user_config_dir`, `config_active`, `set_config_active`, `current_user_id`, `set_current_user_id` | `tests/test_gui.py` |
 | `form_autosave.py` | Qt-free form-autosave model (sample metadata, data dir, last procedure + params, run queue), serialised to one JSON file; never raises on a corrupt file. Historically `session.py` — renamed so "session" is free for the L6 Session Management layer; its class was renamed too (`FormAutosaveState`, formerly `SessionState`), while the on-disk JSON filename is unchanged. | `FormAutosaveState`, `load`, `save` | `tests/test_form_autosave.py` |
 | `theme.py` | Light "lab" colour palette constants and the application-wide QSS string. Includes `BTN_DANGER_DISABLED` and its `QPushButton[class="danger"]:disabled` rule — deliberately low contrast (WCAG 1.4.3 exempts disabled controls), so a destructive action the app is currently refusing does not read as available. | `build_stylesheet`, colour/class constants | `tests/test_gui.py` |
-| `status_mirror.py` | The GUI's local copy of everything the engine last said about itself — the **status-mirror standard** (GLOSSARY.md's **Status mirror**), and the reason no widget reads the engine synchronously. Fed the event stream's `StatusSnapshot` / `StateChange` / `StationInfo` (plus the per-tick operational-status record, which travels on its own signal) and answers every read off the last one, each read named after the `Orchestrator` accessor it replaces and each returning a copy rather than a live container. Re-broadcasts what it absorbs on `status_updated` / `state_changed` / `station_updated` / `operational_status_updated`, so a widget can react as well as ask. Primed through `prime()` by whoever builds the engine (the event stream is a broadcast, so a mirror built later missed the declaration emitted at construction); `for_engine()` is that same wiring for a caller holding an engine on its own thread. | `StatusMirror`, `EventSource`, `for_engine`, `prime`, `attach`, `on_event`, `on_operational_status`, `instrument_info` | `tests/test_status_mirror.py` |
 | `param_form.py` | The single `ParamSpec`-to-Qt-widget mapping, shared by the procedure form and the Logs page's servicing-log dialogs; builds labelled/tooltipped `QFormLayout` rows and the inverse read helpers. A `widget_hint="datetime"` (`str`-typed) field still gets a `QLineEdit` (an ISO 8601 string) with a placeholder showing the expected format — no dedicated date-picker widget yet. | `build_param_widget`, `build_form_layout`, `build_group_box`, `build_param_tooltip`, `collect_value`, `get_widget_raw`, `set_widget_raw` | `tests/test_gui.py` |
 | `sweep_axis_widget.py` | Sweep-shape editor for a Procedure's declared `SweepAxis`: mode selector (Linear / Segments / CSV) over a stacked sub-form, a 2-column segment breakpoint table (`field_segments`), and a hysteresis checkbox. The only GUI code sweep-shape support needs. | `SweepAxisWidget`, `get_params` | `tests/test_sweep_axis_widget.py` |
 | `instrument_panel.py` | Auto-generated per-VI `QGroupBox`, built entirely from the station's **declaration snapshot** (`InstrumentInfo`, read off the `StatusMirror`) — it holds no VI object: declared `@monitored` readings become live `QLabel`s, declared `@control` actions become button + input rows (a parameter marked `declared` has its `ParamSpec` rebuilt from the declaration's JSON and rendered via `param_form` as a combo/checkbox/tooltipped field; one known only from its signature keeps a plain line edit). Card visibility: a `panels:` config allowlist wins, else each control's `panel=` default. Header holds a `LifecycleToggleButton` and the front-panel icon. Updates on each `states_updated` tick; flips a QSS `status` property on ok/stale/disconnected change, and shows/hides a fault row (message + Acknowledge + Retry, disabling every `@control` row) from the Availability standard's unified record (`StatusMirror.availability_tags(vi_name)`'s `not_responding` tag, GLOSSARY.md's **Availability**) — the row's message still reads the mirror's `vi_fault()` for `kind`/`message`/`acknowledged`, fields the unified record does not carry, since acknowledge/retry are comm-specific actions. The RUNTIME sibling of `offline_panel.py`'s build-time fault card. | `InstrumentPanel` | `tests/test_gui.py` |
