@@ -324,9 +324,32 @@ class _ChatCall(QRunnable):
                 self._system, self._messages, self._tools, self._max_tokens
             )
         except Exception as error:  # noqa: BLE001 — a worker never raises into Qt
-            self._signals.failed.emit(str(error), self._token)
+            self._deliver(answered=False, payload=str(error))
             return
-        self._signals.answered.emit(result, self._token)
+        self._deliver(answered=True, payload=result)
+
+    def _deliver(self, *, answered: bool, payload: Any) -> None:
+        """Hand one answer back, tolerating a runtime that has gone away.
+
+        A model call outlives a runtime that is destroyed during it — the
+        window closes, the application quits, a test tears its objects down —
+        and a pool thread that so much as READS a signal off a destroyed
+        ``QObject`` raises, which is why the lookup is inside the guard and not
+        at the call site. There is nothing to report to and nothing to recover,
+        so the answer is dropped with a DEBUG line rather than raised on a
+        thread that has no handler for it.
+
+        Args:
+            answered: Whether the call produced a result or a failure.
+            payload: The answer, or the failure message.
+        """
+        try:
+            signal = self._signals.answered if answered else self._signals.failed
+            signal.emit(payload, self._token)
+        except RuntimeError:
+            logger.debug(
+                "Assistant: the runtime went away before its answer arrived"
+            )
 
 
 class AssistantRuntime(QObject):
