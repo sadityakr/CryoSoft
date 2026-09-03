@@ -136,6 +136,7 @@ class ExperimentManager(QObject):
             envelope=self._current_envelope,
         )
         self._store_save_ok = True
+        self._eln_publisher: Any | None = None
 
         orchestrator.run_started.connect(self._on_run_started)
         orchestrator.run_finished.connect(self._on_run_finished)
@@ -823,6 +824,142 @@ class ExperimentManager(QObject):
             link.url or link.entry_id,
         )
         return True
+
+    # ------------------------------------------------------------------
+    # The drafting approval gate
+    # ------------------------------------------------------------------
+
+    def attach_eln_publisher(self, publisher: Any | None) -> None:
+        """Hold the ELN publisher an approved **draft entry** is enqueued through.
+
+        The one seam between the manager and the publishing track, and it
+        points the way the publisher does not: the publisher already holds
+        this manager (it hands confirmed links to ``set_run_eln_link()``), so
+        approval — a decision about a *record* — is taken here and the
+        enqueue is delegated back. Duck-typed on ``export_draft(run_id,
+        draft)`` rather than imported, so this module stays free of the ELN
+        package and of the Qt object that owns its drain timer.
+
+        Args:
+            publisher: The ``ElnPublisher``, or ``None`` to detach. With none
+                attached, ``approve_eln_draft()`` refuses by saying so.
+        """
+        self._eln_publisher = publisher
+        logger.info(
+            "ELN publisher %s for draft approval",
+            "attached" if publisher is not None else "detached",
+        )
+
+    def set_pending_eln_draft(self, run_id: str, draft: Mapping[str, Any]) -> bool:
+        """Park a **draft entry** on one run of the open experiment, unapproved.
+
+        The single-writer rule applied to the drafting track: an agent that
+        drafts an entry for an ATTENDED experiment may not publish it, so the
+        draft is stored here — as JSON on the run record — until a human
+        approves it with ``approve_eln_draft()``. Storing one replaces
+        whatever was pending, because a draft is a proposal that can be
+        redrawn at any time and only the newest is of interest.
+
+        Args:
+            run_id: The run the draft describes, in the open experiment.
+            draft: The draft as its JSON dict (``DraftEntry.to_dict()``).
+
+        Returns:
+            ``True`` when it was stored, ``False`` when no experiment is open
+            or the run is unknown (logged, never raised).
+        """
+        run = self._open_run(run_id, "park a draft on")
+        if run is None:
+            return False
+        run.pending_eln_draft = dict(draft)
+        self._save_current()
+        self.run_recorded.emit(run.to_dict())
+        logger.info("An ELN draft for run %s is waiting for approval", run_id)
+        return True
+
+    def pending_eln_draft(self, run_id: str) -> dict[str, Any]:
+        """Return the **draft entry** waiting on one run, or ``{}``.
+
+        Args:
+            run_id: The run to read, in the open experiment.
+
+        Returns:
+            The pending draft's JSON dict, or ``{}`` when none is waiting (or
+            no experiment is open, or the run is unknown).
+        """
+        run = self._open_run(run_id, "read a pending draft of")
+        return {} if run is None else dict(run.pending_eln_draft)
+
+    def approve_eln_draft(self, run_id: str) -> str:
+        """Approve the **draft entry** waiting on one run and queue it.
+
+        The human's half of the approval gate. The draft goes to the
+        publisher's ``export_draft()``, which queues it as one ordinary
+        outbox job; only once it is queued is the pending draft cleared, so a
+        publisher that refused (publishing off, no experiment open) leaves the
+        proposal exactly where it was, still approvable later.
+
+        Args:
+            run_id: The run whose pending draft is approved.
+
+        Returns:
+            The queued job's id, or ``""`` when nothing was queued — no
+            experiment open, no such run, no draft pending, no publisher
+            attached, or the publisher queued nothing (all logged, never
+            raised: approval is a GUI action, and a bookkeeping failure must
+            not propagate into it).
+        """
+        run = self._open_run(run_id, "approve a draft of")
+        if run is None:
+            return ""
+        if not run.pending_eln_draft:
+            logger.warning("Run %s has no pending ELN draft to approve", run_id)
+            return ""
+        if self._eln_publisher is None:
+            logger.warning(
+                "No ELN publisher is attached — the approved draft for run %s "
+                "stays pending",
+                run_id,
+            )
+            return ""
+        draft = dict(run.pending_eln_draft)
+        try:
+            job_id = str(self._eln_publisher.export_draft(run_id, draft) or "")
+        except Exception:  # noqa: BLE001 - approval must not raise into the GUI
+            logger.exception("Queuing the approved draft for run %s failed", run_id)
+            return ""
+        if not job_id:
+            logger.warning(
+                "The publisher queued nothing for run %s — its draft stays pending",
+                run_id,
+            )
+            return ""
+        run.pending_eln_draft = {}
+        self._save_current()
+        self.run_recorded.emit(run.to_dict())
+        logger.info("Approved the ELN draft for run %s: queued as %s", run_id, job_id)
+        return job_id
+
+    def _open_run(self, run_id: str, action: str) -> RunRecord | None:
+        """Return one run of the OPEN experiment, or ``None`` with a warning.
+
+        Args:
+            run_id: The run to find.
+            action: What the caller wanted to do, for the log line.
+
+        Returns:
+            The ``RunRecord``, or ``None`` when no experiment is open or the
+            experiment has no such run.
+        """
+        if self._experiment is None:
+            logger.warning("No experiment is open — cannot %s run %r", action, run_id)
+            return None
+        run = self._experiment.find_run(run_id)
+        if run is None:
+            logger.warning(
+                "No run %r in the open experiment — cannot %s it", run_id, action
+            )
+        return run
 
     # ------------------------------------------------------------------
     # Internals

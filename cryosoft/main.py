@@ -308,6 +308,9 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
     # for GC regardless of Qt-side parenting.
     app.eln_publisher = ElnPublisher(session_manager, load_eln_settings())
     orchestrator.run_finished.connect(app.eln_publisher.on_run_finished)
+    # The other direction of the same seam: the manager holds the publisher so
+    # that approving a **draft entry** parked on a run record can queue it.
+    session_manager.attach_eln_publisher(app.eln_publisher)
     app.eln_publisher.start()
 
     # Cryogenics management:

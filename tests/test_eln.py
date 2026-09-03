@@ -1237,3 +1237,69 @@ def test_a_pending_draft_rides_on_the_run_record_and_survives_json():
 
     assert RunRecord.from_dict({"run_id": "r"}).pending_eln_draft == {}
     assert RunRecord.from_dict({"run_id": "r", "pending_eln_draft": 7}).pending_eln_draft == {}
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# The approval gate (ExperimentManager.approve_eln_draft)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_approving_a_pending_draft_queues_exactly_one_job(published_setup):
+    """The human's half of the gate: park, approve, one entry, nothing pending."""
+    manager, publisher, adapter, _manifest = published_setup
+    manager.attach_eln_publisher(publisher)
+
+    assert manager.set_pending_eln_draft(
+        "run-0001", {"title": "Awaiting a human", "body_html": "<p>prose</p>"}
+    )
+    assert manager.pending_eln_draft("run-0001")["title"] == "Awaiting a human"
+    assert publisher.pending_count() == 0, "a pending draft publishes nothing"
+
+    job_id = manager.approve_eln_draft("run-0001")
+
+    assert job_id == "publish_run:run-0001"
+    assert publisher.pending_count() == 1
+    assert manager.pending_eln_draft("run-0001") == {}, "an approved draft is spent"
+
+    assert publisher.drain_once().state == DRAIN_PUBLISHED
+    (entry,) = adapter.entries.values()
+    assert entry["title"] == "Awaiting a human"
+
+
+def test_a_pending_draft_survives_a_reload(published_setup):
+    """The proposal is on the record, not in memory: a restart still finds it."""
+    manager, _publisher, _adapter, _manifest = published_setup
+    experiment_id = manager.current_experiment().experiment_id
+
+    manager.set_pending_eln_draft("run-0001", {"title": "Later"})
+
+    stored = manager.store.load(experiment_id).find_run("run-0001")
+    assert stored.pending_eln_draft == {"title": "Later"}
+
+
+def test_an_unqueueable_draft_stays_pending(published_setup):
+    """A publisher that queued nothing leaves the proposal exactly where it was."""
+    manager, _publisher, adapter, _manifest = published_setup
+    from cryosoft.session.eln.publisher import ElnPublisher
+
+    off = ElnPublisher(manager, ElnSettings(enabled=False), adapter=adapter)
+    manager.attach_eln_publisher(off)
+    manager.set_pending_eln_draft("run-0001", {"title": "Still waiting"})
+
+    assert manager.approve_eln_draft("run-0001") == ""
+    assert manager.pending_eln_draft("run-0001") == {"title": "Still waiting"}
+    off.stop()
+
+
+def test_approval_without_a_draft_or_a_publisher_queues_nothing(published_setup):
+    """Every refusal is a logged "" — approval is a GUI action and never raises."""
+    manager, publisher, _adapter, _manifest = published_setup
+
+    assert manager.approve_eln_draft("run-0001") == "", "nothing is pending"
+
+    manager.set_pending_eln_draft("run-0001", {"title": "t"})
+    assert manager.approve_eln_draft("run-0001") == "", "no publisher is attached"
+
+    manager.attach_eln_publisher(publisher)
+    assert manager.approve_eln_draft("no-such-run") == ""
+    assert manager.set_pending_eln_draft("no-such-run", {"title": "t"}) is False
