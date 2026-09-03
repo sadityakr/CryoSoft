@@ -6,10 +6,12 @@ from typing import ClassVar
 import pytest
 
 
+from cryosoft.core import events as ev
 from cryosoft.core.operational_status import SCHEMA_VERSION
 from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
-from cryosoft.core.plan import Command, PhasePlan, StepPlan, Target
+from cryosoft.core.plan import Command, ExperimentEnvelope, PhasePlan, StepPlan, Target
 from cryosoft.core.station import Station, build_station
+from cryosoft.procedures.field_sweep import FieldSweep
 from cryosoft.virtual_instruments.base import BaseVirtualInstrument
 from cryosoft.virtual_instruments.rampable import RampableVI
 
@@ -2978,3 +2980,512 @@ def test_scanner_toggle_without_a_switch_is_refused_with_a_reason(orchestrator, 
         assert "no switch instrument" in blocker.args[0]
     finally:
         orchestrator._scanner_vi_name = saved
+
+
+# ══════════════════════════════════════════════════════════════════════
+# The engine port: submit(Command) -> one Verdict, and the event stream
+# (the verdict standard — see Orchestrator's class docstring)
+# ══════════════════════════════════════════════════════════════════════
+
+AGENT = ev.Actor(kind=ev.ActorKind.AGENT, id="drift-watch", role="operator")
+
+FIELD_SWEEP_PARAMS = {
+    "measurement_vi": "keithley_delta_mode",
+    "field_start": -0.1,
+    "field_end": 0.1,
+    "field_steps": 3,
+    "temperature": 300.0,
+    "current": 1e-6,
+    "n_readings": 5,
+    "init_wait": 0.0,
+    "step_wait": 0.0,
+}
+
+
+class _Recorder:
+    """Collect everything one Orchestrator said, in emission order."""
+
+    def __init__(self, orchestrator):
+        self.verdicts: list[ev.Verdict] = []
+        self.events: list[object] = []
+        orchestrator.verdict_emitted.connect(self.verdicts.append)
+        orchestrator.event_emitted.connect(self.events.append)
+
+    def of_type(self, event_type):
+        return [event for event in self.events if isinstance(event, event_type)]
+
+
+@pytest.fixture
+def port(station, qtbot, tmp_path):
+    """An Orchestrator with a run catalog, plus a recorder of its two channels."""
+    orch = Orchestrator(
+        station, tick_interval_ms=10, run_catalog={"FieldSweep": FieldSweep}
+    )
+    orch.start_monitoring()
+    recorder = _Recorder(orch)
+    yield orch, recorder, tmp_path
+    orch.shutdown()
+
+
+def _run_procedure_command(data_directory, **overrides):
+    """Build the dict-payload command that starts a FieldSweep."""
+    args = {
+        "procedure": "FieldSweep",
+        "params": dict(FIELD_SWEEP_PARAMS),
+        "sample_info": {"sample_name": "S", "sample_id": "S-1", "comments": ""},
+        "data_directory": str(data_directory),
+        "file_prefix": "submit",
+    }
+    args.update(overrides)
+    return ev.Command(name=ev.CommandName.RUN_PROCEDURE, actor=AGENT, args=args)
+
+
+def test_dict_payload_starts_a_run_and_is_answered_ok(port):
+    """A JSON-shaped run payload builds the procedure and starts the run."""
+    orch, recorder, tmp_path = port
+    command = _run_procedure_command(tmp_path)
+
+    request_id = orch.submit(command)
+
+    assert request_id == command.request_id
+    assert [v.request_id for v in recorder.verdicts] == [request_id]
+    verdict = recorder.verdicts[0]
+    assert verdict.ok and verdict.code is ev.VerdictCode.OK
+    assert verdict.actor == AGENT
+    assert orch.state == OrchestratorState.INITIATING.value
+    started = recorder.of_type(ev.RunStarted)
+    assert len(started) == 1
+    assert started[0].actor.kind is ev.ActorKind.AGENT
+    assert started[0].request_id == request_id
+    orch.abort_procedure()
+
+
+def test_a_run_payload_naming_no_known_class_fails_without_raising(port):
+    """An unknown procedure class is a FAILED verdict, never an exception."""
+    orch, recorder, tmp_path = port
+
+    orch.submit(_run_procedure_command(tmp_path, procedure="NoSuchProcedure"))
+
+    assert len(recorder.verdicts) == 1
+    assert recorder.verdicts[0].code is ev.VerdictCode.FAILED
+    assert "NoSuchProcedure" in recorder.verdicts[0].reason
+    assert orch.state == OrchestratorState.IDLE.value
+
+
+def test_an_unknown_command_name_never_reaches_the_engine(port):
+    """The enumeration is the boundary: an unknown name cannot become a Command.
+
+    ``submit()`` therefore never sees one — and a name that got past the enum
+    would still be answered rather than raised, since dispatch is a guarded
+    lookup (``test_a_command_with_arguments_the_method_rejects_fails``
+    exercises the same path).
+    """
+    with pytest.raises(ValueError):
+        ev.Command(name="no_such_command")
+
+
+def test_a_command_with_arguments_the_method_rejects_fails(port):
+    """Arguments that do not fit the method answer FAILED, never raise."""
+    orch, recorder, _tmp_path = port
+
+    request_id = orch.submit(
+        ev.Command(name=ev.CommandName.STOP_RAMP, actor=AGENT, args={"nope": 1})
+    )
+
+    assert [v.request_id for v in recorder.verdicts] == [request_id]
+    assert recorder.verdicts[0].code is ev.VerdictCode.FAILED
+
+
+def test_pause_when_idle_is_blocked_by_state(port):
+    """A refusal answers the command, with the code AND the existing signal."""
+    orch, recorder, _tmp_path = port
+
+    orch.submit(ev.Command(name=ev.CommandName.PAUSE_PROCEDURE, actor=AGENT))
+
+    assert len(recorder.verdicts) == 1
+    verdict = recorder.verdicts[0]
+    assert verdict.code is ev.VerdictCode.BLOCKED_STATE
+    assert "no run is active" in verdict.reason
+    assert not verdict.ok
+
+
+def test_emergency_standby_is_accepted_from_idle_and_enters_emergency(port):
+    """The unconditional safe-off path is reachable through the port."""
+    orch, recorder, _tmp_path = port
+
+    orch.submit(
+        ev.Command(
+            name=ev.CommandName.EMERGENCY_STANDBY,
+            actor=AGENT,
+            args={"reason": "agent saw a drift it could not explain"},
+        )
+    )
+
+    assert [v.code for v in recorder.verdicts] == [ev.VerdictCode.OK]
+    assert orch.state == OrchestratorState.EMERGENCY.value
+    changes = recorder.of_type(ev.StateChange)
+    assert changes[-1].state == "EMERGENCY"
+    assert changes[-1].cause == "emergency"
+    assert changes[-1].actor.kind is ev.ActorKind.AGENT
+
+
+def test_acknowledge_with_nothing_held_is_refused(port):
+    """One of the audit's silent refusals: acknowledging nothing now answers."""
+    orch, recorder, _tmp_path = port
+
+    orch.submit(ev.Command(name=ev.CommandName.ACKNOWLEDGE, actor=AGENT))
+
+    assert len(recorder.verdicts) == 1
+    assert recorder.verdicts[0].code is ev.VerdictCode.BLOCKED_STATE
+    assert "Nothing to acknowledge" in recorder.verdicts[0].reason
+
+
+def test_acknowledge_fault_with_no_fault_is_refused(orchestrator, qtbot):
+    """Acknowledging a VI that is not faulted says so instead of logging quietly."""
+    with qtbot.waitSignal(orchestrator.action_blocked, timeout=500) as blocker:
+        orchestrator.acknowledge_fault("magnet_z")
+    assert "no active fault" in blocker.args[0]
+
+
+def test_unknown_global_action_is_refused(orchestrator, qtbot):
+    """An unknown global action is a typo the caller must be told about."""
+    with qtbot.waitSignal(orchestrator.action_blocked, timeout=500) as blocker:
+        orchestrator.submit_global_action("standby_everything")
+    assert "standby_everything" in blocker.args[0]
+    assert orchestrator._gui_action_queue == []
+
+
+def test_run_queue_outside_idle_is_refused(orchestrator, qtbot):
+    """Asking the queue to advance while busy answers rather than doing nothing."""
+    orchestrator._state = OrchestratorState.RAMPING
+    try:
+        with qtbot.waitSignal(orchestrator.action_blocked, timeout=500) as blocker:
+            orchestrator.run_queue()
+        assert "requires IDLE" in blocker.args[0]
+    finally:
+        orchestrator._state = OrchestratorState.IDLE
+
+
+def test_over_limit_action_is_blocked_by_limit_with_structured_detail(port):
+    """A control-limit refusal carries the numbers, so no client parses prose."""
+    orch, recorder, _tmp_path = port
+
+    orch.submit(
+        ev.Command(
+            name=ev.CommandName.SUBMIT_VI_ACTION,
+            actor=AGENT,
+            args={"vi_name": "magnet_z", "method_name": "set_field", "target_T": 20.0},
+        )
+    )
+    # Queued for the tick, the single hardware writer: no verdict yet.
+    assert recorder.verdicts == []
+
+    orch._tick()
+
+    assert len(recorder.verdicts) == 1
+    verdict = recorder.verdicts[0]
+    assert verdict.code is ev.VerdictCode.BLOCKED_LIMIT
+    assert verdict.detail == {
+        "param": "target_T",
+        "value": 20.0,
+        "lo": -9.0,
+        "hi": 9.0,
+        "limit_name": "field_T",
+    }
+
+
+def test_an_admitted_action_is_answered_by_the_drain_with_its_result(port):
+    """The asynchronous case: the queued action's verdict arrives at the drain."""
+    orch, recorder, _tmp_path = port
+
+    request_id = orch.submit(
+        ev.Command(
+            name=ev.CommandName.SUBMIT_VI_ACTION,
+            actor=AGENT,
+            args={"vi_name": "magnet_z", "method_name": "set_field", "target_T": 0.05},
+        )
+    )
+    assert recorder.verdicts == []
+
+    orch._tick()
+
+    assert [v.request_id for v in recorder.verdicts] == [request_id]
+    assert recorder.verdicts[0].code is ev.VerdictCode.OK
+
+
+def test_an_action_refused_at_the_drain_is_still_answered(port):
+    """A queued action refused when the tick re-checks it still gets its verdict."""
+    orch, recorder, _tmp_path = port
+    orch.submit(
+        ev.Command(
+            name=ev.CommandName.SUBMIT_VI_ACTION,
+            actor=AGENT,
+            args={"vi_name": "magnet_z", "method_name": "set_field", "target_T": 0.05},
+        )
+    )
+    # The world changed between the click and the tick: a run now claims
+    # everything, so the drain gate refuses what submission admitted.
+    orch._procedure = MockProcedure(orch._station)
+    orch._active_claims = None
+    orch._state = OrchestratorState.RAMPING
+
+    orch._tick()
+
+    assert len(recorder.verdicts) == 1
+    assert recorder.verdicts[0].code is ev.VerdictCode.BLOCKED_CLAIM
+
+
+def test_a_claimed_vi_refuses_a_stop_with_the_claim_code(port):
+    """The admission predicate's code travels with its reason."""
+    orch, recorder, _tmp_path = port
+    orch._procedure = MockProcedure(orch._station)
+    orch._active_claims = {"magnet_z"}
+    orch._state = OrchestratorState.RAMPING
+
+    orch.submit(
+        ev.Command(
+            name=ev.CommandName.STOP_RAMP, actor=AGENT, args={"vi_name": "magnet_z"}
+        )
+    )
+
+    assert recorder.verdicts[-1].code is ev.VerdictCode.BLOCKED_CLAIM
+
+
+def test_an_envelope_violation_is_blocked_by_envelope(port):
+    """The experiment envelope's refusal has its own code, not a generic one."""
+    orch, recorder, _tmp_path = port
+    orch.set_experiment_envelope(
+        ExperimentEnvelope.from_dict({"magnet_z": {"max_value": 1.0}})
+    )
+
+    orch.submit(
+        ev.Command(
+            name=ev.CommandName.SUBMIT_VI_ACTION,
+            actor=AGENT,
+            args={"vi_name": "magnet_z", "method_name": "set_field", "target_T": 5.0},
+        )
+    )
+
+    assert len(recorder.verdicts) == 1
+    assert recorder.verdicts[0].code is ev.VerdictCode.BLOCKED_ENVELOPE
+
+
+def test_the_envelope_can_be_set_and_cleared_through_the_port(port):
+    """``set_experiment_envelope`` takes the envelope's dict form over the wire."""
+    orch, recorder, _tmp_path = port
+
+    orch.submit(
+        ev.Command(
+            name=ev.CommandName.SET_EXPERIMENT_ENVELOPE,
+            actor=AGENT,
+            args={"envelope": {"magnet_z": {"min_value": -1.0, "max_value": 1.0}}},
+        )
+    )
+    assert orch._session_envelope is not None
+    assert orch._session_envelope.bounds["magnet_z"].max_value == 1.0
+
+    orch.submit(
+        ev.Command(
+            name=ev.CommandName.SET_EXPERIMENT_ENVELOPE, args={"envelope": None}
+        )
+    )
+    assert orch._session_envelope is None
+    assert [v.code for v in recorder.verdicts] == [
+        ev.VerdictCode.OK,
+        ev.VerdictCode.OK,
+    ]
+
+
+@pytest.mark.parametrize(
+    "state, expected",
+    [
+        (OrchestratorState.IDLE, ev.VerdictCode.BLOCKED_STATE),
+        (OrchestratorState.RAMPING, ev.VerdictCode.BLOCKED_STATE),
+        (OrchestratorState.ERROR, ev.VerdictCode.BLOCKED_STATE),
+        (OrchestratorState.EMERGENCY, ev.VerdictCode.BLOCKED_STATE),
+    ],
+)
+def test_pause_refusal_matrix_over_states(port, state, expected):
+    """Every state that cannot pause refuses with a code, never silently.
+
+    The completeness rule as a matrix: with no run active, ``pause_procedure``
+    must answer in every state the machine can be in.
+    """
+    orch, recorder, _tmp_path = port
+    orch._state = state
+    try:
+        orch.submit(ev.Command(name=ev.CommandName.PAUSE_PROCEDURE, actor=AGENT))
+    finally:
+        orch._state = OrchestratorState.IDLE
+    assert len(recorder.verdicts) == 1
+    assert recorder.verdicts[0].code is expected
+
+
+def test_every_command_is_answered_exactly_once(port):
+    """The whole point of the standard, checked over a mixed batch."""
+    orch, recorder, tmp_path = port
+    commands = [
+        ev.Command(name=ev.CommandName.START_MONITORING, actor=AGENT),
+        ev.Command(name=ev.CommandName.PAUSE_PROCEDURE, actor=AGENT),
+        ev.Command(name=ev.CommandName.ACKNOWLEDGE, actor=AGENT),
+        ev.Command(name=ev.CommandName.SET_SCANNER_ENABLED, args={"enabled": True}),
+        ev.Command(name=ev.CommandName.RECOVER_FROM_ERROR, actor=AGENT),
+        _run_procedure_command(tmp_path, procedure="NoSuchProcedure"),
+    ]
+    for command in commands:
+        orch.submit(command)
+
+    answered = [v.request_id for v in recorder.verdicts]
+    assert answered == [command.request_id for command in commands]
+    assert len(set(answered)) == len(answered)
+
+
+def test_the_actor_keyword_does_not_change_direct_calls(orchestrator, qtbot):
+    """A direct call still works, still defaults to the operator sentinel."""
+    changes = []
+    orchestrator.event_emitted.connect(
+        lambda event: changes.append(event)
+        if isinstance(event, ev.StateChange)
+        else None
+    )
+    orchestrator._state = OrchestratorState.ERROR
+    orchestrator.recover_from_error()
+
+    assert orchestrator.state == OrchestratorState.IDLE.value
+    assert changes[-1].actor == ev.OPERATOR
+    assert changes[-1].cause == "recover_from_error"
+
+
+def test_a_tick_driven_transition_is_attributed_to_the_system(orchestrator, station):
+    """No command in flight means the engine did it: the system actor."""
+    changes = []
+    orchestrator.event_emitted.connect(
+        lambda event: changes.append(event)
+        if isinstance(event, ev.StateChange)
+        else None
+    )
+    _fast_magnet(station)
+    orchestrator.run_procedure(MockProcedure(station))
+    changes.clear()
+    orchestrator._tick()  # INITIATING -> RAMPING, on the tick
+
+    assert changes, "the tick made no transition"
+    assert changes[0].actor.kind is ev.ActorKind.SYSTEM
+    assert changes[0].cause == "tick"
+    orchestrator.abort_procedure()
+
+
+def test_one_status_snapshot_per_quiet_tick_and_it_round_trips(port):
+    """The status mirror refreshes once per tick and survives a JSON hop."""
+    orch, recorder, _tmp_path = port
+    orch._tick()
+
+    snapshots = recorder.of_type(ev.StatusSnapshot)
+    assert len(snapshots) == 1
+    snapshot = snapshots[0]
+    wire = json.loads(json.dumps(snapshot.to_json()))
+    assert ev.StatusSnapshot.from_json(wire) == snapshot
+
+    assert snapshot.state == OrchestratorState.IDLE.value
+    assert snapshot.is_monitoring is True
+    assert snapshot.run is None
+    assert set(snapshot.availabilities) == set(orch._station.availabilities())
+    assert set(snapshot.instruments) == set(snapshot.availabilities)
+    assert snapshot.envelope_variables  # the sim station has bounded VIs
+
+
+def test_a_state_change_also_refreshes_the_snapshot(port):
+    """A client that never calls in still sees the new state immediately."""
+    orch, recorder, _tmp_path = port
+    orch.submit(
+        ev.Command(
+            name=ev.CommandName.EMERGENCY_STANDBY, args={"reason": "test"}, actor=AGENT
+        )
+    )
+    snapshots = recorder.of_type(ev.StatusSnapshot)
+    assert snapshots and snapshots[-1].state == OrchestratorState.EMERGENCY.value
+
+
+def test_the_snapshot_carries_the_run_in_flight(port, station):
+    """`run` names the run, its kind and where it has got to."""
+    orch, recorder, _tmp_path = port
+    _fast_magnet(station)
+    orch.run_procedure(MockProcedure(station))
+    orch._tick()
+
+    snapshot = recorder.of_type(ev.StatusSnapshot)[-1]
+    assert snapshot.run is not None
+    assert snapshot.run["name"] == "Mock Sweep"
+    assert snapshot.run["kind"] == "procedure"
+    assert snapshot.run["id"]
+    assert snapshot.active_run_kind == "procedure"
+    orch.abort_procedure()
+
+
+def test_every_emitted_snapshot_payload_is_a_copy(port):
+    """Mutating what a listener received can never reach the engine."""
+    orch, recorder, _tmp_path = port
+    orch._tick()
+    snapshot = recorder.of_type(ev.StatusSnapshot)[0]
+    name = next(iter(snapshot.availabilities))
+    snapshot.availabilities[name]["state"] = "tampered"
+
+    orch._tick()
+    fresh = recorder.of_type(ev.StatusSnapshot)[-1]
+    assert fresh.availabilities[name]["state"] != "tampered"
+
+
+def test_readings_and_datapoints_reach_the_event_stream(port, station):
+    """The monitored poll and each measured point are contract events too."""
+    orch, recorder, _tmp_path = port
+    _fast_magnet(station)
+    orch._tick()
+    assert recorder.of_type(ev.Readings), "a monitored tick emits its readings"
+
+    procedure = MockProcedure(station)
+    procedure.last_datapoint = {"field_T": 0.5, "resistance_ohm": 12.75}
+    orch.run_procedure(procedure)
+    _tick_until(orch, lambda: bool(recorder.of_type(ev.Datapoint)))
+
+    point = recorder.of_type(ev.Datapoint)[0]
+    assert point.index == 0
+    assert point.values["field_T"] == 0.5
+    assert point.run_id
+    orch.abort_procedure()
+
+    finished = recorder.of_type(ev.RunFinished)
+    assert finished and finished[-1].status == "aborted"
+
+
+def test_station_info_is_emitted_when_the_station_declares_one(station, qtbot):
+    """The static half is re-declared at construction and after connect/disconnect."""
+    station.station_info = lambda: [{"name": "magnet_z", "vi_type": "system"}]
+    orch = Orchestrator(station, tick_interval_ms=10)
+    events: list[object] = []
+    orch.event_emitted.connect(events.append)
+    try:
+        orch.disconnect_instrument("magnet_z")
+        declared = [e for e in events if isinstance(e, ev.StationInfo)]
+        assert declared, "disconnect must re-declare the station"
+        assert declared[-1].instruments[0]["name"] == "magnet_z"
+    finally:
+        orch.shutdown()
+
+
+def test_a_station_without_station_info_is_simply_silent(port):
+    """A5 must not depend on the Station half having landed."""
+    orch, recorder, _tmp_path = port
+    assert not hasattr(orch._station, "station_info")
+    orch._emit_station_info()
+    assert not recorder.of_type(ev.StationInfo)
+
+
+def test_sequence_numbers_are_one_stream_across_events_and_verdicts(port):
+    """One counter, so a client can order everything the engine said."""
+    orch, recorder, _tmp_path = port
+    orch.submit(ev.Command(name=ev.CommandName.PAUSE_PROCEDURE, actor=AGENT))
+    orch._tick()
+
+    sequences = [item.seq for item in recorder.events + recorder.verdicts]
+    assert len(set(sequences)) == len(sequences)
+    assert min(sequences) >= 1

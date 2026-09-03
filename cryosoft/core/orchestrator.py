@@ -13,20 +13,25 @@ all ramps (hardware hold), and degrades to the ERROR state.
 
 from __future__ import annotations
 
+import dataclasses
+import functools
+import inspect
 import json
 import logging
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
+from cryosoft.core import events as ev
 from cryosoft.core.availability import TAG_POLICY, Availability
 from cryosoft.core.conditions import Condition, Verdict, decide, envelope_conditions
 from cryosoft.core.events import ErrorEvent
-from cryosoft.core.exceptions import CryoSoftSafetyError
+from cryosoft.core.exceptions import CryoSoftActionScopeError, CryoSoftSafetyError
 from cryosoft.core.operational_status import build_operational_status
 from cryosoft.core.plan import (
     Command,
@@ -35,6 +40,7 @@ from cryosoft.core.plan import (
     Target,
 )
 from cryosoft.core.ramps import RampRecord, build_ramp_records
+from cryosoft.core.run_builder import build_procedure
 from cryosoft.core.stall_detection import StallConfig, StallState, apply_stall_verdict
 from cryosoft.core.station import FaultRecord, Station
 from cryosoft.core.tiered_trend_logger import TieredTrendLogger
@@ -52,6 +58,152 @@ logger = logging.getLogger(__name__)
 #: be the accident that decides it. Every other caller of the direct action
 #: path gets ``"measurement"`` unless it opts in the same way.
 MANUAL_ACTION_SCOPE: str = "operation"
+
+#: The actor every transition the engine makes on its own is attributed to —
+#: a tick advancing the state machine, a tripped safety flag, a run ending.
+#: The counterpart of ``events.OPERATOR``, which is who a public method
+#: assumes is calling when nobody says otherwise.
+SYSTEM_ACTOR: ev.Actor = ev.Actor(kind=ev.ActorKind.SYSTEM, id="orchestrator", role="engine")
+
+
+@dataclasses.dataclass
+class _PendingCommand:
+    """The verdict owed for one submitted ``Command``, while it is in flight.
+
+    Held for the duration of the ``submit()`` call (and, for a queued manual
+    action, until the tick drains it) so the refusal and success emitters can
+    complete the answer without every method having to build one. See the
+    **verdict standard** in ``Orchestrator``'s docstring.
+
+    Attributes:
+        request_id: The ``Command.request_id`` being answered.
+        command: Which command was asked for.
+        actor: Who asked.
+        resolved: Whether the one verdict this command is owed has been
+            emitted. Set the moment it is, so nothing can answer twice.
+        deferred: Whether the answer belongs to a later tick (a queued manual
+            action), which is what stops ``submit()`` from closing it with an
+            optimistic ``OK`` when the method returns.
+    """
+
+    request_id: str
+    command: ev.CommandName
+    actor: ev.Actor
+    resolved: bool = False
+    deferred: bool = False
+
+
+def command(method: Callable[..., Any]) -> Callable[..., Any]:
+    """Mark a public ``Orchestrator`` method as a client-issuable command.
+
+    The **operator sentinel** in one place: the wrapper adds the
+    keyword-only ``actor`` argument every command carries (defaulting to
+    ``events.OPERATOR``, so no existing call site changes) and holds it, with
+    the command's own name, for the duration of the call — which is what lets
+    ``_change_state()`` and every verdict record who asked and what for
+    without threading an argument through the state machine.
+
+    An ``actor`` left at the sentinel does not displace an actor already
+    acting, so a command that calls another command internally (``run_
+    procedure()`` queueing) stays attributed to whoever started it.
+
+    Args:
+        method: The public method implementing the command.
+
+    Returns:
+        The wrapped method, whose signature is *method*'s plus a
+        keyword-only ``actor``.
+    """
+
+    @functools.wraps(method)
+    def wrapper(self: Orchestrator, *args: Any, actor: ev.Actor = ev.OPERATOR, **kwargs: Any) -> Any:
+        with self._acting_as(actor, method.__name__):
+            return method(self, *args, **kwargs)
+
+    parameters = list(inspect.signature(method).parameters.values())
+    actor_param = inspect.Parameter(
+        "actor", inspect.Parameter.KEYWORD_ONLY, default=ev.OPERATOR
+    )
+    insert_at = len(parameters)
+    for index, parameter in enumerate(parameters):
+        if parameter.kind is inspect.Parameter.VAR_KEYWORD:
+            insert_at = index
+            break
+    parameters.insert(insert_at, actor_param)
+    wrapper.__signature__ = inspect.Signature(parameters)  # type: ignore[attr-defined]
+    return wrapper
+
+
+def _json_safe(value: Any) -> Any:
+    """Render an arbitrary runtime value as something the contract can carry.
+
+    The contract types validate eagerly and reject anything that is not
+    JSON-safe, which is right for a declaration and wrong for a measured
+    datapoint: a numpy array or a frozenset of availability tags must not be
+    able to stop the engine reporting. So everything the engine puts into an
+    event goes through here first — arrays and numpy scalars via ``tolist()``,
+    mappings and sequences element-wise, sets sorted for a stable rendering,
+    and anything else as its ``str()``, which is lossy but never fatal.
+
+    Args:
+        value: Any runtime value.
+
+    Returns:
+        A value made only of ``str``/``int``/``float``/``bool``/``None``/
+        ``list``/``dict``.
+    """
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return value
+    tolist = getattr(value, "tolist", None)
+    if callable(tolist):
+        try:
+            return _json_safe(tolist())
+        except Exception:  # noqa: BLE001 — degrade, never raise while reporting
+            return str(value)
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (frozenset, set)):
+        return [_json_safe(item) for item in sorted(value, key=str)]
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return str(value)
+
+
+def _verdict_for_exception(
+    error: BaseException | None,
+) -> tuple[ev.VerdictCode, dict[str, Any] | None]:
+    """Classify one failed action into a verdict code and its structured detail.
+
+    The mapping the verdict standard promises: a ``CryoSoftSafetyError``
+    means nothing reached the instrument (a control-limit rejection or a VI
+    interlock), so it is ``BLOCKED_LIMIT`` — with ``param``/``value``/``lo``/
+    ``hi``/``limit_name`` in ``detail`` when the raiser filled them in, which
+    is what lets a client decide from the code and the numbers and never from
+    the prose. A capability outside the caller's scope is ``BLOCKED_ROLE``:
+    the call is well-formed, the authority is not there. Anything else was
+    attempted and failed.
+
+    Args:
+        error: The exception raised, or ``None`` for a failure with no
+            exception behind it.
+
+    Returns:
+        ``(code, detail)``; *detail* is ``None`` unless the error carries the
+        structured limit fields.
+    """
+    if isinstance(error, CryoSoftActionScopeError):
+        return ev.VerdictCode.BLOCKED_ROLE, None
+    if isinstance(error, CryoSoftSafetyError):
+        if getattr(error, "param", None) is None:
+            return ev.VerdictCode.BLOCKED_LIMIT, None
+        return ev.VerdictCode.BLOCKED_LIMIT, {
+            "param": error.param,
+            "value": error.value,
+            "lo": error.lo,
+            "hi": error.hi,
+            "limit_name": error.limit_name,
+        }
+    return ev.VerdictCode.FAILED, None
 
 
 class OrchestratorState(Enum):
@@ -71,6 +223,40 @@ class OrchestratorState(Enum):
 
 class Orchestrator(QObject):
     """State machine driving measurements and monitoring safety.
+
+    **The verdict standard.** Every command a client submits is answered
+    exactly once. ``submit(Command)`` returns the ``request_id`` immediately
+    and the answer arrives on ``verdict_emitted`` as one ``events.Verdict``
+    carrying that id — ``OK`` when the command was accepted and carried out,
+    otherwise the code that says why it was not: ``BLOCKED_STATE`` (the state
+    machine forbids it now), ``BLOCKED_CLAIM`` (an active run claims the
+    instrument), ``BLOCKED_FAULT`` (the target instrument is not controllable
+    — a communication fault or an active safety hold), ``BLOCKED_LIMIT`` (a
+    declared control limit or a VI interlock refused it before any hardware
+    call; ``detail`` carries ``param``/``value``/``lo``/``hi``/``limit_name``
+    when the refusal names them), ``BLOCKED_ENVELOPE`` (the active experiment
+    envelope forbids the value), ``BLOCKED_ROLE`` (the capability is outside
+    the caller's scope) or ``FAILED`` (attempted, and it failed — including
+    an unknown command name or arguments that do not fit the method, neither
+    of which ever raises at the caller).
+
+    Two rules make the answer single and complete. Every refusal inside a
+    command method goes through one of ``_action_blocked()`` /
+    ``_action_failed()`` / ``_action_succeeded()``, which emit the legacy
+    ``action_*`` signal AND close the pending verdict; and a method that
+    returns having emitted no refusal is an acceptance, so silence is
+    ``OK`` rather than nothing. A manual action is the one asynchronous case:
+    ``submit_vi_action()`` QUEUES for the tick (the single hardware writer),
+    so its verdict is emitted when the drain runs it — the pending request
+    travels with the queued action — and carries the action's return value in
+    ``Verdict.result``.
+
+    The public methods stay the surface the GUI and the tests call directly;
+    ``submit()`` is a dispatch table onto them, keyed by ``CommandName``
+    (whose values ARE the method names). Each one gains a keyword-only
+    ``actor`` (see the ``command`` decorator) that defaults to the operator
+    sentinel and is recorded on every ``StateChange`` and ``Verdict`` the
+    call produces.
 
     Signals:
         states_updated (dict): Full station state emitted every monitored tick.
@@ -162,8 +348,22 @@ class Orchestrator(QObject):
             per-procedure code; consumed by the Procedure window's status log.
             Distinct from the per-tick detail stream on the Monitor log.
             PROCEDURE-EXCLUSIVE — see ``operation_status``.
+        verdict_emitted (events.Verdict): The single answer to one submitted
+            ``Command`` — see the verdict standard above. Never emitted for a
+            method called directly rather than through ``submit()``.
+        event_emitted (events.Event): The engine's one event stream, carrying
+            ``StateChange`` (every transition, with its cause and actor),
+            ``StatusSnapshot`` (once per tick and on every state change),
+            ``StationInfo`` (at construction and after connect/disconnect),
+            ``Readings`` (each monitored poll), ``Datapoint`` (each measured
+            point) and ``RunStarted``/``RunFinished``. Every payload is a
+            copy, every event carries a monotonic ``seq`` shared with the
+            verdicts, and the existing per-purpose signals keep emitting
+            unchanged alongside it.
     """
 
+    verdict_emitted = pyqtSignal(object)  # events.Verdict — one per submitted Command
+    event_emitted = pyqtSignal(object)  # events.Event — the engine's one event stream
     states_updated = pyqtSignal(dict)
     monitoring_changed = pyqtSignal(bool)
     state_changed = pyqtSignal(str)
@@ -193,11 +393,52 @@ class Orchestrator(QObject):
         stall_seconds: float = 18.0,
         hold_enforcement_interval_s: float = 10.0,
         hold_enforcement_max_attempts: int = 3,
+        run_catalog: Mapping[str, type] | None = None,
     ) -> None:
+        """Build the engine over a Station.
+
+        Args:
+            station: The L2 Station this engine is the sole writer to.
+            tick_interval_ms: The cooperative tick period.
+            manual_override_timeout_s: How long an ``acknowledge()`` unlocks
+                manual control for before it re-locks itself.
+            stall_seconds: How long a ramp may make no progress before the
+                stall detector reports it.
+            hold_enforcement_interval_s: Minimum gap between two ``standby()``
+                re-assertions on the same held VI.
+            hold_enforcement_max_attempts: Consecutive failed re-assertions
+                before an unenforceable hold is escalated.
+            run_catalog: ``{class name: procedure/operation class}`` used to
+                build a run from a ``Command``'s dict payload (see
+                ``submit()``). Supplied by whoever owns discovery — the GUI,
+                a test, or an agent gateway — because the engine may not
+                import ``cryosoft.procedures`` (contract C5). Empty by
+                default, which refuses a dict-payload run with a ``FAILED``
+                verdict naming the missing class; passing a run object to
+                ``run_procedure()``/``run_operation()`` directly needs no
+                catalog at all.
+        """
         super().__init__()
         self._station = station
         self._state = OrchestratorState.IDLE
         self._procedure: Any = None
+        self._run_catalog: dict[str, type] = dict(run_catalog or {})
+
+        # The control contract's bookkeeping (see the verdict standard in the
+        # class docstring). _pending is the verdict owed for the command
+        # currently in flight (None outside submit(), and outside the drain of
+        # a queued action that carried one); _actor / _acting_command are the
+        # actor and command name held for the duration of a decorated call,
+        # read by _change_state() and by every verdict. _seq is the ONE
+        # monotonic counter across events and verdicts, so a client can order
+        # everything the engine said from a single stream.
+        self._pending: _PendingCommand | None = None
+        self._actor: ev.Actor | None = None
+        self._acting_command: str | None = None
+        self._seq = 0
+        # Index of the next datapoint within the active run, for Datapoint
+        # events; reset at every run start.
+        self._datapoint_index = 0
         self._procedure_queue: list[Any] = []
         # Operations (L4, duck-typed via command_scope == "operation") queue
         # separately and always drain first — see run_operation()/
@@ -371,6 +612,168 @@ class Orchestrator(QObject):
         self._timer.timeout.connect(self._tick)
         self._timer.start()
 
+        # The static half of the picture, if the Station declares one: emitted
+        # once here and again after every connect/disconnect.
+        self._emit_station_info()
+
+    # ------------------------------------------------------------------
+    # Public API — the control-contract port (the verdict standard)
+    # ------------------------------------------------------------------
+
+    def submit(self, command: ev.Command) -> str:
+        """Carry out one client ``Command`` and answer it with one ``Verdict``.
+
+        The engine port: the single entry point a client that speaks the
+        control contract uses, as opposed to calling the public methods
+        directly (which the GUI and the tests still do). Dispatch is a lookup,
+        not a table — every ``CommandName``'s value IS the name of the method
+        implementing it — so a command can never exist here without a method
+        behind it, or a method without a command in front of it (conformance
+        diffs the two).
+
+        The answer arrives on ``verdict_emitted``, exactly once, carrying
+        ``command.request_id``. It is emitted before this returns for every
+        synchronous command; ``SUBMIT_VI_ACTION`` is the exception — it queues
+        for the tick, the single hardware writer, so its verdict is emitted
+        when the drain executes it, with the call's return value in
+        ``Verdict.result``. Nothing here raises at the caller: an unknown
+        name, a malformed payload, or arguments that do not fit the method are
+        all answered ``FAILED``.
+
+        **Argument conventions.** ``command.args`` is JSON, so the few
+        commands whose methods take objects name them instead:
+
+        * ``RUN_PROCEDURE`` / ``QUEUE_PROCEDURE`` take ``procedure`` (the
+          class name, resolved through the ``run_catalog`` given at
+          construction), plus ``params``, ``sample_info``, ``data_directory``,
+          ``file_prefix`` and ``experiment_info`` — the arguments
+          ``run_builder.build_procedure()`` assembles a run from.
+        * ``RUN_OPERATION`` / ``QUEUE_OPERATION`` take ``operation`` (the
+          class name) plus ``params``; an operation is built as
+          ``cls(station, **params)``, the constructor shape every operation
+          declares.
+        * ``SET_EXPERIMENT_ENVELOPE`` takes ``envelope``: the
+          ``{vi_name: {min_value, max_value, state_key}}`` mapping
+          ``ExperimentEnvelope.from_dict()`` reads, or ``null`` to clear it.
+        * ``SUBMIT_VI_ACTION`` takes ``vi_name``, ``method_name`` and the
+          capability's own parameters as FLAT scalars beside them (shaped by
+          the control's ``ParamSpec``s), e.g.
+          ``{"vi_name": "magnet_z", "method_name": "set_field",
+          "target_T": 1.5}``.
+        * Every other command's ``args`` are the method's own keyword
+          arguments.
+
+        Args:
+            command: The client's request.
+
+        Returns:
+            ``command.request_id``, immediately — the correlation id the
+            verdict and every event this command causes carry back.
+        """
+        pending = _PendingCommand(
+            request_id=command.request_id, command=command.name, actor=command.actor
+        )
+        previous, self._pending = self._pending, pending
+        try:
+            method_name = ev.CommandName(command.name).value
+            method = getattr(self, method_name, None)
+            if not callable(method):
+                raise AttributeError(
+                    f"no Orchestrator method implements {method_name!r}"
+                )
+            method(actor=command.actor, **self._command_arguments(command))
+        except Exception as exc:  # noqa: BLE001 — a command never raises at its caller
+            logger.exception("submit(%s) failed", command.name)
+            self._emit_verdict(ev.VerdictCode.FAILED, reason=str(exc) or repr(exc))
+        finally:
+            # Silence is acceptance: a method that returned having emitted no
+            # refusal did what was asked. A queued manual action is deferred
+            # and answered by the drain instead.
+            if not pending.deferred:
+                self._emit_verdict(ev.VerdictCode.OK)
+            self._pending = previous
+        return command.request_id
+
+    def _command_arguments(self, command: ev.Command) -> dict[str, Any]:
+        """Convert one command's JSON ``args`` into the method's arguments.
+
+        See ``submit()`` for the per-command conventions this implements.
+
+        Args:
+            command: The command being dispatched.
+
+        Returns:
+            The keyword arguments to call the implementing method with.
+
+        Raises:
+            KeyError: If a required argument is missing.
+            TypeError: If an argument has the wrong shape.
+            ValueError: If a named procedure/operation class is not in the
+                run catalog, or an envelope is malformed.
+            CryoSoftError: If the procedure refuses to be built.
+        """
+        args = dict(command.args)
+        name = command.name
+        if name in (ev.CommandName.RUN_PROCEDURE, ev.CommandName.QUEUE_PROCEDURE):
+            return {"procedure": self._build_run("procedure", args)}
+        if name in (ev.CommandName.RUN_OPERATION, ev.CommandName.QUEUE_OPERATION):
+            return {"operation": self._build_run("operation", args)}
+        if name is ev.CommandName.SET_EXPERIMENT_ENVELOPE:
+            envelope = args.get("envelope")
+            return {
+                "envelope": (
+                    ExperimentEnvelope.from_dict(envelope) if envelope else None
+                )
+            }
+        if name is ev.CommandName.SUBMIT_VI_ACTION:
+            vi_name = args.pop("vi_name")
+            method_name = args.pop("method_name")
+            return {"vi_name": vi_name, "method_name": method_name, **args}
+        return args
+
+    def _build_run(self, kind: str, args: dict[str, Any]) -> Any:
+        """Build a procedure or an operation from a command's dict payload.
+
+        The engine may not import ``cryosoft.procedures`` (contract C5), so a
+        class name is resolved through the ``run_catalog`` whoever owns
+        discovery handed the constructor. A procedure is assembled by
+        ``run_builder.build_procedure()`` — the one headless construction path
+        — and an operation by its own ``cls(station, **params)`` constructor
+        shape.
+
+        Args:
+            kind: ``"procedure"`` or ``"operation"``; also the args key
+                carrying the class name.
+            args: The command's arguments.
+
+        Returns:
+            The ready procedure or operation instance.
+
+        Raises:
+            ValueError: If no class of that name is in the run catalog.
+            CryoSoftError: If the run refuses to be built (see
+                ``run_builder.PROCEDURE_BUILD_ERRORS``).
+        """
+        class_name = str(args.get(kind, ""))
+        run_class = self._run_catalog.get(class_name)
+        if run_class is None:
+            raise ValueError(
+                f"unknown {kind} {class_name!r}: the run catalog holds "
+                f"{sorted(self._run_catalog)}"
+            )
+        params = dict(args.get("params") or {})
+        if kind == "operation":
+            return run_class(self._station, **params)
+        return build_procedure(
+            run_class,
+            station=self._station,
+            params=params,
+            sample_info=dict(args.get("sample_info") or {}),
+            data_directory=str(args.get("data_directory") or ""),
+            file_prefix=str(args.get("file_prefix") or ""),
+            experiment_info=args.get("experiment_info"),
+        )
+
     # ------------------------------------------------------------------
     # Public API — monitoring lifecycle
     # ------------------------------------------------------------------
@@ -391,6 +794,7 @@ class Orchestrator(QObject):
         """
         return self._state.value
 
+    @command
     def start_monitoring(self) -> bool:
         """Begin the per-tick monitoring cycle (state polling + stall detection).
 
@@ -409,6 +813,7 @@ class Orchestrator(QObject):
         self.monitoring_changed.emit(True)
         return True
 
+    @command
     def stop_monitoring(self) -> bool:
         """Stop the per-tick monitoring cycle (e.g. to debug an instrument).
 
@@ -435,7 +840,7 @@ class Orchestrator(QObject):
                 "running while hardware is active."
             )
             logger.info("Blocked stop_monitoring: %s", msg)
-            self.action_blocked.emit(msg)
+            self._action_blocked(msg)
             return False
         self._monitoring = False
         logger.info("Monitoring stopped")
@@ -458,6 +863,7 @@ class Orchestrator(QObject):
     # Public API
     # ------------------------------------------------------------------
 
+    @command
     def set_experiment_envelope(self, envelope: ExperimentEnvelope | None) -> None:
         """Install (or clear) the active experiment's session envelope.
 
@@ -496,6 +902,7 @@ class Orchestrator(QObject):
         """
         return self._station.envelope_variables()
 
+    @command
     def emergency_standby(self, reason: str) -> None:
         """Stand the whole station down NOW — permitted in every state.
 
@@ -531,6 +938,7 @@ class Orchestrator(QObject):
         logger.critical("Emergency standby requested: %s", reason)
         self._enter_emergency(f"emergency standby requested: {reason}")
 
+    @command
     def run_procedure(self, procedure: Any) -> None:
         """Start a procedure immediately if IDLE or during a manual ramp; else queue it.
 
@@ -548,7 +956,7 @@ class Orchestrator(QObject):
                 f"({', '.join(persistent_magnets)}). Disable persistent mode first."
             )
             logger.info("Blocked run_procedure: %s", msg)
-            self.action_blocked.emit(msg)
+            self._action_blocked(msg)
             return
 
         manual_ramping = (
@@ -574,6 +982,7 @@ class Orchestrator(QObject):
         self._operation_started_from_emergency = False
         self._start_run(procedure, kind="procedure")
 
+    @command
     def run_operation(self, operation: Any) -> None:
         """Start an operation immediately if permitted; else refuse it.
 
@@ -621,7 +1030,7 @@ class Orchestrator(QObject):
                     f"({', '.join(untolerated)}). Resolve them first."
                 )
                 logger.info("Blocked run_operation: %s", msg)
-                self.action_blocked.emit(msg)
+                self._action_blocked(msg)
                 return
             started_from_emergency = True
         elif not (self._state == OrchestratorState.IDLE or manual_ramping):
@@ -636,7 +1045,7 @@ class Orchestrator(QObject):
                 "operation."
             )
             logger.info("Blocked run_operation: %s", msg)
-            self.action_blocked.emit(msg)
+            self._action_blocked(msg)
             return
 
         if manual_ramping:
@@ -771,10 +1180,12 @@ class Orchestrator(QObject):
             return None
         return self._active_system_vis
 
+    @command
     def queue_procedure(self, procedure: Any) -> None:
         """Add procedure to queue."""
         self._procedure_queue.append(procedure)
 
+    @command
     def queue_operation(self, operation: Any) -> None:
         """Queue an operation to run once the Orchestrator returns to IDLE.
 
@@ -784,12 +1195,21 @@ class Orchestrator(QObject):
         """
         self._operation_queue.append(operation)
 
+    @command
     def run_queue(self) -> None:
         """Run the next queued operation, else the next queued procedure, if IDLE.
 
-        Operations always drain before procedures.
+        Operations always drain before procedures. Refused outside IDLE with a
+        reason; an empty queue is NOT a refusal — the queue simply ran to
+        completion — so it returns quietly and the command is accepted.
         """
         if self._state != OrchestratorState.IDLE:
+            message = (
+                "Cannot start the next queued run: the Orchestrator is in "
+                f"state {self._state.name}, starting requires IDLE"
+            )
+            logger.info("Blocked run_queue: %s", message)
+            self._action_blocked(message)
             return
         if self._operation_queue:
             self.run_operation(self._operation_queue.pop(0))
@@ -810,6 +1230,7 @@ class Orchestrator(QObject):
         """
         return self._pause_requested
 
+    @command
     def pause_procedure(self) -> None:
         """Pause the run, holding the hardware — but never mid-datapoint.
 
@@ -836,7 +1257,7 @@ class Orchestrator(QObject):
         between ticks, never between two readings of a datapoint.)
         """
         if self._procedure is None:
-            self.action_blocked.emit("Cannot pause: no run is active")
+            self._action_blocked("Cannot pause: no run is active")
             return
         if self._state == OrchestratorState.MEASURING:
             # Mid-datapoint: defer to the pause boundary rather than strand a
@@ -851,9 +1272,9 @@ class Orchestrator(QObject):
                            OrchestratorState.SWEEPING, OrchestratorState.STANDBY):
             self._enter_paused()
             return
-        self.action_blocked.emit(f"Cannot pause while {self._state.value}")
+        self._action_blocked(f"Cannot pause while {self._state.value}")
 
-    def _enter_paused(self) -> None:
+    def _enter_paused(self, cause: str = "") -> None:
         """Enter PAUSED from the current state, holding all of the run's hardware.
 
         The single PAUSED-entry path, shared by ``pause_procedure()``'s
@@ -862,15 +1283,20 @@ class Orchestrator(QObject):
         ramps (see ``pause_procedure()`` for why the hold is a hardware one,
         and GLOSSARY.md's **Ramp scope** for why only this run's).
         Clears any pending request — it has now been honoured.
+
+        Args:
+            cause: The ``StateChange`` cause, for a pause the tick honoured
+                at the pause boundary rather than one a command asked for.
         """
         self._pause_requested = False
         self._pre_pause_state = self._state
         if self._wait_started:
             self._paused_wait_elapsed = time.time() - self._wait_start_time
         self._station.stop_ramps(self._run_ramp_scope())
-        self._change_state(OrchestratorState.PAUSED)
+        self._change_state(OrchestratorState.PAUSED, cause=cause)
         self._emit_status("Paused - hardware held")
 
+    @command
     def resume_procedure(self) -> None:
         """Resume from PAUSED, or cancel a pause that has not landed yet.
 
@@ -888,7 +1314,7 @@ class Orchestrator(QObject):
                 self._pause_requested = False
                 self._emit_status("Pause request cancelled")
                 return
-            self.action_blocked.emit(f"Cannot resume while {self._state.value}")
+            self._action_blocked(f"Cannot resume while {self._state.value}")
             return
         # _enter_paused() held the hardware, which forgot its ramp — states
         # that were mid-ramp need their targets re-dispatched to continue.
@@ -905,6 +1331,7 @@ class Orchestrator(QObject):
         self._change_state(self._pre_pause_state)
         self._emit_status("Resumed")
 
+    @command
     def abort_procedure(self) -> None:
         """Abort the run: hold instruments where they are (no ramp-to-zero).
 
@@ -915,7 +1342,7 @@ class Orchestrator(QObject):
         """
         if self._state == OrchestratorState.EMERGENCY:
             logger.info("abort_procedure ignored during EMERGENCY")
-            self.action_blocked.emit(
+            self._action_blocked(
                 "Cannot abort during EMERGENCY — acknowledge the emergency first"
             )
             return
@@ -941,6 +1368,7 @@ class Orchestrator(QObject):
         """
         return list(self._active_ramps)
 
+    @command
     def stop_ramp(self, vi_name: str) -> None:
         """Stop one VI's ramp, holding that instrument where it is.
 
@@ -967,25 +1395,26 @@ class Orchestrator(QObject):
         Args:
             vi_name: The system VI whose ramp to stop.
         """
-        admitted, reason = self._manual_action_admissible(vi_name)
+        admitted, reason, code = self._manual_action_admission(vi_name)
         if not admitted:
             logger.info("Blocked stop_ramp on %s: %s", vi_name, reason)
-            self.action_blocked.emit(reason)
+            self._action_blocked(reason, code)
             return
         try:
             self._station.stop_ramps({vi_name})
         except Exception as exc:  # noqa: BLE001 — every action gets a verdict
             logger.exception("stop_ramp failed on VI '%s'", vi_name)
-            self.action_failed.emit(vi_name, "stop_ramp", str(exc))
+            self._action_failed(vi_name, "stop_ramp", str(exc), error=exc)
             return
         logger.info("Ramp on '%s' stopped by user — hardware held", vi_name)
-        self.action_succeeded.emit(vi_name, "stop_ramp")
+        self._action_succeeded(vi_name, "stop_ramp")
         self._emit_status(f"Ramp on {vi_name} stopped by user")
         # Drop the row from the tracker immediately rather than leaving a
         # stopped ramp on screen until the next tick rebuilds the snapshot.
         self._active_ramps = [r for r in self._active_ramps if r.vi_name != vi_name]
         self.ramps_updated.emit(list(self._active_ramps))
 
+    @command
     def finish_operation(self) -> None:
         """Request a graceful stop of the active operation.
 
@@ -1000,13 +1429,14 @@ class Orchestrator(QObject):
         if not self._is_operation_active():
             msg = "Cannot finish operation: no operation is currently running."
             logger.info("Blocked finish_operation: %s", msg)
-            self.action_blocked.emit(msg)
+            self._action_blocked(msg)
             return
         request_finish = getattr(self._procedure, "request_finish", None)
         if callable(request_finish):
             request_finish()
         self._emit_status("Finish requested — completing operation")
 
+    @command
     def confirm_operation(self, key: str) -> None:
         """Record an operator confirmation on the active operation.
 
@@ -1025,7 +1455,7 @@ class Orchestrator(QObject):
         if not self._is_operation_active():
             msg = "Cannot confirm operation step: no operation is currently running."
             logger.info("Blocked confirm_operation: %s", msg)
-            self.action_blocked.emit(msg)
+            self._action_blocked(msg)
             return
         confirm = getattr(self._procedure, "confirm", None)
         if callable(confirm):
@@ -1036,10 +1466,13 @@ class Orchestrator(QObject):
                 confirm(key)
             except Exception as exc:  # noqa: BLE001 — verdict, not crash
                 logger.error("confirm_operation(%r) rejected: %s", key, exc)
-                self.action_blocked.emit(f"Cannot confirm {key!r}: {exc}")
+                self._action_blocked(
+                    f"Cannot confirm {key!r}: {exc}", ev.VerdictCode.FAILED
+                )
                 return
         self._emit_status(f"Confirmed: {key}")
 
+    @command
     def skip_operation_step(self, key: str) -> None:
         """Record that the operator deliberately skipped a step of the active operation.
 
@@ -1068,7 +1501,7 @@ class Orchestrator(QObject):
         if not self._is_operation_active():
             msg = "Cannot skip operation step: no operation is currently running."
             logger.info("Blocked skip_operation_step: %s", msg)
-            self.action_blocked.emit(msg)
+            self._action_blocked(msg)
             return
         skip_step = getattr(self._procedure, "skip_step", None)
         if callable(skip_step):
@@ -1079,7 +1512,9 @@ class Orchestrator(QObject):
                 skip_step(key)
             except Exception as exc:  # noqa: BLE001 — verdict, not crash
                 logger.error("skip_operation_step(%r) rejected: %s", key, exc)
-                self.action_blocked.emit(f"Cannot skip {key!r}: {exc}")
+                self._action_blocked(
+                    f"Cannot skip {key!r}: {exc}", ev.VerdictCode.FAILED
+                )
                 return
         logger.warning(
             "Operator skipped step %r of %s — recorded as an override.",
@@ -1121,6 +1556,7 @@ class Orchestrator(QObject):
         self._emit_status("Ramp stopped — step skipped, holding here")
         return True
 
+    @command
     def recover_from_error(self) -> None:
         """Return to IDLE after the user has reviewed an ERROR condition.
 
@@ -1129,12 +1565,13 @@ class Orchestrator(QObject):
         assumptions may no longer hold; the user restarts explicitly.
         """
         if self._state != OrchestratorState.ERROR:
-            self.action_blocked.emit(
+            self._action_blocked(
                 f"Nothing to recover from: not in ERROR (currently {self._state.value})"
             )
             return
         self._change_state(OrchestratorState.IDLE)
 
+    @command
     def acknowledge(self) -> None:
         """Single GUI entry point: acknowledge EMERGENCY, or unlock held VIs.
 
@@ -1151,7 +1588,9 @@ class Orchestrator(QObject):
         hold case) survives the condition flapping within the window — see
         ``_tick_body()``'s pruning step.
 
-        No-op if nothing is held and the station isn't in EMERGENCY.
+        Refused (with a reason) when nothing is held and the station isn't
+        in EMERGENCY: there is nothing to acknowledge, and whoever pressed the
+        button is owed that answer rather than silence.
         """
         now = time.time()
         if self._state == OrchestratorState.EMERGENCY:
@@ -1160,6 +1599,12 @@ class Orchestrator(QObject):
             return
         held = self._held_vis()
         if not held:
+            message = (
+                "Nothing to acknowledge: no instrument is held and the "
+                f"station is not in EMERGENCY (currently {self._state.value})"
+            )
+            logger.info("Blocked acknowledge: %s", message)
+            self._action_blocked(message)
             return
         until = now + self._manual_override_timeout_s
         for condition in held.values():
@@ -1313,6 +1758,25 @@ class Orchestrator(QObject):
         ).held_vis
 
     def _manual_action_admissible(self, vi_name: str) -> tuple[bool, str]:
+        """Return ``_manual_action_admission()`` without its verdict code.
+
+        The two-value shape every caller that only renders a reason wants —
+        ``stop_ramp()`` and the ramp tracker's stop policy, which must agree
+        with the admission gate exactly (a row's Abort button can never look
+        enabled for a stop the action would refuse).
+
+        Args:
+            vi_name: The VI the action targets.
+
+        Returns:
+            ``(True, "")`` when admitted; ``(False, reason)`` when refused.
+        """
+        admitted, reason, _code = self._manual_action_admission(vi_name)
+        return admitted, reason
+
+    def _manual_action_admission(
+        self, vi_name: str
+    ) -> tuple[bool, str, ev.VerdictCode]:
         """Decide whether a manual action on *vi_name* may be admitted right now.
 
         The single admission predicate (the "Claims + admission gate"),
@@ -1372,14 +1836,20 @@ class Orchestrator(QObject):
             vi_name: The VI the action targets.
 
         Returns:
-            ``(True, "")`` when admitted; ``(False, reason)`` when refused,
-            with a human-readable reason naming why (and, for a claim
-            refusal, the owning run).
+            ``(True, "", VerdictCode.OK)`` when admitted; otherwise
+            ``(False, reason, code)`` with a human-readable reason naming why
+            (and, for a claim refusal, the owning run) and the verdict code
+            that rule refuses with: ``BLOCKED_FAULT`` for rules 0/0b (the
+            instrument itself is not controllable), ``BLOCKED_CLAIM`` for
+            rule 4, ``BLOCKED_STATE`` for the state rules. The code is
+            produced HERE, next to the rule that decides, so a client's
+            machine-readable answer can never drift from the prose one.
         """
         now = time.time()
         emergency_unlocked = (
             self._emergency_override_until is not None and now < self._emergency_override_until
         )
+        admitted = (True, "", ev.VerdictCode.OK)
         held = self._held_vis().get(vi_name)
         if held is not None:
             not_responding = "not_responding" in self._station.availability(vi_name).tags
@@ -1388,52 +1858,54 @@ class Orchestrator(QObject):
                     return False, (
                         f"Cannot control {vi_name}: instrument fault ({held.kind}) — "
                         f"{held.message}. Retry the instrument or wait for it to recover."
-                    )
+                    ), ev.VerdictCode.BLOCKED_FAULT
             else:
                 hold_unlocked = now < self._hold_override_until.get(held.key, 0.0)
                 if emergency_unlocked:
-                    return True, ""
+                    return admitted
                 if hold_unlocked and self._state not in (
                     OrchestratorState.EMERGENCY, OrchestratorState.ERROR
                 ):
-                    return True, ""
+                    return admitted
                 return False, (
                     f"Cannot control {vi_name}: safety hold active "
                     f"({held.kind}). Resolve the condition, or acknowledge to "
                     "unlock manual control."
-                )
+                ), ev.VerdictCode.BLOCKED_FAULT
         if self._state == OrchestratorState.IDLE:
-            return True, ""
+            return admitted
         manual_ramping = (
             self._state == OrchestratorState.RAMPING and self._procedure is None
         )
         if manual_ramping:
-            return True, ""
+            return admitted
         if self._state == OrchestratorState.EMERGENCY:
             if emergency_unlocked:
-                return True, ""
+                return admitted
             return False, (
                 f"Cannot control {vi_name}: EMERGENCY — acknowledge the "
                 "emergency to unlock manual front-panel recovery."
-            )
+            ), ev.VerdictCode.BLOCKED_STATE
         if self._state == OrchestratorState.ERROR:
             return False, (
                 f"Cannot control {vi_name}: procedure is running in state {self._state.name}"
-            )
+            ), ev.VerdictCode.BLOCKED_STATE
         if self._procedure is None:
             # Defensive: no other non-IDLE, non-manual-ramp state should be
             # reachable with no active run. Refuse conservatively rather than
             # admit on an assumption that turned out false.
             return False, (
                 f"Cannot control {vi_name}: procedure is running in state {self._state.name}"
-            )
+            ), ev.VerdictCode.BLOCKED_STATE
         if self._active_claims is None:
-            return False, f"Cannot control {vi_name}: {self._active_run_label()} is running"
+            return False, (
+                f"Cannot control {vi_name}: {self._active_run_label()} is running"
+            ), ev.VerdictCode.BLOCKED_CLAIM
         if vi_name in self._active_claims:
             return False, (
                 f"Cannot control {vi_name}: claimed by running {self._active_run_label()}"
-            )
-        return True, ""
+            ), ev.VerdictCode.BLOCKED_CLAIM
+        return admitted
 
     def _envelope_refusal(
         self, vi_name: str, method_name: str, kwargs: Mapping[str, Any]
@@ -1477,10 +1949,10 @@ class Orchestrator(QObject):
 
     def _manual_action_verdict(
         self, vi_name: str, method_name: str, kwargs: Mapping[str, Any]
-    ) -> tuple[bool, str]:
+    ) -> tuple[bool, str, ev.VerdictCode]:
         """Return the full admission verdict for one manual action.
 
-        ``_manual_action_admissible()`` decides whether this VI may be
+        ``_manual_action_admission()`` decides whether this VI may be
         controlled at all; this adds the value-level check the envelope owns.
         Shared verbatim by ``submit_vi_action()`` (what may be *queued*) and
         the ``_tick_body()`` drain gate (what may be *dispatched*), the same
@@ -1494,16 +1966,19 @@ class Orchestrator(QObject):
             kwargs: The action's keyword arguments.
 
         Returns:
-            ``(admitted, reason)``; *reason* is empty when admitted.
+            ``(admitted, reason, code)``; *reason* is empty and *code* is
+            ``OK`` when admitted, and ``BLOCKED_ENVELOPE`` when the value
+            leaves the active experiment envelope.
         """
-        admitted, reason = self._manual_action_admissible(vi_name)
+        admitted, reason, code = self._manual_action_admission(vi_name)
         if not admitted:
-            return False, reason
+            return False, reason, code
         envelope_reason = self._envelope_refusal(vi_name, method_name, kwargs)
         if envelope_reason is not None:
-            return False, envelope_reason
-        return True, ""
+            return False, envelope_reason, ev.VerdictCode.BLOCKED_ENVELOPE
+        return True, "", ev.VerdictCode.OK
 
+    @command
     def submit_vi_action(self, vi_name: str, method_name: str, **kwargs: Any) -> None:
         """Submit a GUI action to a specific VI.
 
@@ -1524,18 +1999,25 @@ class Orchestrator(QObject):
         callers narrower than ``MANUAL_ACTION_SCOPE`` — an out-of-scope
         capability.
         """
-        admitted, reason = self._manual_action_verdict(vi_name, method_name, kwargs)
+        admitted, reason, code = self._manual_action_verdict(vi_name, method_name, kwargs)
         if not admitted:
             logger.info("Blocked action: %s", reason)
-            self.action_blocked.emit(reason)
+            self._action_blocked(reason, code)
             return
 
+        # The pending verdict travels with the queued action: this command is
+        # answered when the drain runs it, not when this method returns.
+        pending = self._pending
+        if pending is not None:
+            pending.deferred = True
         self._gui_action_queue.append({
             "vi_name": vi_name,
             "method_name": method_name,
-            "kwargs": kwargs
+            "kwargs": kwargs,
+            "pending": pending,
         })
 
+    @command
     def submit_global_action(self, action: str) -> None:
         """Fan a global lifecycle action out into one queued action per VI.
 
@@ -1551,10 +2033,18 @@ class Orchestrator(QObject):
 
         Args:
             action: ``"initiate_all"`` or ``"standby_all"``. Anything else is
-                ignored.
+                refused with a reason naming the two that exist — an unknown
+                action used to be silently ignored, which left the caller
+                unable to tell a typo from a station that did nothing.
         """
         method = {"initiate_all": "initiate", "standby_all": "standby"}.get(action)
         if method is None:
+            message = (
+                f"Unknown global action {action!r}: expected 'initiate_all' "
+                "or 'standby_all'"
+            )
+            logger.info("Blocked submit_global_action: %s", message)
+            self._action_blocked(message, ev.VerdictCode.FAILED)
             return
         # Standby is also a safety action: if a run is in flight, abort it first
         # so the enqueued standby actions run once the Orchestrator is back in IDLE.
@@ -1569,6 +2059,7 @@ class Orchestrator(QObject):
                 {"vi_name": vi_name, "method_name": method, "kwargs": {}}
             )
 
+    @command
     def connect_instrument(self, vi_name: str) -> None:
         """Bring an offline instrument online (the GUI's Connect action).
 
@@ -1597,7 +2088,7 @@ class Orchestrator(QObject):
                 f"{self._state.name}, connecting requires IDLE"
             )
             logger.info("Blocked connect: %s", msg)
-            self.action_blocked.emit(msg)
+            self._action_blocked(msg)
             return
         ok, message = self._station.connect_instrument(vi_name)
         if ok:
@@ -1608,11 +2099,14 @@ class Orchestrator(QObject):
                 self._scanner_vi_name = switch_names[0] if switch_names else None
             logger.info("Connect succeeded for '%s'", vi_name)
             self.instrument_reconnected.emit(vi_name)
-            self.action_succeeded.emit(vi_name, "connect")
+            # What the station IS has changed: re-declare it.
+            self._emit_station_info()
+            self._action_succeeded(vi_name, "connect", result=message)
         else:
             logger.warning("Connect failed for '%s': %s", vi_name, message)
-            self.action_failed.emit(vi_name, "connect", message)
+            self._action_failed(vi_name, "connect", message)
 
+    @command
     def disconnect_instrument(self, vi_name: str) -> None:
         """Release a live instrument to its front panel (the GUI's Disconnect action).
 
@@ -1643,7 +2137,7 @@ class Orchestrator(QObject):
                 f"{self._state.name}, disconnecting requires IDLE"
             )
             logger.info("Blocked disconnect: %s", msg)
-            self.action_blocked.emit(msg)
+            self._action_blocked(msg)
             return
         ok, message = self._station.disconnect_instrument(vi_name)
         if ok:
@@ -1653,10 +2147,12 @@ class Orchestrator(QObject):
                 self._scanner_vi_name = None
             logger.info("Instrument '%s' disconnected by the operator", vi_name)
             self.instrument_disconnected.emit(vi_name)
-            self.action_succeeded.emit(vi_name, "disconnect")
+            # What the station IS has changed: re-declare it.
+            self._emit_station_info()
+            self._action_succeeded(vi_name, "disconnect", result=message)
         else:
             logger.warning("Disconnect failed for '%s': %s", vi_name, message)
-            self.action_failed.emit(vi_name, "disconnect", message)
+            self._action_failed(vi_name, "disconnect", message)
 
     def offline_reason(self, vi_name: str) -> str:
         """Return the current failure reason for an offline VI, GUI-safe.
@@ -1705,6 +2201,7 @@ class Orchestrator(QObject):
         """
         return self._station.availabilities()
 
+    @command
     def acknowledge_fault(self, vi_name: str) -> None:
         """Acknowledge a VI's active runtime fault (calms the Monitor UI).
 
@@ -1718,9 +2215,11 @@ class Orchestrator(QObject):
         """
         if self._station.acknowledge_fault(vi_name):
             logger.info("Fault on '%s' acknowledged", vi_name)
-            self.action_succeeded.emit(vi_name, "acknowledge_fault")
+            self._action_succeeded(vi_name, "acknowledge_fault")
         else:
-            logger.info("acknowledge_fault('%s') ignored: no active fault", vi_name)
+            message = f"Nothing to acknowledge: '{vi_name}' has no active fault"
+            logger.info("Blocked acknowledge_fault: %s", message)
+            self._action_blocked(message)
 
     def _vi_claimed_by_active_run(self, vi_name: str) -> bool:
         """Return whether an active run currently claims *vi_name*.
@@ -1742,6 +2241,7 @@ class Orchestrator(QObject):
             return False
         return self._active_claims is None or vi_name in self._active_claims
 
+    @command
     def retry_fault(self, vi_name: str) -> None:
         """Retry a VI's active runtime fault: reset counters, poll once — or,
         past the disconnect threshold, rebuild its driver session.
@@ -1776,17 +2276,18 @@ class Orchestrator(QObject):
                     "fail, or be aborted before rebuilding its connection"
                 )
                 logger.info("Retry (rebuild) blocked for '%s': %s", vi_name, message)
-                self.action_blocked.emit(message)
+                self._action_blocked(message, ev.VerdictCode.BLOCKED_CLAIM)
                 return
 
         ok, message = self._station.retry_fault(vi_name)
         if ok:
             logger.info("Retry succeeded for faulted VI '%s'", vi_name)
-            self.action_succeeded.emit(vi_name, "retry_fault")
+            self._action_succeeded(vi_name, "retry_fault", result=message)
         else:
             logger.warning("Retry failed for faulted VI '%s': %s", vi_name, message)
-            self.action_failed.emit(vi_name, "retry_fault", message)
+            self._action_failed(vi_name, "retry_fault", message)
 
+    @command
     def set_scanner_enabled(self, enabled: bool) -> None:
         """Toggle scanner availability for scanner-sensitive procedures.
 
@@ -1798,7 +2299,7 @@ class Orchestrator(QObject):
         """
         if self._scanner_vi_name is None:
             logger.info("set_scanner_enabled ignored: no switch VI in station")
-            self.action_blocked.emit(
+            self._action_blocked(
                 "Cannot change scanner availability: this station has no switch instrument"
             )
             return
@@ -1841,7 +2342,17 @@ class Orchestrator(QObject):
             "data_file": str(getattr(procedure, "data_filepath", None) or ""),
             "started_utc": datetime.now(timezone.utc).isoformat(),
         }
+        self._datapoint_index = 0
         self.run_started.emit(dict(self._active_run_manifest))
+        self._emit_event(
+            ev.RunStarted(
+                run_id=self._active_run_manifest["run_id"],
+                manifest=_json_safe(self._active_run_manifest),
+                actor=self._current_actor(),
+                request_id=self._pending.request_id if self._pending else "",
+                seq=self._next_seq(),
+            )
+        )
 
     def _collect_run_summary(self, procedure: Any) -> dict[str, Any]:
         """Return ``procedure.run_summary()``'s result, or ``{}`` on any problem.
@@ -1915,16 +2426,352 @@ class Orchestrator(QObject):
         self._pending_run_summary = {}
         manifest["summary"] = summary
         self.run_finished.emit(manifest)
+        self._emit_event(
+            ev.RunFinished(
+                run_id=str(manifest.get("run_id", "")),
+                status=status,
+                reason=reason,
+                manifest=_json_safe(manifest),
+                seq=self._next_seq(),
+            )
+        )
 
     # ------------------------------------------------------------------
     # Private / internal
     # ------------------------------------------------------------------
 
-    def _change_state(self, new_state: OrchestratorState) -> None:
-        logger.info("Orchestrator state: %s -> %s", self._state.name, new_state.name)
+    def _change_state(self, new_state: OrchestratorState, cause: str = "") -> None:
+        """Move the state machine, announcing the move on both channels.
+
+        Args:
+            new_state: The state being entered.
+            cause: Short machine-readable reason, for the ``StateChange``
+                event. Defaults to the command in flight, or ``"tick"`` for a
+                transition the engine made on its own; callers whose reason is
+                neither (``"emergency"``, ``"fault"``, ``"error"``,
+                ``"procedure_finished"``, ``"pause_boundary"``) pass it here.
+        """
+        previous = self._state
+        logger.info("Orchestrator state: %s -> %s", previous.name, new_state.name)
         self._state = new_state
         self._state_entered_at = time.time()
         self.state_changed.emit(self._state.value)
+        self._emit_event(
+            ev.StateChange(
+                state=self._state.value,
+                previous=previous.value,
+                cause=cause or self._acting_command or "tick",
+                actor=self._current_actor(),
+                request_id=self._pending.request_id if self._pending else "",
+                seq=self._next_seq(),
+            )
+        )
+        self._emit_status_snapshot()
+
+    # ------------------------------------------------------------------
+    # The control contract: actors, verdicts, events
+    # (the verdict standard — see the class docstring)
+    # ------------------------------------------------------------------
+
+    @contextmanager
+    def _acting_as(self, actor: ev.Actor, command_name: str):
+        """Hold *actor* and *command_name* for the duration of one command.
+
+        The ``command`` decorator wraps every public command method in this,
+        so ``_change_state()`` and every verdict can name who asked and what
+        for without an argument threaded through the state machine. An actor
+        left at the ``OPERATOR`` sentinel never displaces one already acting,
+        so a command that internally calls another stays attributed to
+        whoever started it.
+
+        Args:
+            actor: Who is acting.
+            command_name: The command method's own name.
+
+        Yields:
+            ``None`` — used only for its side effect.
+        """
+        previous_actor = self._actor
+        previous_command = self._acting_command
+        if actor is not ev.OPERATOR or previous_actor is None:
+            self._actor = actor
+        self._acting_command = command_name
+        try:
+            yield
+        finally:
+            self._actor = previous_actor
+            self._acting_command = previous_command
+
+    def _current_actor(self) -> ev.Actor:
+        """Return the actor to attribute what is happening right now to.
+
+        Returns:
+            The actor of the command in flight, or ``SYSTEM_ACTOR`` when the
+            engine is acting on its own (a tick, a tripped flag, a run
+            ending).
+        """
+        return self._actor if self._actor is not None else SYSTEM_ACTOR
+
+    def _next_seq(self) -> int:
+        """Return the next sequence number, shared by events and verdicts.
+
+        Returns:
+            A monotonically increasing integer, starting at 1.
+        """
+        self._seq += 1
+        return self._seq
+
+    def _emit_event(self, event: Any) -> None:
+        """Emit one contract event, guarded.
+
+        The event stream is a reporting surface: a listener that raises, or an
+        event that cannot be built, must never degrade a running procedure to
+        ERROR through the tick's exception boundary.
+
+        Args:
+            event: The ``events.Event`` to broadcast.
+        """
+        try:
+            self.event_emitted.emit(event)
+        except Exception:  # noqa: BLE001 — reporting must never disrupt a run
+            logger.exception("event emit failed (non-fatal)")
+
+    def _emit_verdict(
+        self,
+        code: ev.VerdictCode,
+        reason: str = "",
+        detail: dict[str, Any] | None = None,
+        result: Any = None,
+        pending: _PendingCommand | None = None,
+    ) -> None:
+        """Answer the command in flight, exactly once.
+
+        A no-op when no command is in flight (a direct call from the GUI or a
+        test), or when this command has already been answered — which is what
+        makes "exactly one verdict per request id" a property of the code
+        rather than a convention.
+
+        Args:
+            code: The machine-readable outcome.
+            reason: Human-readable explanation, for a banner.
+            detail: Structured explanation of the code, JSON-safe.
+            result: The underlying call's return value, JSON-safe.
+            pending: The command to answer; defaults to the one in flight.
+        """
+        pending = pending if pending is not None else self._pending
+        if pending is None or pending.resolved:
+            return
+        pending.resolved = True
+        try:
+            verdict = ev.Verdict(
+                request_id=pending.request_id,
+                command=pending.command,
+                code=code,
+                actor=pending.actor,
+                reason=reason,
+                detail=detail,
+                result=_json_safe(result) if result is not None else None,
+                seq=self._next_seq(),
+            )
+        except Exception:  # noqa: BLE001 — fall back to the payload-free answer
+            logger.exception("verdict payload rejected; answering without it")
+            verdict = ev.Verdict(
+                request_id=pending.request_id,
+                command=pending.command,
+                code=ev.VerdictCode.FAILED,
+                actor=pending.actor,
+                reason=reason or "the verdict payload could not be built",
+                seq=self._next_seq(),
+            )
+        try:
+            self.verdict_emitted.emit(verdict)
+        except Exception:  # noqa: BLE001 — a signal failure must not disrupt a run
+            logger.exception("verdict emit failed")
+
+    def _action_blocked(
+        self, reason: str, code: ev.VerdictCode = ev.VerdictCode.BLOCKED_STATE
+    ) -> None:
+        """Refuse the action in flight: the compat signal AND the verdict.
+
+        Args:
+            reason: Human-readable refusal, shown verbatim in the GUI.
+            code: Which blocking code the refusal is (default
+                ``BLOCKED_STATE``, the state machine's own refusal).
+        """
+        self.action_blocked.emit(reason)
+        self._emit_verdict(code, reason=reason)
+
+    def _action_failed(
+        self,
+        vi_name: str,
+        method_name: str,
+        reason: str,
+        error: BaseException | None = None,
+        pending: _PendingCommand | None = None,
+    ) -> None:
+        """Report a failed action: the compat signal AND the verdict.
+
+        Args:
+            vi_name: The VI the action targeted.
+            method_name: The capability that was called.
+            reason: The failure text, written to be shown verbatim.
+            error: The exception behind it, when there was one — it decides
+                the verdict code and carries the structured ``detail`` of a
+                control-limit refusal.
+            pending: The command to answer; defaults to the one in flight.
+        """
+        self.action_failed.emit(vi_name, method_name, reason)
+        code, detail = _verdict_for_exception(error)
+        self._emit_verdict(code, reason=reason, detail=detail, pending=pending)
+
+    def _action_succeeded(
+        self,
+        vi_name: str,
+        method_name: str,
+        result: Any = None,
+        pending: _PendingCommand | None = None,
+    ) -> None:
+        """Report a successful action: the compat signal AND the verdict.
+
+        Args:
+            vi_name: The VI the action targeted.
+            method_name: The capability that was called.
+            result: The call's return value, carried in ``Verdict.result``.
+            pending: The command to answer; defaults to the one in flight.
+        """
+        self.action_succeeded.emit(vi_name, method_name)
+        self._emit_verdict(ev.VerdictCode.OK, result=result, pending=pending)
+
+    def _emit_station_info(self) -> None:
+        """Emit the Station's static declaration, if it makes one.
+
+        Called once at construction and after every successful connect or
+        disconnect — the only two things that change what the station IS.
+        A Station without a ``station_info()`` accessor (duck-typed, so this
+        module never depends on that half landing first) is simply silent.
+        """
+        station_info = getattr(self._station, "station_info", None)
+        if not callable(station_info):
+            return
+        try:
+            declared = station_info()
+            if isinstance(declared, ev.StationInfo):
+                event = ev.StationInfo(
+                    instruments=declared.instruments, seq=self._next_seq()
+                )
+            else:
+                event = ev.StationInfo(
+                    instruments=tuple(_json_safe(entry) for entry in declared),
+                    seq=self._next_seq(),
+                )
+        except Exception:  # noqa: BLE001 — reporting must never disrupt a run
+            logger.exception("station_info() failed (non-fatal)")
+            return
+        self._emit_event(event)
+
+    def _run_status(self) -> dict[str, Any] | None:
+        """Return the active run's summary for a ``StatusSnapshot``.
+
+        Returns:
+            ``{"id", "name", "kind", "progress", "step", "steps"}`` for the
+            run in flight — every optional key omitted rather than guessed —
+            or ``None`` when no run is active.
+        """
+        if self._procedure is None and self._active_run_manifest is None:
+            return None
+        manifest = self._active_run_manifest or {}
+        summary: dict[str, Any] = {
+            "id": str(manifest.get("run_id", "")),
+            "name": str(manifest.get("procedure", "")),
+            "kind": self.active_run_kind() or "",
+        }
+        get_progress = getattr(self._procedure, "get_progress", None)
+        if callable(get_progress):
+            try:
+                summary["progress"] = float(get_progress())
+            except Exception:  # noqa: BLE001 — a summary must never raise
+                logger.debug("run summary: get_progress() failed", exc_info=True)
+        get_position = getattr(self._procedure, "get_sweep_position", None)
+        if callable(get_position):
+            try:
+                step, steps = get_position()
+                summary["step"] = int(step)
+                summary["steps"] = int(steps)
+            except Exception:  # noqa: BLE001 — a summary must never raise
+                logger.debug("run summary: get_sweep_position() failed", exc_info=True)
+        return summary
+
+    def _status_snapshot(self) -> ev.StatusSnapshot:
+        """Build this moment's ``StatusSnapshot``.
+
+        Every field is read from a cached or derived source — nothing here
+        polls an instrument, because the tick is the only thing that does.
+        Every payload is a fresh copy.
+
+        Returns:
+            The snapshot, ready to emit.
+        """
+        availabilities = {
+            name: _json_safe(dataclasses.asdict(record))
+            for name, record in self._station.availabilities().items()
+        }
+        faults = {
+            name: _json_safe(dataclasses.asdict(record))
+            for name, record in self.vi_faults().items()
+        }
+        offline_reasons = {
+            name: self.offline_reason(name)
+            for name in availabilities
+            if self.offline_reason(name)
+        }
+        held = self.held_vi_names()
+        instruments = {
+            name: {
+                "availability": availabilities[name],
+                "fault": faults.get(name),
+                "offline_reason": offline_reasons.get(name, ""),
+                "held": name in held,
+                "override_active": self.override_active(name),
+            }
+            for name in availabilities
+        }
+        return ev.StatusSnapshot(
+            state=self._state.value,
+            run=self._run_status(),
+            instruments=instruments,
+            is_monitoring=self._monitoring,
+            pause_pending=self._pause_requested,
+            active_run_kind=self.active_run_kind(),
+            scanner_enabled=self.scanner_enabled(),
+            override_active=self.override_active(),
+            manual_override_expires_at=self.manual_override_expires_at(),
+            held_vi_names=tuple(sorted(held)),
+            active_ramps=tuple(
+                _json_safe(dataclasses.asdict(record)) for record in self._active_ramps
+            ),
+            availabilities=availabilities,
+            vi_faults=faults,
+            offline_reason=offline_reasons,
+            envelope_variables={
+                name: _json_safe(dataclasses.asdict(variable))
+                for name, variable in self.envelope_variables().items()
+            },
+            seq=self._next_seq(),
+        )
+
+    def _emit_status_snapshot(self) -> None:
+        """Emit this moment's ``StatusSnapshot``, guarded.
+
+        Guarded exactly like ``_publish_ramps()``: the status mirror is a
+        reporting surface, so a failure assembling it must never degrade a
+        running procedure to ERROR through the tick's exception boundary.
+        """
+        try:
+            snapshot = self._status_snapshot()
+        except Exception:  # noqa: BLE001 — reporting must never disrupt a run
+            logger.exception("status-snapshot assembly failed (non-fatal)")
+            return
+        self._emit_event(snapshot)
 
     def get_operational_status(self) -> dict:
         """Return the most recent operational-status record.
@@ -2216,6 +3063,9 @@ class Orchestrator(QObject):
         if self._monitoring:
             state = self._station.get_state()
             self.states_updated.emit(state)
+            self._emit_event(
+                ev.Readings(values=_json_safe(state), seq=self._next_seq())
+            )
 
             # One-line summary per tick (full per-method detail stays in the file log)
             parts = []
@@ -2400,28 +3250,41 @@ class Orchestrator(QObject):
         pending_actions = list(self._gui_action_queue)
         self._gui_action_queue.clear()
         for action in pending_actions:
-            admitted, reason = self._manual_action_verdict(
+            # The verdict this action owes its submitter, if it arrived
+            # through submit() — see submit_vi_action()'s asynchronous case.
+            pending = action.get("pending")
+            admitted, reason, code = self._manual_action_verdict(
                 action["vi_name"], action["method_name"], action["kwargs"]
             )
             if not admitted:
                 logger.info("Blocked queued action on %s: %s", action["vi_name"], reason)
                 self.action_blocked.emit(reason)
+                self._emit_verdict(code, reason=reason, pending=pending)
                 continue
             try:
-                self._station.execute_vi_action(
+                result = self._station.execute_vi_action(
                     action["vi_name"],
                     action["method_name"],
                     allowed_scope=MANUAL_ACTION_SCOPE,
                     **action["kwargs"]
                 )
-                self.action_succeeded.emit(action["vi_name"], action["method_name"])
+                self._action_succeeded(
+                    action["vi_name"],
+                    action["method_name"],
+                    result=result,
+                    pending=pending,
+                )
             except Exception as e:
                 # Every user action gets an explicit verdict: rejections
                 # (limit violations, safety guards) and failures surface
                 # to the GUI with the reason, never silently.
                 logger.error("Error executing GUI action on %s: %s", action["vi_name"], e)
-                self.action_failed.emit(
-                    action["vi_name"], action["method_name"], str(e)
+                self._action_failed(
+                    action["vi_name"],
+                    action["method_name"],
+                    str(e),
+                    error=e,
+                    pending=pending,
                 )
         if pending_actions:
             # A drained action may have started, retargeted, or stopped a
@@ -2530,6 +3393,16 @@ class Orchestrator(QObject):
                 last_datapoint = getattr(self._procedure, "last_datapoint", None)
                 if last_datapoint and not is_operation:
                     self.measurement_ready.emit(dict(last_datapoint))
+                    manifest = self._active_run_manifest or {}
+                    self._emit_event(
+                        ev.Datapoint(
+                            run_id=str(manifest.get("run_id", "")),
+                            index=self._datapoint_index,
+                            values=_json_safe(last_datapoint),
+                            seq=self._next_seq(),
+                        )
+                    )
+                    self._datapoint_index += 1
             self._change_state(OrchestratorState.SWEEPING)
         elif self._state == OrchestratorState.SWEEPING:
             self._station.advance_ramps()  # see MEASURING above
@@ -2538,7 +3411,7 @@ class Orchestrator(QObject):
                 # here, where the point just read is saved and the next one has
                 # not been asked for yet. Resume re-enters SWEEPING and steps
                 # from here.
-                self._enter_paused()
+                self._enter_paused(cause="pause_boundary")
             elif self._procedure:
                 step_plan = self._procedure.change_sweep_step()
                 if step_plan is None:
@@ -2606,6 +3479,12 @@ class Orchestrator(QObject):
         # started or just ended) rather than the one it was in on entry.
         # Reads this tick's memoised snapshot; no extra poll.
         self._publish_ramps()
+
+        # 6. The status mirror: one snapshot per tick, so a client that never
+        # calls into the engine still sees every read refreshed at tick rate.
+        # A tick that changed state has already emitted one from
+        # _change_state(); this is the quiet tick's.
+        self._emit_status_snapshot()
 
     # ------------------------------------------------------------------
     # Failure handling
@@ -2825,7 +3704,7 @@ class Orchestrator(QObject):
         self._standby_dispatched = False
         self._pause_requested = False
         self._operation_started_from_emergency = False
-        self._change_state(end_state)
+        self._change_state(end_state, cause="procedure_finished")
         if end_state == OrchestratorState.IDLE:
             self.run_queue()
 
@@ -2840,12 +3719,16 @@ class Orchestrator(QObject):
         not degrade to global ERROR.
         """
         self._error(message)
+        # A command that failed this way (a run whose setup raised) is
+        # answered FAILED rather than closed with the optimistic OK a silent
+        # return would earn it.
+        self._emit_verdict(ev.VerdictCode.FAILED, reason=message)
         try:
             self._abort_active_procedure()
         except Exception:
             logger.exception("Cleanup while entering ERROR also failed")
         self._emit_run_finished("failed", reason=message)
-        self._change_state(OrchestratorState.ERROR)
+        self._change_state(OrchestratorState.ERROR, cause="error")
 
     def _fail_run_for_fault(self, vi_name: str, reason: str | None = None) -> None:
         """Fail the active run because its claimed/watched VI faulted or was held.
@@ -2876,12 +3759,13 @@ class Orchestrator(QObject):
         else:
             message = f"Run failed: {reason}"
         self._error(message, vi_name=vi_name, kind="run_failure", severity="error")
+        self._emit_verdict(ev.VerdictCode.FAILED, reason=message)
         try:
             self._abort_active_procedure()
         except Exception:
             logger.exception("Cleanup while failing run for VI fault also failed")
         self._emit_run_finished("failed", reason=message)
-        self._change_state(OrchestratorState.IDLE)
+        self._change_state(OrchestratorState.IDLE, cause="fault")
 
     def _enter_emergency(self, reason: str, vi_names: tuple[str, ...] = ()) -> None:
         """One-shot emergency entry: clean up the run, then safe shutdown.
@@ -2922,7 +3806,7 @@ class Orchestrator(QObject):
         except Exception:
             logger.exception("Cleanup while entering EMERGENCY failed")
         self._emit_run_finished("failed", reason=f"EMERGENCY: {reason}")
-        self._change_state(OrchestratorState.EMERGENCY)
+        self._change_state(OrchestratorState.EMERGENCY, cause="emergency")
         # Always a blanket standby_all(): critical severity is station-wide
         # scope by construction (the System-Condition standard, core/
         # conditions.py) — there is no "concerned VI" subset to narrow the

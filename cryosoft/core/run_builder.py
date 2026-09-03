@@ -22,13 +22,20 @@ of it.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from cryosoft.core.exceptions import CryoSoftError
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from cryosoft.core.procedure import BaseProcedure
     from cryosoft.core.station import Station
+
+#: The run class being built, so the caller gets back exactly the type it
+#: asked for. Deliberately unbound rather than ``bound=BaseProcedure``: this
+#: module sits below L4 and must not import it — a real dependency would make
+#: every importer of the builder an importer of the data manager (contract
+#: C5). The keyword contract below is what a procedure must satisfy, and
+#: ``tests/test_conformance.py`` is what holds every procedure to it.
+RunT = TypeVar("RunT")
 
 #: Exceptions that mean "this procedure refused to be built", as opposed to a
 #: programming error. ``CryoSoftError`` covers ``CryoSoftConfigError`` and
@@ -47,7 +54,7 @@ PROCEDURE_BUILD_ERRORS: tuple[type[BaseException], ...] = (
 
 
 def build_procedure(
-    cls: type[BaseProcedure],
+    cls: type[RunT],
     *,
     station: Station,
     params: dict[str, Any],
@@ -55,7 +62,7 @@ def build_procedure(
     data_directory: str,
     file_prefix: str = "",
     experiment_info: dict[str, Any] | None = None,
-) -> BaseProcedure:
+) -> RunT:
     """Instantiate *cls* from plain values.
 
     Args:
@@ -72,7 +79,7 @@ def build_procedure(
             already records ``None`` as ``{}``.
 
     Returns:
-        A ready ``BaseProcedure`` instance.
+        A ready instance of *cls*.
 
     Raises:
         CryoSoftError: If the procedure refuses the run — the station cannot

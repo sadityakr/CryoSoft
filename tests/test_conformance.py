@@ -3252,6 +3252,9 @@ ORCHESTRATOR_NON_COMMANDS: dict[str, str] = {
     # ── Process lifecycle: owned by main.py and test teardown, not by a
     #    client. A client that could stop the tick timer could strand a ramp.
     "shutdown": "lifecycle: stops the tick timer at application exit",
+    # ── The port itself: submit(Command) dispatches to the commands below,
+    #    so it is the surface a command arrives through, never a command.
+    "submit": "port: the entry point every Command is dispatched through",
 }
 
 
@@ -3311,6 +3314,30 @@ def test_command_name_covers_every_public_orchestrator_command() -> None:
     )
 
 
+def test_every_command_method_takes_an_actor() -> None:
+    """Every command names who asked, defaulting to the operator sentinel.
+
+    The operator sentinel is what makes accountability a value rather than an
+    ambient fact, and what lets it be added without touching a single existing
+    call site. A command method that forgets it would silently attribute an
+    agent's action to the human at the GUI.
+    """
+    from cryosoft.core.orchestrator import Orchestrator
+
+    for member in CommandName:
+        method = getattr(Orchestrator, member.value)
+        parameter = inspect.signature(method).parameters.get("actor")
+        assert parameter is not None, (
+            f"Orchestrator.{member.value}() takes no actor keyword"
+        )
+        assert parameter.kind is inspect.Parameter.KEYWORD_ONLY, (
+            f"Orchestrator.{member.value}()'s actor must be keyword-only"
+        )
+        assert parameter.default == OPERATOR, (
+            f"Orchestrator.{member.value}()'s actor must default to OPERATOR"
+        )
+
+
 # Read accessors from ``ORCHESTRATOR_NON_COMMANDS`` (plus the two public
 # properties) that are NOT answered by a ``StatusSnapshot`` field of the same
 # name, each with the reason it is not.
@@ -3334,7 +3361,11 @@ def test_status_snapshot_answers_every_engine_read() -> None:
     """
     from cryosoft.core.orchestrator import Orchestrator
 
-    reads = set(ORCHESTRATOR_NON_COMMANDS) - {"shutdown"}
+    reads = {
+        name
+        for name, rationale in ORCHESTRATOR_NON_COMMANDS.items()
+        if rationale.startswith("read:")
+    }
     reads |= {
         name
         for name, value in vars(Orchestrator).items()
