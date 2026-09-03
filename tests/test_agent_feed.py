@@ -361,3 +361,48 @@ def test_the_real_engine_fills_the_trail_end_to_end(orchestrator, feed):
     assert [entry["request_id"] for entry in verdicts] == [request_id]
     assert verdicts[0]["verdict"]["code"] == "OK"
     assert orch.is_monitoring()
+
+
+def test_the_two_trails_join_on_the_request_id(orchestrator, feed):
+    """The join the whole scheme rests on: one id, two independent records.
+
+    The Agent feed says an agent asked for something and what it was told; the
+    operational-status record says what the station was doing and who last got
+    it to act. Neither is derived from the other — one is written by the
+    session layer's feed, the other assembled by the engine's own tick — so
+    the request id being the same value in both is what lets a physicist read
+    "the station started monitoring at 03:12" and "runner-7 asked for it" as
+    one fact.
+    """
+    orch, station = orchestrator
+    feed.attach(orch)
+    gateway = Gateway(
+        orch, Role.SESSION, "runner-7", station_info=station.station_info, feed=feed
+    )
+
+    request_id = gateway.submit(ev.CommandName.START_MONITORING)
+    orch._tick()
+
+    status = orch.get_operational_status()
+    assert status["request_id"] == request_id
+    assert status["actor"] == {"kind": "agent", "id": "runner-7", "role": "session"}
+
+    trail = [entry for entry in read_feed(feed.path) if entry["request_id"] == request_id]
+    assert [entry["record"] for entry in trail] == [RECORD_COMMAND, RECORD_VERDICT]
+
+
+def test_a_refused_command_does_not_claim_the_station(orchestrator, feed):
+    """A refusal changed nothing, so it never displaces who last acted."""
+    orch, station = orchestrator
+    feed.attach(orch)
+    gateway = Gateway(
+        orch, Role.SESSION, "runner-7", station_info=station.station_info, feed=feed
+    )
+
+    accepted = gateway.submit(ev.CommandName.START_MONITORING)
+    orch.set_agent_gate(ev.AgentGate.REVOKED)
+    refused = gateway.submit(ev.CommandName.STOP_MONITORING)
+    orch._tick()
+
+    assert refused != accepted
+    assert orch.get_operational_status()["request_id"] == accepted

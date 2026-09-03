@@ -490,6 +490,11 @@ class Orchestrator(QObject):
         self._actor: ev.Actor | None = None
         self._acting_command: str | None = None
         self._seq = 0
+        # The last command the engine ACCEPTED (see _remember_accepted()),
+        # carried onto every operational-status record so the runtime log
+        # names who last got the engine to do something and under which
+        # request id — the key that joins it to a client's own action trail.
+        self._last_accepted: _PendingCommand | None = None
         # Index of the next datapoint within the active run, for Datapoint
         # events; reset at every run start.
         self._datapoint_index = 0
@@ -2946,10 +2951,30 @@ class Orchestrator(QObject):
                 reason=reason or "the verdict payload could not be built",
                 seq=self._next_seq(),
             )
+        self._remember_accepted(pending, code)
         try:
             self.verdict_emitted.emit(verdict)
         except Exception:  # noqa: BLE001 — a signal failure must not disrupt a run
             logger.exception("verdict emit failed")
+
+    def _remember_accepted(
+        self, pending: _PendingCommand, code: ev.VerdictCode
+    ) -> None:
+        """Hold the last ACCEPTED command, for the operational-status record.
+
+        Accepted, not merely received: ``OK`` and ``FAILED`` both mean the
+        engine took the command and acted (or tried to), while every
+        ``BLOCKED_*`` code means it was refused before anything happened. A
+        refusal therefore leaves the previous value standing, because the
+        pair this feeds answers "who last got the engine to do something"
+        and a refused command did nothing.
+
+        Args:
+            pending: The command just answered.
+            code: The verdict code it was answered with.
+        """
+        if code in (ev.VerdictCode.OK, ev.VerdictCode.FAILED):
+            self._last_accepted = pending
 
     def _action_blocked(
         self, reason: str, code: ev.VerdictCode = ev.VerdictCode.BLOCKED_STATE
@@ -3154,6 +3179,12 @@ class Orchestrator(QObject):
         since nothing re-evaluated it) while every header field of the record
         standard is written as usual — see `cryosoft.core.operational_status`.
 
+        The record also names the last command the engine ACCEPTED — its
+        ``Actor`` and its ``request_id`` (see `_remember_accepted()`) — so a
+        reader of ``status.jsonl`` can say who last got the engine to do
+        something, and can join this log to that client's own action trail
+        on the request id.
+
         Guarded: operational-status reporting is non-critical, so a failure here
         must never degrade a running procedure to ERROR via the tick boundary.
 
@@ -3203,6 +3234,16 @@ class Orchestrator(QObject):
                 conditions=conditions,
                 run_id=manifest.get("run_id"),
                 setup=self._setup_name,
+                actor=(
+                    self._last_accepted.actor.to_json()
+                    if self._last_accepted is not None
+                    else None
+                ),
+                request_id=(
+                    self._last_accepted.request_id
+                    if self._last_accepted is not None
+                    else None
+                ),
             )
             record, self._stall_state = apply_stall_verdict(
                 record, self._stall_state, self._stall_config

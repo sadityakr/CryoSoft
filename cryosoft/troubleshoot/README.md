@@ -122,10 +122,19 @@ saved active config, falling back to `sim_cryostat`.
   plain English. Depends on the JSONL shape only, never on `cryosoft.core`
   (contract C10). Reads the window by tailing from the end of the file, so
   the cost of "what is it doing right now" does not grow with the length of
-  the run, and treats a half-written final line as not-yet-a-record.
+  the run, and treats a half-written final line as not-yet-a-record. Also
+  carries the record's `actor`/`request_id` — who last got the engine to act,
+  and the id that joins this log to that client's own action trail (the same
+  id sits on the **Agent feed**'s command, verdict and event records) — and
+  prints them as one `Last accepted command:` line, or says nothing at all
+  when the log predates the field.
 - `session_report.py` — the after-the-fact half: reads one experiment
-  folder's `experiment.json` and reports its runs, envelope, and incident
-  reports. Contract C12 forbids this package from importing
+  folder's `experiment.json` and reports its runs (each with the actor that
+  started it, so an agent-started run is never rendered as the physicist's),
+  envelope, and incident reports. A run whose record carries no readable
+  actor reads as `unknown (legacy record)` rather than as the operator: the
+  reader reaches the session layer's own legacy verdict from the same bytes,
+  because "old file" must never read as "the physicist did it". Contract C12 forbids this package from importing
   `cryosoft.session`, so it parses the record files directly from the shape
   `cryosoft/session/models.py` documents and the layout
   `cryosoft/session/store.py` writes — those two files are its contract, and

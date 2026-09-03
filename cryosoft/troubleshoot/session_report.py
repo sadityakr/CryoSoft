@@ -2,10 +2,10 @@
 
 The third reading mode of the troubleshoot toolbox, beside ``engine``'s
 setup-time instrument checks and ``status_reader``'s live-run digest: this one
-answers "what did this experiment actually do?" — which runs executed, in what
-order, how each ended, how long it took, where its data file is, whether an
-incident report was filed alongside it, and what safety envelope the
-experiment was running under. It is strictly read-only: it opens no
+answers "what did this experiment actually do?" — which runs executed, who
+started each one, in what order, how each ended, how long it took, where its
+data file is, whether an incident report was filed alongside it, and what
+safety envelope the experiment was running under. It is strictly read-only: it opens no
 instruments, writes nothing, and never touches the running application.
 
 **Why it reads JSON instead of importing the session layer.** Import-linter
@@ -124,6 +124,48 @@ def _as_str(value: object, default: str = "") -> str:
 def _as_dict(value: object) -> dict[str, Any]:
     """Return ``value`` if it is a dict, else an empty dict (defensive parse)."""
     return dict(value) if isinstance(value, dict) else {}
+
+
+# The actor kinds the control contract defines (mirrors core/events.py's
+# ActorKind — contract C10 keeps this package out of the Orchestrator's
+# modules, and the record is the contract here as everywhere else in the
+# troubleshoot toolbox). Anything else in an actor field is unreadable.
+_ACTOR_KINDS = ("operator", "agent", "system")
+
+# What a record with no readable actor is called. Every run written before
+# actors were stamped is one, and so is any file whose actor field is junk.
+_ACTOR_UNKNOWN = "unknown (legacy record)"
+
+
+def _actor_text(entry: dict[str, Any]) -> str:
+    """Say who started a run, applying the session layer's own honesty rule.
+
+    The record's ``actor`` is an `Actor` dict (``kind``, ``id``, ``role``) and
+    ``actor_legacy`` flags one the writer could not read. A record with
+    neither — every run written before actors were stamped — is not the
+    physicist by default: ``session/models.py`` loads it as the operator
+    sentinel *with the legacy flag set* precisely so "old file" never reads as
+    "the physicist did it", and this reader has to reach the same verdict from
+    the same bytes rather than printing a name the record does not support.
+
+    Args:
+        entry: One raw run record as read from ``experiment.json``.
+
+    Returns:
+        A short phrase naming the actor, or `_ACTOR_UNKNOWN` when the record
+        carries no readable one.
+    """
+    actor = _as_dict(entry.get("actor"))
+    kind = _as_str(actor.get("kind"))
+    if entry.get("actor_legacy") or kind not in _ACTOR_KINDS:
+        return _ACTOR_UNKNOWN
+    identity = _as_str(actor.get("id"))
+    # The operator sentinel is Actor("operator", id="operator", role="operator"),
+    # so a plain human run would otherwise read "operator operator (role
+    # operator)". Only the parts that say something new are printed.
+    text = kind if identity in ("", kind) else f"{kind} {identity}"
+    role = _as_str(actor.get("role"))
+    return f"{text} (role {role})" if role and role != kind else text
 
 
 def _parse_iso(value: str) -> datetime | None:
@@ -324,8 +366,11 @@ def _build_runs(experiment_dir: Path, raw_runs: object) -> list[dict[str, Any]]:
 
     Returns:
         One dict per run, numbered from 1, each carrying the run's kind,
-        procedure, outcome, timestamps, duration, and both the stored and the
-        resolved data-file path plus whether that file is actually there.
+        procedure, outcome, timestamps, duration, both the stored and the
+        resolved data-file path plus whether that file is actually there, the
+        starting actor as a short phrase (`_ACTOR_UNKNOWN` when the record
+        carries no readable one), and the run's params digest (``""`` when it
+        has none).
     """
     if not isinstance(raw_runs, list):
         return []
@@ -351,6 +396,8 @@ def _build_runs(experiment_dir: Path, raw_runs: object) -> list[dict[str, Any]]:
                 "data_file": stored_data_file,
                 "data_file_path": None if resolved is None else str(resolved),
                 "data_file_exists": bool(resolved is not None and resolved.is_file()),
+                "actor": _actor_text(entry),
+                "params_digest": _as_str(entry.get("params_digest")),
             }
         )
     return runs
@@ -460,6 +507,7 @@ def _render_runs(runs: list[dict[str, Any]], counts: dict[str, int]) -> list[str
             f"{run['started_utc'] or '-'} -> {run['finished_utc'] or '-'}  "
             f"({duration_str})"
         )
+        lines.append(f"      started by: {run['actor']}")
         if run["reason"]:
             lines.append(f"      reason: {run['reason']}")
         if run["data_file"]:

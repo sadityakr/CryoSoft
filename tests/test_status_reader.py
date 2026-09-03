@@ -224,6 +224,57 @@ def test_summarize_reports_schema_one_for_a_headerless_record():
     assert digest["ts"] is None
 
 
+# ── Who last got the engine to act ───────────────────────────────────────────
+#
+# status.jsonl says what the station is doing; the actor and request id say
+# who last asked for it, and the request id is the join into that client's own
+# action trail. The reader has to carry both through verbatim, and to stay
+# silent rather than guess when the log predates them.
+
+_AGENT = {"kind": "agent", "id": "runner-7", "role": "session"}
+
+
+def test_summarize_carries_the_last_accepted_command():
+    digest = status_reader.summarize(
+        [_fresh(1234.5, actor=_AGENT, request_id="3f2a9c1b")]
+    )
+    assert digest["actor"] == _AGENT
+    assert digest["request_id"] == "3f2a9c1b"
+
+
+def test_summarize_reports_no_command_for_a_log_that_predates_the_field():
+    digest = status_reader.summarize([_fresh(1234.5)])
+    assert digest["actor"] is None
+    assert digest["request_id"] is None
+
+
+def test_render_names_the_actor_and_the_request_id():
+    """Both halves printed verbatim: the request id is a join key, not decoration."""
+    text = status_reader.render_text(
+        status_reader.summarize([_fresh(1234.5, actor=_AGENT, request_id="3f2a9c1b")])
+    )
+    assert "agent 'runner-7'" in text
+    assert "role session" in text
+    assert "3f2a9c1b" in text
+
+
+def test_render_says_nothing_when_no_command_has_been_accepted():
+    text = status_reader.render_text(status_reader.summarize([_fresh(1234.5)]))
+    assert "Last accepted command" not in text
+
+
+def test_cli_status_json_carries_the_last_accepted_command(tmp_path, capsys):
+    """`troubleshoot status --json` is how an agent reads it back."""
+    log = tmp_path / "status.jsonl"
+    _write_log(log, [_fresh(time.time(), actor=_AGENT, request_id="3f2a9c1b")])
+
+    assert main(["status", "--log", str(log), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["actor"]["id"] == "runner-7"
+    assert payload["request_id"] == "3f2a9c1b"
+
+
 # ── Tail-from-end reads ───────────────────────────────────────────────────────
 
 

@@ -159,7 +159,9 @@ def summarize(records: list[dict]) -> dict:
     The record standard's header fields (``schema``, ``ts``, ``seq``,
     ``run_id``, ``experiment_id``, ``setup``) are carried through the same
     way; ``schema`` defaults to 1 (records predating the field) and the rest
-    to None.
+    to None. So are ``actor`` and ``request_id`` — who last got the engine to
+    do something, and the id that joins this log to that client's own action
+    trail (the agent feed's records carry the same request id).
 
     Args:
         records: The window of parsed records, oldest first.
@@ -189,6 +191,8 @@ def summarize(records: list[dict]) -> dict:
         "run_id": latest.get("run_id"),
         "experiment_id": latest.get("experiment_id"),
         "setup": latest.get("setup"),
+        "actor": latest.get("actor"),
+        "request_id": latest.get("request_id"),
         "orch_state": latest.get("orch_state"),
         "elapsed_in_state_s": latest.get("elapsed_in_state_s"),
         "verdict": latest.get("verdict"),
@@ -199,6 +203,35 @@ def summarize(records: list[dict]) -> dict:
         "window": len(records),
         "conditions": latest.get("conditions", []),
     }
+
+
+def _last_command_text(digest: dict) -> str:
+    """Say who last got the engine to act, and under which request id.
+
+    The pair is the join key between this log and a client's own action trail
+    (an agent's feed carries the same ``request_id`` on the command it sent,
+    the verdict it got back, and the state changes that followed), so both
+    halves are printed verbatim rather than prettified. Empty string when the
+    record names no command — a log written before the field existed, or a
+    process that has not accepted one yet.
+
+    Args:
+        digest: A `summarize()` digest.
+
+    Returns:
+        One line, or ``""`` when there is nothing to say.
+    """
+    actor = digest.get("actor")
+    request_id = digest.get("request_id")
+    if not isinstance(actor, dict) and not request_id:
+        return ""
+    who = "unknown"
+    if isinstance(actor, dict):
+        kind = actor.get("kind") or "unknown"
+        who = f"{kind} {actor.get('id')!r}" if actor.get("id") else str(kind)
+        if actor.get("role"):
+            who = f"{who} (role {actor['role']})"
+    return f"Last accepted command: by {who}, request {request_id or '-'}"
 
 
 def render_text(digest: dict) -> str:
@@ -218,6 +251,10 @@ def render_text(digest: dict) -> str:
     )
     if digest.get("progress") is not None:
         lines.append(f"Procedure progress: {digest['progress'] * 100:.0f}%")
+
+    last_command = _last_command_text(digest)
+    if last_command:
+        lines.append(last_command)
 
     if digest["alerts"]:
         lines.append("Alerts:")

@@ -11,13 +11,15 @@ rather than in front of an operator.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 from pathlib import Path
 
 import pytest
 
-from cryosoft.core.plan import EnvelopeBound, ExperimentEnvelope
+from cryosoft.core import events as ev
+from cryosoft.core.plan import EnvelopeBound, ExperimentEnvelope, params_digest
 from cryosoft.session.models import (
     ExperimentRecord,
     RunRecord,
@@ -59,6 +61,11 @@ def _write_experiment(
     )
     store.save(record)
     return session_folder / experiment_id
+
+
+def dataclasses_replace_actor(run: RunRecord, actor: ev.Actor) -> RunRecord:
+    """Return *run* with a different starting actor (the records are frozen-ish)."""
+    return dataclasses.replace(run, actor=actor)
 
 
 def _make_run(
@@ -257,10 +264,76 @@ def test_json_payload_carries_every_run_field(experiment_dir, capsys) -> None:
         "data_file": "data/run_0001.h5",
         "data_file_path": str(experiment_dir / "data" / "run_0001.h5"),
         "data_file_exists": True,
+        "actor": "operator",
+        "params_digest": "",
     }
     assert second["kind"] == "probe"
     assert second["reason"] == "magnet quench"
     assert second["data_file_exists"] is False
+
+
+# ── Who started each run ──────────────────────────────────────────────────────
+#
+# The after-the-fact half of the accountability trail: `troubleshoot status`
+# says who last got the running engine to act, and this says who started each
+# run that already happened. Both read records, never the live app.
+
+
+def test_the_report_names_the_agent_that_started_a_run(tmp_path, capsys) -> None:
+    agent = ev.Actor(kind=ev.ActorKind.AGENT, id="runner-7", role="session")
+    run = _make_run(
+        "r1", "FieldSweep", "done",
+        "2026-09-02T08:10:00+00:00", "2026-09-02T08:40:00+00:00", "data/run_0001.h5",
+    )
+    folder = _write_experiment(
+        _session_root(tmp_path), runs=[dataclasses_replace_actor(run, agent)]
+    )
+
+    assert cli.main(["session", str(folder)]) == 0
+    assert "started by: agent runner-7 (role session)" in capsys.readouterr().out
+
+
+def test_the_report_names_the_operator_without_repeating_the_sentinel(
+    experiment_dir, capsys
+) -> None:
+    """The operator sentinel is Actor("operator", "operator", "operator")."""
+    assert cli.main(["session", str(experiment_dir)]) == 0
+    out = capsys.readouterr().out
+    assert "started by: operator" in out
+    assert "operator operator" not in out
+
+
+def test_a_run_written_before_actors_reads_as_unknown_not_as_the_physicist(
+    tmp_path, capsys
+) -> None:
+    """"Old file" must never render as "the physicist did it"."""
+    folder = _write_experiment(_session_root(tmp_path), runs=[])
+    path = folder / "experiment.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["runs"] = [{"run_id": "old", "procedure": "FieldSweep", "status": "done"}]
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert cli.main(["session", str(folder), "--json"]) == 0
+    assert _json_out(capsys)["runs"][0]["actor"] == "unknown (legacy record)"
+
+
+def test_the_json_payload_carries_the_actor_and_the_params_digest(
+    tmp_path, capsys
+) -> None:
+    agent = ev.Actor(kind=ev.ActorKind.AGENT, id="runner-7", role="session")
+    digest = params_digest({"start_T": 0.0, "stop_T": 1.0})
+    run = _make_run(
+        "r1", "FieldSweep", "done",
+        "2026-09-02T08:10:00+00:00", "2026-09-02T08:40:00+00:00", "data/run_0001.h5",
+    )
+    run = dataclasses_replace_actor(run, agent)
+    run = dataclasses.replace(run, params_digest=digest)
+    folder = _write_experiment(_session_root(tmp_path), runs=[run])
+
+    assert cli.main(["session", str(folder), "--json"]) == 0
+    entry = _json_out(capsys)["runs"][0]
+    assert entry["actor"] == "agent runner-7 (role session)"
+    assert entry["params_digest"] == digest
 
 
 # ── Resolution and exit codes ─────────────────────────────────────────────────
