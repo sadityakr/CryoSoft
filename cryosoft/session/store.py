@@ -19,6 +19,7 @@ _ACTIVE_FILENAME = "active.json"
 _GUI_STATE_FILENAME = "gui_state.json"
 _OUTBOX_FILENAME = "outbox.jsonl"
 _AGENT_FEED_FILENAME = "agent_actions.jsonl"
+_ASSISTANT_TRANSCRIPT_FILENAME = "assistant_transcript.jsonl"
 _DATA_DIRNAME = "data"
 
 
@@ -216,6 +217,24 @@ class ExperimentStore:
             — nothing is written until a non-operator actor acts).
         """
         return self._root / experiment_id / _AGENT_FEED_FILENAME
+
+    def assistant_transcript_path(self, experiment_id: str) -> Path:
+        """Return the experiment's **Assistant transcript** file path.
+
+        The conversation the physicist had with the **Embedded assistant**
+        lives inside the experiment folder for the same reason the **Agent
+        feed** and the **Outbox** do: the folder stays the complete, portable
+        record, so copying it copies the question, the answer and every tool
+        call in between.
+
+        Args:
+            experiment_id: The store key.
+
+        Returns:
+            ``<root>/<experiment_id>/assistant_transcript.jsonl`` (may not
+            exist yet — nothing is written until somebody asks something).
+        """
+        return self._root / experiment_id / _ASSISTANT_TRANSCRIPT_FILENAME
 
     def relativize_data_file(self, experiment_id: str, path: str | Path) -> str:
         """Return ``path`` relative to the experiment's session folder, when inside it.

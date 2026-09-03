@@ -86,6 +86,21 @@ its function. See `session/gateway/README.md` and the **Role** / **Action
 class** / **Agent gateway** / **Tool surface** / **Tool spec** entries in
 `GLOSSARY.md`.
 
+Also hosts the **Embedded assistant** (`assistant/`): the physicist's chat
+client for one running experiment, and deliberately not a third client of the
+engine. It holds one `Gateway`, its tools ARE `Gateway.tool_schemas()` and its
+tool execution IS `Gateway.call_tool()`, so it acts under the same **Role**, is
+refused by the same matrix, is stopped by the same **Kill switch** and leaves
+the same **Agent feed** trail as an agent in another process. It adds two
+things of its own: a written system-prompt standard (probe before running,
+quote a refusal verbatim, never claim an action without an `OK` verdict) and
+the **Assistant transcript**, the conversation half of the evidence the feed
+cannot hold. Its thread rule — model calls on a `QThreadPool` worker, tool
+calls on the thread that receives the answer — is what keeps the engine's
+single-hardware-thread invariant untouched. See
+`session/assistant/README.md` and the **Embedded assistant** / **Assistant
+transcript** entries in `GLOSSARY.md`.
+
 Not to be confused with `gui/form_autosave.py` (historically "the session
 model"): that is form persistence; this layer is experiment management.
 
@@ -123,6 +138,9 @@ GUI imports session).
   calls `approve_eln_draft()`, which hands it to the publisher attached by
   `attach_eln_publisher()`. Approval is a decision about a record, so it is
   taken here; queuing is the publisher's, so it is delegated back.
+- Questions for the **Embedded assistant** (`AssistantRuntime.ask()`), and
+  the `ChatClient` its answers come from — injected, never built here, so a
+  deployment with no API key simply constructs no runtime.
 - Servicing-log writes: `ServicingLogStore.add_entry`/`revise_entry`/
   `delete_entry` (manual, from the GUI's add/edit dialogs, and
   `CryogenicsRecorder`'s machine-attributed `"servicing"` entries — see
@@ -373,4 +391,5 @@ file-format change, not a routine edit.
 | `run_queue.py` | The run queue as data: immutable **run specs**, their ordering (operations drain before procedures — queue-jumping, never preemption), the one construction path from a spec to the live object the engine starts (both kinds, through `core.run_builder`'s `build_procedure()` / `build_operation()`, with a spec's optional `probe_spec` reducing the built run to a **probe run**), and the add-time **run validation** (declared `ParamSpec` bounds, the headless build, `control_limits` + the **session envelope**, plus the **duration estimate**). Imports no Qt, no Orchestrator, and no `cryosoft.procedures` — the classes a spec names are resolved through an injected run catalog. | `RunSpec`, `RunQueue` (`add`, `remove`, `move`, `clear`, `snapshot`, `entries`, `pop_next`, `find`), `RunFinding`, `RunValidation`, `build_run`, `validate_run`, `KIND_PROCEDURE`, `KIND_OPERATION`, the `FINDING_*` codes | `tests/test_run_queue.py` |
 | `agent_feed.py` | The **Agent feed**: one experiment's append-only trail of every command a non-operator actor submitted, every verdict answering one, every agent-caused `StateChange`, and every call of a tool declaring `ToolSpec.recorded` (with its cost line) — joined by `request_id`, tolerant on read, and never able to raise into the engine's emit path. | `AgentFeed` (`attach`, `record_command`, `record_verdict`, `record_event`, `record_tool_call`, `set_run_id`, `path`, `run_id`, `experiment_id`), `read_feed`, `SCHEMA_VERSION`, `RECORD_COMMAND`, `RECORD_VERDICT`, `RECORD_EVENT`, `RECORD_TOOL` | `tests/test_agent_feed.py` |
 | `gateway/` | The **Agent gateway** (sub-package, own README): the permission model in front of the control contract — `Role` × `ActionClass` as one `PERMISSION_MATRIX`, the PROVISIONAL per-command and per-capability classification tables, `authorize()`, and the in-process `Gateway` client that stamps an agent identity onto every command and answers a refusal on the engine's own verdict stream. Also renders the **Tool surface** from `CommandName` and the station declaration, answers `call_tool()` for every call, and — through the **Gateway server** — carries that same client to another PROCESS over a local socket, one `Gateway` per connection, without a thread. | `Gateway`, `EngineClient`, `GatewayServer`, `Role`, `Permission`, `PERMISSION_MATRIX`, `authorize`, `role_within_ceiling`, `ActionClass`, `ClassifiedAction`, `UnclassifiedActionError`, `COMMAND_ACTION_CLASSES`, `CONTROL_ACTION_CLASSES`, `LIFECYCLE_ACTION_CLASSES`, `classify_command`, `classify_control`, `ToolSpec`, `ToolContext`, `ToolError`, `SESSION_TOOLS`, `render_tools`, `capability_tool_name`, `validate_tool_args` | `tests/test_gateway.py`, `tests/test_gateway_tools.py`, `tests/test_gateway_server.py` + conformance |
+| `assistant/` | The **Embedded assistant** (sub-package, own README): the tool-use loop whose tools are the gateway's and whose execution is the gateway's, the system-prompt standard it runs under, the **Assistant transcript** it writes as evidence, the two **cost line**s it reports, and the thread rule that keeps every model call off the thread that drives the tick. | `AssistantRuntime`, `ASSISTANT_SYSTEM_PROMPT`, `ChatClient`, `ChatResult`, `ToolCall`, `AssistantError`, `FakeChatClient`, `AnthropicChatClient`, `AssistantTranscript`, `read_transcript`, `STATUS_*`, `empty_cost_line` | `tests/test_assistant.py` |
 | `servicing_log.py` | The Servicing Log framework: declared log kinds (incl. the unifying flat `servicing` kind, the only one the recorder writes as of Phase 2), revisioned per-kind storage, the hourly helium record, consumption fit, the automatic recorder, and legacy-log migration. | `LogKindSpec`, `DECLARED_LOG_KINDS`, `ServicingLogStore` (`add_entry`, `revise_entry`, `delete_entry`, `append_machine_entry`, `entries`, `revisions`, `recordings_path`, `migrate_legacy`), `HeliumRecordStore` (`append`, `samples`), `consumption_rate_pct_per_h`, `CryogenicsRecorder` (`on_states_updated`, `on_run_started`, `on_run_finished`; signal `cryo_warning`), `migrate_legacy_servicing_log` | `tests/test_servicing_log.py` + conformance |
