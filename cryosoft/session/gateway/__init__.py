@@ -23,6 +23,12 @@ from cryosoft.session.gateway.action_classes import (
     classify_control,
 )
 from cryosoft.session.gateway.gateway import EngineClient, Gateway
+from cryosoft.session.gateway.roles import (
+    PERMISSION_MATRIX,
+    Permission,
+    Role,
+    authorize,
+)
 from cryosoft.session.gateway.tools import (
     COMMAND_ARG_SCHEMAS,
     SESSION_TOOLS,
@@ -34,12 +40,6 @@ from cryosoft.session.gateway.tools import (
     render_command_tools,
     render_tools,
     validate_tool_args,
-)
-from cryosoft.session.gateway.roles import (
-    PERMISSION_MATRIX,
-    Permission,
-    Role,
-    authorize,
 )
 
 __all__ = [
