@@ -142,6 +142,16 @@ is the typed currency shared by all of them.
   previous construction with the thread decision given a name and a home, so
   behaviour is identical and the GUI suite is the proof.
 
+- The **Request spool** (`request_spool.py`, GLOSSARY.md's **Request spool**)
+  is the one way control enters this folder from OUTSIDE the process. A client
+  drops one JSON file per `Command` into `<log directory>/spool/requests/`
+  (written atomically, named for its `request_id`); `Orchestrator._tick_body()`
+  drains it at the same point it drains queued manual actions, re-validates
+  every request there, and submits it through the ordinary `submit()` path. No
+  thread, no socket, no second timer — the tick stays the single writer. It is
+  off unless `monitor.yaml` says `request_spool: true`, and the authority a
+  request may declare is capped by that file's `spool_max_role`.
+
 ## Exit (what it hands to other layers)
 
 - `Station` returns state snapshots `{vi_name: {field: value}}` from
@@ -237,6 +247,14 @@ is the typed currency shared by all of them.
 - `DataManager` writes one HDF5 file to disk per procedure run.
 - `plan.py` hands immutable value objects to every layer; a malformed plan
   raises at construction, at the guilty module, not deep in the tick loop.
+
+- The spool's answering half: every `Verdict` the engine emits is appended to
+  `<log directory>/spool/verdicts.jsonl`, every `StateChange`/`StatusSnapshot`
+  to a size-capped `events.jsonl`, and the latest `StationInfo` to
+  `station.json`. That is what lets an out-of-process client answer its reads
+  from a mirror — the verdict standard's rule that a client never calls into
+  the engine for a read — and wait for its own `request_id` without polling
+  anything but a file.
 
 ## Interface contract
 
@@ -443,6 +461,7 @@ skip it).
 | `conditions.py` | The System-Condition standard's pure policy core (origin × severity, scope follows severity): the `Condition`/`Verdict` value objects and the deterministic `decide()` verdict function. Stdlib-only — no other `cryosoft` import, machine-enforced by import-linter contract C13 | `Condition`, `Verdict`, `decide()`, `envelope_conditions()`, `SEVERITIES`, `ORIGINS` | `test_conditions.py` |
 | `availability.py` | The Availability standard's pure policy core (GLOSSARY.md's **Availability** / **Availability tag**): a closed tag vocabulary, a declared per-tag policy table, and the deterministic `state_for()`/`decide_availability()` functions that turn a VI's tag set into one of four mutually exclusive states plus a `TagPolicy` verdict. Stdlib-only — no other `cryosoft` import, machine-enforced by import-linter contract C14, mirroring C13's isolation of `conditions.py` above | `AVAILABILITY_TAGS`, `AVAILABILITY_STATES`, `TAG_PRECEDENCE`, `TagPolicy`, `TAG_POLICY`, `Availability`, `state_for()`, `decide_availability()` | `test_availability.py` |
 | `exceptions.py` | The exception hierarchy every layer catches by subtype, including the direct action path's typed refusals (each admission check has its own subclass, so a caller tells them apart without parsing prose) | `CryoSoftError`, `CryoSoftCommunicationError`, `CryoSoftSafetyError`, `CryoSoftActionRefusedError`, `CryoSoftPrivateActionError`, `CryoSoftUndeclaredActionError`, `CryoSoftActionScopeError`, `CryoSoftConfigError`, `DataSchemaError` | `test_foundation.py`, `test_direct_action_path.py` |
+| `request_spool.py` | The **Request spool**: a file-based write path into a RUNNING engine, with no thread, no socket and no timer. Owns the request-file format (`{schema, role, command}`, written atomically and named for its `request_id`), the two transport rules that precede the permission model (a spooled request may never claim the `operator` kind; its declared role is capped by the setup's `spool_max_role`), the JSONL verdict sink and the size-capped event/declaration mirror a client reads instead of asking. The permission model itself arrives as an injected `Authorizer` hook, because it lives in the session layer (L6) and nothing here may import it | `RequestSpool` (`take()`, `authorize()`, `record_verdict()`, `record_event()`, `write_request()`, `wait_for_verdict()`, `latest_status()`, `latest_station()`), `SpooledRequest`, `Authorizer`, `spool_directory()`, `SCHEMA_VERSION`, `DEFAULT_MAX_ROLE` | `test_request_spool.py`, `test_ctl.py` |
 | `run_builder.py` | The single headless construction path for a run: `build_procedure()` turns a procedure class plus plain values (params, sample info, data directory, prefix, experiment context, and an optional `ProbeSpec` that reduces the built run to a **probe run**) into a ready instance, and `build_operation()` does the same for an operation's `cls(station, **params)` shape — so the queue, the engine port's dict payloads and a headless client all build the same object, and `validate_run()` covers both kinds. Imports no Qt, so a run can be built from a test, a script, or any non-GUI client (the Orchestrator's `submit()` builds a dict-payload run through it); construction refusal is raised, never swallowed, and `PROCEDURE_BUILD_ERRORS` names the one tuple every caller catches. Generic in the class being built (`RunT`) rather than typed against `BaseProcedure`: an import of L4 here would make every importer of the builder an importer of the data manager under contract C5 | `build_procedure()`, `build_operation()`, `PROCEDURE_BUILD_ERRORS`, `RunT` | `test_run_builder.py`, `test_probe_runs.py` |
 | `estimates.py` | The **duration-estimate standard**'s pure policy core (GLOSSARY.md's **Duration estimate**): plain functions over declared values — no Station, no Orchestrator, no Qt, no hardware — that combine a run's own per-point cost (`estimate_step_seconds() -> StepCost`) with the setup's nominal ramp rates (`Station.nominal_ramp_rates()`) and the run's `planned_targets()` into a total plus its `setup`/`ramp`/`settle`/`measure` breakdown. Duck-typed on the run so it stays below L4. Every unknown — a VI with no declared rate, a measurement nothing times, a run with no cost model — becomes an explicit assumption, never a silent zero | `estimate_duration()`, `PHASE_SETUP`/`PHASE_RAMP`/`PHASE_SETTLE`/`PHASE_MEASURE` | `test_estimates.py` |
 | `ramps.py` | The `RampRecord` payload for `Orchestrator.ramps_updated`/`active_ramps()` — one entry per ramp running right now (label, unit, value, NEXT setpoint, END setpoint, rate, phase, owning run, stoppable + refusal reason, stale) — plus the pure `build_ramp_records()` builder that filters and assembles one `Station.get_ramp_status()` snapshot into it. Dependency-free, like `events.py`, so `orchestrator.py` (emitter) and `gui/ramp_tracker_panel.py` (consumer) can both import it | `RampRecord`, `build_ramp_records()`, `ACTIVE_RAMP_STATUS` | `test_ramps.py`, `test_l3_orchestrator.py` |

@@ -42,6 +42,7 @@ from cryosoft.core.plan import (
     Target,
 )
 from cryosoft.core.ramps import RampRecord, build_ramp_records
+from cryosoft.core.request_spool import RequestSpool
 from cryosoft.core.run_builder import build_operation, build_procedure
 from cryosoft.core.stall_detection import StallConfig, StallState, apply_stall_verdict
 from cryosoft.core.station import FaultRecord, Station
@@ -428,6 +429,7 @@ class Orchestrator(QObject):
         run_catalog: Mapping[str, type] | None = None,
         next_procedure: Callable[[], Any] | None = None,
         queue_snapshot: Callable[[], Sequence[Mapping[str, Any]]] | None = None,
+        request_spool: RequestSpool | None = None,
     ) -> None:
         """Build the engine over a Station.
 
@@ -463,6 +465,17 @@ class Orchestrator(QObject):
                 as JSON-safe dicts, merged into every ``QueueChanged`` event
                 so one snapshot describes the whole queue. Also a settable
                 attribute.
+            request_spool: The **Request spool** this engine drains, or
+                ``None`` (the default) for an engine with no file-based write
+                path at all. Given one, the tick reads it at the same point it
+                drains queued manual actions, and both broadcast streams are
+                mirrored into it so an out-of-process client can answer its
+                reads without asking. It adds no thread, no socket and no
+                timer: the drain is a plain synchronous call inside the tick.
+                Whoever supplies it also supplies its permission hook (see
+                ``session/gateway/roles.py``'s ``authorize_spooled()``),
+                because the role model lives in a layer this one may not
+                import.
         """
         super().__init__()
         self._station = station
@@ -510,6 +523,15 @@ class Orchestrator(QObject):
         # dropped the moment their run leaves the queue.
         self._queued_actors: dict[int, ev.Actor] = {}
         self._gui_action_queue: list[dict[str, Any]] = []
+        # The Request spool, when this engine has one: the file-based write
+        # path a client outside the process submits through. It is drained by
+        # the tick beside the manual-action queue and mirrors both broadcast
+        # streams; nothing about it runs off the tick.
+        self._request_spool: RequestSpool | None = request_spool
+        if request_spool is not None:
+            request_spool.ensure()
+            self.verdict_emitted.connect(request_spool.record_verdict)
+            self.event_emitted.connect(request_spool.record_event)
         self._active_system_vis: set[str] = set()
 
         self._wait_started = False
@@ -3547,6 +3569,49 @@ class Orchestrator(QObject):
                 return
             self._fail_to_error(f"Internal error: {exc}")
 
+    def _drain_request_spool(self) -> None:
+        """Carry out every request the **Request spool** queued, this tick.
+
+        The engine's file-based front door, drained beside the manual-action
+        queue and for the same reason: the tick is the single writer, so a
+        request that arrived from outside the process is admitted at the one
+        point where nothing else is touching the hardware. It runs on the
+        tick's own stack — no thread, no socket, no second timer.
+
+        Every request is validated again HERE, not where it was written: the
+        state, the claims, **Attendance** and the **Kill switch** may all have
+        moved since the file was dropped, so the answer a request gets is the
+        answer it would get if it had been submitted this instant. A request
+        the permission model refuses is answered with its ``BLOCKED_ROLE``
+        verdict on this engine's own ``verdict_emitted`` stream — the same
+        place an obeyed command's verdict appears, so the human's window sees
+        an agent being refused exactly as it sees it being obeyed — and never
+        reaches ``submit()``.
+        """
+        spool = self._request_spool
+        if spool is None:
+            return
+        requests = spool.take()
+        if not requests:
+            return
+        # Only now: building the declaration snapshot costs something, and an
+        # idle spool is the overwhelmingly common case.
+        station_info = self.station_info()
+        for request in requests:
+            refusal = spool.authorize(
+                request, station_info, self._attended, self._agent_gate
+            )
+            if refusal is not None:
+                logger.info(
+                    "Blocked spooled request %s: %s",
+                    request.request_id,
+                    refusal.reason,
+                )
+                self.verdict_emitted.emit(replace(refusal, seq=self._next_seq()))
+                continue
+            if request.command is not None:
+                self.submit(request.command)
+
     def _tick_body(self) -> None:
         # Fresh tick: whatever ramp snapshot the last one memoised is stale.
         # See _ramp_info() — one poll per tick, shared by every consumer.
@@ -3740,7 +3805,13 @@ class Orchestrator(QObject):
                     self._fail_run_for_fault(vi_name)
                 return
 
-        # 3. GUI Actions — each queued action gets the SAME verdict
+        # 3. Client requests, then GUI actions. The Request spool is drained
+        # FIRST so that a spooled submit_vi_action — which submit() queues for
+        # the single writer rather than dispatching — is executed by the drain
+        # immediately below, on this same tick rather than the next one.
+        self._drain_request_spool()
+
+        # Each queued action gets the SAME verdict
         # submit_vi_action() would give it right now, via the shared
         # _manual_action_admissible() predicate: the run may have
         # started/finished/changed claims since it was queued, and a claim

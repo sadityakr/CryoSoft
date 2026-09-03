@@ -44,6 +44,7 @@ from cryosoft.core.exceptions import (
     CryoSoftSafetyError,
     CryoSoftUndeclaredActionError,
 )
+from cryosoft.core.request_spool import DEFAULT_MAX_ROLE
 from cryosoft.core.plan import (
     SETPOINT_PARAM_PREFIX,
     Command,
@@ -2929,6 +2930,45 @@ def read_tick_interval_ms(config_path: str) -> int:
         return int(mon.get("tick_interval_ms", _DEFAULT_TICK_INTERVAL_MS))
     except (TypeError, ValueError):
         return _DEFAULT_TICK_INTERVAL_MS
+
+
+def read_request_spool_config(config_path: str) -> dict[str, Any]:
+    """Read ``monitor.yaml``'s **Request spool** settings, GUI-safe, defaulted.
+
+    Whether this setup offers a file-based write path into the running
+    application, and how much authority that door may grant, are properties
+    of the SETUP — a shared rig in a student lab and a single-user
+    development machine want different answers — so they live in the config
+    like every other limit. Expected shape::
+
+        monitor:
+          request_spool: true
+          spool_max_role: session
+
+    ``request_spool`` is ``false`` by default: an installation that has not
+    asked for the door does not have one. ``spool_max_role`` is
+    ``observer`` by default, the safe end of the role ladder, so turning the
+    spool on without a second thought grants reads and nothing more.
+
+    Args:
+        config_path: Path to the config directory containing ``monitor.yaml``.
+
+    Returns:
+        ``{"enabled": bool, "max_role": str}``, fully defaulted. Never
+        raises: a missing, unreadable or malformed file reads as "off".
+    """
+    settings: dict[str, Any] = {"enabled": False, "max_role": DEFAULT_MAX_ROLE}
+    monitor_config = _load_monitor_yaml(config_path)
+    if monitor_config is None:
+        return settings
+    block = monitor_config.get("monitor")
+    if not isinstance(block, dict):
+        return settings
+    settings["enabled"] = bool(block.get("request_spool", False))
+    max_role = block.get("spool_max_role", DEFAULT_MAX_ROLE)
+    if isinstance(max_role, str) and max_role:
+        settings["max_role"] = max_role
+    return settings
 
 
 def read_panels_config(config_path: str) -> dict[str, list[str]]:
