@@ -3112,6 +3112,60 @@ def read_gateway_config(config_path: str) -> dict[str, Any]:
     return merged
 
 
+#: The **Embedded assistant**'s defaults: off, and — when a setup does switch
+#: it on — offering no more authority than the role that reads and changes
+#: nothing. ``assistant_max_role`` is empty by default rather than
+#: ``"observer"`` so that a setup which has already declared a
+#: ``gateway_max_role`` does not have to declare its ceiling twice: empty means
+#: "the same ceiling this setup already grants an autonomous client", which is
+#: the honest answer, since the assistant IS one.
+_ASSISTANT_DEFAULTS: dict[str, Any] = {
+    "assistant": False,
+    "assistant_max_role": "",
+}
+
+
+def read_assistant_config(config_path: str) -> dict[str, Any]:
+    """Read ``monitor.yaml``'s assistant keys, GUI-safe, always defaulted.
+
+    Whether this setup offers a chat assistant at the window, and how much
+    authority its role selector may hand out, is a property of the setup rather
+    than of the code — the same rule every limit follows — so both live in the
+    config beside the gateway's own keys. Like ``read_gateway_config()``, an
+    absent block means "use the defaults", and the defaults are the closed
+    door.
+
+    Expected shape::
+
+        monitor:
+          tick_interval_ms: 3000
+          assistant: true
+          assistant_max_role: session
+
+    Args:
+        config_path: Path to the config directory containing ``monitor.yaml``.
+
+    Returns:
+        ``_ASSISTANT_DEFAULTS`` with any declared override merged in:
+        ``assistant`` as a bool and ``assistant_max_role`` as a string, where
+        ``""`` means "fall back to this setup's ``gateway_max_role``". Falls
+        back to the defaults untouched if the file or YAML is unreadable or the
+        keys are absent — never raises.
+    """
+    merged = dict(_ASSISTANT_DEFAULTS)
+    monitor_config = _load_monitor_yaml(config_path)
+    if monitor_config is None:
+        return merged
+    block = monitor_config.get("monitor")
+    if not isinstance(block, dict):
+        return merged
+    if "assistant" in block:
+        merged["assistant"] = bool(block["assistant"])
+    if "assistant_max_role" in block:
+        merged["assistant_max_role"] = str(block["assistant_max_role"])
+    return merged
+
+
 def read_cryogenics_config(config_path: str) -> dict[str, Any]:
     """Read the optional ``cryogenics:`` block, GUI-safe, with defaults applied.
 

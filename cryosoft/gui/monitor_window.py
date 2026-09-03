@@ -56,8 +56,10 @@ from cryosoft.gui.theme import (
     TEXT_ON_ACCENT,
     TEXT_PRIMARY,
 )
+from cryosoft.gui.assistant_dock import AssistantDock
 from cryosoft.gui.trends_quadrant import TrendsQuadrant
 from cryosoft.gui.widget_lifecycle import hold_window, release_window, retire_widget
+from cryosoft.session.gateway import Role
 from cryosoft.session.manager import ExperimentManager
 from cryosoft.session.models import GUEST_USER_ID
 from cryosoft.session.store import SessionStore
@@ -68,6 +70,7 @@ if TYPE_CHECKING:
     from cryosoft.core.station import Station
 
     from cryosoft.core.config_catalog import ConfigCatalog
+    from cryosoft.session.assistant import AssistantRuntime
     from cryosoft.session.servicing_log import (
         CryogenicsRecorder,
         HeliumRecordStore,
@@ -177,6 +180,21 @@ class MonitorWindow(QMainWindow):
             (``Station.read_panels_config()``): per-VI allowlists of the
             controls shown on the compact instrument cards. None/empty means
             every VI keeps its declared ``panel=`` defaults.
+        assistant_enabled: Whether this setup declares ``monitor.yaml``'s
+            ``assistant: true``. False (the default) builds no chat dock at
+            all, so a setup that never asked for one carries no widget.
+        assistant_runtime: The **Embedded assistant**'s ``AssistantRuntime``,
+            or None when there is no API key to build a client with — in which
+            case the dock is still registered and shows its one-line
+            no-key state, because a missing key is a configuration fact rather
+            than a fault.
+        assistant_max_role: The most authority the dock's role selector may
+            offer (``assistant_max_role``, falling back to
+            ``gateway_max_role``). Never widened here.
+        assistant_role_factory: Called with a role value to build the
+            ``Gateway`` the assistant should reconnect under. None leaves the
+            selector disabled: the window does not own the engine, so it does
+            not build connections.
     """
 
     def __init__(
@@ -198,6 +216,10 @@ class MonitorWindow(QMainWindow):
         cryogenics_recorder: CryogenicsRecorder | None = None,
         panels_config: dict[str, list[str]] | None = None,
         mirror: StatusMirror | None = None,
+        assistant_enabled: bool = False,
+        assistant_runtime: AssistantRuntime | None = None,
+        assistant_max_role: str = "",
+        assistant_role_factory: Callable[[str], Any] | None = None,
     ) -> None:
         super().__init__(parent)
         self._station = station
@@ -308,7 +330,23 @@ class MonitorWindow(QMainWindow):
         self.setWindowTitle("CryoSoft — Monitor")
         window_geometry.restore_or_center(self, _GEOMETRY_KEY, fraction=0.9)
 
+        # The Embedded assistant's chat dock: config-gated like every optional
+        # feature, so a setup that does not declare `assistant: true` builds no
+        # widget at all. The window renders the runtime and never drives it —
+        # it holds no gateway and calls no tool (see gui/README.md).
+        self._assistant_dock: AssistantDock | None = None
+
         self._build_ui()
+        if assistant_enabled:
+            self._assistant_dock = AssistantDock(
+                assistant_runtime,
+                max_role=assistant_max_role or Role.OBSERVER.value,
+                role_factory=assistant_role_factory,
+                parent=self,
+            )
+            self.addDockWidget(
+                Qt.DockWidgetArea.RightDockWidgetArea, self._assistant_dock
+            )
         self._session_info.apply_session(self._session)
         self._build_menu()
         self._connect_signals()
