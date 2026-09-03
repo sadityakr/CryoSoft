@@ -319,3 +319,46 @@ forbidden_modules = [
     "cryosoft.core.plan",
     "cryosoft.core.data_manager",
 ]
+
+[[tool.importlinter.contracts]]
+name = "C17: the data reader is standalone — it imports only events/exceptions from cryosoft (plus h5py/numpy/stdlib), so an analysis process can import it alone"
+type = "forbidden"
+# The allowlist is exactly `cryosoft.core.events` and `cryosoft.core.exceptions`;
+# everything else in the package is enumerated below, because import-linter only
+# matches a forbidden module that is not an ancestor of the source (naming
+# `cryosoft` or `cryosoft.core` here would silently match nothing). A core module
+# added later is caught by test_l5_data_reader.py's import-allowlist test, which
+# reads the module's own imports rather than a list that has to be maintained.
+source_modules = ["cryosoft.core.data_reader"]
+forbidden_modules = [
+    "cryosoft.drivers",
+    "cryosoft.virtual_instruments",
+    "cryosoft.procedures",
+    "cryosoft.gui",
+    "cryosoft.main",
+    "cryosoft.session",
+    "cryosoft.troubleshoot",
+    "cryosoft.core.availability",
+    "cryosoft.core.conditions",
+    "cryosoft.core.config_catalog",
+    "cryosoft.core.data_manager",
+    "cryosoft.core.decorators",
+    "cryosoft.core.gates",
+    "cryosoft.core.logging_config",
+    "cryosoft.core.operation",
+    "cryosoft.core.operational_status",
+    "cryosoft.core.orchestrator",
+    "cryosoft.core.paths",
+    "cryosoft.core.plan",
+    "cryosoft.core.procedure",
+    "cryosoft.core.ramps",
+    "cryosoft.core.run_buffer",
+    "cryosoft.core.run_builder",
+    "cryosoft.core.stall_detection",
+    "cryosoft.core.station",
+    "cryosoft.core.sweep_builder",
+    "cryosoft.core.tiered_trend_logger",
+    "cryosoft.core.trend_check_runner",
+    "cryosoft.core.trend_checks",
+    "cryosoft.core.trend_history",
+]
