@@ -186,6 +186,13 @@ COMMAND_ACTION_CLASSES: dict[CommandName, ClassifiedAction] = {
     CommandName.DISCONNECT_INSTRUMENT: ClassifiedAction(
         ActionClass.RECOVERY, "Its inverse — releases the bus, commands nothing."
     ),
+    CommandName.PING_INSTRUMENT: ClassifiedAction(
+        ActionClass.RECOVERY,
+        "PROVISIONAL: an identity query changes nothing, so rule 3 would "
+        "make it a read — but it is bus traffic on a shared bus during a "
+        "run, and it is the connection-lifecycle probe the two rows above "
+        "belong to, so it is classified with them.",
+    ),
     # ── Faults, safety and recovery ──
     CommandName.EMERGENCY_STANDBY: ClassifiedAction(
         ActionClass.RECOVERY,

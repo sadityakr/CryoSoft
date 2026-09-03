@@ -50,6 +50,7 @@ import-linter, see pyproject.toml [tool.importlinter]):
 
 from __future__ import annotations
 
+import ast
 import dataclasses
 import importlib
 import inspect
@@ -3585,6 +3586,12 @@ ORCHESTRATOR_NON_COMMANDS: dict[str, str] = {
     "override_active": "read: whether a manual override is in force",
     "scanner_enabled": "read: whether the scanner is enabled",
     "vi_faults": "read: the current FaultRecord per VI",
+    # ── The status mirror's two priming reads: taken once, by whoever
+    #    BUILDS the engine, on the engine's own thread, to prime the client
+    #    mirror it hands over. Every later value arrives on the event
+    #    stream, so no client ever calls either of these.
+    "station_info": "read: the station declaration, the mirror's priming read",
+    "status_snapshot": "read: this moment's status, the mirror's priming read",
     # ── Process lifecycle: owned by main.py and test teardown, not by a
     #    client. A client that could stop the tick timer could strand a ramp.
     "shutdown": "lifecycle: stops the tick timer at application exit",
@@ -3689,6 +3696,10 @@ SNAPSHOT_UNANSWERED_READS: dict[str, str] = {
     # The per-tick troubleshooting record has its own stream (the
     # ``operational_status`` signal and status.jsonl), not the status mirror.
     "get_operational_status": "carried by the operational-status stream",
+    # The mirror's two priming reads are what a client is primed WITH; they
+    # are the snapshot and the declaration, not fields inside one.
+    "status_snapshot": "IS the snapshot — the mirror's priming read",
+    "station_info": "the declaration event, primed and then re-emitted",
 }
 
 
@@ -4150,6 +4161,328 @@ def test_no_source_reaches_into_the_engines_queue() -> None:
         "Orchestrator.queue_procedure/queue_operation) instead:\n"
         + "\n".join(offenders)
     )
+
+
+# ── The GUI/engine boundary ───────────────────────────────────────────────────
+# The status-mirror standard (gui/README.md, GLOSSARY.md's **Status mirror**)
+# and the control contract's command half. A widget may SUBMIT commands and
+# CONNECT to signals; it may not read the engine, because a read is the one
+# thing that cannot cross to an engine that is deep inside one measure().
+# These two tests are what keep that true as widgets are added.
+
+#: Engine attributes a widget may touch, beyond the commands themselves: the
+#: Qt signals it connects to, and the port a client that speaks the control
+#: contract submits through. The two contract channels appear twice: a client
+#: CONSUMES them rather than relaying them, so the proxy carries
+#: ``verdict_emitted``/``event_emitted`` under the shorter ``verdict``/
+#: ``event``, and a widget may connect to whichever name its client offers.
+_ENGINE_SIGNALS = frozenset({
+    "verdict_emitted",
+    "event_emitted",
+    "verdict",
+    "event",
+    "states_updated",
+    "monitoring_changed",
+    "state_changed",
+    "procedure_progress",
+    "procedure_finished",
+    "run_started",
+    "run_finished",
+    "error_occurred",
+    "error_event",
+    "action_blocked",
+    "action_succeeded",
+    "action_failed",
+    "instrument_reconnected",
+    "instrument_disconnected",
+    "measurement_ready",
+    "operational_status",
+    "ramps_updated",
+    "status_message",
+    "operation_status",
+    "operation_progress",
+})
+
+#: Non-command engine attributes a named GUI module may still touch, each with
+#: the reason. Anything not listed is a violation, including a private one.
+_GUI_ENGINE_EXEMPTIONS: dict[str, dict[str, str]] = {
+    "cryosoft/gui/queue_panel.py": {
+        "publish_queue": (
+            "the queue seam, not a command: the queue is data this panel "
+            "owns when no session layer is wired, so the engine cannot see a "
+            "change happen and is asked to broadcast it"
+        ),
+        "next_procedure": (
+            "the pull seam a standalone window claims when nobody else has, "
+            "so a window with no session layer still has a queue the engine "
+            "can pull from — never a way to push a run in"
+        ),
+        "queue_snapshot": (
+            "the other half of that seam: what the engine reads the waiting "
+            "entries from for every QueueChanged"
+        ),
+    },
+}
+
+
+def _engine_attribute_reads(source: str) -> list[tuple[int, str]]:
+    """Return every attribute taken off an engine-shaped name in *source*.
+
+    "Engine-shaped" is a name mentioning ``orch``, ``proxy`` or ``engine``:
+    the widgets hold the engine (and, later, its proxy) under exactly those
+    names, and matching on the name rather than on a type keeps this a pure
+    source scan that needs no imports and no Qt.
+
+    Args:
+        source: One module's source text.
+
+    Returns:
+        ``(line number, attribute name)`` for each access, in file order.
+    """
+    found: list[tuple[int, str]] = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Attribute):
+            continue
+        base = node.value
+        if isinstance(base, ast.Name):
+            owner = base.id
+        elif isinstance(base, ast.Attribute):
+            owner = base.attr
+        else:
+            continue
+        lowered = owner.lower()
+        if any(token in lowered for token in ("orch", "proxy", "engine")):
+            found.append((node.lineno, node.attr))
+    return found
+
+
+def test_gui_touches_the_engine_only_through_commands_and_signals() -> None:
+    """No read from ``gui/`` into the engine — the status-mirror standard.
+
+    Every widget answers reads from its ``StatusMirror`` and reaches the
+    engine only to submit a command (a ``CommandName``, which is exactly the
+    method set the proxy exposes) or to connect a signal. A read that slipped
+    back in would be a synchronous call into an engine the thread move puts
+    on the other side of a boundary, and it would block the window for as
+    long as the engine is inside one ``measure()``.
+
+    If this fails on a read you just added: answer it from the mirror. If the
+    mirror cannot answer it, the ``StatusSnapshot`` is missing a field.
+    """
+    allowed = {member.value for member in CommandName} | _ENGINE_SIGNALS | {"submit"}
+    offenders: list[str] = []
+    for path in sorted((PACKAGE_DIR / "gui").rglob("*.py")):
+        relative = path.relative_to(PACKAGE_DIR.parent).as_posix()
+        exempt = _GUI_ENGINE_EXEMPTIONS.get(relative, {})
+        for line_number, attribute in _engine_attribute_reads(
+            path.read_text(encoding="utf-8")
+        ):
+            if attribute in allowed or attribute in exempt:
+                continue
+            # OrchestratorState.IDLE and friends are the enum, not the engine.
+            if attribute.isupper():
+                continue
+            offenders.append(f"{relative}:{line_number}: .{attribute}")
+
+    assert not offenders, (
+        "GUI access to the engine outside the command set and the signals — "
+        "read it from the StatusMirror instead:\n" + "\n".join(sorted(offenders))
+    )
+
+
+def test_gui_never_reaches_into_the_station_for_a_vi() -> None:
+    """``Station.get_vi()`` is never called from ``gui/``.
+
+    A VI is an object on the engine's side of the boundary: holding one lets
+    a widget call hardware directly, and it cannot cross a thread. The panels
+    build from the **Station info** declaration snapshot instead, which says
+    everything about an instrument that a panel renders and nothing a client
+    cannot hold.
+    """
+    offenders: list[str] = []
+    for path in sorted((PACKAGE_DIR / "gui").rglob("*.py")):
+        relative = path.relative_to(PACKAGE_DIR.parent).as_posix()
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "get_vi"
+            ):
+                offenders.append(f"{relative}:{node.lineno}: get_vi()")
+
+    assert not offenders, (
+        "Station.get_vi() called from cryosoft/gui/ — build from the "
+        "StationInfo declaration the mirror carries instead:\n"
+        + "\n".join(offenders)
+    )
+
+
+def test_the_proxy_exposes_every_command_and_nothing_the_engine_lacks() -> None:
+    """The three-way contract check, two legs of it: ``CommandName`` ⊆ proxy
+    methods ⊆ Orchestrator commands.
+
+    The engine has two clients and the contract is declared once, so neither
+    can offer an action the other cannot see. The third leg — the agent
+    gateway's tool list — joins this test when the gateway lands; it will be
+    the same enumeration a third time.
+
+    If this fails on a command you just added: give the proxy a typed method
+    of that name, taking the arguments the engine method takes.
+    """
+    from cryosoft.core.orchestrator_proxy import OrchestratorProxy
+
+    declared = {member.value for member in CommandName}
+    proxy_methods = {
+        name
+        for name, value in vars(OrchestratorProxy).items()
+        if not name.startswith("_") and inspect.isfunction(value)
+    }
+    engine_methods = _orchestrator_public_methods()
+
+    assert declared - proxy_methods == set(), (
+        f"CommandName members the proxy does not expose: "
+        f"{sorted(declared - proxy_methods)}"
+    )
+    assert declared - engine_methods == set(), (
+        f"CommandName members with no Orchestrator method behind them: "
+        f"{sorted(declared - engine_methods)}"
+    )
+
+
+def test_every_proxy_command_takes_the_engine_methods_arguments() -> None:
+    """A widget swapping the engine for the proxy must not have to adapt.
+
+    Same names, same parameters, in the same order — which is what makes the
+    proxy transparent enough for the whole GUI to move behind it in one step
+    rather than widget by widget. The proxy returns a ``request_id`` where the
+    engine returns the call's own value, which is the one deliberate
+    difference: an answer that has to survive a thread boundary cannot be a
+    return value.
+    """
+    from cryosoft.core.orchestrator import Orchestrator
+    from cryosoft.core.orchestrator_proxy import OrchestratorProxy
+
+    mismatches: list[str] = []
+    for member in CommandName:
+        engine_params = [
+            name
+            for name in inspect.signature(
+                getattr(Orchestrator, member.value)
+            ).parameters
+            if name not in ("self", "actor")
+        ]
+        proxy_params = [
+            name
+            for name in inspect.signature(
+                getattr(OrchestratorProxy, member.value)
+            ).parameters
+            if name != "self"
+        ]
+        if engine_params != proxy_params:
+            mismatches.append(
+                f"{member.value}: engine{engine_params} != proxy{proxy_params}"
+            )
+
+    assert not mismatches, (
+        "Proxy methods whose parameters do not match the engine's:\n"
+        + "\n".join(mismatches)
+    )
+
+
+def test_the_proxy_re_exposes_every_engine_signal() -> None:
+    """Every Orchestrator signal a widget can connect to exists on the proxy.
+
+    The passthrough half of transparency: ``orchestrator.states_updated
+    .connect(...)`` in a widget becomes ``proxy.states_updated.connect(...)``
+    and nothing else moves. The two contract channels are deliberately
+    renamed — ``verdict_emitted``/``event_emitted`` become ``verdict``/
+    ``event`` — because a client consumes them, it does not relay them.
+    """
+    from PyQt6.QtCore import pyqtSignal
+
+    from cryosoft.core.orchestrator import Orchestrator
+    from cryosoft.core.orchestrator_proxy import OrchestratorProxy
+
+    renamed = {"verdict_emitted": "verdict", "event_emitted": "event"}
+    engine_signals = {
+        name
+        for name, value in vars(Orchestrator).items()
+        if isinstance(value, pyqtSignal)
+    }
+    proxy_signals = {
+        name
+        for name, value in vars(OrchestratorProxy).items()
+        if isinstance(value, pyqtSignal)
+    }
+    expected = {renamed.get(name, name) for name in engine_signals}
+    missing = expected - proxy_signals
+    assert not missing, f"Engine signals the proxy does not re-expose: {sorted(missing)}"
+
+
+#: GUI modules allowed to import ``cryosoft.core.station`` at RUNTIME, and
+#: what they take from it. Both are pure config-FILE readers that take no
+#: Station and touch no instrument; they are in that module for historical
+#: reasons and moving them is a separate change. Import contract C19 carries
+#: the matching ``ignore_imports`` entries.
+_RUNTIME_STATION_IMPORTS: dict[str, set[str]] = {
+    "cryosoft/gui/config_editor.py": {"validate_config_dir"},
+    "cryosoft/gui/monitor_window.py": {"read_instrument_metadata"},
+}
+
+
+def test_gui_imports_the_station_only_for_typing_or_config_helpers() -> None:
+    """C19's other half: a ``cryosoft.core.station`` import under ``gui/`` is
+    type-only, or one of the two named config-file helpers.
+
+    Import contract C19 forbids the dependency outright and lists the
+    existing modules in ``ignore_imports`` — import-linter counts an import
+    inside ``if TYPE_CHECKING:`` like any other, so the contract alone cannot
+    express "types are fine". This is the half that can: every ignored import
+    must be inside a type-checking guard, unless it is one of the two config
+    helpers named above.
+    """
+    offenders: list[str] = []
+    for path in sorted((PACKAGE_DIR / "gui").rglob("*.py")):
+        relative = path.relative_to(PACKAGE_DIR.parent).as_posix()
+        allowed_names = _RUNTIME_STATION_IMPORTS.get(relative, set())
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        guarded = {
+            node
+            for block in ast.walk(tree)
+            if isinstance(block, ast.If) and _is_type_checking_guard(block.test)
+            for node in ast.walk(block)
+        }
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            if node.module != "cryosoft.core.station":
+                continue
+            if node in guarded:
+                continue
+            for alias in node.names:
+                if alias.name not in allowed_names:
+                    offenders.append(f"{relative}:{node.lineno}: {alias.name}")
+
+    assert not offenders, (
+        "Runtime import(s) of cryosoft.core.station under cryosoft/gui/ — put "
+        "the name behind `if TYPE_CHECKING:` (the GUI holds a Station only as "
+        "a type), or add it to _RUNTIME_STATION_IMPORTS and C19's "
+        "ignore_imports with its reason:\n" + "\n".join(offenders)
+    )
+
+
+def _is_type_checking_guard(test: ast.expr) -> bool:
+    """Return whether an ``if`` test is a ``TYPE_CHECKING`` guard.
+
+    Args:
+        test: The ``If`` node's test expression.
+
+    Returns:
+        True for ``TYPE_CHECKING`` and ``typing.TYPE_CHECKING``.
+    """
+    if isinstance(test, ast.Name):
+        return test.id == "TYPE_CHECKING"
+    return isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"
 
 
 # ── Run-source contract ───────────────────────────────────────────────────────

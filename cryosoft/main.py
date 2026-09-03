@@ -5,15 +5,15 @@ from __future__ import annotations
 import logging
 import sys
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import pyqtgraph as pg
 from PyQt6.QtCore import QProcess
 from PyQt6.QtWidgets import QApplication
 
 from cryosoft.core.config_catalog import ConfigCatalog
+from cryosoft.core.instrument_host import InstrumentHost
 from cryosoft.core.logging_config import setup_logging
-from cryosoft.core.orchestrator import Orchestrator
 from cryosoft.core.paths import measurement_root
 from cryosoft.core.station import (
     Station,
@@ -159,9 +159,60 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
     catalog = ConfigCatalog(
         app_settings.shipped_config_dir(), app_settings.user_config_dir()
     )
-    station, used_path, warnings = build_station_with_fallback(_startup_candidates())
-    if on_station_built is not None:
-        on_station_built(station)
+
+    # The run catalog: {class __name__: class} for every discovered procedure
+    # and operation. Discovery lives up here because neither the engine
+    # (contract C5) nor the session layer (C11) may import
+    # cryosoft.procedures — whoever owns discovery hands the catalog down, so
+    # a client that speaks the control contract can name a run by class and
+    # the run queue can resolve a stored spec back to its class.
+    run_catalog: dict[str, type] = {
+        cls.__name__: cls for cls in (*discover_procedures(), *discover_operations())
+    }
+
+    # The instrument stack is built by the InstrumentHost, not here: which
+    # THREAD owns the Station and the Orchestrator is the host's decision, and
+    # `inline` mode is exactly today's behaviour with that decision named. The
+    # station factory therefore carries the whole build — including the config
+    # fallback, whose resolved path the Orchestrator's own safety settings
+    # come from, which is why the options are a callable too.
+    build: dict[str, Any] = {}
+
+    def _build_station() -> Station:
+        """Build the Station from the first usable startup config."""
+        station, used_path, warnings = build_station_with_fallback(
+            _startup_candidates()
+        )
+        build["used_path"] = used_path
+        build["warnings"] = warnings
+        if on_station_built is not None:
+            on_station_built(station)
+        return station
+
+    def _orchestrator_options(_station: Station) -> dict[str, Any]:
+        """Read the engine's settings from the config the build resolved."""
+        safety_config = read_safety_config(build["used_path"])
+        return {
+            "tick_interval_ms": 3000,
+            "manual_override_timeout_s": safety_config["manual_override_timeout_s"],
+            "stall_seconds": safety_config["stall_seconds"],
+            "hold_enforcement_interval_s": safety_config[
+                "hold_enforcement_interval_s"
+            ],
+            "hold_enforcement_max_attempts": safety_config[
+                "hold_enforcement_max_attempts"
+            ],
+            "run_catalog": run_catalog,
+        }
+
+    app.instrument_host = InstrumentHost(
+        _build_station, orchestrator_options=_orchestrator_options
+    )
+    app.instrument_host.start()
+    station = app.instrument_host.station
+    used_path = build["used_path"]
+    warnings = build["warnings"]
+
     # Persist the config that actually loaded (by identity, not path) so the
     # next launch starts there even from a different clone/worktree.
     used_entry = catalog.get_by_path(used_path)
@@ -177,26 +228,12 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
             station.get_offline_info(offline_name).reason,
         )
 
-    # The run catalog: {class __name__: class} for every discovered procedure
-    # and operation. Discovery lives up here because neither the engine
-    # (contract C5) nor the session layer (C11) may import
-    # cryosoft.procedures — whoever owns discovery hands the catalog down, so
-    # a client that speaks the control contract can name a run by class and
-    # the run queue can resolve a stored spec back to its class.
-    run_catalog: dict[str, type] = {
-        cls.__name__: cls for cls in (*discover_procedures(), *discover_operations())
-    }
-
-    safety_config = read_safety_config(used_path)
-    orchestrator = Orchestrator(
-        station,
-        tick_interval_ms=3000,
-        manual_override_timeout_s=safety_config["manual_override_timeout_s"],
-        stall_seconds=safety_config["stall_seconds"],
-        hold_enforcement_interval_s=safety_config["hold_enforcement_interval_s"],
-        hold_enforcement_max_attempts=safety_config["hold_enforcement_max_attempts"],
-        run_catalog=run_catalog,
-    )
+    # The control contract, rendered for this process's clients: one typed
+    # method per command, the engine's signals re-exposed, and every read
+    # answered from a status mirror the host primed on the engine's own
+    # thread. Nothing above this line hands the engine itself to anyone.
+    orchestrator = app.instrument_host.build_proxy()
+    mirror = orchestrator.status
 
     # Trend-check standard (core/trend_checks.py, GLOSSARY.md's **Trend
     # check**): a small, single-purpose scheduler independent of the
@@ -254,7 +291,8 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
     # reads the waiting entries from it for every QueueChanged event. Wired
     # here because this is the one place that owns both objects — the queue
     # cannot exist before the engine it broadcasts through, and the engine
-    # must not import the session layer (contract C12).
+    # must not import the session layer (contract C12). It is installed
+    # through the proxy, like every other call a client makes here.
     orchestrator.next_procedure = session_manager.next_run
     orchestrator.queue_snapshot = session_manager.queue_entries
 
@@ -336,6 +374,7 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
         servicing_log_kinds=servicing_log_kinds,
         cryogenics_recorder=cryogenics_recorder,
         panels_config=read_panels_config(used_path),
+        mirror=mirror,
     )
     monitor.show()
 

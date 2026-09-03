@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import qtawesome as qta
 from PyQt6.QtCore import Qt, pyqtSignal
@@ -25,7 +25,6 @@ from PyQt6.QtWidgets import (
 
 from cryosoft.core.plan import ParamGroup, ParamSpec
 from cryosoft.core.procedure import BaseProcedure
-from cryosoft.core.station import Station
 from cryosoft.gui import param_form
 from cryosoft.gui.form_autosave import FormAutosaveState
 from cryosoft.gui.sweep_axis_widget import SweepAxisWidget
@@ -35,6 +34,9 @@ from cryosoft.gui.theme import (
     TEXT_ON_ACCENT,
     TEXT_PRIMARY,
 )
+
+if TYPE_CHECKING:  # the GUI holds a Station only as a type (contract C19)
+    from cryosoft.core.station import Station
 
 # Max width (px) for the Sweep parameter column. Its inputs are narrow, so this
 # stops it expanding to an equal third and crowding out the Measurement column.

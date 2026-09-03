@@ -28,8 +28,9 @@ from PyQt6.QtWidgets import (
 )
 
 from cryosoft.core.events import ErrorEvent
-from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
-from cryosoft.core.station import Station, read_instrument_metadata
+from cryosoft.core.orchestrator import OrchestratorState
+from cryosoft.core.orchestrator_proxy import OrchestratorProxy
+from cryosoft.core.station import read_instrument_metadata
 from cryosoft.gui import app_settings  # import the module (not the function) so tests can monkeypatch the factory
 from cryosoft.gui import form_autosave  # module import keeps save/load monkeypatchable
 from cryosoft.gui import window_geometry
@@ -45,6 +46,7 @@ from cryosoft.gui.operations_panel import OperationsPanel
 from cryosoft.gui.ramp_tracker_panel import RampTrackerPanel
 from cryosoft.gui.servicing_log_page import ServicingLogPage
 from cryosoft.gui.session_dialogs import ResumeSessionDialog
+from cryosoft.core.status_mirror import StatusMirror
 from cryosoft.gui.setup_dialogs import InstrumentInfoDialog, LoginDialog
 from cryosoft.gui.theme import (
     BANNER_SEVERITY_ERROR,
@@ -61,6 +63,8 @@ from cryosoft.session.store import SessionStore
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from cryosoft.core.station import Station
 
     from cryosoft.core.config_catalog import ConfigCatalog
     from cryosoft.session.servicing_log import (
@@ -177,7 +181,7 @@ class MonitorWindow(QMainWindow):
     def __init__(
         self,
         station: Station,
-        orchestrator: Orchestrator,
+        orchestrator: OrchestratorProxy,
         parent: QWidget | None = None,
         catalog: ConfigCatalog | None = None,
         active_config_path: str | None = None,
@@ -192,10 +196,19 @@ class MonitorWindow(QMainWindow):
         servicing_log_kinds: list[str] | None = None,
         cryogenics_recorder: CryogenicsRecorder | None = None,
         panels_config: dict[str, list[str]] | None = None,
+        mirror: StatusMirror | None = None,
     ) -> None:
         super().__init__(parent)
         self._station = station
         self._orchestrator = orchestrator
+        # The status-mirror standard: every read below is a mirror read. One
+        # mirror is shared by this window and every panel it builds, so they
+        # all answer from the same event. Whoever builds the engine hands one
+        # in already primed; the fallback is the inline construction path
+        # (tests, and any caller with the engine on its own thread).
+        self._mirror = mirror if mirror is not None else StatusMirror.for_engine(
+            orchestrator
+        )
         self._panels_config = dict(panels_config or {})
         self._procedure_window = None  # lazily created
         self._diagnostics_window = None  # lazily created
@@ -307,7 +320,7 @@ class MonitorWindow(QMainWindow):
         # (or a pre-existing hold — _refresh_ack_controls() checks
         # held_vi_names() live, independent of the state passed in) may
         # already be active by the time this window is constructed.
-        self._on_state_changed(self._orchestrator.state)
+        self._on_state_changed(self._mirror.state)
 
         # Attach the log handler after the UI exists (LogPanel guards against
         # a duplicate if the window is ever reconstructed in-process).
@@ -441,6 +454,7 @@ class MonitorWindow(QMainWindow):
                     if self._session_manager is not None
                     else None
                 ),
+                mirror=self._mirror,
             )
         self._procedure_window.show()
         self._procedure_window.raise_()
@@ -449,7 +463,9 @@ class MonitorWindow(QMainWindow):
     def _open_diagnostics_window(self) -> None:
         """Lazily create and show the DiagnosticsWindow."""
         if self._diagnostics_window is None:
-            self._diagnostics_window = DiagnosticsWindow(self._orchestrator)
+            self._diagnostics_window = DiagnosticsWindow(
+                self._orchestrator, self._mirror
+            )
         self._diagnostics_window.show()
         self._diagnostics_window.raise_()
         self._diagnostics_window.activateWindow()
@@ -662,7 +678,7 @@ class MonitorWindow(QMainWindow):
 
     def _sync_monitoring_btn(self) -> None:
         """Mirror the Orchestrator's confirmed monitoring state onto the toggle."""
-        monitoring = self._orchestrator.is_monitoring()
+        monitoring = self._mirror.is_monitoring()
         btn = self._monitoring_btn
         btn.setChecked(monitoring)
         btn.setText("Stop Monitoring" if monitoring else "Start Monitoring")
@@ -727,13 +743,12 @@ class MonitorWindow(QMainWindow):
         # a live panel in place (_on_instrument_reconnected).
         tag_by_type = {"measurement": "Measurement", "switch": "Scanner"}
         for offset, vi_name in enumerate(self._station.offline_vi_names()):
-            info = self._station.get_offline_info(vi_name)
             card = OfflineInstrumentPanel(
                 vi_name,
-                info,
                 self._orchestrator,
+                self._mirror,
                 parent=self,
-                type_tag=tag_by_type.get(info.vi_type),
+                type_tag=tag_by_type.get(self._role_of(vi_name)),
             )
             card.setSizePolicy(
                 QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
@@ -762,16 +777,15 @@ class MonitorWindow(QMainWindow):
         Returns:
             The wired InstrumentPanel, size policy applied.
         """
-        vi = self._station.get_vi(vi_name)
         extra = (
             self._build_scanner_enable_checkbox(vi_name)
-            if self._station.get_vi_type(vi_name) == "switch"
+            if self._role_of(vi_name) == "switch"
             else None
         )
         panel = InstrumentPanel(
             vi_name,
-            vi,
             self._orchestrator,
+            self._mirror,
             parent=self,
             panel_controls=self._panels_config.get(vi_name),
             type_tag=type_tag,
@@ -781,6 +795,19 @@ class MonitorWindow(QMainWindow):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
         return panel
+
+    def _role_of(self, vi_name: str) -> str:
+        """Return one configured VI's config-registry role, from the declaration.
+
+        Args:
+            vi_name: The VI's configured name.
+
+        Returns:
+            ``"system"``/``"measurement"``/``"switch"``/``"level"``, or ``""``
+            when the declaration names no such instrument.
+        """
+        info = self._mirror.instrument_info(vi_name)
+        return info.role if info is not None else ""
 
     def _on_instrument_reconnected(self, vi_name: str) -> None:
         """Swap an offline card for a live InstrumentPanel in place.
@@ -793,9 +820,7 @@ class MonitorWindow(QMainWindow):
         if card is None:
             return
         tag_by_type = {"measurement": "Measurement", "switch": "Scanner"}
-        panel = self._make_live_panel(
-            vi_name, tag_by_type.get(self._station.get_vi_type(vi_name))
-        )
+        panel = self._make_live_panel(vi_name, tag_by_type.get(self._role_of(vi_name)))
         self._panels.append(panel)
         self._instruments_grid.replaceWidget(card, panel)
         panel.show()
@@ -822,13 +847,12 @@ class MonitorWindow(QMainWindow):
         if panel is None:
             return
         tag_by_type = {"measurement": "Measurement", "switch": "Scanner"}
-        info = self._station.get_offline_info(vi_name)
         card = OfflineInstrumentPanel(
             vi_name,
-            info,
             self._orchestrator,
+            self._mirror,
             parent=self,
-            type_tag=tag_by_type.get(info.vi_type),
+            type_tag=tag_by_type.get(self._role_of(vi_name)),
         )
         card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._offline_cards[vi_name] = card
@@ -858,7 +882,7 @@ class MonitorWindow(QMainWindow):
             "Off by default. Required before the Procedure window offers "
             "this scanner's routes as loopable measurement parameters."
         )
-        enable_chk.setChecked(self._orchestrator.scanner_enabled())
+        enable_chk.setChecked(self._mirror.scanner_enabled())
         enable_chk.toggled.connect(self._on_scanner_toggled)
         self._scanner_enable_checks.append(enable_chk)
         return enable_chk
@@ -1294,6 +1318,11 @@ class MonitorWindow(QMainWindow):
         # run_finished fires only at run boundaries (not every tick), so
         # there is no teardown-race concern connecting it here directly.
         self._orchestrator.run_finished.connect(self._on_run_finished_for_logs)
+        # The held-VI set and the override window are mirror reads with no
+        # state transition to piggyback on — a hold-only condition never
+        # changes the engine's state — so the ack controls refresh when the
+        # mirror does, which is once per tick and on every state change.
+        self._mirror.status_updated.connect(self._on_status_snapshot)
         if self._session_manager is not None:
             self._session_manager.experiment_changed.connect(
                 self._on_session_experiment_changed
@@ -1374,7 +1403,7 @@ class MonitorWindow(QMainWindow):
         # cleared — but only if THIS banner is the one showing
         # (never steal a dismiss from an unrelated message, e.g. the
         # save-health error).
-        if self._last_fault_message is not None and not self._orchestrator.vi_faults():
+        if self._last_fault_message is not None and not self._mirror.vi_faults():
             self._banner.dismiss()
             self._last_fault_message = None
 
@@ -1418,13 +1447,7 @@ class MonitorWindow(QMainWindow):
         ``_on_states_updated`` — ``ramps_updated`` fires every tick, and
         LAST (``_publish_ramps()`` is the final step of ``_tick_body()``),
         after that tick's ``update_conditions()``/``decide()`` and any state
-        transition it triggered. This is deliberately where
-        ``_refresh_ack_controls()`` is called rather than from
-        ``_on_states_updated`` (which fires FIRST, before conditions are
-        recomputed): the hold-visibility path has no state transition to
-        piggyback on — a hold-only condition never changes ``_state`` — so
-        it must be driven by a signal that fires after the tick's condition
-        computation, or it always shows the PREVIOUS tick's held-VI set.
+        transition it triggered.
 
         Args:
             records: ``list[cryosoft.core.ramps.RampRecord]`` from the
@@ -1433,6 +1456,15 @@ class MonitorWindow(QMainWindow):
         """
         if self._ramp_tracker is not None:
             self._ramp_tracker.on_ramps_updated(records)
+
+    def _on_status_snapshot(self, _snapshot: object) -> None:
+        """Refresh the state-dependent header controls from the fresh mirror.
+
+        Args:
+            _snapshot: The ``StatusSnapshot`` the mirror just absorbed; the
+                controls read the mirror rather than the payload, so that
+                one slot serves every read they make.
+        """
         self._refresh_ack_controls()
 
     def _on_run_finished_for_logs(self, _manifest: dict) -> None:
@@ -1503,13 +1535,13 @@ class MonitorWindow(QMainWindow):
         succeeds or is refused against (Orchestrator.acknowledge()), so a
         refusal after it reads 00:00 is never a silent surprise.
         """
-        held = self._orchestrator.held_vi_names()
+        held = self._mirror.held_vi_names()
         self._ack_btn.setVisible(self._in_emergency or bool(held))
         self._ack_btn.setText(
             "Acknowledge emergency" if self._in_emergency else "Acknowledge & unlock"
         )
         self._refresh_hold_banner(held)
-        expires_at = self._orchestrator.manual_override_expires_at()
+        expires_at = self._mirror.manual_override_expires_at()
         if expires_at is None:
             self._ack_countdown_label.setVisible(False)
             return
@@ -1544,7 +1576,7 @@ class MonitorWindow(QMainWindow):
                 self._last_hold_message = None
             return
 
-        conditions = self._orchestrator.get_operational_status().get("conditions", [])
+        conditions = self._mirror.get_operational_status().get("conditions", [])
         hold_conditions = [c for c in conditions if c.get("severity") == "hold"]
         if not hold_conditions:
             if self._last_hold_message is not None:
@@ -1641,11 +1673,11 @@ class MonitorWindow(QMainWindow):
         Args:
             event: The Qt close event.
         """
-        if self._orchestrator.state != OrchestratorState.IDLE.value:
+        if self._mirror.state != OrchestratorState.IDLE.value:
             logger.warning(
                 "MonitorWindow closing while orchestrator state=%s — aborting "
                 "the active run to leave hardware safed.",
-                self._orchestrator.state,
+                self._mirror.state,
             )
             self._orchestrator.abort_procedure()
         self._save_session()

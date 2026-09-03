@@ -155,6 +155,50 @@ def procedure_win(station, orchestrator, qtbot):
     return win
 
 
+def _publish_state(orchestrator, state):
+    """Publish one station-state snapshot the way a real tick does.
+
+    A tick refreshes the client's status mirror and THEN emits
+    ``states_updated``; a test that emits only the latter leaves every
+    mirror read (fault rows, availability tags) answering from the previous
+    tick. Order matters — the panels read the mirror inside their
+    ``states_updated`` slot.
+
+    Args:
+        orchestrator: The engine to publish from.
+        state: The ``{vi_name: {field: value}}`` snapshot to emit.
+    """
+    orchestrator._emit_status_snapshot()
+    orchestrator.states_updated.emit(state)
+
+
+def _mock_mirror(orchestrator, vi_name, vi):
+    """A status mirror whose declaration names one ad-hoc mock VI.
+
+    The panels build from the station declaration, so a test VI that is not
+    in the sim config needs one declared for it. Built by the same machinery
+    production uses — an in-process `Station` with the VI registered — so the
+    test exercises the real rendering path rather than a hand-written
+    `InstrumentInfo`.
+
+    Args:
+        orchestrator: The engine the mirror otherwise mirrors.
+        vi_name: The name to declare the VI under.
+        vi: The mock VI instance.
+
+    Returns:
+        The primed StatusMirror.
+    """
+    from cryosoft.core.station import Station
+    from cryosoft.core.status_mirror import StatusMirror
+
+    declaring = Station()
+    declaring.register_vi(vi_name, vi, "measurement")
+    mirror = StatusMirror.for_engine(orchestrator)
+    mirror.prime(station_info=declaring.station_info())
+    return mirror
+
+
 # ── MonitorWindow tests ───────────────────────────────────────────────────────
 
 def test_monitor_window_has_global_buttons(monitor_win):
@@ -179,7 +223,7 @@ def test_instrument_panel_creates_value_labels(station, orchestrator, qtbot):
 
     vi_name = "magnet_z"
     vi = station._virtual_instruments[vi_name]
-    panel = InstrumentPanel(vi_name, vi, orchestrator)
+    panel = InstrumentPanel(vi_name, orchestrator)
     qtbot.addWidget(panel)
 
     monitored = get_monitored_methods(vi)
@@ -194,7 +238,7 @@ def test_instrument_panel_creates_control_buttons(station, orchestrator, qtbot):
 
     vi_name = "magnet_z"
     vi = station._virtual_instruments[vi_name]
-    panel = InstrumentPanel(vi_name, vi, orchestrator)
+    panel = InstrumentPanel(vi_name, orchestrator)
     qtbot.addWidget(panel)
 
     controls = get_control_methods(vi)
@@ -206,8 +250,7 @@ def test_instrument_panel_creates_control_buttons(station, orchestrator, qtbot):
 def test_instrument_panel_lifecycle_buttons_exist(station, orchestrator, qtbot):
     """InstrumentPanel has a single lifecycle toggle button (Initiate/Standby)."""
     vi_name = "temperature_vti"
-    vi = station._virtual_instruments[vi_name]
-    panel = InstrumentPanel(vi_name, vi, orchestrator)
+    panel = InstrumentPanel(vi_name, orchestrator)
     qtbot.addWidget(panel)
 
     assert panel.findChild(QPushButton, f"{vi_name}_lifecycle_btn") is not None
@@ -218,8 +261,7 @@ def test_instrument_panel_lifecycle_buttons_exist(station, orchestrator, qtbot):
 def test_instrument_panel_updates_values_on_signal(station, orchestrator, qtbot):
     """states_updated signal → value labels reflect new state."""
     vi_name = "magnet_z"
-    vi = station._virtual_instruments[vi_name]
-    panel = InstrumentPanel(vi_name, vi, orchestrator)
+    panel = InstrumentPanel(vi_name, orchestrator)
     qtbot.addWidget(panel)
 
     # Emit a fake state with known field value
@@ -237,8 +279,7 @@ def test_instrument_panel_updates_values_on_signal(station, orchestrator, qtbot)
 def test_instrument_panel_stale_border(station, orchestrator, qtbot):
     """Stale state sets the 'stale' status property (amber border via QSS)."""
     vi_name = "magnet_z"
-    vi = station._virtual_instruments[vi_name]
-    panel = InstrumentPanel(vi_name, vi, orchestrator)
+    panel = InstrumentPanel(vi_name, orchestrator)
     qtbot.addWidget(panel)
 
     orchestrator.states_updated.emit({vi_name: {"_stale": True}})
@@ -249,8 +290,7 @@ def test_instrument_panel_stale_border(station, orchestrator, qtbot):
 def test_instrument_panel_disconnected_border(station, orchestrator, qtbot):
     """Disconnected state sets the 'disconnected' status property (red border via QSS)."""
     vi_name = "magnet_z"
-    vi = station._virtual_instruments[vi_name]
-    panel = InstrumentPanel(vi_name, vi, orchestrator)
+    panel = InstrumentPanel(vi_name, orchestrator)
     qtbot.addWidget(panel)
 
     orchestrator.states_updated.emit({vi_name: {"_stale": True, "_disconnected": True}})
@@ -264,8 +304,7 @@ def test_instrument_panel_disconnected_border(station, orchestrator, qtbot):
 def test_instrument_panel_status_resets_to_ok(station, orchestrator, qtbot):
     """A stale panel returns to 'ok' status (plain title) when state is healthy again."""
     vi_name = "magnet_z"
-    vi = station._virtual_instruments[vi_name]
-    panel = InstrumentPanel(vi_name, vi, orchestrator)
+    panel = InstrumentPanel(vi_name, orchestrator)
     qtbot.addWidget(panel)
 
     orchestrator.states_updated.emit({vi_name: {"_stale": True}})
@@ -285,7 +324,7 @@ def test_instrument_panel_fault_row_disables_controls_and_wires_ack_retry(
     """
     vi_name = "magnet_z"
     vi = station._virtual_instruments[vi_name]
-    panel = InstrumentPanel(vi_name, vi, orchestrator)
+    panel = InstrumentPanel(vi_name, orchestrator)
     qtbot.addWidget(panel)
     panel.show()
     assert not panel._fault_row.isVisible()
@@ -297,7 +336,7 @@ def test_instrument_panel_fault_row_disables_controls_and_wires_ack_retry(
     # states_updated payload) so Orchestrator.vi_faults() actually reports it.
     vi._driver._simulate_error = True
     state = station.get_state()
-    orchestrator.states_updated.emit(state)
+    _publish_state(orchestrator, state)
 
     assert panel._fault_row.isVisible()
     for btn in panel._control_buttons.values():
@@ -311,7 +350,7 @@ def test_instrument_panel_fault_row_disables_controls_and_wires_ack_retry(
     assert station.vi_faults()[vi_name].acknowledged is True
     # Re-emit the same tick's snapshot: the Acknowledge button reflects the
     # now-acknowledged fault (disabled — nothing left to acknowledge).
-    orchestrator.states_updated.emit(state)
+    _publish_state(orchestrator, state)
     assert not ack_btn.isEnabled()
 
     # Retry while still broken: action_failed, fault stands (still faulted).
@@ -326,7 +365,7 @@ def test_instrument_panel_fault_row_disables_controls_and_wires_ack_retry(
         retry_btn.click()
     assert vi_name not in station.vi_faults()
     state = station.get_state()
-    orchestrator.states_updated.emit(state)
+    _publish_state(orchestrator, state)
     assert not panel._fault_row.isVisible()
     for btn in panel._control_buttons.values():
         assert btn.isEnabled()
@@ -410,7 +449,7 @@ def test_instrument_panel_retry_button_rebuilds_a_disconnected_instrument(
     try:
         vi_name = "toggle_vi"
         original_driver = station.get_vi(vi_name)._drivers["main"]
-        panel = InstrumentPanel(vi_name, station.get_vi(vi_name), orch)
+        panel = InstrumentPanel(vi_name, orch)
         qtbot.addWidget(panel)
         panel.show()
         assert not panel._fault_row.isVisible()
@@ -420,7 +459,7 @@ def test_instrument_panel_retry_button_rebuilds_a_disconnected_instrument(
         _ToggleableFaultDriver.broken = True
         for _ in range(3):
             state = station.get_state()
-            orch.states_updated.emit(state)
+            _publish_state(orch, state)
         assert station.vi_faults()[vi_name].kind == "disconnected"
         assert panel._fault_row.isVisible()
         for btn in panel._control_buttons.values():
@@ -447,7 +486,7 @@ def test_instrument_panel_retry_button_rebuilds_a_disconnected_instrument(
         assert station.get_vi(vi_name)._drivers["main"] is not original_driver
 
         state = station.get_state()
-        orch.states_updated.emit(state)
+        _publish_state(orch, state)
         assert not panel._fault_row.isVisible()
         for btn in panel._control_buttons.values():
             assert btn.isEnabled()
@@ -468,14 +507,14 @@ def test_instrument_panel_retry_button_blocked_while_run_claims_the_instrument(
     try:
         vi_name = "toggle_vi"
         original_driver = station.get_vi(vi_name)._drivers["main"]
-        panel = InstrumentPanel(vi_name, station.get_vi(vi_name), orch)
+        panel = InstrumentPanel(vi_name, orch)
         qtbot.addWidget(panel)
         panel.show()
 
         _ToggleableFaultDriver.broken = True
         for _ in range(3):
             state = station.get_state()
-            orch.states_updated.emit(state)
+            _publish_state(orch, state)
         assert station.vi_faults()[vi_name].kind == "disconnected"
 
         _ToggleableFaultDriver.broken = False  # hardware IS fixed now...
@@ -517,7 +556,7 @@ def test_monitor_window_banner_shows_and_clears_vi_fault_warning(
 
     vi._driver._simulate_error = False
     station.get_state()  # clears the Station-side fault record
-    orchestrator.states_updated.emit(state)  # MonitorWindow polls vi_faults() here
+    _publish_state(orchestrator, state)  # MonitorWindow polls vi_faults() here
     assert not monitor_win._banner.isVisible()
 
 
@@ -549,7 +588,7 @@ class _SpecControlVI(BaseVirtualInstrument):
 def spec_panel(orchestrator, qtbot):
     """InstrumentPanel over the spec-declaring mock VI, plus a submit spy."""
     vi = _SpecControlVI({})
-    panel = InstrumentPanel("mock_vi", vi, orchestrator)
+    panel = InstrumentPanel("mock_vi", orchestrator, _mock_mirror(orchestrator, "mock_vi", vi))
     qtbot.addWidget(panel)
     submitted: list[tuple] = []
     orchestrator.submit_vi_action = lambda vi_name, method, **kw: submitted.append(
@@ -615,7 +654,7 @@ def test_spec_controls_emptied_field_falls_back_to_method_default(spec_panel):
 def delta_front_panel(station, orchestrator, qtbot):
     """InstrumentFrontPanel over the sim station's delta-mode measurement VI."""
     vi_name = "keithley_delta_mode"
-    panel = InstrumentFrontPanel(vi_name, station.get_vi(vi_name), orchestrator)
+    panel = InstrumentFrontPanel(vi_name, orchestrator)
     qtbot.addWidget(panel)
     return vi_name, panel
 
@@ -691,7 +730,9 @@ class _PanelFlagVI(BaseVirtualInstrument):
 
 def test_panel_false_control_hidden_by_default(orchestrator, qtbot):
     """Without a config allowlist, panel=False controls stay off the card."""
-    panel = InstrumentPanel("mock_vi", _PanelFlagVI({}), orchestrator)
+    panel = InstrumentPanel(
+        "mock_vi", orchestrator, _mock_mirror(orchestrator, "mock_vi", _PanelFlagVI({}))
+    )
     qtbot.addWidget(panel)
     assert panel.findChild(QPushButton, "mock_vi_set_temperature_btn") is not None
     assert panel.findChild(QPushButton, "mock_vi_set_heater_power_btn") is None
@@ -700,8 +741,9 @@ def test_panel_false_control_hidden_by_default(orchestrator, qtbot):
 def test_config_allowlist_overrides_panel_defaults(orchestrator, qtbot):
     """A panels: allowlist wins in both directions: it can surface a
     panel=False control and hide a panel=True one."""
+    vi = _PanelFlagVI({})
     panel = InstrumentPanel(
-        "mock_vi", _PanelFlagVI({}), orchestrator,
+        "mock_vi", orchestrator, _mock_mirror(orchestrator, "mock_vi", vi),
         panel_controls=["set_heater_power"],
     )
     qtbot.addWidget(panel)
@@ -745,7 +787,9 @@ def test_multi_param_control_stacks_in_one_column(orchestrator, qtbot):
                 e: float = 5, f: float = 6, g: float = 7):
             pass
 
-    panel = InstrumentPanel("mock_vi", _SevenParamVI({}), orchestrator)
+    panel = InstrumentPanel(
+        "mock_vi", orchestrator, _mock_mirror(orchestrator, "mock_vi", _SevenParamVI({}))
+    )
     qtbot.addWidget(panel)
     grid = _control_grid(panel, "mock_vi", "arm")
     assert grid is not None, "7-param control must stack, not render inline"
@@ -765,7 +809,9 @@ def test_many_param_control_uses_two_columns(orchestrator, qtbot):
                 p9: float = 1, p10: float = 1, p11: float = 1):
             pass
 
-    panel = InstrumentPanel("mock_vi", _ElevenParamVI({}), orchestrator)
+    panel = InstrumentPanel(
+        "mock_vi", orchestrator, _mock_mirror(orchestrator, "mock_vi", _ElevenParamVI({}))
+    )
     qtbot.addWidget(panel)
     grid = _control_grid(panel, "mock_vi", "arm")
     assert grid is not None
@@ -775,7 +821,9 @@ def test_many_param_control_uses_two_columns(orchestrator, qtbot):
 
 def test_two_param_control_stays_inline(orchestrator, qtbot):
     """Up to two parameters keep the compact inline row (no grid)."""
-    panel = InstrumentPanel("mock_vi", _PanelFlagVI({}), orchestrator)
+    panel = InstrumentPanel(
+        "mock_vi", orchestrator, _mock_mirror(orchestrator, "mock_vi", _PanelFlagVI({}))
+    )
     qtbot.addWidget(panel)
     assert _control_grid(panel, "mock_vi", "set_temperature") is None
 
@@ -784,7 +832,7 @@ def test_switch_select_route_renders_route_dropdown(station, orchestrator, qtbot
     """select_route's route renders as a drop-down of the config's route names
     (via the control_param_specs instance hook), and submits the chosen name."""
     vi = station._virtual_instruments["switch_matrix"]
-    panel = InstrumentPanel("switch_matrix", vi, orchestrator)
+    panel = InstrumentPanel("switch_matrix", orchestrator)
     qtbot.addWidget(panel)
 
     combo = panel.findChild(QComboBox, "switch_matrix_select_route_route_input")
@@ -806,7 +854,9 @@ def test_switch_select_route_renders_route_dropdown(station, orchestrator, qtbot
 def test_front_panel_button_opens_full_control_surface(orchestrator, qtbot):
     """The card's sliders icon opens a window showing every control —
     including panel=False ones the card hides — and reuses it on re-click."""
-    card = InstrumentPanel("mock_vi", _PanelFlagVI({}), orchestrator)
+    card = InstrumentPanel(
+        "mock_vi", orchestrator, _mock_mirror(orchestrator, "mock_vi", _PanelFlagVI({}))
+    )
     qtbot.addWidget(card)
 
     fp_btn = card.findChild(QPushButton, "mock_vi_front_panel_btn")
@@ -831,8 +881,9 @@ def test_front_panel_button_opens_full_control_surface(orchestrator, qtbot):
 def test_front_panel_ignores_config_allowlist(orchestrator, qtbot):
     """A monitor.yaml allowlist trims only the card; the front panel opened
     from that card still shows everything."""
+    vi = _PanelFlagVI({})
     card = InstrumentPanel(
-        "mock_vi", _PanelFlagVI({}), orchestrator,
+        "mock_vi", orchestrator, _mock_mirror(orchestrator, "mock_vi", vi),
         panel_controls=["set_temperature"],
     )
     qtbot.addWidget(card)
@@ -847,8 +898,7 @@ def test_instrument_panel_status_not_restyled_when_unchanged(
 ):
     """The status property is only re-set when it changes, not on every tick."""
     vi_name = "magnet_z"
-    vi = station._virtual_instruments[vi_name]
-    panel = InstrumentPanel(vi_name, vi, orchestrator)
+    panel = InstrumentPanel(vi_name, orchestrator)
     qtbot.addWidget(panel)
 
     status_sets: list[object] = []
@@ -2411,13 +2461,15 @@ def test_hold_banner_shows_message_and_dismisses_on_clear(monitor_win, orchestra
 
     Regression test: previously the ACK button appeared alone with no
     explanation on the banner above it (see _refresh_hold_banner()). Stubs
-    the Orchestrator's public API (held_vi_names / get_operational_status)
-    rather than reaching into the Station's private condition registry.
+    the window's own read surface — the status mirror (held_vi_names /
+    get_operational_status) — rather than reaching into the Station's private
+    condition registry.
     """
+    mirror = monitor_win._mirror
     held = {"magnet_y", "magnet_z"}
-    monkeypatch.setattr(orchestrator, "held_vi_names", lambda: frozenset(held))
+    monkeypatch.setattr(mirror, "held_vi_names", lambda: frozenset(held))
     monkeypatch.setattr(
-        orchestrator,
+        mirror,
         "get_operational_status",
         lambda: {
             "conditions": [
@@ -2445,8 +2497,8 @@ def test_hold_banner_shows_message_and_dismisses_on_clear(monitor_win, orchestra
 
     # Clearing the hold condition dismisses the banner it owns.
     held.clear()
-    monkeypatch.setattr(orchestrator, "held_vi_names", lambda: frozenset())
-    monkeypatch.setattr(orchestrator, "get_operational_status", lambda: {"conditions": []})
+    monkeypatch.setattr(mirror, "held_vi_names", lambda: frozenset())
+    monkeypatch.setattr(mirror, "get_operational_status", lambda: {"conditions": []})
 
     monitor_win._refresh_ack_controls()
 
@@ -2852,10 +2904,12 @@ def test_abort_button_does_not_act_while_operation_runs(procedure_win, orchestra
     called = []
     monkeypatch.setattr(orchestrator, "abort_procedure", lambda: called.append(True))
     orchestrator._procedure = _StubOperation()
+    orchestrator._emit_status_snapshot()  # the window reads the run kind off its mirror
     try:
         procedure_win._on_abort()
     finally:
         orchestrator._procedure = None
+        orchestrator._emit_status_snapshot()
     assert called == []
 
 
@@ -2866,11 +2920,13 @@ def test_pause_resume_do_not_act_while_operation_runs(procedure_win, orchestrato
     monkeypatch.setattr(orchestrator, "pause_procedure", lambda: pause_calls.append(True))
     monkeypatch.setattr(orchestrator, "resume_procedure", lambda: resume_calls.append(True))
     orchestrator._procedure = _StubOperation()
+    orchestrator._emit_status_snapshot()  # the window reads the run kind off its mirror
     try:
         procedure_win._on_pause_clicked()
         procedure_win._on_resume_clicked()
     finally:
         orchestrator._procedure = None
+        orchestrator._emit_status_snapshot()
     assert pause_calls == []
     assert resume_calls == []
 
@@ -2945,7 +3001,9 @@ def test_closing_window_aborts_active_run(monitor_win, orchestrator):
     active, with nothing to send the abort/standby commands. closeEvent()
     must now call abort_procedure() whenever state is not already IDLE.
     """
-    orchestrator._state = OrchestratorState.SWEEPING
+    # Through _change_state, not a bare assignment: the window reads state
+    # off its status mirror, which is fed by the engine's event stream.
+    orchestrator._change_state(OrchestratorState.SWEEPING)
     monitor_win.close()
     assert orchestrator.state == OrchestratorState.IDLE.value
 
@@ -3045,8 +3103,7 @@ def test_procedure_error_signal_drives_banner(procedure_win, orchestrator):
 def test_instrument_panel_has_no_action_blocked_handler(station, orchestrator, qtbot):
     """The per-panel modal warning handler was removed (banner replaces it)."""
     vi_name = "magnet_z"
-    vi = station._virtual_instruments[vi_name]
-    panel = InstrumentPanel(vi_name, vi, orchestrator)
+    panel = InstrumentPanel(vi_name, orchestrator)
     qtbot.addWidget(panel)
     assert not hasattr(panel, "_on_action_blocked")
 

@@ -29,9 +29,8 @@ from PyQt6.QtWidgets import (
 )
 
 from cryosoft.core.events import QueueChanged
-from cryosoft.core.orchestrator import Orchestrator
+from cryosoft.core.orchestrator_proxy import OrchestratorProxy
 from cryosoft.core.procedure import BaseProcedure
-from cryosoft.core.station import Station
 from cryosoft.gui.form_autosave import (
     STATUS_DONE,
     STATUS_FAILED,
@@ -44,6 +43,9 @@ from cryosoft.session.run_queue import KIND_PROCEDURE, RunQueueHost, RunSpec
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
+
+    # The GUI holds a Station only as a type (contract C19).
+    from cryosoft.core.station import Station
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +77,7 @@ class QueuePanel(QGroupBox):
     Args:
         station: The active Station instance (needed to validate and build a
             queued run headlessly).
-        orchestrator: The active Orchestrator instance.
+        orchestrator: The client's ``OrchestratorProxy``.
         parent: Optional Qt parent widget.
         get_experiment_info: Callable returning the session layer's experiment
             context, stamped into a queued run when it is built. ``None``
@@ -92,7 +94,7 @@ class QueuePanel(QGroupBox):
     def __init__(
         self,
         station: Station,
-        orchestrator: Orchestrator,
+        orchestrator: OrchestratorProxy,
         parent: QWidget | None = None,
         get_experiment_info: Callable[[], dict[str, str]] | None = None,
         queue_host: RunQueueHost | None = None,
@@ -114,7 +116,16 @@ class QueuePanel(QGroupBox):
         # the queue's per-item status.
         self._queue_running = False
 
-        orchestrator.event_emitted.connect(self._on_event)
+        # The engine's one event stream, under whichever name this client
+        # offers it. A client CONSUMES the stream rather than relaying it, so
+        # the proxy renames ``event_emitted`` to ``event``; a window handed a
+        # bare Orchestrator (the inline construction path the GUI suites take)
+        # still finds the engine's own signal. The same deliberate rename
+        # ``StatusMirror.of()`` accommodates for the mirror.
+        stream = getattr(orchestrator, "event_emitted", None)
+        if stream is None:
+            stream = orchestrator.event
+        stream.connect(self._on_event)
 
         vlay = QVBoxLayout(self)
 

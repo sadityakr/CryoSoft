@@ -18,35 +18,86 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from cryosoft.core.decorators import (
-    get_control_methods,
-    get_control_panel,
-    get_monitored_methods,
-)
-from cryosoft.core.orchestrator import Orchestrator
+from cryosoft.core.events import ControlInfo, GroupInfo, InstrumentInfo
+from cryosoft.core.orchestrator_proxy import OrchestratorProxy
+from cryosoft.core.plan import ParamSpec
 from cryosoft.gui.lifecycle_toggle import ConnectionButton, LifecycleToggleButton
 from cryosoft.gui.param_form import (
     build_param_tooltip,
     build_param_widget,
     collect_value,
 )
+from cryosoft.core.status_mirror import StatusMirror
 from cryosoft.gui.theme import BTN_CLASS_DANGER, BTN_CLASS_SECONDARY, TEXT_PRIMARY
-from cryosoft.virtual_instruments.base import BaseVirtualInstrument
 
 logger = logging.getLogger(__name__)
+
+#: The four scalar types a ``ParamSpec`` may declare, keyed by the name the
+#: declaration snapshot renders them under. Rebuilding the spec from its JSON
+#: is what lets a panel render the typed widget the VI declared without ever
+#: touching the VI (the status-mirror standard — see ``gui/README.md``).
+_PARAM_TYPES: dict[str, type] = {
+    "float": float,
+    "int": int,
+    "str": str,
+    "bool": bool,
+}
+
+
+def _spec_from_json(param: dict[str, Any]) -> ParamSpec | None:
+    """Rebuild one control parameter's ``ParamSpec`` from its declaration.
+
+    Args:
+        param: One entry of ``ControlInfo.params`` — ``name``, ``declared``,
+            ``kind``, ``unit``, ``description``, ``default``, ``min``,
+            ``max``, ``choices``.
+
+    Returns:
+        The reconstructed spec, or ``None`` when the parameter declares none
+        (``declared`` false) or names a type no spec can carry — in both
+        cases the panel falls back to the plain text input the signature
+        alone justifies.
+    """
+    if not param.get("declared"):
+        return None
+    param_type = _PARAM_TYPES.get(str(param.get("kind", "")))
+    if param_type is None:
+        return None
+    try:
+        return ParamSpec(
+            type=param_type,
+            default=param.get("default"),
+            unit=str(param.get("unit", "")),
+            description=str(param.get("description", "")),
+            min=param.get("min"),
+            max=param.get("max"),
+            choices=param.get("choices") or None,
+        )
+    except (TypeError, ValueError):
+        logger.warning(
+            "InstrumentPanel: declaration for %r could not be rebuilt as a "
+            "ParamSpec; falling back to a plain input",
+            param.get("name"),
+        )
+        return None
 
 
 class InstrumentPanel(QGroupBox):
     """Auto-generated display + control panel for one Virtual Instrument.
 
-    Created by MonitorWindow for each VI registered in the Station. The
-    layout is derived entirely from decorator metadata — no hardcoded
-    per-instrument widget lists.
+    Created by MonitorWindow for each configured VI. The layout is derived
+    entirely from the station's **declaration snapshot** (``InstrumentInfo``
+    — GLOSSARY.md's *Station info*), never from the VI object: the panel
+    lives on the client side of the boundary and holds nothing the engine
+    owns. No hardcoded per-instrument widget lists.
 
     Args:
         vi_name: The VI's registered name (e.g. ``"magnet_z"``).
-        vi: The VI instance (used for introspection only).
-        orchestrator: Orchestrator whose ``states_updated`` signal drives updates.
+        orchestrator: OrchestratorProxy every action is submitted to, and whose
+            ``states_updated`` signal drives value updates.
+        mirror: The status mirror this panel reads from — its declaration
+            supplies the layout, its snapshot the fault row. Built from the
+            engine when none is given (the inline construction path).
         parent: Optional Qt parent widget.
         panel_controls: Optional allowlist of @control method names to show
             (a setup's ``monitor.yaml`` ``panels:`` entry for this VI). When
@@ -63,27 +114,42 @@ class InstrumentPanel(QGroupBox):
             rows — the hook for role-specific additions (e.g. the switch
             card's station-wide Enable Scanner checkbox) without this class
             learning any per-role logic.
+        grouped: Whether to render the VI's declared ``ui_groups`` as titled
+            boxes (see ``_build_capability_rows()``). False for the compact
+            monitor card, which stays flat by decision — a card is a glance,
+            not a workflow — and True for the instrument front panel. A VI
+            that declares no groups renders identically either way.
     """
 
     def __init__(
         self,
         vi_name: str,
-        vi: BaseVirtualInstrument,
-        orchestrator: Orchestrator,
+        orchestrator: OrchestratorProxy,
+        mirror: StatusMirror | None = None,
         parent: QWidget | None = None,
         panel_controls: list[str] | None = None,
         show_front_panel_button: bool = True,
         type_tag: str | None = None,
         extra_widget: QWidget | None = None,
+        grouped: bool = False,
     ) -> None:
         super().__init__(parent)  # no native title — see module docstring
         # objectNames are API (gui-edit skill): MonitorWindow finds this card
         # by name when a disconnect swaps it for an offline one.
         self.setObjectName(f"{vi_name}_panel")
         self._vi_name = vi_name
-        self._vi = vi
         self._orchestrator = orchestrator
+        self._mirror = (
+            mirror if mirror is not None else StatusMirror.of(orchestrator)
+        )
+        # An instrument the declaration does not name renders as an empty
+        # card rather than raising: a panel is a report, and reporting must
+        # never be the thing that fails.
+        self._info = self._mirror.instrument_info(vi_name) or InstrumentInfo(
+            name=vi_name
+        )
         self._panel_controls = panel_controls
+        self._grouped = grouped
         self._show_front_panel_button = show_front_panel_button
         self._type_tag = type_tag
         self._extra_widget = extra_widget
@@ -95,6 +161,10 @@ class InstrumentPanel(QGroupBox):
         # param_form when the control declares ParamSpecs (combo/checkbox/
         # line-edit), plain QLineEdits otherwise.
         self._control_inputs: dict[str, dict[str, QWidget]] = {}
+        # Maps method_name → {param_name → the declaration entry it was built
+        # from}, so submitting reads the same declaration the widget was
+        # rendered from instead of asking the VI a second time.
+        self._control_params: dict[str, dict[str, dict[str, Any]]] = {}
         # Maps method_name → the control's QPushButton, so a runtime fault
         # can disable every @control row (inputs above, buttons here) in
         # one pass — mirroring OfflineInstrumentPanel's "deliberately
@@ -201,26 +271,8 @@ class InstrumentPanel(QGroupBox):
         self._fault_row.setVisible(False)
         outer.addWidget(self._fault_row)
 
-        # ── Monitored fields ──────────────────────────────────────────
-        for method_name in get_monitored_methods(self._vi):
-            row = QHBoxLayout()
-            display_name = method_name.replace("_", " ")
-            lbl = QLabel(f"{display_name}:")
-            lbl.setMinimumWidth(130)
-            val = QLabel("—")
-            val.setObjectName(f"{self._vi_name}_{method_name}_value")
-            val.setProperty("class", "value_readout")
-            self._value_labels[method_name] = val
-            row.addWidget(lbl)
-            row.addWidget(val)
-            row.addStretch()
-            outer.addLayout(row)
-
-        # ── Control methods ───────────────────────────────────────────
-        for method_name, params in get_control_methods(self._vi).items():
-            if not self._control_visible(method_name):
-                continue
-            outer.addWidget(self._build_control_row(method_name, params))
+        # ── Monitored fields and control methods ──────────────────────
+        self._build_capability_rows(outer)
 
         if self._extra_widget is not None:
             outer.addWidget(self._extra_widget)
@@ -230,6 +282,124 @@ class InstrumentPanel(QGroupBox):
         outer.addStretch()
 
         self.setLayout(outer)
+
+    def _build_capability_rows(self, outer: QVBoxLayout) -> None:
+        """Lay out this instrument's readings and actions, grouped or flat.
+
+        Two renderings of the same declaration, and which one applies is the
+        `grouped` flag, not a property of the instrument:
+
+        * **Flat** (the compact monitor card, and any VI that declares no
+          groups): every reading first, then every visible control, both in
+          NAME order. That order is what the card has always shown, and a
+          VI with no ``ui_groups`` renders here identically either way.
+        * **Grouped** (the instrument front panel): one titled ``QGroupBox``
+          per declared group, in DECLARED order, holding that group's
+          members in the group's own order — which is the workflow order the
+          VI author wrote down — followed by whatever no group claims, in
+          name order as before.
+
+        A member a group names but the declaration does not carry is
+        skipped: a group is presentation, and it must never be able to
+        invent a capability.
+
+        Args:
+            outer: The panel's outer layout, appended to in place.
+        """
+        monitored = sorted(info.name for info in self._info.monitored)
+        controls = {control.name: control for control in self._info.controls}
+        claimed: set[str] = set()
+
+        if self._grouped:
+            for group in self._info.ui_groups:
+                box = self._build_group_box(group, monitored, controls, claimed)
+                if box is not None:
+                    outer.addWidget(box)
+
+        for method_name in monitored:
+            if method_name not in claimed:
+                outer.addLayout(self._build_monitored_row(method_name))
+
+        for name in sorted(controls):
+            if name in claimed or not self._control_visible(controls[name]):
+                continue
+            outer.addWidget(self._build_control_row(controls[name]))
+
+    def _build_group_box(
+        self,
+        group: GroupInfo,
+        monitored: list[str],
+        controls: dict[str, ControlInfo],
+        claimed: set[str],
+    ) -> QGroupBox | None:
+        """Build one declared group's titled box, in the group's own order.
+
+        Args:
+            group: The group's declaration.
+            monitored: Every declared reading name.
+            controls: Every declared control, keyed by name.
+            claimed: Names already rendered; extended in place with the ones
+                this box takes, so the ungrouped pass skips them.
+
+        Returns:
+            The assembled box, or ``None`` when the group claims nothing
+            this panel renders (every member hidden by a ``panels:``
+            allowlist, say) — an empty titled box is noise.
+        """
+        box = QGroupBox(group.title)
+        box.setObjectName(f"{self._vi_name}_group_{group.key}")
+        if group.description:
+            box.setToolTip(group.description)
+        inner = QVBoxLayout(box)
+        inner.setSpacing(4)
+        inner.setContentsMargins(8, 4, 8, 4)
+        members = 0
+        for member in group.members:
+            if member in monitored:
+                inner.addLayout(self._build_monitored_row(member))
+            elif member in controls:
+                if not self._control_visible(controls[member]):
+                    continue
+                inner.addWidget(self._build_control_row(controls[member]))
+            else:
+                logger.warning(
+                    "InstrumentPanel: %s group %r names %r, which %s does not "
+                    "declare; skipped",
+                    self._vi_name,
+                    group.key,
+                    member,
+                    self._vi_name,
+                )
+                continue
+            claimed.add(member)
+            members += 1
+        if members == 0:
+            box.deleteLater()
+            return None
+        return box
+
+    def _build_monitored_row(self, method_name: str) -> QHBoxLayout:
+        """Build one ``@monitored`` reading's label + value row.
+
+        Args:
+            method_name: The reading's declared name, which is also the key
+                its value arrives under in the state dict.
+
+        Returns:
+            The assembled row; its value label is registered for updates.
+        """
+        row = QHBoxLayout()
+        display_name = method_name.replace("_", " ")
+        lbl = QLabel(f"{display_name}:")
+        lbl.setMinimumWidth(130)
+        val = QLabel("—")
+        val.setObjectName(f"{self._vi_name}_{method_name}_value")
+        val.setProperty("class", "value_readout")
+        self._value_labels[method_name] = val
+        row.addWidget(lbl)
+        row.addWidget(val)
+        row.addStretch()
+        return row
 
     @property
     def vi_name(self) -> str:
@@ -256,50 +426,53 @@ class InstrumentPanel(QGroupBox):
             from cryosoft.gui.instrument_front_panel import InstrumentFrontPanel
 
             self._front_panel = InstrumentFrontPanel(
-                self._vi_name, self._vi, self._orchestrator, parent=self.window()
+                self._vi_name,
+                self._orchestrator,
+                self._mirror,
+                parent=self.window(),
             )
         self._front_panel.show()
         self._front_panel.raise_()
         self._front_panel.activateWindow()
 
-    def _control_visible(self, method_name: str) -> bool:
+    def _control_visible(self, control: ControlInfo) -> bool:
         """Decide whether one @control appears on this compact card.
 
         A config allowlist (``panels:`` in ``monitor.yaml``) wins when given;
-        otherwise the control's own ``panel=`` declaration decides.
+        otherwise the control's own declared ``panel`` flag decides.
 
         Args:
-            method_name: The @control method name.
+            control: The control's declaration.
 
         Returns:
             True when the control's row should be built.
         """
         if self._panel_controls is not None:
-            return method_name in self._panel_controls
-        return get_control_panel(getattr(self._vi, method_name))
+            return control.name in self._panel_controls
+        return control.panel
 
     def _build_param_input(
-        self, method_name: str, param_name: str, param_info: dict
+        self, method_name: str, param: dict[str, Any]
     ) -> tuple[QLabel, QWidget]:
         """Build one parameter's label + input widget.
 
-        A parameter covered by a ``ParamSpec`` (from the VI's
-        ``control_param_specs()`` hook — decorator declaration or dynamic
-        override) gets its widget from ``param_form.build_param_widget``
-        (drop-down for ``choices``, checkbox for ``bool``, else a line edit)
-        with the unit in its label and the description/default/range in a
-        tooltip. Parameters without a spec keep the legacy plain ``QLineEdit``
-        seeded from the signature default.
+        A parameter the declaration marks ``declared`` carries a
+        ``ParamSpec``, rebuilt here from its JSON (``_spec_from_json()``) and
+        handed to ``param_form.build_param_widget`` (drop-down for
+        ``choices``, checkbox for ``bool``, else a line edit) with the unit
+        in its label and the description/default/range in a tooltip. A
+        parameter known only from its signature keeps the legacy plain
+        ``QLineEdit`` seeded from that signature's default.
 
         Args:
             method_name: The @control method the parameter belongs to.
-            param_name: The parameter name.
-            param_info: The signature-derived ``{"type", "default"}`` info.
+            param: The parameter's entry in ``ControlInfo.params``.
 
         Returns:
             ``(label, field)``, the field's objectName already set.
         """
-        spec = self._vi.control_param_specs(method_name).get(param_name)
+        param_name = str(param["name"])
+        spec = _spec_from_json(param)
         if spec is not None:
             label_text = (
                 f"{param_name} ({spec.unit}):" if spec.unit else f"{param_name}:"
@@ -316,13 +489,13 @@ class InstrumentPanel(QGroupBox):
             field = QLineEdit()
             field.setPlaceholderText(param_name)
             field.setMaximumWidth(90)
-            default = param_info.get("default")
+            default = param.get("default")
             if default is not None:
                 field.setText(str(default))
         field.setObjectName(f"{self._vi_name}_{method_name}_{param_name}_input")
         return lbl, field
 
-    def _build_control_row(self, method_name: str, params: dict) -> QWidget:
+    def _build_control_row(self, control: ControlInfo) -> QWidget:
         """Build one @control method's widget block: button + input widgets.
 
         Layout scales with the parameter count: up to two parameters stay
@@ -333,12 +506,13 @@ class InstrumentPanel(QGroupBox):
         single row.
 
         Args:
-            method_name: Name of the @control method.
-            params: ``{param_name: {"type": type, "default": value, ...}}``
+            control: The control's declaration — its name and its parameters
+                in signature order.
 
         Returns:
             A QWidget containing the assembled block.
         """
+        method_name = control.name
         container = QWidget()
         # Fixed vertical policy prevents the container from expanding when the
         # parent panel is given extra height, which would make the button thin.
@@ -350,8 +524,8 @@ class InstrumentPanel(QGroupBox):
 
         inputs: dict[str, QWidget] = {}
         widgets = [
-            (param_name, *self._build_param_input(method_name, param_name, info))
-            for param_name, info in params.items()
+            (str(param["name"]), *self._build_param_input(method_name, param))
+            for param in control.params
         ]
         for param_name, _lbl, field in widgets:
             inputs[param_name] = field
@@ -386,6 +560,9 @@ class InstrumentPanel(QGroupBox):
 
         self._control_inputs[method_name] = inputs
         self._control_buttons[method_name] = btn
+        self._control_params[method_name] = {
+            str(param["name"]): dict(param) for param in control.params
+        }
 
         btn.clicked.connect(
             lambda checked=False, mn=method_name: self._submit_control(mn)
@@ -457,10 +634,10 @@ class InstrumentPanel(QGroupBox):
         """Show/hide the fault row and enable/disable controls from the fault registry.
 
         Visibility follows the Availability standard's unified record
-        (``Orchestrator.availability()``, ``cryosoft.core.availability``):
+        (``StatusMirror.availability_tags()``, ``cryosoft.core.availability``):
         the row shows exactly while this VI carries the ``not_responding``
         tag, the same "faulted" state the QSS status border already reflects.
-        The row's message still reads ``Orchestrator.vi_faults()`` for
+        The row's message still reads the mirror's ``vi_fault()`` for
         ``kind``/``message``/``acknowledged`` — fields the unified record
         does not carry, since acknowledge/retry are comm-specific actions
         (see GLOSSARY.md's **Instrument fault**). Reads every tick, but only
@@ -468,7 +645,7 @@ class InstrumentPanel(QGroupBox):
         matching the existing status-border repolish discipline (never
         restyle unless something changed).
         """
-        is_faulted = "not_responding" in self._orchestrator.availability(self._vi_name).tags
+        is_faulted = "not_responding" in self._mirror.availability_tags(self._vi_name)
         if is_faulted != self._faulted:
             self._faulted = is_faulted
             self._fault_row.setVisible(is_faulted)
@@ -478,10 +655,12 @@ class InstrumentPanel(QGroupBox):
                 for widget in inputs.values():
                     widget.setEnabled(not is_faulted)
         if is_faulted:
-            fault = self._orchestrator.vi_faults().get(self._vi_name)
+            fault = self._mirror.vi_fault(self._vi_name)
             if fault is not None:
-                self._fault_label.setText(f"Fault ({fault.kind}): {fault.message}")
-                self._ack_fault_btn.setEnabled(not fault.acknowledged)
+                self._fault_label.setText(
+                    f"Fault ({fault.get('kind', '')}): {fault.get('message', '')}"
+                )
+                self._ack_fault_btn.setEnabled(not fault.get("acknowledged", False))
 
     # ------------------------------------------------------------------
     # Fault row actions (runtime fault registry)
@@ -506,13 +685,12 @@ class InstrumentPanel(QGroupBox):
             method_name: The @control method to call.
         """
         inputs = self._control_inputs.get(method_name, {})
-        vi_method = getattr(self._vi, method_name, None)
-        params_meta = getattr(vi_method, "_control_params", {}) if vi_method else {}
-        specs = self._vi.control_param_specs(method_name) if vi_method else {}
+        declarations = self._control_params.get(method_name, {})
 
         kwargs: dict[str, Any] = {}
         for param_name, field in inputs.items():
-            spec = specs.get(param_name)
+            declaration = declarations.get(param_name, {})
+            spec = _spec_from_json(declaration)
             if spec is not None:
                 # Spec-built widget: an emptied line edit falls back to the
                 # method's own default (a ParamSpec always declares one); an
@@ -535,9 +713,8 @@ class InstrumentPanel(QGroupBox):
                 continue
 
             raw = field.text().strip()
-            meta = params_meta.get(param_name, {})
-            param_type = meta.get("type", str)
-            has_default = "default" in meta
+            param_type = _PARAM_TYPES.get(str(declaration.get("kind", "")), str)
+            has_default = declaration.get("default") is not None
 
             if not raw:
                 if not has_default:

@@ -381,3 +381,41 @@ forbidden_modules = [
     "cryosoft.core.operation",
     "cryosoft.core.data_manager",
 ]
+
+[[tool.importlinter.contracts]]
+name = "C19: the GUI holds neither the Station nor the Orchestrator — it builds from the StationInfo declaration and acts through the OrchestratorProxy"
+type = "forbidden"
+source_modules = ["cryosoft.gui"]
+# Direct imports only: the GUI legitimately imports the Orchestrator, which
+# sits directly on top of the Station, so every indirect chain runs through a
+# layer that is SUPPOSED to hold one. What this contract forbids is a widget
+# naming the Station module itself.
+allow_indirect_imports = "True"
+# import-linter counts an import inside `if TYPE_CHECKING:` like any other, so
+# a contract alone cannot say "as a type, yes; at runtime, no". Every entry
+# below is therefore paired with the conformance test
+# `test_gui_imports_the_station_only_for_typing_or_config_helpers`, which is
+# what actually enforces the distinction: each ignored import must be inside a
+# type-checking guard, or be one of the two pure config-FILE helpers named
+# there (`validate_config_dir`, `read_instrument_metadata` — neither takes a
+# Station nor touches an instrument; they live in that module for historical
+# reasons and moving them is a separate change). A gui module NOT listed here
+# cannot import the Station at all, which is the property this contract keeps.
+ignore_imports = [
+    "cryosoft.gui.config_editor -> cryosoft.core.station",
+    "cryosoft.gui.monitor_window -> cryosoft.core.station",
+    "cryosoft.gui.operations_panel -> cryosoft.core.station",
+    "cryosoft.gui.procedure_params_panel -> cryosoft.core.station",
+    "cryosoft.gui.procedure_window -> cryosoft.core.station",
+    "cryosoft.gui.queue_panel -> cryosoft.core.station",
+    "cryosoft.gui.trends_quadrant -> cryosoft.core.station",
+    # The state-machine ENUM, not the engine: MonitorWindow names
+    # OrchestratorState's members to colour its status bar. Every other GUI
+    # module now imports cryosoft.core.orchestrator_proxy instead, and this
+    # last one goes when the state vocabulary moves into the contract.
+    "cryosoft.gui.monitor_window -> cryosoft.core.orchestrator",
+]
+forbidden_modules = [
+    "cryosoft.core.station",
+    "cryosoft.core.orchestrator",
+]

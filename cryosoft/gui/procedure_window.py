@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import qtawesome as qta
 from PyQt6.QtCore import Qt
@@ -23,10 +24,9 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from cryosoft.core.orchestrator import Orchestrator
+from cryosoft.core.orchestrator_proxy import OrchestratorProxy
 from cryosoft.core.procedure import BaseProcedure
 from cryosoft.core.run_builder import PROCEDURE_BUILD_ERRORS, build_procedure
-from cryosoft.core.station import Station
 from cryosoft.gui import window_geometry
 from cryosoft.gui.live_plot_panel import LivePlotPanel
 from cryosoft.gui.notification_banner import NotificationBanner
@@ -34,7 +34,12 @@ from cryosoft.gui.form_autosave import FormAutosaveState
 from cryosoft.gui.procedure_discovery import discover_procedures
 from cryosoft.gui.procedure_params_panel import ProcedureParamsPanel
 from cryosoft.gui.queue_panel import QueuePanel
+from cryosoft.core.status_mirror import StatusMirror
 from cryosoft.session.run_queue import RunQueueHost
+
+if TYPE_CHECKING:  # the GUI holds a Station only as a type (contract C19)
+    from cryosoft.core.station import Station
+
 from cryosoft.gui.theme import (
     BANNER_SEVERITY_ERROR,
     BANNER_SEVERITY_WARNING,
@@ -88,22 +93,32 @@ class ProcedureWindow(QMainWindow):
             (``ExperimentManager.run_queue_host``), which the queue panel
             renders and mutates. ``None`` means no session layer is wired and
             the panel builds a standalone queue of its own.
+        mirror: The status mirror every read in this window is answered from
+            (the status-mirror standard, ``gui/README.md``). Built from the
+            proxy when none is given (the inline construction path).
     """
 
     def __init__(
         self,
         station: Station,
-        orchestrator: Orchestrator,
+        orchestrator: OrchestratorProxy,
         get_sample_info: Callable[[], dict[str, str]],
         get_data_dir: Callable[[], str | None],
         parent: QWidget | None = None,
         initial_session: FormAutosaveState | None = None,
         get_experiment_info: Callable[[], dict[str, str]] | None = None,
         queue_host: RunQueueHost | None = None,
+        mirror: StatusMirror | None = None,
     ) -> None:
         super().__init__(parent)
         self._station = station
         self._orchestrator = orchestrator
+        # Every read this window makes is a mirror read (the status-mirror
+        # standard, gui/README.md); the run-kind guards below are advisory,
+        # and the engine remains the authority on what actually happens.
+        self._mirror = (
+            mirror if mirror is not None else StatusMirror.of(orchestrator)
+        )
         self._get_sample_info = get_sample_info
         self._get_data_dir = get_data_dir
         # Session-layer experiment context, stamped into every built
@@ -463,8 +478,15 @@ class ProcedureWindow(QMainWindow):
         ``GLOSSARY.md``): its Pause button must never arm because an
         operation (e.g. a helium fill) happens to be RAMPING. Operation
         control lives on the Operations panel's OperationCard exclusively.
+
+        The run-kind check is an ADVISORY guard read off the status mirror,
+        never an authoritative one: which run is in flight is the engine's
+        fact, and the engine refuses anything it should refuse. The guard
+        exists because operation-blindness is a property of THIS window
+        rather than of the command — the Operations panel drives the very
+        same engine actions for the operation it owns.
         """
-        if self._orchestrator.active_run_kind() == "operation":
+        if self._mirror.active_run_kind() == "operation":
             return
         self._orchestrator.pause_procedure()
 
@@ -473,7 +495,7 @@ class ProcedureWindow(QMainWindow):
 
         Mirrors ``_on_pause_clicked``'s run-kind gate; see its docstring.
         """
-        if self._orchestrator.active_run_kind() == "operation":
+        if self._mirror.active_run_kind() == "operation":
             return
         self._orchestrator.resume_procedure()
 
@@ -486,7 +508,7 @@ class ProcedureWindow(QMainWindow):
         helium fill mid-RAMPING). An operation ends via its own OperationCard
         "Finish" control, never from here.
         """
-        if self._orchestrator.active_run_kind() == "operation":
+        if self._mirror.active_run_kind() == "operation":
             return
         answer = QMessageBox.question(
             self,
