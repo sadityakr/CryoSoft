@@ -43,7 +43,7 @@ from cryosoft.core.events import OPERATOR, Actor
 from cryosoft.core.run_builder import PROCEDURE_BUILD_ERRORS, build_procedure
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from collections.abc import Iterable, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Mapping, Sequence
 
     from cryosoft.core.plan import ExperimentEnvelope
     from cryosoft.core.station import Station
@@ -719,3 +719,276 @@ def validate_run(
         findings.extend(_target_findings(run, station=station, envelope=envelope))
 
     return RunValidation(findings=tuple(findings), duration_estimate_s=None)
+
+
+class RunQueueHost:
+    """A ``RunQueue`` plus the policy around it: validate, broadcast, build.
+
+    The queue itself is pure ordering; this is where the three things that
+    make it behave like the system's run queue live, in one place so nobody
+    reimplements them:
+
+    * **Validation on the way in.** ``add()`` runs ``validate_run()`` first
+      and refuses a spec that fails, so nothing waiting is known-unrunnable.
+    * **A broadcast on every change.** Each mutation that actually changed
+      something calls the injected ``publish`` with the actor behind it,
+      which is how a ``QueueChanged`` reaches the engine's one event stream
+      even though the queue lives outside the engine.
+    * **One construction on the way out.** ``next_run()`` pops one spec and
+      builds the single live object it describes — the engine's pull seam.
+
+    ``ExperimentManager`` wires one of these to the open experiment's context
+    and envelope and exposes it as its own queue surface. A client with no
+    session layer (the Procedure window in a bare unit test) builds one
+    directly: the setup's own ``control_limits`` still guard every add, there
+    is simply no experiment envelope to narrow them.
+    """
+
+    def __init__(
+        self,
+        *,
+        station: Station | None = None,
+        run_catalog: Mapping[str, type] | None = None,
+        publish: Callable[[Actor], None] | None = None,
+        experiment_info: Callable[[], Mapping[str, Any]] | None = None,
+        envelope: Callable[[], ExperimentEnvelope | None] | None = None,
+    ) -> None:
+        """Build a queue and the policy around it.
+
+        Args:
+            station: The Station a queued run would drive. ``None`` leaves
+                everything working except validation and the pull, which say
+                so rather than guessing.
+            run_catalog: ``{class __name__: class}`` a spec's class name is
+                resolved through, supplied by whoever owns discovery.
+            publish: Called with the actor after any mutation that changed
+                the queue — normally ``Orchestrator.publish_queue``. ``None``
+                means nothing is broadcast.
+            experiment_info: Returns the experiment context to stamp onto a
+                run, read at BUILD time so a run queued before an experiment
+                was opened belongs to the one open when it starts.
+            envelope: Returns the active session envelope, or ``None``.
+        """
+        self._station = station
+        self._run_catalog: dict[str, type] = dict(run_catalog or {})
+        self._publish = publish
+        self._experiment_info = experiment_info
+        self._envelope = envelope
+        self._queue = RunQueue()
+
+    @property
+    def queue(self) -> RunQueue:
+        """The underlying ordered queue (read; mutate through this host)."""
+        return self._queue
+
+    def snapshot(self) -> tuple[RunSpec, ...]:
+        """Return every waiting spec, in the order they will run."""
+        return self._queue.snapshot()
+
+    def entries(self) -> tuple[dict[str, Any], ...]:
+        """Return ``snapshot()`` as JSON-safe dicts, for ``QueueChanged``."""
+        return self._queue.entries()
+
+    def validate(
+        self,
+        run_class: type,
+        params: Mapping[str, Any],
+        *,
+        kind: str = KIND_PROCEDURE,
+        sample_info: Mapping[str, Any] | None = None,
+        data_directory: str = "",
+        file_prefix: str = "",
+    ) -> RunValidation:
+        """Check a proposed run without dispatching anything.
+
+        Args:
+            run_class: The procedure or operation class to check.
+            params: The parameter values it would run with.
+            kind: ``"procedure"`` or ``"operation"``.
+            sample_info: Sample metadata the run would record.
+            data_directory: Directory the run would write into.
+            file_prefix: Filename prefix the run would use.
+
+        Returns:
+            A ``RunValidation``.
+
+        Raises:
+            RuntimeError: If this host has no Station, which makes a headless
+                build impossible.
+        """
+        if self._station is None:
+            raise RuntimeError(
+                "validating a run needs a Station; this run queue was built "
+                "without one"
+            )
+        return validate_run(
+            run_class,
+            params,
+            station=self._station,
+            kind=kind,
+            sample_info=sample_info,
+            data_directory=data_directory,
+            file_prefix=file_prefix,
+            experiment_info=self._experiment_info() if self._experiment_info else None,
+            envelope=self._envelope() if self._envelope else None,
+        )
+
+    def add(
+        self,
+        run_class: type,
+        params: Mapping[str, Any],
+        *,
+        kind: str = KIND_PROCEDURE,
+        sample_info: Mapping[str, Any] | None = None,
+        data_directory: str = "",
+        file_prefix: str = "",
+        actor: Actor = OPERATOR,
+    ) -> tuple[RunSpec | None, RunValidation]:
+        """Validate a proposed run and, if it passes, queue it.
+
+        Args:
+            run_class: The procedure or operation class to queue.
+            params: The parameter values it will run with.
+            kind: ``"procedure"`` or ``"operation"``.
+            sample_info: Sample metadata to record with the run.
+            data_directory: Directory the run writes into.
+            file_prefix: Optional filename prefix.
+            actor: Who is queueing it.
+
+        Returns:
+            ``(spec, validation)`` — *spec* is ``None`` when validation
+            refused the run, and *validation.findings* says why.
+        """
+        validation = self.validate(
+            run_class,
+            params,
+            kind=kind,
+            sample_info=sample_info,
+            data_directory=data_directory,
+            file_prefix=file_prefix,
+        )
+        if not validation.ok:
+            logger.info(
+                "Refused to queue %s: %s",
+                run_class.__name__,
+                "; ".join(validation.messages()),
+            )
+            return None, validation
+        spec = self._queue.add(
+            RunSpec(
+                kind=kind,
+                run_class=run_class.__name__,
+                params=dict(params),
+                sample_info=dict(sample_info or {}),
+                data_directory=data_directory,
+                file_prefix=file_prefix,
+                actor=actor,
+            )
+        )
+        self._broadcast(actor)
+        return spec, validation
+
+    def add_spec(self, spec: RunSpec) -> RunSpec:
+        """Queue an already-built spec, unvalidated.
+
+        The restore path: a spec rebuilt from persisted session state is put
+        back exactly as it was saved, so the operator sees the queue they
+        left behind — a stored value that has since gone out of bounds is
+        reported when the run is pulled, not silently dropped on load.
+
+        Args:
+            spec: The spec to queue.
+
+        Returns:
+            The queued spec.
+        """
+        queued = self._queue.add(spec)
+        self._broadcast(spec.actor)
+        return queued
+
+    def remove(self, spec_id: str, *, actor: Actor = OPERATOR) -> bool:
+        """Remove one waiting run.
+
+        Args:
+            spec_id: The entry's ``RunSpec.spec_id``.
+            actor: Who is removing it.
+
+        Returns:
+            True if an entry was removed.
+        """
+        return self._changed(self._queue.remove(spec_id), actor)
+
+    def move(self, spec_id: str, offset: int, *, actor: Actor = OPERATOR) -> bool:
+        """Move one waiting run within its own half of the queue.
+
+        Args:
+            spec_id: The entry's ``RunSpec.spec_id``.
+            offset: Places to move it — negative towards the front.
+            actor: Who is reordering it.
+
+        Returns:
+            True if the order changed.
+        """
+        return self._changed(self._queue.move(spec_id, offset), actor)
+
+    def clear(self, *, actor: Actor = OPERATOR) -> bool:
+        """Empty the queue.
+
+        Args:
+            actor: Who is clearing it.
+
+        Returns:
+            True if anything was removed.
+        """
+        return self._changed(self._queue.clear(), actor)
+
+    def next_run(self) -> Any:
+        """Build and return the run the engine should start next.
+
+        Returns:
+            A ready procedure or operation, or ``None`` when the queue is
+            empty or this host has no Station/catalog to build with.
+
+        Raises:
+            KeyError: If the catalog holds no class of the spec's name.
+            CryoSoftError: If the run refuses to be built.
+            TypeError: If the stored parameters no longer fit the signature.
+            ValueError: If a parameter value is invalid.
+        """
+        if self._station is None or not self._run_catalog:
+            return None
+        spec = self._queue.pop_next()
+        if spec is None:
+            return None
+        try:
+            return build_run(
+                spec,
+                station=self._station,
+                run_catalog=self._run_catalog,
+                experiment_info=(
+                    self._experiment_info() if self._experiment_info else None
+                ),
+            )
+        finally:
+            # The spec has left the queue either way; a build that refused
+            # must not leave clients rendering an entry that is gone.
+            self._broadcast(spec.actor)
+
+    def _changed(self, changed: bool, actor: Actor) -> bool:
+        """Broadcast if a mutation actually changed the queue.
+
+        Args:
+            changed: What the ``RunQueue`` method reported.
+            actor: Who made the change.
+
+        Returns:
+            *changed*, unchanged.
+        """
+        if changed:
+            self._broadcast(actor)
+        return changed
+
+    def _broadcast(self, actor: Actor) -> None:
+        """Tell the injected publisher the queue changed, if there is one."""
+        if self._publish is not None:
+            self._publish(actor)

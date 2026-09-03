@@ -29,10 +29,9 @@ from cryosoft.session.models import (
 from cryosoft.session.run_queue import (
     KIND_PROCEDURE,
     RunQueue,
+    RunQueueHost,
     RunSpec,
     RunValidation,
-    build_run,
-    validate_run,
 )
 from cryosoft.session.store import ExperimentStore, SessionStore, UserRoster
 
@@ -128,10 +127,14 @@ class ExperimentManager(QObject):
             read_instrument_metadata(config_path) if config_path else {}
         )
         self._session_store = session_store
-        self._station = station
-        self._run_catalog: dict[str, type] = dict(run_catalog or {})
-        self._run_queue = RunQueue()
         self._experiment: ExperimentRecord | None = None
+        self._queue_host = RunQueueHost(
+            station=station,
+            run_catalog=run_catalog,
+            publish=self._publish_queue,
+            experiment_info=self.experiment_context,
+            envelope=self._current_envelope,
+        )
         self._store_save_ok = True
 
         orchestrator.run_started.connect(self._on_run_started)
@@ -466,13 +469,23 @@ class ExperimentManager(QObject):
         Read-only in practice: mutate it through the methods below, which
         validate, log and broadcast. A client that only needs to render the
         queue reads ``queue_snapshot()`` (or the ``QueueChanged`` events the
-        mutations emit) instead of holding this object.
+        mutations emit) rather than holding this object.
         """
-        return self._run_queue
+        return self._queue_host.queue
+
+    @property
+    def run_queue_host(self) -> RunQueueHost:
+        """The queue plus its policy, for a client that owns the whole surface.
+
+        The Procedure window's queue panel holds this rather than reaching
+        back through the manager for each call; everything it offers is also
+        available as a method here.
+        """
+        return self._queue_host
 
     def queue_snapshot(self) -> tuple[RunSpec, ...]:
         """Return every waiting **run spec**, in the order they will start."""
-        return self._run_queue.snapshot()
+        return self._queue_host.snapshot()
 
     def queue_entries(self) -> tuple[dict[str, Any], ...]:
         """Return ``queue_snapshot()`` as JSON-safe dicts.
@@ -481,7 +494,7 @@ class ExperimentManager(QObject):
         whole queue into every ``QueueChanged`` without knowing what a
         ``RunSpec`` is.
         """
-        return self._run_queue.entries()
+        return self._queue_host.entries()
 
     def validate_run(
         self,
@@ -495,13 +508,13 @@ class ExperimentManager(QObject):
     ) -> RunValidation:
         """Decide whether a proposed run may be queued — free, and with no effect.
 
-        The L6 entry point for **run validation**: it supplies the station and
-        the OPEN EXPERIMENT'S envelope, which is exactly what this layer knows
-        and ``session/run_queue.py``'s ``validate_run()`` does not. The run is
-        built headlessly and thrown away — nothing is dispatched, no data file
-        is opened — so an operator (or an agent) learns at the moment of
-        queueing that a value is out of bounds, instead of an hour later when
-        the run would have started.
+        The L6 entry point for **run validation**. What this layer adds over
+        the bare check is the two things only it knows: the Station to build
+        against and the OPEN EXPERIMENT'S envelope, both wired into the queue
+        host at construction. The run is built headlessly and thrown away —
+        nothing dispatched, no data file opened — so an operator (or an
+        agent) learns at the moment of queueing that a value is out of
+        bounds, instead of an hour later when the run would have started.
 
         Args:
             procedure_cls: The procedure or operation class to check.
@@ -519,25 +532,13 @@ class ExperimentManager(QObject):
             RuntimeError: If this manager was built without a Station, which
                 makes a headless build impossible.
         """
-        if self._station is None:
-            raise RuntimeError(
-                "validate_run() needs a Station; this ExperimentManager was "
-                "built without one"
-            )
-        return validate_run(
+        return self._queue_host.validate(
             procedure_cls,
             params,
-            station=self._station,
             kind=kind,
             sample_info=sample_info,
             data_directory=data_directory,
             file_prefix=file_prefix,
-            experiment_info=self.experiment_context(),
-            envelope=(
-                envelope_from_dict(self._experiment.envelope)
-                if self._experiment is not None
-                else None
-            ),
         )
 
     def queue_run(
@@ -571,34 +572,15 @@ class ExperimentManager(QObject):
             ``None`` when validation refused it and *validation.findings*
             says why.
         """
-        validation = self.validate_run(
+        return self._queue_host.add(
             procedure_cls,
             params,
             kind=kind,
             sample_info=sample_info,
             data_directory=data_directory,
             file_prefix=file_prefix,
+            actor=actor,
         )
-        if not validation.ok:
-            logger.info(
-                "Refused to queue %s: %s",
-                procedure_cls.__name__,
-                "; ".join(validation.messages()),
-            )
-            return None, validation
-        spec = self._run_queue.add(
-            RunSpec(
-                kind=kind,
-                run_class=procedure_cls.__name__,
-                params=dict(params),
-                sample_info=dict(sample_info or {}),
-                data_directory=data_directory,
-                file_prefix=file_prefix,
-                actor=actor,
-            )
-        )
-        self._publish_queue(actor)
-        return spec, validation
 
     def dequeue_run(self, spec_id: str, *, actor: Actor = OPERATOR) -> bool:
         """Remove one waiting run from the queue.
@@ -610,7 +592,7 @@ class ExperimentManager(QObject):
         Returns:
             True if an entry was removed.
         """
-        return self._mutate_queue(self._run_queue.remove(spec_id), actor)
+        return self._queue_host.remove(spec_id, actor=actor)
 
     def move_queued_run(
         self, spec_id: str, offset: int, *, actor: Actor = OPERATOR
@@ -625,7 +607,7 @@ class ExperimentManager(QObject):
         Returns:
             True if the order changed.
         """
-        return self._mutate_queue(self._run_queue.move(spec_id, offset), actor)
+        return self._queue_host.move(spec_id, offset, actor=actor)
 
     def clear_run_queue(self, *, actor: Actor = OPERATOR) -> bool:
         """Empty the run queue.
@@ -636,16 +618,16 @@ class ExperimentManager(QObject):
         Returns:
             True if anything was removed.
         """
-        return self._mutate_queue(self._run_queue.clear(), actor)
+        return self._queue_host.clear(actor=actor)
 
     def next_run(self) -> Any:
         """Build and return the run the engine should start next.
 
         The **pull seam**'s other end, wired to
         ``Orchestrator.next_procedure``: the engine asks, this pops one spec
-        and constructs the single live object it describes. Stamped with the
-        experiment context read HERE, at build time, so a run queued before an
-        experiment was opened still belongs to the one open when it runs.
+        and constructs the single live object it describes, stamped with the
+        experiment context read HERE, at build time — so a run queued before
+        an experiment was opened still belongs to the one open when it runs.
 
         Returns:
             A ready procedure or operation, or ``None`` when the queue is
@@ -657,36 +639,13 @@ class ExperimentManager(QObject):
             TypeError: If the stored parameters no longer fit the signature.
             ValueError: If a parameter value is invalid.
         """
-        if self._station is None or not self._run_catalog:
+        return self._queue_host.next_run()
+
+    def _current_envelope(self) -> ExperimentEnvelope | None:
+        """Return the open experiment's envelope, or ``None`` when none is open."""
+        if self._experiment is None:
             return None
-        spec = self._run_queue.pop_next()
-        if spec is None:
-            return None
-        try:
-            return build_run(
-                spec,
-                station=self._station,
-                run_catalog=self._run_catalog,
-                experiment_info=self.experiment_context(),
-            )
-        finally:
-            # The spec has left the queue either way; a build that refused
-            # must not leave clients rendering an entry that is gone.
-            self._publish_queue(spec.actor)
-
-    def _mutate_queue(self, changed: bool, actor: Actor) -> bool:
-        """Broadcast the queue if a mutation actually changed it.
-
-        Args:
-            changed: What the ``RunQueue`` method reported.
-            actor: Who made the change.
-
-        Returns:
-            *changed*, unchanged, so the caller can return it straight on.
-        """
-        if changed:
-            self._publish_queue(actor)
-        return changed
+        return envelope_from_dict(self._experiment.envelope)
 
     def _publish_queue(self, actor: Actor) -> None:
         """Ask the Orchestrator to broadcast the queue as it now stands.

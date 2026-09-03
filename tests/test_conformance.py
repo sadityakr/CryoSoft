@@ -4117,6 +4117,41 @@ def test_no_blocking_sleep_in_gui_sources() -> None:
     )
 
 
+# ── The run queue lives outside the engine ────────────────────────────────────
+
+_ENGINE_QUEUE_ATTRS = ("_procedure_queue", "_operation_queue")
+
+
+def test_no_source_reaches_into_the_engines_queue() -> None:
+    """Only ``orchestrator.py`` touches the engine's own run queues.
+
+    The run queue is data in the session layer (GLOSSARY.md's **Run queue**);
+    the engine keeps two small lists for runs handed to it directly, and it
+    PULLS the rest through ``next_procedure()``. A widget or a session module
+    reaching into one of those private lists would be pushing runs into the
+    engine behind its back — exactly the shared mutable queue this design
+    removed, and the seam through which a client could start a run the engine
+    did not decide to start.
+    """
+    offenders: list[str] = []
+    for path in sorted(PACKAGE_DIR.rglob("*.py")):
+        if path.name == "orchestrator.py":
+            continue
+        relative = path.relative_to(PACKAGE_DIR.parent).as_posix()
+        for line_number, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), start=1
+        ):
+            if any(attribute in line for attribute in _ENGINE_QUEUE_ATTRS):
+                offenders.append(f"{relative}:{line_number}: {line.strip()}")
+
+    assert not offenders, (
+        "The engine's private run queues are referenced outside "
+        "core/orchestrator.py. Queue through the session layer's RunQueue (or "
+        "Orchestrator.queue_procedure/queue_operation) instead:\n"
+        + "\n".join(offenders)
+    )
+
+
 # ── Run-source contract ───────────────────────────────────────────────────────
 # The "one vocabulary for live and stored runs" standard (core/data_reader.py's
 # module docstring, GLOSSARY.md's **Run source**). Implementations are found by

@@ -2481,7 +2481,7 @@ def test_add_to_queue_captures_current_file_prefix(procedure_win, qtbot):
     procedure_win._params_panel._file_prefix_input.setText("run_b")
     qtbot.mouseClick(add_btn, Qt.MouseButton.LeftButton)
 
-    prefixes = [entry.file_prefix for entry in procedure_win._queue_panel._queue]
+    prefixes = [entry.spec.file_prefix for entry in procedure_win._queue_panel._queue]
     assert prefixes[-2:] == ["run_a", "run_b"]
     assert "run_a" in procedure_win._queue_panel._queue_list.item(len(prefixes) - 2).text()
     assert "run_b" in procedure_win._queue_panel._queue_list.item(len(prefixes) - 1).text()
@@ -2496,9 +2496,10 @@ def test_blank_file_prefix_omitted_from_queue_label(procedure_win, qtbot):
     qtbot.mouseClick(add_btn, Qt.MouseButton.LeftButton)
 
     entry = procedure_win._queue_panel._queue[-1]
-    assert entry.file_prefix == ""
+    assert entry.spec.file_prefix == ""
     assert "[" not in procedure_win._queue_panel._queue_list.item(procedure_win._queue_panel._queue_list.count() - 1).text()
-    assert entry.cls.name in procedure_win._queue_panel._queue_list.item(procedure_win._queue_panel._queue_list.count() - 1).text()
+    queued_cls = procedure_win._queue_panel._classes[entry.spec.run_class]
+    assert queued_cls.name in procedure_win._queue_panel._queue_list.item(procedure_win._queue_panel._queue_list.count() - 1).text()
 
 
 def test_run_now_passes_file_prefix_to_procedure_instance(procedure_win, qtbot):
@@ -3209,7 +3210,7 @@ def test_procedure_window_restores_selection_and_params(station, orchestrator, q
 
 
 def test_procedure_window_exports_and_restores_queue(station, orchestrator, qtbot):
-    """A queued procedure round-trips through a session and is re-armed on restore."""
+    """A queued run round-trips through a session and is re-queued on restore."""
     info, ddir = _sample_stub(), _data_dir_stub()
     win = ProcedureWindow(station, orchestrator, info, ddir)
     qtbot.addWidget(win)
@@ -3223,7 +3224,8 @@ def test_procedure_window_exports_and_restores_queue(station, orchestrator, qtbo
     win2 = ProcedureWindow(station, orchestrator, info, ddir, initial_session=state)
     qtbot.addWidget(win2)
     assert win2._queue_panel._queue_list.count() == 1
-    assert len(orchestrator._procedure_queue) == 1
+    # The queue is data in the session layer, not procedures in the engine.
+    assert len(win2._queue_panel._host.snapshot()) == 1
 
 
 def test_procedure_window_skips_unknown_procedure_in_queue(station, orchestrator, qtbot):
@@ -3281,18 +3283,89 @@ def test_abort_marks_running_item_failed(station, orchestrator, qtbot, monkeypat
     assert win._queue_panel._queue[1].status == "running"
 
 
-def test_queue_remove_resyncs_orchestrator(station, orchestrator, qtbot):
-    """Removing a pending queue item keeps the Orchestrator queue in sync."""
+def test_queue_holds_specs_not_procedures(station, orchestrator, qtbot):
+    """Nothing waiting in the queue holds a live procedure object."""
+    info, ddir = _sample_stub(), _data_dir_stub()
+    win = ProcedureWindow(station, orchestrator, info, ddir)
+    qtbot.addWidget(win)
+    win._on_add_to_queue()
+
+    entry = win._queue_panel._queue[0]
+    assert not hasattr(entry, "proc")
+    assert entry.spec.run_class in win._queue_panel._classes
+    assert entry.spec.actor.id == "operator"
+
+
+def test_an_out_of_bounds_run_is_refused_when_it_is_queued(
+    station, orchestrator, qtbot, monkeypatch
+):
+    """Validation happens at add time, with the findings on screen."""
+    info, ddir = _sample_stub(), _data_dir_stub()
+    win = ProcedureWindow(station, orchestrator, info, ddir)
+    qtbot.addWidget(win)
+    shown: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox, "warning", lambda parent, title, text, *a, **k: shown.append(text)
+    )
+    end_input = win.findChild(QLineEdit, "sweep_field_end_input")
+    assert end_input is not None, "the field sweep renders a sweep-axis widget"
+    end_input.setText("50")
+
+    win._on_add_to_queue()
+
+    assert win._queue_panel._queue_list.count() == 0
+    assert shown and "magnet_z" in shown[0]
+    assert win._queue_panel._host.snapshot() == ()
+
+
+def test_the_panel_renders_a_run_queued_by_someone_else(station, orchestrator, qtbot):
+    """The panel is a view: a QueueChanged it did not cause still updates it."""
+    info, ddir = _sample_stub(), _data_dir_stub()
+    win = ProcedureWindow(station, orchestrator, info, ddir)
+    qtbot.addWidget(win)
+    cls = win._params_panel.current_class()
+
+    params, sample_info, data_dir, _prefix = win._collect_params()
+    win._queue_panel._host.add(
+        cls, params, sample_info=sample_info, data_directory=data_dir
+    )
+
+    assert win._queue_panel._queue_list.count() == 1
+
+
+def test_reordering_moves_the_spec_in_the_run_queue(station, orchestrator, qtbot):
+    """Up/down reorder the queue itself, not a GUI-only copy of it."""
+    info, ddir = _sample_stub(), _data_dir_stub()
+    win = ProcedureWindow(station, orchestrator, info, ddir)
+    qtbot.addWidget(win)
+    win._params_panel._file_prefix_input.setText("first")
+    win._on_add_to_queue()
+    win._params_panel._file_prefix_input.setText("second")
+    win._on_add_to_queue()
+
+    win._queue_panel._queue_list.setCurrentRow(1)
+    win._queue_panel._queue_move_up()
+
+    assert [
+        spec.file_prefix for spec in win._queue_panel._host.snapshot()
+    ] == ["second", "first"]
+    assert win._queue_panel._queue_list.currentRow() == 0
+
+
+def test_queue_remove_drops_the_spec_from_the_run_queue(station, orchestrator, qtbot):
+    """Removing a pending row removes the spec itself — there is one queue now."""
     info, ddir = _sample_stub(), _data_dir_stub()
     win = ProcedureWindow(station, orchestrator, info, ddir)
     qtbot.addWidget(win)
     win._on_add_to_queue()
     win._on_add_to_queue()
-    assert len(orchestrator._procedure_queue) == 2
+    assert len(win._queue_panel._host.snapshot()) == 2
+    removed = win._queue_panel._queue[0].spec.spec_id
     win._queue_panel._queue_list.setCurrentRow(0)
     win._queue_panel._queue_remove()
     assert win._queue_panel._queue_list.count() == 1
-    assert len(orchestrator._procedure_queue) == 1
+    assert [s.spec_id for s in win._queue_panel._host.snapshot()] != [removed]
+    assert len(win._queue_panel._host.snapshot()) == 1
 
 
 # ── Config management + geometry tests ─────────────────────────────────────────
