@@ -451,6 +451,28 @@ class BaseProcedure:
         """
         return None
 
+    def planned_targets(self) -> dict[str, list[float]]:
+        """Return every system setpoint this run would command, per VI.
+
+        The **pre-dispatch declaration**: a built run says what it is going to
+        ask the hardware for, so those values can be checked against the
+        setup's ``control_limits`` and the session envelope *before* anything
+        is dispatched — which is what lets a queued run be validated the
+        moment it is added rather than an hour later when it starts. Purely
+        declarative: reading it touches no instrument, opens no data file and
+        changes nothing about the run.
+
+        The default is ``{}`` — "this run commands no system setpoint" — the
+        honest answer for a procedure that only reads. A procedure that ramps
+        overrides it, deriving the values from the same target hooks its plans
+        are built from so the declaration cannot drift from what is actually
+        dispatched.
+
+        Returns:
+            ``{vi_name: [setpoint, ...]}`` in SI units, in dispatch order.
+        """
+        return {}
+
     def _claim_initiate_commands(self) -> tuple[Command, ...]:
         """Build an ``initiate()`` command for every VI this procedure claims.
 
@@ -1458,6 +1480,28 @@ class SweepMeasureProcedure(BaseProcedure):
             measurement_blocks=measurement_blocks,
             loop_shape=self._loop_shape,
         )
+
+    def planned_targets(self) -> dict[str, list[float]]:
+        """Return every system setpoint this sweep would command, per VI.
+
+        Derived from the very hooks ``initiate()`` and ``change_sweep_step()``
+        dispatch from — ``_initial_system_targets()`` and ``_step_targets()``
+        over every point of the built sweep — so the pre-dispatch declaration
+        (see ``BaseProcedure.planned_targets()``) is the same set of numbers
+        the run will actually send, and cannot drift from it. Pure: the hooks
+        only read the already-built sweep array.
+
+        Returns:
+            ``{vi_name: [setpoint, ...]}`` in SI units, first the initial
+            targets and then one entry per sweep point.
+        """
+        planned: dict[str, list[float]] = {}
+        plans = [self._initial_system_targets()]
+        plans.extend(self._step_targets(index) for index in range(len(self._sweep)))
+        for targets in plans:
+            for vi_name, target in targets.items():
+                planned.setdefault(vi_name, []).append(float(target.target))
+        return planned
 
     def initiate(self) -> PhasePlan:
         """Ramp to the first sweep point, arm the selected VI, open the file.

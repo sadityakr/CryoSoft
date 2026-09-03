@@ -1,0 +1,720 @@
+"""The run queue: immutable specs, their ordering, and their validation.
+
+The **run queue** holds what the operator asked for, not the machinery that
+would carry it out. Every waiting run is a frozen ``RunSpec`` — a class name,
+a validated parameter dict, the sample metadata and file prefix it was queued
+with, and the ``Actor`` who queued it — so nothing in the queue holds engine
+state, an open data file, or bus access. The one live object is constructed by
+the engine, from the one spec it is about to start.
+
+Two consequences follow, and they are the point of the design:
+
+* **The engine pulls.** ``Orchestrator.run_queue()`` asks its injected
+  ``next_procedure()`` callback for the next run and starts it itself. A
+  client that instead watched ``state_changed`` for ``"idle"`` and started the
+  next run would advance re-entrantly inside the engine's own emit, would
+  starve queued operations (which jump ahead of procedures — queue-jumping,
+  never preemption), and could not tell a clean finish from a hold
+  acknowledge, so it would auto-start a run straight after an emergency
+  standby. Authority over *when* a run starts stays with the engine.
+* **Entries are validated when they are added, not when they start.**
+  ``validate_run()`` builds the run headlessly and reports its findings, so a
+  parameter outside a declared bound, a setup limit, or the session envelope
+  is refused at the moment the operator queues it rather than an hour later.
+
+This module is headless and Qt-free by contract: it imports no widget and no
+Orchestrator, so a queue can be built, ordered and validated in a test, in a
+script, or in an agent gateway that has no GUI at all. It also never imports
+``cryosoft.procedures`` (contract C11) — the classes a spec names are resolved
+through a *run catalog* handed in by whoever owns discovery.
+"""
+
+from __future__ import annotations
+
+import inspect
+import logging
+import time
+import uuid
+from dataclasses import dataclass, field, fields
+from typing import TYPE_CHECKING, Any
+
+from cryosoft.core.events import OPERATOR, Actor
+from cryosoft.core.run_builder import PROCEDURE_BUILD_ERRORS, build_procedure
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from collections.abc import Iterable, Mapping, Sequence
+
+    from cryosoft.core.plan import ExperimentEnvelope
+    from cryosoft.core.station import Station
+
+logger = logging.getLogger(__name__)
+
+#: A spec that names a measurement recipe (L4 ``BaseProcedure``).
+KIND_PROCEDURE = "procedure"
+#: A spec that names an operation (L4 ``OperationBase``). Operations jump the
+#: whole queue: every waiting operation drains before the first procedure.
+KIND_OPERATION = "operation"
+#: The two kinds a ``RunSpec`` may declare.
+RUN_KINDS: frozenset[str] = frozenset({KIND_PROCEDURE, KIND_OPERATION})
+
+#: The run refused to be built at all (see ``PROCEDURE_BUILD_ERRORS``).
+FINDING_BUILD_REFUSED = "build_refused"
+#: A supplied parameter the procedure does not declare.
+FINDING_UNKNOWN_PARAM = "unknown_param"
+#: A parameter outside its ``ParamSpec`` declaration (type, bounds, choices).
+FINDING_PARAM_BOUNDS = "param_bounds"
+#: A setpoint the run would command outside the setup's ``control_limits``.
+FINDING_CONTROL_LIMIT = "control_limit"
+#: A setpoint the run would command outside the open experiment's envelope.
+FINDING_ENVELOPE = "envelope"
+
+
+def _json_value(value: Any) -> Any:
+    """Return *value* as a JSON-safe copy.
+
+    Args:
+        value: Any queued parameter value.
+
+    Returns:
+        A structure made only of ``str``/``int``/``float``/``bool``/``None``/
+        ``list``/``dict``.
+
+    Raises:
+        TypeError: If the value is not JSON-safe. A spec is a contract type:
+            it refuses eagerly rather than emitting an event a client cannot
+            parse.
+    """
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_value(item) for item in value]
+    raise TypeError(f"value {value!r} of type {type(value).__name__} is not JSON-safe")
+
+
+def _json_dict(value: Any, owner: str) -> dict[str, Any]:
+    """Return a JSON-safe dict copy of *value*.
+
+    Args:
+        value: The mapping to copy, or ``None`` for an empty one.
+        owner: Field name, for the error message.
+
+    Returns:
+        A fresh JSON-safe dict.
+
+    Raises:
+        TypeError: If *value* is not a mapping, or holds a non-JSON-safe value.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise TypeError(f"{owner} must be a mapping, got {type(value).__name__}")
+    return {str(key): _json_value(item) for key, item in value.items()}
+
+
+@dataclass(frozen=True)
+class RunSpec:
+    """One queued run, as data: what to run, with which values, on whose behalf.
+
+    Frozen and JSON-safe end to end, so the same object serves the queue, the
+    ``QueueChanged`` event a client renders, and the persisted session state.
+    It deliberately holds no procedure instance: a live run owns a data file
+    and a claim on instruments, and neither belongs to something that is only
+    waiting.
+
+    Attributes:
+        kind: ``"procedure"`` or ``"operation"`` (see ``RUN_KINDS``).
+        run_class: The class's ``__name__``, resolved against the run catalog
+            when the engine pulls this spec.
+        params: The run's own parameter values, already validated.
+        sample_info: Sample metadata to record with the run.
+        data_directory: Directory the run writes its data file into.
+        file_prefix: Optional filename prefix.
+        actor: Who queued it.
+        spec_id: Stable identity of this queue entry, for remove/move.
+        queued_at: Unix time it was queued.
+    """
+
+    kind: str
+    run_class: str
+    params: dict[str, Any] = field(default_factory=dict)
+    sample_info: dict[str, Any] = field(default_factory=dict)
+    data_directory: str = ""
+    file_prefix: str = ""
+    actor: Actor = OPERATOR
+    spec_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    queued_at: float = field(default_factory=time.time)
+
+    def __post_init__(self) -> None:
+        """Validate the kind and freeze JSON-safe copies of the dict fields.
+
+        Raises:
+            ValueError: If ``kind`` is not one of ``RUN_KINDS``, or
+                ``run_class`` is empty.
+            TypeError: If ``params``/``sample_info`` are not JSON-safe
+                mappings, or ``actor`` is neither an ``Actor`` nor its dict.
+        """
+        if self.kind not in RUN_KINDS:
+            raise ValueError(
+                f"RunSpec.kind must be one of {sorted(RUN_KINDS)}, got {self.kind!r}"
+            )
+        if not isinstance(self.run_class, str) or not self.run_class:
+            raise ValueError("RunSpec.run_class must be a non-empty class name")
+        object.__setattr__(self, "params", _json_dict(self.params, "RunSpec.params"))
+        object.__setattr__(
+            self, "sample_info", _json_dict(self.sample_info, "RunSpec.sample_info")
+        )
+        actor = self.actor
+        if isinstance(actor, dict):
+            actor = Actor.from_json(actor)
+        if not isinstance(actor, Actor):
+            raise TypeError(f"RunSpec.actor must be an Actor, got {actor!r}")
+        object.__setattr__(self, "actor", actor)
+        for name in ("data_directory", "file_prefix"):
+            if not isinstance(getattr(self, name), str):
+                raise TypeError(f"RunSpec.{name} must be a str")
+
+    def to_json(self) -> dict[str, Any]:
+        """Render this spec as a JSON-safe dict.
+
+        Returns:
+            The declared fields, with ``actor`` rendered as its own dict.
+        """
+        payload = {f.name: getattr(self, f.name) for f in fields(self)}
+        payload["params"] = dict(self.params)
+        payload["sample_info"] = dict(self.sample_info)
+        payload["actor"] = self.actor.to_json()
+        return payload
+
+    @classmethod
+    def from_json(cls, payload: Mapping[str, Any]) -> RunSpec:
+        """Rebuild a spec from its ``to_json()`` dict.
+
+        Args:
+            payload: A mapping as produced by ``to_json()``. Unknown keys are
+                ignored, so a newer producer never breaks an older consumer.
+
+        Returns:
+            The spec.
+
+        Raises:
+            TypeError: If a declared field carries a value the type rejects.
+            ValueError: If ``kind`` or ``run_class`` is invalid.
+        """
+        declared = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in payload.items() if k in declared})
+
+
+@dataclass(frozen=True)
+class RunFinding:
+    """One reason a run was refused, or one caveat about it.
+
+    Structured rather than prose so a client decides from ``code`` and the
+    numbers and never by parsing the message.
+
+    Attributes:
+        code: Machine-readable category — one of the ``FINDING_*`` constants.
+        message: Operator-facing explanation.
+        param: The parameter or VI name the finding is about, or ``""``.
+    """
+
+    code: str
+    message: str
+    param: str = ""
+
+    def to_json(self) -> dict[str, Any]:
+        """Render this finding as a JSON-safe dict."""
+        return {"code": self.code, "message": self.message, "param": self.param}
+
+
+@dataclass(frozen=True)
+class RunValidation:
+    """The verdict on a proposed run, decided before anything is dispatched.
+
+    Attributes:
+        findings: Every problem found, in discovery order. Empty means the run
+            is accepted.
+        duration_estimate_s: How long the run is expected to take, or ``None``
+            when no estimate is available. A placeholder for now: the estimate
+            needs the sweep length and the per-step settle model, which the
+            duration-estimate work will supply; the field exists so clients can
+            already render it.
+    """
+
+    findings: tuple[RunFinding, ...] = ()
+    duration_estimate_s: float | None = None
+
+    def __post_init__(self) -> None:
+        """Freeze ``findings`` into a tuple.
+
+        Raises:
+            TypeError: If a finding is not a ``RunFinding``.
+        """
+        findings = tuple(self.findings)
+        for finding in findings:
+            if not isinstance(finding, RunFinding):
+                raise TypeError(
+                    f"RunValidation.findings must hold RunFindings, got {finding!r}"
+                )
+        object.__setattr__(self, "findings", findings)
+
+    @property
+    def ok(self) -> bool:
+        """True when nothing was found against the run."""
+        return not self.findings
+
+    def messages(self) -> tuple[str, ...]:
+        """Return each finding's message, for a log line or a dialog body."""
+        return tuple(finding.message for finding in self.findings)
+
+    def to_json(self) -> dict[str, Any]:
+        """Render this validation as a JSON-safe dict."""
+        return {
+            "ok": self.ok,
+            "findings": [finding.to_json() for finding in self.findings],
+            "duration_estimate_s": self.duration_estimate_s,
+        }
+
+
+class RunQueue:
+    """The ordered run queue: immutable specs, operations first.
+
+    Two ordered buckets rather than one list, because the queue-jumping rule
+    is an ordering property and not a per-entry priority field: every waiting
+    operation drains before the first waiting procedure, and adding a
+    procedure can never delay an operation. Within a bucket, order is exactly
+    the order entries were added (or moved to).
+
+    Nothing here touches hardware, Qt, or the engine. Mutating methods return
+    whether they changed anything, so a caller knows when to broadcast.
+    """
+
+    def __init__(self, specs: Iterable[RunSpec] = ()) -> None:
+        """Build a queue, optionally pre-filled.
+
+        Args:
+            specs: Initial specs, added in order.
+        """
+        self._operations: list[RunSpec] = []
+        self._procedures: list[RunSpec] = []
+        for spec in specs:
+            self.add(spec)
+
+    def _bucket(self, kind: str) -> list[RunSpec]:
+        """Return the list holding specs of *kind*."""
+        return self._operations if kind == KIND_OPERATION else self._procedures
+
+    def _locate(self, spec_id: str) -> tuple[list[RunSpec], int] | None:
+        """Return the bucket and index holding *spec_id*, or ``None``."""
+        for bucket in (self._operations, self._procedures):
+            for index, spec in enumerate(bucket):
+                if spec.spec_id == spec_id:
+                    return bucket, index
+        return None
+
+    def add(self, spec: RunSpec) -> RunSpec:
+        """Append *spec* to the end of its own bucket.
+
+        Args:
+            spec: The spec to queue.
+
+        Returns:
+            The spec, so a caller can chain on its ``spec_id``.
+
+        Raises:
+            TypeError: If *spec* is not a ``RunSpec``.
+            ValueError: If a spec with the same ``spec_id`` is already queued.
+        """
+        if not isinstance(spec, RunSpec):
+            raise TypeError(f"RunQueue.add expects a RunSpec, got {spec!r}")
+        if self._locate(spec.spec_id) is not None:
+            raise ValueError(f"spec_id {spec.spec_id!r} is already queued")
+        self._bucket(spec.kind).append(spec)
+        logger.info(
+            "Run queue: %s %s queued by %s (%d waiting)",
+            spec.kind,
+            spec.run_class,
+            spec.actor.id,
+            len(self),
+        )
+        return spec
+
+    def remove(self, spec_id: str) -> bool:
+        """Drop the spec with this id.
+
+        Args:
+            spec_id: The entry's identity.
+
+        Returns:
+            True if an entry was removed, False if no entry had that id.
+        """
+        found = self._locate(spec_id)
+        if found is None:
+            return False
+        bucket, index = found
+        removed = bucket.pop(index)
+        logger.info("Run queue: %s %s removed", removed.kind, removed.run_class)
+        return True
+
+    def move(self, spec_id: str, offset: int) -> bool:
+        """Move an entry *offset* places within its own bucket.
+
+        Operations and procedures never interleave, so a move is clamped to
+        the entry's own bucket: moving the first procedure up cannot push it
+        ahead of a waiting operation.
+
+        Args:
+            spec_id: The entry's identity.
+            offset: Places to move it — negative towards the front.
+
+        Returns:
+            True if the order changed, False if the id is unknown, the offset
+            is zero, or the entry is already at that end.
+        """
+        found = self._locate(spec_id)
+        if found is None or offset == 0:
+            return False
+        bucket, index = found
+        target = max(0, min(len(bucket) - 1, index + offset))
+        if target == index:
+            return False
+        bucket.insert(target, bucket.pop(index))
+        return True
+
+    def clear(self) -> bool:
+        """Empty the queue.
+
+        Returns:
+            True if anything was removed.
+        """
+        if not self._operations and not self._procedures:
+            return False
+        self._operations.clear()
+        self._procedures.clear()
+        logger.info("Run queue: cleared")
+        return True
+
+    def snapshot(self) -> tuple[RunSpec, ...]:
+        """Return every waiting spec in the order they will run.
+
+        Returns:
+            Operations first (in their own order), then procedures.
+        """
+        return (*self._operations, *self._procedures)
+
+    def entries(self) -> tuple[dict[str, Any], ...]:
+        """Return ``snapshot()`` rendered as JSON-safe dicts."""
+        return tuple(spec.to_json() for spec in self.snapshot())
+
+    def pop_next(self) -> RunSpec | None:
+        """Remove and return the spec that should run next.
+
+        Returns:
+            The first waiting operation if there is one, else the first
+            waiting procedure, else ``None`` for an empty queue.
+        """
+        for bucket in (self._operations, self._procedures):
+            if bucket:
+                return bucket.pop(0)
+        return None
+
+    def find(self, spec_id: str) -> RunSpec | None:
+        """Return the queued spec with this id, or ``None``."""
+        found = self._locate(spec_id)
+        if found is None:
+            return None
+        bucket, index = found
+        return bucket[index]
+
+    def __len__(self) -> int:
+        """Return how many specs are waiting."""
+        return len(self._operations) + len(self._procedures)
+
+    def __bool__(self) -> bool:
+        """True while anything is waiting."""
+        return bool(self._operations or self._procedures)
+
+
+def build_run(
+    spec: RunSpec,
+    *,
+    station: Station,
+    run_catalog: Mapping[str, type],
+    experiment_info: Mapping[str, Any] | None = None,
+) -> Any:
+    """Construct the one live object a spec describes.
+
+    The other half of the pull seam: the engine asks for the next run, and
+    exactly one procedure/operation instance comes into existence, for the run
+    that is about to start. A procedure is assembled by
+    ``run_builder.build_procedure()`` — the one headless construction path —
+    and an operation by its own ``cls(station, **params)`` constructor shape,
+    the same two shapes ``Orchestrator.submit()`` honours.
+
+    Args:
+        spec: The queued spec.
+        station: The Station the run will drive.
+        run_catalog: ``{class __name__: class}``, supplied by whoever owns
+            discovery — this module may not import ``cryosoft.procedures``
+            (contract C11).
+        experiment_info: Experiment context stamped onto the run, read at
+            build time so a queued run belongs to the experiment that is open
+            when it actually starts. Ignored for an operation, which records
+            no experiment metadata of its own.
+
+    Returns:
+        A ready procedure or operation instance.
+
+    Raises:
+        KeyError: If the catalog holds no class of that name.
+        CryoSoftError: If the run refuses to be built.
+        TypeError: If the stored parameters no longer fit the signature.
+        ValueError: If a parameter value is invalid.
+    """
+    run_class = run_catalog.get(spec.run_class)
+    if run_class is None:
+        raise KeyError(
+            f"unknown {spec.kind} {spec.run_class!r}: the run catalog holds "
+            f"{sorted(run_catalog)}"
+        )
+    if spec.kind == KIND_OPERATION:
+        return run_class(station, **spec.params)
+    return build_procedure(
+        run_class,
+        station=station,
+        params=dict(spec.params),
+        sample_info=dict(spec.sample_info),
+        data_directory=spec.data_directory,
+        file_prefix=spec.file_prefix,
+        experiment_info=dict(experiment_info) if experiment_info else None,
+    )
+
+
+def _accepts_extra_params(run_class: type) -> bool:
+    """True if the class's ``__init__`` absorbs keyword arguments it never declared.
+
+    The generic sweep procedures deliberately do: they resolve a measurement
+    VI from the station and take ITS parameters alongside their own, so those
+    values are legitimately absent from ``cls.parameters``. Only a class with
+    a closed signature can be told that a supplied name is undeclared.
+
+    Args:
+        run_class: The procedure or operation class being queued.
+
+    Returns:
+        True when ``__init__`` declares a ``**kwargs`` catch-all.
+    """
+    try:
+        parameters = inspect.signature(run_class.__init__).parameters.values()
+    except (TypeError, ValueError):  # pragma: no cover - exotic callables
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters)
+
+
+def _declared_param_findings(
+    run_class: type, params: Mapping[str, Any]
+) -> list[RunFinding]:
+    """Check supplied values against the class's own ``ParamSpec`` declarations.
+
+    The first of ``validate_run()``'s three checks. Every declared parameter
+    validates itself — type, inclusive bounds, enumerated choices — so a value
+    the form or an agent produced is refused here rather than by whichever
+    layer happens to notice it first.
+
+    Args:
+        run_class: The procedure or operation class being queued.
+        params: The supplied parameter values.
+
+    Returns:
+        One finding per violation, in declaration order, followed by one per
+        undeclared parameter name.
+    """
+    declared: Mapping[str, Any] = getattr(run_class, "parameters", {}) or {}
+    findings: list[RunFinding] = []
+    for name, spec in declared.items():
+        if name not in params:
+            continue
+        value = params[name]
+        choices = getattr(spec, "choices", None)
+        if choices:
+            if value not in choices.values():
+                findings.append(
+                    RunFinding(
+                        FINDING_PARAM_BOUNDS,
+                        f"{name}={value!r} is not one of the declared choices "
+                        f"{sorted(choices.values(), key=str)}",
+                        name,
+                    )
+                )
+            continue
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            continue
+        low = getattr(spec, "min", None)
+        high = getattr(spec, "max", None)
+        if low is not None and value < low:
+            findings.append(
+                RunFinding(
+                    FINDING_PARAM_BOUNDS,
+                    f"{name}={value:g} is below the declared minimum {low:g}",
+                    name,
+                )
+            )
+        if high is not None and value > high:
+            findings.append(
+                RunFinding(
+                    FINDING_PARAM_BOUNDS,
+                    f"{name}={value:g} is above the declared maximum {high:g}",
+                    name,
+                )
+            )
+    if declared and not _accepts_extra_params(run_class):
+        for name in params:
+            if name not in declared:
+                findings.append(
+                    RunFinding(
+                        FINDING_UNKNOWN_PARAM,
+                        f"{run_class.__name__} declares no parameter {name!r}",
+                        name,
+                    )
+                )
+    return findings
+
+
+def _target_findings(
+    run: Any,
+    *,
+    station: Station,
+    envelope: ExperimentEnvelope | None,
+) -> list[RunFinding]:
+    """Check the setpoints a built run would command, before any are dispatched.
+
+    The other two of ``validate_run()``'s three checks, both over the same
+    values: the run's own ``planned_targets()`` — the setpoints it declares it
+    will command, per system VI. Each is compared against the setup's
+    ``control_limits`` bound for that VI (``Station.envelope_variables()``, the
+    read side of the control-validation standard) and against the open
+    experiment's envelope, which narrows it.
+
+    Args:
+        run: The freshly built procedure or operation.
+        station: The Station it would drive.
+        envelope: The open experiment's envelope, or ``None``.
+
+    Returns:
+        One finding per out-of-range setpoint, at most one per VI per bound.
+    """
+    planned = getattr(run, "planned_targets", None)
+    if not callable(planned):
+        return []
+    try:
+        targets: Mapping[str, Sequence[float]] = planned()
+    except Exception:  # noqa: BLE001 — validation must never raise at its caller
+        logger.exception("validate_run: planned_targets() failed")
+        return []
+
+    variables = station.envelope_variables()
+    findings: list[RunFinding] = []
+    for vi_name, values in targets.items():
+        numbers = [float(value) for value in values]
+        if not numbers:
+            continue
+        extremes = (min(numbers), max(numbers))
+        variable = variables.get(vi_name)
+        if variable is not None:
+            for value in extremes:
+                low, high = variable.config_min, variable.config_max
+                if (low is not None and value < low) or (
+                    high is not None and value > high
+                ):
+                    findings.append(
+                        RunFinding(
+                            FINDING_CONTROL_LIMIT,
+                            f"{vi_name} setpoint {value:g} is outside the setup "
+                            f"limit [{'-inf' if low is None else f'{low:g}'}, "
+                            f"{'inf' if high is None else f'{high:g}'}]",
+                            vi_name,
+                        )
+                    )
+                    break
+        if envelope is not None:
+            for value in extremes:
+                message = envelope.check_target(vi_name, value)
+                if message is not None:
+                    findings.append(RunFinding(FINDING_ENVELOPE, message, vi_name))
+                    break
+    return findings
+
+
+def validate_run(
+    run_class: type,
+    params: Mapping[str, Any],
+    *,
+    station: Station,
+    kind: str = KIND_PROCEDURE,
+    sample_info: Mapping[str, Any] | None = None,
+    data_directory: str = "",
+    file_prefix: str = "",
+    experiment_info: Mapping[str, Any] | None = None,
+    envelope: ExperimentEnvelope | None = None,
+) -> RunValidation:
+    """Decide whether a proposed run may be queued, without dispatching anything.
+
+    Free of hardware and free of consequence: the run is built headlessly and
+    thrown away, no target reaches the Station, no data file is opened. Three
+    checks, in order — the declared ``ParamSpec`` bounds, the build itself
+    (a procedure legitimately refuses a run this station cannot honour), and
+    the setpoints the built run declares it would command, against the setup's
+    ``control_limits`` and the open experiment's envelope.
+
+    ``ExperimentManager.validate_run()`` is the L6 entry point that supplies
+    the station and the open experiment's envelope; this function is what it
+    calls, and what a caller with no session layer can call directly.
+
+    Args:
+        run_class: The procedure or operation class being queued.
+        params: The parameter values it would run with.
+        station: The Station the run would drive.
+        kind: ``"procedure"`` or ``"operation"``.
+        sample_info: Sample metadata the run would record.
+        data_directory: Directory the run would write into. Never created or
+            written here.
+        file_prefix: Filename prefix the run would use.
+        experiment_info: Experiment context the run would be stamped with.
+        envelope: The open experiment's envelope, or ``None`` for none.
+
+    Returns:
+        A ``RunValidation``; ``ok`` is True exactly when nothing was found.
+    """
+    findings = _declared_param_findings(run_class, params)
+
+    catalog = {run_class.__name__: run_class}
+    spec = RunSpec(
+        kind=kind,
+        run_class=run_class.__name__,
+        params=dict(params),
+        sample_info=dict(sample_info or {}),
+        data_directory=data_directory,
+        file_prefix=file_prefix,
+    )
+    run: Any = None
+    try:
+        run = build_run(
+            spec,
+            station=station,
+            run_catalog=catalog,
+            experiment_info=experiment_info,
+        )
+    except PROCEDURE_BUILD_ERRORS as exc:
+        findings.append(
+            RunFinding(
+                FINDING_BUILD_REFUSED,
+                f"{getattr(run_class, 'name', run_class.__name__)} refused this "
+                f"run: {exc}",
+            )
+        )
+
+    if run is not None:
+        findings.extend(_target_findings(run, station=station, envelope=envelope))
+
+    return RunValidation(findings=tuple(findings), duration_estimate_s=None)
