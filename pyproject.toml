@@ -419,3 +419,23 @@ forbidden_modules = [
     "cryosoft.core.station",
     "cryosoft.core.orchestrator",
 ]
+
+[[tool.importlinter.contracts]]
+name = "C20: the reference client is a leaf entry point — cryosoft.ctl imports core, the session layer and the troubleshoot toolbox, plus cryosoft.procedures for the run catalog it discovers; never the GUI, drivers or VIs"
+type = "forbidden"
+# cryosoft.ctl is an ENTRY POINT, like cryosoft.main: it owns discovery. A run
+# travels as a class NAME, and neither the engine (C5) nor the session layer
+# (C11) may import cryosoft.procedures, so whoever owns discovery resolves the
+# name and hands the catalog down — which is why that one package above
+# core/session is reachable here and nothing else above them is. Procedures are
+# hardware-blind by C6, so importing them brings no instrument I/O with them.
+source_modules = ["cryosoft.ctl"]
+# Same pass-through exemption as C5/C6/C11: the client reaches the Station and
+# the Orchestrator, whose own VI imports do not make it hardware-aware.
+ignore_imports = ["cryosoft.core.station -> cryosoft.virtual_instruments.*"]
+forbidden_modules = [
+    "cryosoft.gui",
+    "cryosoft.main",
+    "cryosoft.drivers",
+    "cryosoft.virtual_instruments",
+]

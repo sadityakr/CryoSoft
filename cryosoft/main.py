@@ -15,12 +15,14 @@ from cryosoft.core.config_catalog import ConfigCatalog
 from cryosoft.core.instrument_host import InstrumentHost
 from cryosoft.core.logging_config import setup_logging
 from cryosoft.core.paths import measurement_root
+from cryosoft.core.request_spool import RequestSpool
 from cryosoft.core.station import (
     Station,
     build_station_with_fallback,
     read_cryogenics_config,
     read_operations_config,
     read_panels_config,
+    read_request_spool_config,
     read_safety_config,
     read_servicing_logs_config,
     read_trends_config,
@@ -32,6 +34,7 @@ from cryosoft.gui.monitor_window import MonitorWindow
 from cryosoft.gui.procedure_discovery import discover_operations, discover_procedures
 from cryosoft.gui.theme import PLOT_AXIS, PLOT_BG, build_stylesheet
 from cryosoft.session.eln.publisher import ElnPublisher
+from cryosoft.session.gateway import authorize_spooled
 from cryosoft.session.eln.settings import load_eln_settings
 from cryosoft.session.manager import ExperimentManager
 from cryosoft.session.models import GUEST_USER_ID, GUEST_USER_NAME, User
@@ -192,6 +195,19 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
     def _orchestrator_options(_station: Station) -> dict[str, Any]:
         """Read the engine's settings from the config the build resolved."""
         safety_config = read_safety_config(build["used_path"])
+        # The Request spool (GLOSSARY.md's **Request spool**): off unless the
+        # setup asks for it, and capped at the role the setup declares. The
+        # permission hook is wired HERE because the role model is the session
+        # layer's and the engine may not import it (contract C12) — the same
+        # reason the run catalog is handed down rather than discovered below.
+        spool_config = read_request_spool_config(build["used_path"])
+        request_spool = (
+            RequestSpool(
+                max_role=spool_config["max_role"], authorizer=authorize_spooled
+            )
+            if spool_config["enabled"]
+            else None
+        )
         return {
             "tick_interval_ms": 3000,
             "manual_override_timeout_s": safety_config["manual_override_timeout_s"],
@@ -203,6 +219,7 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
                 "hold_enforcement_max_attempts"
             ],
             "run_catalog": run_catalog,
+            "request_spool": request_spool,
         }
 
     app.instrument_host = InstrumentHost(

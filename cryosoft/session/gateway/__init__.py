@@ -25,9 +25,11 @@ from cryosoft.session.gateway.action_classes import (
 from cryosoft.session.gateway.gateway import EngineClient, Gateway
 from cryosoft.session.gateway.roles import (
     PERMISSION_MATRIX,
+    ROLE_LADDER,
     Permission,
     Role,
     authorize,
+    authorize_spooled,
 )
 from cryosoft.session.gateway.tools import (
     COMMAND_ARG_SCHEMAS,
@@ -54,7 +56,9 @@ __all__ = [
     "Role",
     "Permission",
     "PERMISSION_MATRIX",
+    "ROLE_LADDER",
     "authorize",
+    "authorize_spooled",
     "Gateway",
     "EngineClient",
     "ToolSpec",

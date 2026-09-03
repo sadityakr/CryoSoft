@@ -45,6 +45,13 @@ The **kill switch** is checked before the matrix and can only ever subtract:
 leaves it nothing at all. It is enforced a second time inside the engine
 (``Orchestrator.submit()``), which is the authority — this check is the front
 door, so that an agent gets a specific refusal rather than a generic one.
+
+One door narrows the model further. A request that arrives through the
+**Request spool** — a file dropped into a directory, rather than an
+in-process connection — is judged by ``authorize_spooled()``, which caps the
+role the file may declare at the setup's configured ``spool_max_role`` before
+handing the command on to ``authorize()``. The cap subtracts exactly as the
+kill switch does and, like it, never applies to emergency standby.
 """
 
 from __future__ import annotations
@@ -268,4 +275,110 @@ def authorize(
         f"actions, so {command.name.value!r} is refused.",
         {**detail, "rule": "role_matrix"},
         seq,
+    )
+
+
+#: The roles in ascending order of authority. The matrix above is monotone
+#: along it — a role never has less than the one below it in any row — which
+#: is what makes "no more than this role" (``authorize_spooled()``'s cap) a
+#: meaningful bound rather than an arbitrary comparison.
+ROLE_LADDER: tuple[Role, ...] = (Role.OBSERVER, Role.DEBUG, Role.SESSION)
+
+
+def _outranks(role: Role, cap: Role) -> bool:
+    """Return whether *role* claims more authority than *cap* allows.
+
+    Args:
+        role: The role being claimed.
+        cap: The most authority that may be granted.
+
+    Returns:
+        ``True`` when *role* sits above *cap* on ``ROLE_LADDER``.
+    """
+    return ROLE_LADDER.index(role) > ROLE_LADDER.index(cap)
+
+
+def authorize_spooled(
+    *,
+    command: Command,
+    declared_role: str,
+    max_role: str,
+    station_info: StationInfo,
+    attendance: bool,
+    kill_switch: AgentGate,
+    seq: int = 0,
+) -> Verdict | None:
+    """Decide whether one **Request spool** request may be submitted.
+
+    The permission hook ``core.request_spool.RequestSpool`` is wired with
+    (see its ``Authorizer``): the same model ``authorize()`` applies, with one
+    extra bound in front of it. A file dropped into a directory is a weaker
+    claim of identity than an in-process connection, so the setup declares how
+    much authority that door may ever grant (``monitor.yaml``'s
+    ``spool_max_role``) and a request declaring more is refused here — before
+    the matrix, and regardless of what the agent's own role would permit.
+
+    The cap is checked AFTER the emergency-standby carve-out, never before:
+    an actor that can see a problem must never be unable to make the station
+    safe, and that is as true through a file drop as through a window.
+
+    A ``max_role`` that names no known role is treated as the safest one
+    (``observer``) and logged, because a typo in a config must narrow
+    authority, never widen it.
+
+    Args:
+        command: The command the request carries, actor already stamped with
+            the file's declared role.
+        declared_role: The authority the request file declared.
+        max_role: The cap the setup configured for this spool.
+        station_info: The station's declaration snapshot.
+        attendance: Whether a human is watching.
+        kill_switch: The gate the human set.
+        seq: Sequence number to stamp on a refusal verdict.
+
+    Returns:
+        ``None`` when the command may be submitted, or the ``BLOCKED_ROLE``
+        ``Verdict`` that refuses it.
+    """
+    if command.name is CommandName.EMERGENCY_STANDBY:
+        return None
+
+    try:
+        cap = Role(max_role)
+    except ValueError:
+        logger.warning(
+            "Unknown request-spool cap %r; capping at %r instead.",
+            max_role,
+            Role.OBSERVER.value,
+        )
+        cap = Role.OBSERVER
+
+    try:
+        role = Role(declared_role)
+    except ValueError:
+        # An unknown role is refused by authorize() itself, with the message
+        # that names the roles that exist; nothing is gained by saying it
+        # twice in two different words.
+        return authorize(
+            command.actor, command, station_info, attendance, kill_switch, seq=seq
+        )
+
+    if _outranks(role, cap):
+        return _refusal(
+            command,
+            command.actor,
+            f"The request spool grants at most the {cap.value!r} role on this "
+            f"setup, and this request declares {role.value!r}. Raise "
+            f"monitor.yaml's spool_max_role to widen it, or submit through a "
+            f"client that is inside the application.",
+            {
+                "rule": "spool_role_cap",
+                "role": role.value,
+                "max_role": cap.value,
+            },
+            seq,
+        )
+
+    return authorize(
+        command.actor, command, station_info, attendance, kill_switch, seq=seq
     )
