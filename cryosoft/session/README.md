@@ -59,6 +59,12 @@ same run reduced to a **probe run** (a few cheap points, `run_kind =
 queue is the probe itself. See the **Run queue** / **Run spec** /
 **Run validation** / **Probe run** entries in `GLOSSARY.md`.
 
+Also hosts the **Agent feed** (`agent_feed.py`): one experiment's
+append-only trail of everything a non-operator **Actor** asked for and was
+told, written to `agent_actions.jsonl` inside the experiment folder so the
+folder stays the complete, portable record. See the **Agent feed** entry in
+`GLOSSARY.md` for the record standard.
+
 Also hosts the **Agent gateway** (`gateway/`): the second adapter of the
 **Control contract**, letting an autonomous client submit the same
 `Command`s the GUI does under a declared **Role**, with every action's
@@ -165,6 +171,14 @@ GUI imports session).
   failure/recovery, emitted once per transition).
 - Servicing-log storage: `<store root>/<config_name>/<kind>.jsonl` (one file
   per declared log kind) and `<store root>/<config_name>/helium_record.jsonl`.
+- The **Agent feed**, `<experiment_id>/agent_actions.jsonl`
+  (`ExperimentStore.agent_feed_path()`) — one line per command a
+  non-operator actor submitted, per verdict answering one, and per
+  `StateChange` an agent caused, joined by `request_id`. The `Gateway`
+  writes the command records (it alone still holds the arguments); the feed
+  itself reads verdicts and events off the engine's streams
+  (`AgentFeed.attach()`), so an agent that skips the gateway is still
+  recorded.
 - The ELN publish journal, `<experiment_id>/outbox.jsonl`
   (`ExperimentStore.outbox_path()`) — written by `session/eln/`'s **Outbox**,
   inside the experiment folder so a copied experiment carries its
@@ -215,6 +229,14 @@ file-format change, not a routine edit.
   a recursive basename search under `<experiment_id>/data/`; if nothing
   matches, the original path is returned unchanged. This is what makes
   "copy or move the experiment folder elsewhere and it still opens" true.
+- **The agent feed is a journal of facts, not of entities.** Every line in
+  `agent_actions.jsonl` is a distinct thing that happened, ordered by a
+  per-file `seq` that continues where an earlier process left off; nothing
+  supersedes an earlier line, so the last-line-wins rule the **Outbox** and
+  the servicing log follow does NOT apply here. Every record carries every
+  key of the standard, `null` where one does not apply — a reader must never
+  have to guess whether an absent key means "no" or "old file". A corrupt
+  line is skipped with a WARNING, as everywhere else in this layer.
 - **`queue`** on `ExperimentRecord` is GUI-authored, opaque JSON — a list of
   dicts whose shape only `gui.form_autosave.QueueItemState` (planned) knows.
   The session layer stores and round-trips it via `ExperimentManager.set_queue()`
@@ -305,8 +327,9 @@ file-format change, not a routine edit.
 | File | Responsibility | Key public API | Owning test |
 |------|----------------|----------------|-------------|
 | `models.py` | Tolerant-parse records: users, sessions (the L6 tier above an experiment, incl. its `experiments` index), runs (incl. the per-run `eln_link` the publisher stamps), experiments (incl. `queue` and `schema_version`), ELN links, servicing-log entries; envelope (de)serialisation. | `SCHEMA_VERSION`, `GUEST_USER_ID`, `GUEST_USER_NAME`, `User`, `Session`, `ExperimentIndexEntry`, `RunRecord`, `ExperimentRecord`, `ElnLink`, `ServiceLogEntry`, `envelope_to_dict`, `envelope_from_dict` | `tests/test_session_layer.py` / `tests/test_servicing_log.py` + conformance |
-| `store.py` | Disk persistence: per-user, per-session folders (`session.json` + machine-wide active pointer) via `SessionStore`, one level above per-experiment folders (`experiment.json`, `gui_state.json`, `data/`) + their own active pointer via `ExperimentStore`; user roster; bundle-relative data-path (de)resolution. | `SessionStore` (`list_sessions(user_id)`, `create_session`, `load(user_id, session_id)`, `save`, `get_active` → `tuple[str, str] \| None`, `set_active(user_id, session_id)`, `make_session_id`), `ExperimentStore` (`list_experiments`, `load`, `save`, `get_active`, `set_active`, `make_experiment_id`, `data_dir`, `gui_state_path`, `outbox_path`, `relativize_data_file`, `resolve_data_file`), `UserRoster` (`list_users`, `get`, `add`) | `tests/test_session_layer.py` |
+| `store.py` | Disk persistence: per-user, per-session folders (`session.json` + machine-wide active pointer) via `SessionStore`, one level above per-experiment folders (`experiment.json`, `gui_state.json`, `data/`) + their own active pointer via `ExperimentStore`; user roster; bundle-relative data-path (de)resolution. | `SessionStore` (`list_sessions(user_id)`, `create_session`, `load(user_id, session_id)`, `save`, `get_active` → `tuple[str, str] \| None`, `set_active(user_id, session_id)`, `make_session_id`), `ExperimentStore` (`list_experiments`, `load`, `save`, `get_active`, `set_active`, `make_experiment_id`, `data_dir`, `gui_state_path`, `outbox_path`, `agent_feed_path`, `relativize_data_file`, `resolve_data_file`), `UserRoster` (`list_users`, `get`, `add`) | `tests/test_session_layer.py` |
 | `manager.py` | The L6 façade: experiment lifecycle (incl. switching between open experiments, the run queue, and a chosen experiment folder name), automatic run recording from manifests, envelope installation, HDF5 context, save-health surfacing, session experiment-index reconciliation, the single write path for published ELN links, and the run queue (validated adds, ordered mutations, and the engine's pull seam). | `ExperimentManager` (`start_experiment(..., envelope=None, experiment_dirname=None)`, `close_experiment`, `set_findings`, `set_attended`, `set_queue`, `switch_experiment`, `current_data_dir`, `current_gui_state_path`, `experiment_context`, `envelope_variables`, `current_experiment`, `set_run_eln_link`, `run_queue`, `queue_snapshot`, `queue_entries`, `validate_run`, `queue_run`, `dequeue_run`, `move_queued_run`, `clear_run_queue`, `next_run`; optional `session_store`/`station`/`run_catalog` constructor args; signals `experiment_changed`, `run_recorded`, `store_health_changed`) | `tests/test_session_layer.py` |
 | `run_queue.py` | The run queue as data: immutable **run specs**, their ordering (operations drain before procedures — queue-jumping, never preemption), the one construction path from a spec to the live object the engine starts (both kinds, through `core.run_builder`'s `build_procedure()` / `build_operation()`, with a spec's optional `probe_spec` reducing the built run to a **probe run**), and the add-time **run validation** (declared `ParamSpec` bounds, the headless build, `control_limits` + the **session envelope**, plus the **duration estimate**). Imports no Qt, no Orchestrator, and no `cryosoft.procedures` — the classes a spec names are resolved through an injected run catalog. | `RunSpec`, `RunQueue` (`add`, `remove`, `move`, `clear`, `snapshot`, `entries`, `pop_next`, `find`), `RunFinding`, `RunValidation`, `build_run`, `validate_run`, `KIND_PROCEDURE`, `KIND_OPERATION`, the `FINDING_*` codes | `tests/test_run_queue.py` |
+| `agent_feed.py` | The **Agent feed**: one experiment's append-only trail of every command a non-operator actor submitted, every verdict answering one, and every agent-caused `StateChange` — joined by `request_id`, tolerant on read, and never able to raise into the engine's emit path. | `AgentFeed` (`attach`, `record_command`, `record_verdict`, `record_event`, `set_run_id`, `path`, `run_id`, `experiment_id`), `read_feed`, `SCHEMA_VERSION`, `RECORD_COMMAND`, `RECORD_VERDICT`, `RECORD_EVENT` | `tests/test_agent_feed.py` |
 | `gateway/` | The **Agent gateway** (sub-package, own README): the permission model in front of the control contract — `Role` × `ActionClass` as one `PERMISSION_MATRIX`, the PROVISIONAL per-command and per-capability classification tables, `authorize()`, and the in-process `Gateway` client that stamps an agent identity onto every command and answers a refusal on the engine's own verdict stream. | `Gateway`, `EngineClient`, `Role`, `Permission`, `PERMISSION_MATRIX`, `authorize`, `ActionClass`, `ClassifiedAction`, `UnclassifiedActionError`, `COMMAND_ACTION_CLASSES`, `CONTROL_ACTION_CLASSES`, `LIFECYCLE_ACTION_CLASSES`, `classify_command`, `classify_control` | `tests/test_gateway.py` + conformance |
 | `servicing_log.py` | The Servicing Log framework: declared log kinds (incl. the unifying flat `servicing` kind, the only one the recorder writes as of Phase 2), revisioned per-kind storage, the hourly helium record, consumption fit, the automatic recorder, and legacy-log migration. | `LogKindSpec`, `DECLARED_LOG_KINDS`, `ServicingLogStore` (`add_entry`, `revise_entry`, `delete_entry`, `append_machine_entry`, `entries`, `revisions`, `recordings_path`, `migrate_legacy`), `HeliumRecordStore` (`append`, `samples`), `consumption_rate_pct_per_h`, `CryogenicsRecorder` (`on_states_updated`, `on_run_started`, `on_run_finished`; signal `cryo_warning`), `migrate_legacy_servicing_log` | `tests/test_servicing_log.py` + conformance |

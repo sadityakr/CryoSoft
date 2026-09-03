@@ -18,6 +18,7 @@ _SESSION_FILENAME = "session.json"
 _ACTIVE_FILENAME = "active.json"
 _GUI_STATE_FILENAME = "gui_state.json"
 _OUTBOX_FILENAME = "outbox.jsonl"
+_AGENT_FEED_FILENAME = "agent_actions.jsonl"
 _DATA_DIRNAME = "data"
 
 
@@ -72,6 +73,8 @@ class ExperimentStore:
             <experiment_id>/
                 experiment.json
                 gui_state.json              # GUI-authored, opaque to this store
+                outbox.jsonl                # the ELN publish journal
+                agent_actions.jsonl         # the Agent feed
                 data/                       # HDF5 files; sub-folders allowed
                     <sub-folders>/
 
@@ -196,6 +199,23 @@ class ExperimentStore:
             nothing is written until a run is actually queued).
         """
         return self._root / experiment_id / _OUTBOX_FILENAME
+
+    def agent_feed_path(self, experiment_id: str) -> Path:
+        """Return the experiment's **Agent feed** file path.
+
+        The trail of everything a non-operator actor asked for and got lives
+        inside the experiment folder for the same reason the **Outbox**
+        does: the folder stays the complete, portable record, so copying it
+        copies the accountability trail with it.
+
+        Args:
+            experiment_id: The store key.
+
+        Returns:
+            ``<root>/<experiment_id>/agent_actions.jsonl`` (may not exist yet
+            — nothing is written until a non-operator actor acts).
+        """
+        return self._root / experiment_id / _AGENT_FEED_FILENAME
 
     def relativize_data_file(self, experiment_id: str, path: str | Path) -> str:
         """Return ``path`` relative to the experiment's session folder, when inside it.

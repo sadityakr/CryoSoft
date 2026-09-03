@@ -49,6 +49,13 @@ is.
 ## Exit (what goes out)
 
 - **Forwarded commands** on the engine's own `submit()`, actor stamped.
+- **Agent-feed command records**, when a `Gateway` was given a feed: every
+  command it submits — forwarded or refused here — is written to the
+  experiment's **Agent feed** before the permission check, because what an
+  agent TRIED is as much a part of accountability as what it managed. The
+  answering verdict is recorded by the feed itself off the engine's own
+  stream, so the two halves join on `request_id`. `permits()` records
+  nothing: asking is not acting.
 - **Refusal verdicts** on the same `verdict_emitted` stream every other
   verdict travels: `BLOCKED_ROLE`, with a `detail` dict naming the `rule`
   that refused (`role_matrix`, `attendance`, `kill_switch`, `unknown_role`,
@@ -136,5 +143,5 @@ The default rule the rows were derived from:
 | File | Responsibility | Key public API | Owning test |
 |------|----------------|----------------|-------------|
 | `action_classes.py` | What an action IS, as declarative tables: one row per `CommandName`, one per `(VI kind, @control name)`, and the two lifecycle actions — each with the rationale a physicist reviews. **PROVISIONAL.** Resolves a `submit_vi_action` to its target's class through the station's declaration snapshot; refuses by name rather than defaulting. | `ActionClass`, `ClassifiedAction`, `UnclassifiedActionError`, `COMMAND_ACTION_CLASSES`, `CONTROL_ACTION_CLASSES`, `LIFECYCLE_ACTION_CLASSES`, `classify_command()`, `classify_control()` | `tests/test_gateway.py` + conformance |
-| `gateway.py` | The in-process client an agent holds: one connection, one `Role`, one actor id. Stamps `Actor(kind="agent", ...)` on every command, runs `authorize()`, and either forwards to the engine or answers the request itself with a `BLOCKED_ROLE` verdict on the engine's OWN `verdict_emitted` stream. Mirrors the latest `StatusSnapshot`/`StationInfo` so every read — attendance and the gate included — is answered locally. Duck-typed on `EngineClient`, so it holds the Orchestrator today and a transport proxy later without noticing. No Qt import, no network, no thread. | `Gateway` (`submit(name, args)`, `permits(name, args)`, `status()`, `station()`, `state()`, `attended()`, `agent_gate()`, `role`, `actor`), `EngineClient` | `tests/test_gateway.py` |
+| `gateway.py` | The in-process client an agent holds: one connection, one `Role`, one actor id. Stamps `Actor(kind="agent", ...)` on every command, runs `authorize()`, and either forwards to the engine or answers the request itself with a `BLOCKED_ROLE` verdict on the engine's OWN `verdict_emitted` stream. Mirrors the latest `StatusSnapshot`/`StationInfo` so every read — attendance and the gate included — is answered locally. Duck-typed on `EngineClient`, so it holds the Orchestrator today and a transport proxy later without noticing. No Qt import, no network, no thread. | `Gateway` (`submit(name, args)`, `permits(name, args)`, optional `feed=`, `status()`, `station()`, `state()`, `attended()`, `agent_gate()`, `role`, `actor`), `EngineClient` | `tests/test_gateway.py` |
 | `roles.py` | Who may take an action of a given class: the `Role` enum, the `Permission` cell values, the one `PERMISSION_MATRIX` table that is the standard, and `authorize()` — the ordered checks (emergency standby, actor kind, role validity, classification, kill switch, matrix) that answer with `None` or one `BLOCKED_ROLE` verdict. | `Role`, `Permission`, `PERMISSION_MATRIX`, `authorize()` | `tests/test_gateway.py` + conformance |
