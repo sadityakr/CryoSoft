@@ -14,6 +14,11 @@ import json
 import pytest
 
 from cryosoft.session.eln.adapter import ElnEntryRef, ElnError
+from cryosoft.session.eln.elabftw import (
+    ElabFtwAdapter,
+    HttpResponse,
+    UrllibTransport,
+)
 from cryosoft.session.eln.outbox import (
     DRAIN_IDLE,
     DRAIN_PUBLISHED,
@@ -415,3 +420,221 @@ def test_outbox_drain_never_raises_on_a_misbehaving_adapter(tmp_path):
     assert result.state == DRAIN_RETRY
     assert "RuntimeError" in result.detail
     assert outbox.get("publish_run:run-0001").attempts == 1
+
+
+# ── The eLabFTW backend (against a fake transport — never a live server) ──────
+
+
+class FakeTransport:
+    """Canned HTTP responses plus a full record of what was requested."""
+
+    def __init__(self, responses=None):
+        """Queue one response per expected call, keyed by ``"METHOD /path"``."""
+        self.responses = dict(responses or {})
+        self.calls = []
+
+    def request(self, method, url, headers, body, timeout_s):
+        """Record the call and answer from the canned table."""
+        path = url.split("/api/v2", 1)[-1]
+        self.calls.append(
+            {
+                "method": method,
+                "url": url,
+                "path": path,
+                "headers": dict(headers),
+                "body": body,
+                "timeout_s": timeout_s,
+            }
+        )
+        key = f"{method} {path}"
+        if key not in self.responses:
+            return HttpResponse(status=404, body=b'{"description":"not found"}')
+        canned = self.responses[key]
+        return canned.pop(0) if isinstance(canned, list) else canned
+
+
+def _elab(responses=None, **settings):
+    """Build an eLabFTW adapter over a fake transport."""
+    base = {
+        "enabled": True,
+        "base_url": "https://elab.example.org",
+        "api_key": "top-secret-key",
+    }
+    base.update(settings)
+    transport = FakeTransport(responses)
+    return ElabFtwAdapter(base, transport=transport), transport
+
+
+def test_elabftw_verify_names_the_account_and_sends_the_token():
+    """The health check authenticates and reports who the key belongs to."""
+    adapter, transport = _elab(
+        {"GET /users/me": HttpResponse(200, {}, b'{"fullname":"A Sen","team_name":"Cryo"}')}
+    )
+    assert adapter.verify() == "A Sen (Cryo)"
+    call = transport.calls[0]
+    assert call["url"] == "https://elab.example.org/api/v2/users/me"
+    assert call["headers"]["Authorization"] == "top-secret-key"
+    assert call["timeout_s"] == 15.0
+
+
+def test_elabftw_maps_a_rejected_key_to_an_eln_error_without_leaking_it():
+    """A 401 becomes an ``ElnError`` naming the status, never the key."""
+    adapter, _ = _elab({"GET /users/me": HttpResponse(401, {}, b'{"description":"bad key"}')})
+    with pytest.raises(ElnError) as excinfo:
+        adapter.verify()
+    assert "401" in str(excinfo.value)
+    assert "top-secret-key" not in str(excinfo.value)
+
+
+def test_elabftw_refuses_to_call_without_a_url_or_a_key():
+    """Half-configured settings fail as an ``ElnError``, not a stray exception."""
+    no_url, _ = _elab(base_url="")
+    with pytest.raises(ElnError):
+        no_url.verify()
+    no_key, _ = _elab(api_key="")
+    with pytest.raises(ElnError):
+        no_key.verify()
+
+
+def test_elabftw_lists_templates():
+    """Templates come back as ``ElnTemplate``s, junk entries ignored."""
+    adapter, _ = _elab(
+        {
+            "GET /experiments_templates": HttpResponse(
+                200, {}, b'[{"id":7,"title":"Cryostat run"},"junk"]'
+            )
+        }
+    )
+    templates = adapter.list_templates()
+    assert [(t.template_id, t.name) for t in templates] == [("7", "Cryostat run")]
+
+
+def test_elabftw_creates_an_entry_from_a_template_then_fills_it_in():
+    """Create + patch: the id comes from the Location header, the URL is human-facing."""
+    adapter, transport = _elab(
+        {
+            "POST /experiments": HttpResponse(
+                201, {"location": "https://elab.example.org/api/v2/experiments/42"}, b""
+            ),
+            "PATCH /experiments/42": HttpResponse(200, {}, b"{}"),
+        },
+        template_id="7",
+    )
+    ref = adapter.create_entry("Run 1", None, "<p>body</p>", ["cryosoft"], {"run_id": "r1"})
+    assert ref.backend == "elabftw"
+    assert ref.entry_id == "42"
+    assert ref.template_id == "7"
+    assert ref.url == "https://elab.example.org/experiments.php?mode=view&id=42"
+
+    create, patch = transport.calls
+    assert json.loads(create["body"]) == {"template": "7"}
+    payload = json.loads(patch["body"])
+    assert payload["title"] == "Run 1"
+    assert payload["body"] == "<p>body</p>"
+    assert payload["tags"] == ["cryosoft"]
+    assert json.loads(payload["metadata"]) == {"run_id": "r1"}
+
+
+def test_elabftw_falls_back_to_the_body_for_the_new_entry_id():
+    """A deployment that echoes the id in the body instead of a header still works."""
+    adapter, _ = _elab(
+        {
+            "POST /experiments": HttpResponse(201, {}, b'{"id":9}'),
+            "PATCH /experiments/9": HttpResponse(200, {}, b"{}"),
+        }
+    )
+    assert adapter.create_entry("T", None, "", [], {}).entry_id == "9"
+
+
+def test_elabftw_create_without_an_id_is_an_eln_error():
+    """An entry CryoSoft cannot address again is a failure, not a silent success."""
+    adapter, _ = _elab({"POST /experiments": HttpResponse(201, {}, b"")})
+    with pytest.raises(ElnError):
+        adapter.create_entry("T", None, "", [], {})
+
+
+def test_elabftw_updates_an_entry():
+    """``update_entry`` rewrites body and metadata in one PATCH."""
+    adapter, transport = _elab({"PATCH /experiments/42": HttpResponse(200, {}, b"{}")})
+    adapter.update_entry(ElnEntryRef(entry_id="42"), "<p>new</p>", {"k": "v"})
+    payload = json.loads(transport.calls[0]["body"])
+    assert payload["body"] == "<p>new</p>"
+    assert json.loads(payload["metadata"]) == {"k": "v"}
+
+
+def test_elabftw_uploads_a_file_as_multipart(tmp_path):
+    """The upload is a multipart POST carrying the filename and the bytes."""
+    data = tmp_path / "run-0001.h5"
+    data.write_bytes(b"\x89HDF\r\n\x1a\nPAYLOAD")
+    adapter, transport = _elab(
+        {"POST /experiments/42/uploads": HttpResponse(201, {}, b"{}")}
+    )
+    adapter.attach_file(ElnEntryRef(entry_id="42"), data, "Run data")
+
+    call = transport.calls[0]
+    assert call["headers"]["Content-Type"].startswith("multipart/form-data; boundary=")
+    assert b'name="file"; filename="run-0001.h5"' in call["body"]
+    assert b"PAYLOAD" in call["body"]
+    assert b'name="comment"' in call["body"]
+
+
+def test_elabftw_upload_of_a_missing_file_is_an_eln_error(tmp_path):
+    """An unreadable file fails before anything is sent."""
+    adapter, transport = _elab()
+    with pytest.raises(ElnError):
+        adapter.attach_file(ElnEntryRef(entry_id="42"), tmp_path / "gone.h5")
+    assert transport.calls == []
+
+
+def test_elabftw_attaches_a_link_by_appending_to_the_body():
+    """With no link endpoint, the path is appended to the entry body, escaped."""
+    adapter, transport = _elab(
+        {
+            "GET /experiments/42": HttpResponse(200, {}, b'{"body":"<p>existing</p>"}'),
+            "PATCH /experiments/42": HttpResponse(200, {}, b"{}"),
+        }
+    )
+    adapter.attach_link(ElnEntryRef(entry_id="42"), "/data/<run>.h5", "Run data")
+    body = json.loads(transport.calls[1]["body"])["body"]
+    assert body.startswith("<p>existing</p>")
+    assert "&lt;run&gt;" in body and "<run>" not in body
+    assert "Run data" in body
+
+
+def test_elabftw_reports_a_non_json_body_as_an_eln_error():
+    """An HTML error page from a proxy is a backend failure, not a crash."""
+    adapter, _ = _elab({"GET /users/me": HttpResponse(200, {}, b"<html>hi</html>")})
+    with pytest.raises(ElnError):
+        adapter.verify()
+
+
+def test_elabftw_publishes_end_to_end_through_the_outbox(tmp_path):
+    """The outbox drives the real backend exactly as it drives the sim twin."""
+    data = _data_file(tmp_path)
+    adapter, transport = _elab(
+        {
+            "POST /experiments": HttpResponse(
+                201, {"location": "/api/v2/experiments/42"}, b""
+            ),
+            "PATCH /experiments/42": HttpResponse(200, {}, b"{}"),
+            "POST /experiments/42/uploads": HttpResponse(201, {}, b"{}"),
+        }
+    )
+    outbox = Outbox(tmp_path / "outbox.jsonl")
+    outbox.enqueue(_job(tmp_path))
+
+    result = outbox.drain(adapter)
+    assert result.state == DRAIN_PUBLISHED
+    assert result.entry.url.endswith("id=42")
+    assert [call["method"] for call in transport.calls] == ["POST", "PATCH", "POST"]
+    assert data.name.encode() in transport.calls[2]["body"]
+
+
+def test_urllib_transport_refuses_to_verify_when_told_to(caplog):
+    """Disabling TLS verification is possible, deliberate, and always logged."""
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        UrllibTransport(verify_tls=False)
+    assert any("verification is DISABLED" in record.message for record in caplog.records)
+    UrllibTransport()  # the default verifies, silently

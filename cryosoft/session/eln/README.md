@@ -38,7 +38,10 @@ GUI-side drain, never from `core/`.
 ## Exit (what goes out)
 
 - **HTTP requests to one ELN backend**, and nothing else. Every request is
-  issued inside an `ElnAdapter` method.
+  issued inside an `ElnAdapter` method, and for `elabftw.py` through a
+  single injectable `ElnHttpTransport.request()` call — the same split the
+  driver layer uses: the adapter is the instrument, the transport is the
+  bus, so the whole backend is testable against canned responses.
 - **`ElnEntryRef`** — backend, entry id, URL, template id — the value a
   successful publish returns, sharing its field names with
   `cryosoft.session.models.ElnLink` so a persisted link is
@@ -105,4 +108,5 @@ GUI-side drain, never from `core/`.
 | `sim_eln.py` | The in-memory twin of the contract — the workhorse of every ELN test; models offline, transient failure, and refused uploads. | `SimElnAdapter` (`entries`, `uploads`, `links`, `calls`, `offline`) | `tests/test_eln.py` |
 | `settings.py` | User-level backend URL/key/policy: tolerant load, environment override, redaction. | `ElnSettings`, `load_eln_settings`, `eln_settings_path`, `API_KEY_ENV_VAR`, `SETTINGS_PATH_ENV_VAR` | `tests/test_eln.py` |
 | `outbox.py` | The offline-first publish journal: append-only JSONL, idempotent by `job_id`, persisted capped backoff, one job per drain, never raises. | `Outbox` (`enqueue`, `jobs`, `get`, `pending`, `drain`), `OutboxJob`, `DrainResult`, `JOB_*`/`DRAIN_*` constants | `tests/test_eln.py` |
+| `elabftw.py` | The eLabFTW backend: REST API v2 over `/users/me`, `/experiments_templates`, `/experiments`, `/experiments/{id}`, `/experiments/{id}/uploads`; token auth, verified TLS, hand-rolled multipart, every non-2xx mapped to `ElnError` without the key. | `ElabFtwAdapter`, `ElnHttpTransport`, `UrllibTransport`, `HttpResponse` | `tests/test_eln.py` |
 | `templates.py` | Run manifest → entry title, self-contained HTML body, and flat metadata. | `render_run_title`, `render_run_body`, `render_run_metadata` | `tests/test_eln.py` |

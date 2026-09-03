@@ -12,6 +12,12 @@ from cryosoft.session.eln.adapter import (
     ElnError,
     ElnTemplate,
 )
+from cryosoft.session.eln.elabftw import (
+    ElabFtwAdapter,
+    ElnHttpTransport,
+    HttpResponse,
+    UrllibTransport,
+)
 from cryosoft.session.eln.outbox import (
     DRAIN_IDLE,
     DRAIN_PUBLISHED,
@@ -44,6 +50,10 @@ __all__ = [
     "API_KEY_ENV_VAR",
     "SETTINGS_PATH_ENV_VAR",
     "SimElnAdapter",
+    "ElabFtwAdapter",
+    "ElnHttpTransport",
+    "HttpResponse",
+    "UrllibTransport",
     "Outbox",
     "OutboxJob",
     "DrainResult",
