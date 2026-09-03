@@ -36,6 +36,14 @@ as an in-process one, because it *is* an in-process one with a wire in front
 of it. No thread is added and no blocking call enters the tick path: a frame
 arrives in an ordinary slot that cannot run beside the tick.
 
+That transport is where this folder stops. Everything an external protocol
+needs — MCP's framing, its handshakes, its resource URIs — lives in the
+**MCP adapter** (`cryosoft/mcp/`, a SEPARATE process with its own README),
+which translates that protocol into the wire above and can import nothing
+from this layer at all (import contract C21). The rule is the same one the
+socket follows: a second protocol is a translation in front of the one
+client, never a second client.
+
 ## Architecture layer
 
 **L6, inside the Session Manager.** Imports `cryosoft.core.*` and
@@ -279,7 +287,12 @@ The default rule the rows were derived from:
    JSON, and nothing else. If it needs a permission check of its own, the
    check belongs in `roles.py` or `gateway.py` where the other one already
    is, not beside the socket.
-6. New behavior needs its own tests in `tests/test_gateway.py` (the
+6. **A new protocol is an adapter in its own process, not a module here.**
+   The socket above is the one wire this folder owns. Anything that speaks
+   another protocol translates into it from outside, the way `cryosoft/mcp/`
+   does, so the thing facing the outside world cannot reach an instrument
+   even by mistake.
+7. New behavior needs its own tests in `tests/test_gateway.py` (the
    permission model), `tests/test_gateway_tools.py` (the tool surface) or
    `tests/test_gateway_server.py` (the transport); conformance coverage is
    necessary but not sufficient.

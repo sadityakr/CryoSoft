@@ -7,7 +7,11 @@ which per-experiment safety bounds (**ExperimentRecord** + **session
 envelope**), and which runs were produced (**RunRecord**, recorded
 automatically from the Orchestrator's run manifests). This is the layer the
 eLab publishing track (`session/eln/` — see its own README) and the **Agent
-gateway** (`session/gateway/` — see its own README) build on.
+gateway** (`session/gateway/` — see its own README) build on. The gateway is
+also what the **MCP adapter** (`cryosoft/mcp/`, a SEPARATE process with its
+own README) reaches, over the socket the **Gateway server** publishes: an
+external agent session therefore sees this layer's tool surface and is bound
+by its permission model without holding any of it.
 
 Also hosts the **Servicing Log** framework (`servicing_log.py`): per-setup,
 typed, human-editable logs of servicing events (**log kind**, e.g. the
