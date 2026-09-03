@@ -1145,3 +1145,95 @@ def test_the_assistant_settings_redact_the_key_and_carry_a_price_table(tmp_path)
         assert load_eln_settings(path).assistant.api_key == "sk-from-env"
     finally:
         del os.environ[ASSISTANT_API_KEY_ENV_VAR]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Publishing an approved draft (publisher.export_draft)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_an_approved_draft_is_queued_as_one_ordinary_job(published_setup):
+    """A draft is data: the same journal, the same drain, only the text differs."""
+    from cryosoft.session.eln.drafting import DraftEntry
+
+    manager, publisher, adapter, _manifest = published_setup
+
+    draft = DraftEntry(
+        title="Drafted title",
+        body_html="<p>Drafted prose over the facts.</p>",
+        tags=["draft", "Field Sweep"],
+        model="m-1",
+        input_tokens=1000,
+        output_tokens=200,
+        cost_usd=0.01,
+        prompt_digest="d" * 64,
+    )
+
+    job_id = publisher.export_draft("run-0001", draft)
+    assert job_id == "publish_run:run-0001"
+
+    assert publisher.drain_once().state == DRAIN_PUBLISHED
+    (entry,) = adapter.entries.values()
+    assert entry["title"] == "Drafted title"
+    assert "Drafted prose over the facts." in entry["body_html"]
+    # The notebook's own standing tags and the draft's own, merged and sorted.
+    assert entry["tags"] == ["Field Sweep", "cryosoft", "draft", "sim"]
+    assert entry["metadata"]["run_id"] == "run-0001"
+    assert entry["metadata"]["draft_model"] == "m-1"
+    assert entry["metadata"]["draft_prompt_digest"] == "d" * 64
+
+    run = manager.current_experiment().find_run("run-0001")
+    assert run.published is True and run.eln_link is not None
+
+
+def test_an_approved_draft_is_queued_from_its_json_dict(published_setup):
+    """The run record stores a draft as JSON; export_draft loads it tolerantly."""
+    _manager, publisher, adapter, _manifest = published_setup
+
+    job_id = publisher.export_draft(
+        "run-0001",
+        {"title": "From JSON", "body_html": "<p>x</p>", "tags": ["draft"]},
+    )
+
+    assert job_id == "publish_run:run-0001"
+    assert publisher.drain_once().state == DRAIN_PUBLISHED
+    (entry,) = adapter.entries.values()
+    assert entry["title"] == "From JSON"
+
+
+def test_an_approved_draft_does_not_publish_a_run_twice(published_setup):
+    """Idempotent by the same job_id: a queued run is not requeued under a draft."""
+    from cryosoft.session.eln.drafting import DraftEntry
+
+    manager, publisher, adapter, manifest = published_setup
+    manager._orchestrator.run_finished.emit(manifest)
+    assert publisher.pending_count() == 1
+
+    publisher.export_draft("run-0001", DraftEntry(title="Drafted", body_html="<p>y</p>"))
+
+    assert publisher.pending_count() == 1, "one run, one entry, however it was queued"
+
+
+def test_a_draft_is_never_queued_while_publishing_is_off(published_setup, tmp_path):
+    """The track's master switch binds the drafting path exactly as the rest."""
+    from cryosoft.session.eln.drafting import DraftEntry
+    from cryosoft.session.eln.publisher import ElnPublisher
+
+    manager, _publisher, adapter, _manifest = published_setup
+    off = ElnPublisher(manager, ElnSettings(enabled=False), adapter=adapter)
+
+    assert off.export_draft("run-0001", DraftEntry(title="t", body_html="<p>b</p>")) == ""
+    off.stop()
+
+
+def test_a_pending_draft_rides_on_the_run_record_and_survives_json():
+    """An unapproved draft is parked on the run record, JSON-safe and tolerant."""
+    from cryosoft.session.models import RunRecord
+
+    record = RunRecord(run_id="run-0001", pending_eln_draft={"title": "t", "tags": ["draft"]})
+
+    round_tripped = RunRecord.from_dict(json.loads(json.dumps(record.to_dict())))
+    assert round_tripped.pending_eln_draft == {"title": "t", "tags": ["draft"]}
+
+    assert RunRecord.from_dict({"run_id": "r"}).pending_eln_draft == {}
+    assert RunRecord.from_dict({"run_id": "r", "pending_eln_draft": 7}).pending_eln_draft == {}

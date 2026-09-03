@@ -86,6 +86,14 @@ GUI-side drain, never from `core/`.
   `attach_file`, `attach_link` — so any adapter substitutes for any other.
 - **Adapters are stateless and synchronous** and raise exactly one exception
   type, `ElnError`. Queuing, retry, and backoff belong to the outbox.
+- **An approved draft is not a second write path.** `export_draft()` queues
+  one ordinary outbox job whose title, body and tags come from an approved
+  **draft entry** instead of from the renderers, merging the notebook's
+  standing tags with the draft's own and stamping `draft_model` and
+  `draft_prompt_digest` into the entry's metadata, so the notebook itself
+  says which model wrote the prose and from which prompt. Same journal, same
+  `job_id`, same idempotency, same drain — the draft is data, and only the
+  text differs.
 - **Nothing publishes directly.** Work is rendered in full at enqueue time
   and queued; the drain never re-renders against state that has since moved
   on. `Outbox.drain()` attempts at most one job per call and never raises
@@ -208,6 +216,6 @@ edit.
 | `settings.py` | User-level backend URL/key/policy and the assistant's model, key, token cap and price table: tolerant load, environment overrides, redaction. | `ElnSettings`, `AssistantSettings`, `load_eln_settings`, `eln_settings_path`, `API_KEY_ENV_VAR`, `ASSISTANT_API_KEY_ENV_VAR`, `SETTINGS_PATH_ENV_VAR`, `DEFAULT_ASSISTANT_MODEL`, `DEFAULT_MODEL_PRICES` | `tests/test_eln.py` |
 | `outbox.py` | The offline-first publish journal: append-only JSONL, idempotent by `job_id`, persisted capped backoff, one job per drain, never raises. | `Outbox` (`enqueue`, `jobs`, `get`, `pending`, `drain`), `OutboxJob`, `DrainResult`, `JOB_*`/`DRAIN_*` constants | `tests/test_eln.py` |
 | `elabftw.py` | The eLabFTW backend: REST API v2 over `/users/me`, `/experiments_templates`, `/experiments`, `/experiments/{id}`, `/experiments/{id}/uploads`; token auth, verified TLS, hand-rolled multipart, every non-2xx mapped to `ElnError` without the key. | `ElabFtwAdapter`, `ElnHttpTransport`, `UrllibTransport`, `HttpResponse` | `tests/test_eln.py` |
-| `publisher.py` | What is queued when, the GUI-side drain timer, backend discovery, and the hand-off of a confirmed link to the manager. | `ElnPublisher` (`on_run_finished`, `export_run`, `drain_once`, `start`, `stop`, `pending_count`, `status`; signals `publish_state_changed`, `run_published`), `discover_backends`, `PUBLISH_*` constants | `tests/test_eln.py` |
+| `publisher.py` | What is queued when (a finished run, a manual export, or an approved **draft entry**), the GUI-side drain timer, backend discovery, and the hand-off of a confirmed link to the manager. | `ElnPublisher` (`on_run_finished`, `export_run`, `export_draft`, `drain_once`, `start`, `stop`, `pending_count`, `status`; signals `publish_state_changed`, `run_published`), `discover_backends`, `PUBLISH_*` constants | `tests/test_eln.py` |
 | `templates.py` | Run manifest → entry title, self-contained HTML body (published or drafted), and flat metadata; shared row builders so a run reads identically in both bodies. | `render_run_title`, `render_run_body`, `render_draft_body`, `render_prose_section`, `render_stats_section`, `render_run_metadata` | `tests/test_eln.py` |
 | `drafting.py` | The draft prompt standard and the **Draft client** contract: render one run's facts into a deterministic prompt, ask one model, parse tolerantly, and return a **draft entry** carrying its prompt digest and cost line. Publishes nothing. | `DraftRequest`, `DraftEntry`, `DraftClient`, `CompletionResult`, `draft_entry`, `render_draft_prompt`, `prompt_digest`, `parse_completion`, `manifest_from_run`, `cost_usd`, `FakeDraftClient`, `AnthropicDraftClient`, `DRAFT_SYSTEM_PROMPT` | `tests/test_eln.py` |

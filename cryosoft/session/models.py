@@ -299,6 +299,16 @@ class RunRecord:
             is in the notebook. One run maps to one entry (see the **Outbox**
             and `session/eln/README.md`); the experiment-level ``eln_link`` on
             ``ExperimentRecord`` is a separate, coarser link.
+        pending_eln_draft: A **draft entry** awaiting a human's approval, as
+            its JSON dict (``session/eln/drafting.py``'s
+            ``DraftEntry.to_dict()``), or ``{}`` when none is pending. Written
+            when an agent drafts an entry for an ATTENDED experiment, where
+            publishing is the human's to authorise: the draft is parked here
+            and ``ExperimentManager.approve_eln_draft()`` is what enqueues it.
+            Deliberately NOT a ``SCHEMA_VERSION`` bump — a pending draft is an
+            unapproved proposal that can be redrawn at any time, so an older
+            app dropping one on resave loses nothing authoritative, which is
+            the only thing that rule protects.
     """
 
     run_id: str = ""
@@ -315,6 +325,7 @@ class RunRecord:
     reason: str = ""
     published: bool = False
     eln_link: ElnLink | None = None
+    pending_eln_draft: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-safe dict representation."""
@@ -333,6 +344,7 @@ class RunRecord:
             "reason": self.reason,
             "published": self.published,
             "eln_link": self.eln_link.to_dict() if self.eln_link else None,
+            "pending_eln_draft": dict(self.pending_eln_draft),
         }
 
     @classmethod
@@ -371,6 +383,7 @@ class RunRecord:
                 if isinstance(data.get("eln_link"), dict)
                 else None
             ),
+            pending_eln_draft=_as_dict(data.get("pending_eln_draft")),
         )
 
 
