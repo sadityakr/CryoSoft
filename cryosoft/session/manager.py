@@ -5,13 +5,14 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
+from cryosoft.core.events import OPERATOR, Actor
 from cryosoft.core.orchestrator import Orchestrator
 from cryosoft.core.plan import EnvelopeVariable, ExperimentEnvelope
-from cryosoft.core.station import read_instrument_metadata
+from cryosoft.core.station import Station, read_instrument_metadata
 from cryosoft.session.models import (
     EXPERIMENT_STATUS_CLOSED,
     EXPERIMENT_STATUS_OPEN,
@@ -25,7 +26,18 @@ from cryosoft.session.models import (
     envelope_from_dict,
     envelope_to_dict,
 )
+from cryosoft.session.run_queue import (
+    KIND_PROCEDURE,
+    RunQueue,
+    RunSpec,
+    RunValidation,
+    build_run,
+    validate_run,
+)
 from cryosoft.session.store import ExperimentStore, SessionStore, UserRoster
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from collections.abc import Mapping
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +82,8 @@ class ExperimentManager(QObject):
         config_name: str = "",
         config_path: str | None = None,
         session_store: SessionStore | None = None,
+        station: Station | None = None,
+        run_catalog: Mapping[str, type] | None = None,
     ) -> None:
         """Wire into the Orchestrator and resume any active experiment.
 
@@ -95,6 +109,15 @@ class ExperimentManager(QObject):
                 identity is derived from ``store.root``'s own two path
                 segments (``sessions/<user_id>/<session_id>``), not passed
                 separately, so there is no second source of truth to drift.
+            station: The Station a queued run would drive — needed to build a
+                run headlessly for ``validate_run()`` and to construct the one
+                live object the engine pulls. ``None`` (a unit test that only
+                exercises the experiment tier) leaves every other feature
+                working; the two that need it say so.
+            run_catalog: ``{class __name__: procedure/operation class}``, the
+                catalog a queued **run spec**'s class name is resolved
+                through. Supplied by whoever owns discovery, because this
+                package may not import ``cryosoft.procedures`` (contract C11).
         """
         super().__init__()
         self._store = store
@@ -105,6 +128,9 @@ class ExperimentManager(QObject):
             read_instrument_metadata(config_path) if config_path else {}
         )
         self._session_store = session_store
+        self._station = station
+        self._run_catalog: dict[str, type] = dict(run_catalog or {})
+        self._run_queue = RunQueue()
         self._experiment: ExperimentRecord | None = None
         self._store_save_ok = True
 
@@ -428,6 +454,252 @@ class ExperimentManager(QObject):
         if self._experiment is None:
             return None
         return self._store.gui_state_path(self._experiment.experiment_id)
+
+    # ------------------------------------------------------------------
+    # The run queue (see session/run_queue.py and GLOSSARY.md's Run queue)
+    # ------------------------------------------------------------------
+
+    @property
+    def run_queue(self) -> RunQueue:
+        """The ordered queue of runs waiting to start.
+
+        Read-only in practice: mutate it through the methods below, which
+        validate, log and broadcast. A client that only needs to render the
+        queue reads ``queue_snapshot()`` (or the ``QueueChanged`` events the
+        mutations emit) instead of holding this object.
+        """
+        return self._run_queue
+
+    def queue_snapshot(self) -> tuple[RunSpec, ...]:
+        """Return every waiting **run spec**, in the order they will start."""
+        return self._run_queue.snapshot()
+
+    def queue_entries(self) -> tuple[dict[str, Any], ...]:
+        """Return ``queue_snapshot()`` as JSON-safe dicts.
+
+        Wired to ``Orchestrator.queue_snapshot`` so the engine can put the
+        whole queue into every ``QueueChanged`` without knowing what a
+        ``RunSpec`` is.
+        """
+        return self._run_queue.entries()
+
+    def validate_run(
+        self,
+        procedure_cls: type,
+        params: Mapping[str, Any],
+        *,
+        kind: str = KIND_PROCEDURE,
+        sample_info: Mapping[str, Any] | None = None,
+        data_directory: str = "",
+        file_prefix: str = "",
+    ) -> RunValidation:
+        """Decide whether a proposed run may be queued — free, and with no effect.
+
+        The L6 entry point for **run validation**: it supplies the station and
+        the OPEN EXPERIMENT'S envelope, which is exactly what this layer knows
+        and ``session/run_queue.py``'s ``validate_run()`` does not. The run is
+        built headlessly and thrown away — nothing is dispatched, no data file
+        is opened — so an operator (or an agent) learns at the moment of
+        queueing that a value is out of bounds, instead of an hour later when
+        the run would have started.
+
+        Args:
+            procedure_cls: The procedure or operation class to check.
+            params: The parameter values it would run with.
+            kind: ``"procedure"`` or ``"operation"``.
+            sample_info: Sample metadata the run would record.
+            data_directory: Directory the run would write into. Never created
+                or written here.
+            file_prefix: Filename prefix the run would use.
+
+        Returns:
+            A ``RunValidation``; ``ok`` is True exactly when nothing was found.
+
+        Raises:
+            RuntimeError: If this manager was built without a Station, which
+                makes a headless build impossible.
+        """
+        if self._station is None:
+            raise RuntimeError(
+                "validate_run() needs a Station; this ExperimentManager was "
+                "built without one"
+            )
+        return validate_run(
+            procedure_cls,
+            params,
+            station=self._station,
+            kind=kind,
+            sample_info=sample_info,
+            data_directory=data_directory,
+            file_prefix=file_prefix,
+            experiment_info=self.experiment_context(),
+            envelope=(
+                envelope_from_dict(self._experiment.envelope)
+                if self._experiment is not None
+                else None
+            ),
+        )
+
+    def queue_run(
+        self,
+        procedure_cls: type,
+        params: Mapping[str, Any],
+        *,
+        kind: str = KIND_PROCEDURE,
+        sample_info: Mapping[str, Any] | None = None,
+        data_directory: str = "",
+        file_prefix: str = "",
+        actor: Actor = OPERATOR,
+    ) -> tuple[RunSpec | None, RunValidation]:
+        """Validate a proposed run and, if it passes, queue it.
+
+        Validation happens HERE, at add time — a spec that fails never enters
+        the queue, so nothing waiting in it is known to be unrunnable.
+
+        Args:
+            procedure_cls: The procedure or operation class to queue.
+            params: The parameter values it will run with.
+            kind: ``"procedure"`` or ``"operation"``. Operations jump ahead of
+                every queued procedure.
+            sample_info: Sample metadata to record with the run.
+            data_directory: Directory the run writes into.
+            file_prefix: Optional filename prefix.
+            actor: Who is queueing it.
+
+        Returns:
+            ``(spec, validation)`` — *spec* is the queued ``RunSpec``, or
+            ``None`` when validation refused it and *validation.findings*
+            says why.
+        """
+        validation = self.validate_run(
+            procedure_cls,
+            params,
+            kind=kind,
+            sample_info=sample_info,
+            data_directory=data_directory,
+            file_prefix=file_prefix,
+        )
+        if not validation.ok:
+            logger.info(
+                "Refused to queue %s: %s",
+                procedure_cls.__name__,
+                "; ".join(validation.messages()),
+            )
+            return None, validation
+        spec = self._run_queue.add(
+            RunSpec(
+                kind=kind,
+                run_class=procedure_cls.__name__,
+                params=dict(params),
+                sample_info=dict(sample_info or {}),
+                data_directory=data_directory,
+                file_prefix=file_prefix,
+                actor=actor,
+            )
+        )
+        self._publish_queue(actor)
+        return spec, validation
+
+    def dequeue_run(self, spec_id: str, *, actor: Actor = OPERATOR) -> bool:
+        """Remove one waiting run from the queue.
+
+        Args:
+            spec_id: The entry's ``RunSpec.spec_id``.
+            actor: Who is removing it.
+
+        Returns:
+            True if an entry was removed.
+        """
+        return self._mutate_queue(self._run_queue.remove(spec_id), actor)
+
+    def move_queued_run(
+        self, spec_id: str, offset: int, *, actor: Actor = OPERATOR
+    ) -> bool:
+        """Move one waiting run within its own half of the queue.
+
+        Args:
+            spec_id: The entry's ``RunSpec.spec_id``.
+            offset: Places to move it — negative towards the front.
+            actor: Who is reordering it.
+
+        Returns:
+            True if the order changed.
+        """
+        return self._mutate_queue(self._run_queue.move(spec_id, offset), actor)
+
+    def clear_run_queue(self, *, actor: Actor = OPERATOR) -> bool:
+        """Empty the run queue.
+
+        Args:
+            actor: Who is clearing it.
+
+        Returns:
+            True if anything was removed.
+        """
+        return self._mutate_queue(self._run_queue.clear(), actor)
+
+    def next_run(self) -> Any:
+        """Build and return the run the engine should start next.
+
+        The **pull seam**'s other end, wired to
+        ``Orchestrator.next_procedure``: the engine asks, this pops one spec
+        and constructs the single live object it describes. Stamped with the
+        experiment context read HERE, at build time, so a run queued before an
+        experiment was opened still belongs to the one open when it runs.
+
+        Returns:
+            A ready procedure or operation, or ``None`` when the queue is
+            empty or this manager has no Station/catalog to build with.
+
+        Raises:
+            KeyError: If the run catalog holds no class of the spec's name.
+            CryoSoftError: If the run refuses to be built.
+            TypeError: If the stored parameters no longer fit the signature.
+            ValueError: If a parameter value is invalid.
+        """
+        if self._station is None or not self._run_catalog:
+            return None
+        spec = self._run_queue.pop_next()
+        if spec is None:
+            return None
+        try:
+            return build_run(
+                spec,
+                station=self._station,
+                run_catalog=self._run_catalog,
+                experiment_info=self.experiment_context(),
+            )
+        finally:
+            # The spec has left the queue either way; a build that refused
+            # must not leave clients rendering an entry that is gone.
+            self._publish_queue(spec.actor)
+
+    def _mutate_queue(self, changed: bool, actor: Actor) -> bool:
+        """Broadcast the queue if a mutation actually changed it.
+
+        Args:
+            changed: What the ``RunQueue`` method reported.
+            actor: Who made the change.
+
+        Returns:
+            *changed*, unchanged, so the caller can return it straight on.
+        """
+        if changed:
+            self._publish_queue(actor)
+        return changed
+
+    def _publish_queue(self, actor: Actor) -> None:
+        """Ask the Orchestrator to broadcast the queue as it now stands.
+
+        The queue lives here, not in the engine, so the engine cannot see a
+        change happen — but ``QueueChanged`` belongs on the one event stream
+        every client already listens to, not on a second channel of this
+        layer's own.
+
+        Args:
+            actor: Who caused the change.
+        """
+        self._orchestrator.publish_queue(actor=actor)
 
     # ------------------------------------------------------------------
     # Run recording (driven by the Orchestrator's manifests)

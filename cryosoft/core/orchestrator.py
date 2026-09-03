@@ -1334,16 +1334,20 @@ class Orchestrator(QObject):
         else:
             self.run_procedure(run)
 
-    def publish_queue(self) -> None:
+    def publish_queue(self, *, actor: ev.Actor = ev.OPERATOR) -> None:
         """Broadcast the run queue after a client changed it.
 
         The queue lives outside the engine, so the engine cannot see an add,
         a removal or a reorder happen; whoever made the change calls this and
         the resulting ``QueueChanged`` goes out on the one event stream,
-        naming the actor in flight, exactly like a change the engine made
-        itself. Nothing else about the engine is touched.
+        exactly like a change the engine made itself. Nothing else about the
+        engine is touched — this starts nothing and refuses nothing, which is
+        why it is a broadcast rather than a command.
+
+        Args:
+            actor: Who made the change, defaulting to the operator sentinel.
         """
-        self._emit_queue_changed()
+        self._emit_queue_changed(actor)
 
     def _queue_entry(self, run: Any, kind: str) -> dict[str, Any]:
         """Render one directly-handed-over run as a queue entry.
@@ -1392,12 +1396,18 @@ class Orchestrator(QObject):
                 logger.exception("queue_snapshot() failed (non-fatal)")
         return tuple(entries)
 
-    def _emit_queue_changed(self) -> None:
-        """Broadcast the queue as it now stands, naming the actor in flight."""
+    def _emit_queue_changed(self, actor: ev.Actor | None = None) -> None:
+        """Broadcast the queue as it now stands.
+
+        Args:
+            actor: Who caused the change. ``None`` (the default) attributes it
+                to the actor of the command in flight, which is right for
+                every mutation the engine makes itself.
+        """
         self._emit_event(
             ev.QueueChanged(
                 entries=self._queue_entries(),
-                actor=self._current_actor(),
+                actor=actor if actor is not None else self._current_actor(),
                 request_id=self._pending.request_id if self._pending else "",
                 seq=self._next_seq(),
             )
