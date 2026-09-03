@@ -12,7 +12,9 @@ import json
 
 import pytest
 
-from cryosoft.core.data_reader import open_run, read_metadata
+from cryosoft.core import events as ev
+from cryosoft.core.data_reader import list_columns, open_run, read_metadata, summary_stats
+from cryosoft.core.orchestrator import Orchestrator
 from cryosoft.core.plan import ProbeSpec
 from cryosoft.core.procedure import BaseProcedure
 from cryosoft.core.run_builder import build_procedure
@@ -224,3 +226,90 @@ def test_a_science_run_file_is_tagged_run(station, tmp_path):
 
     with open_run(path) as handle:
         assert read_metadata(handle)["run_kind"] == "run"
+
+
+# ── The engine port: a probe submitted as JSON, start to file ────────────────
+
+def _tick_until(orchestrator, predicate, max_ticks: int = 4000):
+    """Tick the engine until *predicate* holds; assert that it eventually does."""
+    for _ in range(max_ticks):
+        orchestrator._tick()
+        if predicate():
+            return
+    raise AssertionError("the run never reached the expected state")
+
+
+def test_a_probe_submitted_as_a_command_runs_and_writes_a_probe_file(
+    station, qtbot, tmp_path
+):
+    """The whole path: submit a probe, tick it out, read the file back.
+
+    The one test that exercises every layer the probe standard touches — the
+    control contract's ``probe_spec`` argument, the headless build, the
+    engine's run manifest, the HDF5 file's ``run_kind``, and the reader an
+    analyst would use.
+    """
+    # The sim magnet ramps at a realistic rate; a tick-by-tick test cannot
+    # wait for it, so speed it up (the same treatment the engine suite gives).
+    station.magnet_z._default_ramp_rate = 6000.0
+    station.magnet_z._ramp_segments = []
+
+    orchestrator = Orchestrator(
+        station, tick_interval_ms=10, run_catalog={"FieldSweep": FieldSweep}
+    )
+    orchestrator.start_monitoring()
+    verdicts: list[ev.Verdict] = []
+    events: list[object] = []
+    orchestrator.verdict_emitted.connect(verdicts.append)
+    orchestrator.event_emitted.connect(events.append)
+
+    command = ev.Command(
+        name=ev.CommandName.RUN_PROCEDURE,
+        actor=ev.Actor(kind=ev.ActorKind.AGENT, id="drift-watch", role="operator"),
+        args={
+            "procedure": "FieldSweep",
+            "params": {**FULL_PARAMS, "field_steps": 51},
+            "sample_info": SAMPLE_INFO,
+            "data_directory": str(tmp_path),
+            "file_prefix": "probe",
+            "probe_spec": {"n_points": 3, "averaging": 2, "max_wait_s": 0.0},
+        },
+    )
+    try:
+        request_id = orchestrator.submit(command)
+
+        assert request_id == command.request_id
+        assert [v.request_id for v in verdicts] == [request_id]
+        assert verdicts[0].code is ev.VerdictCode.OK
+
+        started = [e for e in events if isinstance(e, ev.RunStarted)]
+        assert len(started) == 1
+        assert started[0].manifest["kind"] == "probe"
+        assert started[0].request_id == request_id
+
+        _tick_until(
+            orchestrator, lambda: any(isinstance(e, ev.RunFinished) for e in events)
+        )
+        finished = [e for e in events if isinstance(e, ev.RunFinished)][0]
+        assert finished.status == "done"
+        data_file = finished.manifest["data_file"]
+    finally:
+        orchestrator.shutdown()
+
+    with open_run(data_file) as handle:
+        metadata = read_metadata(handle)
+        columns = {info.name for info in list_columns(handle)}
+        stats = summary_stats(handle, "field_T")
+
+    assert metadata["run_kind"] == "probe"
+    assert metadata["params"]["probe_spec"] == {
+        "n_points": 3,
+        "averaging": 2,
+        "max_wait_s": 0.0,
+    }
+    assert metadata["params"]["n_readings"] == 2
+    assert {"field_T", "voltage_V"} <= columns
+    # The reduced point count, end to end: 51 requested, 3 measured, and the
+    # extremes of the requested sweep still reached.
+    assert stats.count == 3
+    assert (stats.min, stats.max) == pytest.approx((-1.0, 1.0))

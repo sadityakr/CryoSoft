@@ -53,8 +53,11 @@ waiting to start, held as immutable **run specs** rather than as live
 procedure objects, together with the **run validation** every spec passes
 before it may enter it. Headless and Qt-free — no widget, no Orchestrator —
 so a queue can be built, ordered and validated in a test, a script, or an
-agent gateway with no GUI at all. See the **Run queue** / **Run spec** /
-**Run validation** entries in `GLOSSARY.md`.
+agent gateway with no GUI at all. A spec may also carry a `probe_spec`: the
+same run reduced to a **probe run** (a few cheap points, `run_kind =
+"probe"`), validated and queued as the reduced run, so what waits in the
+queue is the probe itself. See the **Run queue** / **Run spec** /
+**Run validation** / **Probe run** entries in `GLOSSARY.md`.
 
 Not to be confused with `gui/form_autosave.py` (historically "the session
 model"): that is form persistence; this layer is experiment management.
@@ -215,7 +218,11 @@ file-format change, not a routine edit.
 - **The queue is data, and it is validated on the way in.** Nothing waiting
   in the run queue holds a live procedure object, and nothing enters it
   without passing `validate_run()` — so a queued run is never known-unrunnable
-  and never holds a data file or a claim on instruments. The engine PULLS: it
+  and never holds a data file or a claim on instruments. Validation covers
+  both run kinds: a procedure through `run_builder.build_procedure()` and an
+  operation through `run_builder.build_operation()`, each built headlessly and
+  thrown away. A `probe_spec` is applied before those checks, so a probe is
+  validated as what would actually run — its reduced targets, its estimate. The engine PULLS: it
   asks `next_run()` when it is ready, and keeps sole authority over *when* a
   run starts. See `run_queue.py`'s module docstring for why the opposite
   direction was rejected.
@@ -291,5 +298,5 @@ file-format change, not a routine edit.
 | `models.py` | Tolerant-parse records: users, sessions (the L6 tier above an experiment, incl. its `experiments` index), runs (incl. the per-run `eln_link` the publisher stamps), experiments (incl. `queue` and `schema_version`), ELN links, servicing-log entries; envelope (de)serialisation. | `SCHEMA_VERSION`, `GUEST_USER_ID`, `GUEST_USER_NAME`, `User`, `Session`, `ExperimentIndexEntry`, `RunRecord`, `ExperimentRecord`, `ElnLink`, `ServiceLogEntry`, `envelope_to_dict`, `envelope_from_dict` | `tests/test_session_layer.py` / `tests/test_servicing_log.py` + conformance |
 | `store.py` | Disk persistence: per-user, per-session folders (`session.json` + machine-wide active pointer) via `SessionStore`, one level above per-experiment folders (`experiment.json`, `gui_state.json`, `data/`) + their own active pointer via `ExperimentStore`; user roster; bundle-relative data-path (de)resolution. | `SessionStore` (`list_sessions(user_id)`, `create_session`, `load(user_id, session_id)`, `save`, `get_active` → `tuple[str, str] \| None`, `set_active(user_id, session_id)`, `make_session_id`), `ExperimentStore` (`list_experiments`, `load`, `save`, `get_active`, `set_active`, `make_experiment_id`, `data_dir`, `gui_state_path`, `outbox_path`, `relativize_data_file`, `resolve_data_file`), `UserRoster` (`list_users`, `get`, `add`) | `tests/test_session_layer.py` |
 | `manager.py` | The L6 façade: experiment lifecycle (incl. switching between open experiments, the run queue, and a chosen experiment folder name), automatic run recording from manifests, envelope installation, HDF5 context, save-health surfacing, session experiment-index reconciliation, the single write path for published ELN links, and the run queue (validated adds, ordered mutations, and the engine's pull seam). | `ExperimentManager` (`start_experiment(..., envelope=None, experiment_dirname=None)`, `close_experiment`, `set_findings`, `set_attended`, `set_queue`, `switch_experiment`, `current_data_dir`, `current_gui_state_path`, `experiment_context`, `envelope_variables`, `current_experiment`, `set_run_eln_link`, `run_queue`, `queue_snapshot`, `queue_entries`, `validate_run`, `queue_run`, `dequeue_run`, `move_queued_run`, `clear_run_queue`, `next_run`; optional `session_store`/`station`/`run_catalog` constructor args; signals `experiment_changed`, `run_recorded`, `store_health_changed`) | `tests/test_session_layer.py` |
-| `run_queue.py` | The run queue as data: immutable **run specs**, their ordering (operations drain before procedures — queue-jumping, never preemption), the one construction path from a spec to the live object the engine starts, and the add-time **run validation** (declared `ParamSpec` bounds, the headless build, `control_limits` + the **session envelope**). Imports no Qt, no Orchestrator, and no `cryosoft.procedures` — the classes a spec names are resolved through an injected run catalog. | `RunSpec`, `RunQueue` (`add`, `remove`, `move`, `clear`, `snapshot`, `entries`, `pop_next`, `find`), `RunFinding`, `RunValidation`, `build_run`, `validate_run`, `KIND_PROCEDURE`, `KIND_OPERATION`, the `FINDING_*` codes | `tests/test_run_queue.py` |
+| `run_queue.py` | The run queue as data: immutable **run specs**, their ordering (operations drain before procedures — queue-jumping, never preemption), the one construction path from a spec to the live object the engine starts (both kinds, through `core.run_builder`'s `build_procedure()` / `build_operation()`, with a spec's optional `probe_spec` reducing the built run to a **probe run**), and the add-time **run validation** (declared `ParamSpec` bounds, the headless build, `control_limits` + the **session envelope**, plus the **duration estimate**). Imports no Qt, no Orchestrator, and no `cryosoft.procedures` — the classes a spec names are resolved through an injected run catalog. | `RunSpec`, `RunQueue` (`add`, `remove`, `move`, `clear`, `snapshot`, `entries`, `pop_next`, `find`), `RunFinding`, `RunValidation`, `build_run`, `validate_run`, `KIND_PROCEDURE`, `KIND_OPERATION`, the `FINDING_*` codes | `tests/test_run_queue.py` |
 | `servicing_log.py` | The Servicing Log framework: declared log kinds (incl. the unifying flat `servicing` kind, the only one the recorder writes as of Phase 2), revisioned per-kind storage, the hourly helium record, consumption fit, the automatic recorder, and legacy-log migration. | `LogKindSpec`, `DECLARED_LOG_KINDS`, `ServicingLogStore` (`add_entry`, `revise_entry`, `delete_entry`, `append_machine_entry`, `entries`, `revisions`, `recordings_path`, `migrate_legacy`), `HeliumRecordStore` (`append`, `samples`), `consumption_rate_pct_per_h`, `CryogenicsRecorder` (`on_states_updated`, `on_run_started`, `on_run_finished`; signal `cryo_warning`), `migrate_legacy_servicing_log` | `tests/test_servicing_log.py` + conformance |

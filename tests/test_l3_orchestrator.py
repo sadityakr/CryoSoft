@@ -12,6 +12,7 @@ from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 from cryosoft.core.plan import Command, ExperimentEnvelope, PhasePlan, StepPlan, Target
 from cryosoft.core.station import Station, build_station
 from cryosoft.procedures.field_sweep import FieldSweep
+from cryosoft.procedures.operations.helium_fill import HeliumFillOperation
 from cryosoft.session.run_queue import RunQueue, RunSpec, build_run
 from cryosoft.virtual_instruments.base import BaseVirtualInstrument
 from cryosoft.virtual_instruments.rampable import RampableVI
@@ -3059,6 +3060,41 @@ def test_dict_payload_starts_a_run_and_is_answered_ok(port):
     assert started[0].actor.kind is ev.ActorKind.AGENT
     assert started[0].request_id == request_id
     orch.abort_procedure()
+
+
+def test_an_operation_dict_payload_starts_an_operation_run(station, qtbot, tmp_path):
+    """The other headless construction path: an operation, submitted as JSON.
+
+    ``build_operation()`` is what turns the payload into the live operation,
+    so the engine port covers both run kinds with no inline constructor call
+    of its own.
+    """
+    orch = Orchestrator(
+        station,
+        tick_interval_ms=10,
+        run_catalog={"HeliumFillOperation": HeliumFillOperation},
+    )
+    orch.start_monitoring()
+    verdicts: list[ev.Verdict] = []
+    orch.verdict_emitted.connect(verdicts.append)
+    try:
+        request_id = orch.submit(
+            ev.Command(
+                name=ev.CommandName.RUN_OPERATION,
+                actor=AGENT,
+                args={
+                    "operation": "HeliumFillOperation",
+                    "params": {"person": "AK"},
+                },
+            )
+        )
+
+        assert [v.request_id for v in verdicts] == [request_id]
+        assert verdicts[0].code is ev.VerdictCode.OK
+        assert orch.active_run_kind() == "operation"
+        orch.abort_procedure()
+    finally:
+        orch.shutdown()
 
 
 def test_a_run_payload_naming_no_known_class_fails_without_raising(port):
