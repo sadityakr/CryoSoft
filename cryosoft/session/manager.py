@@ -240,7 +240,12 @@ class ExperimentManager(QObject):
         attended: bool = True,
         experiment_dirname: str | None = None,
     ) -> ExperimentRecord:
-        """Open a new experiment and install its envelope on the Orchestrator.
+        """Open a new experiment and install its policy on the Orchestrator.
+
+        Two session-owned policy values are pushed down as values here, for
+        the same reason (contract C12): the **Session envelope** and
+        **Attendance**. Both are re-installed by every other path that makes
+        a record live — ``switch_experiment`` and the resume on construction.
 
         Args:
             title: Human title (also slugged into the experiment id when
@@ -295,6 +300,7 @@ class ExperimentManager(QObject):
         self._store.set_active(record.experiment_id)
         self._experiment = record
         self._orchestrator.set_experiment_envelope(envelope)
+        self._orchestrator.set_attendance(record.attended)
         logger.info(
             "Experiment %s started (user=%s, attended=%s)",
             record.experiment_id,
@@ -362,6 +368,43 @@ class ExperimentManager(QObject):
         self._experiment = None
         self.experiment_changed.emit({})
 
+    def set_experiment_envelope(
+        self, envelope: ExperimentEnvelope | None
+    ) -> str:
+        """Replace the open experiment's **Session envelope**. No-op when none.
+
+        The write side of the envelope, and the counterpart to
+        ``envelope_variables()``: the operator narrows the setup's limits at
+        the experiment header, and the new bounds have to reach two places —
+        the record (so they survive a restart and describe what this
+        experiment was actually bounded by) and the Orchestrator (which is
+        the only enforcement point). Both go through here for the same
+        reason ``set_attended()`` does: this layer is the single writer for
+        the record, and the engine cannot read it.
+
+        Args:
+            envelope: The new envelope, or ``None`` to clear it.
+
+        Returns:
+            The engine command's request id, or ``""`` when no experiment is
+            open (nothing to bound, and nothing written).
+        """
+        if self._experiment is None:
+            logger.warning("No experiment is open — the envelope was not applied")
+            return ""
+        self._experiment.envelope = envelope_to_dict(envelope)
+        self._save_current()
+        request_id = str(
+            self._orchestrator.set_experiment_envelope(envelope) or ""
+        )
+        logger.info(
+            "Experiment %s envelope %s",
+            self._experiment.experiment_id,
+            "cleared" if envelope is None else "updated",
+        )
+        self.experiment_changed.emit(self._experiment.to_dict())
+        return request_id
+
     def set_findings(self, text: str) -> None:
         """Replace the experiment's free-text findings. No-op when none open.
 
@@ -385,6 +428,12 @@ class ExperimentManager(QObject):
         by ``Orchestrator.set_attendance()``, since contract C12 stops the
         enforcement point from reading this record.
 
+        Nothing is pushed down for a value the record already holds. That is
+        safe because every path that makes a record live — ``start_experiment``,
+        ``switch_experiment``, the resume on construction — installs its
+        attendance on the engine the same way it installs the envelope, so
+        the two can never be out of step to begin with.
+
         Args:
             attended: ``True`` when a human is present at the setup.
         """
@@ -392,6 +441,7 @@ class ExperimentManager(QObject):
             return
         self._experiment.attended = attended
         self._save_current()
+        self._orchestrator.set_attendance(attended)
         logger.info(
             "Experiment %s attendance: %s",
             self._experiment.experiment_id,
@@ -456,6 +506,7 @@ class ExperimentManager(QObject):
         self._experiment = record
         self._store.set_active(record.experiment_id)
         self._orchestrator.set_experiment_envelope(envelope_from_dict(record.envelope))
+        self._orchestrator.set_attendance(record.attended)
         logger.info("Switched to experiment %s", record.experiment_id)
         self._reconcile_session_index()
         self.experiment_changed.emit(record.to_dict())
@@ -1162,5 +1213,6 @@ class ExperimentManager(QObject):
         self._orchestrator.set_experiment_envelope(
             envelope_from_dict(record.envelope)
         )
+        self._orchestrator.set_attendance(record.attended)
         logger.info("Resumed experiment %s (%d runs)", record.experiment_id, len(record.runs))
         self.experiment_changed.emit(record.to_dict())

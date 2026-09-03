@@ -22,8 +22,13 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from cryosoft.core.events import Verdict
 from cryosoft.core.paths import measurement_root
-from cryosoft.gui.experiment_dialogs import CloseExperimentDialog, StartExperimentDialog
+from cryosoft.gui.experiment_dialogs import (
+    CloseExperimentDialog,
+    EnvelopeEditorWidget,
+    StartExperimentDialog,
+)
 from cryosoft.gui.form_autosave import FormAutosaveState
 from cryosoft.gui.theme import TEXT_PRIMARY
 from cryosoft.session.manager import ExperimentManager
@@ -68,12 +73,23 @@ class ExperimentInfoPanel(QWidget):
         outer.setSpacing(4)
         outer.addWidget(QLabel("<b>Experiment</b>"))
         outer.addLayout(self._build_experiment_row())
-        outer.addWidget(QLabel("<b>Sample Info</b>"))
+
+        # One scrolled region for everything below the experiment row: the
+        # envelope editor is one row per enveloped quantity, and a setup with
+        # five of them would otherwise push the sample fields off the bottom
+        # of the quadrant.
+        scrolled = QWidget()
+        scrolled_layout = QVBoxLayout(scrolled)
+        scrolled_layout.setContentsMargins(0, 0, 0, 0)
+        scrolled_layout.setSpacing(4)
+        self._build_envelope_editor(scrolled_layout)
+        scrolled_layout.addWidget(QLabel("<b>Sample Info</b>"))
+        scrolled_layout.addWidget(self._build_form())
 
         scroll = QScrollArea()
         scroll.setObjectName("session_info_scroll")
         scroll.setWidgetResizable(True)
-        scroll.setWidget(self._build_form())
+        scroll.setWidget(scrolled)
         outer.addWidget(scroll)
 
         outer.addWidget(QLabel("<b>eLab</b>"))
@@ -120,6 +136,150 @@ class ExperimentInfoPanel(QWidget):
         section.addWidget(self._attended_checkbox)
 
         return section
+
+    def _build_envelope_editor(self, outer: QVBoxLayout) -> None:
+        """Build the experiment header's own **Session envelope** editor.
+
+        The envelope belongs where the experiment is: the Start Experiment
+        dialog sets it at the one moment the operator knows what is mounted,
+        and this editor is how it is NARROWED afterwards, without closing the
+        experiment to do it. Deliberately the same widget class as the
+        dialog's, so the two can never diverge in what they accept or how
+        they refuse it.
+
+        Hidden outright with no session layer and while no experiment is
+        open: an envelope with no experiment to bound would be a control that
+        does nothing.
+
+        Args:
+            outer: The panel's root layout, which the editor is added to.
+        """
+        self._envelope_editor: EnvelopeEditorWidget | None = None
+        self._pending_envelope_request = ""
+        variables = (
+            self._session_manager.envelope_variables()
+            if self._session_manager is not None
+            else {}
+        )
+        if not variables:
+            return
+        self._envelope_editor = EnvelopeEditorWidget(variables)
+        self._envelope_editor.changed.connect(self._on_envelope_changed)
+        self._envelope_editor.setVisible(False)
+        outer.addWidget(self._envelope_editor)
+
+        row = QHBoxLayout()
+        self._envelope_verdict_label = QLabel("")
+        self._envelope_verdict_label.setObjectName("envelope_verdict_label")
+        self._envelope_verdict_label.setProperty("class", "verdict_badge")
+        self._envelope_verdict_label.setProperty("severity", "ok")
+        self._envelope_verdict_label.setWordWrap(True)
+        self._envelope_verdict_label.setVisible(False)
+        row.addWidget(self._envelope_verdict_label, 1)
+        row.addStretch()
+        self._envelope_apply_btn = QPushButton("Apply envelope")
+        self._envelope_apply_btn.setObjectName("envelope_apply_btn")
+        self._envelope_apply_btn.setToolTip(
+            "Bound this experiment to the entered limits from now on. Every "
+            "writer is held to them — a procedure's targets, a manual action, "
+            "an agent."
+        )
+        self._envelope_apply_btn.clicked.connect(self._on_apply_envelope)
+        row.addWidget(self._envelope_apply_btn)
+        self._envelope_row = row
+        outer.addLayout(row)
+        self._set_envelope_visible(False)
+
+    def _set_envelope_visible(self, visible: bool) -> None:
+        """Show or hide the envelope editor and its Apply row together.
+
+        Args:
+            visible: Whether an experiment is open to bound.
+        """
+        if self._envelope_editor is None:
+            return
+        self._envelope_editor.setVisible(visible)
+        self._envelope_apply_btn.setVisible(visible)
+        if not visible:
+            self._envelope_verdict_label.setVisible(False)
+
+    def _on_envelope_changed(self) -> None:
+        """Keep Apply available exactly while the entry could be sent.
+
+        The editor shows its own refusal on its own badge, so this does not
+        repeat it — saying the same sentence twice, six pixels apart, reads
+        as two different problems. What is left for the panel is the half the
+        editor cannot know: whether the value may be sent at all.
+        """
+        if self._envelope_editor is None:
+            return
+        self._envelope_apply_btn.setEnabled(not self._envelope_editor.error())
+        self._envelope_verdict_label.setVisible(False)
+
+    def _on_apply_envelope(self) -> None:
+        """Install the edited envelope on the open experiment.
+
+        Through the session manager, which is the single writer for both
+        homes of the value — the experiment record and the engine.
+        """
+        if self._envelope_editor is None or self._session_manager is None:
+            return
+        if self._envelope_editor.error():
+            # Belt and braces: the button is disabled while the entry is
+            # unusable, and the editor is already showing why.
+            return
+        self._pending_envelope_request = self._session_manager.set_experiment_envelope(
+            self._envelope_editor.envelope()
+        )
+        self._show_envelope_verdict("Envelope applied", "ok")
+
+    def on_verdict(self, verdict: object) -> None:
+        """Answer the Apply click with the engine's own verdict.
+
+        Forwarded by the window that owns the client connection (the
+        destruction-order rule). Only the verdict answering THIS panel's own
+        request is rendered: every action gets exactly one verdict, and a
+        panel that showed somebody else's would be reporting on an action it
+        did not take.
+
+        Args:
+            verdict: Anything off the client's verdict stream.
+        """
+        if not isinstance(verdict, Verdict) or self._envelope_editor is None:
+            return
+        if not self._pending_envelope_request:
+            return
+        if verdict.request_id != self._pending_envelope_request:
+            return
+        self._pending_envelope_request = ""
+        if verdict.ok:
+            self._show_envelope_verdict("Envelope applied", "ok")
+        else:
+            self._show_envelope_verdict(
+                f"{verdict.code.value} — {verdict.reason}", "error"
+            )
+
+    def _show_envelope_verdict(self, text: str, severity: str) -> None:
+        """Show one line on the envelope's verdict badge.
+
+        Only ever the ENGINE's answer to an Apply — the editor owns the
+        refusals it can decide itself.
+
+        Args:
+            text: What to say.
+            severity: ``"ok"`` or ``"error"`` — the validated ``verdict_badge``
+                QSS severities (no widget stylesheet, theme tokens only).
+        """
+        label = self._envelope_verdict_label
+        label.setText(text)
+        if label.property("severity") != severity:
+            label.setProperty("severity", severity)
+            # Dynamic-property QSS is re-evaluated only after an
+            # unpolish/polish cycle; the badge is a single label, so this one
+            # widget is the whole cycle.
+            label.style().unpolish(label)
+            label.style().polish(label)
+        label.setVisible(True)
 
     def _on_start_close_clicked(self) -> None:
         """Open the Start or Close Experiment dialog depending on current state."""
@@ -183,6 +343,7 @@ class ExperimentInfoPanel(QWidget):
             self._experiment_status_label.setText("No experiment open")
             self._start_close_btn.setText("Start Experiment…")
             self._attended_checkbox.setVisible(False)
+            self._set_envelope_visible(False)
             self._eln_status_label.setText(_ELN_NOT_CONFIGURED_TEXT)
             self._restore_data_dir_on_close()
             return
@@ -200,6 +361,11 @@ class ExperimentInfoPanel(QWidget):
             f"({'attended' if attended else 'unattended'})"
         )
         self._start_close_btn.setText("Close Experiment…")
+        self._set_envelope_visible(True)
+        if self._envelope_editor is not None:
+            # The experiment already HAS an envelope; showing the setup's own
+            # limits instead would invite widening it back out by accident.
+            self._envelope_editor.set_bounds(record.get("envelope") or {})
         self._attended_checkbox.setVisible(True)
         self._attended_checkbox.blockSignals(True)
         self._attended_checkbox.setChecked(attended)

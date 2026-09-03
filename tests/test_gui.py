@@ -1772,13 +1772,28 @@ def test_start_experiment_with_invalid_dirname_shows_warning_and_stays_closed(
 # ── The envelope editor (Start Experiment dialog) ────────────────────────────
 
 
+def _envelope_variables_dict(station):
+    """The sim station's envelope variables in the DICT form a client sees.
+
+    The editor is fed what crossed the client boundary — the JSON-safe
+    rendering a ``StatusSnapshot`` carries — never the engine's typed
+    ``EnvelopeVariable``, which no client ever holds.
+    """
+    import dataclasses
+
+    return {
+        name: dataclasses.asdict(variable)
+        for name, variable in station.envelope_variables().items()
+    }
+
+
 def _envelope_dialog(qtbot, tmp_path, station):
     """A Start Experiment dialog carrying the sim station's envelope editor."""
     from cryosoft.gui.experiment_dialogs import StartExperimentDialog
 
     dialog = StartExperimentDialog(
         _start_dialog_roster(tmp_path),
-        envelope_variables=station.envelope_variables(),
+        envelope_variables=_envelope_variables_dict(station),
     )
     qtbot.addWidget(dialog)
     dialog._title_input.setText("Hall bar A3")
@@ -1901,6 +1916,54 @@ def test_start_dialog_is_offered_the_setups_envelope_variables(
     # engine holds. This suite asserts the production shape because the panel
     # is now given the proxy the application gives it.
     assert seen[0]["magnet_z"]["param_name"] == "target_T"
+
+
+def test_start_dialog_opens_with_a_populated_envelope_editor(
+    monitor_win_session, session_manager, qtbot
+):
+    """The real dialog builds on the production dict form and is pre-filled.
+
+    The regression this guards: the manager answers the mirror's JSON dict
+    form, and an editor doing attribute access on it crashed the Start
+    Experiment dialog for every setup with an enveloped quantity. This opens
+    the real dialog on the sim station, through the manager the window holds.
+    """
+    from cryosoft.gui.experiment_dialogs import StartExperimentDialog
+
+    dialog = StartExperimentDialog(
+        session_manager.roster,
+        envelope_variables=session_manager.envelope_variables(),
+    )
+    qtbot.addWidget(dialog)
+    editor = dialog._envelope_editor
+
+    assert editor is not None, "the sim setup declares an enveloped quantity"
+    assert "magnet_z" in editor._rows
+    lo, hi = monitor_win_session._station.get_vi("magnet_z").limit_bounds("field_T")
+    magnet_min, magnet_max = editor._rows["magnet_z"]
+    assert (float(magnet_min.text()), float(magnet_max.text())) == (lo, hi)
+    # The unit label is derived from the setpoint parameter's own name, which
+    # is a property the dict form cannot carry.
+    assert editor._variables["magnet_z"].unit_suffix == "T"
+    assert "magnet_z" in dialog.envelope().bounds
+
+
+def test_envelope_editor_shows_an_envelope_already_in_force(qtbot, tmp_path, station):
+    """set_bounds() replaces the setup defaults with the stored envelope."""
+    from cryosoft.gui.experiment_dialogs import EnvelopeEditorWidget
+
+    editor = EnvelopeEditorWidget(_envelope_variables_dict(station))
+    qtbot.addWidget(editor)
+    editor.set_bounds({"magnet_z": {"min_value": -1.0, "max_value": 1.5}})
+
+    magnet_min, magnet_max = editor._rows["magnet_z"]
+    assert (magnet_min.text(), magnet_max.text()) == ("-1", "1.5")
+    bound = editor.envelope().bounds["magnet_z"]
+    assert (bound.min_value, bound.max_value) == (-1.0, 1.5)
+
+    editor.set_bounds(None)
+    assert editor.envelope() is None
+    assert float(magnet_max.text()) == station.get_vi("magnet_z").limit_bounds("field_T")[1]
 
 
 # ── Setup tier: login and instrument info (User / Config menus) ───────────────
@@ -2629,6 +2692,112 @@ def test_blank_file_prefix_omitted_from_queue_label(procedure_win, qtbot):
     assert "[" not in procedure_win._queue_panel._queue_list.item(procedure_win._queue_panel._queue_list.count() - 1).text()
     queued_cls = procedure_win._queue_panel._classes[entry.spec.run_class]
     assert queued_cls.name in procedure_win._queue_panel._queue_list.item(procedure_win._queue_panel._queue_list.count() - 1).text()
+
+
+def test_probe_first_queues_a_reduced_run_ahead_of_the_item(procedure_win, qtbot):
+    """A probe of the selected run goes in FRONT of it, validated like any run."""
+    from cryosoft.gui.queue_panel import DEFAULT_PROBE_SPEC
+
+    panel = procedure_win._queue_panel
+    procedure_win._on_add_to_queue()
+    settled(procedure_win._orchestrator)
+    queued = panel._host.snapshot()[-1]
+    panel._select_spec(queued.spec_id)
+
+    procedure_win.findChild(QPushButton, "queue_probe_btn").click()
+    settled(procedure_win._orchestrator)
+
+    order = panel._host.snapshot()
+    assert [spec.probe_spec != {} for spec in order[-2:]] == [True, False], (
+        "the probe comes first — that is the whole point of probing"
+    )
+    probe = order[-2]
+    assert probe.run_class == queued.run_class and probe.params == queued.params
+    assert probe.probe_spec == DEFAULT_PROBE_SPEC.to_json()
+
+    row = panel._queue_list.item(panel._queue_list.count() - 2)
+    assert "probe" in row.text(), "a probe is never science data and says so"
+    assert "probe" in row.toolTip()
+    assert panel._probe_label.isVisible()
+    assert "probe" in panel._probe_label.text()
+
+
+def test_a_probe_row_says_so_once(procedure_win):
+    """The label names the probe once — a prefix that already says it is enough."""
+    import dataclasses
+
+    from cryosoft.gui.queue_panel import QueueEntry
+
+    panel = procedure_win._queue_panel
+    procedure_win._on_add_to_queue()
+    settled(procedure_win._orchestrator)
+    queued = panel._host.snapshot()[-1]
+    reduction = {"n_points": 3, "averaging": 1, "max_wait_s": 5.0}
+    prefixed = dataclasses.replace(
+        queued, file_prefix="probe", probe_spec=reduction, spec_id="p1"
+    )
+    plain = dataclasses.replace(
+        queued, file_prefix="", probe_spec=reduction, spec_id="p2"
+    )
+
+    assert panel._entry_summary(QueueEntry(spec=prefixed)).count("probe") == 1
+    assert "(probe)" in panel._entry_summary(QueueEntry(spec=plain))
+
+
+def test_probe_first_shows_the_estimate_and_the_findings(procedure_win, qtbot):
+    """The caveats travel with the probe: inline, and on the row's tooltip."""
+    panel = procedure_win._queue_panel
+    procedure_win._on_add_to_queue()
+    settled(procedure_win._orchestrator)
+    panel._select_spec(panel._host.snapshot()[-1].spec_id)
+
+    procedure_win.findChild(QPushButton, "queue_probe_btn").click()
+    settled(procedure_win._orchestrator)
+
+    note = panel._probe_label.text()
+    probe = panel._host.snapshot()[-2]
+    assert panel._spec_notes[probe.spec_id] == note
+    # An estimate is never shown bare: it is qualified by what it assumed.
+    if "≈" in note:
+        assert "assuming" in note
+
+
+def test_probe_first_does_nothing_without_a_selected_waiting_row(procedure_win):
+    """Nothing selected, nothing queued — the action is per-row."""
+    panel = procedure_win._queue_panel
+    procedure_win._on_add_to_queue()
+    settled(procedure_win._orchestrator)
+    before = len(panel._host.snapshot())
+    panel._queue_list.setCurrentRow(-1)
+
+    procedure_win.findChild(QPushButton, "queue_probe_btn").click()
+    settled(procedure_win._orchestrator)
+
+    assert len(panel._host.snapshot()) == before
+    assert not panel._probe_label.isVisible()
+
+
+def test_probe_first_refuses_an_operation_row(procedure_win, monkeypatch):
+    """An operation is a servicing action, not a measurement to reduce."""
+    from cryosoft.session.run_queue import KIND_OPERATION, RunSpec
+
+    panel = procedure_win._queue_panel
+    spec = panel._host.add_spec(
+        RunSpec(kind=KIND_OPERATION, run_class="HeliumFillOperation", params={})
+    )
+    settled(procedure_win._orchestrator)
+    panel._sync_from_queue()
+    panel._select_spec(spec.spec_id)
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox, "warning", lambda *args, **kwargs: warnings.append(args[2])
+    )
+
+    procedure_win.findChild(QPushButton, "queue_probe_btn").click()
+    settled(procedure_win._orchestrator)
+
+    assert warnings and "operation" in warnings[0]
+    assert len(panel._host.snapshot()) == 1, "nothing was queued"
 
 
 def test_run_now_passes_file_prefix_to_procedure_instance(procedure_win, qtbot):

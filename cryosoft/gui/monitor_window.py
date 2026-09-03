@@ -37,6 +37,7 @@ from cryosoft.gui import window_geometry
 from cryosoft.gui.config_menu import ConfigMenuController
 from cryosoft.gui.diagnostics_window import DiagnosticsWindow
 from cryosoft.gui.experiment_info_panel import ExperimentInfoPanel
+from cryosoft.gui.agent_panel import AgentPanel
 from cryosoft.gui.instrument_panel import InstrumentPanel
 from cryosoft.gui.log_panel import LogPanel
 from cryosoft.gui.notification_banner import NotificationBanner
@@ -57,6 +58,7 @@ from cryosoft.gui.theme import (
     TEXT_PRIMARY,
 )
 from cryosoft.gui.assistant_dock import AssistantDock
+from cryosoft.gui.takeover_strip import TakeoverStrip
 from cryosoft.gui.trends_quadrant import TrendsQuadrant
 from cryosoft.gui.widget_lifecycle import hold_window, release_window, retire_widget
 from cryosoft.session.gateway import Role
@@ -90,6 +92,7 @@ _MAIN_SPLITTER_KEY = "MonitorWindow/quadrant_main_splitter"
 _LEFT_SPLITTER_KEY = "MonitorWindow/quadrant_left_splitter"
 _RIGHT_SPLITTER_KEY = "MonitorWindow/quadrant_right_splitter"
 _BOTTOM_RIGHT_SPLITTER_KEY = "MonitorWindow/quadrant_bottom_right_splitter"
+_AGENTS_SPLITTER_KEY = "MonitorWindow/quadrant_agents_splitter"
 
 # Minimum widths for the bottom-right quadrant's two sub-panels, and the
 # default split between them. Asymmetric on purpose: a ramp row is one line of
@@ -111,6 +114,15 @@ _BOTTOM_RIGHT_DEFAULT_SIZES = [220, 440]
 # ramp tracker half the quadrant it does not need. 1:2 keeps the split
 # proportional at every window width.
 _BOTTOM_RIGHT_STRETCH = (1, 2)
+
+# The bottom-right quadrant's own vertical split: the Ramps/Operations row on
+# top, the Agents sub-panel underneath. Vertical rather than a third column
+# because an agent row is one wide line of text — time, actor, command,
+# verdict, reason — and a third column would wrap every one of them. The
+# minimum is what keeps two rows and the filter visible at the smallest drag.
+_AGENTS_MIN_HEIGHT = 90
+_BOTTOM_RIGHT_VERTICAL_SIZES = [220, 220]
+_BOTTOM_RIGHT_VERTICAL_STRETCH = (1, 1)
 
 # Orchestrator state names that colour the status bar (dynamic 'level' property).
 _ACTIVE_STATES = frozenset({
@@ -138,8 +150,11 @@ class MonitorWindow(QMainWindow):
     measurement and switch cards tagged by role (the switch card carries the
     station-wide Enable Scanner checkbox) — top-right is the
     :class:`TrendsQuadrant`, bottom-left is the :class:`ExperimentInfoPanel`,
-    and bottom-right splits horizontally into the :class:`RampTrackerPanel`
-    (left) and the optional :class:`OperationsPanel` (right). Every splitter
+    and bottom-right splits vertically into a horizontal row of the
+    :class:`RampTrackerPanel` (left) and the optional
+    :class:`OperationsPanel` (right), over the full-width
+    :class:`AgentPanel`. The header carries the :class:`TakeoverStrip`.
+    Every splitter
     boundary is draggable; nothing in the grid can be closed, detached, or
     floated. Page 2 (Logs) is a :class:`ServicingLogPage` hosting one table
     per configured servicing-log kind plus the relocated :class:`LogPanel`.
@@ -592,7 +607,10 @@ class MonitorWindow(QMainWindow):
         self._right_splitter.setChildrenCollapsible(False)
         self._right_splitter.addWidget(self._trends)
         self._right_splitter.addWidget(bottom_right)
-        self._right_splitter.setSizes([750, 250])
+        # The bottom-right quadrant carries three things now (ramps,
+        # operations, agents), so it starts with a little more of the column
+        # than it did when it carried two.
+        self._right_splitter.setSizes([700, 300])
 
         self._main_splitter = QSplitter(Qt.Orientation.Horizontal)
         self._main_splitter.setObjectName("main_splitter")
@@ -662,6 +680,18 @@ class MonitorWindow(QMainWindow):
         row.addWidget(self._page_tab_bar)
 
         row.addStretch()
+
+        # The takeover strip: the kill switch, the attendance toggle and the
+        # "agents active" indicator, in the header because taking the machine
+        # back must never be somewhere you have to go and find. Its own
+        # controls are never gated — see takeover_strip.py.
+        self._takeover_strip = TakeoverStrip(
+            self._orchestrator,
+            self._mirror,
+            self._session_manager,
+            parent=self,
+        )
+        row.addWidget(self._takeover_strip)
 
         # Monitoring toggle: the Orchestrator polls no instrument until
         # monitoring is started (typically after "Initiate All" has brought
@@ -960,18 +990,22 @@ class MonitorWindow(QMainWindow):
                 chk.blockSignals(False)
 
     def _build_operations_quadrant(self) -> QWidget:
-        """Build the bottom-right quadrant: the Ramps and Operations sub-panels.
+        """Build the bottom-right quadrant: Ramps, Operations, and Agents.
 
-        The quadrant is split horizontally into two titled sub-panels: the
-        always-present ``RampTrackerPanel`` on the left (every ramp running
-        right now, each with its own Abort) and the optional
-        ``OperationsPanel`` on the right. They are siblings rather than one
-        stacked column because they answer different questions and are read
-        at different moments — "what is moving right now, and stop it" vs
-        "what servicing action should I start".
+        Two levels. The top row is split horizontally into two titled
+        sub-panels: the always-present ``RampTrackerPanel`` on the left
+        (every ramp running right now, each with its own Abort) and the
+        optional ``OperationsPanel`` on the right. They are siblings rather
+        than one stacked column because they answer different questions and
+        are read at different moments — "what is moving right now, and stop
+        it" vs "what servicing action should I start". Underneath, across the
+        full width, sits the ``AgentPanel``: a third question again ("what
+        did the machines do"), and a full-width one, because each of its rows
+        is a single wide line that a third column would only wrap.
 
         Returns:
-            A QSplitter holding both sub-panels.
+            A vertical QSplitter holding the two-panel row and the Agents
+            sub-panel.
         """
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setObjectName("bottom_right_splitter")
@@ -982,7 +1016,43 @@ class MonitorWindow(QMainWindow):
         splitter.setStretchFactor(0, _BOTTOM_RIGHT_STRETCH[0])
         splitter.setStretchFactor(1, _BOTTOM_RIGHT_STRETCH[1])
         self._operations_splitter = splitter
-        return splitter
+
+        column = QSplitter(Qt.Orientation.Vertical)
+        column.setObjectName("agents_splitter")
+        column.setChildrenCollapsible(False)
+        column.addWidget(splitter)
+        column.addWidget(self._build_agents_subpanel())
+        column.setSizes(list(_BOTTOM_RIGHT_VERTICAL_SIZES))
+        column.setStretchFactor(0, _BOTTOM_RIGHT_VERTICAL_STRETCH[0])
+        column.setStretchFactor(1, _BOTTOM_RIGHT_VERTICAL_STRETCH[1])
+        self._agents_splitter = column
+        return column
+
+    def _build_agents_subpanel(self) -> QWidget:
+        """Build the bottom-right quadrant's bottom sub-panel: the Agent panel.
+
+        Always built, like the ramp tracker: a setup with no agent shows the
+        panel's own empty state, and "nothing has acted on my cryostat but
+        me" is an answer the physicist should be able to read off the window
+        rather than infer from an absent widget. The panel connects to no
+        engine signal itself — the window forwards the two it filters (see
+        ``_connect_signals``), which is the destruction-order rule.
+
+        Returns:
+            A QWidget containing the title and the panel.
+        """
+        container = QWidget()
+        container.setObjectName("agents_quadrant")
+        container.setMinimumHeight(_AGENTS_MIN_HEIGHT)
+        outer = QVBoxLayout(container)
+        outer.setContentsMargins(4, 4, 4, 4)
+        outer.setSpacing(4)
+        outer.addWidget(QLabel("<b>Agents</b>"))
+        self._agent_panel = AgentPanel(
+            session_manager=self._session_manager, parent=self
+        )
+        outer.addWidget(self._agent_panel)
+        return container
 
     def _build_ramps_subpanel(self) -> QWidget:
         """Build the bottom-right quadrant's left sub-panel: the ramp tracker.
@@ -1382,6 +1452,27 @@ class MonitorWindow(QMainWindow):
         # changes the engine's state — so the ack controls refresh when the
         # mirror does, which is once per tick and on every state change.
         self._mirror.status_updated.connect(self._on_status_snapshot)
+        # The Agent panel is a FILTER of these two streams, and this window is
+        # the receiver for both — a panel that connected itself would keep a
+        # live connection into a tree Qt is already tearing down (the
+        # destruction-order rule).
+        # Both channels under whichever name this client carries them: the
+        # engine's own ``verdict_emitted``/``event_emitted``, which the proxy
+        # renames to ``verdict``/``event`` because a client CONSUMES the
+        # contract rather than relaying it. The engine's names are tried
+        # first, because ``event`` is also QObject's own virtual handler and
+        # every QObject answers to it.
+        verdict_stream = getattr(self._orchestrator, "verdict_emitted", None)
+        if verdict_stream is None:
+            verdict_stream = self._orchestrator.verdict
+        verdict_stream.connect(self._on_verdict_for_agents)
+        event_stream = getattr(self._orchestrator, "event_emitted", None)
+        if event_stream is None:
+            event_stream = self._orchestrator.event
+        event_stream.connect(self._on_event_for_agents)
+        self._agent_panel.agents_active_changed.connect(
+            self._takeover_strip.set_agents_active
+        )
         if self._session_manager is not None:
             self._session_manager.experiment_changed.connect(
                 self._on_session_experiment_changed
@@ -1525,6 +1616,36 @@ class MonitorWindow(QMainWindow):
                 one slot serves every read they make.
         """
         self._refresh_ack_controls()
+        # The kill switch and attendance are values ANY client can change, so
+        # the strip re-reads the mirror rather than trusting its own last
+        # click; the activity count decays with time, so it is recomputed
+        # here too rather than only when an agent acts.
+        self._takeover_strip.sync_from_mirror()
+        self._takeover_strip.set_agents_active(
+            self._agent_panel.active_agent_count()
+        )
+
+    def _on_verdict_for_agents(self, verdict: object) -> None:
+        """Forward one verdict to the panels that render verdicts.
+
+        Two of them, for opposite halves of the same contract: the Agent
+        panel keeps the non-operator ones, and the experiment header keeps
+        the one answering its own Apply click.
+
+        Args:
+            verdict: Anything off the client's ``verdict`` stream.
+        """
+        self._agent_panel.on_verdict(verdict)
+        self._session_info.on_verdict(verdict)
+
+    def _on_event_for_agents(self, event: object) -> None:
+        """Forward one event to the Agent panel.
+
+        Args:
+            event: Anything off the client's ``event`` stream; the panel keeps
+                the non-operator ``StateChange``s and ignores the rest.
+        """
+        self._agent_panel.on_event(event)
 
     def _on_run_finished_for_logs(self, _manifest: dict) -> None:
         """Refresh the Logs page's tables after any run finishes.
@@ -1752,6 +1873,7 @@ class MonitorWindow(QMainWindow):
         settings.setValue(
             _BOTTOM_RIGHT_SPLITTER_KEY, self._operations_splitter.saveState()
         )
+        settings.setValue(_AGENTS_SPLITTER_KEY, self._agents_splitter.saveState())
         self._trends.save_settings()
         super().closeEvent(event)
         if event.isAccepted():
@@ -1775,6 +1897,7 @@ class MonitorWindow(QMainWindow):
             (self._left_splitter, _LEFT_SPLITTER_KEY),
             (self._right_splitter, _RIGHT_SPLITTER_KEY),
             (self._operations_splitter, _BOTTOM_RIGHT_SPLITTER_KEY),
+            (self._agents_splitter, _AGENTS_SPLITTER_KEY),
         ):
             state = settings.value(key)
             if state is None:

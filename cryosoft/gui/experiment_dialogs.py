@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any
 
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
@@ -22,7 +24,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from cryosoft.core.plan import EnvelopeBound, EnvelopeVariable, ExperimentEnvelope
+from cryosoft.core.plan import SETPOINT_PARAM_PREFIX, EnvelopeBound, ExperimentEnvelope
 from cryosoft.session.models import User
 from cryosoft.session.store import UserRoster
 
@@ -35,6 +37,83 @@ def _slugify(text: str) -> str:
 def _format_bound(value: float | None) -> str:
     """Render a bound for an editor field (``""`` for "unbounded")."""
     return "" if value is None else f"{value:g}"
+
+
+def _optional_float(value: Any) -> float | None:
+    """Coerce one JSON bound to a float, or ``None`` for "unbounded".
+
+    Args:
+        value: The bound as it crossed the client boundary — a number,
+            ``None``, or anything a malformed declaration might carry.
+
+    Returns:
+        The bound as a float, or ``None`` when it is absent or unreadable
+        (an unreadable bound means "the setup does not bound this side",
+        which is the reading that shows the operator a blank field rather
+        than crashing the dialog).
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+@dataclass(frozen=True)
+class _EnvelopeVariable:
+    """One enveloped quantity as the GUI reads it: the dict form, typed.
+
+    **The dict-form rule**: the GUI builds from declarations, never from
+    engine objects. What a client is handed for an enveloped quantity is the
+    JSON-safe dict a ``StatusSnapshot`` carried (``ExperimentManager
+    .envelope_variables()`` → ``StatusMirror.envelope_variables()``), so this
+    is what the editor parses — never ``core.plan.EnvelopeVariable``, which
+    lives on the engine's side of the boundary and would make the editor
+    unusable in production the moment it was reached for.
+
+    Attributes:
+        method_name: The ``@control`` capability that commands the quantity.
+        param_name: That capability's setpoint parameter (``target_*``).
+        config_min: Setup lower bound, or ``None`` when unbounded below.
+        config_max: Setup upper bound, or ``None`` when unbounded above.
+    """
+
+    method_name: str = ""
+    param_name: str = ""
+    config_min: float | None = None
+    config_max: float | None = None
+
+    @classmethod
+    def from_json(cls, record: Mapping[str, Any]) -> _EnvelopeVariable:
+        """Build one from the dict a snapshot carried.
+
+        Args:
+            record: One value of ``envelope_variables()``, i.e. an
+                ``EnvelopeVariable`` rendered as a JSON-safe dict.
+
+        Returns:
+            The typed view of it, with unreadable bounds read as unbounded.
+        """
+        return cls(
+            method_name=str(record.get("method_name") or ""),
+            param_name=str(record.get("param_name") or ""),
+            config_min=_optional_float(record.get("config_min")),
+            config_max=_optional_float(record.get("config_max")),
+        )
+
+    @property
+    def unit_suffix(self) -> str:
+        """Return the setpoint parameter's trailing unit token, or ``""``.
+
+        Derived here rather than read off the record, because it is a
+        property of ``EnvelopeVariable`` and properties do not survive the
+        dataclass-to-dict rendering the snapshot does. The
+        setpoint-parameter convention is the whole rule: ``target_T`` → T.
+        """
+        if not self.param_name.startswith(SETPOINT_PARAM_PREFIX):
+            return ""
+        return self.param_name[len(SETPOINT_PARAM_PREFIX):]
 
 
 class AddUserDialog(QDialog):
@@ -183,13 +262,18 @@ class EnvelopeEditorWidget(QGroupBox):
     parameter's name (``target_T`` → T). A blank field means "unbounded on that
     side"; a VI with both fields blank contributes no bound at all.
 
+    The editor reads the **dict form** and only the dict form: each variable
+    arrives as the JSON-safe dict a ``StatusSnapshot`` carried, which is what
+    ``ExperimentManager.envelope_variables()`` answers in production (see
+    ``_EnvelopeVariable``).
+
     ObjectNames (API for tests and muscle memory): the group is
     ``envelope_editor_group``, its toggle ``envelope_enabled_checkbox``, the
     validation message ``envelope_error_label``, and each VI's two fields
     ``envelope_min_<vi_name>`` / ``envelope_max_<vi_name>``.
 
     Args:
-        variables: ``{vi_name: EnvelopeVariable}`` from
+        variables: ``{vi_name: envelope-variable dict}`` from
             ``ExperimentManager.envelope_variables()``.
         parent: Optional Qt parent widget.
     """
@@ -198,12 +282,15 @@ class EnvelopeEditorWidget(QGroupBox):
 
     def __init__(
         self,
-        variables: Mapping[str, EnvelopeVariable],
+        variables: Mapping[str, Mapping[str, Any]],
         parent: QWidget | None = None,
     ) -> None:
         super().__init__("Sample envelope", parent)
         self.setObjectName("envelope_editor_group")
-        self._variables = dict(sorted(variables.items()))
+        self._variables = {
+            vi_name: _EnvelopeVariable.from_json(record)
+            for vi_name, record in sorted(variables.items())
+        }
         self._rows: dict[str, tuple[QLineEdit, QLineEdit]] = {}
         self._error = ""
 
@@ -331,6 +418,40 @@ class EnvelopeEditorWidget(QGroupBox):
         """Return why the current entry is unusable, or ``""`` when it is valid."""
         return self._error
 
+    def set_bounds(self, bounds: Mapping[str, Mapping[str, Any]] | None) -> None:
+        """Show an envelope that is already in force, in place of the defaults.
+
+        What the experiment header needs and the Start dialog does not: an
+        experiment that is already open HAS an envelope, and an editor still
+        showing the setup's own limits would invite the operator to widen it
+        back out by accident. A VI the envelope says nothing about falls back
+        to the setup bounds it was pre-filled with, since that is what the
+        experiment is actually bounded by.
+
+        Args:
+            bounds: ``{vi_name: {"min_value", "max_value", …}}`` — the stored
+                envelope's dict form (``ExperimentRecord.envelope``) — or
+                ``None``/empty to return every field to the setup's limits
+                and switch the editor off (no envelope is in force).
+        """
+        stored = dict(bounds or {})
+        for vi_name, (min_edit, max_edit) in self._rows.items():
+            variable = self._variables[vi_name]
+            record = stored.get(vi_name)
+            if record is None:
+                low, high = variable.config_min, variable.config_max
+            else:
+                low = _optional_float(record.get("min_value"))
+                high = _optional_float(record.get("max_value"))
+            for edit, value in ((min_edit, low), (max_edit, high)):
+                edit.blockSignals(True)
+                edit.setText(_format_bound(value))
+                edit.blockSignals(False)
+        self._enabled_checkbox.blockSignals(True)
+        self._enabled_checkbox.setChecked(bool(stored))
+        self._enabled_checkbox.blockSignals(False)
+        self._on_enabled_toggled(self._enabled_checkbox.isChecked())
+
     def envelope(self) -> ExperimentEnvelope | None:
         """Return the edited envelope, or ``None`` for "no envelope".
 
@@ -365,7 +486,7 @@ class StartExperimentDialog(QDialog):
     Args:
         roster: The setup-local user roster.
         parent: Optional Qt parent widget.
-        envelope_variables: ``{vi_name: EnvelopeVariable}`` (see
+        envelope_variables: ``{vi_name: envelope-variable dict}`` (see
             ``ExperimentManager.envelope_variables()``). ``None`` or empty
             leaves the envelope editor out entirely, which is what a caller
             with no station wired — a unit test, say — gets.
@@ -375,7 +496,7 @@ class StartExperimentDialog(QDialog):
         self,
         roster: UserRoster,
         parent: QWidget | None = None,
-        envelope_variables: Mapping[str, EnvelopeVariable] | None = None,
+        envelope_variables: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Start Experiment")
