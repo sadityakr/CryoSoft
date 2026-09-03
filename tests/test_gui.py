@@ -1772,13 +1772,28 @@ def test_start_experiment_with_invalid_dirname_shows_warning_and_stays_closed(
 # ── The envelope editor (Start Experiment dialog) ────────────────────────────
 
 
+def _envelope_variables_dict(station):
+    """The sim station's envelope variables in the DICT form a client sees.
+
+    The editor is fed what crossed the client boundary — the JSON-safe
+    rendering a ``StatusSnapshot`` carries — never the engine's typed
+    ``EnvelopeVariable``, which no client ever holds.
+    """
+    import dataclasses
+
+    return {
+        name: dataclasses.asdict(variable)
+        for name, variable in station.envelope_variables().items()
+    }
+
+
 def _envelope_dialog(qtbot, tmp_path, station):
     """A Start Experiment dialog carrying the sim station's envelope editor."""
     from cryosoft.gui.experiment_dialogs import StartExperimentDialog
 
     dialog = StartExperimentDialog(
         _start_dialog_roster(tmp_path),
-        envelope_variables=station.envelope_variables(),
+        envelope_variables=_envelope_variables_dict(station),
     )
     qtbot.addWidget(dialog)
     dialog._title_input.setText("Hall bar A3")
@@ -1901,6 +1916,54 @@ def test_start_dialog_is_offered_the_setups_envelope_variables(
     # engine holds. This suite asserts the production shape because the panel
     # is now given the proxy the application gives it.
     assert seen[0]["magnet_z"]["param_name"] == "target_T"
+
+
+def test_start_dialog_opens_with_a_populated_envelope_editor(
+    monitor_win_session, session_manager, qtbot
+):
+    """The real dialog builds on the production dict form and is pre-filled.
+
+    The regression this guards: the manager answers the mirror's JSON dict
+    form, and an editor doing attribute access on it crashed the Start
+    Experiment dialog for every setup with an enveloped quantity. This opens
+    the real dialog on the sim station, through the manager the window holds.
+    """
+    from cryosoft.gui.experiment_dialogs import StartExperimentDialog
+
+    dialog = StartExperimentDialog(
+        session_manager.roster,
+        envelope_variables=session_manager.envelope_variables(),
+    )
+    qtbot.addWidget(dialog)
+    editor = dialog._envelope_editor
+
+    assert editor is not None, "the sim setup declares an enveloped quantity"
+    assert "magnet_z" in editor._rows
+    lo, hi = monitor_win_session._station.get_vi("magnet_z").limit_bounds("field_T")
+    magnet_min, magnet_max = editor._rows["magnet_z"]
+    assert (float(magnet_min.text()), float(magnet_max.text())) == (lo, hi)
+    # The unit label is derived from the setpoint parameter's own name, which
+    # is a property the dict form cannot carry.
+    assert editor._variables["magnet_z"].unit_suffix == "T"
+    assert "magnet_z" in dialog.envelope().bounds
+
+
+def test_envelope_editor_shows_an_envelope_already_in_force(qtbot, tmp_path, station):
+    """set_bounds() replaces the setup defaults with the stored envelope."""
+    from cryosoft.gui.experiment_dialogs import EnvelopeEditorWidget
+
+    editor = EnvelopeEditorWidget(_envelope_variables_dict(station))
+    qtbot.addWidget(editor)
+    editor.set_bounds({"magnet_z": {"min_value": -1.0, "max_value": 1.5}})
+
+    magnet_min, magnet_max = editor._rows["magnet_z"]
+    assert (magnet_min.text(), magnet_max.text()) == ("-1", "1.5")
+    bound = editor.envelope().bounds["magnet_z"]
+    assert (bound.min_value, bound.max_value) == (-1.0, 1.5)
+
+    editor.set_bounds(None)
+    assert editor.envelope() is None
+    assert float(magnet_max.text()) == station.get_vi("magnet_z").limit_bounds("field_T")[1]
 
 
 # ── Setup tier: login and instrument info (User / Config menus) ───────────────
