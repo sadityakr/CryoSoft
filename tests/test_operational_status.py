@@ -216,7 +216,7 @@ def test_header_fields_are_always_present_and_typed():
 def test_unknown_header_values_are_null_never_missing():
     """A value the caller does not know is None — a reader never sees a gap."""
     record = _minimal_record()
-    for field in ("run_id", "experiment_id", "setup"):
+    for field in ("run_id", "experiment_id", "setup", "actor", "request_id"):
         assert field in record
         assert record[field] is None
 
@@ -258,3 +258,39 @@ def test_record_is_json_serialisable_with_the_header():
     assert round_tripped["schema"] == SCHEMA_VERSION
     assert round_tripped["run_id"] == "r1"
     assert round_tripped["experiment_id"] is None
+
+
+# ── Who last got the engine to act ───────────────────────────────────────────
+#
+# The pair exists so status.jsonl can be joined to a client's own action trail
+# on the request id — that join is the point, so the tests hold the pair's
+# presence, its null-when-none rule, and that it survives the JSON line.
+
+
+def test_the_last_accepted_command_is_carried_through_when_supplied():
+    actor = {"kind": "agent", "id": "runner-7", "role": "session"}
+    record = _minimal_record(actor=actor, request_id="3f2a9c1b")
+
+    assert record["actor"] == actor
+    assert record["request_id"] == "3f2a9c1b"
+
+
+def test_the_last_accepted_command_survives_the_json_line():
+    """The record is written as one line, so the join key must round-trip."""
+    record = _minimal_record(
+        actor={"kind": "agent", "id": "runner-7", "role": "session"},
+        request_id="3f2a9c1b",
+    )
+    round_tripped = json.loads(json.dumps(record))
+
+    assert round_tripped["actor"]["id"] == "runner-7"
+    assert round_tripped["request_id"] == "3f2a9c1b"
+
+
+def test_the_actor_is_copied_not_aliased():
+    """A record is a snapshot; mutating the caller's dict must not rewrite it."""
+    actor = {"kind": "agent", "id": "runner-7", "role": "session"}
+    record = _minimal_record(actor=actor)
+    actor["id"] = "someone-else"
+
+    assert record["actor"]["id"] == "runner-7"

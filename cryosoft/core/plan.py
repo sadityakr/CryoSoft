@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -25,7 +27,51 @@ __all__ = [
     "ProbeSpec",
     "StepCost",
     "SETPOINT_PARAM_PREFIX",
+    "params_digest",
 ]
+
+
+def params_digest(params: Mapping[str, Any] | None) -> str:
+    """Return the **Params digest** of one parameter set.
+
+    A record that says a physical step was confirmed is only evidence if it
+    also says WHAT was confirmed. Parameters live in several places by then —
+    a run manifest, a queue entry, an operation's own defaults — and a
+    dispute months later cannot tell whether the values in one of them are
+    the values that were actually in force. So a confirmation stores this
+    digest of the parameters as they stood at that instant: two records agree
+    about the parameters exactly when their digests match, without either
+    having to carry a copy of them.
+
+    **The canonicalisation**, which is what makes the digest stable and is
+    therefore part of the standard rather than an implementation detail: the
+    mapping is rendered by ``json.dumps`` with keys sorted, no whitespace
+    (``", "``/``": "`` collapsed to ``","``/``":"``), floats written as
+    ``repr()`` gives them (the shortest text that round-trips back to the
+    same double, which is what ``json`` does for a float by construction),
+    non-ASCII characters left as themselves, and any value JSON cannot
+    render itself (a numpy scalar, an enum, a path) replaced by its
+    ``str()`` — the same degrade-never-fail rule the contract's own
+    rendering follows. That UTF-8 text is hashed with SHA-256 and returned
+    as its 64-character lowercase hex digest. Key ORDER therefore never matters and key SPELLING always
+    does; ``None`` and an empty mapping give the same digest, because "no
+    parameters" is one fact, not two.
+
+    Args:
+        params: The parameter mapping to digest, or ``None`` for "none".
+
+    Returns:
+        The 64-character lowercase SHA-256 hex digest of the canonical JSON.
+    """
+    canonical = json.dumps(
+        dict(params or {}),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        default=str,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
 
 # Scalar Python types accepted for GUI-facing parameters and their HDF5 dtypes.
 _PARAM_TYPES: tuple[type, ...] = (float, int, str, bool)

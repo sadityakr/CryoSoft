@@ -9,9 +9,9 @@ from typing import TYPE_CHECKING, Any
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
-from cryosoft.core.events import OPERATOR, Actor
+from cryosoft.core.events import OPERATOR, Actor, RunStarted
 from cryosoft.core.orchestrator_proxy import OrchestratorProxy
-from cryosoft.core.plan import ExperimentEnvelope
+from cryosoft.core.plan import ExperimentEnvelope, params_digest
 from cryosoft.core.station import Station, read_instrument_metadata
 from cryosoft.session.models import (
     EXPERIMENT_STATUS_CLOSED,
@@ -139,6 +139,7 @@ class ExperimentManager(QObject):
 
         orchestrator.run_started.connect(self._on_run_started)
         orchestrator.run_finished.connect(self._on_run_finished)
+        orchestrator.event_emitted.connect(self._on_engine_event)
 
         self._resume_active_experiment()
 
@@ -681,6 +682,11 @@ class ExperimentManager(QObject):
 
         Runs outside an experiment are not recorded — there is no record to
         attach them to (their HDF5 file still exists, unstamped).
+
+        The **Params digest** is stamped here, from the manifest's own
+        parameters, so what the run started with is fixed at the moment it
+        started rather than recomputed from a record that may since have been
+        amended.
         """
         if self._experiment is None:
             return
@@ -690,16 +696,45 @@ class ExperimentManager(QObject):
             if raw_data_file
             else ""
         )
+        params = dict(manifest.get("params") or {})
         run = RunRecord(
             run_id=str(manifest.get("run_id", "")),
             procedure=str(manifest.get("procedure", "")),
             kind=str(manifest.get("kind", "run")),
-            params=dict(manifest.get("params") or {}),
+            params=params,
+            params_digest=params_digest(params),
             data_file=data_file,
             started_utc=str(manifest.get("started_utc", "")),
             status=RUN_STATUS_RUNNING,
         )
         self._experiment.runs.append(run)
+        self._save_current()
+        self.run_recorded.emit(run.to_dict())
+
+    def _on_engine_event(self, event: object) -> None:
+        """Stamp who started a run onto the record the manifest just opened.
+
+        The manifest says WHAT ran; the contract's ``RunStarted`` event says
+        who asked, and it is the only place that fact exists — so the record
+        is completed from the event rather than from the manifest. The two
+        arrive in that order (the engine emits the manifest signal first,
+        then the event), which is what lets this find the record already
+        there instead of racing it.
+
+        Nothing else on the event stream concerns this layer; a run that
+        started outside an experiment, or whose actor is already what the
+        record says, writes nothing.
+
+        Args:
+            event: Anything on the Orchestrator's one event stream.
+        """
+        if not isinstance(event, RunStarted) or self._experiment is None:
+            return
+        run = self._experiment.find_run(event.run_id)
+        if run is None or (run.actor == event.actor and not run.actor_legacy):
+            return
+        run.actor = event.actor
+        run.actor_legacy = False
         self._save_current()
         self.run_recorded.emit(run.to_dict())
 

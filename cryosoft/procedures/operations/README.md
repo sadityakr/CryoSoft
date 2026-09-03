@@ -238,13 +238,19 @@ no per-operation GUI code, exactly like the readiness-condition standard:
   rule is what makes the sequence sequential: the GUI offers a Confirm/Skip
   action for that step alone, and it advances the instant an outcome is
   recorded. No stage counter, no explicit advance call.
-- **`confirm_step(key)` / `skip_step(key)`** stamp a `StepRecord` — status,
-  unix time, and `step_conditions_snapshot()`, a flat cached-state snapshot.
-  That snapshot is where the *non-numeric* monitored values live (a needle
-  valve's AUTO/MANUAL mode, a magnet's state), which the numeric recording
-  cannot hold, and which are exactly what you want to know at the moment a
-  step was attested. Recording an already-recorded step is a no-op, so a
-  double-click cannot rewrite when something happened.
+- **`confirm_step(key, *, actor)` / `skip_step(key, *, actor)`** stamp a
+  `StepRecord` — status, unix time, `step_conditions_snapshot()` (a flat
+  cached-state snapshot), the `Actor` who attested it, and the **Params
+  digest** of the operation's `get_params()` at that instant. That snapshot is
+  where the *non-numeric* monitored values live (a needle valve's AUTO/MANUAL
+  mode, a magnet's state), which the numeric recording cannot hold, and which
+  are exactly what you want to know at the moment a step was attested. The
+  actor is what makes an autonomous client's self-confirmation of a physical
+  step distinguishable from the physicist's — it defaults to the `OPERATOR`
+  sentinel, because a direct GUI click *is* the human — and the digest is what
+  lets a later dispute say which parameters were confirmed rather than which
+  ones the record happens to say now. Recording an already-recorded step is a
+  no-op, so a double-click cannot rewrite when something happened.
 - **`steps_summary()`** returns the whole timeline, pending steps included,
   for `run_summary()` and thence the servicing log.
 - **Reset** with `_reset_steps()` in `initiate()`, beside

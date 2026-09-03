@@ -7,6 +7,7 @@ import time
 from typing import Any
 
 from cryosoft.core.decorators import get_monitored_methods
+from cryosoft.core.events import OPERATOR, Actor
 from cryosoft.core.exceptions import CryoSoftConfigError
 from cryosoft.core.gates import Gate
 from cryosoft.core.operation import (
@@ -337,7 +338,7 @@ class _SampleAccessOperationBase(OperationBase):
                     snapshot[f"{vi_name}.{field}"] = value
         return snapshot
 
-    def skip_step(self, key: str) -> None:
+    def skip_step(self, key: str, *, actor: Actor = OPERATOR) -> None:
         """Record a skipped step, and flag a ramp stop when it was the warm-up.
 
         Extends the base implementation with the one thing an ``auto_ramp``
@@ -347,20 +348,25 @@ class _SampleAccessOperationBase(OperationBase):
 
         Args:
             key: One of ``steps()``' keys.
+            actor: Who decided to skip it, forwarded verbatim to the base
+                implementation so the record names who took the override.
+                Defaults to the ``OPERATOR`` sentinel.
 
         Raises:
             ValueError: If ``key`` is not a declared step.
         """
         already_recorded = key in self.step_records()
-        super().skip_step(key)
+        super().skip_step(key, actor=actor)
         if already_recorded:
             return
         if self._step_by_key(key).kind == STEP_KIND_AUTO_RAMP:
             self.skip_ramp_requested = True
             logger.warning(
-                "%s: operator skipped %r — requesting the %s ramp be "
+                "%s: %s %r skipped %r — requesting the %s ramp be "
                 "stopped and clamped where it is.",
                 type(self).__name__,
+                actor.kind.value,
+                actor.id,
                 key,
                 self._vti_vi_name,
             )
@@ -369,21 +375,24 @@ class _SampleAccessOperationBase(OperationBase):
     # Operator confirmations — the Orchestrator-facing names
     # ------------------------------------------------------------------
 
-    def confirm(self, key: str) -> None:
-        """Record an operator confirmation for a declared step.
+    def confirm(self, key: str, *, actor: Actor = OPERATOR) -> None:
+        """Record a confirmation for a declared step.
 
         The name the Orchestrator calls duck-typed from
         ``confirm_operation(key)``; delegates to the step standard's
-        ``confirm_step()``. Never sets hardware — purely a human attestation
+        ``confirm_step()``. Never sets hardware — purely an attestation
         about a physical action, consumed by ``postcondition_gates()``.
 
         Args:
             key: One of ``steps()``' keys.
+            actor: Who attests it, forwarded verbatim to ``confirm_step()``
+                so the record can tell an agent's self-confirmation from the
+                physicist's. Defaults to the ``OPERATOR`` sentinel.
 
         Raises:
             ValueError: If ``key`` is not a declared step.
         """
-        self.confirm_step(key)
+        self.confirm_step(key, actor=actor)
 
     def confirmed(self, key: str) -> bool:
         """Return whether ``key`` has been confirmed *done* (not skipped).

@@ -17,6 +17,11 @@ Three jobs:
   ``verdict_emitted`` stream, so the human's window sees the agent being
   refused exactly as it sees it being obeyed. A refusal never reaches the
   engine at all.
+* **Leave a trail.** Every command this connection submits — forwarded or
+  refused here — is written to the experiment's **Agent feed** when one is
+  given, which is the only place the arguments are still in hand. The
+  answering verdict is recorded by the feed itself, off the engine's own
+  stream, so the two halves join on ``request_id``.
 * **Mirror, never poll.** Every read is answered from the latest
   ``StatusSnapshot`` / ``StationInfo`` the engine broadcast, following the
   verdict standard's rule that a client answers reads locally and never
@@ -70,6 +75,7 @@ from cryosoft.session.gateway.tools import (
     render_tools,
     validate_tool_args,
 )
+from cryosoft.session.agent_feed import AgentFeed
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +118,7 @@ class Gateway:
         *,
         station_info: StationInfo | Any | None = None,
         tool_context: ToolContext | None = None,
+        feed: AgentFeed | None = None,
     ) -> None:
         """Attach to an engine under a declared role.
 
@@ -135,11 +142,19 @@ class Gateway:
                 it every command tool still works and the three
                 declaration-reading tools still answer from the mirror, while
                 a tool whose collaborator is absent is refused by name.
+            feed: The experiment's **Agent feed**, or ``None`` to record
+                nothing. Given one, every command this connection submits is
+                written to it before it is forwarded or refused. Attaching
+                the same feed to the engine (``AgentFeed.attach()``) is what
+                records the answering verdicts and the state changes; the
+                two are separate because only this side ever sees a
+                command's arguments.
 
         Raises:
             ValueError: If *role* is not a known ``Role``.
         """
         self._engine = engine
+        self._feed = feed
         self.role = Role(role)
         self.actor = Actor(kind=ActorKind.AGENT, id=str(actor_id), role=self.role.value)
 
@@ -345,6 +360,7 @@ class Gateway:
             TypeError: If *args* is not a mapping of JSON-safe values.
         """
         command = self._command(name, args)
+        self._record(command)
         refusal = self._authorize(command)
         if refusal is None:
             return self._engine.submit(command)
@@ -364,6 +380,19 @@ class Gateway:
             The ``Command``, validated by the contract at construction.
         """
         return Command(name=name, actor=self.actor, args=dict(args or {}))
+
+    def _record(self, command: Command) -> None:
+        """Write one submitted command to the **Agent feed**, when there is one.
+
+        Called before the permission check, so a refused command is in the
+        trail exactly like an obeyed one — what an agent TRIED to do is as
+        much a part of accountability as what it managed to do.
+
+        Args:
+            command: The command about to be authorized.
+        """
+        if self._feed is not None:
+            self._feed.record_command(command)
 
     def _authorize(self, command: Command) -> Verdict | None:
         """Run the permission check for one command against the current mirror.

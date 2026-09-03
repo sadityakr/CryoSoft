@@ -38,13 +38,29 @@ Field                        Type         Meaning
 ``vis``                      list[obj]    One ``VIHealth`` dict per system VI.
 ``active_gates``             list[str]    Pending initiation/reading gate names.
 ``conditions``               list[obj]    This tick's `Condition` registry.
+``actor``                    obj | null   Actor of the last accepted command.
+``request_id``               str | null   That command's correlation id.
 ============================ ============ ===================================
+
+``actor``/``request_id`` name the last command the engine *accepted* — the
+``Actor`` that issued it and the id its ``Verdict`` and events carry back —
+and are ``null`` until one has been. A refused command (any ``BLOCKED_*``
+verdict) never displaces them, because the pair answers "who last got the
+engine to do something", and a command that was refused changed nothing. The
+``request_id`` is what joins this log to the accountability trails on the
+other side of the engine: the same id appears on the command, verdict and
+event records of the **Agent feed**, so "the station started ramping at
+03:12 and the last thing anyone asked for was request X" and "agent runner-7
+asked for X" are one query rather than two guesses.
 
 Schema history: version 1 is every record written before ``schema``/``ts``/
 ``seq``/``run_id``/``experiment_id``/``setup`` existed — it carried no time at
 all, so an agent could not tell a live run from a log left by a process that
 died three days ago. Version 1 records have no ``schema`` key; a reader that
-needs the distinction treats an absent ``schema`` as 1.
+needs the distinction treats an absent ``schema`` as 1. Version 2 added those
+six; version 3 added ``actor``/``request_id``. Both additions are additive in
+the sense the add-only rule means: a version-2 log simply reports the new
+fields as ``None``, and stays readable.
 
 ``vis`` is the heavy part of the record and is empty on a tick that polled
 nothing (monitoring off and IDLE — see
@@ -67,7 +83,7 @@ from cryosoft.core.conditions import Condition
 # Version of the record shape documented in this module's docstring. Bump it
 # only when the shape changes; adding a field is a bump, renaming or retyping
 # one is forbidden outright.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Process-wide record counter behind next_sequence_number(). Module-level
 # rather than per-Orchestrator because the guarantee readers rely on is "one
@@ -221,6 +237,8 @@ def build_operational_status(
     run_id: str | None = None,
     experiment_id: str | None = None,
     setup: str | None = None,
+    actor: dict | None = None,
+    request_id: str | None = None,
 ) -> tuple[dict, dict[str, float]]:
     """Assemble one operational-status record and the next-tick gap map.
 
@@ -276,6 +294,12 @@ def build_operational_status(
         setup: The setup (config) name this station was built from, from
             `Station.setup_name()`, or None for a Station built in-process
             without a config directory.
+        actor: The `events.Actor` of the last command the engine accepted,
+            already rendered as its JSON dict — this module is pure data
+            assembly and does not import the contract to re-render one. None
+            until a command has been accepted.
+        request_id: That command's correlation id, the join key into the
+            **Agent feed**. None alongside ``actor``.
 
     Returns:
         ``(record, new_gaps)`` — the JSON-ready record dict and the gap map to
@@ -360,5 +384,7 @@ def build_operational_status(
         "vis": vis,
         "active_gates": list(active_gates) if active_gates else [],
         "conditions": [_condition_as_dict(c) for c in sorted_conditions],
+        "actor": dict(actor) if actor else None,
+        "request_id": request_id,
     }
     return record, new_gaps

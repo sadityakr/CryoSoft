@@ -6,7 +6,7 @@ import pytest
 
 from cryosoft.core import events as ev
 from cryosoft.core.orchestrator import Orchestrator
-from cryosoft.core.plan import EnvelopeBound, ExperimentEnvelope
+from cryosoft.core.plan import EnvelopeBound, ExperimentEnvelope, params_digest
 from cryosoft.core.station import build_station
 from cryosoft.procedures.field_sweep import FieldSweep
 from cryosoft.session.manager import ExperimentManager
@@ -963,6 +963,125 @@ def test_save_current_refuses_to_overwrite_future_schema_version(manager, store,
     assert store.load(record.experiment_id) == on_disk_before
 
 
+# ── Accountability: who started the run, and who queued it ──────────────────
+
+AGENT = ev.Actor(kind=ev.ActorKind.AGENT, id="runner-7", role="session")
+
+
+def test_a_run_record_names_the_operator_by_default(manager, orchestrator, store):
+    """The physicist's own run says so, and is not flagged as a legacy record."""
+    record = manager.start_experiment("X", "jdoe", SAMPLE_INFO)
+
+    orchestrator.run_started.emit({"run_id": "r1", "procedure": "Field Sweep"})
+    orchestrator.event_emitted.emit(ev.RunStarted(run_id="r1"))
+
+    run = store.load(record.experiment_id).find_run("r1")
+    assert run.actor == ev.OPERATOR
+    assert run.actor_legacy is False
+
+
+def test_an_agent_started_run_names_the_agent_forever_after(
+    manager, orchestrator, store
+):
+    """The exit criterion: the record, not just the live event, says who ran it."""
+    record = manager.start_experiment("X", "jdoe", SAMPLE_INFO)
+
+    orchestrator.run_started.emit({"run_id": "r1", "procedure": "Field Sweep"})
+    orchestrator.event_emitted.emit(ev.RunStarted(run_id="r1", actor=AGENT))
+
+    run = store.load(record.experiment_id).find_run("r1")
+    assert run.actor.kind is ev.ActorKind.AGENT
+    assert run.actor.id == "runner-7"
+    assert run.actor.role == "session"
+    assert run.actor_legacy is False
+
+
+def test_a_real_agent_run_is_recorded_as_the_agents(
+    manager, orchestrator, station, store, tmp_path, qtbot
+):
+    """Through the real engine: the actor on the command reaches the record."""
+    station.magnet_z._default_ramp_rate = 6000.0
+    station.magnet_z._ramp_segments = []
+    record = manager.start_experiment("X", "jdoe", SAMPLE_INFO)
+    procedure = FieldSweep(
+        station=station,
+        sample_info=SAMPLE_INFO,
+        data_directory=str(tmp_path),
+        experiment_info=manager.experiment_context(),
+        **FAST_PARAMS,
+    )
+
+    orchestrator.run_procedure(procedure, actor=AGENT)
+    with qtbot.waitSignal(orchestrator.procedure_finished, timeout=10000):
+        pass
+
+    run = store.load(record.experiment_id).runs[0]
+    assert run.actor.kind is ev.ActorKind.AGENT
+    assert run.actor.id == "runner-7"
+
+
+def test_a_run_written_before_actors_were_stamped_loads_as_legacy(manager, store):
+    """An old file must not read as "the physicist did it" — it reads as unknown."""
+    record = manager.start_experiment("X", "jdoe", SAMPLE_INFO)
+    path = store.root / record.experiment_id / "experiment.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["runs"] = [{"run_id": "old", "procedure": "Field Sweep", "status": "done"}]
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    run = store.load(record.experiment_id).find_run("old")
+
+    assert run.actor == ev.OPERATOR
+    assert run.actor_legacy is True, "the sentinel is not evidence of who acted"
+
+
+def test_an_unreadable_actor_field_degrades_to_legacy():
+    """Junk in the actor field never raises, and never claims the operator acted."""
+    assert RunRecord.from_dict({"actor": {"kind": "wizard", "id": "x"}}).actor_legacy
+    assert RunRecord.from_dict({"actor": "jdoe"}).actor_legacy
+
+
+# ── Accountability: what the run was started with ───────────────────────────
+
+
+def test_a_run_record_digests_the_parameters_it_started_with(
+    manager, orchestrator, store
+):
+    """The Params digest is stamped when the run opens, from the manifest itself."""
+    record = manager.start_experiment("X", "jdoe", SAMPLE_INFO)
+    params = {"start_T": 0.0, "stop_T": 1.0, "points": 11}
+
+    orchestrator.run_started.emit(
+        {"run_id": "r1", "procedure": "Field Sweep", "params": params}
+    )
+
+    run = store.load(record.experiment_id).find_run("r1")
+    assert run.params_digest == params_digest(params)
+    assert run.params == params
+
+
+def test_the_run_digest_is_stored_not_recomputed_on_read(manager, store):
+    """It fixes what the run started with, so an amended record cannot rewrite it."""
+    record = manager.start_experiment("X", "jdoe", SAMPLE_INFO)
+    path = store.root / record.experiment_id / "experiment.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["runs"] = [
+        {"run_id": "r1", "params": {"start_T": 9.9}, "params_digest": "abc123"}
+    ]
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert store.load(record.experiment_id).find_run("r1").params_digest == "abc123"
+
+
+def test_a_run_written_before_digests_reads_as_no_digest():
+    """An old record has no digest, and never a wrong one invented on read."""
+    assert RunRecord.from_dict({"run_id": "old", "params": {"a": 1}}).params_digest == ""
+
+
+def test_the_run_digest_round_trips_through_the_record():
+    run = RunRecord(run_id="r1", params={"b": 2, "a": 1}, params_digest=params_digest({"a": 1, "b": 2}))
+    assert RunRecord.from_dict(run.to_dict()).params_digest == run.params_digest
+
+
 # ── End-to-end: a real run recorded and cross-checked against HDF5 ───────────
 
 def test_end_to_end_run_recorded_and_stamped(
@@ -1071,6 +1190,30 @@ def _queue_events(orchestrator):
         lambda event: events.append(event) if isinstance(event, ev.QueueChanged) else None
     )
     return events
+
+
+def test_a_queued_run_carries_who_queued_it(queue_manager, tmp_path):
+    """Every queue entry names the actor that put it there, spec and JSON alike."""
+    queue_manager.queue_run(
+        FieldSweep, FAST_PARAMS, data_directory=str(tmp_path), actor=AGENT
+    )
+
+    assert queue_manager.queue_snapshot()[0].actor == AGENT
+    assert queue_manager.queue_entries()[0]["actor"] == AGENT.to_json()
+
+
+def test_the_queue_broadcast_carries_the_actor_of_every_entry(
+    queue_manager, orchestrator, tmp_path
+):
+    """QueueChanged is what a client renders from, so the actor must survive it."""
+    events = _queue_events(orchestrator)
+
+    queue_manager.queue_run(
+        FieldSweep, FAST_PARAMS, data_directory=str(tmp_path), actor=AGENT
+    )
+
+    assert events[-1].actor == AGENT
+    assert [entry["actor"] for entry in events[-1].entries] == [AGENT.to_json()]
 
 
 def test_a_valid_run_is_queued_as_a_spec(queue_manager, tmp_path):
