@@ -160,7 +160,7 @@ class Gateway:
         self._tools: dict[str, ToolSpec] = {}
         self._tools_rendered_from: StationInfo | None = None
         self._awaiting_verdict = False
-        self._awaited_verdict: Verdict | None = None
+        self._awaited_verdicts: list[Verdict] = []
         self._tool_context = replace(
             tool_context or ToolContext(),
             status_source=self.status,
@@ -230,7 +230,7 @@ class Gateway:
         try:
             self._engine_seq = max(self._engine_seq, int(verdict.seq))
             if self._awaiting_verdict:
-                self._awaited_verdict = verdict
+                self._awaited_verdicts.append(verdict)
         except Exception:  # noqa: BLE001 — mirroring must never disrupt the engine
             logger.exception("gateway verdict mirror update failed (non-fatal)")
 
@@ -505,16 +505,27 @@ class Gateway:
         """
         payload = {**tool.fixed_args, **args}
         self._awaiting_verdict = True
-        self._awaited_verdict = None
+        self._awaited_verdicts.clear()
         try:
             request_id = self.submit(tool.command, payload)
         finally:
             self._awaiting_verdict = False
-        verdict = self._awaited_verdict
-        self._awaited_verdict = None
+        # Everything the engine said while the command was in flight, not
+        # merely the last of it: carrying out one command can answer another
+        # (a queued action drained on the same call), and the answer to THIS
+        # call is the one carrying its request id.
+        verdict = next(
+            (
+                seen
+                for seen in self._awaited_verdicts
+                if seen.request_id == request_id
+            ),
+            None,
+        )
+        self._awaited_verdicts.clear()
 
         answer: dict[str, Any] = {"tool": tool.name, "request_id": request_id}
-        if verdict is None or verdict.request_id != request_id:
+        if verdict is None:
             answer.update(
                 {
                     "ok": False,
