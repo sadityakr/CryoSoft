@@ -29,6 +29,14 @@ from cryosoft.session.eln.outbox import (
     Outbox,
     OutboxJob,
 )
+from cryosoft.session.eln.publisher import (
+    PUBLISH_DISABLED,
+    PUBLISH_OFFLINE,
+    PUBLISH_PENDING,
+    PUBLISH_SYNCED,
+    ElnPublisher,
+    discover_backends,
+)
 from cryosoft.session.eln.settings import (
     API_KEY_ENV_VAR,
     SETTINGS_PATH_ENV_VAR,
@@ -63,4 +71,10 @@ __all__ = [
     "DRAIN_IDLE",
     "DRAIN_PUBLISHED",
     "DRAIN_RETRY",
+    "ElnPublisher",
+    "discover_backends",
+    "PUBLISH_SYNCED",
+    "PUBLISH_PENDING",
+    "PUBLISH_OFFLINE",
+    "PUBLISH_DISABLED",
 ]

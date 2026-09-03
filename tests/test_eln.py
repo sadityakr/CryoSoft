@@ -638,3 +638,259 @@ def test_urllib_transport_refuses_to_verify_when_told_to(caplog):
         UrllibTransport(verify_tls=False)
     assert any("verification is DISABLED" in record.message for record in caplog.records)
     UrllibTransport()  # the default verifies, silently
+
+
+# ── The publisher (end to end, over a real ExperimentManager) ─────────────────
+
+
+@pytest.fixture
+def published_setup(tmp_path, qtbot):
+    """A real ExperimentManager with an open experiment, plus a sim notebook.
+
+    Yields ``(manager, publisher, adapter, run_manifest)``. The manifest is
+    the shape the Orchestrator emits, and its data file really exists inside
+    the experiment folder, so the whole path — relativize, resolve, attach —
+    is exercised rather than stubbed.
+    """
+    from cryosoft.core.orchestrator import Orchestrator
+    from cryosoft.core.station import build_station
+    from cryosoft.session.eln.publisher import ElnPublisher
+    from cryosoft.session.manager import ExperimentManager
+    from cryosoft.session.models import User
+    from cryosoft.session.store import ExperimentStore, UserRoster
+
+    store = ExperimentStore(tmp_path / "experiments")
+    roster = UserRoster(tmp_path / "users.json")
+    roster.add(User(user_id="jdoe", name="J. Doe"))
+    orchestrator = Orchestrator(build_station("cryosoft/configs/sim_cryostat"), tick_interval_ms=10)
+    manager = ExperimentManager(
+        store=store, roster=roster, orchestrator=orchestrator, config_name="sim_cryostat"
+    )
+    experiment = manager.start_experiment("Sample A", "jdoe", {"sample_name": "A3"})
+
+    data_file = store.data_dir(experiment.experiment_id) / "run-0001.h5"
+    data_file.parent.mkdir(parents=True, exist_ok=True)
+    data_file.write_bytes(b"\x89HDF\r\n\x1a\n")
+
+    started = {
+        "run_id": "run-0001",
+        "procedure": "Field Sweep",
+        "kind": "run",
+        "params": {"field_T": 1.5},
+        "data_file": str(data_file),
+        "started_utc": "2026-01-01T10:00:00+00:00",
+    }
+    orchestrator.run_started.emit(started)
+    finished = dict(started, finished_utc="2026-01-01T11:00:00+00:00", status="done", reason="")
+
+    settings = ElnSettings(
+        enabled=True,
+        backend="sim_eln",
+        base_url="https://sim.example",
+        api_key="k",
+        tags=("cryosoft", "sim"),
+        # No backoff: these tests step the queue by hand, and the backoff
+        # itself is exercised against the Outbox directly.
+        retry_base_s=0.0,
+        retry_max_s=0.0,
+    )
+    adapter = SimElnAdapter({})
+    publisher = ElnPublisher(manager, settings, adapter=adapter)
+    orchestrator.run_finished.connect(publisher.on_run_finished)
+    yield manager, publisher, adapter, finished
+    publisher.stop()
+
+
+def test_run_finished_publishes_one_entry_with_body_and_data(published_setup):
+    """The exit criterion: one RunFinished, one entry, one attachment, one link."""
+    manager, publisher, adapter, manifest = published_setup
+    experiment = manager.current_experiment()
+
+    manager._orchestrator.run_finished.emit(manifest)
+    assert publisher.pending_count() == 1
+    assert not adapter.entries, "queuing must touch no network"
+
+    result = publisher.drain_once()
+    assert result.state == DRAIN_PUBLISHED
+
+    (entry,) = adapter.entries.values()
+    assert entry["title"].startswith("Sample A — Field Sweep")
+    assert "run-0001" in entry["body_html"] and "sim_cryostat" in entry["body_html"]
+    assert entry["tags"] == ["cryosoft", "sim"]
+    assert entry["metadata"]["run_id"] == "run-0001"
+    assert adapter.uploads[0]["path"].endswith("run-0001.h5")
+
+    run = manager.current_experiment().find_run("run-0001")
+    assert run.published is True
+    assert run.eln_link is not None
+    assert run.eln_link.backend == "sim_eln"
+    assert run.eln_link.entry_id and run.eln_link.url
+
+    reloaded = manager.store.load(experiment.experiment_id).find_run("run-0001")
+    assert reloaded.eln_link == run.eln_link, "the link is persisted, not just in memory"
+
+
+def test_offline_leaves_the_job_queued_and_a_later_drain_publishes_once(published_setup):
+    """The offline-first exit criterion, end to end."""
+    manager, publisher, adapter, manifest = published_setup
+    adapter.offline = True
+    manager._orchestrator.run_finished.emit(manifest)
+
+    assert publisher.drain_once().state == DRAIN_RETRY
+    assert not adapter.entries
+    assert publisher.pending_count() == 1
+    assert manager.current_experiment().find_run("run-0001").eln_link is None
+
+    adapter.offline = False
+    assert publisher.drain_once().state == DRAIN_PUBLISHED
+    assert len(adapter.entries) == 1
+    assert publisher.drain_once().state == DRAIN_IDLE
+    assert len(adapter.entries) == 1
+    assert manager.current_experiment().find_run("run-0001").eln_link is not None
+
+
+def test_a_duplicate_run_finished_publishes_exactly_once(published_setup):
+    """Two identical RunFinished events are one job and one entry."""
+    manager, publisher, adapter, manifest = published_setup
+    manager._orchestrator.run_finished.emit(manifest)
+    manager._orchestrator.run_finished.emit(manifest)
+    assert publisher.pending_count() == 1
+
+    assert publisher.drain_once().state == DRAIN_PUBLISHED
+    assert publisher.drain_once().state == DRAIN_IDLE
+    assert len(adapter.entries) == 1
+    assert adapter.calls.count("create_entry") == 1
+
+
+def test_the_publisher_accepts_a_run_finished_contract_event(published_setup):
+    """``RunFinished`` and the Orchestrator's manifest dict are both accepted."""
+    from cryosoft.core.events import RunFinished
+
+    manager, publisher, adapter, manifest = published_setup
+    event = RunFinished(run_id="run-0001", status="done", manifest=manifest)
+    assert publisher.on_run_finished(event) == "publish_run:run-0001"
+    assert publisher.drain_once().state == DRAIN_PUBLISHED
+    assert len(adapter.entries) == 1
+
+
+def test_nothing_is_published_without_an_open_experiment(published_setup):
+    """No silent uploads of ad-hoc runs — an entry needs a record to belong to."""
+    manager, publisher, adapter, manifest = published_setup
+    manager.close_experiment()
+    assert publisher.on_run_finished(manifest) == ""
+    assert publisher.drain_once().state == DRAIN_IDLE
+    assert not adapter.entries
+
+
+def test_auto_publish_off_leaves_manual_export_as_the_only_trigger(published_setup):
+    """With auto-publish off a finished run waits for an explicit export."""
+    manager, publisher, adapter, manifest = published_setup
+    publisher._settings = ElnSettings(
+        **{**publisher.settings.to_dict(include_secret=True), "auto_publish": False}
+    )
+    manager._orchestrator.run_finished.emit(manifest)
+    assert publisher.pending_count() == 0
+
+    assert publisher.export_run("run-0001") == "publish_run:run-0001"
+    assert publisher.drain_once().state == DRAIN_PUBLISHED
+    (entry,) = adapter.entries.values()
+    assert "run-0001" in entry["body_html"]
+
+
+def test_export_of_an_unknown_run_queues_nothing(published_setup):
+    """A manual export names a recorded run or does nothing."""
+    _, publisher, adapter, _ = published_setup
+    assert publisher.export_run("no-such-run") == ""
+    assert publisher.pending_count() == 0
+
+
+def test_disabled_settings_publish_nothing_at_all(published_setup):
+    """The default (no settings file) means nothing ever leaves the machine."""
+    manager, publisher, adapter, manifest = published_setup
+    publisher._settings = ElnSettings()
+    assert publisher.on_run_finished(manifest) == ""
+    assert publisher.export_run("run-0001") == ""
+    assert publisher.drain_once().state == DRAIN_IDLE
+    assert not adapter.entries
+
+
+def test_a_queued_job_survives_a_restart(published_setup, qtbot):
+    """A publisher built afterwards adopts the outbox left on disk and drains it."""
+    from cryosoft.session.eln.publisher import ElnPublisher
+
+    manager, publisher, adapter, manifest = published_setup
+    adapter.offline = True
+    manager._orchestrator.run_finished.emit(manifest)
+    publisher.drain_once()
+    publisher.stop()
+
+    fresh_adapter = SimElnAdapter({})
+    restarted = ElnPublisher(manager, publisher.settings, adapter=fresh_adapter)
+    assert restarted.pending_count() == 1
+    assert restarted.drain_once().state == DRAIN_PUBLISHED
+    assert len(fresh_adapter.entries) == 1
+    restarted.stop()
+
+
+def test_publish_state_changes_are_announced(published_setup, qtbot):
+    """The status chip's signal follows queued → published."""
+    manager, publisher, adapter, manifest = published_setup
+    seen = []
+    publisher.publish_state_changed.connect(seen.append)
+
+    manager._orchestrator.run_finished.emit(manifest)
+    publisher.drain_once()
+
+    assert [item["state"] for item in seen] == ["pending", "synced"]
+    assert seen[0]["pending"] == 1 and seen[-1]["pending"] == 0
+
+
+def test_run_published_signal_carries_the_link(published_setup, qtbot):
+    """A confirmed entry is announced once, with its link."""
+    manager, publisher, adapter, manifest = published_setup
+    seen = []
+    publisher.run_published.connect(seen.append)
+
+    manager._orchestrator.run_finished.emit(manifest)
+    publisher.drain_once()
+
+    assert len(seen) == 1
+    assert seen[0]["run_id"] == "run-0001"
+    assert seen[0]["eln_link"]["backend"] == "sim_eln"
+
+
+def test_backends_are_discovered_not_listed():
+    """A new backend module is selectable the moment its file exists."""
+    from cryosoft.session.eln.publisher import discover_backends
+
+    backends = discover_backends()
+    assert backends["elabftw"] is ElabFtwAdapter
+    assert backends["sim_eln"] is SimElnAdapter
+
+
+def test_an_unknown_backend_disables_publishing_rather_than_raising(published_setup):
+    """A typo in the settings file switches the track off, loudly, not fatally."""
+    manager, publisher, _, manifest = published_setup
+    publisher._adapter = None
+    publisher._settings = ElnSettings(
+        **{**publisher.settings.to_dict(include_secret=True), "backend": "not_a_backend"}
+    )
+    manager._orchestrator.run_finished.emit(manifest)
+    assert publisher.drain_once().state == DRAIN_IDLE
+    assert publisher.pending_count() == 1, "the job stays queued for a fixed settings file"
+
+
+def test_a_link_recorded_after_the_experiment_closed_still_lands(published_setup):
+    """An outbox job that drains a week later still stamps its own experiment."""
+    manager, publisher, adapter, manifest = published_setup
+    experiment_id = manager.current_experiment().experiment_id
+    adapter.offline = True
+    manager._orchestrator.run_finished.emit(manifest)
+    publisher.drain_once()
+
+    manager.close_experiment()
+    adapter.offline = False
+    assert publisher.drain_once().state == DRAIN_PUBLISHED
+
+    stored = manager.store.load(experiment_id).find_run("run-0001")
+    assert stored.eln_link is not None and stored.published is True

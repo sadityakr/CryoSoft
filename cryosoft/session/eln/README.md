@@ -3,13 +3,14 @@
 ## Purpose
 
 Publish what CryoSoft measured into an **electronic lab notebook**, without
-ever letting the notebook's availability affect a measurement. Three
+ever letting the notebook's availability affect a measurement. Five
 separable pieces: a backend-neutral **ELN adapter** standard (`adapter.py`)
 with an eLabFTW backend and an in-memory sim twin, deterministic **body
 renderers** that turn a run manifest into entry text (`templates.py`), an
 offline-first **outbox** that queues what to publish and retries it forever
-(`outbox.py`), and user-level settings holding the backend URL and API key
-(`settings.py`).
+(`outbox.py`), a **publisher** deciding what is queued when and draining the
+queue off the tick (`publisher.py`), and user-level settings holding the
+backend URL and API key (`settings.py`).
 
 ## Architecture layer
 
@@ -34,6 +35,8 @@ GUI-side drain, never from `core/`.
 - **The experiment's own `outbox.jsonl`** (`ExperimentStore.outbox_path()`) —
   read back on every drain, including after a restart or on a machine that
   the experiment folder was copied to.
+- **A drain tick**: `ElnPublisher.drain_once()`, called by the publisher's own
+  QTimer, started from `cryosoft.main` once the application has an event loop.
 
 ## Exit (what goes out)
 
@@ -49,6 +52,12 @@ GUI-side drain, never from `core/`.
 - **Appended `outbox.jsonl` lines** inside the experiment folder: one per
   enqueue and one per state change, so the folder stays the complete,
   portable record — copy it and its unpublished runs travel with it.
+- **`ExperimentManager.set_run_eln_link()`** — the confirmed entry reference,
+  handed to the session layer's single writer. This package never edits a
+  record or writes an experiment file itself.
+- **Signals for the GUI**: `publish_state_changed(dict)`
+  (`synced` / `pending` / `offline` / `disabled`, plus a pending count) and
+  `run_published(dict)` (run id, experiment id, the `ElnLink`).
 
 ## Interface contract
 
@@ -75,13 +84,57 @@ GUI-side drain, never from `core/`.
   This is the `sim_` driver rule applied to notebooks, including the rule
   that a twin models failure modes (offline, transient failure, refused
   upload), not just the happy path.
+- **Publishing is opt-in and never silent.** No settings file (the default)
+  means nothing is configured, the drain timer never starts, and nothing
+  leaves the machine. `auto_publish: false` leaves the manual export as the
+  only trigger. And a run belonging to no experiment is never published —
+  an ad-hoc run has no record for an entry to attach to.
 - **The API key is never logged.** `ElnSettings` redacts it in `repr()` and
   in `to_dict()`; only `to_dict(include_secret=True)` (writing the file back,
   building an auth header) yields the real value.
+- **Backends are discovered, not listed.** `publisher.discover_backends()`
+  walks this package for `ElnAdapter` subclasses and keys them by their
+  declared `backend`, so a new backend is selectable from the settings file
+  the moment its file exists — the same auto-discovery idiom as drivers, VIs,
+  and procedures.
 - **Rendered bodies are self-contained.** No `<script>`, `<link>`, `<img>`,
   or external URL of any kind, every value HTML-escaped and length-capped,
   and identical output for identical input — conformance-checked, so an entry
   renders the same in the notebook, in an export, and in a test snapshot.
+
+## Decisions this package makes
+
+The owning design left four questions open. Each is answered here with the
+simplest defensible option; changing one is a design change, not a routine
+edit.
+
+- **One ELN entry per run**, not per experiment. The **run manifest** is the
+  unit the Orchestrator hands over, a run's HDF5 file is exactly one
+  attachment, and idempotency falls straight out of the run id
+  (`job_id = "publish_run:<run_id>"`). So `RunRecord.eln_link` is what the
+  publisher writes. `ExperimentRecord.eln_link` stays in the record model,
+  unwritten by this package, for a future coarser parent entry — the record
+  model supports either granularity, and nothing here forecloses it.
+- **A QTimer drain, one job per firing** — no thread, no async client. This
+  is the tick loop's cooperative single-threaded philosophy applied to the
+  network: a slow upload delays the next upload, never the event loop's next
+  turn, and never a hardware write. The measured alternatives, in preference
+  order if multi-MB uploads over slow lab links prove to stutter the GUI:
+  chunked uploads per firing, then an async single-threaded HTTP client, then
+  one dedicated upload thread that touches only HTTP and files. Start here
+  and measure.
+- **No terminal failure state.** A job is retried forever under a capped
+  backoff rather than being marked dead after *n* attempts, because the case
+  this exists for is an offline week, and a dead job is a silently lost run.
+  A wrong API key therefore shows up as a permanently `offline` status chip
+  with the backend's own message in `detail` — deliberately not a separate
+  "auth error" state, which would be a second thing to get wrong for no
+  behavioural difference.
+- **The publisher never asks the notebook who anybody is.** Identity comes
+  from the local **user** roster; the ELN account is a property of the
+  installation, in the user-level settings file. This works offline and adds
+  no auth complexity.
+
 
 ## How to add a new module
 
@@ -109,4 +162,5 @@ GUI-side drain, never from `core/`.
 | `settings.py` | User-level backend URL/key/policy: tolerant load, environment override, redaction. | `ElnSettings`, `load_eln_settings`, `eln_settings_path`, `API_KEY_ENV_VAR`, `SETTINGS_PATH_ENV_VAR` | `tests/test_eln.py` |
 | `outbox.py` | The offline-first publish journal: append-only JSONL, idempotent by `job_id`, persisted capped backoff, one job per drain, never raises. | `Outbox` (`enqueue`, `jobs`, `get`, `pending`, `drain`), `OutboxJob`, `DrainResult`, `JOB_*`/`DRAIN_*` constants | `tests/test_eln.py` |
 | `elabftw.py` | The eLabFTW backend: REST API v2 over `/users/me`, `/experiments_templates`, `/experiments`, `/experiments/{id}`, `/experiments/{id}/uploads`; token auth, verified TLS, hand-rolled multipart, every non-2xx mapped to `ElnError` without the key. | `ElabFtwAdapter`, `ElnHttpTransport`, `UrllibTransport`, `HttpResponse` | `tests/test_eln.py` |
+| `publisher.py` | What is queued when, the GUI-side drain timer, backend discovery, and the hand-off of a confirmed link to the manager. | `ElnPublisher` (`on_run_finished`, `export_run`, `drain_once`, `start`, `stop`, `pending_count`, `status`; signals `publish_state_changed`, `run_published`), `discover_backends`, `PUBLISH_*` constants | `tests/test_eln.py` |
 | `templates.py` | Run manifest → entry title, self-contained HTML body, and flat metadata. | `render_run_title`, `render_run_body`, `render_run_metadata` | `tests/test_eln.py` |
