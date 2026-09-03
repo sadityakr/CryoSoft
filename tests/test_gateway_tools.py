@@ -400,6 +400,36 @@ def _zero_of(json_type):
     }[json_type]
 
 
+def test_a_session_tool_is_judged_by_the_same_rules_a_command_is(engine):
+    """A non-read session tool would meet `authorize()`'s rules, named the same.
+
+    Every session tool shipped today is `read`-class, so the attendance rule
+    has no tool to bite on yet. It is checked here against the tool a future
+    contributor would add, because a refusal that named a different rule than
+    the identical command would is exactly the drift two code paths produce.
+    """
+    orch, _station = engine
+    gateway = _gateway(engine, Role.DEBUG)
+    gateway.tools()
+    gateway._tools["read_something_risky"] = ToolSpec(
+        name="read_something_risky",
+        description="A hypothetical recovery-class session tool.",
+        input_schema={"type": "object", "properties": {}, "required": []},
+        action_class=ActionClass.RECOVERY,
+        session_function="read_status",
+    )
+
+    orch.set_attendance(True)
+    attended = gateway.call_tool("read_something_risky")
+    orch.set_attendance(False)
+    unattended = gateway.call_tool("read_something_risky")
+
+    assert attended["code"] == "BLOCKED_ROLE"
+    assert attended["detail"]["rule"] == "attendance"
+    assert attended["detail"]["action_class"] == "recovery"
+    assert unattended["ok"] is True
+
+
 def test_the_kill_switch_closes_the_read_tools_too(engine):
     """`revoked` leaves an agent nothing — the session tools included."""
     orch, _station = engine

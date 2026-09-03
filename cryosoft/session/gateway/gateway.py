@@ -601,8 +601,17 @@ class Gateway:
         permission = PERMISSION_MATRIX[tool.action_class][self.role]
         if permission is Permission.PERMITTED:
             return None
-        if permission is Permission.UNATTENDED_ONLY and not self.attended():
-            return None
+        if permission is Permission.UNATTENDED_ONLY:
+            if not self.attended():
+                return None
+            return self._tool_refusal(
+                tool,
+                f"The {self.role.value!r} role may take "
+                f"{tool.action_class.value} actions only while the experiment "
+                f"is unattended; a human is watching, so {tool.name!r} is "
+                f"refused — report it instead.",
+                {"rule": "attendance", "attended": True},
+            )
         return self._tool_refusal(
             tool,
             f"The {self.role.value!r} role does not grant "
