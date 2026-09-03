@@ -1064,6 +1064,50 @@ class ExperimentEnvelope:
             copied[vi_name] = bound
         object.__setattr__(self, "bounds", copied)
 
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> ExperimentEnvelope:
+        """Build an envelope from its plain-dict form.
+
+        The dict form is what a client that speaks JSON rather than Python
+        sends — ``{vi_name: {"min_value": ..., "max_value": ...,
+        "state_key": ...}}``, one entry per bounded VI, each key optional
+        beyond the requirement that at least one bound is present. Strict by
+        design: a malformed envelope raises here so the caller can refuse the
+        request outright. (The session layer keeps its own *tolerant* reader
+        for records loaded from disk, where a corrupt stored envelope must
+        degrade to "no envelope" rather than block loading.)
+
+        Args:
+            data: The mapping described above. Must be non-empty — pass
+                ``None`` to ``Orchestrator.set_experiment_envelope()`` for
+                "no envelope" rather than an empty mapping.
+
+        Returns:
+            The typed envelope.
+
+        Raises:
+            TypeError: If *data* is not a mapping, or an entry is not a
+                mapping of the ``EnvelopeBound`` fields.
+            ValueError: If *data* is empty, or a bound is invalid (see
+                ``EnvelopeBound``).
+        """
+        if not isinstance(data, Mapping):
+            raise TypeError(
+                f"ExperimentEnvelope.from_dict expects a mapping, got {data!r}"
+            )
+        bounds: dict[str, EnvelopeBound] = {}
+        for vi_name, entry in data.items():
+            if not isinstance(entry, Mapping):
+                raise TypeError(
+                    f"envelope bound for {vi_name!r} must be a mapping, got {entry!r}"
+                )
+            bounds[str(vi_name)] = EnvelopeBound(
+                min_value=entry.get("min_value"),
+                max_value=entry.get("max_value"),
+                state_key=str(entry.get("state_key") or ""),
+            )
+        return cls(bounds=bounds)
+
     def check_target(self, vi_name: str, value: float) -> str | None:
         """Validate one submitted target value against the envelope.
 
