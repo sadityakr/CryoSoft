@@ -623,3 +623,36 @@ def test_stopping_removes_the_descriptor_and_the_socket(qtbot, served):
 
     assert not (tmp_path / "gateway.json").exists()
     assert not server.isListening()
+
+
+def test_the_app_stops_the_server_when_it_quits():
+    """``main()`` wires ``stop()`` to the application's own shutdown.
+
+    Read off the source rather than by running ``main()``, which needs a
+    real application, a real station and a real window. What is being
+    asserted is one wiring decision: a descriptor that outlives its process
+    names a socket that is gone and a token that means nothing, so an
+    adapter reading it reports "cannot connect" where it should report "the
+    app is not running".
+    """
+    import ast
+    from pathlib import Path
+
+    import cryosoft.main
+
+    tree = ast.parse(Path(cryosoft.main.__file__).read_text(encoding="utf-8"))
+    wired = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "connect"
+        and isinstance(node.func.value, ast.Attribute)
+        and node.func.value.attr == "aboutToQuit"
+        and any(
+            isinstance(argument, ast.Attribute) and argument.attr == "stop"
+            for argument in node.args
+        )
+    ]
+
+    assert wired, "main() must stop the Gateway server when the app quits"

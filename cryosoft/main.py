@@ -358,6 +358,13 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
             )
         else:
             app.gateway_server.start()
+            # Stopping on quit is what keeps the descriptor honest: a
+            # gateway.json left behind names a socket that is gone and a
+            # token that means nothing, and an adapter reading it reports
+            # "cannot connect" instead of "the app is not running". The
+            # socket itself is reclaimed either way — start() removes a
+            # stale one — so this exists for the descriptor's sake.
+            app.aboutToQuit.connect(app.gateway_server.stop)
 
     # ELN publishing (cryosoft/session/eln/): entirely opt-in and entirely
     # GUI-side. With no user-level settings file — the default — the
