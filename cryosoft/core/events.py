@@ -249,6 +249,33 @@ class Actor(_ContractMessage):
 OPERATOR = Actor(kind=ActorKind.OPERATOR, id="operator", role="operator")
 
 
+class AgentGate(str, Enum):
+    """The kill switch: how much of the engine autonomous actors may reach.
+
+    A tri-state the human owns, pushed DOWN into the engine as a value (see
+    ``Orchestrator.set_agent_gate()``) so that the single writer enforces it
+    rather than trusting a client to police itself. It gates ``agent``
+    actors ONLY: the ``operator`` and ``system`` paths are never consulted,
+    which is the whole point of a kill switch — flipping it must never be
+    able to lock the human out of their own instrument. ``emergency_standby``
+    passes at every setting, because an actor that can see a problem must
+    never be unable to make the station safe.
+
+    A ``str`` enum so the value is JSON-safe as it stands and travels on a
+    ``StatusSnapshot`` unchanged.
+
+    Members:
+        ACTIVE: Agents act normally; their role's permissions decide.
+        READ_ONLY: Agents may take read-class actions only; anything that
+            writes is refused naming the gate.
+        REVOKED: Agents may take no action at all.
+    """
+
+    ACTIVE = "active"
+    READ_ONLY = "read_only"
+    REVOKED = "revoked"
+
+
 def _as_actor(value: Actor | Mapping[str, Any]) -> Actor:
     """Coerce an actor field, which may arrive as its JSON dict.
 
@@ -321,6 +348,8 @@ class CommandName(str, Enum):
     STOP_MONITORING = "stop_monitoring"
     SET_SCANNER_ENABLED = "set_scanner_enabled"
     SET_EXPERIMENT_ENVELOPE = "set_experiment_envelope"
+    SET_ATTENDANCE = "set_attendance"
+    SET_AGENT_GATE = "set_agent_gate"
 
 
 @dataclass(frozen=True)
@@ -544,6 +573,9 @@ class StatusSnapshot(_ContractMessage):
         vi_faults: ``{vi_name: fault dict}`` for every faulted VI.
         offline_reason: ``{vi_name: reason}`` for every offline VI.
         envelope_variables: ``{vi_name: envelope-variable dict}``.
+        attended: Whether a human is watching this experiment. Pushed down
+            by the session layer; read by a client's permission check.
+        agent_gate: The kill switch's setting, one of ``AgentGate``'s values.
         seq: Monotonic sequence number.
         ts: Unix time the snapshot was taken.
     """
@@ -565,6 +597,8 @@ class StatusSnapshot(_ContractMessage):
     vi_faults: dict[str, Any] = field(default_factory=dict)
     offline_reason: dict[str, str] = field(default_factory=dict)
     envelope_variables: dict[str, Any] = field(default_factory=dict)
+    attended: bool = True
+    agent_gate: str = AgentGate.ACTIVE.value
     seq: int = 0
     ts: float = field(default_factory=time.time)
 
@@ -575,6 +609,7 @@ class StatusSnapshot(_ContractMessage):
             TypeError: If a mapping field is not a mapping of JSON-safe
                 values, if a sequence field is not a sequence, or if a scalar
                 field carries the wrong type.
+            ValueError: If ``agent_gate`` is not a known ``AgentGate``.
         """
         if self.run is not None:
             object.__setattr__(self, "run", _checked_mapping(self.run))
@@ -587,9 +622,10 @@ class StatusSnapshot(_ContractMessage):
         ):
             object.__setattr__(self, name, _checked_mapping(getattr(self, name)))
         for name in ("is_monitoring", "pause_pending", "scanner_enabled",
-                     "override_active"):
+                     "override_active", "attended"):
             if not isinstance(getattr(self, name), bool):
                 raise TypeError(f"StatusSnapshot.{name} must be a bool")
+        object.__setattr__(self, "agent_gate", AgentGate(self.agent_gate).value)
         if self.active_run_kind is not None and not isinstance(self.active_run_kind, str):
             raise TypeError("StatusSnapshot.active_run_kind must be a str or None")
         if self.manual_override_expires_at is not None and not isinstance(
