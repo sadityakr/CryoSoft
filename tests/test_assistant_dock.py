@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 import pytest
-from PyQt6.QtCore import QSettings
+from PyQt6.QtCore import Qt, QSettings
 
 from cryosoft.core.orchestrator import Orchestrator
 from cryosoft.core.orchestrator_proxy import OrchestratorProxy
@@ -313,3 +313,60 @@ def test_markup_in_a_question_is_escaped(dock):
     dock._on_message({"record": "user", "text": "<b>bold</b> & <i>italic</i>"})
 
     assert "<b>bold</b> & <i>italic</i>" in dock._transcript.toPlainText()
+
+
+# ── Registration in the Monitor window ────────────────────────────────────────
+
+
+def test_the_window_builds_no_dock_unless_the_setup_asks_for_one(proxy, qtbot):
+    """Config-gated like every optional feature: no declaration, no widget."""
+    from cryosoft.gui.monitor_window import MonitorWindow
+
+    engine, station = proxy
+    window = MonitorWindow(station, OrchestratorProxy(engine))
+    qtbot.addWidget(window)
+
+    assert window._assistant_dock is None
+    assert window.findChild(AssistantDock, "assistant_dock") is None
+
+
+def test_a_setup_that_asks_gets_the_dock_even_with_no_client(proxy, qtbot):
+    """`assistant: true` with no API key registers the dock in its no-key state."""
+    from cryosoft.gui.monitor_window import MonitorWindow
+
+    engine, station = proxy
+    window = MonitorWindow(
+        station,
+        OrchestratorProxy(engine),
+        assistant_enabled=True,
+        assistant_runtime=None,
+        assistant_max_role=Role.OBSERVER.value,
+    )
+    qtbot.addWidget(window)
+
+    dock = window.findChild(AssistantDock, "assistant_dock")
+    assert dock is not None
+    assert dock.runtime is None
+    assert dock._unavailable.text() == NO_CLIENT_MESSAGE
+    assert window.dockWidgetArea(dock) == Qt.DockWidgetArea.RightDockWidgetArea
+
+
+def test_the_window_hands_the_dock_the_runtime_and_the_ceiling(proxy, qtbot):
+    """The window renders the assistant; it never builds a gateway of its own."""
+    from cryosoft.gui.monitor_window import MonitorWindow
+
+    engine, station = proxy
+    runtime = _runtime(proxy, [ChatResult(text_blocks=("Hi.",))], Role.OBSERVER)
+    window = MonitorWindow(
+        station,
+        OrchestratorProxy(engine),
+        assistant_enabled=True,
+        assistant_runtime=runtime,
+        assistant_max_role=Role.DEBUG.value,
+    )
+    qtbot.addWidget(window)
+
+    dock = window.findChild(AssistantDock, "assistant_dock")
+    offered = [dock._role_combo.itemText(i) for i in range(dock._role_combo.count())]
+    assert dock.runtime is runtime
+    assert offered == ["observer", "debug"]
