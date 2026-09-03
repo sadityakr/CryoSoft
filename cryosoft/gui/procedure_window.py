@@ -30,10 +30,11 @@ from cryosoft.core.station import Station
 from cryosoft.gui import window_geometry
 from cryosoft.gui.live_plot_panel import LivePlotPanel
 from cryosoft.gui.notification_banner import NotificationBanner
-from cryosoft.gui.form_autosave import STATUS_PENDING, FormAutosaveState
+from cryosoft.gui.form_autosave import FormAutosaveState
 from cryosoft.gui.procedure_discovery import discover_procedures
 from cryosoft.gui.procedure_params_panel import ProcedureParamsPanel
-from cryosoft.gui.queue_panel import QueueEntry, QueuePanel
+from cryosoft.gui.queue_panel import QueuePanel
+from cryosoft.session.run_queue import RunQueueHost
 from cryosoft.gui.theme import (
     BANNER_SEVERITY_ERROR,
     BANNER_SEVERITY_WARNING,
@@ -83,6 +84,10 @@ class ProcedureWindow(QMainWindow):
             context (``ExperimentManager.experiment_context()``), stamped into
             every built procedure as ``experiment_info``. ``None`` means no
             session layer is wired (unit tests) — procedures get ``{}``.
+        queue_host: The session layer's run queue
+            (``ExperimentManager.run_queue_host``), which the queue panel
+            renders and mutates. ``None`` means no session layer is wired and
+            the panel builds a standalone queue of its own.
     """
 
     def __init__(
@@ -94,6 +99,7 @@ class ProcedureWindow(QMainWindow):
         parent: QWidget | None = None,
         initial_session: FormAutosaveState | None = None,
         get_experiment_info: Callable[[], dict[str, str]] | None = None,
+        queue_host: RunQueueHost | None = None,
     ) -> None:
         super().__init__(parent)
         self._station = station
@@ -104,6 +110,7 @@ class ProcedureWindow(QMainWindow):
         # procedure's HDF5 metadata. None (unit tests, no session layer)
         # means "no experiment": procedures get an empty context.
         self._get_experiment_info = get_experiment_info
+        self._queue_host = queue_host
 
         # Active procedure reference (set on run)
         self._active_procedure: BaseProcedure | None = None
@@ -140,7 +147,10 @@ class ProcedureWindow(QMainWindow):
         root.addWidget(self._banner)
 
         # ── Fixed 2x2 quadrant grid ────────────────────────────────────
-        self._params_panel = ProcedureParamsPanel(self._station, discover_procedures())
+        self._procedure_classes = discover_procedures()
+        self._params_panel = ProcedureParamsPanel(
+            self._station, self._procedure_classes
+        )
         top_right = self._build_queue_quadrant()
         bottom_left, bottom_right = self._build_plot_quadrants()
 
@@ -201,7 +211,11 @@ class ProcedureWindow(QMainWindow):
         split.setObjectName("queue_status_splitter")
         split.setChildrenCollapsible(False)
         self._queue_panel = QueuePanel(
-            self._station, self._orchestrator, get_experiment_info=self._experiment_info
+            self._station,
+            self._orchestrator,
+            get_experiment_info=self._experiment_info,
+            queue_host=self._queue_host,
+            procedure_classes=self._procedure_classes,
         )
         self._queue_panel.setMinimumHeight(120)
         split.addWidget(self._queue_panel)
@@ -416,7 +430,12 @@ class ProcedureWindow(QMainWindow):
             return None
 
     def _on_add_to_queue(self) -> None:
-        """Freeze current form values and add a procedure entry to the queue."""
+        """Freeze current form values and queue them as a run spec.
+
+        Nothing is constructed here: what goes into the queue is the values,
+        validated at this moment (see ``QueuePanel.add_run``), and the engine
+        builds the one live object when it pulls the run.
+        """
         result = self._collect_params()
         if result is None:
             return
@@ -424,20 +443,8 @@ class ProcedureWindow(QMainWindow):
         cls = self._params_panel.current_class()
         if cls is None:
             return
-
-        # Construct through the shared _build_procedure_instance path (reusing the
-        # params we already collected) instead of re-implementing cls(...) here.
-        proc = self._build_procedure_instance(result)
-        self._queue_panel.add_entry(
-            QueueEntry(
-                cls=cls,
-                params=param_values,
-                sample_info=sample_info,
-                data_dir=data_dir,
-                file_prefix=file_prefix,
-                status=STATUS_PENDING,
-                proc=proc,
-            )
+        self._queue_panel.add_run(
+            cls, param_values, sample_info, data_dir, file_prefix
         )
 
     def _on_run_now(self) -> None:

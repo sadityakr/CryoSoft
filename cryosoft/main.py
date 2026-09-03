@@ -29,6 +29,7 @@ from cryosoft.core.trend_check_runner import TrendCheckRunner
 from cryosoft.core.trend_checks import declared_checks
 from cryosoft.gui import app_settings
 from cryosoft.gui.monitor_window import MonitorWindow
+from cryosoft.gui.procedure_discovery import discover_operations, discover_procedures
 from cryosoft.gui.theme import PLOT_AXIS, PLOT_BG, build_stylesheet
 from cryosoft.session.eln.publisher import ElnPublisher
 from cryosoft.session.eln.settings import load_eln_settings
@@ -176,6 +177,16 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
             station.get_offline_info(offline_name).reason,
         )
 
+    # The run catalog: {class __name__: class} for every discovered procedure
+    # and operation. Discovery lives up here because neither the engine
+    # (contract C5) nor the session layer (C11) may import
+    # cryosoft.procedures — whoever owns discovery hands the catalog down, so
+    # a client that speaks the control contract can name a run by class and
+    # the run queue can resolve a stored spec back to its class.
+    run_catalog: dict[str, type] = {
+        cls.__name__: cls for cls in (*discover_procedures(), *discover_operations())
+    }
+
     safety_config = read_safety_config(used_path)
     orchestrator = Orchestrator(
         station,
@@ -184,6 +195,7 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
         stall_seconds=safety_config["stall_seconds"],
         hold_enforcement_interval_s=safety_config["hold_enforcement_interval_s"],
         hold_enforcement_max_attempts=safety_config["hold_enforcement_max_attempts"],
+        run_catalog=run_catalog,
     )
 
     # Trend-check standard (core/trend_checks.py, GLOSSARY.md's **Trend
@@ -233,7 +245,18 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
         config_name=used_entry.name if used_entry is not None else Path(used_path).name,
         config_path=used_path,
         session_store=session_store,
+        station=station,
+        run_catalog=run_catalog,
     )
+
+    # The pull seam (GLOSSARY.md's **Run queue**): the engine ASKS the session
+    # layer's queue for the next run rather than holding one of its own, and
+    # reads the waiting entries from it for every QueueChanged event. Wired
+    # here because this is the one place that owns both objects — the queue
+    # cannot exist before the engine it broadcasts through, and the engine
+    # must not import the session layer (contract C12).
+    orchestrator.next_procedure = session_manager.next_run
+    orchestrator.queue_snapshot = session_manager.queue_entries
 
     # ELN publishing (cryosoft/session/eln/): entirely opt-in and entirely
     # GUI-side. With no user-level settings file — the default — the

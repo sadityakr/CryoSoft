@@ -4,11 +4,13 @@ import shutil
 import h5py
 import pytest
 
+from cryosoft.core import events as ev
 from cryosoft.core.orchestrator import Orchestrator
 from cryosoft.core.plan import EnvelopeBound, ExperimentEnvelope
 from cryosoft.core.station import build_station
 from cryosoft.procedures.field_sweep import FieldSweep
 from cryosoft.session.manager import ExperimentManager
+from cryosoft.session.run_queue import KIND_OPERATION, RunSpec
 from cryosoft.session.models import (
     EXPERIMENT_STATUS_CLOSED,
     EXPERIMENT_STATUS_OPEN,
@@ -1041,3 +1043,182 @@ def test_set_run_eln_link_refuses_unknown_targets_without_raising(manager):
     link = ElnLink(backend="sim_eln", entry_id="7")
     assert manager.set_run_eln_link(record.experiment_id, "no-such-run", link) is False
     assert manager.set_run_eln_link("no-such-experiment", "r1", link) is False
+
+
+# ── The run queue (validated on add, pulled by the engine) ──────────────────
+
+
+@pytest.fixture
+def queue_manager(store, roster, orchestrator, station):
+    """A manager that owns a run queue: a Station to build with, and a catalog."""
+    manager = ExperimentManager(
+        store=store,
+        roster=roster,
+        orchestrator=orchestrator,
+        config_name="sim_cryostat",
+        station=station,
+        run_catalog={"FieldSweep": FieldSweep},
+    )
+    orchestrator.next_procedure = manager.next_run
+    orchestrator.queue_snapshot = manager.queue_entries
+    return manager
+
+
+def _queue_events(orchestrator):
+    """Collect every QueueChanged the Orchestrator emits from now on."""
+    events: list = []
+    orchestrator.event_emitted.connect(
+        lambda event: events.append(event) if isinstance(event, ev.QueueChanged) else None
+    )
+    return events
+
+
+def test_a_valid_run_is_queued_as_a_spec(queue_manager, tmp_path):
+    """What waits in the queue is data, not a live procedure object."""
+    spec, validation = queue_manager.queue_run(
+        FieldSweep,
+        FAST_PARAMS,
+        sample_info=SAMPLE_INFO,
+        data_directory=str(tmp_path),
+        file_prefix="q1",
+    )
+
+    assert validation.ok
+    assert spec is not None
+    assert spec.run_class == "FieldSweep"
+    assert spec.file_prefix == "q1"
+    assert queue_manager.queue_snapshot() == (spec,)
+    assert not hasattr(spec, "proc")
+
+
+def test_an_out_of_bounds_run_is_refused_at_add_time_with_findings(
+    queue_manager, tmp_path
+):
+    """A spec that fails validation never enters the queue."""
+    spec, validation = queue_manager.queue_run(
+        FieldSweep,
+        dict(FAST_PARAMS, field_end=50.0),
+        sample_info=SAMPLE_INFO,
+        data_directory=str(tmp_path),
+    )
+
+    assert spec is None
+    assert not validation.ok
+    assert any("magnet_z" in message for message in validation.messages())
+    assert queue_manager.queue_snapshot() == ()
+
+
+def test_validation_uses_the_open_experiment_envelope(queue_manager, tmp_path):
+    """The envelope narrows the setup's limits, and narrows them at queue time."""
+    queue_manager.start_experiment(
+        "Bounded",
+        "jdoe",
+        dict(SAMPLE_INFO),
+        envelope=ExperimentEnvelope(
+            bounds={"magnet_z": EnvelopeBound(min_value=-0.01, max_value=0.01)}
+        ),
+    )
+
+    validation = queue_manager.validate_run(
+        FieldSweep, FAST_PARAMS, data_directory=str(tmp_path)
+    )
+
+    assert not validation.ok
+    assert any("envelope" in message for message in validation.messages())
+
+
+def test_validate_run_without_a_station_says_so(manager):
+    """A manager built for the experiment tier alone cannot build a run."""
+    with pytest.raises(RuntimeError, match="Station"):
+        manager.validate_run(FieldSweep, FAST_PARAMS)
+
+
+def test_every_queue_mutation_broadcasts_and_names_its_actor(
+    queue_manager, orchestrator, tmp_path
+):
+    """QueueChanged rides the engine's one event stream, actor and all."""
+    events = _queue_events(orchestrator)
+    agent = ev.Actor(kind=ev.ActorKind.AGENT, id="drift-watch", role="operator")
+
+    spec, _ = queue_manager.queue_run(
+        FieldSweep,
+        FAST_PARAMS,
+        sample_info=SAMPLE_INFO,
+        data_directory=str(tmp_path),
+        actor=agent,
+    )
+    queue_manager.dequeue_run(spec.spec_id, actor=agent)
+
+    assert [event.actor for event in events] == [agent, agent]
+    assert events[0].entries[0]["run_class"] == "FieldSweep"
+    assert events[0].entries[0]["actor"]["id"] == "drift-watch"
+    assert events[-1].entries == ()
+
+
+def test_a_no_op_mutation_broadcasts_nothing(queue_manager, orchestrator):
+    """Nothing changed means nothing to tell anyone about."""
+    events = _queue_events(orchestrator)
+
+    assert queue_manager.dequeue_run("no-such-spec") is False
+    assert queue_manager.move_queued_run("no-such-spec", -1) is False
+    assert queue_manager.clear_run_queue() is False
+    assert events == []
+
+
+def test_the_engine_pulls_the_next_run_and_builds_it_here(
+    queue_manager, orchestrator, tmp_path
+):
+    """The engine asks; exactly one live object comes into existence."""
+    queue_manager.queue_run(
+        FieldSweep,
+        FAST_PARAMS,
+        sample_info=SAMPLE_INFO,
+        data_directory=str(tmp_path),
+    )
+
+    run = orchestrator.next_procedure()
+
+    assert isinstance(run, FieldSweep)
+    assert queue_manager.queue_snapshot() == ()
+
+
+def test_a_pulled_run_is_stamped_with_the_experiment_open_when_it_starts(
+    queue_manager, tmp_path
+):
+    """A run queued before an experiment opened belongs to the one that runs it."""
+    queue_manager.queue_run(
+        FieldSweep,
+        FAST_PARAMS,
+        sample_info=SAMPLE_INFO,
+        data_directory=str(tmp_path),
+    )
+    record = queue_manager.start_experiment("Later", "jdoe", dict(SAMPLE_INFO))
+
+    run = queue_manager.next_run()
+
+    assert (
+        run._experiment_info["experiment"]["experiment_id"] == record.experiment_id
+    )
+
+
+def test_next_run_on_an_empty_queue_is_none(queue_manager):
+    """An exhausted queue is not an error — the engine simply stays IDLE."""
+    assert queue_manager.next_run() is None
+
+
+def test_an_operation_spec_jumps_the_whole_queue(queue_manager, tmp_path):
+    """Queue-jumping, never preemption — and it survives the move out of the engine."""
+    queue_manager.queue_run(
+        FieldSweep,
+        FAST_PARAMS,
+        sample_info=SAMPLE_INFO,
+        data_directory=str(tmp_path),
+    )
+    queue_manager.run_queue.add(
+        RunSpec(kind=KIND_OPERATION, run_class="SomeOperation")
+    )
+
+    assert [spec.run_class for spec in queue_manager.queue_snapshot()] == [
+        "SomeOperation",
+        "FieldSweep",
+    ]

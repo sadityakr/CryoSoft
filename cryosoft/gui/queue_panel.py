@@ -1,9 +1,19 @@
-"""QueuePanel — the run queue list, its statuses, and Orchestrator sync."""
+"""QueuePanel — the run-queue list and its per-item lifecycle status.
+
+The panel renders the queue; it does not own it. Waiting runs live in the
+session layer as immutable **run specs** (`session/run_queue.py`), the engine
+pulls the next one when it is ready, and this widget holds nothing the engine
+owns — no built procedure, no reach into a private engine list. What it adds
+on top of the queue is the one thing the queue has no opinion about: the
+per-item lifecycle status an operator watches (pending -> running -> done or
+failed), which outlives the spec, since a run that has started is no longer
+waiting.
+"""
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import qtawesome as qta
@@ -12,14 +22,15 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QListWidget,
     QListWidgetItem,
+    QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
+from cryosoft.core.events import QueueChanged
 from cryosoft.core.orchestrator import Orchestrator
 from cryosoft.core.procedure import BaseProcedure
-from cryosoft.core.run_builder import PROCEDURE_BUILD_ERRORS, build_procedure
 from cryosoft.core.station import Station
 from cryosoft.gui.form_autosave import (
     STATUS_DONE,
@@ -29,30 +40,30 @@ from cryosoft.gui.form_autosave import (
     QueueItemState,
 )
 from cryosoft.gui.theme import BTN_CLASS_PRIMARY, TEXT_ON_ACCENT, TEXT_PRIMARY
+from cryosoft.session.run_queue import KIND_PROCEDURE, RunQueueHost, RunSpec
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class QueueEntry:
-    """One row of the run queue, held in memory by the QueuePanel.
+    """One row of the queue list: the queued spec plus its lifecycle status.
 
-    Pairs the procedure spec with its captured parameters, filename prefix, and
-    a lifecycle ``status``. The built ``proc`` instance is kept for pending
-    entries so the Orchestrator queue can be rebuilt from the GUI's entries
-    without re-reading the form; it is ``None`` for entries restored as done.
+    The spec is the queue's own immutable record of what was asked for; the
+    status is this panel's, because it describes what happened to the run
+    afterwards and outlives the spec's time in the queue — a running or
+    finished entry has already been pulled out of it.
+
+    Attributes:
+        spec: The queued ``RunSpec``.
+        status: One of ``pending``, ``running``, ``done``, ``failed``.
     """
 
-    cls: type[BaseProcedure]
-    params: dict[str, Any]
-    sample_info: dict[str, str]
-    data_dir: str
-    file_prefix: str = ""
+    spec: RunSpec
     status: str = STATUS_PENDING
-    proc: BaseProcedure | None = field(default=None, repr=False)
 
 
 class QueuePanel(QGroupBox):
@@ -62,12 +73,20 @@ class QueuePanel(QGroupBox):
     ``queue_remove_btn``, ``run_queue_btn``) are preserved API.
 
     Args:
-        station: The active Station instance (rebuilds restored procedures).
+        station: The active Station instance (needed to validate and build a
+            queued run headlessly).
         orchestrator: The active Orchestrator instance.
         parent: Optional Qt parent widget.
         get_experiment_info: Callable returning the session layer's experiment
-            context, stamped into procedures rebuilt from a persisted queue.
-            ``None`` means no session layer is wired — procedures get ``{}``.
+            context, stamped into a queued run when it is built. ``None``
+            means no session layer is wired — runs get ``{}``.
+        queue_host: The session layer's run queue (normally
+            ``ExperimentManager.run_queue_host``). ``None`` means no session
+            layer is wired: the panel builds a queue of its own from
+            *procedure_classes* so the window still works standalone, and
+            adopts the engine's pull seam only if nobody else has claimed it.
+        procedure_classes: The discovered procedure classes, used to render a
+            spec's summary line and to build the standalone queue's catalog.
     """
 
     def __init__(
@@ -76,17 +95,26 @@ class QueuePanel(QGroupBox):
         orchestrator: Orchestrator,
         parent: QWidget | None = None,
         get_experiment_info: Callable[[], dict[str, str]] | None = None,
+        queue_host: RunQueueHost | None = None,
+        procedure_classes: Sequence[type[BaseProcedure]] = (),
     ) -> None:
         super().__init__("Queue", parent)
         self._station = station
         self._orchestrator = orchestrator
         self._get_experiment_info = get_experiment_info
+        self._classes: dict[str, type[BaseProcedure]] = {
+            cls.__name__: cls for cls in procedure_classes
+        }
+        self._host = queue_host or self._standalone_host()
 
-        # Run queue as QueueEntry objects (spec + params + prefix + status).
+        # The rendered rows: every pending spec the queue holds, plus the
+        # running/finished ones it no longer does.
         self._queue: list[QueueEntry] = []
         # True while a queued run is executing, so notify_finished advances
         # the queue's per-item status.
         self._queue_running = False
+
+        orchestrator.event_emitted.connect(self._on_event)
 
         vlay = QVBoxLayout(self)
 
@@ -125,33 +153,127 @@ class QueuePanel(QGroupBox):
         btn_row.addWidget(run_queue_btn)
         vlay.addLayout(btn_row)
 
+        self._sync_from_queue()
+
+    def _standalone_host(self) -> RunQueueHost:
+        """Build this window's own run queue, for a window with no session layer.
+
+        Unit tests (and any launch without an ``ExperimentManager``) still get
+        a working queue: the setup's own ``control_limits`` guard every add
+        exactly as they do in production — there is simply no open experiment,
+        so no envelope narrows them. The engine's pull seam is adopted only if
+        nothing has claimed it, so this can never displace the wiring
+        ``main.py`` installed.
+
+        Returns:
+            A ``RunQueueHost`` over this window's discovered procedures.
+        """
+        host = RunQueueHost(
+            station=self._station,
+            run_catalog=dict(self._classes),
+            publish=lambda actor: self._orchestrator.publish_queue(actor=actor),
+            experiment_info=self._get_experiment_info,
+        )
+        if self._orchestrator.next_procedure is None:
+            self._orchestrator.next_procedure = host.next_run
+            self._orchestrator.queue_snapshot = host.entries
+        return host
+
     # ------------------------------------------------------------------
     # Queue mutation
     # ------------------------------------------------------------------
 
-    def add_entry(self, entry: QueueEntry) -> None:
-        """Append an entry to the queue and arm its procedure on the Orchestrator.
+    def add_run(
+        self,
+        procedure_cls: type[BaseProcedure],
+        params: dict[str, Any],
+        sample_info: dict[str, str],
+        data_directory: str,
+        file_prefix: str = "",
+    ) -> RunSpec | None:
+        """Queue one run, refusing it with its findings if validation fails.
+
+        Validation happens here, at add time: the run is built headlessly and
+        thrown away, so a parameter outside a setup limit or the open
+        experiment's envelope is refused while the operator is still looking
+        at the form — not an hour later when the run would have started. The
+        refusal is a modal because it answers a direct click, exactly like the
+        Run-now path's build refusal.
 
         Args:
-            entry: The frozen queue entry (with ``proc`` built, or ``None`` if
-                construction was refused — the row still appears so the user
-                sees what they queued).
+            procedure_cls: The procedure class to queue.
+            params: The parameter values collected from the form.
+            sample_info: Sample metadata captured with the item.
+            data_directory: Data directory captured with the item.
+            file_prefix: Optional filename prefix.
+
+        Returns:
+            The queued ``RunSpec``, or ``None`` when it was refused.
         """
-        self._queue.append(entry)
-        self._refresh_queue_list()
-        if entry.proc is not None:
-            self._orchestrator.queue_procedure(entry.proc)
+        spec, validation = self._host.add(
+            procedure_cls,
+            params,
+            sample_info=sample_info,
+            data_directory=data_directory,
+            file_prefix=file_prefix,
+        )
+        if spec is None:
+            logger.warning(
+                "Refused to queue %s: %s",
+                procedure_cls.__name__,
+                "; ".join(validation.messages()),
+            )
+            QMessageBox.warning(
+                self, "Cannot Queue Run", "\n".join(validation.messages())
+            )
+            return None
+        return spec
 
     def is_running(self) -> bool:
         """Return True while a queued run is executing."""
         return self._queue_running
 
+    def _on_event(self, event: object) -> None:
+        """Re-render the queue whenever the engine says it changed.
+
+        The single subscription that makes this panel a VIEW: a run queued by
+        an agent, popped by the engine, or reordered elsewhere shows up here
+        for the same reason the operator's own click does.
+
+        Args:
+            event: One event from the engine's stream; anything but a
+                ``QueueChanged`` is ignored.
+        """
+        if isinstance(event, QueueChanged):
+            self._sync_from_queue()
+
+    def _sync_from_queue(self) -> None:
+        """Re-derive the pending rows from the queue, keeping the finished ones.
+
+        The queue is the source of truth for what is still waiting and in what
+        order; this panel is the source of truth for what already happened.
+        Rows that are no longer pending stay where they are, in the order they
+        ran, and the pending rows below them are rebuilt from the snapshot so
+        an entry keeps its ``QueueEntry`` — and therefore its status — across a
+        reorder.
+        """
+        by_id = {entry.spec.spec_id: entry for entry in self._queue}
+        history = [entry for entry in self._queue if entry.status != STATUS_PENDING]
+        pending = [
+            by_id.get(spec.spec_id) or QueueEntry(spec=spec)
+            for spec in self._host.snapshot()
+        ]
+        self._queue = history + pending
+        self._refresh_queue_list()
+
     def _on_run_queue(self) -> None:
         """Start the queue run, marking the first pending item as running.
 
-        Wraps ``Orchestrator.run_queue`` so the queue's per-item status reflects
-        execution: the first pending entry becomes ``running`` and, from here on,
-        ``notify_finished`` advances the status (see ``_advance_queue_status``).
+        Wraps ``Orchestrator.run_queue`` so the queue's per-item status
+        reflects execution: the first pending entry becomes ``running`` and,
+        from here on, ``notify_finished`` advances the status (see
+        ``_advance_queue_status``). The engine still decides *when* the run
+        starts — this asks, it never starts anything itself.
         """
         first_pending = next(
             (e for e in self._queue if e.status == STATUS_PENDING), None
@@ -196,49 +318,47 @@ class QueuePanel(QGroupBox):
             self._queue_running = False
         self._refresh_queue_list()
 
-    def _resync_orchestrator_queue(self) -> None:
-        """Rebuild the Orchestrator's pending queue from this panel's entries.
+    def _selected_pending(self) -> QueueEntry | None:
+        """Return the selected row when it is still waiting, else ``None``.
 
-        The GUI queue is the source of truth. After a reorder or removal, the
-        Orchestrator's not-yet-started queue is rebuilt in-place from the pending
-        entries (each holds its built ``proc``), so it always matches the GUI —
-        removing the old index-alignment fragility. The currently-running item
-        was already popped by ``run_queue`` and is not re-added.
+        A row that is running or finished has already left the queue, so there
+        is nothing to remove or reorder.
         """
-        self._orchestrator._procedure_queue[:] = [
-            entry.proc
-            for entry in self._queue
-            if entry.status == STATUS_PENDING and entry.proc is not None
-        ]
+        row = self._queue_list.currentRow()
+        if row < 0 or row >= len(self._queue):
+            return None
+        entry = self._queue[row]
+        return entry if entry.status == STATUS_PENDING else None
 
     def _queue_move_up(self) -> None:
         """Move the selected queue item up by one position."""
-        row = self._queue_list.currentRow()
-        if row <= 0:
+        entry = self._selected_pending()
+        if entry is None:
             return
-        self._queue[row - 1], self._queue[row] = self._queue[row], self._queue[row - 1]
-        self._resync_orchestrator_queue()
-        self._refresh_queue_list()
-        self._queue_list.setCurrentRow(row - 1)
+        if self._host.move(entry.spec.spec_id, -1):
+            self._select_spec(entry.spec.spec_id)
 
     def _queue_move_down(self) -> None:
         """Move the selected queue item down by one position."""
-        row = self._queue_list.currentRow()
-        if row < 0 or row >= len(self._queue) - 1:
+        entry = self._selected_pending()
+        if entry is None:
             return
-        self._queue[row], self._queue[row + 1] = self._queue[row + 1], self._queue[row]
-        self._resync_orchestrator_queue()
-        self._refresh_queue_list()
-        self._queue_list.setCurrentRow(row + 1)
+        if self._host.move(entry.spec.spec_id, 1):
+            self._select_spec(entry.spec.spec_id)
 
     def _queue_remove(self) -> None:
         """Remove the selected item from the queue."""
-        row = self._queue_list.currentRow()
-        if row < 0 or row >= len(self._queue):
+        entry = self._selected_pending()
+        if entry is None:
             return
-        self._queue.pop(row)
-        self._resync_orchestrator_queue()
-        self._refresh_queue_list()
+        self._host.remove(entry.spec.spec_id)
+
+    def _select_spec(self, spec_id: str) -> None:
+        """Keep the selection on one entry after the list was rebuilt."""
+        for row, entry in enumerate(self._queue):
+            if entry.spec.spec_id == spec_id:
+                self._queue_list.setCurrentRow(row)
+                return
 
     # ------------------------------------------------------------------
     # Display
@@ -246,8 +366,13 @@ class QueuePanel(QGroupBox):
 
     def _entry_summary(self, entry: QueueEntry) -> str:
         """Return the one-line queue summary for a queue entry (prefix-aware)."""
-        summary_parts = self._queue_summary_parts(entry.cls, entry.params)
-        label = f"[{entry.file_prefix}] {entry.cls.name}" if entry.file_prefix else entry.cls.name
+        spec = entry.spec
+        cls = self._classes.get(spec.run_class)
+        name = getattr(cls, "name", "") or spec.run_class
+        label = f"[{spec.file_prefix}] {name}" if spec.file_prefix else name
+        if cls is None:
+            return label
+        summary_parts = self._queue_summary_parts(cls, spec.params)
         return f"{label} ({', '.join(summary_parts)})"
 
     def _refresh_queue_list(self) -> None:
@@ -291,50 +416,26 @@ class QueuePanel(QGroupBox):
     # Session persistence
     # ------------------------------------------------------------------
 
-    def _build_entry_procedure(self, entry: QueueEntry) -> BaseProcedure | None:
-        """Build a procedure instance from a queue entry's stored values.
-
-        Stamped with the experiment context read at build time, so a restored
-        run belongs to the experiment that is open when it actually runs.
-        """
-        experiment_info = (
-            self._get_experiment_info() if self._get_experiment_info else {}
-        )
-        try:
-            return build_procedure(
-                entry.cls,
-                station=self._station,
-                params=entry.params,
-                sample_info=entry.sample_info,
-                data_directory=entry.data_dir,
-                file_prefix=entry.file_prefix,
-                experiment_info=experiment_info,
-            )
-        except PROCEDURE_BUILD_ERRORS as exc:
-            # Widened from (TypeError, ValueError): a procedure that refuses a
-            # restored run raises CryoSoftConfigError, which derives from
-            # CryoSoftError, not from ValueError — so the narrower catch let it
-            # escape into restore_items() and take the window down while
-            # reopening a session.
-            logger.warning(
-                "session: could not rebuild queued %s: %s", entry.cls.name, exc
-            )
-            return None
-
     def restore_items(
         self,
         items: list[QueueItemState],
         procedure_lookup: Callable[[str], type[BaseProcedure] | None],
     ) -> None:
-        """Rebuild the queue from persisted items, re-arming pending ones.
+        """Rebuild the queue from persisted items, re-queueing the pending ones.
+
+        A restored spec is put back exactly as it was saved rather than
+        re-validated: the operator gets the queue they left behind, and a
+        stored value that has since gone out of bounds is reported when the
+        engine pulls the run, not silently dropped while reopening a session.
 
         Args:
             items: The persisted queue items.
             procedure_lookup: Maps a saved procedure name to its discovered
                 class (``None`` for an unknown name, which is skipped).
         """
+        self._host.clear()
         self._queue.clear()
-        self._orchestrator._procedure_queue.clear()
+        history: list[QueueEntry] = []
         for item in items:
             cls = procedure_lookup(item.procedure)
             if cls is None:
@@ -349,38 +450,47 @@ class QueuePanel(QGroupBox):
                 if item.status in (STATUS_PENDING, STATUS_RUNNING)
                 else item.status
             )
-            entry = QueueEntry(
-                cls=cls,
+            spec = RunSpec(
+                kind=KIND_PROCEDURE,
+                run_class=cls.__name__,
                 params=dict(item.params),
                 sample_info=dict(item.sample_info),
-                data_dir=item.data_dir,
+                data_directory=item.data_dir,
                 file_prefix=item.file_prefix,
-                status=status,
             )
             if status == STATUS_PENDING:
-                entry.proc = self._build_entry_procedure(entry)
-                if entry.proc is not None:
-                    self._orchestrator.queue_procedure(entry.proc)
-            self._queue.append(entry)
-        self._refresh_queue_list()
+                self._host.add_spec(spec)
+            else:
+                history.append(QueueEntry(spec=spec, status=status))
+        self._queue = history
+        self._sync_from_queue()
 
     def export_items(self) -> list[QueueItemState]:
         """Return the queue as persistable QueueItemStates."""
         return [
             QueueItemState(
-                procedure=getattr(entry.cls, "name", entry.cls.__name__),
-                params=entry.params,
-                sample_info=entry.sample_info,
-                data_dir=entry.data_dir,
-                file_prefix=entry.file_prefix,
+                procedure=self._saved_name(entry.spec.run_class),
+                params=dict(entry.spec.params),
+                sample_info=dict(entry.spec.sample_info),
+                data_dir=entry.spec.data_directory,
+                file_prefix=entry.spec.file_prefix,
                 status=entry.status,
             )
             for entry in self._queue
         ]
 
+    def _saved_name(self, run_class: str) -> str:
+        """Return the display name a queue item is persisted under.
+
+        Saved state names a procedure the way the selector does, so the file
+        format is unchanged by the queue moving to class names internally.
+        """
+        cls = self._classes.get(run_class)
+        return getattr(cls, "name", "") or run_class
+
     def reset(self) -> None:
-        """Clear the queue (GUI and Orchestrator) and stop status tracking."""
+        """Clear the queue (rows and specs) and stop status tracking."""
+        self._host.clear()
         self._queue.clear()
-        self._orchestrator._procedure_queue.clear()
         self._queue_running = False
         self._refresh_queue_list()

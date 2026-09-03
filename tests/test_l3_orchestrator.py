@@ -12,6 +12,7 @@ from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 from cryosoft.core.plan import Command, ExperimentEnvelope, PhasePlan, StepPlan, Target
 from cryosoft.core.station import Station, build_station
 from cryosoft.procedures.field_sweep import FieldSweep
+from cryosoft.session.run_queue import RunQueue, RunSpec, build_run
 from cryosoft.virtual_instruments.base import BaseVirtualInstrument
 from cryosoft.virtual_instruments.rampable import RampableVI
 
@@ -3510,3 +3511,286 @@ def test_sequence_numbers_are_one_stream_across_events_and_verdicts(port):
     sequences = [item.seq for item in recorder.events + recorder.verdicts]
     assert len(set(sequences)) == len(sequences)
     assert min(sequences) >= 1
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# The pull seam: the engine asks for the next run, and decides when it starts
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class QueueableProcedure(MockProcedure):
+    """A MockProcedure that accepts ``build_procedure()``'s keyword contract."""
+
+    name = "Queueable Sweep"
+
+    def __init__(
+        self,
+        station,
+        sample_info=None,
+        data_directory="",
+        file_prefix="",
+        experiment_info=None,
+        **params,
+    ):
+        super().__init__(station)
+
+
+class QueueableOperation(MockProcedure):
+    """A duck-typed operation: same plan interface, operation command scope."""
+
+    name = "Queueable Operation"
+    command_scope = "operation"
+
+
+def _pull_seam(orchestrator, station, queue):
+    """Wire *queue* to the engine as its pull seam, and return the catalog."""
+    catalog = {
+        "QueueableProcedure": QueueableProcedure,
+        "QueueableOperation": QueueableOperation,
+    }
+
+    def next_run():
+        spec = queue.pop_next()
+        if spec is None:
+            return None
+        return build_run(spec, station=station, run_catalog=catalog)
+
+    orchestrator.next_procedure = next_run
+    orchestrator.queue_snapshot = queue.entries
+    return catalog
+
+
+def test_a_queued_operation_starts_ahead_of_a_queued_procedure(orchestrator, station):
+    """Killer #1: queue-jumping survives the queue moving out of the engine.
+
+    The procedure is queued first and the operation second; the operation
+    still starts first, because the queue orders operations ahead of
+    procedures and the engine pulls from it in that order.
+    """
+    queue = RunQueue()
+    _pull_seam(orchestrator, station, queue)
+    queue.add(RunSpec(kind="procedure", run_class="QueueableProcedure"))
+    queue.add(RunSpec(kind="operation", run_class="QueueableOperation"))
+
+    orchestrator.run_queue()
+
+    assert isinstance(orchestrator._procedure, QueueableOperation)
+    assert [spec.run_class for spec in queue.snapshot()] == ["QueueableProcedure"]
+    orchestrator.abort_procedure()
+
+
+def test_the_pull_seam_starts_a_plain_procedure_as_a_procedure(orchestrator, station):
+    """A pulled run with no operation scope goes down the procedure path."""
+    queue = RunQueue()
+    _pull_seam(orchestrator, station, queue)
+    queue.add(RunSpec(kind="procedure", run_class="QueueableProcedure"))
+
+    orchestrator.run_queue()
+
+    assert isinstance(orchestrator._procedure, QueueableProcedure)
+    assert orchestrator.active_run_kind() == "procedure"
+    orchestrator.abort_procedure()
+
+
+def test_an_empty_pull_seam_is_not_a_refusal(orchestrator, station):
+    """A queue that simply ran to completion leaves the engine quietly IDLE."""
+    blocked: list[str] = []
+    orchestrator.action_blocked.connect(blocked.append)
+    _pull_seam(orchestrator, station, RunQueue())
+
+    orchestrator.run_queue()
+
+    assert orchestrator._state == OrchestratorState.IDLE
+    assert blocked == []
+
+
+def test_a_pull_seam_that_raises_leaves_the_engine_idle_and_says_so(
+    orchestrator, station
+):
+    """The queue lives outside the engine, so its failure is reportable, not fatal."""
+    blocked: list[str] = []
+    orchestrator.action_blocked.connect(blocked.append)
+
+    def exploding():
+        raise RuntimeError("stale spec")
+
+    orchestrator.next_procedure = exploding
+
+    orchestrator.run_queue()
+
+    assert orchestrator._state == OrchestratorState.IDLE
+    assert orchestrator._procedure is None
+    assert blocked and "stale spec" in blocked[0]
+
+
+def test_runs_handed_over_directly_drain_before_the_pull_seam(orchestrator, station):
+    """A run handed over as a live object is already the engine's to start."""
+    queue = RunQueue()
+    _pull_seam(orchestrator, station, queue)
+    queue.add(RunSpec(kind="procedure", run_class="QueueableProcedure"))
+    handed_over = MockProcedure(station)
+    orchestrator.queue_procedure(handed_over)
+
+    orchestrator.run_queue()
+
+    assert orchestrator._procedure is handed_over
+    assert len(queue) == 1
+    orchestrator.abort_procedure()
+
+
+def test_queueing_from_a_state_changed_slot_does_not_start_a_run_inside_the_emit(
+    orchestrator, station
+):
+    """Killer #2: the advance is never re-entrant inside ``state_changed``.
+
+    ``_change_state()`` emits synchronously, so a client reacting to the IDLE
+    state runs INSIDE the engine's own transition. Queueing from there
+    must not start anything: the engine's own ``run_queue()``, which has not
+    been reached yet, is what starts it — after the emit returns.
+    """
+    observed: list = []
+
+    def on_state(state):
+        if state == OrchestratorState.IDLE.value and not observed:
+            orchestrator.queue_procedure(MockProcedure(station))
+            observed.append(orchestrator._procedure)
+
+    orchestrator.state_changed.connect(on_state)
+    orchestrator.run_procedure(MockProcedure(station))
+
+    orchestrator.abort_procedure()
+
+    assert observed == [None], "a run started inside the state_changed emit"
+    assert isinstance(orchestrator._procedure, MockProcedure)
+    orchestrator.abort_procedure()
+
+
+def test_nothing_auto_starts_after_an_emergency_acknowledge(
+    orchestrator, station, qtbot
+):
+    """Killer #3: acknowledging a quench is not a request to carry on measuring.
+
+    The queued procedure stays queued: the emergency acknowledge is one of
+    the four transitions to IDLE that deliberately do not chain
+    ``run_queue()``.
+    """
+    _fast_magnet(station)
+    queued = MockProcedure(station)
+    orchestrator.queue_procedure(queued)
+
+    station.magnet_z._driver._simulate_quench = True
+    qtbot.waitUntil(
+        lambda: orchestrator._state == OrchestratorState.EMERGENCY, timeout=2000
+    )
+    station.magnet_z._driver._simulate_quench = False
+    qtbot.waitUntil(
+        lambda: not orchestrator._station.check_safety().get("quench"), timeout=2000
+    )
+
+    orchestrator.acknowledge()
+    assert orchestrator._state == OrchestratorState.IDLE
+
+    orchestrator._tick()
+
+    assert orchestrator._state == OrchestratorState.IDLE
+    assert orchestrator._procedure is None
+    assert orchestrator._procedure_queue == [queued]
+
+
+def test_error_recovery_does_not_chain_the_queue(orchestrator, station):
+    """After an error the queue's assumptions may no longer hold."""
+    queued = MockProcedure(station)
+    orchestrator.queue_procedure(queued)
+    orchestrator._fail_to_error("something unknown broke")
+    assert orchestrator._state == OrchestratorState.ERROR
+
+    orchestrator.recover_from_error()
+
+    assert orchestrator._state == OrchestratorState.IDLE
+    assert orchestrator._procedure_queue == [queued]
+
+
+# ── QueueChanged: every mutation is broadcast, and names its actor ───────────
+
+
+def test_queueing_a_run_broadcasts_the_whole_queue(port, station):
+    """One event describes the queue as it now stands, in run order."""
+    orch, recorder, _tmp_path = port
+    orch.queue_procedure(MockProcedure(station))
+    orch.queue_operation(QueueableOperation(station))
+
+    events = recorder.of_type(ev.QueueChanged)
+    assert len(events) == 2
+    assert [entry["run_class"] for entry in events[-1].entries] == [
+        "QueueableOperation",
+        "MockProcedure",
+    ]
+    assert events[-1].entries[0]["kind"] == "operation"
+
+
+def test_a_queue_changed_event_names_the_actor_who_queued(port, tmp_path):
+    """Accountability is a value: the queue shows who queued a run."""
+    orch, recorder, _tmp_path = port
+    command = ev.Command(
+        name=ev.CommandName.QUEUE_PROCEDURE,
+        actor=AGENT,
+        args={
+            "procedure": "FieldSweep",
+            "params": dict(FIELD_SWEEP_PARAMS),
+            "sample_info": {"sample_name": "S", "sample_id": "S-1", "comments": ""},
+            "data_directory": str(tmp_path),
+        },
+    )
+
+    request_id = orch.submit(command)
+
+    event = recorder.of_type(ev.QueueChanged)[-1]
+    assert event.actor == AGENT
+    assert event.request_id == request_id
+    assert event.entries[0]["run_class"] == "FieldSweep"
+    assert event.entries[0]["actor"]["id"] == AGENT.id
+    assert json.loads(json.dumps(event.to_json()))
+
+
+def test_starting_a_queued_run_broadcasts_the_shortened_queue(port, station):
+    """The snapshot is emitted after the pop, so a client sees what is left."""
+    orch, recorder, _tmp_path = port
+    orch.queue_procedure(MockProcedure(station))
+    orch.queue_procedure(MockProcedure(station))
+
+    orch.run_queue()
+
+    assert len(recorder.of_type(ev.QueueChanged)[-1].entries) == 1
+    orch.abort_procedure()
+
+
+def test_publish_queue_broadcasts_a_client_side_change(port, station):
+    """The engine cannot see an external add/remove/reorder — it is told."""
+    orch, recorder, _tmp_path = port
+    queue = RunQueue()
+    _pull_seam(orch, station, queue)
+    before = len(recorder.of_type(ev.QueueChanged))
+
+    queue.add(RunSpec(kind="procedure", run_class="QueueableProcedure"))
+    orch.publish_queue()
+
+    events = recorder.of_type(ev.QueueChanged)
+    assert len(events) == before + 1
+    assert [entry["run_class"] for entry in events[-1].entries] == [
+        "QueueableProcedure"
+    ]
+
+
+def test_a_failing_queue_snapshot_is_logged_not_raised(port, station, caplog):
+    """Reporting never disrupts a run, the queue snapshot included."""
+    orch, recorder, _tmp_path = port
+
+    def broken():
+        raise RuntimeError("snapshot exploded")
+
+    orch.queue_snapshot = broken
+    with caplog.at_level(logging.ERROR):
+        orch.publish_queue()
+
+    assert recorder.of_type(ev.QueueChanged)[-1].entries == ()
+    assert any("queue_snapshot() failed" in r.message for r in caplog.records)

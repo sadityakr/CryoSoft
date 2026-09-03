@@ -3591,6 +3591,11 @@ ORCHESTRATOR_NON_COMMANDS: dict[str, str] = {
     # ── The port itself: submit(Command) dispatches to the commands below,
     #    so it is the surface a command arrives through, never a command.
     "submit": "port: the entry point every Command is dispatched through",
+    # ── Broadcast: the run queue lives outside the engine (session/
+    #    run_queue.py), so the engine cannot see a client add, remove or
+    #    reorder an entry. This asks it to re-emit QueueChanged; it changes
+    #    nothing and starts nothing, so it is not an action a client takes.
+    "publish_queue": "broadcast: re-emits QueueChanged after a client-side queue change",
 }
 
 
@@ -4109,6 +4114,41 @@ def test_no_blocking_sleep_in_gui_sources() -> None:
         "Blocking sleep(s) under cryosoft/gui/ — the GUI shares its one thread "
         "with the tick loop, so express the wait as a tick-driven state "
         "instead:\n" + "\n".join(offenders)
+    )
+
+
+# ── The run queue lives outside the engine ────────────────────────────────────
+
+_ENGINE_QUEUE_ATTRS = ("_procedure_queue", "_operation_queue")
+
+
+def test_no_source_reaches_into_the_engines_queue() -> None:
+    """Only ``orchestrator.py`` touches the engine's own run queues.
+
+    The run queue is data in the session layer (GLOSSARY.md's **Run queue**);
+    the engine keeps two small lists for runs handed to it directly, and it
+    PULLS the rest through ``next_procedure()``. A widget or a session module
+    reaching into one of those private lists would be pushing runs into the
+    engine behind its back — exactly the shared mutable queue this design
+    removed, and the seam through which a client could start a run the engine
+    did not decide to start.
+    """
+    offenders: list[str] = []
+    for path in sorted(PACKAGE_DIR.rglob("*.py")):
+        if path.name == "orchestrator.py":
+            continue
+        relative = path.relative_to(PACKAGE_DIR.parent).as_posix()
+        for line_number, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), start=1
+        ):
+            if any(attribute in line for attribute in _ENGINE_QUEUE_ATTRS):
+                offenders.append(f"{relative}:{line_number}: {line.strip()}")
+
+    assert not offenders, (
+        "The engine's private run queues are referenced outside "
+        "core/orchestrator.py. Queue through the session layer's RunQueue (or "
+        "Orchestrator.queue_procedure/queue_operation) instead:\n"
+        + "\n".join(offenders)
     )
 
 

@@ -436,6 +436,11 @@ class MonitorWindow(QMainWindow):
                 get_data_dir=self.get_data_dir_for_run,
                 initial_session=self._session,
                 get_experiment_info=self.get_experiment_info,
+                queue_host=(
+                    self._session_manager.run_queue_host
+                    if self._session_manager is not None
+                    else None
+                ),
             )
         self._procedure_window.show()
         self._procedure_window.raise_()
