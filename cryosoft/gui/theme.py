@@ -627,6 +627,39 @@ QLabel[class="assistant_chip"][status="refused"] {{
     color: {BANNER_ERROR_TEXT};
 }}
 
+/* ── Agent panel rows (AgentPanel) ───────────────────────────────────────── */
+/* One rule per outcome, and no new colour: a refusal reuses the banner's
+   validated error triple, a pending draft-approval row its warning triple.
+   The base rule reserves the 2px transparent border so a filled row never
+   shifts the list — the same pattern the QGroupBox[status] borders, the
+   verdict badge and the assistant chip follow. A refusal must be
+   recognisable without colour too, which is why the row's own text always
+   names the verdict code and the refusing rule. */
+QLabel[class="agent_row"] {{
+    padding: 2px 6px;
+    border: 2px solid transparent;
+    border-radius: 4px;
+    color: {TEXT_SECONDARY};
+    background-color: transparent;
+}}
+QLabel[class="agent_row"][outcome="ok"] {{
+    color: {TEXT_PRIMARY};
+}}
+QLabel[class="agent_row"][outcome="event"] {{
+    color: {TEXT_SECONDARY};
+}}
+QLabel[class="agent_row"][outcome="refused"] {{
+    background-color: {BANNER_ERROR_BG};
+    border-color: {BANNER_ERROR_BORDER};
+    color: {BANNER_ERROR_TEXT};
+    font-weight: bold;
+}}
+QLabel[class="agent_row"][outcome="pending"] {{
+    background-color: {BANNER_WARNING_BG};
+    border-color: {BANNER_WARNING_BORDER};
+    color: {BANNER_WARNING_TEXT};
+}}
+
 /* ── Verdict badge (DiagnosticsWindow) ──────────────────────────────────── */
 /* Base rule reserves the 2px transparent border so warning/error states
    (which add a coloured border) never shift layout — same pattern as the
