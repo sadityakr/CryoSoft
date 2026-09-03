@@ -206,9 +206,7 @@ class MonitorWindow(QMainWindow):
         # all answer from the same event. Whoever builds the engine hands one
         # in already primed; the fallback is the inline construction path
         # (tests, and any caller with the engine on its own thread).
-        self._mirror = mirror if mirror is not None else StatusMirror.for_engine(
-            orchestrator
-        )
+        self._mirror = mirror if mirror is not None else StatusMirror.of(orchestrator)
         self._panels_config = dict(panels_config or {})
         self._procedure_window = None  # lazily created
         self._diagnostics_window = None  # lazily created

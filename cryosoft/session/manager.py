@@ -11,7 +11,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 
 from cryosoft.core.events import OPERATOR, Actor
 from cryosoft.core.orchestrator_proxy import OrchestratorProxy
-from cryosoft.core.plan import EnvelopeVariable, ExperimentEnvelope
+from cryosoft.core.plan import ExperimentEnvelope
 from cryosoft.core.station import Station, read_instrument_metadata
 from cryosoft.session.models import (
     EXPERIMENT_STATUS_CLOSED,
@@ -160,7 +160,7 @@ class ExperimentManager(QObject):
         """Return the open experiment record, or ``None``."""
         return self._experiment
 
-    def envelope_variables(self) -> dict[str, EnvelopeVariable]:
+    def envelope_variables(self) -> dict[str, dict[str, Any]]:
         """Return each enveloped quantity and the setup's own bounds on it.
 
         The read side of the envelope this layer installs: the Start
@@ -172,8 +172,8 @@ class ExperimentManager(QObject):
         (``set_experiment_envelope()``), so the read side belongs beside it.
 
         Returns:
-            ``{vi_name: EnvelopeVariable}``; empty when no VI declares a
-            setpoint capability.
+            ``{vi_name: rendered EnvelopeVariable}`` as the proxy's mirror
+            answers it; empty when no VI declares a setpoint capability.
         """
         return self._orchestrator.envelope_variables()
 
