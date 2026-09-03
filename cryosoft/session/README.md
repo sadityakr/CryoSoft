@@ -89,6 +89,10 @@ GUI imports session).
 - Orchestrator signals: `run_started` / `run_finished` manifests (run id,
   procedure, kind, params, data file path, timestamps, terminal status), and
   `states_updated` (full station state, polled into `CryogenicsRecorder`).
+- The Orchestrator's `event_emitted` stream, for the one fact the manifests
+  do not carry: `RunStarted.actor`, stamped onto the `RunRecord` the
+  manifest just opened (the manifest signal is emitted first, so the record
+  is already there).
 - GUI lifecycle calls on the `ExperimentManager`: `start_experiment`,
   `close_experiment`, `set_findings`, `set_attended`, `set_queue`,
   `switch_experiment`.
@@ -215,6 +219,15 @@ file-format change, not a routine edit.
   forever — the next `start_experiment()`/`close_experiment()`/
   `switch_experiment()` in that session backfills every experiment folder
   already there.
+- **Every record names its actor, and says when it had to guess.**
+  `RunRecord.actor` is the `Actor` of the `RunStarted` event that opened the
+  run — not of the manifest, which says only what ran — so an agent-started
+  run stays distinguishable from the physicist's after the process is gone.
+  A record with no readable actor (every run written before actors were
+  stamped) loads as the `OPERATOR` sentinel with `actor_legacy` set: "old
+  file" must never read as "the physicist did it". Queue entries carry the
+  same fact through `RunSpec.actor`, which `queue_entries()` and every
+  `QueueChanged` render verbatim.
 - **Bundle-relative data paths.** `RunRecord.data_file` is stored relative to
   the experiment's session folder whenever the file lives under it (normally
   inside `data/`, sub-folders included, e.g. `data/heating_runs/xyz.h5`) —
@@ -326,7 +339,7 @@ file-format change, not a routine edit.
 
 | File | Responsibility | Key public API | Owning test |
 |------|----------------|----------------|-------------|
-| `models.py` | Tolerant-parse records: users, sessions (the L6 tier above an experiment, incl. its `experiments` index), runs (incl. the per-run `eln_link` the publisher stamps), experiments (incl. `queue` and `schema_version`), ELN links, servicing-log entries; envelope (de)serialisation. | `SCHEMA_VERSION`, `GUEST_USER_ID`, `GUEST_USER_NAME`, `User`, `Session`, `ExperimentIndexEntry`, `RunRecord`, `ExperimentRecord`, `ElnLink`, `ServiceLogEntry`, `envelope_to_dict`, `envelope_from_dict` | `tests/test_session_layer.py` / `tests/test_servicing_log.py` + conformance |
+| `models.py` | Tolerant-parse records: users, sessions (the L6 tier above an experiment, incl. its `experiments` index), runs (incl. the per-run `eln_link` the publisher stamps, and the `actor`/`actor_legacy` pair naming who started it), experiments (incl. `queue` and `schema_version`), ELN links, servicing-log entries; envelope (de)serialisation. | `SCHEMA_VERSION`, `GUEST_USER_ID`, `GUEST_USER_NAME`, `User`, `Session`, `ExperimentIndexEntry`, `RunRecord`, `ExperimentRecord`, `ElnLink`, `ServiceLogEntry`, `envelope_to_dict`, `envelope_from_dict` | `tests/test_session_layer.py` / `tests/test_servicing_log.py` + conformance |
 | `store.py` | Disk persistence: per-user, per-session folders (`session.json` + machine-wide active pointer) via `SessionStore`, one level above per-experiment folders (`experiment.json`, `gui_state.json`, `data/`) + their own active pointer via `ExperimentStore`; user roster; bundle-relative data-path (de)resolution. | `SessionStore` (`list_sessions(user_id)`, `create_session`, `load(user_id, session_id)`, `save`, `get_active` → `tuple[str, str] \| None`, `set_active(user_id, session_id)`, `make_session_id`), `ExperimentStore` (`list_experiments`, `load`, `save`, `get_active`, `set_active`, `make_experiment_id`, `data_dir`, `gui_state_path`, `outbox_path`, `agent_feed_path`, `relativize_data_file`, `resolve_data_file`), `UserRoster` (`list_users`, `get`, `add`) | `tests/test_session_layer.py` |
 | `manager.py` | The L6 façade: experiment lifecycle (incl. switching between open experiments, the run queue, and a chosen experiment folder name), automatic run recording from manifests, envelope installation, HDF5 context, save-health surfacing, session experiment-index reconciliation, the single write path for published ELN links, and the run queue (validated adds, ordered mutations, and the engine's pull seam). | `ExperimentManager` (`start_experiment(..., envelope=None, experiment_dirname=None)`, `close_experiment`, `set_findings`, `set_attended`, `set_queue`, `switch_experiment`, `current_data_dir`, `current_gui_state_path`, `experiment_context`, `envelope_variables`, `current_experiment`, `set_run_eln_link`, `run_queue`, `queue_snapshot`, `queue_entries`, `validate_run`, `queue_run`, `dequeue_run`, `move_queued_run`, `clear_run_queue`, `next_run`; optional `session_store`/`station`/`run_catalog` constructor args; signals `experiment_changed`, `run_recorded`, `store_health_changed`) | `tests/test_session_layer.py` |
 | `run_queue.py` | The run queue as data: immutable **run specs**, their ordering (operations drain before procedures — queue-jumping, never preemption), the one construction path from a spec to the live object the engine starts (both kinds, through `core.run_builder`'s `build_procedure()` / `build_operation()`, with a spec's optional `probe_spec` reducing the built run to a **probe run**), and the add-time **run validation** (declared `ParamSpec` bounds, the headless build, `control_limits` + the **session envelope**, plus the **duration estimate**). Imports no Qt, no Orchestrator, and no `cryosoft.procedures` — the classes a spec names are resolved through an injected run catalog. | `RunSpec`, `RunQueue` (`add`, `remove`, `move`, `clear`, `snapshot`, `entries`, `pop_next`, `find`), `RunFinding`, `RunValidation`, `build_run`, `validate_run`, `KIND_PROCEDURE`, `KIND_OPERATION`, the `FINDING_*` codes | `tests/test_run_queue.py` |
