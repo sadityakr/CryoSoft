@@ -6,8 +6,8 @@ Manage complete experiments: who is measuring (**User**), which sample under
 which per-experiment safety bounds (**ExperimentRecord** + **session
 envelope**), and which runs were produced (**RunRecord**, recorded
 automatically from the Orchestrator's run manifests). This is the layer the
-eLab publishing track (`session/eln/`, planned) and the Agent Gateway
-(`session/gateway/`, planned) will build on.
+eLab publishing track (`session/eln/` — see its own README) and the Agent
+Gateway (`session/gateway/`, planned) build on.
 
 Also hosts the **Servicing Log** framework (`servicing_log.py`): per-setup,
 typed, human-editable logs of servicing events (**log kind**, e.g. the
@@ -68,6 +68,9 @@ GUI imports session).
   `close_experiment`, `set_findings`, `set_attended`, `set_queue`,
   `switch_experiment`.
 - The active config identity (from `main.py`).
+- Confirmed ELN entry references from `session/eln/`'s publisher, via
+  `ExperimentManager.set_run_eln_link()` — the single write path for the
+  publishing track, which never edits a record itself.
 - Servicing-log writes: `ServicingLogStore.add_entry`/`revise_entry`/
   `delete_entry` (manual, from the GUI's add/edit dialogs, and
   `CryogenicsRecorder`'s machine-attributed `"servicing"` entries — see
@@ -130,6 +133,10 @@ GUI imports session).
   failure/recovery, emitted once per transition).
 - Servicing-log storage: `<store root>/<config_name>/<kind>.jsonl` (one file
   per declared log kind) and `<store root>/<config_name>/helium_record.jsonl`.
+- The ELN publish journal, `<experiment_id>/outbox.jsonl`
+  (`ExperimentStore.outbox_path()`) — written by `session/eln/`'s **Outbox**,
+  inside the experiment folder so a copied experiment carries its
+  unpublished runs with it. See `session/eln/README.md`.
 
 ## Format rules
 
@@ -237,9 +244,10 @@ file-format change, not a routine edit.
    write/tolerant read pattern.
 3. New behavior needs its own tests in `tests/test_session_layer.py`;
    conformance coverage is necessary but not sufficient.
-4. The planned sub-packages live here too: `session/eln/` (ELN adapters —
-   every real adapter with a `sim_` twin) and `session/gateway/` (agent MCP
-   API).
+4. The sub-packages live here too: `session/eln/` (the ELN adapter standard,
+   the eLabFTW backend, the **Outbox**, and the publisher — see
+   `session/eln/README.md`, which owns its own rules) and `session/gateway/`
+   (agent MCP API, planned).
 5. **New servicing-log kind:** add one `LogKindSpec` to `DECLARED_LOG_KINDS`
    in `servicing_log.py` (fields as `ParamSpec`s, every one with a usable
    default) — storage, revision handling, and (once Phase 5 lands) the GUI
@@ -252,7 +260,7 @@ file-format change, not a routine edit.
 
 | File | Responsibility | Key public API | Owning test |
 |------|----------------|----------------|-------------|
-| `models.py` | Tolerant-parse records: users, sessions (the L6 tier above an experiment, incl. its `experiments` index), runs, experiments (incl. `queue` and `schema_version`), ELN links, servicing-log entries; envelope (de)serialisation. | `SCHEMA_VERSION`, `GUEST_USER_ID`, `GUEST_USER_NAME`, `User`, `Session`, `ExperimentIndexEntry`, `RunRecord`, `ExperimentRecord`, `ElnLink`, `ServiceLogEntry`, `envelope_to_dict`, `envelope_from_dict` | `tests/test_session_layer.py` / `tests/test_servicing_log.py` + conformance |
-| `store.py` | Disk persistence: per-user, per-session folders (`session.json` + machine-wide active pointer) via `SessionStore`, one level above per-experiment folders (`experiment.json`, `gui_state.json`, `data/`) + their own active pointer via `ExperimentStore`; user roster; bundle-relative data-path (de)resolution. | `SessionStore` (`list_sessions(user_id)`, `create_session`, `load(user_id, session_id)`, `save`, `get_active` → `tuple[str, str] \| None`, `set_active(user_id, session_id)`, `make_session_id`), `ExperimentStore` (`list_experiments`, `load`, `save`, `get_active`, `set_active`, `make_experiment_id`, `data_dir`, `gui_state_path`, `relativize_data_file`, `resolve_data_file`), `UserRoster` (`list_users`, `get`, `add`) | `tests/test_session_layer.py` |
-| `manager.py` | The L6 façade: experiment lifecycle (incl. switching between open experiments, the run queue, and a chosen experiment folder name), automatic run recording from manifests, envelope installation, HDF5 context, save-health surfacing, session experiment-index reconciliation. | `ExperimentManager` (`start_experiment(..., envelope=None, experiment_dirname=None)`, `close_experiment`, `set_findings`, `set_attended`, `set_queue`, `switch_experiment`, `current_data_dir`, `current_gui_state_path`, `experiment_context`, `envelope_variables`, `current_experiment`; optional `session_store` constructor arg; signals `experiment_changed`, `run_recorded`, `store_health_changed`) | `tests/test_session_layer.py` |
+| `models.py` | Tolerant-parse records: users, sessions (the L6 tier above an experiment, incl. its `experiments` index), runs (incl. the per-run `eln_link` the publisher stamps), experiments (incl. `queue` and `schema_version`), ELN links, servicing-log entries; envelope (de)serialisation. | `SCHEMA_VERSION`, `GUEST_USER_ID`, `GUEST_USER_NAME`, `User`, `Session`, `ExperimentIndexEntry`, `RunRecord`, `ExperimentRecord`, `ElnLink`, `ServiceLogEntry`, `envelope_to_dict`, `envelope_from_dict` | `tests/test_session_layer.py` / `tests/test_servicing_log.py` + conformance |
+| `store.py` | Disk persistence: per-user, per-session folders (`session.json` + machine-wide active pointer) via `SessionStore`, one level above per-experiment folders (`experiment.json`, `gui_state.json`, `data/`) + their own active pointer via `ExperimentStore`; user roster; bundle-relative data-path (de)resolution. | `SessionStore` (`list_sessions(user_id)`, `create_session`, `load(user_id, session_id)`, `save`, `get_active` → `tuple[str, str] \| None`, `set_active(user_id, session_id)`, `make_session_id`), `ExperimentStore` (`list_experiments`, `load`, `save`, `get_active`, `set_active`, `make_experiment_id`, `data_dir`, `gui_state_path`, `outbox_path`, `relativize_data_file`, `resolve_data_file`), `UserRoster` (`list_users`, `get`, `add`) | `tests/test_session_layer.py` |
+| `manager.py` | The L6 façade: experiment lifecycle (incl. switching between open experiments, the run queue, and a chosen experiment folder name), automatic run recording from manifests, envelope installation, HDF5 context, save-health surfacing, session experiment-index reconciliation, and the single write path for published ELN links. | `ExperimentManager` (`start_experiment(..., envelope=None, experiment_dirname=None)`, `close_experiment`, `set_findings`, `set_attended`, `set_queue`, `switch_experiment`, `current_data_dir`, `current_gui_state_path`, `experiment_context`, `envelope_variables`, `current_experiment`, `set_run_eln_link`; optional `session_store` constructor arg; signals `experiment_changed`, `run_recorded`, `store_health_changed`) | `tests/test_session_layer.py` |
 | `servicing_log.py` | The Servicing Log framework: declared log kinds (incl. the unifying flat `servicing` kind, the only one the recorder writes as of Phase 2), revisioned per-kind storage, the hourly helium record, consumption fit, the automatic recorder, and legacy-log migration. | `LogKindSpec`, `DECLARED_LOG_KINDS`, `ServicingLogStore` (`add_entry`, `revise_entry`, `delete_entry`, `append_machine_entry`, `entries`, `revisions`, `recordings_path`, `migrate_legacy`), `HeliumRecordStore` (`append`, `samples`), `consumption_rate_pct_per_h`, `CryogenicsRecorder` (`on_states_updated`, `on_run_started`, `on_run_finished`; signal `cryo_warning`), `migrate_legacy_servicing_log` | `tests/test_servicing_log.py` + conformance |

@@ -2737,6 +2737,176 @@ def test_session_model_from_dict_tolerates_junk(model_cls: type, junk) -> None:
     assert isinstance(result, model_cls)
 
 
+# ── ELN adapter standard (L6, cryosoft/session/eln/) ──────────────────────────
+# The adapter contract written at the top of cryosoft/session/eln/adapter.py:
+# one concrete ElnAdapter per backend module, constructed from a single plain
+# settings mapping, declaring a backend id and its capabilities, and exposing
+# EXACTLY the contract's methods so any adapter substitutes for any other. A
+# new backend module is covered the moment the file exists.
+
+
+def _eln_adapter_classes() -> list[type]:
+    """Every concrete ElnAdapter subclass in cryosoft.session.eln."""
+    import cryosoft.session.eln as eln_pkg
+    from cryosoft.session.eln.adapter import ElnAdapter
+
+    classes: list[type] = []
+    for mod_info in pkgutil.iter_modules(eln_pkg.__path__):
+        module = importlib.import_module(f"cryosoft.session.eln.{mod_info.name}")
+        for cls in _public_classes(module):
+            if (
+                issubclass(cls, ElnAdapter)
+                and cls is not ElnAdapter
+                and cls.__module__ == module.__name__
+            ):
+                classes.append(cls)
+    return classes
+
+
+def _eln_dict_dataclasses() -> list[type]:
+    """Every to_dict()-carrying dataclass defined in cryosoft.session.eln."""
+    import cryosoft.session.eln as eln_pkg
+
+    classes: list[type] = []
+    for mod_info in pkgutil.iter_modules(eln_pkg.__path__):
+        module = importlib.import_module(f"cryosoft.session.eln.{mod_info.name}")
+        for name, obj in vars(module).items():
+            if name.startswith("_") or not isinstance(obj, type):
+                continue
+            if not dataclasses.is_dataclass(obj) or obj.__module__ != module.__name__:
+                continue
+            if hasattr(obj, "to_dict"):
+                classes.append(obj)
+    return classes
+
+
+@pytest.mark.parametrize("adapter_cls", _eln_adapter_classes(), ids=lambda c: c.__name__)
+def test_eln_adapter_public_api_is_exactly_the_contract(adapter_cls: type) -> None:
+    """An adapter adds no public method and drops none — full substitutability."""
+    from cryosoft.session.eln.adapter import ElnAdapter
+
+    contract = _public_api(ElnAdapter)
+    actual = _public_api(adapter_cls)
+    assert contract.keys() == actual.keys(), (
+        f"{adapter_cls.__name__} must expose exactly the ElnAdapter contract: "
+        f"missing={sorted(contract.keys() - actual.keys())}, "
+        f"extra={sorted(actual.keys() - contract.keys())} — queuing, retry, and "
+        f"backend-specific helpers belong in the outbox or behind a private name"
+    )
+    for method in contract:
+        expected = list(contract[method].parameters)
+        got = list(actual[method].parameters)
+        assert expected == got, (
+            f"{adapter_cls.__name__}.{method}{actual[method]} does not match the "
+            f"contract ElnAdapter.{method}{contract[method]}"
+        )
+
+
+@pytest.mark.parametrize("adapter_cls", _eln_adapter_classes(), ids=lambda c: c.__name__)
+def test_eln_adapter_constructs_from_a_plain_settings_mapping(adapter_cls: type) -> None:
+    """``__init__(self, settings, ...)`` — one settings mapping, nothing else required.
+
+    The analogue of the driver contract's one-resource-string rule: everything
+    a backend needs comes from the mapping, so the publisher can build any
+    adapter from the user-level settings file alone.
+    """
+    params = [
+        p
+        for p in inspect.signature(adapter_cls.__init__).parameters.values()
+        if p.name != "self"
+    ]
+    assert params, f"{adapter_cls.__name__}.__init__ must take a settings mapping"
+    assert params[0].name == "settings", (
+        f"{adapter_cls.__name__}.__init__'s first argument must be named "
+        f"'settings', got {params[0].name!r}"
+    )
+    required = [p for p in params[1:] if p.default is inspect.Parameter.empty]
+    assert not required, (
+        f"{adapter_cls.__name__}.__init__ requires {[p.name for p in required]} "
+        f"beyond the settings mapping; make them optional (e.g. an injectable "
+        f"transport) so the publisher can build the adapter from settings alone"
+    )
+    adapter_cls({})  # constructs from a plain dict, with no network touched
+
+
+@pytest.mark.parametrize("adapter_cls", _eln_adapter_classes(), ids=lambda c: c.__name__)
+def test_eln_adapter_declares_backend_and_capabilities(adapter_cls: type) -> None:
+    """``backend`` is a lowercase identifier and ``capabilities`` is declared."""
+    from cryosoft.session.eln.adapter import ElnCapabilities
+
+    backend = adapter_cls.backend
+    assert backend and backend == backend.lower() and backend.isidentifier(), (
+        f"{adapter_cls.__name__}.backend must be a non-empty lowercase "
+        f"identifier, got {backend!r}"
+    )
+    assert isinstance(adapter_cls.capabilities, ElnCapabilities), (
+        f"{adapter_cls.__name__}.capabilities must be an ElnCapabilities — "
+        f"callers branch on the flags, never on the backend name"
+    )
+
+
+def test_eln_package_has_a_sim_twin() -> None:
+    """The ``sim_`` rule, applied to notebooks: one in-memory twin of the contract.
+
+    Because the contract fixes the public API exactly (see the test above),
+    every backend's adapter surface is identical, so ONE sim twin stands in
+    for all of them; a backend's own HTTP dialect is faked one level lower, at
+    its injectable transport.
+    """
+    from cryosoft.session.eln.adapter import ElnAdapter
+    from cryosoft.session.eln.sim_eln import SimElnAdapter
+
+    assert issubclass(SimElnAdapter, ElnAdapter)
+    assert SimElnAdapter in _eln_adapter_classes()
+
+
+@pytest.mark.parametrize("model_cls", _eln_dict_dataclasses(), ids=lambda c: c.__name__)
+def test_eln_dataclass_dict_contract(model_cls: type) -> None:
+    """Every persisted ELN dataclass round-trips and tolerates junk."""
+    instance = model_cls()
+    payload = instance.to_dict()
+    json.dumps(payload)  # JSON-safe or this raises
+    assert hasattr(model_cls, "from_dict"), (
+        f"{model_cls.__name__} has to_dict() but no from_dict()"
+    )
+    assert model_cls.from_dict(payload) == instance
+    for junk in (None, 42, "text", [], {"bogus_key": object}):
+        assert isinstance(model_cls.from_dict(junk), model_cls), (
+            f"{model_cls.__name__}.from_dict({junk!r}) must degrade to defaults"
+        )
+
+
+def test_eln_rendered_body_is_self_contained_html() -> None:
+    """A rendered entry body pulls in nothing from outside the notebook.
+
+    No script, no stylesheet, no image, no external URL — so the entry renders
+    identically in the notebook, in an export, and in a test snapshot.
+    """
+    from cryosoft.session.eln.templates import render_run_body
+
+    body = render_run_body(
+        {
+            "run_id": "r-1",
+            "procedure": "Field Sweep",
+            "kind": "run",
+            "params": {"field_T": 1.0, "note": "<b>escape me</b>"},
+            "started_utc": "2026-01-01T00:00:00+00:00",
+            "finished_utc": "2026-01-01T01:00:00+00:00",
+            "status": "done",
+        },
+        experiment_id="exp-1",
+        experiment_title="Sample A",
+        setup={"config_name": "sim", "instruments": {"magnet": {"model": "sim"}}},
+        data_path="/data/exp-1/data/r-1.h5",
+    )
+    lowered = body.lower()
+    for forbidden in ("<script", "<link", "<img", "<iframe", "http://", "https://"):
+        assert forbidden not in lowered, (
+            f"rendered ELN body must be self-contained, found {forbidden!r}"
+        )
+    assert "<b>escape me</b>" not in body, "rendered ELN body must escape every value"
+
+
 # ── Servicing-log kind standard (L6) ──────────────────────────────────────────
 # Every declared LogKindSpec (cryosoft.session.servicing_log.DECLARED_LOG_KINDS)
 # must have a valid key, a title, and a non-empty ordered field schema of

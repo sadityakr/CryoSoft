@@ -110,6 +110,7 @@ config also has automatic `test_conformance.py` coverage on top of these.
 | `cryosoft/core/data_manager.py` (L5) | `tests/test_l5_data_manager.py` |
 | `cryosoft/session/` (L6) | `tests/test_session_layer.py` + session-model conformance |
 | `cryosoft/session/servicing_log.py` (L6) | `tests/test_servicing_log.py` + log-kind conformance |
+| `cryosoft/session/eln/` (L6) | `tests/test_eln.py` + ELN-adapter conformance |
 | `cryosoft/gui/param_form.py`, `monitor_window.py`, `procedure_window.py`, `instrument_panel.py`, `notification_banner.py`, `theme.py`, `live_plot_panel.py`, `app_settings.py` | `tests/test_gui.py` |
 | `cryosoft/gui/sweep_axis_widget.py` | `tests/test_sweep_axis_widget.py` |
 | `cryosoft/gui/lifecycle_toggle.py` | `tests/test_lifecycle_toggle.py` |
@@ -136,6 +137,6 @@ config also has automatic `test_conformance.py` coverage on top of these.
 - **L3/L4 operations:** `test_operations.py` (`OperationBase`, `run_operation`/`queue_operation`/`finish_operation`, tolerated safety flags, postcondition gates, capability-scope dispatch); `test_operation_readiness.py` (the readiness/next-due contract — `ReadinessCondition`/`NextDue`, `OperationBase` defaults, `HeliumFillOperation`'s and the shared `_SampleAccessOperationBase`'s (via `SampleLoadOperation`/`SampleUnloadOperation`) concrete `readiness_conditions()`/`next_due()`, Qt-free); `test_helium_fill.py` (`HeliumFillOperation` end-to-end against a real Orchestrator + `sim_cryostat`, including the `CryogenicsRecorder` wiring); `test_sample_access.py` (`SampleLoadOperation`/`SampleUnloadOperation` end-to-end against a real Orchestrator + `sim_cryostat`, parametrized over both, including `confirm_operation()`'s operator-confirmation gate and postcondition timeout).
 - **L4 procedures + planning:** `test_l4_procedure.py`, `test_new_procedures.py`, `test_field_voltage_procedure.py`, `test_plan.py`, `test_sweep_builder.py`.
 - **L5 data manager:** `test_l5_data_manager.py`.
-- **L6 session management:** `test_session_layer.py`, `test_servicing_log.py`.
+- **L6 session management:** `test_session_layer.py`, `test_servicing_log.py`, `test_eln.py` (ELN publishing — sim adapter and a fake HTTP transport, never a live notebook).
 - **GUI (pytest-qt, offscreen):** `test_gui.py`, `test_sweep_axis_widget.py`, `test_lifecycle_toggle.py`, `test_form_autosave.py`, `test_monitor_history.py`, `test_trend_plot_panel.py`, `test_config_editor.py`, `test_operations_panel.py`, `test_servicing_log_page.py`.
 - **Troubleshooting / operational status:** `test_troubleshoot_cli.py`, `test_troubleshoot_engine.py`, `test_operational_status.py`, `test_status_reader.py`, `test_stall_detection.py`.

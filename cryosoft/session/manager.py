@@ -18,6 +18,7 @@ from cryosoft.session.models import (
     RUN_STATUS_FAILED,
     RUN_STATUS_RUNNING,
     SCHEMA_VERSION,
+    ElnLink,
     ExperimentIndexEntry,
     ExperimentRecord,
     RunRecord,
@@ -474,6 +475,76 @@ class ExperimentManager(QObject):
         run.reason = str(manifest.get("reason", ""))
         self._save_current()
         self.run_recorded.emit(run.to_dict())
+
+    def set_run_eln_link(self, experiment_id: str, run_id: str, link: ElnLink) -> bool:
+        """Record the ELN entry one run was published to.
+
+        The single-writer rule applied to the publishing track: the publisher
+        never edits a record or touches the store itself, it hands the
+        confirmed entry reference here. Called only after the backend has
+        confirmed the entry, so a run that carries a link really is in the
+        notebook.
+
+        Works on any experiment in this store, not just the open one: an
+        outbox job queued today may only reach the notebook next week, by
+        which time its experiment is closed and something else is open. When
+        the target IS the open experiment the in-memory record is updated and
+        ``run_recorded`` is emitted; otherwise the record is loaded, amended,
+        and saved without disturbing the live one.
+
+        Args:
+            experiment_id: The store key of the experiment owning the run.
+            run_id: The run to stamp.
+            link: The confirmed ELN entry reference.
+
+        Returns:
+            ``True`` when the link was recorded, ``False`` when the
+            experiment or the run is unknown, or the record could not be
+            written (all logged, never raised — a bookkeeping failure must
+            not propagate into a GUI timer).
+        """
+        if self._experiment is not None and self._experiment.experiment_id == experiment_id:
+            run = self._experiment.find_run(run_id)
+            if run is None:
+                logger.warning("No run %r in the open experiment to stamp an ELN link on", run_id)
+                return False
+            run.eln_link = link
+            run.published = True
+            self._save_current()
+            self.run_recorded.emit(run.to_dict())
+            logger.info("Run %s published to %s", run_id, link.url or link.entry_id)
+            return True
+
+        record = self._store.load(experiment_id)
+        if record is None:
+            logger.warning("Unknown experiment %r — cannot record its ELN link", experiment_id)
+            return False
+        run = record.find_run(run_id)
+        if run is None:
+            logger.warning("No run %r in experiment %r to stamp an ELN link on", run_id, experiment_id)
+            return False
+        if record.schema_version > SCHEMA_VERSION:
+            logger.warning(
+                "Refusing to stamp an ELN link on experiment %s: its schema_version=%d > %d",
+                experiment_id,
+                record.schema_version,
+                SCHEMA_VERSION,
+            )
+            return False
+        run.eln_link = link
+        run.published = True
+        try:
+            self._store.save(record)
+        except OSError as exc:
+            logger.error("Could not record the ELN link for run %s: %s", run_id, exc)
+            return False
+        logger.info(
+            "Run %s of closed experiment %s published to %s",
+            run_id,
+            experiment_id,
+            link.url or link.entry_id,
+        )
+        return True
 
     # ------------------------------------------------------------------
     # Internals

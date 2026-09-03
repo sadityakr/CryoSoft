@@ -30,6 +30,8 @@ from cryosoft.core.trend_checks import declared_checks
 from cryosoft.gui import app_settings
 from cryosoft.gui.monitor_window import MonitorWindow
 from cryosoft.gui.theme import PLOT_AXIS, PLOT_BG, build_stylesheet
+from cryosoft.session.eln.publisher import ElnPublisher
+from cryosoft.session.eln.settings import load_eln_settings
 from cryosoft.session.manager import ExperimentManager
 from cryosoft.session.models import GUEST_USER_ID, GUEST_USER_NAME, User
 from cryosoft.session.servicing_log import (
@@ -232,6 +234,20 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
         config_path=used_path,
         session_store=session_store,
     )
+
+    # ELN publishing (cryosoft/session/eln/): entirely opt-in and entirely
+    # GUI-side. With no user-level settings file — the default — the
+    # publisher is built, finds nothing configured, and does nothing: the
+    # drain timer never starts and on_run_finished() returns immediately, so
+    # a setup that has no notebook carries no footprint. The timer lives HERE,
+    # in the application entry point, rather than in the Orchestrator, for the
+    # same reason all network I/O does: it must never share the tick that
+    # writes to hardware. Attached to `app` (like trend_check_runner) so its
+    # ownership is explicit — a QObject with no Python reference is eligible
+    # for GC regardless of Qt-side parenting.
+    app.eln_publisher = ElnPublisher(session_manager, load_eln_settings())
+    orchestrator.run_finished.connect(app.eln_publisher.on_run_finished)
+    app.eln_publisher.start()
 
     # Cryogenics management:
     # config-gated like every optional feature — a setup without a

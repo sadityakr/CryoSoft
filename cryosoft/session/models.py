@@ -252,6 +252,12 @@ class RunRecord:
         reason: Error text for a failed run; empty otherwise.
         published: Whether this run has been mirrored to the ELN entry yet
             (written by the publishing track).
+        eln_link: The ELN entry this run was published to, or ``None`` while
+            it is unpublished. Written once, by the publisher, after the
+            backend confirms the entry — so a run that carries a link really
+            is in the notebook. One run maps to one entry (see the **Outbox**
+            and `session/eln/README.md`); the experiment-level ``eln_link`` on
+            ``ExperimentRecord`` is a separate, coarser link.
     """
 
     run_id: str = ""
@@ -264,6 +270,7 @@ class RunRecord:
     status: str = RUN_STATUS_RUNNING
     reason: str = ""
     published: bool = False
+    eln_link: ElnLink | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-safe dict representation."""
@@ -278,6 +285,7 @@ class RunRecord:
             "status": self.status,
             "reason": self.reason,
             "published": self.published,
+            "eln_link": self.eln_link.to_dict() if self.eln_link else None,
         }
 
     @classmethod
@@ -304,6 +312,11 @@ class RunRecord:
             status=status,
             reason=_as_str(data.get("reason")),
             published=_as_bool(data.get("published"), False),
+            eln_link=(
+                ElnLink.from_dict(data["eln_link"])
+                if isinstance(data.get("eln_link"), dict)
+                else None
+            ),
         )
 
 

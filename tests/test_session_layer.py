@@ -234,7 +234,10 @@ def test_store_load_warns_on_future_schema_version(store, caplog):
 def test_store_data_dir_and_gui_state_path(store):
     assert store.data_dir("exp1") == store.root / "exp1" / "data"
     assert store.gui_state_path("exp1") == store.root / "exp1" / "gui_state.json"
-    # Neither call creates anything on disk.
+    # The ELN outbox lives inside the experiment folder, so an experiment that
+    # is copied elsewhere takes its unpublished runs with it.
+    assert store.outbox_path("exp1") == store.root / "exp1" / "outbox.jsonl"
+    # None of these calls creates anything on disk.
     assert not store.root.exists()
 
 
@@ -1002,3 +1005,39 @@ def test_end_to_end_run_recorded_and_stamped(
     assert info["experiment"]["user_id"] == "jdoe"
     assert info["experiment"]["experiment_title"] == "SOT switching vs T"
     assert info["setup"]["config_name"] == "sim_cryostat"
+
+
+# ── set_run_eln_link (the publishing track's one write path) ─────────────────
+
+def test_set_run_eln_link_stamps_the_open_experiment(manager, qtbot):
+    """A confirmed entry lands on the run, is persisted, and is announced."""
+    record = manager.start_experiment("ELN", "jdoe", dict(SAMPLE_INFO))
+    manager._on_run_started({"run_id": "r1", "procedure": "Field Sweep"})
+    link = ElnLink(backend="sim_eln", entry_id="7", url="https://eln/7")
+
+    with qtbot.waitSignal(manager.run_recorded):
+        assert manager.set_run_eln_link(record.experiment_id, "r1", link) is True
+
+    run = manager.current_experiment().find_run("r1")
+    assert run.eln_link == link and run.published is True
+    assert manager.store.load(record.experiment_id).find_run("r1").eln_link == link
+
+
+def test_set_run_eln_link_reaches_a_closed_experiment(manager):
+    """A job that drains after the experiment closed still stamps its own record."""
+    record = manager.start_experiment("ELN", "jdoe", dict(SAMPLE_INFO))
+    manager._on_run_started({"run_id": "r1", "procedure": "Field Sweep"})
+    manager.close_experiment()
+    link = ElnLink(backend="sim_eln", entry_id="7", url="https://eln/7")
+
+    assert manager.set_run_eln_link(record.experiment_id, "r1", link) is True
+    assert manager.current_experiment() is None, "the closed record must not become live"
+    assert manager.store.load(record.experiment_id).find_run("r1").eln_link == link
+
+
+def test_set_run_eln_link_refuses_unknown_targets_without_raising(manager):
+    """Bookkeeping failures are reported, never propagated into a GUI timer."""
+    record = manager.start_experiment("ELN", "jdoe", dict(SAMPLE_INFO))
+    link = ElnLink(backend="sim_eln", entry_id="7")
+    assert manager.set_run_eln_link(record.experiment_id, "no-such-run", link) is False
+    assert manager.set_run_eln_link("no-such-experiment", "r1", link) is False
