@@ -93,6 +93,20 @@ Read this before adding or "hiding" a control — the split trips people up:
   `control_param_specs(method_name)` to inject a ParamSpec with `choices` —
   the GUI consults the hook, not the raw decorator metadata
   (`SwitchMatrixVI.select_route` is the reference example).
+- **The purity rule** binds every such override: `control_param_specs()` is
+  a PURE READ of config and cached state and must send no command to any
+  driver. It is a *describe* path — the front panel calls it on every
+  render, and `Station.station_info()` calls it to build the station
+  declaration snapshot, which must work for an offline instrument — and the
+  Orchestrator is the sole writer to hardware, so a read issued here would
+  sit outside the one tick loop that serialises bus access. An override that
+  wants a widget defaulted to the instrument's current setting reads it with
+  `last_monitored(name, fallback)`, the monitor cycle's cache
+  (`Lakeshore335SampleTemperatureControllerVI` is the reference example);
+  the fallback covers the not-yet-polled case, and a `ParamSpec` default
+  must be one of its own `choices`, so the fallback must be too.
+  `tests/test_conformance.py` builds the whole station declaration against
+  spied drivers and fails on any call this path makes.
 
 ## Interface contract
 The written standards all live in this root and are enforced by
@@ -221,7 +235,11 @@ Shared contracts at the root; concrete classes live in the subfolders.
   `TemperatureControllerBase`, `LevelMeterBase`, `RotatorBase`,
   `MeasurementInstrumentBase`, `DCMeasurementBase`. Provides `__init_subclass__` auto-wrapping of
   `@monitored`/`@control` (structured logging + declarative limit enforcement),
-  `get_state()`, `evaluate_safety()`/`safety_flags`/`merged_safety_flags()`/
+  `get_state()` (which also fills the monitor-cycle cache `last_monitored()`
+  serves), `control_limit_bounds()` (the read side of the control-validation
+  standard, resolving `control_limits` against the config-populated bounds so
+  a caller that must REPORT limits never reaches into `self._limits`),
+  `evaluate_safety()`/`safety_flags`/`merged_safety_flags()`/
   `safety_concerns()` (the System-Condition standard's producer/consumer
   declarations — GLOSSARY.md's **Safety-flag manifest** / **Safety concern**
   / **Safety hold** / **Critical safety flag**), the full

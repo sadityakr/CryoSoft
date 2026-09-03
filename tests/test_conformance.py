@@ -70,8 +70,12 @@ from cryosoft.core.events import (
     ActorKind,
     Command,
     CommandName,
+    ControlInfo,
     Datapoint,
     Event,
+    GroupInfo,
+    InstrumentInfo,
+    MonitoredInfo,
     QueueChanged,
     Readings,
     RunFinished,
@@ -110,13 +114,21 @@ from cryosoft.core.operation import (
 )
 from cryosoft.core.plan import SETPOINT_PARAM_PREFIX, ParamSpec, UIGroup
 from cryosoft.core.procedure import BaseProcedure
+from cryosoft.core.capability_manifest import (
+    _instrument_json,
+    build_manifest,
+    validate_manifest,
+)
 from cryosoft.core.station import (
     LIFECYCLE_ACTIONS,
     Station,
+    _control_infos,
     _import_class,
+    _monitored_infos,
     build_station,
 )
 from cryosoft.session.servicing_log import DECLARED_LOG_KINDS
+from tests.mocks.bus_spy import spy_on_station
 from cryosoft.virtual_instruments.base import (
     EXCITATION_CURRENT_LIMIT,
     MAX_SOURCE_CURRENT_KEY,
@@ -3062,10 +3074,154 @@ def _contract_specimens() -> dict[str, object]:
             seq=9,
             ts=1_700_000_003.0,
         ),
+        "MonitoredInfo": MonitoredInfo(
+            name="field_T",
+            unit="T",
+            description="Measured magnetic field at the sample",
+            group="coil",
+            returns="float",
+        ),
+        "ControlInfo": ControlInfo(
+            name="start_ramp",
+            scope="operation",
+            panel=False,
+            group="coil",
+            params=(
+                {
+                    "name": "target",
+                    "kind": "float",
+                    "unit": "T",
+                    "description": "Field to ramp to",
+                    "default": 0.0,
+                    "min": -1.0,
+                    "max": 1.0,
+                    "choices": None,
+                },
+            ),
+        ),
+        "GroupInfo": GroupInfo(
+            key="coil",
+            title="Coil",
+            description="Field readback and the ramp that changes it.",
+            members=("field_T", "start_ramp"),
+        ),
+        "InstrumentInfo": InstrumentInfo(
+            name="magnet_z",
+            vi_class="SuperconductingMagnetVI",
+            role="system",
+            kind="magnet",
+            availability=("not_responding",),
+            monitored=(
+                MonitoredInfo(
+                    name="field_T",
+                    unit="T",
+                    description="Measured magnetic field at the sample",
+                    group="coil",
+                    returns="float",
+                ),
+            ),
+            controls=(
+                ControlInfo(
+                    name="start_ramp",
+                    scope="operation",
+                    panel=False,
+                    group="coil",
+                    params=(
+                        {
+                            "name": "target",
+                            "kind": "float",
+                            "unit": "T",
+                            "description": "Field to ramp to",
+                            "default": 0.0,
+                            "min": -1.0,
+                            "max": 1.0,
+                            "choices": None,
+                        },
+                    ),
+                ),
+            ),
+            limits={
+                "start_ramp": {
+                    "target": {"limit": "max_field_T", "min": -1.0, "max": 1.0}
+                }
+            },
+            ui_groups=(
+                GroupInfo(
+                    key="coil",
+                    title="Coil",
+                    description="Field readback and the ramp that changes it.",
+                    members=("field_T", "start_ramp"),
+                ),
+            ),
+            safety_flags={"quench": "critical"},
+        ),
         "StationInfo": StationInfo(
+            setup="sim_cryostat",
+            tick_interval_s=3.0,
             instruments=(
-                {"name": "magnet_z", "vi_type": "magnet", "monitored": ["field_T"]},
-                {"name": "level_meter", "vi_type": "level_meter", "monitored": []},
+                InstrumentInfo(
+                    name="magnet_z",
+                    vi_class="SuperconductingMagnetVI",
+                    role="system",
+                    kind="magnet",
+                    availability=("not_responding",),
+                    monitored=(
+                        MonitoredInfo(
+                            name="field_T",
+                            unit="T",
+                            description="Measured magnetic field at the sample",
+                            group="coil",
+                            returns="float",
+                        ),
+                    ),
+                    controls=(
+                        ControlInfo(
+                            name="start_ramp",
+                            scope="operation",
+                            panel=False,
+                            group="coil",
+                            params=(
+                                {
+                                    "name": "target",
+                                    "kind": "float",
+                                    "unit": "T",
+                                    "description": "Field to ramp to",
+                                    "default": 0.0,
+                                    "min": -1.0,
+                                    "max": 1.0,
+                                    "choices": None,
+                                },
+                            ),
+                        ),
+                    ),
+                    limits={
+                        "start_ramp": {
+                            "target": {
+                                "limit": "max_field_T",
+                                "min": -1.0,
+                                "max": 1.0,
+                            }
+                        }
+                    },
+                    ui_groups=(
+                        GroupInfo(
+                            key="coil",
+                            title="Coil",
+                            description=(
+                                "Field readback and the ramp that changes it."
+                            ),
+                            members=("field_T", "start_ramp"),
+                        ),
+                    ),
+                    safety_flags={"quench": "critical"},
+                ),
+                InstrumentInfo(
+                    name="level_meter",
+                    vi_class="CryogenLevelMeterVI",
+                    role="level",
+                    kind="level",
+                    availability=("connect_failed",),
+                ),
             ),
             seq=10,
             ts=1_700_000_004.0,
@@ -3311,3 +3467,183 @@ def test_command_name_values_are_the_method_names() -> None:
             f"CommandName.{member.name} = {member.value!r} is not a public "
             f"Orchestrator method"
         )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# The station declaration snapshot and the capability manifest
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.parametrize("config_dir", _sim_config_dirs(), ids=lambda p: p.name)
+def test_station_declaration_issues_no_instrument_traffic(config_dir: Path) -> None:
+    """Describing the station never operates it — not one driver call.
+
+    The standard behind three separate things: `control_param_specs()`'s
+    purity rule (`virtual_instruments/base.py`),
+    `Station.station_info()`'s promise that a snapshot can be built for an
+    offline instrument, and the Orchestrator's position as the sole writer to
+    hardware — a bus read from a describe path would sit outside the one tick
+    loop that serialises access.
+
+    The station is polled once first, so the monitor-cycle cache a pure
+    override reads from is populated, and one VI is disconnected so the
+    offline branch — described from the class, with no instance to consult —
+    is covered on the same station. Only THEN are the drivers spied, so the
+    log holds nothing but what describing does, and the assertion is an empty
+    log rather than trust.
+
+    `_sim_config_dirs()` for the same reason every other station-building
+    conformance test uses it: the two real-hardware configs cannot be polled.
+    """
+    station = build_station(str(config_dir))
+    station.get_state()  # fill the monitor-cycle cache a pure override reads
+    live = station.get_vi_names()
+    if live:
+        station.disconnect_instrument(live[0])
+
+    calls: list[str] = []
+    spy_on_station(station, calls)
+
+    station._invalidate_station_info()
+    assert station.station_info().instruments
+    assert build_manifest(station)["instruments"]
+
+    assert calls == [], (
+        f"{config_dir.name}: building the station declaration called "
+        f"{sorted(set(calls))} — a describe path must send nothing to any "
+        f"instrument (see control_param_specs()'s purity rule)"
+    )
+
+
+@pytest.mark.parametrize("config_dir", _sim_config_dirs(), ids=lambda p: p.name)
+def test_capability_manifest_validates_against_its_schema(config_dir: Path) -> None:
+    """Every buildable config renders a manifest matching MANIFEST_SCHEMA.
+
+    The manifest is generated from declarations, so a VI that declares
+    something the schema cannot describe breaks here the moment its file is
+    configured — which is the point of validating every config rather than
+    one.
+    """
+    station = build_station(str(config_dir))
+    manifest = build_manifest(station)
+    assert validate_manifest(manifest) == []
+    assert json.loads(json.dumps(manifest)) == manifest
+
+
+@pytest.mark.parametrize("config_dir", _sim_config_dirs(), ids=lambda p: p.name)
+def test_capability_manifest_covers_every_configured_vi(config_dir: Path) -> None:
+    """No configured instrument is missing from the manifest, live or offline.
+
+    A client builds its whole instrument surface from this one document, so
+    an instrument absent from it is an instrument nobody can see.
+    """
+    station = build_station(str(config_dir))
+    described = {entry["name"] for entry in build_manifest(station)["instruments"]}
+    assert described == set(station.get_vi_names()) | set(station.offline_vi_names())
+
+
+@pytest.mark.parametrize("vi_cls", _all_vi_classes(), ids=lambda c: c.__name__)
+def test_manifest_renders_every_declared_capability(vi_cls: type) -> None:
+    """Every VI's declarations survive the trip into the manifest's shape.
+
+    `test_capability_manifest_is_complete` checks the DECLARATIONS are there;
+    this checks the rendering carries all of them, for every VI whose file
+    exists — including the ones no shipped config happens to configure, which
+    the config-driven tests above cannot reach. Rendered from the class, the
+    way the snapshot describes an offline instrument.
+    """
+    monitored_infos = _monitored_infos(vi_cls)
+    control_infos = _control_infos(vi_cls, None)
+
+    assert {info.name for info in monitored_infos} == set(
+        get_monitored_methods(vi_cls)
+    )
+    assert {info.name for info in control_infos} == set(_control_methods(vi_cls))
+
+    for info in monitored_infos:
+        method = getattr(vi_cls, info.name)
+        assert info.unit == (get_monitored_unit(method) or "")
+        assert info.description == get_monitored_description(method)
+        assert info.group == get_ui_group(method)
+
+    for info in control_infos:
+        method = getattr(vi_cls, info.name)
+        assert info.scope == get_control_scope(method)
+        assert info.panel == get_control_panel(method)
+        assert [param["name"] for param in info.params] == list(
+            getattr(method, "_control_params", {})
+        )
+
+
+def test_measurement_arming_controls_render_their_declared_knobs() -> None:
+    """Every measurement VI's `initiate_measurement` renders every knob.
+
+    The measurement-method standard installs `measurement_parameters` as that
+    control's declared specs; this is what proves the whole chain — the
+    install, the ParamSpec rendering, the unit and the enumerated choices —
+    reaches the manifest for every measurement VI whose file exists, not just
+    the ones a shipped config configures.
+    """
+    arming_vis = [
+        vi_cls
+        for vi_cls in _all_vi_classes()
+        if issubclass(vi_cls, MeasurementInstrumentBase)
+        and getattr(vars(vi_cls).get("initiate_measurement"), "_is_control", False)
+    ]
+    assert arming_vis, "measurement VIs declare initiate_measurement as a @control"
+
+    for vi_cls in arming_vis:
+        arming = {info.name: info for info in _control_infos(vi_cls, None)}[
+            "initiate_measurement"
+        ]
+        rendered = {param["name"]: param for param in arming.params}
+        assert set(rendered) == set(vi_cls.measurement_parameters), vi_cls.__name__
+        for name, spec in vi_cls.measurement_parameters.items():
+            param = rendered[name]
+            assert param["kind"] == spec.type.__name__
+            assert param["unit"] == spec.unit
+            assert param["description"] == spec.description
+            assert param["choices"] == (dict(spec.choices) if spec.choices else None)
+
+
+@pytest.mark.parametrize("vi_cls", _all_vi_classes(), ids=lambda c: c.__name__)
+def test_manifest_group_index_matches_the_vis_ui_groups(vi_cls: type) -> None:
+    """A VI's manifest groups ARE its `ui_groups` declaration, member for member.
+
+    One declaration, one rendering: the manifest adds no group, renames none,
+    and reorders no member.
+    """
+    instrument = InstrumentInfo(
+        name="specimen",
+        vi_class=vi_cls.__name__,
+        monitored=_monitored_infos(vi_cls),
+        controls=_control_infos(vi_cls, None),
+        ui_groups=tuple(
+            GroupInfo(
+                key=group.key,
+                title=group.title,
+                description=group.description,
+                members=tuple(group.members),
+            )
+            for group in vi_cls.ui_groups
+        ),
+    )
+    entry = _instrument_json(instrument)
+
+    assert [group["key"] for group in entry["groups"]] == [
+        group.key for group in vi_cls.ui_groups
+    ]
+    for rendered, declared in zip(entry["groups"], vi_cls.ui_groups, strict=True):
+        assert rendered["title"] == declared.title
+        assert rendered["description"] == declared.description
+        assert rendered["monitored"] + rendered["controls"] == list(declared.members)
+
+    indexed = [
+        name
+        for group in entry["groups"]
+        for name in group["monitored"] + group["controls"]
+    ]
+    indexed += entry["ungrouped"]["monitored"] + entry["ungrouped"]["controls"]
+    declared_names = [item["name"] for item in entry["monitored"]]
+    declared_names += [item["name"] for item in entry["controls"]]
+    assert sorted(indexed) == sorted(declared_names)

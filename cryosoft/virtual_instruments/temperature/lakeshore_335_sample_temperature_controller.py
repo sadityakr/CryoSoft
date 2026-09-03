@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from cryosoft.core.decorators import control, monitored
 from cryosoft.core.plan import ParamSpec
@@ -56,6 +56,30 @@ class Lakeshore335SampleTemperatureControllerVI(SampleTemperatureControllerVI):
         "High": "HIGH",
     }
 
+    def _cached_choice(
+        self, field: str, choices: dict[str, Any], fallback: Any
+    ) -> Any:
+        """Return a monitored field's last polled value if it is a valid choice.
+
+        Honours ``control_param_specs()``'s purity rule (see
+        ``BaseVirtualInstrument``): the value comes from the monitor cycle's
+        cache, never from a fresh instrument read. Anything the cache cannot
+        supply — this VI has not been polled yet, or the instrument reported
+        a setting outside the declared list — falls back, because a
+        ``ParamSpec`` default must be one of its own ``choices``.
+
+        Args:
+            field: The @monitored method whose value defaults the drop-down.
+            choices: The drop-down's label -> value mapping.
+            fallback: The value to use when the cache cannot supply a valid
+                one. Must itself be one of ``choices``' values.
+
+        Returns:
+            The cached value, or ``fallback``.
+        """
+        value = self.last_monitored(field, fallback)
+        return value if value in choices.values() else fallback
+
     def control_param_specs(self, method_name: str) -> dict[str, ParamSpec]:
         """Render ``set_curve``/``set_heater_range`` as drop-downs defaulted to the current value.
 
@@ -64,6 +88,13 @@ class Lakeshore335SampleTemperatureControllerVI(SampleTemperatureControllerVI):
         currently-assigned value — known only per instance — so this
         instance-level hook is used even though the choices themselves need
         no runtime data.
+
+        That current value is read from the monitor cycle's cache
+        (``last_monitored()``), not from the instrument: this method is a
+        describe path, and describing must never put traffic on the bus —
+        see ``control_param_specs()``'s purity rule in
+        ``BaseVirtualInstrument``. The default is therefore at most one tick
+        old, which is exactly what a drop-down needs.
 
         Args:
             method_name: The @control method name being rendered.
@@ -77,7 +108,7 @@ class Lakeshore335SampleTemperatureControllerVI(SampleTemperatureControllerVI):
             return {
                 "curve": ParamSpec(
                     type=int,
-                    default=self.curve(),
+                    default=self._cached_choice("curve", self._CURVE_CHOICES, 0),
                     choices=self._CURVE_CHOICES,
                     description="Calibration curve assigned to the sample sensor input",
                 )
@@ -86,7 +117,9 @@ class Lakeshore335SampleTemperatureControllerVI(SampleTemperatureControllerVI):
             return {
                 "range_setting": ParamSpec(
                     type=str,
-                    default=self.heater_range(),
+                    default=self._cached_choice(
+                        "heater_range", self._HEATER_RANGE_CHOICES, "OFF"
+                    ),
                     choices=self._HEATER_RANGE_CHOICES,
                     description=(
                         "Heater output power range — Off switches the heater "

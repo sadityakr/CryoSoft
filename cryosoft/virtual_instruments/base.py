@@ -744,6 +744,11 @@ class BaseVirtualInstrument:
         # docstring): True until a detach_when_idle VI's __init__ or
         # standby() calls self._detach(). Read by is_attached().
         self._attached: bool = True
+        # The monitor-cycle cache behind last_monitored(): the values of
+        # this VI's @monitored methods as of the most recent successful
+        # get_state() poll. Empty until the first one. See
+        # ``control_param_specs()``'s purity rule.
+        self._monitored_cache: dict[str, Any] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -1027,13 +1032,49 @@ class BaseVirtualInstrument:
     # ------------------------------------------------------------------
 
     def get_state(self) -> dict:
-        """Return {method_name: value} for all @monitored methods."""
+        """Poll every @monitored method and return ``{method_name: value}``.
+
+        The VI's half of the monitor cycle, and the ONE place this VI reads
+        its instrument on a tick. The result is also kept as the cache
+        ``last_monitored()`` serves, so a pure read — a
+        ``control_param_specs()`` override that wants the instrument's
+        current setting as a widget default — never has to poll the bus a
+        second time (see ``control_param_specs()``'s purity rule).
+
+        Returns:
+            ``{monitored_method_name: value}`` for every @monitored method.
+
+        Raises:
+            CryoSoftCommunicationError: Propagated from a failing driver
+                read; the cache then keeps the previous poll's values, which
+                is what makes them "last known" rather than "current".
+        """
         from cryosoft.core.decorators import get_monitored_methods
 
         state: dict = {}
         for method_name in get_monitored_methods(self):
             state[method_name] = getattr(self, method_name)()
+        self._monitored_cache = dict(state)
         return state
+
+    def last_monitored(self, name: str, default: Any = None) -> Any:
+        """Return one @monitored value as of the last successful poll.
+
+        The pure-read counterpart of calling the monitored method itself:
+        it answers from the monitor cycle's cache and NEVER touches the
+        bus, which is what lets ``control_param_specs()`` honour its purity
+        rule while still defaulting a widget to the instrument's current
+        setting.
+
+        Args:
+            name: The @monitored method's name.
+            default: What to return when this VI has not been polled yet,
+                or never reported that field.
+
+        Returns:
+            The cached value, or ``default``.
+        """
+        return getattr(self, "_monitored_cache", {}).get(name, default)
 
     # ------------------------------------------------------------------
     # Safety
@@ -1049,6 +1090,24 @@ class BaseVirtualInstrument:
         this hook instead of the raw decorator metadata. Presentation only:
         enforcement stays with ``control_limits`` and the method's own checks.
 
+        **Purity rule.** This method is a PURE READ of config and of cached
+        state: an override may read ``self._init_params``-derived attributes
+        and ``last_monitored()``, and must send NO command to any driver.
+        Two reasons, and either alone would be enough. It is called to
+        DESCRIBE the instrument — by the front panel every time it renders,
+        and by ``Station.station_info()`` to build the station declaration
+        snapshot — so a bus read here puts instrument traffic on paths that
+        are meant to describe, not operate, including one that must work
+        for an instrument that is offline. And the Orchestrator is the sole
+        writer to hardware (see ``core/orchestrator.py``): a read issued
+        from a describe path is outside the single tick loop that
+        serialises bus access. A VI that wants a widget defaulted to the
+        instrument's current setting reads it from the monitor cycle's
+        cache with ``last_monitored(name, fallback)`` — the value is at most
+        one tick old, and the fallback covers the not-yet-polled case.
+        ``tests/test_conformance.py`` builds the whole station declaration
+        against spied drivers and fails on any call this path makes.
+
         Args:
             method_name: The @control method name.
 
@@ -1058,6 +1117,35 @@ class BaseVirtualInstrument:
         from cryosoft.core.decorators import get_control_specs
 
         return get_control_specs(getattr(self, method_name))
+
+    def control_limit_bounds(self) -> dict[str, dict[str, tuple[float | None, float | None]]]:
+        """Return the configured bounds of every declared control limit.
+
+        The read side of the control-validation standard (see the class
+        docstring), and the counterpart of ``merged_safety_flags()``: it
+        resolves this class's ``control_limits`` declaration — method name
+        -> parameter name -> limit name — against the ``self._limits``
+        bounds this VI's ``__init__`` populated from the config, so a caller
+        that has to REPORT the limits (the station declaration snapshot,
+        an operator-facing panel) never reaches into the private mapping
+        itself.
+
+        Returns:
+            ``{method_name: {param_name: (lo, hi)}}``, ``None`` on either
+            side meaning unbounded there. A declared limit whose value the
+            config never supplied reports ``(None, None)`` rather than
+            raising — enforcement is where that violation is caught (with
+            ``CryoSoftConfigError``, at call time), and it is checked in CI
+            by ``tests/test_conformance.py``.
+        """
+        bounds: dict[str, dict[str, tuple[float | None, float | None]]] = {}
+        limits = getattr(self, "_limits", {})
+        for method_name, param_map in type(self).control_limits.items():
+            bounds[method_name] = {
+                param_name: tuple(limits.get(limit_name, (None, None)))  # type: ignore[misc]
+                for param_name, limit_name in param_map.items()
+            }
+        return bounds
 
     @classmethod
     def merged_safety_flags(cls) -> dict[str, str]:

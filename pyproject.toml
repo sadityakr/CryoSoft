@@ -303,3 +303,19 @@ forbidden_modules = [
     "cryosoft.core.plan",
     "cryosoft.core.data_manager",
 ]
+
+[[tool.importlinter.contracts]]
+name = "C16: cryosoft.core.events is a pure contract — stdlib only, nothing else in cryosoft"
+type = "forbidden"
+source_modules = ["cryosoft.core.events"]
+forbidden_modules = [
+    "cryosoft.drivers",
+    "cryosoft.virtual_instruments",
+    "cryosoft.procedures",
+    "cryosoft.gui",
+    "cryosoft.main",
+    "cryosoft.core.station",
+    "cryosoft.core.orchestrator",
+    "cryosoft.core.plan",
+    "cryosoft.core.data_manager",
+]
