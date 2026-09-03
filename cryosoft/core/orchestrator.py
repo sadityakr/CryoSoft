@@ -19,7 +19,7 @@ import inspect
 import json
 import logging
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from enum import Enum
@@ -2474,7 +2474,7 @@ class Orchestrator(QObject):
     # ------------------------------------------------------------------
 
     @contextmanager
-    def _acting_as(self, actor: ev.Actor, command_name: str):
+    def _acting_as(self, actor: ev.Actor, command_name: str) -> Iterator[None]:
         """Hold *actor* and *command_name* for the duration of one command.
 
         The ``command`` decorator wraps every public command method in this,
