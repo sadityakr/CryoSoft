@@ -254,3 +254,178 @@ def test_the_matrix_is_the_only_thing_that_decides(station_info):
     )
     assert PERMISSION_MATRIX[ActionClass.ENVELOPE][Role.SESSION] is Permission.REFUSED
     assert PERMISSION_MATRIX[ActionClass.READ][Role.OBSERVER] is Permission.PERMITTED
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# The Gateway object: one connection, end to end against a sim station
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class _Recorder:
+    """Collect everything one engine said, in emission order."""
+
+    def __init__(self, engine):
+        self.verdicts: list[ev.Verdict] = []
+        self.events: list[object] = []
+        engine.verdict_emitted.connect(self.verdicts.append)
+        engine.event_emitted.connect(self.events.append)
+
+    def of_type(self, event_type):
+        return [event for event in self.events if isinstance(event, event_type)]
+
+
+@pytest.fixture
+def engine(qtbot):
+    """A real Orchestrator over a real simulated station."""
+    from cryosoft.core.orchestrator import Orchestrator
+
+    station = build_station("cryosoft/configs/sim_cryostat")
+    orch = Orchestrator(station, tick_interval_ms=10)
+    yield orch, station
+    orch.shutdown()
+
+
+def _gateway(engine, role, actor_id="agent-1"):
+    from cryosoft.session.gateway import Gateway
+
+    orch, station = engine
+    return Gateway(orch, role, actor_id, station_info=station.station_info)
+
+
+def test_the_gateway_stamps_its_identity_on_every_command(engine):
+    """A forwarded command names the agent and the role it acted under."""
+    orch, _station = engine
+    recorder = _Recorder(orch)
+    gateway = _gateway(engine, Role.SESSION, actor_id="runner-7")
+
+    request_id = gateway.submit(ev.CommandName.START_MONITORING)
+
+    verdict = recorder.verdicts[-1]
+    assert verdict.request_id == request_id
+    assert verdict.code is ev.VerdictCode.OK
+    assert verdict.actor == ev.Actor(
+        kind=ev.ActorKind.AGENT, id="runner-7", role="session"
+    )
+    assert orch.is_monitoring()
+
+
+def test_a_refused_command_never_reaches_the_engine(engine):
+    """The refusal is answered on the engine's own stream, and nothing runs."""
+    orch, _station = engine
+    recorder = _Recorder(orch)
+    gateway = _gateway(engine, Role.OBSERVER)
+
+    request_id = gateway.submit(ev.CommandName.START_MONITORING)
+
+    assert [v.request_id for v in recorder.verdicts] == [request_id]
+    verdict = recorder.verdicts[-1]
+    assert verdict.code is ev.VerdictCode.BLOCKED_ROLE
+    assert verdict.detail["rule"] == "role_matrix"
+    assert verdict.seq > 0
+    assert not orch.is_monitoring()
+
+
+def test_permits_answers_without_provoking_anything(engine):
+    """A client can render its own tool list without submitting to find out."""
+    orch, _station = engine
+    recorder = _Recorder(orch)
+    gateway = _gateway(engine, Role.OBSERVER)
+
+    assert gateway.permits(ev.CommandName.RUN_QUEUE) is not None
+    assert recorder.verdicts == []
+
+
+def test_the_gateway_reads_from_its_mirror(engine, qtbot):
+    """Every read is answered locally, from what the engine broadcast."""
+    orch, _station = engine
+    gateway = _gateway(engine, Role.SESSION)
+
+    assert gateway.status() is None
+    assert gateway.attended() is True
+    assert gateway.agent_gate() is ev.AgentGate.ACTIVE
+    assert gateway.station().instruments
+
+    orch.set_attendance(False)
+    orch.set_agent_gate(ev.AgentGate.READ_ONLY)
+
+    assert gateway.attended() is False
+    assert gateway.agent_gate() is ev.AgentGate.READ_ONLY
+    assert gateway.state() == "IDLE"
+
+
+def test_unattended_widens_debug_to_recovery_end_to_end(engine):
+    """The attendance value pushed into the engine changes what the agent may do."""
+    orch, _station = engine
+    recorder = _Recorder(orch)
+    gateway = _gateway(engine, Role.DEBUG)
+
+    orch.set_attendance(True)
+    gateway.submit(ev.CommandName.START_MONITORING)
+    assert recorder.verdicts[-1].code is ev.VerdictCode.BLOCKED_ROLE
+    assert recorder.verdicts[-1].detail["rule"] == "attendance"
+    assert not orch.is_monitoring()
+
+    orch.set_attendance(False)
+    gateway.submit(ev.CommandName.START_MONITORING)
+    assert recorder.verdicts[-1].code is ev.VerdictCode.OK
+    assert orch.is_monitoring()
+
+
+def test_the_kill_switch_refuses_the_agent_and_leaves_the_human_alone(engine):
+    """The same command: refused from the gateway, carried out from the GUI path."""
+    orch, _station = engine
+    recorder = _Recorder(orch)
+    gateway = _gateway(engine, Role.SESSION)
+    orch.set_agent_gate(ev.AgentGate.REVOKED)
+
+    gateway.submit(ev.CommandName.START_MONITORING)
+
+    assert recorder.verdicts[-1].code is ev.VerdictCode.BLOCKED_ROLE
+    assert recorder.verdicts[-1].detail["gate"] == "revoked"
+    assert not orch.is_monitoring()
+
+    orch.submit(ev.Command(name=ev.CommandName.START_MONITORING))
+
+    assert recorder.verdicts[-1].code is ev.VerdictCode.OK
+    assert orch.is_monitoring()
+
+
+def test_the_engine_gates_an_agent_that_skips_the_gateway(engine):
+    """The gateway is the front door; the engine is the authority behind it."""
+    orch, _station = engine
+    recorder = _Recorder(orch)
+    orch.set_agent_gate(ev.AgentGate.REVOKED)
+
+    orch.submit(ev.Command(name=ev.CommandName.START_MONITORING, actor=SESSION))
+
+    assert recorder.verdicts[-1].code is ev.VerdictCode.BLOCKED_ROLE
+    assert recorder.verdicts[-1].detail["gate"] == "revoked"
+    assert not orch.is_monitoring()
+
+
+def test_an_observer_can_always_stand_the_station_down(engine):
+    """The exit criterion: emergency standby under a closed gate, from the lowest role."""
+    orch, _station = engine
+    recorder = _Recorder(orch)
+    gateway = _gateway(engine, Role.OBSERVER)
+    orch.set_agent_gate(ev.AgentGate.REVOKED)
+
+    gateway.submit(
+        ev.CommandName.EMERGENCY_STANDBY, {"reason": "coil voltage climbing"}
+    )
+
+    assert recorder.verdicts[-1].code is ev.VerdictCode.OK
+    assert orch.state == "EMERGENCY"
+
+
+def test_a_gateway_refusal_orders_after_what_the_engine_said(engine):
+    """A locally emitted verdict still sorts correctly against the engine's stream."""
+    orch, _station = engine
+    recorder = _Recorder(orch)
+    gateway = _gateway(engine, Role.OBSERVER)
+    orch.set_attendance(False)
+    engine_seq = max(getattr(e, "seq", 0) for e in recorder.events)
+
+    gateway.submit(ev.CommandName.RUN_QUEUE)
+
+    assert recorder.verdicts[-1].seq > engine_seq

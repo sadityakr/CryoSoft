@@ -20,6 +20,7 @@ from cryosoft.session.gateway.action_classes import (
     classify_command,
     classify_control,
 )
+from cryosoft.session.gateway.gateway import EngineClient, Gateway
 from cryosoft.session.gateway.roles import (
     PERMISSION_MATRIX,
     Permission,
@@ -40,4 +41,6 @@ __all__ = [
     "Permission",
     "PERMISSION_MATRIX",
     "authorize",
+    "Gateway",
+    "EngineClient",
 ]

@@ -57,7 +57,8 @@ is.
   parsing prose.
 - **Read-only accessors** over the latest `StatusSnapshot` / `StationInfo`,
   so an agent answers every query from its mirror instead of calling into
-  the engine.
+  the engine. A refusal the engine never saw still carries a sequence number
+  above everything the engine has said, so the two orderings merge.
 
 ## Interface contract
 
@@ -118,8 +119,9 @@ The default rule the rows were derived from:
    build otherwise), and nothing below the GUI may import back (C12).
 2. Keep the import direction *inside* the folder one-way too:
    `action_classes.py` (what an action is) has no idea who is asking;
-   `roles.py` (who may ask) imports it. A rule that needed both directions
-   would mean the split is in the wrong place.
+   `roles.py` (who may ask) imports it; `gateway.py` (a client asking)
+   imports both. A rule that needed those arrows to point both ways would
+   mean the split is in the wrong place.
 3. **A new command or capability is a new table row, in the same commit.**
    A `CommandName` added to the contract needs a row in
    `COMMAND_ACTION_CLASSES`; a new `@control` or a new VI kind needs one in
@@ -134,4 +136,5 @@ The default rule the rows were derived from:
 | File | Responsibility | Key public API | Owning test |
 |------|----------------|----------------|-------------|
 | `action_classes.py` | What an action IS, as declarative tables: one row per `CommandName`, one per `(VI kind, @control name)`, and the two lifecycle actions — each with the rationale a physicist reviews. **PROVISIONAL.** Resolves a `submit_vi_action` to its target's class through the station's declaration snapshot; refuses by name rather than defaulting. | `ActionClass`, `ClassifiedAction`, `UnclassifiedActionError`, `COMMAND_ACTION_CLASSES`, `CONTROL_ACTION_CLASSES`, `LIFECYCLE_ACTION_CLASSES`, `classify_command()`, `classify_control()` | `tests/test_gateway.py` + conformance |
+| `gateway.py` | The in-process client an agent holds: one connection, one `Role`, one actor id. Stamps `Actor(kind="agent", ...)` on every command, runs `authorize()`, and either forwards to the engine or answers the request itself with a `BLOCKED_ROLE` verdict on the engine's OWN `verdict_emitted` stream. Mirrors the latest `StatusSnapshot`/`StationInfo` so every read — attendance and the gate included — is answered locally. Duck-typed on `EngineClient`, so it holds the Orchestrator today and a transport proxy later without noticing. No Qt import, no network, no thread. | `Gateway` (`submit(name, args)`, `permits(name, args)`, `status()`, `station()`, `state()`, `attended()`, `agent_gate()`, `role`, `actor`), `EngineClient` | `tests/test_gateway.py` |
 | `roles.py` | Who may take an action of a given class: the `Role` enum, the `Permission` cell values, the one `PERMISSION_MATRIX` table that is the standard, and `authorize()` — the ordered checks (emergency standby, actor kind, role validity, classification, kill switch, matrix) that answer with `None` or one `BLOCKED_ROLE` verdict. | `Role`, `Permission`, `PERMISSION_MATRIX`, `authorize()` | `tests/test_gateway.py` + conformance |
