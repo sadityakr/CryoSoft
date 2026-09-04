@@ -86,6 +86,7 @@ from cryosoft.core.events import (
     Event,
     GroupInfo,
     InstrumentInfo,
+    LifecycleState,
     MonitoredInfo,
     QueueChanged,
     Readings,
@@ -2130,6 +2131,83 @@ def test_shipped_config_bounds_the_excitation_current(
             f"{config_name}/{vi_name}: '{limit_name}' upper bound is {hi!r} — "
             f"'{MAX_SOURCE_CURRENT_KEY}' did not reach the VI"
         )
+
+
+# ── Lifecycle-state standard (BaseVirtualInstrument.lifecycle_state) ─────────
+# See BaseVirtualInstrument's "Lifecycle-state standard": what an instrument
+# is DOING is data every VI carries and every client RENDERS, never something
+# a client reconstructs from whichever actions it happened to witness. These
+# tests make the standard binding for every present and future VI over every
+# buildable sim config, so a new VI is covered the moment a config names it.
+
+
+@pytest.mark.parametrize("config_dir", _sim_config_dirs(), ids=lambda p: p.name)
+def test_vi_lifecycle_state_is_declared_and_follows_the_verbs(config_dir: Path) -> None:
+    """Every VI starts idle and moves to initiated/standby with its own verbs.
+
+    Rule 1 of the lifecycle-state standard: the verbs own the fact. Built
+    silently (rule 1 of the connection-lifecycle standard), so a fresh
+    Station's every VI must read ``"idle"``; ``initiate_all()`` /
+    ``standby_all()`` then move every one of them, which is what lets an
+    emergency's blanket stand-down reach a client as a fact rather than as
+    an action nobody saw.
+    """
+    declared = {member.value for member in LifecycleState}
+    station = build_station(str(config_dir))
+    vi_names = station.get_vi_names()
+    assert vi_names, f"{config_dir.name}: no VI built, nothing to check"
+
+    for vi_name in vi_names:
+        state = station.get_vi(vi_name).lifecycle_state()
+        assert state == LifecycleState.IDLE.value, (
+            f"{config_dir.name}/{vi_name}: a freshly built VI must read "
+            f"lifecycle_state() == 'idle' (building the Station commands "
+            f"nothing), got {state!r}"
+        )
+
+    station.initiate_all()
+    for vi_name in vi_names:
+        state = station.get_vi(vi_name).lifecycle_state()
+        assert state == LifecycleState.INITIATED.value, (
+            f"{config_dir.name}/{vi_name}: initiate() left lifecycle_state() "
+            f"at {state!r} — the lifecycle-state standard records the state "
+            f"in BaseVirtualInstrument's wrap, so this VI either raised or "
+            f"replaced the wrapped method"
+        )
+
+    station.standby_all()
+    for vi_name in vi_names:
+        state = station.get_vi(vi_name).lifecycle_state()
+        assert state == LifecycleState.STANDBY.value, (
+            f"{config_dir.name}/{vi_name}: standby() left lifecycle_state() "
+            f"at {state!r} — an instrument stood down must say so, whichever "
+            f"path stood it down"
+        )
+        assert state in declared
+
+
+@pytest.mark.parametrize("config_dir", _sim_config_dirs(), ids=lambda p: p.name)
+def test_vi_lifecycle_state_is_a_pure_read(config_dir: Path) -> None:
+    """Reading a VI's lifecycle state sends nothing on the bus.
+
+    Rule 2 of the lifecycle-state standard, watched at the drivers rather
+    than trusted: the status-snapshot assembly reads this for every VI on
+    every tick and on every state change, so a read that polled would put
+    instrument traffic on a reporting path.
+    """
+    station = build_station(str(config_dir))
+    station.initiate_all()
+    calls: list[str] = []
+    spy_on_station(station, calls)
+    for vi_name in station.get_vi_names():
+        station.get_vi(vi_name).lifecycle_state()
+    assert not calls, (
+        f"{config_dir.name}: lifecycle_state() sent instrument traffic "
+        f"{sorted(set(calls))} — it must answer from the cached value "
+        f"(the lifecycle-state standard's purity rule); a VI that can "
+        f"observe the instrument overrides observe_lifecycle_state(), which "
+        f"the monitor cycle consults, instead"
+    )
 
 
 # ── The direct action path refuses what is not a capability ──────────────────

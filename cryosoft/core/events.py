@@ -276,6 +276,41 @@ class AgentGate(str, Enum):
     REVOKED = "revoked"
 
 
+class LifecycleState(str, Enum):
+    """What an instrument is DOING, as an observed fact rather than a history.
+
+    The **lifecycle-state standard**'s vocabulary (GLOSSARY.md's *Lifecycle
+    state*): the VI layer keeps this as data
+    (``BaseVirtualInstrument.lifecycle_state()``), the Station reports it
+    (``Station.lifecycle_states()``), and it reaches every client on
+    ``StatusSnapshot.instruments[vi_name]["lifecycle"]``. Declared HERE, in
+    the contract, for the same reason every other shared vocabulary is: a
+    client renders the fact without importing the instrument stack, and no
+    client has to reconstruct it from whichever actions it happened to
+    witness — a station stood down by a path that emits no per-VI action
+    (an emergency's blanket ``standby_all()``) still reports the truth on
+    the very next snapshot.
+
+    A ``str`` enum, like ``AgentGate``, so the value is JSON-safe as it
+    stands and travels on a ``StatusSnapshot`` unchanged.
+
+    Members:
+        IDLE: Not initiated — a freshly built VI, one whose ``disconnect()``
+            hook has run, and any instrument that is not in the live
+            registry at all.
+        INITIATED: ``initiate()`` succeeded and nothing has stood the
+            instrument down since. A measurement VI's
+            ``initiate_measurement()`` — the arming half of its lifecycle —
+            counts the same way.
+        STANDBY: ``standby()`` succeeded; the instrument is at the safe idle
+            state its own stand-down drives it to.
+    """
+
+    IDLE = "idle"
+    INITIATED = "initiated"
+    STANDBY = "standby"
+
+
 def _as_actor(value: Actor | Mapping[str, Any]) -> Actor:
     """Coerce an actor field, which may arrive as its JSON dict.
 

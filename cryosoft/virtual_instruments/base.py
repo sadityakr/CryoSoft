@@ -17,6 +17,7 @@ import statistics
 from collections.abc import Mapping, Sequence
 from typing import Any, ClassVar
 
+from cryosoft.core.events import LifecycleState
 from cryosoft.core.exceptions import (
     CryoSoftCommunicationError,
     CryoSoftConfigError,
@@ -129,6 +130,46 @@ class BaseVirtualInstrument:
     ``disconnect()`` (release VI-held state). Reconnecting is the Station's
     job (``Station.connect_instrument()``), because only it holds the build
     recipe needed to construct fresh drivers.
+
+    Lifecycle-state standard
+    ------------------------
+    The operating half of the connection lifecycle is also DATA, not just a
+    pair of verbs: every VI carries its lifecycle state — ``"idle"``,
+    ``"initiated"`` or ``"standby"``, the ``LifecycleState`` vocabulary the
+    contract declares (``core/events.py``) — and ``lifecycle_state()`` reads
+    it. The rule this exists to enforce: a client RENDERS the state, it never
+    reconstructs it from the actions it happened to witness. An instrument
+    stood down by a path that emits no per-VI action — an emergency's
+    blanket ``Station.standby_all()`` — reports the truth on the very next
+    ``StatusSnapshot`` all the same, because the fact travels with the VI
+    rather than with the action.
+
+    Three rules bind every VI, and a VI author writes nothing to obey them:
+
+    1. **The verbs own the fact.** ``initiate()`` sets ``"initiated"``,
+       ``standby()`` sets ``"standby"``, ``disconnect()`` resets to
+       ``"idle"``, and a measurement VI's ``initiate_measurement()`` — the
+       arming half of its own lifecycle — sets ``"initiated"`` like the
+       plain verb. Each is written only AFTER the call returns without
+       raising, so a refused or failed stand-down never claims to have
+       happened. Maintained by ``__init_subclass__``'s wrap of a directly
+       defined method (the same inherited-enforcement idiom the
+       control-validation standard uses for ``@control``) and by these base
+       methods' own bodies, for a VI that inherits them unchanged.
+    2. **The read is pure.** ``lifecycle_state()`` returns the cached value
+       and sends nothing on the bus — the same purity rule
+       ``control_param_specs()`` follows — so any client may ask at any
+       time, including inside the status-snapshot assembly.
+    3. **Hardware may correct it, the cache still answers.** A VI that can
+       genuinely observe what the instrument is doing (an output that reads
+       back on/off) overrides ``observe_lifecycle_state()``, which the
+       monitor cycle consults once per poll, off the values it already read.
+       That refreshes the cached value; it never becomes the read itself.
+
+    Distinct from ``standby_status()``, which answers a narrower question —
+    is this VI at, or converging on, the state its own ``standby()`` drives
+    it to — from command provenance, for hold enforcement. Lifecycle state
+    is the operator-facing fact the instrument card renders.
 
     Detach-when-idle declaration
     -----------------------------
@@ -327,6 +368,17 @@ class BaseVirtualInstrument:
     # of how this attribute works.
     _standby_commanded: bool = False
 
+    # The lifecycle-state standard's observed fact (see the class docstring
+    # and ``lifecycle_state()``): a CLASS-level default of ``"idle"``,
+    # shadowed by an instance attribute the first time a wrapped
+    # ``initiate()``/``initiate_measurement()``/``standby()``/``disconnect()``
+    # writes to it. Deliberately not set in ``__init__`` and deliberately NOT
+    # annotated ``ClassVar``, for exactly the reasons ``_standby_commanded``
+    # above gives: a freshly constructed VI — including a subclass that
+    # defines none of the wrapped methods — reads this class attribute and
+    # gets "idle" until the first lifecycle call gives it an instance value.
+    _lifecycle_state: str = LifecycleState.IDLE.value
+
     # ── Reading-loop participation (see GLOSSARY "Reading loop") ──────────
     # A VI in the reading path may declare parameters the generic sweep
     # procedure can loop at every sweep point: ``reading_setters`` maps a
@@ -436,6 +488,30 @@ class BaseVirtualInstrument:
         standby_method = vars(cls).get("standby")
         if callable(standby_method):
             cls.standby = BaseVirtualInstrument._make_standby_wrapper(standby_method)
+
+        # The lifecycle-state standard's other three verbs (see the class
+        # docstring): a directly defined initiate() / initiate_measurement()
+        # / disconnect() is wrapped so the state is recorded after the VI's
+        # own commands ran, with no VI author writing anything. Same
+        # ``vars(cls)`` discipline as the standby wrap above — an inherited
+        # method is already wrapped and must not be wrapped twice — and the
+        # same after-the-call timing, so a raise leaves the state untouched.
+        # ``standby()`` is not listed: its own wrapper above records
+        # ``"standby"`` alongside the detach and the standby provenance.
+        for lifecycle_method, resulting_state in (
+            ("initiate", LifecycleState.INITIATED),
+            ("initiate_measurement", LifecycleState.INITIATED),
+            ("disconnect", LifecycleState.IDLE),
+        ):
+            method = vars(cls).get(lifecycle_method)
+            if callable(method):
+                setattr(
+                    cls,
+                    lifecycle_method,
+                    BaseVirtualInstrument._make_lifecycle_wrapper(
+                        method, resulting_state
+                    ),
+                )
 
         # The standby-provenance standard's invalidation half: any directly
         # defined start_ramp()/stop_ramp() clears _standby_commanded, since
@@ -584,8 +660,40 @@ class BaseVirtualInstrument:
         def wrapper(self, *args: Any, **kwargs: Any):
             result = method(self, *args, **kwargs)
             self._standby_commanded = True
+            self._lifecycle_state = LifecycleState.STANDBY.value
             if self.detach_when_idle:
                 self._detach()
+            return result
+
+        return wrapper
+
+    # ------------------------------------------------------------------
+    # Lifecycle-state wrapper factory (the lifecycle-state standard; see
+    # the class docstring and ``lifecycle_state()``)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _make_lifecycle_wrapper(method, resulting_state: LifecycleState):
+        """Return *method* wrapped to record the lifecycle state it reaches.
+
+        Calls the ORIGINAL method first — a VI's own setup, arming or
+        release commands run exactly as written — and records the new state
+        only once it returns without raising, so a refused ``initiate()``
+        never leaves a card claiming the instrument is running.
+
+        Args:
+            method: The subclass's directly defined ``initiate``,
+                ``initiate_measurement`` or ``disconnect``.
+            resulting_state: The state the VI is in once *method* succeeds.
+
+        Returns:
+            The wrapped method, to be set back onto the class.
+        """
+
+        @functools.wraps(method)
+        def wrapper(self, *args: Any, **kwargs: Any):
+            result = method(self, *args, **kwargs)
+            self._lifecycle_state = resulting_state.value
             return result
 
         return wrapper
@@ -765,7 +873,14 @@ class BaseVirtualInstrument:
         CryoSoft while an instrument is mid-experiment finds it untouched.
 
         Override in subclasses to send those setup commands.
+
+        Records ``lifecycle_state() == "initiated"`` (the lifecycle-state
+        standard, see the class docstring). A subclass that overrides this
+        gets the same record from ``__init_subclass__``'s wrap instead
+        (``_make_lifecycle_wrapper``), so this body is only ever reached
+        directly by a VI with no override of its own.
         """
+        self._lifecycle_state = LifecycleState.INITIATED.value
 
     def standby(self) -> None:
         """Put the instrument in a safe idle state.
@@ -775,12 +890,13 @@ class BaseVirtualInstrument:
         ``disconnect()``, which releases the bus session and changes nothing
         the instrument is doing.
 
-        Honours the detach-when-idle declaration (see the class docstring)
-        and the standby-provenance standard (see ``standby_status()``): a VI
-        that inherits this base implementation unchanged — never overriding
+        Honours the detach-when-idle declaration (see the class docstring),
+        the standby-provenance standard (see ``standby_status()``) and the
+        lifecycle-state standard (see ``lifecycle_state()``): a VI that
+        inherits this base implementation unchanged — never overriding
         ``standby()`` itself — still records ``self._standby_commanded =
-        True`` and releases its driver session here when ``detach_when_idle``
-        is true. A subclass that DOES override ``standby()`` gets both of
+        True``, records ``lifecycle_state() == "standby"``, and releases its
+        driver session here when ``detach_when_idle`` is true. A subclass that DOES override ``standby()`` gets both of
         those from ``__init_subclass__``'s wrap instead (``_make_standby_
         wrapper``), so this method body is only ever reached directly by a
         VI with no override of its own — the one call site
@@ -788,6 +904,7 @@ class BaseVirtualInstrument:
         only.
         """
         self._standby_commanded = True
+        self._lifecycle_state = LifecycleState.STANDBY.value
         if self.detach_when_idle:
             self._detach()
 
@@ -925,6 +1042,82 @@ class BaseVirtualInstrument:
         self._attached = False
 
     # ------------------------------------------------------------------
+    # Lifecycle state (the lifecycle-state standard; see the class docstring)
+    # ------------------------------------------------------------------
+
+    def lifecycle_state(self) -> str:
+        """Return what this instrument is DOING, as a pure cached read.
+
+        The lifecycle-state standard's read side (see the class docstring):
+        the operating half of the connection lifecycle as a fact a client
+        renders, rather than one it has to infer from whichever actions it
+        happened to see. Sends NOTHING on the bus — the same purity rule
+        ``control_param_specs()`` follows — so the Station may call it while
+        assembling a status snapshot, on any tick, for every VI.
+
+        Returns:
+            One of ``LifecycleState``'s values (``core/events.py``):
+            ``"idle"`` (never initiated, or reset by ``disconnect()``),
+            ``"initiated"`` (``initiate()`` — or, for a measurement VI,
+            ``initiate_measurement()`` — succeeded and nothing has stood it
+            down since), or ``"standby"`` (``standby()`` succeeded).
+        """
+        return self._lifecycle_state
+
+    def observe_lifecycle_state(self) -> str | None:
+        """Return the lifecycle state this VI can PROVE from hardware, or None.
+
+        The lifecycle-state standard's optional third rule (see the class
+        docstring): a VI whose instrument reports what it is doing — a
+        source whose output reads back on or off, a controller whose heater
+        range is readable — overrides this so the monitor cycle can correct
+        a cached value that a front-panel fiddle or a power cycle has made
+        wrong. ``get_state()`` consults it once per poll, AFTER the
+        ``@monitored`` reads, so an override answers from
+        ``last_monitored()`` and sends nothing extra on the bus.
+
+        Overriding this never changes where a client reads from:
+        ``lifecycle_state()`` remains the read, and this only refreshes what
+        it returns. An override that raises, or that answers with a value
+        outside the vocabulary, is logged and ignored — reporting must never
+        be the thing that breaks a monitor cycle.
+
+        Returns:
+            One of ``LifecycleState``'s values, or ``None`` (the default:
+            "this instrument cannot tell me, keep the commanded value").
+        """
+        return None
+
+    def _refresh_lifecycle_state(self) -> None:
+        """Let ``observe_lifecycle_state()`` correct the cached lifecycle state.
+
+        Called by ``get_state()`` at the end of every successful poll.
+        Guarded on both failure modes an override can present, because the
+        monitor cycle is the one thing that must not stop.
+        """
+        try:
+            observed = self.observe_lifecycle_state()
+        except Exception:  # noqa: BLE001 — an observation must not fail a poll
+            logging.getLogger(f"cryosoft.vi.{self.vi_name}").warning(
+                "%s: observe_lifecycle_state() raised — keeping the "
+                "commanded lifecycle state",
+                self.vi_name or type(self).__name__,
+                exc_info=True,
+            )
+            return
+        if observed is None:
+            return
+        try:
+            self._lifecycle_state = LifecycleState(observed).value
+        except ValueError:
+            logging.getLogger(f"cryosoft.vi.{self.vi_name}").warning(
+                "%s: observe_lifecycle_state() returned %r, which is not a "
+                "LifecycleState — keeping the commanded lifecycle state",
+                self.vi_name or type(self).__name__,
+                observed,
+            )
+
+    # ------------------------------------------------------------------
     # Standby provenance (the command-provenance standard)
     # ------------------------------------------------------------------
 
@@ -1025,7 +1218,16 @@ class BaseVirtualInstrument:
         must leave the instrument doing exactly what it was doing (rule 2 of
         the connection-lifecycle standard). That is ``standby()``'s job, and
         the operator chooses whether to press it first.
+
+        Resets ``lifecycle_state()`` to ``"idle"`` (the lifecycle-state
+        standard): CryoSoft has stopped tracking what this instrument does,
+        so it must not keep claiming the last thing it asked for — and the
+        VI a later ``Station.connect_instrument()`` builds is a fresh object
+        that starts at ``"idle"`` anyway. A subclass that overrides this
+        gets the same reset from ``__init_subclass__``'s wrap
+        (``_make_lifecycle_wrapper``).
         """
+        self._lifecycle_state = LifecycleState.IDLE.value
 
     # ------------------------------------------------------------------
     # State snapshot
@@ -1055,6 +1257,10 @@ class BaseVirtualInstrument:
         for method_name in get_monitored_methods(self):
             state[method_name] = getattr(self, method_name)()
         self._monitored_cache = dict(state)
+        # The lifecycle-state standard's hardware-correction rule (see
+        # ``observe_lifecycle_state()``): last, so an override answers from
+        # the values this very poll just cached rather than reading again.
+        self._refresh_lifecycle_state()
         return state
 
     def last_monitored(self, name: str, default: Any = None) -> Any:
