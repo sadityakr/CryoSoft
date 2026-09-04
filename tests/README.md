@@ -66,6 +66,24 @@ forces a state the next tick would undo, and `settled()` waits out the round
 trip a GUI action makes — all no-ops or direct calls inline, so a test reads
 the same either way.
 
+**Every wait in those helpers is bounded.** `drain()` runs the client's event
+loop until the queue is dry, until `max_events` (20 000) deliveries have
+landed, or until `timeout_s` is up — and the last of those raises
+`EngineNotSettled` (a `TimeoutError`) naming how many events it drained, the
+engine's state and its tick interval. Without the bound, an engine that keeps
+its client fed — a fast tick with a visible `MonitorWindow` attached — left
+`drain()` spinning at 100 % CPU until the run was killed, with nothing in the
+report to say why. The default bound is 10 s and comes from
+`CRYOSOFT_TEST_SETTLE_TIMEOUT_S`, so a slow machine can widen every helper at
+once (`CRYOSOFT_TEST_SETTLE_TIMEOUT_S=30 pytest tests/test_gui.py`); a single
+call that legitimately needs longer passes its own `timeout_s`
+(`settled(orchestrator, timeout_s=30)`, `on_engine(orchestrator, call,
+timeout_s=30)`, likewise `tick_engine()`, `set_on_engine()` and
+`ticks_paused()`). The deadline is read between passes of the event loop, so
+a drain can overrun it by one pass: the bound guarantees that a wait ends and
+says why, not when. `test_instrument_modes.py` is the helper family's own
+test file.
+
 `scenarios.py` (not itself a test file) names the sim-driver state-injection
 recipes every hazard/fault test needs — helium low, quench, a disconnected
 instrument, a measurement instrument erroring instead of returning data, a
@@ -147,6 +165,7 @@ config also has automatic `test_conformance.py` coverage on top of these.
 
 - `conftest.py` — shared fixtures (logging setup, an isolated measurement root).
 - `instrument_modes.py` — building a host in the session's instrument mode, and the tick helpers a test needs to reach the engine across the boundary (see above).
+- `test_instrument_modes.py` — the harness testing itself: the settle bound on `drain()`, `on_engine()` and `settled()`, its `CRYOSOFT_TEST_SETTLE_TIMEOUT_S` default and per-call override, and the two ways a drain ends without hanging (`max_events` reached, or `EngineNotSettled` with the engine named). Runs in both instrument modes.
 - `mocks/` — shared mock objects, including `bus_spy.py`: recording shims over a
   live driver's public methods, for proving a path issues no instrument traffic
   (an empty call log, rather than trust).
