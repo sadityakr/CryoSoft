@@ -328,7 +328,7 @@ block the human path.
 `@control` as `recovery` or `run-control` (framework §6 item 2). Scheduled
 here because E1 cannot ship without it and no agent should guess it.
 
-**E2. The tool surface, rendered.** *(2 days; framework Phase 4 step 5,
+**E2. The tool surface, rendered.** *(2 days; framework Phase 4 step 6,
 thread plan §3.4)*
 Tools are rendered from `CommandName` plus the manifest: no hand-written
 tool per command. Session tools wrap `data_reader`, `validate_run`, probe
@@ -336,7 +336,7 @@ runs, the experiment store, the operational log and the agent feed. The
 three-way conformance test gains its third leg: every `CommandName` has a
 tool.
 
-**E3. Feed and accountability.** *(2 days; framework Phase 4 step 4, audit
+**E3. Feed and accountability.** *(2 days; framework Phase 4 step 5, audit
 Phase 4 items 1, 2, 6)*
 `agent_actions.jsonl` per experiment following the JSONL discipline;
 `actor` on `RunRecord`, queued entries and `StepRecord`, so an agent's
@@ -344,12 +344,31 @@ self-confirmation of a physical step is distinguishable from the
 physicist's; `params_digest` on operator confirmations; `actor` and
 `request_id` added to the troubleshoot transcript so the two trails join.
 
-**E4. `python -m cryosoft.ctl`.** *(2 days; framework Phase 4 step 6)*
+**E4. `python -m cryosoft.ctl`.** *(2 days; framework Phase 4 step 7)*
 The reference client: argparse over the in-process gateway, JSON in and
 out, following the troubleshoot CLI's conventions. Then the live write path
 at the audit's D4 rung 1: a request spool the tick drains at the same point
 it drains manual actions, verdicts appended to a JSONL sink, so the CLI
 can act on a running app.
+
+**E5. Run ownership.** *(1 day; framework Phase 4 step 4)*
+The owner of a run is the `Actor` that started it (a queued run: whoever
+queued it), as a fact and never a lease. The four destructive run-scoped
+commands — `abort_procedure`, `confirm_operation`, `skip_operation_step`,
+`finish_operation` — are owner-scoped for `agent` actors: a non-owner is
+refused `BLOCKED_ROLE`/`run_owner` naming the owner, and the same command
+with `override_owner` and a non-empty `reason` is accepted and recorded as a
+takeover (verdict `detail.takeover`, `RunFinished.actor` +
+`overridden_owner`, the agent feed, and a distinct row in the agent panel).
+The human is never gated and no safety or recovery command is owner-scoped.
+Enforced in the engine's own admission path so every door passes it, mirrored
+in `roles.authorize()` off `StatusSnapshot.run.owner`, and published on the
+four tools' schemas so every client offers the override with no code of its
+own.
+*Done 2026-09-04: the end-to-end scenario tests had shown a second agent
+aborting another agent's run with no record anywhere; scenario 9 now asserts
+the standard instead of the permissive behaviour, and `cryosoft.ctl` drives
+the same refusal-then-override from the terminal.*
 
 **Phase E exit.** The framework's Phase 4 scenario on a sim station: a
 client validates, probe-runs, starts and aborts a `FieldSweep`; envelope,
@@ -429,5 +448,6 @@ milestones a reader can check without reading code:
 | C | click Pause during a twenty-second sim datapoint and watch the window keep painting |
 | D | probe-run a sweep from a script and read its stats back |
 | E | drive a running sim station from `cryosoft.ctl` and watch the Monitor window name the agent as the actor |
+| E5 | see who owns the run in flight, and watch a second agent be refused it — then take it over on the record |
 | F | do the same from an external Claude Code session over MCP, or from the chat dock |
 | G | find the run in the eLab with a drafted entry |
