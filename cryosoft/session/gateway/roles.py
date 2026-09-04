@@ -40,6 +40,20 @@ Four properties of that table are the design, not incidental:
   matrix is consulted. An actor that can see a problem must never be unable
   to make the station safe.
 
+One rule sits AFTER the matrix, and it is about the run rather than the
+role: the **run-ownership standard** (GLOSSARY.md's *Run owner*). Four
+run-scoped commands — ``abort_procedure``, ``confirm_operation``,
+``skip_operation_step`` and ``finish_operation`` — end somebody's result or
+attest to a physical step of it, and an ``agent`` that did not start the run
+may not take them on it. Refused, not forbidden: the same command carrying
+``override_owner`` and a non-empty ``reason`` is admitted as a **takeover**
+and recorded as one. It is checked last because it is the narrowest question
+of the lot — a role that may not run the experiment at all is refused by the
+matrix, on the authority it lacks, rather than being told whose run it is.
+The engine enforces the same rule at the single writer (``Orchestrator``'s
+``command`` decorator); this check is the front door, so a tool call is
+refused fast, in the same words, and lands in the **Agent feed** either way.
+
 The **kill switch** is checked before the matrix and can only ever subtract:
 ``read_only`` leaves an agent nothing but ``read``-class actions, ``revoked``
 leaves it nothing at all. It is enforced a second time inside the engine
@@ -57,7 +71,9 @@ kill switch does and, like it, never applies to emergency standby.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from enum import Enum
+from typing import Any
 
 from cryosoft.core.events import (
     Actor,
@@ -141,6 +157,21 @@ PERMISSION_MATRIX: dict[ActionClass, dict[Role, Permission]] = {
 }
 
 
+#: The commands the **run-ownership standard** scopes to the run's owner, by
+#: their ``CommandName``. It mirrors ``Orchestrator.OWNER_SCOPED_COMMANDS``,
+#: which is the authority — this module may read the contract but not the
+#: engine, so the set is restated here rather than imported, and conformance
+#: diffs the two so they cannot drift.
+OWNER_SCOPED_COMMANDS: frozenset[CommandName] = frozenset(
+    {
+        CommandName.ABORT_PROCEDURE,
+        CommandName.CONFIRM_OPERATION,
+        CommandName.SKIP_OPERATION_STEP,
+        CommandName.FINISH_OPERATION,
+    }
+)
+
+
 def _refusal(
     command: Command,
     actor: Actor,
@@ -180,15 +211,17 @@ def authorize(
     kill_switch: AgentGate,
     *,
     seq: int = 0,
+    run_owner: Mapping[str, Any] | None = None,
 ) -> Verdict | None:
     """Decide whether *actor* may submit *command*, per the standard above.
 
     The checks run in this order, and the order is the model: emergency
     standby first (always permitted), then the actor kind (only agents are
     judged), then the role's own validity, then the action's class, then the
-    kill switch, and only then the matrix. Every refusal is a
-    ``BLOCKED_ROLE`` verdict whose ``detail`` names the rule that refused, so
-    a client decides from the code and the dict and never by parsing prose.
+    kill switch, then the matrix, and last of all run ownership. Every
+    refusal is a ``BLOCKED_ROLE`` verdict whose ``detail`` names the rule that
+    refused, so a client decides from the code and the dict and never by
+    parsing prose.
 
     Args:
         actor: Who is asking, carrying the declared ``Role`` in ``actor.role``.
@@ -199,6 +232,11 @@ def authorize(
             ``Orchestrator.set_attendance()`` published).
         kill_switch: The gate the human set (``Orchestrator.set_agent_gate()``).
         seq: Sequence number to stamp on a refusal verdict.
+        run_owner: The **run owner** of the run in flight, as
+            ``StatusSnapshot.run["owner"]`` publishes it (``{"kind", "id"}``),
+            or ``None`` when nothing is running or the caller mirrors no
+            status — in which case ownership refuses nothing here and the
+            engine, which always knows, decides alone.
 
     Returns:
         ``None`` when the command is permitted and may be forwarded to the
@@ -254,11 +292,7 @@ def authorize(
         )
 
     permission = PERMISSION_MATRIX[action_class][role]
-    if permission is Permission.PERMITTED:
-        return None
-    if permission is Permission.UNATTENDED_ONLY:
-        if not attendance:
-            return None
+    if permission is Permission.UNATTENDED_ONLY and attendance:
         return _refusal(
             command,
             actor,
@@ -268,14 +302,78 @@ def authorize(
             {**detail, "rule": "attendance", "attended": True},
             seq,
         )
-    return _refusal(
-        command,
-        actor,
-        f"The {role.value!r} role does not grant {action_class.value} "
-        f"actions, so {command.name.value!r} is refused.",
-        {**detail, "rule": "role_matrix"},
-        seq,
-    )
+    if permission is Permission.REFUSED:
+        return _refusal(
+            command,
+            actor,
+            f"The {role.value!r} role does not grant {action_class.value} "
+            f"actions, so {command.name.value!r} is refused.",
+            {**detail, "rule": "role_matrix"},
+            seq,
+        )
+    # The role grants it; the last question is whose run it would be taken on.
+    return _ownership_refusal(command, actor, run_owner, detail, seq)
+
+
+def _ownership_refusal(
+    command: Command,
+    actor: Actor,
+    run_owner: Mapping[str, Any] | None,
+    detail: dict[str, object],
+    seq: int,
+) -> Verdict | None:
+    """Apply the **run-ownership standard** to one already-permitted command.
+
+    The local mirror of ``Orchestrator._run_owner_admission()``, in the same
+    words and with the same ``detail.rule`` values, so an agent gets one
+    answer whichever door it came through. It refuses only what the engine
+    would refuse; it never ADMITS anything the engine would not, because the
+    engine checks again with the ownership it actually holds.
+
+    Args:
+        command: The command being judged, whose ``args`` carry
+            ``override_owner`` and ``reason``.
+        actor: The agent asking (the human never reaches here).
+        run_owner: The run in flight's owner, or ``None``.
+        detail: The refusal detail built so far — role, action class and
+            rationale.
+        seq: Sequence number to stamp on a refusal verdict.
+
+    Returns:
+        ``None`` when the command may be forwarded — the actor owns the run,
+        no run is owned, the command is not owner-scoped, or the takeover is
+        properly declared — else the refusing ``Verdict``.
+    """
+    if command.name not in OWNER_SCOPED_COMMANDS or not run_owner:
+        return None
+    owner = {"kind": str(run_owner.get("kind", "")), "id": str(run_owner.get("id", ""))}
+    if owner["kind"] == actor.kind.value and owner["id"] == actor.id:
+        return None
+    owned: dict[str, object] = {**detail, "owner": owner, "actor_id": actor.id}
+    if not bool(command.args.get("override_owner", False)):
+        return _refusal(
+            command,
+            actor,
+            f"This run is owned by {owner['kind']} {owner['id']!r}, and agent "
+            f"{actor.id!r} is not its owner, so {command.name.value!r} is "
+            f"refused. Ask the owner or the operator to do it; if you must do "
+            f"it yourself, re-send the same command with override_owner=true "
+            f"and a reason saying why — the takeover is recorded on the run "
+            f"and in the agent feed.",
+            {**owned, "rule": "run_owner"},
+            seq,
+        )
+    if not str(command.args.get("reason", "") or "").strip():
+        return _refusal(
+            command,
+            actor,
+            f"Taking over {owner['kind']} {owner['id']!r}'s run needs a "
+            f"reason: re-send {command.name.value!r} with override_owner=true "
+            f"and a non-empty reason saying why you are taking the run over.",
+            {**owned, "rule": "override_reason_required"},
+            seq,
+        )
+    return None
 
 
 #: The roles in ascending order of authority. The matrix above is monotone

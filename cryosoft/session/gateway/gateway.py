@@ -12,7 +12,9 @@ Three jobs:
 * **Stamp the identity.** Every command leaves here as
   ``Actor(kind="agent", id=..., role=...)``, so a verdict, a run record and
   the status bar all name the authority the action was taken under.
-* **Authorize before forwarding.** ``roles.authorize()`` decides; a refusal
+* **Authorize before forwarding.** ``roles.authorize()`` decides — the role
+  matrix, the kill switch, **Attendance**, and the **run-ownership
+  standard** judged against the owner this connection mirrors; a refusal
   is answered as a ``BLOCKED_ROLE`` verdict on the engine's OWN
   ``verdict_emitted`` stream, so the human's window sees the agent being
   refused exactly as it sees it being obeyed. A refusal never reaches the
@@ -371,6 +373,24 @@ class Gateway:
         """
         return self._status.attended if self._status is not None else True
 
+    def run_owner(self) -> dict[str, Any] | None:
+        """Return the **run owner** of the run in flight, per the mirror.
+
+        Read exactly as **Attendance** and the **Kill switch** are: off the
+        latest ``StatusSnapshot``, so this connection's ownership check reads
+        the same fact every other client sees, and the engine still enforces
+        the rule regardless of what a client makes of it.
+
+        Returns:
+            The owner's ``{"kind", "id"}``, or ``None`` when nothing is
+            running or no snapshot has arrived yet.
+        """
+        run = self._status.run if self._status is not None else None
+        if not run:
+            return None
+        owner = run.get("owner")
+        return dict(owner) if isinstance(owner, Mapping) else None
+
     def agent_gate(self) -> AgentGate:
         """Return the **Kill switch**'s setting, per the engine's mirror.
 
@@ -482,6 +502,7 @@ class Gateway:
             self._station_info,
             self.attended(),
             self.agent_gate(),
+            run_owner=self.run_owner(),
         )
         if refusal is None:
             return None

@@ -163,6 +163,25 @@ is.
   second time inside `Orchestrator.submit()` — that is the authority, and
   this check is the front door that turns a generic refusal into a specific
   one.
+- **Run ownership is checked last, and it is about the run, not the role.**
+  The **run-ownership standard** (GLOSSARY.md's **Run owner**): the `Actor`
+  that started the run in flight owns it, and an `agent` that is not the
+  owner may not `abort_procedure`, `confirm_operation`,
+  `skip_operation_step` or `finish_operation` on it —
+  `roles.OWNER_SCOPED_COMMANDS`, the four that end somebody's result or
+  attest to a physical step of it. Refused with `detail.rule == "run_owner"`
+  naming the owner; the same command re-sent with `override_owner` and a
+  non-empty `reason` is admitted as a **Takeover** (an override with no
+  reason is refused, `detail.rule == "override_reason_required"`). Last in
+  the order because it is the narrowest question: a role that may not run
+  the experiment at all is refused by the matrix, on the authority it lacks.
+  The owner is read off the mirrored `StatusSnapshot`
+  (`Gateway.run_owner()`), and — exactly like the kill switch — the engine
+  enforces it a second time at the single writer, which is the authority;
+  conformance diffs the two command sets so they cannot drift. The two
+  arguments are published on the four tools' schemas
+  (`tools.COMMAND_ARG_SCHEMAS`), so every client offers the override with no
+  code of its own.
 - **A request that arrived as a file is capped.** `authorize_spooled()` is the
   entry point the **Request spool** is wired with: it caps the role a request
   file may declare at the setup's `spool_max_role` and then hands the command
@@ -220,11 +239,14 @@ is.
   method's Google `Args:` entry, so the text an agent reads is the text a
   reader of the code reads.
 - **A signature becomes a schema.** A scalar parameter renders straight from
-  its annotation. Four commands' JSON `args` are translated by
-  `Orchestrator.submit()` rather than being the method's parameters (a
-  procedure travels as a class name plus its params, an envelope as a
-  mapping, the kill switch as its `AgentGate` value); those are declared once
-  in `COMMAND_ARG_SCHEMAS`, each with the rationale for why it deviates. A
+  its annotation. Some commands' JSON `args` are not the method's parameters:
+  five are translated by `Orchestrator.submit()` (a procedure travels as a
+  class name plus its params, an envelope as a mapping, the kill switch as
+  its `AgentGate` value), and the four owner-scoped ones carry
+  `override_owner` and `reason` on the wire, which the `command` decorator
+  absorbs before the method is called (the **run-ownership standard**). All
+  of them are declared once in `COMMAND_ARG_SCHEMAS`, each with the
+  rationale for why it deviates. A
   command whose signature carries a type the renderer cannot render and that
   has no entry there **fails to render** rather than being guessed at — the
   same no-silent-default rule the classification tables follow.
@@ -341,7 +363,7 @@ The default rule the rows were derived from:
 | File | Responsibility | Key public API | Owning test |
 |------|----------------|----------------|-------------|
 | `action_classes.py` | What an action IS, as declarative tables: one row per `CommandName`, one per `(VI kind, @control name)`, and the two lifecycle actions — each with the rationale a physicist reviews. **PROVISIONAL.** Resolves a `submit_vi_action` to its target's class through the station's declaration snapshot; refuses by name rather than defaulting. | `ActionClass`, `ClassifiedAction`, `UnclassifiedActionError`, `COMMAND_ACTION_CLASSES`, `CONTROL_ACTION_CLASSES`, `LIFECYCLE_ACTION_CLASSES`, `classify_command()`, `classify_control()` | `tests/test_gateway.py` + conformance |
-| `gateway.py` | The in-process client an agent holds: one connection, one `Role`, one actor id. Stamps `Actor(kind="agent", ...)` on every command, runs `authorize()`, and either forwards to the engine or answers the request itself with a `BLOCKED_ROLE` verdict on the engine's OWN `verdict_emitted` stream. Mirrors the latest `StatusSnapshot`/`StationInfo` so every read — attendance and the gate included — is answered locally. Duck-typed on `EngineClient` and reaching the two streams through `verdict_stream()`/`event_stream()`, so it holds the **Orchestrator proxy** on the GUI thread, the Orchestrator on the instrument thread, and a transport proxy later, without noticing. No Qt import, no network, no thread. Also publishes the rendered surface: `tools()` / `tool_schemas()` re-render whenever the mirrored declaration is replaced, and `call_tool()` validates a call against its schema before routing it — a command tool through `submit()`, a session tool to its function after the same kill-switch and matrix checks. It answers every call and raises at none. | `Gateway` (`submit(name, args)`, `permits(name, args)`, optional `feed=` (the **Agent feed** every submitted command is written to before it is forwarded or refused), `call_tool(name, args)`, `tools()`, `tool_schemas()`, `tool(name)`, `status()`, `station()`, `state()`, `attended()`, `agent_gate()`, `role`, `actor`), `EngineClient`, `verdict_stream`, `event_stream` | `tests/test_gateway.py`, `tests/test_gateway_tools.py` |
+| `gateway.py` | The in-process client an agent holds: one connection, one `Role`, one actor id. Stamps `Actor(kind="agent", ...)` on every command, runs `authorize()`, and either forwards to the engine or answers the request itself with a `BLOCKED_ROLE` verdict on the engine's OWN `verdict_emitted` stream. Mirrors the latest `StatusSnapshot`/`StationInfo` so every read — attendance, the gate and the **run owner** included — is answered locally. Duck-typed on `EngineClient` and reaching the two streams through `verdict_stream()`/`event_stream()`, so it holds the **Orchestrator proxy** on the GUI thread, the Orchestrator on the instrument thread, and a transport proxy later, without noticing. No Qt import, no network, no thread. Also publishes the rendered surface: `tools()` / `tool_schemas()` re-render whenever the mirrored declaration is replaced, and `call_tool()` validates a call against its schema before routing it — a command tool through `submit()`, a session tool to its function after the same kill-switch and matrix checks. It answers every call and raises at none. | `Gateway` (`submit(name, args)`, `permits(name, args)`, optional `feed=` (the **Agent feed** every submitted command is written to before it is forwarded or refused), `call_tool(name, args)`, `tools()`, `tool_schemas()`, `tool(name)`, `status()`, `station()`, `state()`, `attended()`, `agent_gate()`, `run_owner()`, `role`, `actor`), `EngineClient`, `verdict_stream`, `event_stream` | `tests/test_gateway.py`, `tests/test_gateway_tools.py` |
 | `local_server.py` | The **Gateway server**: a `QLocalServer` on the GUI thread's event loop that accepts local-socket connections and gives each one its own `Gateway`, built with the role and actor id its `hello` declared. Speaks newline-delimited JSON-RPC 2.0 (`hello`, `tools/list`, `tools/call`, `status`, `station`, `events/subscribe`, plus `event`/`verdict` notifications), publishes `gateway.json` with the socket name, pid, schema version and per-launch token at 0600, and refuses a bad token, an unknown role or a role above the deployment's ceiling at the handshake. Buffers partial reads, caps a frame, and answers every malformed thing as a JSON-RPC error rather than raising into the loop. No thread. | `GatewayServer` (`start()`, `stop()`, `socket_name`, `descriptor`, `token`, `max_role`), `SCHEMA_VERSION`, `MAX_FRAME_BYTES`, `descriptor_path()`, `default_socket_name()` | `tests/test_gateway_server.py` |
-| `roles.py` | Who may take an action of a given class: the `Role` enum, the `Permission` cell values, the one `PERMISSION_MATRIX` table that is the standard, and `authorize()` — the ordered checks (emergency standby, actor kind, role validity, classification, kill switch, matrix) that answer with `None` or one `BLOCKED_ROLE` verdict. `authorize_spooled()` is the same model with the **Request spool**'s role cap in front of it, injected into `core.request_spool` as its permission hook. | `Role`, `Permission`, `PERMISSION_MATRIX`, `ROLE_LADDER`, `authorize()`, `authorize_spooled()` | `tests/test_gateway.py`, `tests/test_request_spool.py` + conformance |
+| `roles.py` | Who may take an action of a given class: the `Role` enum, the `Permission` cell values, the one `PERMISSION_MATRIX` table that is the standard, and `authorize()` — the ordered checks (emergency standby, actor kind, role validity, classification, kill switch, matrix, and last the **run-ownership standard** against the mirrored owner) that answer with `None` or one `BLOCKED_ROLE` verdict. `authorize_spooled()` is the same model with the **Request spool**'s role cap in front of it, injected into `core.request_spool` as its permission hook. | `Role`, `Permission`, `PERMISSION_MATRIX`, `ROLE_LADDER`, `OWNER_SCOPED_COMMANDS`, `authorize()`, `authorize_spooled()` | `tests/test_gateway.py`, `tests/test_request_spool.py` + conformance |
 | `tools.py` | The **Tool surface**, rendered not written: one command tool per `CommandName` (description from the Orchestrator method's docstring, schema from its signature or its `COMMAND_ARG_SCHEMAS` entry), one capability tool per `(instrument, @control)` the station declares (schema from the `ParamSpec`s, bounds from the config), and the hand-declared session tools that read the store, the run files and the two audit trails, and that draft and publish notebook entries. Validates a call against its schema and names the bound it violated. | `ToolSpec`, `ToolContext`, `ToolError`, `SESSION_TOOLS`, `COMMAND_ARG_SCHEMAS`, `render_tools()`, `render_command_tools()`, `render_capability_tools()`, `capability_tool_name()`, `validate_tool_args()`, `call_session_tool()` | `tests/test_gateway_tools.py` + conformance |

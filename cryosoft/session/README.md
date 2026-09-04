@@ -93,7 +93,7 @@ tool execution IS `Gateway.call_tool()`, so it acts under the same **Role**, is
 refused by the same matrix, is stopped by the same **Kill switch** and leaves
 the same **Agent feed** trail as an agent in another process. It adds two
 things of its own: a written system-prompt standard (probe before running,
-quote a refusal verbatim, never claim an action without an `OK` verdict) and
+quote a refusal verbatim, never take over another actor's run without stating why, never claim an action without an `OK` verdict) and
 the **Assistant transcript**, the conversation half of the evidence the feed
 cannot hold. Its thread rule — model calls on a `QThreadPool` worker, tool
 calls on the thread that receives the answer — is what keeps the engine's
