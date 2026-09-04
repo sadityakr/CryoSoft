@@ -629,7 +629,11 @@ QLabel[class="assistant_chip"][status="refused"] {{
 
 /* ── Agent panel rows (AgentPanel) ───────────────────────────────────────── */
 /* One rule per outcome, and no new colour: a refusal reuses the banner's
-   validated error triple, a pending draft-approval row its warning triple.
+   validated error triple, a pending draft-approval row its warning triple,
+   and a **takeover** — an agent acting on another actor's run, accepted but
+   never routine — the same warning triple in bold, which is what tells it
+   apart from the pending row that shares its fill. Its text says whose run
+   was taken and why, so the row is legible without the colour at all.
    The base rule reserves the 2px transparent border so a filled row never
    shifts the list — the same pattern the QGroupBox[status] borders, the
    verdict badge and the assistant chip follow. A refusal must be
@@ -652,6 +656,12 @@ QLabel[class="agent_row"][outcome="refused"] {{
     background-color: {BANNER_ERROR_BG};
     border-color: {BANNER_ERROR_BORDER};
     color: {BANNER_ERROR_TEXT};
+    font-weight: bold;
+}}
+QLabel[class="agent_row"][outcome="takeover"] {{
+    background-color: {BANNER_WARNING_BG};
+    border-color: {BANNER_WARNING_BORDER};
+    color: {BANNER_WARNING_TEXT};
     font-weight: bold;
 }}
 QLabel[class="agent_row"][outcome="pending"] {{
