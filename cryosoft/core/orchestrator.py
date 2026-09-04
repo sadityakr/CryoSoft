@@ -1151,11 +1151,11 @@ class Orchestrator(QObject):
         happen.
 
         Args:
-            reason: Why the station is being stood down. Logged at CRITICAL
-                and carried into the emergency's error message and
-                ``ErrorEvent``, so the record says who asked and why.
+            reason: Why the station is being stood down. Carried into the
+                emergency's error message, its ``ErrorEvent`` and the single
+                CRITICAL entry record ``_enter_emergency()`` writes (which
+                also names the actor), so the record says who asked and why.
         """
-        logger.critical("Emergency standby requested: %s", reason)
         self._enter_emergency(f"emergency standby requested: {reason}")
 
     @command
@@ -4353,6 +4353,18 @@ class Orchestrator(QObject):
         each tick would, for a persistent magnet, restart the full
         switch-heater warmup/cooldown cycle every few seconds.
 
+        **The single EMERGENCY-entry record.** This is the one path into
+        EMERGENCY — a tripped critical condition observed by the tick and an
+        operator's or agent's ``emergency_standby()`` alike — so the one
+        CRITICAL log line for the entry is written HERE, naming the cause
+        (the tripped condition, or the caller's reason) and the actor it is
+        attributed to. CLAUDE.md reserves CRITICAL for safety events, and an
+        entry into EMERGENCY is one however it was observed; writing it here
+        rather than at each caller is what keeps the two routes from
+        diverging (they did: the manual call logged CRITICAL, the tick's
+        quench only ERROR). Callers pass their reason and add no log line of
+        their own, so the file log carries exactly one record per entry.
+
         Args:
             reason: Human-readable description of the tripped condition(s)
                 (e.g. flag names or an envelope-violation message).
@@ -4363,14 +4375,17 @@ class Orchestrator(QObject):
                 violation, which is checked against a live reading rather
                 than a VI-tagged safety flag).
         """
+        actor = self._current_actor()
         message = f"EMERGENCY: safety condition triggered ({reason})"
         if vi_names:
             message += f" — instrument(s): {', '.join(vi_names)}"
+        message += f" [actor {actor.kind.value}:{actor.id}]"
         self._error(
             message,
             vi_name=", ".join(vi_names) if vi_names else None,
             kind="safety",
             severity="emergency",
+            log_level=logging.CRITICAL,
         )
         # Defense in depth alongside _manual_action_admissible()'s own
         # EMERGENCY/ERROR guard on the hold override: a fresh EMERGENCY

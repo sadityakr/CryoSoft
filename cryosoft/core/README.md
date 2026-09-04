@@ -270,12 +270,22 @@ is the typed currency shared by all of them.
 - `Orchestrator.emergency_standby(reason)` is the unconditional safe-off
   route (GLOSSARY.md's **Emergency standby**): permitted in EVERY state,
   including EMERGENCY and ERROR where every other manual route is refused,
-  deliberately outside `_manual_action_admissible()`, logged at CRITICAL with
-  the reason and routed into the same emergency flow a tripped critical
-  condition takes. It runs on the caller's stack like `stop_ramp()`; because
-  the tick is single-threaded and cooperative, a call arriving mid-tick lands
-  after the current `measure()` returns — accepted latency, bounded by one
-  reading, not an oversight.
+  deliberately outside `_manual_action_admissible()`, carrying its reason
+  into the same emergency flow a tripped critical condition takes. It runs
+  on the caller's stack like `stop_ramp()`; because the tick is
+  single-threaded and cooperative, a call arriving mid-tick lands after the
+  current `measure()` returns — accepted latency, bounded by one reading,
+  not an oversight.
+- `Orchestrator._enter_emergency(reason, vi_names)` is the single
+  EMERGENCY-entry path — a critical condition the tick observed and an
+  operator's or agent's `emergency_standby()` alike — and writes the one
+  CRITICAL log record for the entry, naming the cause (the tripped
+  condition or the caller's reason, plus the originating instruments) and
+  the actor it is attributed to. CLAUDE.md reserves CRITICAL for safety
+  events and every entry into EMERGENCY is one, however it was observed;
+  logging it at the shared entry rather than at each caller is what keeps
+  the two routes from diverging, and callers add no log line of their own,
+  so one entry means exactly one CRITICAL record.
 - `Station.station_info()` returns the **station info** snapshot
   (GLOSSARY.md's **Station info**): the frozen, JSON-safe declaration of
   every configured instrument — live and offline alike — assembled from the
