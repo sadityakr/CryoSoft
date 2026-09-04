@@ -102,6 +102,22 @@ class InstrumentFrontPanel(QWidget):
 
         orchestrator.action_succeeded.connect(self._on_check_answered)
         orchestrator.action_failed.connect(self._on_check_refused)
+        # This WINDOW is the receiver for the tick-rate mirror signal that
+        # re-renders its embedded card, exactly as MonitorWindow is for the
+        # cards in the instrument grid (the gui-edit skill's
+        # destruction-order rule). It is what puts the lifecycle-state
+        # standard's rendering on the front panel too, so the toggle here
+        # cannot disagree with the one on the card.
+        self._mirror.status_updated.connect(self._on_status_snapshot)
+
+    def _on_status_snapshot(self, _snapshot: object) -> None:
+        """Forward a fresh snapshot to the embedded panel.
+
+        Args:
+            _snapshot: The ``StatusSnapshot`` the mirror just absorbed; the
+                panel reads the mirror rather than the payload.
+        """
+        self._panel.on_status_snapshot()
 
     def _on_check(self) -> None:
         """Submit the connection check; the verdict arrives on a signal."""

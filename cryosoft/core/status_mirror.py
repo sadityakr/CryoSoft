@@ -39,6 +39,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 
 from cryosoft.core.events import (
     InstrumentInfo,
+    LifecycleState,
     StateChange,
     StationInfo,
     StatusSnapshot,
@@ -321,6 +322,28 @@ class StatusMirror(QObject):
             Its tags, empty for a fully usable (or unknown) instrument.
         """
         return frozenset(self.availability(vi_name).get("tags") or ())
+
+    def lifecycle_state(self, vi_name: str) -> str:
+        """Return what one instrument is DOING, as of the last snapshot.
+
+        The client read of the lifecycle-state standard (GLOSSARY.md's
+        **Lifecycle state**): the answer ``Station.lifecycle_states()`` gave
+        when the snapshot was taken, carried on
+        ``StatusSnapshot.instruments[vi_name]["lifecycle"]``. This is what an
+        instrument card's Initiate/Standby toggle renders, so a stand-down
+        that dispatched no per-VI action still reaches the operator.
+
+        Args:
+            vi_name: The VI to ask about.
+
+        Returns:
+            One of ``LifecycleState``'s values; ``"idle"`` for a VI the last
+            snapshot did not carry (one configured after it, or none at all)
+            — the same answer an offline instrument gets, and the
+            conservative one for a toggle deciding whether to offer Standby.
+        """
+        entry = self._snapshot.instruments.get(vi_name) or {}
+        return str(entry.get("lifecycle") or LifecycleState.IDLE.value)
 
     def vi_faults(self) -> dict[str, dict[str, Any]]:
         """Return ``{vi_name: fault dict}`` for every faulted VI."""

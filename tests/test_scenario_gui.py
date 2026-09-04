@@ -15,8 +15,9 @@
 #   Passing scenarios are regression tests. A genuine defect is recorded as
 #   ``@pytest.mark.xfail(strict=True, reason="DEFECT: ...")`` with its
 #   reproduction in the test body, never fixed here (rules of engagement —
-#   this suite tests, it does not patch product code).
-# last_updated: 2026-09-03
+#   this suite tests, it does not patch product code). A defect that HAS been
+#   fixed loses its xfail and stays as the regression test for the fix.
+# last_updated: 2026-09-04
 # ---
 
 """GUI scenarios for a running measurement (both instrument modes)."""
@@ -34,6 +35,7 @@ from PyQt6.QtWidgets import QApplication, QPushButton
 from cryosoft.core import events as ev
 from cryosoft.core.instrument_host import InstrumentHost
 from cryosoft.core.plan import PhasePlan, StepPlan, Target
+from cryosoft.core.request_spool import RequestSpool
 from cryosoft.core.station import build_station
 from cryosoft.gui.monitor_window import MonitorWindow
 from cryosoft.gui.procedure_window import ProcedureWindow
@@ -41,7 +43,7 @@ from cryosoft.procedures.field_sweep import FieldSweep
 from cryosoft.session.eln.publisher import ElnPublisher
 from cryosoft.session.eln.settings import ElnSettings
 from cryosoft.session.eln.sim_eln import SimElnAdapter
-from cryosoft.session.gateway import Gateway, Role, ToolContext
+from cryosoft.session.gateway import Gateway, Role, ToolContext, authorize_spooled
 from cryosoft.session.manager import ExperimentManager
 from cryosoft.session.models import User
 from cryosoft.session.store import ExperimentStore, UserRoster
@@ -54,6 +56,7 @@ from tests.instrument_modes import (
     on_engine,
     settled,
     shutdown_host,
+    tick_engine,
 )
 
 CONFIG_PATH = "cryosoft/configs/sim_cryostat"
@@ -642,35 +645,35 @@ def test_emergency_standby_during_measuring_reaches_emergency_and_acknowledge_re
     assert len(procedure_win._queue_panel._host.snapshot()) == queued_before
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "DEFECT: after emergency_standby() every VI's Initiate/Standby "
-        "lifecycle toggle keeps showing 'Standby' (i.e. still initiated) "
-        "even though the hardware was actually stood down — "
-        "Orchestrator._enter_emergency() calls Station.standby_all() "
-        "directly (core/station.py) rather than through the per-VI GUI "
-        "action queue, so no action_succeeded fires and "
-        "InstrumentPanel._on_action_succeeded() (the only place that calls "
-        "LifecycleToggleButton.set_initiated(False)) never runs. The "
-        "operator's card is left claiming the instrument is still running."
-    ),
-)
 def test_cards_reflect_the_standby_emergency_standby_actually_performed(
     monitor_win, station, orchestrator, qtbot
 ):
-    """The card's lifecycle toggle should reflect the standby EMERGENCY performed."""
+    """The card's lifecycle toggle reflects the standby EMERGENCY performed.
+
+    ``_enter_emergency()`` stands every VI down through
+    ``Station.standby_all()``, which deliberately bypasses the per-VI action
+    queue and so emits no ``action_succeeded`` at all. The card learns it
+    anyway, because the Initiate/Standby toggle RENDERS the lifecycle state
+    the ``StatusSnapshot`` carries (GLOSSARY.md's **Lifecycle state**)
+    rather than tracking the actions it happened to see — which is exactly
+    what used to leave the operator's card claiming the instrument was
+    still running.
+    """
     on_engine(orchestrator, lambda: _fast_magnet(station))
     orchestrator.start_monitoring()
     orchestrator.submit_vi_action("magnet_z", "initiate")
-    settled(orchestrator)
+    # A manual action is QUEUED for the tick (the tick is the single hardware
+    # writer), and the snapshot that reports its consequence is that tick's.
+    tick_engine(orchestrator, times=2)
 
     panel = next(p for p in monitor_win._panels if p.vi_name == "magnet_z")
     assert panel._lifecycle.is_initiated() is True
 
     orchestrator.emergency_standby("scenario test")
     qtbot.waitUntil(lambda: orchestrator.state == "EMERGENCY", timeout=10000)
-    settled(orchestrator)
+    # The shutdown runs inside _enter_emergency(), after the state change
+    # emitted its snapshot, so the snapshot that reports it is the next one.
+    tick_engine(orchestrator)
 
     assert panel._lifecycle.is_initiated() is False, (
         "the magnet was actually put into standby by emergency_standby(), "
@@ -679,6 +682,97 @@ def test_cards_reflect_the_standby_emergency_standby_actually_performed(
 
     monitor_win._ack_btn.click()
     settled(orchestrator)
+
+
+def test_a_card_shows_the_standby_an_agent_asked_for_through_the_gateway(
+    monitor_win, station, orchestrator, qtbot
+):
+    """An agent stands one VI down; the human's card says so, with no GUI action.
+
+    The whole path is the agent's: a ``SUBMIT_VI_ACTION`` command stamped
+    with the agent's own actor, authorised by its role (``standby`` is a
+    recovery action), carried out on the tick. Nothing was clicked in this
+    window, and the card still ends up rendering the state the engine
+    reports — which is the point of the lifecycle state travelling the
+    contract.
+    """
+    on_engine(orchestrator, lambda: _fast_magnet(station))
+    orchestrator.start_monitoring()
+    orchestrator.submit_vi_action("magnet_z", "initiate")
+    tick_engine(orchestrator, times=2)
+
+    panel = next(p for p in monitor_win._panels if p.vi_name == "magnet_z")
+    assert panel._lifecycle.is_initiated() is True
+
+    gateway = Gateway(
+        engine_of(orchestrator),
+        Role.SESSION,
+        "runner-7",
+        station_info=station.station_info,
+    )
+    gateway.submit(
+        ev.CommandName.SUBMIT_VI_ACTION,
+        {"vi_name": "magnet_z", "method_name": "standby"},
+    )
+    tick_engine(orchestrator, times=2)
+
+    assert panel._mirror.lifecycle_state("magnet_z") == "standby"
+    assert panel._lifecycle.is_initiated() is False, (
+        "an agent stood magnet_z down through the gateway, but the "
+        "operator's card still shows it as initiated"
+    )
+    _screenshot(panel, "04b_card_after_agent_standby")
+
+
+def test_a_card_shows_the_initiate_the_operator_asked_for_from_the_cli(
+    tmp_path, qtbot
+):
+    """A command that arrives through the Request spool reaches the card too.
+
+    The out-of-process client (``cryosoft.ctl``) never touches the GUI: it
+    drops a request file, the running engine drains it on its next tick, and
+    the only thing that can carry the consequence back to the window is the
+    ``StatusSnapshot``. Built on its own host because the spool is an engine
+    construction option.
+    """
+    spool = RequestSpool(
+        tmp_path / "spool", max_role=Role.SESSION.value, authorizer=authorize_spooled
+    )
+    host = InstrumentHost(
+        lambda: build_station(CONFIG_PATH),
+        mode=instrument_mode(),
+        orchestrator_options={"tick_interval_ms": 200, "request_spool": spool},
+        join_timeout_ms=JOIN_TIMEOUT_MS,
+    )
+    host.start()
+    try:
+        orchestrator = host.build_proxy()
+        win = MonitorWindow(host.station, orchestrator)
+        qtbot.addWidget(win)
+        panel = next(p for p in win._panels if p.vi_name == "magnet_z")
+        assert panel._lifecycle.is_initiated() is False
+
+        spool.write_request(
+            ev.Command(
+                name=ev.CommandName.SUBMIT_VI_ACTION,
+                actor=ev.Actor(
+                    kind=ev.ActorKind.AGENT, id="ctl-1", role=Role.SESSION.value
+                ),
+                args={"vi_name": "magnet_z", "method_name": "initiate"},
+            ),
+            Role.SESSION.value,
+        )
+        # Two ticks: the first drains the spool and queues the action, the
+        # second carries it out and reports it on that tick's snapshot.
+        tick_engine(orchestrator, times=3)
+
+        assert panel._mirror.lifecycle_state("magnet_z") == "initiated"
+        assert panel._lifecycle.is_initiated() is True, (
+            "the operator initiated magnet_z from the CLI, but the Monitor "
+            "window's card still shows it as idle"
+        )
+    finally:
+        shutdown_host(host)
 
 
 # ══════════════════════════════════════════════════════════════════════════

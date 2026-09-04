@@ -64,6 +64,27 @@ a `drivers` dict of role → driver instance (e.g. `{"main": ...}`,
   particular must be a pure accessor over what the generator last commanded
   — never a hardware read — and must be cleared in `stop_ramp()` alongside
   the target.
+- `lifecycle_state()` — what this instrument is DOING, as a fact rather than
+  a history: `"idle"`, `"initiated"` or `"standby"` (the contract's
+  `LifecycleState` vocabulary, `core/events.py`). The **lifecycle-state
+  standard** (full text in `BaseVirtualInstrument`'s docstring; GLOSSARY.md's
+  **Lifecycle state**) in three rules, none of which a VI author writes
+  anything to obey: (1) *the verbs own the fact* — `initiate()` records
+  `"initiated"`, `standby()` records `"standby"`, `disconnect()` resets to
+  `"idle"`, and a measurement VI's `initiate_measurement()` records
+  `"initiated"` exactly like the plain verb, each only AFTER the call returns
+  without raising, maintained by the same `__init_subclass__` wrap the
+  standby-provenance standard uses; (2) *the read is pure* — `lifecycle_state()`
+  answers from the cached value and sends nothing on the bus, because
+  `Station.lifecycle_states()` reads it for every VI on every status snapshot;
+  (3) *hardware may correct it* — a VI whose instrument reports what it is
+  doing overrides `observe_lifecycle_state()`, which the monitor cycle
+  consults once per poll off the values it already read, refreshing the cache
+  without becoming the read. This is what an instrument card renders, so an
+  emergency's blanket `Station.standby_all()` — which emits no per-VI action —
+  still reaches the operator's card on the next snapshot. Distinct from
+  `standby_status()` below, which answers the narrower hold-enforcement
+  question from command provenance.
 - `standby_status()` — whether this VI is at the safe idle state its own
   `standby()` drives it to (`"reached"`), on its way there
   (`"converging"`), or neither (`"away"`). Derived entirely from command
@@ -144,6 +165,13 @@ The written standards all live in this root and are enforced by
   release branch in `standby()` to get this — see
   `virtual_instruments/measurement/README.md`'s "Externally configured
   instruments" section for the motivating case.
+- The lifecycle-state standard (see "Exit" above and
+  `BaseVirtualInstrument`'s docstring): `lifecycle_state()` returns one of the
+  contract's `LifecycleState` values, a freshly built VI reads `"idle"`, and
+  `initiate()`/`standby()` move it. Machine-checked over every VI of every sim
+  config by `test_vi_lifecycle_state_is_declared_and_follows_the_verbs` and
+  `test_vi_lifecycle_state_is_a_pure_read` (the latter watches the drivers, so
+  a read that polled fails).
 - A `vi_type` class attribute (`system` / `measurement` / `level` / `switch`).
 - The control-validation standard: bounded `@control` parameters declared in
   `control_limits`, limit values populated from `init_params`, enforced by the

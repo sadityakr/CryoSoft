@@ -1614,6 +1614,8 @@ class MonitorWindow(QMainWindow):
     def _on_status_snapshot(self, _snapshot: object) -> None:
         """Refresh the state-dependent header controls from the fresh mirror.
 
+        Also re-renders every instrument card's lifecycle toggle.
+
         Args:
             _snapshot: The ``StatusSnapshot`` the mirror just absorbed; the
                 controls read the mirror rather than the payload, so that
@@ -1631,6 +1633,15 @@ class MonitorWindow(QMainWindow):
         self._takeover_strip.set_agents_active(
             self._agent_panel.active_agent_count()
         )
+        # Each instrument card's Initiate/Standby toggle renders the
+        # lifecycle state this snapshot carries (GLOSSARY.md's **Lifecycle
+        # state**), so a stand-down nobody clicked — an emergency's blanket
+        # standby_all(), an agent through the gateway, the CLI — reaches the
+        # card. Routed through this window rather than connected per panel:
+        # the mirror emits at tick rate, and the destruction-order rule wants
+        # the window as the receiver.
+        for panel in self._panels:
+            panel.on_status_snapshot()
 
     def _on_verdict_for_agents(self, verdict: object) -> None:
         """Forward one verdict to the panels that render verdicts.

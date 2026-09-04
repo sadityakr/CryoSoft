@@ -276,6 +276,41 @@ class AgentGate(str, Enum):
     REVOKED = "revoked"
 
 
+class LifecycleState(str, Enum):
+    """What an instrument is DOING, as an observed fact rather than a history.
+
+    The **lifecycle-state standard**'s vocabulary (GLOSSARY.md's *Lifecycle
+    state*): the VI layer keeps this as data
+    (``BaseVirtualInstrument.lifecycle_state()``), the Station reports it
+    (``Station.lifecycle_states()``), and it reaches every client on
+    ``StatusSnapshot.instruments[vi_name]["lifecycle"]``. Declared HERE, in
+    the contract, for the same reason every other shared vocabulary is: a
+    client renders the fact without importing the instrument stack, and no
+    client has to reconstruct it from whichever actions it happened to
+    witness — a station stood down by a path that emits no per-VI action
+    (an emergency's blanket ``standby_all()``) still reports the truth on
+    the very next snapshot.
+
+    A ``str`` enum, like ``AgentGate``, so the value is JSON-safe as it
+    stands and travels on a ``StatusSnapshot`` unchanged.
+
+    Members:
+        IDLE: Not initiated — a freshly built VI, one whose ``disconnect()``
+            hook has run, and any instrument that is not in the live
+            registry at all.
+        INITIATED: ``initiate()`` succeeded and nothing has stood the
+            instrument down since. A measurement VI's
+            ``initiate_measurement()`` — the arming half of its lifecycle —
+            counts the same way.
+        STANDBY: ``standby()`` succeeded; the instrument is at the safe idle
+            state its own stand-down drives it to.
+    """
+
+    IDLE = "idle"
+    INITIATED = "initiated"
+    STANDBY = "standby"
+
+
 def _as_actor(value: Actor | Mapping[str, Any]) -> Actor:
     """Coerce an actor field, which may arrive as its JSON dict.
 
@@ -553,13 +588,23 @@ class StatusSnapshot(_ContractMessage):
     ``instruments`` is the per-VI merge of the same information (availability,
     fault, offline reason, hold, override) for a client that renders one panel
     per instrument rather than one table per concern; it carries the live half
-    of what ``StationInfo`` declares statically.
+    of what ``StationInfo`` declares statically. One of its keys is answered
+    by no other field: ``lifecycle`` — a ``LifecycleState`` value saying what
+    that instrument is DOING (see GLOSSARY.md's *Lifecycle state*). It is
+    here, rather than left for a client to infer from the actions it saw,
+    because the engine stands the whole station down by paths that emit no
+    per-VI action at all (an emergency's ``Station.standby_all()``); a client
+    that reconstructed the state from action history would go on showing an
+    instrument as running after the hardware was stood down.
 
     Attributes:
         state: The engine's current state name.
         run: The active run's summary (``run_id``, ``kind``, ``name``,
             ``progress``, ``step`` where available), or ``None`` when idle.
-        instruments: ``{vi_name: {...}}`` of live per-instrument status.
+        instruments: ``{vi_name: {...}}`` of live per-instrument status —
+            ``availability``, ``fault``, ``offline_reason``, ``held``,
+            ``override_active`` and ``lifecycle`` (a ``LifecycleState``
+            value; see above).
         is_monitoring: Whether the per-tick monitoring cycle is polling.
         pause_pending: Whether a pause is waiting for the current datapoint.
         active_run_kind: ``"procedure"``/``"operation"``, or ``None``.

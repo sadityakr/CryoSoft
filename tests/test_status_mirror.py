@@ -135,3 +135,23 @@ def test_unknown_instruments_answer_empty_rather_than_raising(mirror):
     assert mirror.vi_fault("nope") is None
     assert mirror.offline_reason("nope") == ""
     assert mirror.instrument_info("nope") is None
+    assert mirror.lifecycle_state("nope") == ev.LifecycleState.IDLE.value
+
+
+def test_lifecycle_state_is_mirrored_from_the_snapshot(mirror, engine, station):
+    """The card's fact travels the contract, not the action history.
+
+    Stands the station down the way an emergency does — straight through
+    ``Station.standby_all()``, dispatching no per-VI action — and requires
+    the next snapshot to say so.
+    """
+    station.initiate_all()
+    engine._emit_status_snapshot()
+    assert mirror.lifecycle_state("magnet_z") == "initiated"
+
+    station.standby_all()
+    engine._emit_status_snapshot()
+    assert mirror.lifecycle_state("magnet_z") == "standby"
+    assert all(
+        mirror.lifecycle_state(name) == "standby" for name in station.get_vi_names()
+    )

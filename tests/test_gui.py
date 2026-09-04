@@ -316,6 +316,78 @@ def test_instrument_panel_lifecycle_buttons_exist(station, orchestrator, qtbot):
     assert panel.findChild(QPushButton, f"{vi_name}_standby_btn") is None
 
 
+# ── The lifecycle toggle renders the snapshot (the lifecycle-state standard;
+#    GLOSSARY.md's Lifecycle state) ─────────────────────────────────────────
+
+
+def _publish_snapshot(orchestrator):
+    """Emit one status snapshot from the engine and let it reach this thread."""
+    engine = engine_of(orchestrator)
+    on_engine(orchestrator, engine._emit_status_snapshot)
+
+
+def test_a_card_renders_the_lifecycle_state_the_snapshot_carries(
+    monitor_win, station, orchestrator, qtbot
+):
+    """The toggle follows the engine, including a stand-down nobody clicked.
+
+    ``standby_all()`` is the path an emergency takes: it bypasses the per-VI
+    action queue and emits no ``action_succeeded``, so the only thing that
+    can reach the card is the lifecycle state on the snapshot.
+    """
+    panel = next(p for p in monitor_win._panels if p.vi_name == "magnet_z")
+    assert panel._lifecycle.is_initiated() is False
+
+    on_engine(orchestrator, station.initiate_all)
+    _publish_snapshot(orchestrator)
+    assert panel._lifecycle.is_initiated() is True
+
+    on_engine(orchestrator, station.standby_all)
+    _publish_snapshot(orchestrator)
+    assert panel._lifecycle.is_initiated() is False
+
+
+def test_the_next_snapshot_corrects_an_optimistic_lifecycle_flip(
+    monitor_win, station, orchestrator, qtbot
+):
+    """``_on_action_succeeded()`` may flip early; it no longer owns the truth."""
+    panel = next(p for p in monitor_win._panels if p.vi_name == "magnet_z")
+    panel._lifecycle.set_initiated(True)  # as the optimistic flip would
+    assert panel._lifecycle.is_initiated() is True
+
+    _publish_snapshot(orchestrator)
+    assert panel._lifecycle.is_initiated() is False, (
+        "the snapshot says magnet_z is idle, so the card must stop claiming "
+        "it is initiated"
+    )
+
+
+def test_a_card_opens_showing_an_already_initiated_instrument(
+    station, orchestrator, qtbot
+):
+    """A card built mid-experiment starts on the truth, not on 'Initiate'."""
+    on_engine(orchestrator, station.initiate_all)
+    _publish_snapshot(orchestrator)
+
+    panel = InstrumentPanel("magnet_z", orchestrator)
+    qtbot.addWidget(panel)
+
+    assert panel._lifecycle.is_initiated() is True
+
+
+def test_the_front_panels_toggle_follows_the_snapshot_too(
+    station, orchestrator, qtbot
+):
+    """The front panel's embedded card cannot disagree with the monitor card."""
+    win = InstrumentFrontPanel("magnet_z", orchestrator)
+    qtbot.addWidget(win)
+    assert win._panel._lifecycle.is_initiated() is False
+
+    on_engine(orchestrator, station.initiate_all)
+    _publish_snapshot(orchestrator)
+    assert win._panel._lifecycle.is_initiated() is True
+
+
 def test_instrument_panel_updates_values_on_signal(station, orchestrator, qtbot):
     """states_updated signal → value labels reflect new state."""
     vi_name = "magnet_z"

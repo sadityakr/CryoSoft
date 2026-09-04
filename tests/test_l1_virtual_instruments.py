@@ -1193,3 +1193,171 @@ def test_arming_signature_must_match_measurement_parameters():
             },
             initiate_measurement=initiate_measurement,
         )
+
+
+# 18. Lifecycle-state standard: lifecycle_state() (see BaseVirtualInstrument's
+#     "Lifecycle-state standard" — the verbs own the fact, the read is pure,
+#     and an observing VI may correct the cache from the monitor cycle)
+
+
+def test_lifecycle_state_starts_idle_and_follows_the_verbs():
+    """A fresh VI is idle; initiate() and standby() move it, in either order."""
+    from cryosoft.virtual_instruments.magnet.superconducting_magnet import (
+        SuperconductingMagnetVI,
+    )
+
+    driver = SimOxfordIPS120("SIM")
+    vi = SuperconductingMagnetVI({"main": driver}, amperes_per_tesla=10.0)
+
+    assert vi.lifecycle_state() == "idle"
+    vi.initiate()
+    assert vi.lifecycle_state() == "initiated"
+    vi.standby()
+    assert vi.lifecycle_state() == "standby"
+    vi.initiate()
+    assert vi.lifecycle_state() == "initiated"
+
+
+def test_lifecycle_state_resets_to_idle_on_disconnect():
+    """The release hook drops the fact with the session (the standard's rule 1)."""
+    from cryosoft.virtual_instruments.magnet.superconducting_magnet import (
+        SuperconductingMagnetVI,
+    )
+
+    driver = SimOxfordIPS120("SIM")
+    vi = SuperconductingMagnetVI({"main": driver}, amperes_per_tesla=10.0)
+    vi.initiate()
+    assert vi.lifecycle_state() == "initiated"
+
+    vi.disconnect()
+    assert vi.lifecycle_state() == "idle"
+
+
+def test_lifecycle_state_is_untouched_when_initiate_raises():
+    """A refused initiate() must never leave a card claiming the instrument runs."""
+
+    class RaisingInitiateVI(BaseVirtualInstrument):
+        vi_type = "mock"
+
+        def __init__(self):
+            super().__init__({})
+
+        def initiate(self):
+            raise RuntimeError("could not initiate")
+
+    vi = RaisingInitiateVI()
+    with pytest.raises(RuntimeError):
+        vi.initiate()
+    assert vi.lifecycle_state() == "idle"
+
+
+def test_lifecycle_state_inherited_verbs_are_still_tracked():
+    """A subclass that overrides neither verb inherits the already-wrapped ones."""
+    from cryosoft.virtual_instruments.magnet.superconducting_magnet import (
+        SuperconductingMagnetVI,
+    )
+
+    class UnmodifiedMagnetVI(SuperconductingMagnetVI):
+        """Adds nothing; initiate()/standby() are both inherited."""
+
+    vi = UnmodifiedMagnetVI({"main": SimOxfordIPS120("SIM")}, amperes_per_tesla=10.0)
+
+    assert vi.lifecycle_state() == "idle"
+    vi.initiate()
+    assert vi.lifecycle_state() == "initiated"
+    vi.standby()
+    assert vi.lifecycle_state() == "standby"
+
+
+def test_measurement_vi_arming_counts_as_initiated():
+    """initiate_measurement() is a measurement VI's own initiate (the standard).
+
+    Its plain ``initiate()`` is only a connection check, so a VI armed by a
+    procedure would otherwise still read "idle" while it is sourcing current.
+    """
+    from cryosoft.virtual_instruments.measurement.measurement_dc_mode import (
+        DCModeMeasurementVI,
+    )
+
+    source = SimKeithley6221("SIM")
+    meter = SimKeithley2182A("SIM")
+    source._paired_meter = meter
+    vi = DCModeMeasurementVI({"source": source, "meter": meter})
+
+    assert vi.lifecycle_state() == "idle"
+    vi.initiate_measurement(current=1e-6)
+    assert vi.lifecycle_state() == "initiated"
+    vi.standby()
+    assert vi.lifecycle_state() == "standby"
+
+
+def test_measurement_vi_plain_initiate_also_counts_as_initiated():
+    """The connection-check ``initiate()`` still records the operator's verb."""
+    from cryosoft.virtual_instruments.measurement.measurement_dc_mode import (
+        DCModeMeasurementVI,
+    )
+
+    source = SimKeithley6221("SIM")
+    meter = SimKeithley2182A("SIM")
+    source._paired_meter = meter
+    vi = DCModeMeasurementVI({"source": source, "meter": meter})
+
+    vi.initiate()
+    assert vi.lifecycle_state() == "initiated"
+
+
+def test_observe_lifecycle_state_refreshes_the_cache_on_the_monitor_cycle():
+    """A VI that can read the instrument corrects the cached value at poll time."""
+
+    class ObservingVI(BaseVirtualInstrument):
+        vi_type = "mock"
+
+        def __init__(self):
+            super().__init__({})
+            self.output_on = False
+
+        @monitored
+        def output(self):
+            return self.output_on
+
+        def observe_lifecycle_state(self):
+            return "initiated" if self.last_monitored("output") else "standby"
+
+    vi = ObservingVI()
+    vi.initiate()
+    assert vi.lifecycle_state() == "initiated"
+
+    # Somebody turned the output off at the instrument's own front panel.
+    vi.get_state()
+    assert vi.lifecycle_state() == "standby"
+
+    vi.output_on = True
+    vi.get_state()
+    assert vi.lifecycle_state() == "initiated"
+
+
+def test_observe_lifecycle_state_failures_never_break_the_monitor_cycle():
+    """A raising or out-of-vocabulary observation is ignored, not propagated."""
+
+    class BadObserverVI(BaseVirtualInstrument):
+        vi_type = "mock"
+
+        def __init__(self, answer):
+            super().__init__({})
+            self._answer = answer
+
+        @monitored
+        def reading(self):
+            return 1.0
+
+        def observe_lifecycle_state(self):
+            if self._answer is RuntimeError:
+                raise RuntimeError("cannot tell")
+            return self._answer
+
+    for answer in (RuntimeError, "armed"):
+        vi = BadObserverVI(answer)
+        vi.initiate()
+        state = vi.get_state()
+        assert state["reading"] == 1.0
+        assert vi.lifecycle_state() == "initiated"
