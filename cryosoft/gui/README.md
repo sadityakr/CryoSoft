@@ -116,7 +116,10 @@ is alive and not mid-tick.
   `connect_instrument`, `disconnect_instrument` (the **connection lifecycle**
   in GLOSSARY.md: one `ConnectionButton` on every card, next to the
   Initiate/Standby toggle, and a card SWAP when it is pressed — the live
-  `InstrumentPanel` becomes an `OfflineInstrumentPanel` and back). Every
+  `InstrumentPanel` becomes an `OfflineInstrumentPanel` and back; Connect is
+  refused outside IDLE, while Disconnect follows the **Claim** gate, so a
+  card the running run does not claim swaps mid-run and one it claims is
+  refused into the banner). Every
   `submit_vi_action` is a **direct action path** call and can come back
   refused for any of five reasons (GLOSSARY.md) — the GUI shows the reason on
   the notification banner and never retries on the operator's behalf.

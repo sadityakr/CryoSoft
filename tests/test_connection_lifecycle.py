@@ -405,17 +405,83 @@ def test_orchestrator_disconnect_emits_the_verdict(station: Station, qtbot):
         orch.shutdown()
 
 
-def test_orchestrator_disconnect_blocked_outside_idle(station: Station, qtbot):
-    """Losing an instrument mid-run would escape the run's safety review."""
+def test_orchestrator_disconnect_blocked_for_a_vi_the_run_claims(
+    station: Station, qtbot
+):
+    """A run losing an instrument it CLAIMS would escape its safety review.
+
+    Disconnect goes through the same claim gate every manual action does, so
+    the refusal names the owning run and answers ``BLOCKED_CLAIM``.
+    """
     orch = Orchestrator(station, tick_interval_ms=10)
     try:
         orch._state = OrchestratorState.MEASURING
+        orch._procedure = object()  # any non-None value marks a run active
+        orch._active_claims = {"magnet_z"}
         with qtbot.waitSignal(orch.action_blocked, timeout=500) as blocker:
             orch.disconnect_instrument("magnet_z")
         assert "magnet_z" in blocker.args[0]
+        assert "claimed by running" in blocker.args[0]
         assert station.has_vi("magnet_z") is True
     finally:
         orch._state = OrchestratorState.IDLE
+        orch._procedure = None
+        orch._active_claims = None
+        orch.shutdown()
+
+
+def test_orchestrator_disconnect_allowed_mid_run_for_a_vi_it_does_not_claim(
+    station: Station, qtbot
+):
+    """A VI outside the run's claim stays the operator's to release.
+
+    The gate is the claim, not the state: a run that narrowed
+    ``claimed_vi_names()`` leaves every other instrument under manual
+    control for the length of the run — including handing one back to its
+    own front panel.
+    """
+    orch = Orchestrator(station, tick_interval_ms=10)
+    try:
+        orch._state = OrchestratorState.MEASURING
+        orch._procedure = object()
+        orch._active_claims = {"magnet_z"}
+        with qtbot.waitSignals(
+            [orch.instrument_disconnected, orch.action_succeeded], timeout=500
+        ):
+            orch.disconnect_instrument("level_meter")
+        assert station.has_vi("level_meter") is False
+        assert station.has_vi("magnet_z") is True
+    finally:
+        orch._state = OrchestratorState.IDLE
+        orch._procedure = None
+        orch._active_claims = None
+        orch.shutdown()
+
+
+def test_orchestrator_disconnect_blocked_for_a_vi_the_run_is_ramping(
+    station: Station, qtbot
+):
+    """A VI the run is physically moving is owned by it, claimed or not.
+
+    The run's **Ramp scope** is refused alongside its claim: a ramp in
+    flight is this run's hardware motion, and releasing the instrument
+    under it would abandon a moving magnet to nobody.
+    """
+    orch = Orchestrator(station, tick_interval_ms=10)
+    try:
+        orch._state = OrchestratorState.RAMPING
+        orch._procedure = object()
+        orch._active_claims = {"level_meter"}  # deliberately NOT magnet_z
+        orch._active_system_vis = {"magnet_z"}
+        with qtbot.waitSignal(orch.action_blocked, timeout=500) as blocker:
+            orch.disconnect_instrument("magnet_z")
+        assert "ramped by running" in blocker.args[0]
+        assert station.has_vi("magnet_z") is True
+    finally:
+        orch._state = OrchestratorState.IDLE
+        orch._procedure = None
+        orch._active_claims = None
+        orch._active_system_vis = set()
         orch.shutdown()
 
 
@@ -470,8 +536,9 @@ def test_disconnect_survives_a_round_trip_through_the_tick(
 # (rebuilding every driver from config) actually reconnected it. The fix
 # (Station.retry_fault()'s disconnected-kind branch) rebuilds the session in
 # place; these tests cover the Orchestrator-level restriction that makes it
-# safe: never rebuild a VI a run currently claims, mirroring why
-# connect_instrument()/disconnect_instrument() are IDLE-only.
+# safe: never rebuild a VI a run currently claims — the same claim gate
+# disconnect_instrument() applies, and the reason connect_instrument()
+# is IDLE-only (a VI joining mid-run bypasses the run's safety review).
 
 
 def _escalate_to_disconnected(station: Station, vi_name: str) -> None:

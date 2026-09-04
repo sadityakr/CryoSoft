@@ -275,6 +275,21 @@ class _SlowDatapointProcedure:
         return self._index / len(self._sweep)
 
 
+class _MagnetOnlyClaimProcedure(_SlowDatapointProcedure):
+    """The same sweep, claiming only the magnet it drives.
+
+    A narrowed **Claim** (GLOSSARY.md), as ``TimeSeries`` and the operations
+    declare one: everything the run does not name stays under manual control
+    for the length of the run — including being released to its own front
+    panel.
+    """
+
+    name = "Magnet-Only Claim Probe"
+
+    def claimed_vi_names(self) -> set[str]:
+        return {"magnet_z"}
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # Scenario 1 — click storm during a long datapoint
 # ══════════════════════════════════════════════════════════════════════════
@@ -431,12 +446,10 @@ def test_disconnect_swaps_the_card_reconnect_swaps_it_back_and_station_info_rede
 ):
     """Disconnect (while IDLE) swaps the card, re-declares the VI offline, and reconnects.
 
-    ``Orchestrator.disconnect_instrument()`` is only ever allowed in IDLE —
-    for EVERY VI, not only ones a run claims (see the next test, and its own
-    docstring: "no separate claims check is needed" because a run is never
-    active while IDLE). So the swap-and-reconnect round trip is exercised
-    here at IDLE, and the "mid-run" half of this scenario is the refusal
-    below.
+    The whole round trip — release, re-declaration, reconnect — with nothing
+    running, so no claim is in play at all. The next test is the same swap
+    happening MID-RUN for a VI the run does not claim, plus the refusal for
+    the one it does.
     """
     from PyQt6.QtWidgets import QGroupBox
 
@@ -471,39 +484,50 @@ def test_disconnect_swaps_the_card_reconnect_swaps_it_back_and_station_info_rede
     assert "operator" not in _availability("level_meter")
 
 
-def test_disconnect_mid_run_is_refused_for_the_claimed_vi_and_the_free_one_alike(
+def test_disconnect_mid_run_is_refused_for_the_claimed_vi_and_allowed_for_the_free_one(
     monitor_win, station, orchestrator, qtbot
 ):
-    """Mid-run, Disconnect is refused with a reason — for ANY VI, not only a claimed one.
+    """Mid-run, Disconnect follows the CLAIM: refused for the run's VI, allowed for the rest.
 
-    The task brief for this scenario expects disconnecting an unclaimed VI
-    (e.g. the level meter) to succeed and swap its card while the run
-    continues, refusing only a VI the run claims. That is not what the code
-    does: ``Orchestrator.disconnect_instrument()`` gates on
-    ``self._state != IDLE`` alone (``orchestrator.py``), with no per-VI
-    claims check at all — its own docstring says so explicitly ("no
-    separate claims check is needed"). So BOTH the claimed VI (``magnet_z``)
-    and the free one (``level_meter``) are refused here, identically. This
-    is documented, intentional behavior, not a defect this suite flags —
-    the assertions below record the actual, broader refusal.
+    ``Orchestrator.disconnect_instrument()`` runs the same admission
+    predicate every manual action does (see its docstring), so releasing an
+    instrument is refused exactly where controlling it would be. The magnet
+    this run claims is refused with a reason in the banner and stays
+    connected; the level meter it does not claim is released while the run
+    keeps going — its card swaps to the offline form and the station's own
+    declaration re-declares it offline, exactly as at IDLE.
     """
     from PyQt6.QtWidgets import QGroupBox
 
     on_engine(orchestrator, lambda: _fast_magnet(station))
     orchestrator.start_monitoring()
-    orchestrator.run_procedure(_SlowDatapointProcedure(measure_seconds=0.05))
+    orchestrator.run_procedure(_MagnetOnlyClaimProcedure(measure_seconds=0.05))
     qtbot.waitUntil(lambda: orchestrator.state != "IDLE", timeout=5000)
 
-    for vi_name in ("magnet_z", "level_meter"):
-        monitor_win._banner.hide()
-        card = monitor_win.findChild(QGroupBox, f"{vi_name}_panel")
-        card.findChild(QPushButton, f"{vi_name}_disconnect_btn").click()
-        settled(orchestrator)
+    # The VI the run claims: refused, named, still connected.
+    monitor_win._banner.hide()
+    monitor_win.findChild(QGroupBox, "magnet_z_panel").findChild(
+        QPushButton, "magnet_z_disconnect_btn"
+    ).click()
+    settled(orchestrator)
+    assert station.has_vi("magnet_z") is True, "the claimed VI must stay connected"
+    assert monitor_win._offline_cards == {}
+    assert monitor_win._banner.isVisible()
+    assert "magnet_z" in monitor_win._banner._label.text()
 
-        assert station.has_vi(vi_name) is True, f"{vi_name} must stay connected"
-        assert monitor_win._offline_cards == {}
-        assert monitor_win._banner.isVisible()
-        assert vi_name in monitor_win._banner._label.text()
+    # The VI it does not claim: released mid-run, card swapped, run continues.
+    monitor_win.findChild(QGroupBox, "level_meter_panel").findChild(
+        QPushButton, "level_meter_disconnect_btn"
+    ).click()
+    settled(orchestrator)
+    assert station.has_vi("level_meter") is False
+    assert "level_meter" in monitor_win._offline_cards
+    assert monitor_win.findChild(QGroupBox, "level_meter_offline_card") is not None
+    info = next(
+        i for i in station.station_info().instruments if i.name == "level_meter"
+    )
+    assert "operator" in info.availability
+    assert orchestrator.state != "IDLE", "the run carries on without it"
 
     qtbot.waitUntil(lambda: orchestrator.state == "IDLE", timeout=15000)
 
