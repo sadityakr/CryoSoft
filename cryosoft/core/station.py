@@ -33,6 +33,7 @@ from cryosoft.core.events import (
     ControlInfo,
     GroupInfo,
     InstrumentInfo,
+    LifecycleState,
     MonitoredInfo,
     StationInfo,
 )
@@ -524,6 +525,47 @@ class Station:
         """
         names = list(self._virtual_instruments.keys()) + list(self._offline_vis.keys())
         return {name: self._build_availability(name) for name in names}
+
+    def lifecycle_state(self, vi_name: str) -> str:
+        """Return what one configured instrument is DOING (the lifecycle-state standard).
+
+        The Station's read side of the standard (GLOSSARY.md's **Lifecycle
+        state**; full text in ``BaseVirtualInstrument``'s docstring): a pure
+        passthrough to the VI's own cached answer, so this costs nothing and
+        can be asked for every VI on every tick.
+
+        Args:
+            vi_name: Name of a configured VI — live or offline.
+
+        Returns:
+            One of ``LifecycleState``'s values. An OFFLINE instrument is
+            reported ``"idle"``: CryoSoft holds nothing of it, so it cannot
+            be initiated as far as any client is concerned, and the VI a
+            later ``connect_instrument()`` builds starts there too.
+
+        Raises:
+            KeyError: If `vi_name` is not a configured VI at all, mirroring
+                ``availability()`` / ``get_vi()``.
+        """
+        vi = self._virtual_instruments.get(vi_name)
+        if vi is None:
+            if vi_name in self._offline_vis:
+                return LifecycleState.IDLE.value
+            raise KeyError(vi_name)
+        return vi.lifecycle_state()
+
+    def lifecycle_states(self) -> dict[str, str]:
+        """Return every configured instrument's lifecycle state.
+
+        Covers the live and the offline registry, exactly as
+        ``availabilities()`` does, so the status-snapshot assembly can carry
+        one entry per VI a client renders a card for. Polls nothing.
+
+        Returns:
+            ``{vi_name: lifecycle state}`` for every configured VI.
+        """
+        names = list(self._virtual_instruments.keys()) + list(self._offline_vis.keys())
+        return {name: self.lifecycle_state(name) for name in names}
 
     def connect_instrument(self, vi_name: str) -> tuple[bool, str]:
         """Bring an offline VI online: rebuild its drivers, the VI, then verify.
@@ -2158,7 +2200,12 @@ class Station:
     # ------------------------------------------------------------------
 
     def initiate_all(self) -> None:
-        """Call ``initiate()`` on every registered VI."""
+        """Call ``initiate()`` on every registered VI.
+
+        Each successful call records that VI's lifecycle state (the
+        lifecycle-state standard), so a bulk bring-up that dispatches no
+        per-VI action still reaches every client on the next snapshot.
+        """
         for vi_name, vi in self._virtual_instruments.items():
             logger.info("Initiating VI '%s'", vi_name)
             try:
@@ -2167,7 +2214,15 @@ class Station:
                 logger.exception("Error initiating VI '%s'", vi_name)
 
     def standby_all(self) -> None:
-        """Call ``standby()`` on every registered VI."""
+        """Call ``standby()`` on every registered VI.
+
+        The blanket stand-down an emergency takes (``Orchestrator.
+        _enter_emergency()``). It deliberately bypasses the per-VI action
+        queue, so it emits no ``action_succeeded`` — which is exactly why
+        each VI records its own lifecycle state (the lifecycle-state
+        standard) instead: the next ``StatusSnapshot`` reports every
+        instrument as stood down whether or not any client saw an action.
+        """
         for vi_name, vi in self._virtual_instruments.items():
             logger.info("Putting VI '%s' into standby", vi_name)
             try:

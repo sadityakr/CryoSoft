@@ -4002,3 +4002,49 @@ def test_emergency_standby_passes_the_closed_gate(port):
 
     assert recorder.verdicts[-1].code is ev.VerdictCode.OK
     assert orch.state == OrchestratorState.EMERGENCY.value
+
+
+# ── Lifecycle state on the snapshot (GLOSSARY.md's Lifecycle state) ──────────
+
+
+def test_snapshot_carries_each_instruments_lifecycle_state(orchestrator, station):
+    """Every instrument entry says what that instrument is doing."""
+    station.initiate_all()
+    snapshot = orchestrator.status_snapshot()
+    assert {
+        name: entry["lifecycle"] for name, entry in snapshot.instruments.items()
+    } == {name: "initiated" for name in station.get_vi_names()}
+
+
+def test_emergency_standby_reaches_the_snapshot_as_a_lifecycle_change(
+    orchestrator, station
+):
+    """The blanket stand-down dispatches no per-VI action, and still shows up.
+
+    This is the defect the lifecycle-state standard exists for: an operator's
+    card must never keep claiming an instrument is running after
+    ``_enter_emergency()`` has stood it down through ``Station.standby_all()``.
+    """
+    station.initiate_all()
+    assert all(
+        entry["lifecycle"] == "initiated"
+        for entry in orchestrator.status_snapshot().instruments.values()
+    )
+
+    orchestrator.emergency_standby("coil voltage climbing")
+    assert orchestrator.state == OrchestratorState.EMERGENCY.value
+
+    snapshot = orchestrator.status_snapshot()
+    assert all(
+        entry["lifecycle"] == "standby" for entry in snapshot.instruments.values()
+    ), snapshot.instruments
+
+
+def test_snapshot_reports_a_disconnected_instrument_as_idle(orchestrator, station):
+    """An instrument CryoSoft no longer holds cannot be shown as initiated."""
+    station.initiate_all()
+    orchestrator.disconnect_instrument("magnet_z")
+
+    snapshot = orchestrator.status_snapshot()
+    assert snapshot.instruments["magnet_z"]["lifecycle"] == "idle"
+    assert snapshot.instruments["magnet_y"]["lifecycle"] == "initiated"

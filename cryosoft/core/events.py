@@ -588,13 +588,23 @@ class StatusSnapshot(_ContractMessage):
     ``instruments`` is the per-VI merge of the same information (availability,
     fault, offline reason, hold, override) for a client that renders one panel
     per instrument rather than one table per concern; it carries the live half
-    of what ``StationInfo`` declares statically.
+    of what ``StationInfo`` declares statically. One of its keys is answered
+    by no other field: ``lifecycle`` — a ``LifecycleState`` value saying what
+    that instrument is DOING (see GLOSSARY.md's *Lifecycle state*). It is
+    here, rather than left for a client to infer from the actions it saw,
+    because the engine stands the whole station down by paths that emit no
+    per-VI action at all (an emergency's ``Station.standby_all()``); a client
+    that reconstructed the state from action history would go on showing an
+    instrument as running after the hardware was stood down.
 
     Attributes:
         state: The engine's current state name.
         run: The active run's summary (``run_id``, ``kind``, ``name``,
             ``progress``, ``step`` where available), or ``None`` when idle.
-        instruments: ``{vi_name: {...}}`` of live per-instrument status.
+        instruments: ``{vi_name: {...}}`` of live per-instrument status —
+            ``availability``, ``fault``, ``offline_reason``, ``held``,
+            ``override_active`` and ``lifecycle`` (a ``LifecycleState``
+            value; see above).
         is_monitoring: Whether the per-tick monitoring cycle is polling.
         pause_pending: Whether a pause is waiting for the current datapoint.
         active_run_kind: ``"procedure"``/``"operation"``, or ``None``.

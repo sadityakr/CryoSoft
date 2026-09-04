@@ -3229,6 +3229,12 @@ class Orchestrator(QObject):
             if reason:
                 offline_reasons[name] = reason
         held = self.held_vi_names()
+        # The lifecycle-state standard (GLOSSARY.md's **Lifecycle state**):
+        # what each instrument is DOING, read from the Station as a fact
+        # rather than left for a client to infer from the actions it saw —
+        # the emergency's blanket standby_all() dispatches none. A pure
+        # cached read per VI, so it costs the tick nothing.
+        lifecycles = self._station.lifecycle_states()
         instruments = {
             name: {
                 "availability": availabilities[name],
@@ -3236,6 +3242,7 @@ class Orchestrator(QObject):
                 "offline_reason": offline_reasons.get(name, ""),
                 "held": name in held,
                 "override_active": self.override_active(name),
+                "lifecycle": lifecycles.get(name, ev.LifecycleState.IDLE.value),
             }
             for name in availabilities
         }

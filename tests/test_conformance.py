@@ -3329,7 +3329,13 @@ def _contract_specimens() -> dict[str, object]:
         "StatusSnapshot": StatusSnapshot(
             state="RAMPING",
             run={"run_id": "r-1", "kind": "procedure", "progress": 0.25},
-            instruments={"magnet_z": {"availability": "live", "held": False}},
+            instruments={
+                "magnet_z": {
+                    "availability": "live",
+                    "held": False,
+                    "lifecycle": "initiated",
+                }
+            },
             is_monitoring=True,
             pause_pending=True,
             active_run_kind="procedure",

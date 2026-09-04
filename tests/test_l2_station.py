@@ -1500,3 +1500,55 @@ def test_read_instrument_thread_honours_a_deliberate_refusal(tmp_path):
         "monitor:\n  tick_interval_ms: 1000\n  instrument_thread: true\n"
     )
     assert read_instrument_thread(str(tmp_path)) is True
+
+
+# ── Lifecycle-state standard: the Station's read (GLOSSARY.md's Lifecycle
+#    state; the VI half lives in BaseVirtualInstrument) ────────────────────
+
+
+def test_lifecycle_states_cover_every_vi_and_follow_the_verbs(sim_station):
+    """Every configured VI is reported, and initiate_all/standby_all move all of them."""
+    states = sim_station.lifecycle_states()
+    assert set(states) == set(sim_station.get_vi_names())
+    assert set(states.values()) == {"idle"}
+
+    sim_station.initiate_all()
+    assert set(sim_station.lifecycle_states().values()) == {"initiated"}
+
+    sim_station.standby_all()
+    assert set(sim_station.lifecycle_states().values()) == {"standby"}
+
+
+def test_lifecycle_state_of_one_vi_matches_the_vi_itself(sim_station):
+    """The Station's per-VI read is a passthrough, never a second copy."""
+    sim_station.execute_vi_action("magnet_z", "initiate")
+    assert sim_station.lifecycle_state("magnet_z") == "initiated"
+    assert sim_station.lifecycle_state("magnet_z") == (
+        sim_station.get_vi("magnet_z").lifecycle_state()
+    )
+    assert sim_station.lifecycle_state("magnet_y") == "idle"
+
+    with pytest.raises(KeyError):
+        sim_station.lifecycle_state("no_such_instrument")
+
+
+def test_lifecycle_state_reads_idle_for_a_disconnected_instrument(sim_station):
+    """A released instrument is not initiated as far as any client is concerned."""
+    sim_station.execute_vi_action("magnet_z", "initiate")
+    assert sim_station.lifecycle_state("magnet_z") == "initiated"
+
+    ok, _message = sim_station.disconnect_instrument("magnet_z")
+    assert ok
+    assert sim_station.lifecycle_state("magnet_z") == "idle"
+    assert sim_station.lifecycle_states()["magnet_z"] == "idle"
+
+
+def test_lifecycle_states_send_no_instrument_traffic(sim_station):
+    """The snapshot assembly reads this every tick, so it must not poll."""
+    from tests.mocks.bus_spy import spy_on_station
+
+    sim_station.initiate_all()
+    calls: list[str] = []
+    spy_on_station(sim_station, calls)
+    assert sim_station.lifecycle_states()
+    assert not calls, f"lifecycle_states() polled the bus: {sorted(set(calls))}"
