@@ -509,7 +509,12 @@ def build_run(
 
     Returns:
         A ready procedure or operation instance, reduced to a **probe run**
-        when the spec carries a ``probe_spec``.
+        when the spec carries a ``probe_spec``, and carrying ``queued_by``:
+        the spec's **Actor**, which becomes the **run owner** when the engine
+        starts it (see ``Orchestrator._pull_next_run()``). It rides on the
+        object because that object is all the engine ever receives — the
+        spec stays here — and it is read duck-typed there, since contract C5
+        forbids the engine from importing this module to learn the type.
 
     Raises:
         KeyError: If the catalog holds no class of that name.
@@ -525,17 +530,20 @@ def build_run(
             f"{sorted(run_catalog)}"
         )
     if spec.kind == KIND_OPERATION:
-        return build_operation(run_class, station=station, params=spec.params)
-    return build_procedure(
-        run_class,
-        station=station,
-        params=dict(spec.params),
-        sample_info=dict(spec.sample_info),
-        data_directory=spec.data_directory,
-        file_prefix=spec.file_prefix,
-        experiment_info=dict(experiment_info) if experiment_info else None,
-        probe=ProbeSpec.from_json(spec.probe_spec) if spec.probe_spec else None,
-    )
+        run = build_operation(run_class, station=station, params=spec.params)
+    else:
+        run = build_procedure(
+            run_class,
+            station=station,
+            params=dict(spec.params),
+            sample_info=dict(spec.sample_info),
+            data_directory=spec.data_directory,
+            file_prefix=spec.file_prefix,
+            experiment_info=dict(experiment_info) if experiment_info else None,
+            probe=ProbeSpec.from_json(spec.probe_spec) if spec.probe_spec else None,
+        )
+    run.queued_by = spec.actor
+    return run
 
 
 def _accepts_extra_params(run_class: type) -> bool:

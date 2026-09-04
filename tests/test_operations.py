@@ -597,7 +597,9 @@ def test_confirm_operation_names_the_actor_when_the_operation_declares_one(
 
     agent = ev.Actor(kind=ev.ActorKind.AGENT, id="runner-7", role="session")
     op = AttestingOperation(station)
-    orchestrator.run_operation(op)
+    # The agent runs the operation, so it is the **run owner** and the
+    # run-ownership standard has nothing to say about its own attestation.
+    orchestrator.run_operation(op, actor=agent)
 
     orchestrator.confirm_operation("needle_valve", actor=agent)
     assert op.attested == [("needle_valve", agent)]
@@ -617,7 +619,7 @@ def test_confirm_operation_still_reaches_an_operation_that_names_no_actor(
     """
     agent = ev.Actor(kind=ev.ActorKind.AGENT, id="runner-7", role="session")
     op = SimpleOperation(station)  # confirm(self, key) — no actor parameter
-    orchestrator.run_operation(op)
+    orchestrator.run_operation(op, actor=agent)  # its own run to confirm on
 
     blocked: list[str] = []
     orchestrator.action_blocked.connect(blocked.append)

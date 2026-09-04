@@ -821,7 +821,10 @@ def test_an_agent_command_through_the_engine_is_recorded_as_the_agents(
     _fast_magnets(station)
     _fast_vti(station)
     op = _make_op(op_cls, station)
-    orchestrator.run_operation(op)
+    # Started by the agent, so it OWNS the run: the run-ownership standard
+    # gates an agent attesting to somebody else's operation, and this test is
+    # about the actor reaching the step record, not about that rule.
+    orchestrator.run_operation(op, actor=_AGENT)
     assert orchestrator._procedure is op
 
     verdicts: list[ev.Verdict] = []

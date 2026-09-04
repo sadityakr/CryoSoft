@@ -246,6 +246,26 @@ class StatusMirror(QObject):
         """
         return dict(self._snapshot.run) if self._snapshot.run is not None else None
 
+    def run_owner(self) -> dict[str, Any] | None:
+        """Return the **run owner** of the run in flight, or ``None``.
+
+        The read half of the run-ownership standard (GLOSSARY.md's *Run
+        owner*): who started the run every client is watching, so a panel can
+        say whose run it is and a client can tell before it asks whether a
+        run-scoped action of its own would be a **takeover**. The engine
+        enforces the rule regardless; this is the mirror of the same fact.
+
+        Returns:
+            The owner's ``Actor.ref()`` — ``{"kind", "id"}`` — or ``None``
+            when nothing is running (and for a run summary that carries no
+            owner at all, which nothing this engine emits does).
+        """
+        run = self._snapshot.run
+        if not run:
+            return None
+        owner = run.get("owner")
+        return dict(owner) if isinstance(owner, dict) else None
+
     def is_monitoring(self) -> bool:
         """Return whether the per-tick monitoring cycle was polling."""
         return self._snapshot.is_monitoring
