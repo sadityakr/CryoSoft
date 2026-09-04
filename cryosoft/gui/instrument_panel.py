@@ -18,7 +18,12 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from cryosoft.core.events import ControlInfo, GroupInfo, InstrumentInfo
+from cryosoft.core.events import (
+    ControlInfo,
+    GroupInfo,
+    InstrumentInfo,
+    LifecycleState,
+)
 from cryosoft.core.orchestrator_proxy import OrchestratorProxy
 from cryosoft.core.plan import ParamSpec
 from cryosoft.gui.lifecycle_toggle import ConnectionButton, LifecycleToggleButton
@@ -188,6 +193,11 @@ class InstrumentPanel(QGroupBox):
 
         orchestrator.states_updated.connect(self._on_states_updated)
         orchestrator.action_succeeded.connect(self._on_action_succeeded)
+        # The lifecycle toggle renders the mirror, so a card built for an
+        # instrument that is ALREADY initiated (a reconnect, a window opened
+        # mid-experiment) opens showing that, not "Initiate". Refreshed
+        # afterwards by on_status_snapshot(), which the owning window calls.
+        self._sync_lifecycle()
 
     # ------------------------------------------------------------------
     # Layout construction
@@ -573,6 +583,34 @@ class InstrumentPanel(QGroupBox):
     # Signal handlers
     # ------------------------------------------------------------------
 
+    def on_status_snapshot(self) -> None:
+        """Re-render everything this card reads off a fresh ``StatusSnapshot``.
+
+        Called by the window that owns this card whenever its
+        ``StatusMirror`` absorbs a snapshot — once per tick and on every
+        state change. The window is the connection receiver on purpose (the
+        gui-edit skill's destruction-order rule): Qt severs a receiver's
+        connections at the start of its own destruction, so routing a
+        tick-rate signal through the window is what keeps it out of a
+        partially destroyed child tree.
+        """
+        self._sync_lifecycle()
+
+    def _sync_lifecycle(self) -> None:
+        """Render the Initiate/Standby toggle from the mirror's lifecycle state.
+
+        The lifecycle-state standard's client half (GLOSSARY.md's **Lifecycle
+        state**): the card RENDERS what the engine says the instrument is
+        doing; it never reconstructs it from the actions it happened to see.
+        That is what makes a stand-down nobody clicked — an emergency's
+        blanket ``Station.standby_all()``, an agent standing the VI down
+        through the gateway, an operator initiating from the CLI — reach this
+        card at all. ``set_initiated()`` is a no-op when nothing changed, so
+        calling this every snapshot costs no repaint.
+        """
+        lifecycle = self._mirror.lifecycle_state(self._vi_name)
+        self._lifecycle.set_initiated(lifecycle == LifecycleState.INITIATED.value)
+
     def _on_states_updated(self, full_state: dict) -> None:
         """Update displayed values and border from the station state dict.
 
@@ -761,7 +799,14 @@ class InstrumentPanel(QGroupBox):
         self._orchestrator.disconnect_instrument(self._vi_name)
 
     def _on_action_succeeded(self, vi_name: str, method_name: str) -> None:
-        """Flip the lifecycle toggle once Orchestrator confirms initiate/standby ran.
+        """Flip the lifecycle toggle the moment this card's own action lands.
+
+        An OPTIMISTIC flip, no longer the truth: the toggle's state is the
+        lifecycle the ``StatusSnapshot`` carries (see ``_sync_lifecycle()``),
+        and the next snapshot confirms this or corrects it. It is kept
+        because a verdict arrives before the snapshot that reports its
+        consequence, and a button that answers the click it just received is
+        worth one tick of optimism.
 
         Args:
             vi_name: The VI the confirmed action was submitted for.
