@@ -504,21 +504,15 @@ def test_helium_low_mid_measurement_fails_only_the_run_not_the_station(
     assert orchestrator.override_active("magnet_z") is True
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "DEFECT: a tick-triggered EMERGENCY entry (e.g. a quench) is logged "
-        "only at ERROR, never CRITICAL, unlike an operator/agent "
-        "emergency_standby() call. Repro: trip scenarios.apply_quench() "
-        "under caplog.at_level(logging.CRITICAL, "
-        "logger='cryosoft.core.orchestrator') and tick until EMERGENCY — no "
-        "CRITICAL record is emitted, though CLAUDE.md reserves CRITICAL for "
-        "safety events and _enter_emergency()'s own _error() call passes no "
-        "log_level override. Layer: L3 Orchestrator (_enter_emergency())."
-    ),
-)
 def test_tick_triggered_emergency_entry_is_logged_critical(orchestrator, station, caplog):
-    """A quench observed by the tick, not a manual call, should still log CRITICAL."""
+    """A quench observed by the tick, not a manual call, still logs CRITICAL.
+
+    Every entry into EMERGENCY goes through ``_enter_emergency()``, which
+    writes the one CRITICAL record for it naming the cause and the actor —
+    so the tick's own observation of a quench is recorded at exactly the
+    severity CLAUDE.md reserves for a safety event, the same as an
+    operator's ``emergency_standby()``.
+    """
     with caplog.at_level(logging.CRITICAL, logger="cryosoft.core.orchestrator"):
         scenarios.apply_quench(station)
         _tick_until(
@@ -526,6 +520,9 @@ def test_tick_triggered_emergency_entry_is_logged_critical(orchestrator, station
         )
     critical = [r for r in caplog.records if r.levelno >= logging.CRITICAL]
     assert critical, "a tick-triggered EMERGENCY entry must log CRITICAL too"
+    # The record names the tripped condition and who it is attributed to.
+    assert any("quench" in r.getMessage() for r in critical)
+    assert any("actor system:orchestrator" in r.getMessage() for r in critical)
 
 
 # ══════════════════════════════════════════════════════════════════════════

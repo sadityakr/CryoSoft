@@ -4269,11 +4269,18 @@ def test_connect_click_swaps_the_offline_card_back(qtbot):
         orch.shutdown()
 
 
-def test_disconnect_is_blocked_while_a_run_is_active(qtbot):
-    """The refusal reaches the operator through the banner, not a dialog."""
+def test_disconnect_is_blocked_for_a_vi_the_running_run_claims(qtbot):
+    """The refusal reaches the operator through the banner, not a dialog.
+
+    Disconnect is gated by the claim, not by the state (see
+    ``Orchestrator.disconnect_instrument()``), so the card that gets the
+    refusal is the one the active run owns.
+    """
     station, orch, win = _sim_monitor(qtbot)
     try:
         orch._state = OrchestratorState.MEASURING
+        orch._procedure = object()  # any non-None value marks a run active
+        orch._active_claims = {"magnet_z"}
         win.findChild(QGroupBox, "magnet_z_panel").findChild(
             QPushButton, "magnet_z_disconnect_btn"
         ).click()
@@ -4283,6 +4290,33 @@ def test_disconnect_is_blocked_while_a_run_is_active(qtbot):
         assert "magnet_z" in win._banner._label.text()
     finally:
         orch._state = OrchestratorState.IDLE
+        orch._procedure = None
+        orch._active_claims = None
+        orch.shutdown()
+
+
+def test_disconnect_mid_run_swaps_the_card_for_a_vi_the_run_does_not_claim(qtbot):
+    """An unclaimed instrument stays the operator's to release, run or no run.
+
+    The GUI half of the claim gate: the card swaps to its offline form
+    exactly as it does at IDLE, and the run carries on.
+    """
+    station, orch, win = _sim_monitor(qtbot)
+    try:
+        orch._state = OrchestratorState.MEASURING
+        orch._procedure = object()
+        orch._active_claims = {"magnet_z"}
+        win.findChild(QGroupBox, "level_meter_panel").findChild(
+            QPushButton, "level_meter_disconnect_btn"
+        ).click()
+
+        assert station.has_vi("level_meter") is False
+        assert win.findChild(QGroupBox, "level_meter_offline_card") is not None
+        assert station.has_vi("magnet_z") is True
+    finally:
+        orch._state = OrchestratorState.IDLE
+        orch._procedure = None
+        orch._active_claims = None
         orch.shutdown()
 
 

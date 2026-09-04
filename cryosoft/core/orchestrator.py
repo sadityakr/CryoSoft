@@ -1151,11 +1151,11 @@ class Orchestrator(QObject):
         happen.
 
         Args:
-            reason: Why the station is being stood down. Logged at CRITICAL
-                and carried into the emergency's error message and
-                ``ErrorEvent``, so the record says who asked and why.
+            reason: Why the station is being stood down. Carried into the
+                emergency's error message, its ``ErrorEvent`` and the single
+                CRITICAL entry record ``_enter_emergency()`` writes (which
+                also names the actor), so the record says who asked and why.
         """
-        logger.critical("Emergency standby requested: %s", reason)
         self._enter_emergency(f"emergency standby requested: {reason}")
 
     @command
@@ -1613,6 +1613,13 @@ class Orchestrator(QObject):
         other state pauses on the spot. Goes False again the moment the run
         enters PAUSED, or when the request is cancelled by
         ``resume_procedure()``/``abort_procedure()``.
+
+        Both edges are broadcast: raising and withdrawing the request each
+        emit a ``StatusSnapshot`` on the spot, so a client's status mirror
+        can show ``{state: MEASURING, pause_pending: True}`` — the state the
+        GUI renders as "Pausing" — for the whole interval between the click
+        and the pause boundary, rather than learning of it a tick later when
+        the state has already moved on.
         """
         return self._pause_requested
 
@@ -1652,6 +1659,11 @@ class Orchestrator(QObject):
                 return
             self._pause_requested = True
             self._emit_status("Pause requested - pausing after this point")
+            # The request is a client-visible fact the moment it is accepted,
+            # and no state change carries it: without this the mirror would
+            # only learn of it on the next tick, by which time the state has
+            # already left MEASURING and "pausing" has nothing left to say.
+            self._emit_status_snapshot()
             return
         if self._state in (OrchestratorState.INITIATING, OrchestratorState.RAMPING,
                            OrchestratorState.INITIATION_GATE, OrchestratorState.READING_GATE,
@@ -1699,6 +1711,11 @@ class Orchestrator(QObject):
             if self._pause_requested:
                 self._pause_requested = False
                 self._emit_status("Pause request cancelled")
+                # Symmetric with pause_procedure()'s deferred branch: the
+                # withdrawal is a client-visible fact with no state change of
+                # its own, so the "Pausing" indicator must be taken down by a
+                # snapshot rather than left standing until the next tick.
+                self._emit_status_snapshot()
                 return
             self._action_blocked(f"Cannot resume while {self._state.value}")
             return
@@ -2175,15 +2192,16 @@ class Orchestrator(QObject):
         return admitted, reason
 
     def _manual_action_admission(
-        self, vi_name: str
+        self, vi_name: str, *, verb: str = "control"
     ) -> tuple[bool, str, ev.VerdictCode]:
         """Decide whether a manual action on *vi_name* may be admitted right now.
 
         The single admission predicate (the "Claims + admission gate"),
-        shared verbatim by ``submit_vi_action()`` (what may be *queued*) and
-        the ``_tick_body()`` GUI-action drain gate (what may be *drained*) —
-        they must agree, or a queued action could sit forever without a
-        verdict.
+        shared verbatim by ``submit_vi_action()`` (what may be *queued*), the
+        ``_tick_body()`` GUI-action drain gate (what may be *drained*) — they
+        must agree, or a queued action could sit forever without a verdict —
+        and ``disconnect_instrument()``, whose question is the same one:
+        whoever owns this instrument right now decides who may touch it.
 
         Admission rules, in order:
 
@@ -2234,6 +2252,12 @@ class Orchestrator(QObject):
 
         Args:
             vi_name: The VI the action targets.
+            verb: The verb every refusal reason is phrased with ("Cannot
+                ``verb`` ``vi_name``: …"). Defaults to ``"control"``, which
+                is what a front-panel action is doing; ``disconnect_
+                instrument()`` passes its own so one predicate can answer for
+                both without a client reading "cannot control" over a refused
+                Disconnect. Only the wording changes — never the decision.
 
         Returns:
             ``(True, "", VerdictCode.OK)`` when admitted; otherwise
@@ -2256,7 +2280,7 @@ class Orchestrator(QObject):
             if not_responding:
                 if not TAG_POLICY["not_responding"].controllable:
                     return False, (
-                        f"Cannot control {vi_name}: instrument fault ({held.kind}) — "
+                        f"Cannot {verb} {vi_name}: instrument fault ({held.kind}) — "
                         f"{held.message}. Retry the instrument or wait for it to recover."
                     ), ev.VerdictCode.BLOCKED_FAULT
             else:
@@ -2268,7 +2292,7 @@ class Orchestrator(QObject):
                 ):
                     return admitted
                 return False, (
-                    f"Cannot control {vi_name}: safety hold active "
+                    f"Cannot {verb} {vi_name}: safety hold active "
                     f"({held.kind}). Resolve the condition, or acknowledge to "
                     "unlock manual control."
                 ), ev.VerdictCode.BLOCKED_FAULT
@@ -2283,27 +2307,27 @@ class Orchestrator(QObject):
             if emergency_unlocked:
                 return admitted
             return False, (
-                f"Cannot control {vi_name}: EMERGENCY — acknowledge the "
+                f"Cannot {verb} {vi_name}: EMERGENCY — acknowledge the "
                 "emergency to unlock manual front-panel recovery."
             ), ev.VerdictCode.BLOCKED_STATE
         if self._state == OrchestratorState.ERROR:
             return False, (
-                f"Cannot control {vi_name}: procedure is running in state {self._state.name}"
+                f"Cannot {verb} {vi_name}: procedure is running in state {self._state.name}"
             ), ev.VerdictCode.BLOCKED_STATE
         if self._procedure is None:
             # Defensive: no other non-IDLE, non-manual-ramp state should be
             # reachable with no active run. Refuse conservatively rather than
             # admit on an assumption that turned out false.
             return False, (
-                f"Cannot control {vi_name}: procedure is running in state {self._state.name}"
+                f"Cannot {verb} {vi_name}: procedure is running in state {self._state.name}"
             ), ev.VerdictCode.BLOCKED_STATE
         if self._active_claims is None:
             return False, (
-                f"Cannot control {vi_name}: {self._active_run_label()} is running"
+                f"Cannot {verb} {vi_name}: {self._active_run_label()} is running"
             ), ev.VerdictCode.BLOCKED_CLAIM
         if vi_name in self._active_claims:
             return False, (
-                f"Cannot control {vi_name}: claimed by running {self._active_run_label()}"
+                f"Cannot {verb} {vi_name}: claimed by running {self._active_run_label()}"
             ), ev.VerdictCode.BLOCKED_CLAIM
         return admitted
 
@@ -2525,26 +2549,47 @@ class Orchestrator(QObject):
         connected. Reports through ``action_succeeded(vi_name, "disconnect")``
         plus ``instrument_disconnected(vi_name)``, or ``action_failed``.
 
-        Allowed only in IDLE, the same restriction ``connect_instrument()``
-        uses, for the same reason: a station that loses an instrument
-        mid-procedure has escaped the run's safety review. Since a run is
-        never active while IDLE, this alone keeps a claimed VI from being
-        disconnected out from under it — no separate claims check is needed
-        (contrast ``_manual_action_admissible()``, which also runs outside
-        IDLE and does check claims explicitly). A disconnected instrument is
-        not a fault, so no ``ErrorEvent`` is raised: the operator asked for
-        this.
+        **Gated by the claim, not by the state.** Admission runs through
+        ``_manual_action_admission()``, the single admission predicate every
+        other manual route uses (the "Claims + admission gate"), rather than
+        a blanket "IDLE only" of its own. Releasing an instrument is a manual
+        action on that instrument, so it is refused for exactly the VIs whose
+        front-panel controls are refused, and for the same reasons: a VI the
+        active run CLAIMS is refused ``BLOCKED_CLAIM`` naming the run — that
+        run would lose an instrument mid-procedure, escaping its safety
+        review — while a VI it does not claim may be released mid-run, which
+        is what the narrowed-claim procedures exist for (a ``TimeSeries``
+        recording leaves the cryostat under manual control, and the operator
+        may hand a magnet to its own front panel while it runs). Faults,
+        safety holds, ERROR and EMERGENCY are answered by the same predicate,
+        so this route can never disagree with the rest of the GUI about who
+        owns an instrument. ``connect_instrument()`` stays IDLE-only by
+        contrast: a VI the station does not hold has no claim to consult, and
+        one JOINING mid-run has genuinely bypassed that run's safety review.
+
+        The run's **ramp scope** (``_run_ramp_scope()``) is refused with it:
+        a run that is physically moving a VI owns it for as long as that ramp
+        is in flight, whether or not its ``claimed_vi_names()`` named it.
+
+        A disconnected instrument is not a fault, so no ``ErrorEvent`` is
+        raised: the operator asked for this.
 
         Args:
             vi_name: Name of the live VI to disconnect.
         """
-        if self._state != OrchestratorState.IDLE:
-            msg = (
-                f"Cannot disconnect {vi_name}: Orchestrator is in state "
-                f"{self._state.name}, disconnecting requires IDLE"
+        admitted, reason, code = self._manual_action_admission(
+            vi_name, verb="disconnect"
+        )
+        if admitted and vi_name in (self._run_ramp_scope() or ()):
+            admitted = False
+            reason = (
+                f"Cannot disconnect {vi_name}: ramped by running "
+                f"{self._active_run_label()}"
             )
-            logger.info("Blocked disconnect: %s", msg)
-            self._action_blocked(msg)
+            code = ev.VerdictCode.BLOCKED_CLAIM
+        if not admitted:
+            logger.info("Blocked disconnect: %s", reason)
+            self._action_blocked(reason, code)
             return
         ok, message = self._station.disconnect_instrument(vi_name)
         # Re-declared, and the snapshot refreshed with it, before any per-VI
@@ -2717,8 +2762,8 @@ class Orchestrator(QObject):
         docstring), which must never happen to a VI an active run currently
         claims — that would refresh hardware state out from under a run
         without going through its safety review, the same hazard
-        ``connect_instrument()``/``disconnect_instrument()``'s IDLE-only
-        restriction exists to prevent. So the rebuild is refused (not just
+        ``disconnect_instrument()``'s claim gate and ``connect_instrument()``'s
+        IDLE-only restriction exist to prevent. So the rebuild is refused (not just
         deferred) while the VI is claimed; the operator can retry again once
         the run releases it (ends, fails, or is aborted).
 
@@ -4353,6 +4398,18 @@ class Orchestrator(QObject):
         each tick would, for a persistent magnet, restart the full
         switch-heater warmup/cooldown cycle every few seconds.
 
+        **The single EMERGENCY-entry record.** This is the one path into
+        EMERGENCY — a tripped critical condition observed by the tick and an
+        operator's or agent's ``emergency_standby()`` alike — so the one
+        CRITICAL log line for the entry is written HERE, naming the cause
+        (the tripped condition, or the caller's reason) and the actor it is
+        attributed to. CLAUDE.md reserves CRITICAL for safety events, and an
+        entry into EMERGENCY is one however it was observed; writing it here
+        rather than at each caller is what keeps the two routes from
+        diverging (they did: the manual call logged CRITICAL, the tick's
+        quench only ERROR). Callers pass their reason and add no log line of
+        their own, so the file log carries exactly one record per entry.
+
         Args:
             reason: Human-readable description of the tripped condition(s)
                 (e.g. flag names or an envelope-violation message).
@@ -4363,14 +4420,17 @@ class Orchestrator(QObject):
                 violation, which is checked against a live reading rather
                 than a VI-tagged safety flag).
         """
+        actor = self._current_actor()
         message = f"EMERGENCY: safety condition triggered ({reason})"
         if vi_names:
             message += f" — instrument(s): {', '.join(vi_names)}"
+        message += f" [actor {actor.kind.value}:{actor.id}]"
         self._error(
             message,
             vi_name=", ".join(vi_names) if vi_names else None,
             kind="safety",
             severity="emergency",
+            log_level=logging.CRITICAL,
         )
         # Defense in depth alongside _manual_action_admissible()'s own
         # EMERGENCY/ERROR guard on the hold override: a fresh EMERGENCY

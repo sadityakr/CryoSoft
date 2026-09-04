@@ -646,7 +646,11 @@ class MonitorWindow(QMainWindow):
         # ── Status bar ────────────────────────────────────────────────
         self._status_bar = QStatusBar()
         self.setStatusBar(self._status_bar)
-        self._state_label = QLabel("State: IDLE")
+        # The last state announced, kept because the label is re-rendered
+        # from it whenever a fresh status snapshot lands (a pause requested
+        # mid-datapoint changes no state — see _refresh_state_label()).
+        self._state_name = OrchestratorState.IDLE.value
+        self._state_label = QLabel(f"State: {self._state_name}")
         self._status_bar.addWidget(self._state_label)
         # Current status-bar 'level' ("", "active", "error"); tracked so the
         # dynamic-property restyle only fires when the level actually changes.
@@ -1616,6 +1620,9 @@ class MonitorWindow(QMainWindow):
                 one slot serves every read they make.
         """
         self._refresh_ack_controls()
+        # A requested-but-not-yet-honoured pause changes no state, so the
+        # state label has to follow the snapshot as well as state_changed.
+        self._refresh_state_label()
         # The kill switch and attendance are values ANY client can change, so
         # the strip re-reads the mirror rather than trusting its own last
         # click; the activity count decays with time, so it is recomputed
@@ -1667,7 +1674,8 @@ class MonitorWindow(QMainWindow):
         Args:
             state_name: The new state name string (e.g. ``"IDLE"``).
         """
-        self._state_label.setText(f"State: {state_name}")
+        self._state_name = state_name
+        self._refresh_state_label()
         logger.debug("MonitorWindow: orchestrator state → %s", state_name)
 
         self._in_emergency = state_name == OrchestratorState.EMERGENCY.value
@@ -1689,6 +1697,24 @@ class MonitorWindow(QMainWindow):
             for widget in (self._status_bar, self._state_label):
                 widget.style().unpolish(widget)
                 widget.style().polish(widget)
+
+    def _refresh_state_label(self) -> None:
+        """Render the status bar's state label, including a requested pause.
+
+        A pause asked for while the run is MEASURING is *deferred* to the
+        pause boundary (GLOSSARY.md's **Pause boundary**), so for the length
+        of that datapoint the state is still MEASURING and the only thing
+        that has changed is a flag on the status snapshot. Rendering it as
+        ``MEASURING · Pausing`` is what tells the operator their click was
+        taken — otherwise the window looks identical before and after it, and
+        the pause reads as ignored until the state finally moves.
+
+        Text only: no dynamic property, no new colour. The status-bar level
+        still follows the STATE (a pending pause is not an error, and the run
+        is still active), so nothing here can drift from the palette.
+        """
+        pausing = " · Pausing" if self._mirror.pause_pending() else ""
+        self._state_label.setText(f"State: {self._state_name}{pausing}")
 
     def _on_ack_clicked(self) -> None:
         """Acknowledge, then refresh immediately rather than waiting for the
