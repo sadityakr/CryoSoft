@@ -18,6 +18,11 @@ have to go and find:
   recently, rendered from the **Agent panel**'s own ledger — the panel already
   sees every agent action, so counting them twice would be counting them
   differently.
+* **"run owned by N"**, the **Run owner** of the run in flight, reflected
+  from the same mirror: whose run it is decides who may end it (GLOSSARY.md's
+  *Run owner*), so the fact belongs beside the controls that decide how far
+  agents may go at all. A read, never a control — ownership is a fact about
+  the run, and there is nothing here to set.
 
 Nothing here is ever disabled by the gate. A kill switch that could lock the
 human out of their own instrument would be a hazard rather than a safeguard,
@@ -34,6 +39,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QRadioButton,
+    QSizePolicy,
     QWidget,
 )
 
@@ -68,14 +74,28 @@ GATE_CHOICES: tuple[tuple[AgentGate, str, str], ...] = (
 )
 
 
+#: What the strip says about the run in flight, and nothing at all when
+#: there is none: an empty label rather than "no run", because the state bar
+#: beside it already says the station is idle.
+RUN_OWNER_TEXT = "run owned by {owner}"
+
+#: Why the run owner is worth a line in the header at all. Also the whole of
+#: what the line says when the header is too narrow to show its text.
+OWNER_TOOLTIP = (
+    "Who started the run in flight. Only that actor — or you — may abort it "
+    "or attest to its steps; another agent has to take it over deliberately, "
+    "and the takeover is recorded."
+)
+
+
 class TakeoverStrip(QWidget):
     """The header's agent-control strip.
 
     ObjectNames (API for tests and muscle memory): the strip is
     ``takeover_strip``, its radios ``agent_gate_active_radio`` /
     ``agent_gate_read_only_radio`` / ``agent_gate_revoked_radio``, the
-    attendance box ``takeover_attended_checkbox`` and the indicator
-    ``agents_active_label``.
+    attendance box ``takeover_attended_checkbox``, the indicator
+    ``agents_active_label`` and the run-owner line ``run_owner_label``.
 
     Args:
         orchestrator: The client's ``OrchestratorProxy`` — the gate and
@@ -135,6 +155,21 @@ class TakeoverStrip(QWidget):
         self._attended_checkbox.toggled.connect(self._on_attendance_toggled)
         row.addWidget(self._attended_checkbox)
 
+        self._run_owner_label = QLabel("")
+        self._run_owner_label.setObjectName("run_owner_label")
+        self._run_owner_label.setProperty("class", "secondary_label")
+        # The one widget in the header that yields space when the window is
+        # at its narrowest: it is the only READ here, and the controls beside
+        # it are the human's way of taking the machine back — a kill switch
+        # whose labels had been squeezed to fit a status line would be the
+        # wrong trade. The full text is always in the tooltip.
+        self._run_owner_label.setSizePolicy(
+            QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred
+        )
+        self._run_owner_label.setMinimumWidth(0)
+        self._run_owner_label.setToolTip(OWNER_TOOLTIP)
+        row.addWidget(self._run_owner_label)
+
         self._agents_active_label = QLabel("")
         self._agents_active_label.setObjectName("agents_active_label")
         self._agents_active_label.setProperty("class", "secondary_label")
@@ -173,6 +208,13 @@ class TakeoverStrip(QWidget):
             self._attended_checkbox.blockSignals(True)
             self._attended_checkbox.setChecked(attended)
             self._attended_checkbox.blockSignals(False)
+        owner = self._mirror.run_owner()
+        actor_id = str(owner.get("id") or "") if owner else ""
+        text = RUN_OWNER_TEXT.format(owner=actor_id) if actor_id else ""
+        self._run_owner_label.setText(text)
+        self._run_owner_label.setToolTip(
+            f"{text}. {OWNER_TOOLTIP}" if text else OWNER_TOOLTIP
+        )
 
     def set_agents_active(self, count: int) -> None:
         """Show how many agents are currently acting.

@@ -87,6 +87,11 @@ class _PendingCommand:
         deferred: Whether the answer belongs to a later tick (a queued manual
             action), which is what stops ``submit()`` from closing it with an
             optimistic ``OK`` when the method returns.
+        takeover: The **takeover** record, when this command was admitted
+            over another actor's run ownership. It rides on the pending
+            command rather than on the engine because the verdict that
+            carries it is emitted AFTER the method has returned, by which
+            time the acting context that decided it is gone.
     """
 
     request_id: str
@@ -94,6 +99,33 @@ class _PendingCommand:
     actor: ev.Actor
     resolved: bool = False
     deferred: bool = False
+    takeover: dict[str, Any] | None = None
+
+
+#: The run-scoped commands an agent may take only on a run it OWNS — the
+#: **run-ownership standard** (GLOSSARY.md's *Run owner*). Every one of them
+#: is destructive of somebody's work: it ends the run, ends a step of it, or
+#: attests that a physical step was carried out. Safety and recovery are
+#: deliberately absent — ``emergency_standby``, ``stop_ramp``,
+#: ``pause_procedure`` and ``resume_procedure`` hold the cryostat rather than
+#: destroying a result, and an actor that can see a problem must never be
+#: unable to make the station safe. ``run_queue`` is absent for the same
+#: reason read backwards: it starts a run, it destroys none.
+OWNER_SCOPED_COMMANDS: frozenset[str] = frozenset(
+    {
+        ev.CommandName.ABORT_PROCEDURE.value,
+        ev.CommandName.CONFIRM_OPERATION.value,
+        ev.CommandName.SKIP_OPERATION_STEP.value,
+        ev.CommandName.FINISH_OPERATION.value,
+    }
+)
+
+#: The two arguments an owner-scoped command carries to take a run over
+#: (the refuse-then-override half of the run-ownership standard). The
+#: ``command`` decorator absorbs them exactly as it absorbs ``actor``, so the
+#: four methods keep the signatures they had and no caller of a method that
+#: is not owner-scoped can pass them by accident.
+OWNERSHIP_ARGUMENTS: tuple[str, ...] = ("override_owner", "reason")
 
 
 def command(method: Callable[..., Any]) -> Callable[..., Any]:
@@ -110,6 +142,16 @@ def command(method: Callable[..., Any]) -> Callable[..., Any]:
     acting, so a command that calls another command internally (``run_
     procedure()`` queueing) stays attributed to whoever started it.
 
+    **The run-ownership admission** runs here too, for the four commands in
+    ``OWNER_SCOPED_COMMANDS``: it is in the wrapper rather than in
+    ``submit()`` so that the spool, the local socket and a direct Python
+    caller are all covered by the one check — the same reason the kill
+    switch is enforced in the engine rather than in the client. It absorbs
+    ``override_owner`` and ``reason`` (``OWNERSHIP_ARGUMENTS``) before the
+    method sees them, refuses with ``BLOCKED_ROLE`` when the acting agent is
+    not the owner, and otherwise holds the takeover for the duration of the
+    call so the verdict and ``RunFinished`` can both name it.
+
     Args:
         method: The public method implementing the command.
 
@@ -117,10 +159,29 @@ def command(method: Callable[..., Any]) -> Callable[..., Any]:
         The wrapped method, whose signature is *method*'s plus a
         keyword-only ``actor``.
     """
+    owner_scoped = method.__name__ in OWNER_SCOPED_COMMANDS
 
     @functools.wraps(method)
     def wrapper(self: Orchestrator, *args: Any, actor: ev.Actor = ev.OPERATOR, **kwargs: Any) -> Any:
-        with self._acting_as(actor, method.__name__):
+        refusal: tuple[str, dict[str, Any]] | None = None
+        takeover: dict[str, Any] | None = None
+        if owner_scoped:
+            override = bool(kwargs.pop("override_owner", False))
+            stated = kwargs.pop("reason", "")
+            refusal, takeover = self._run_owner_admission(
+                method.__name__, actor, override, str(stated or "")
+            )
+        pending = self._pending
+        if takeover is not None and pending is not None and (
+            pending.command.value == method.__name__
+        ):
+            pending.takeover = takeover
+        with self._acting_as(actor, method.__name__, takeover=takeover):
+            if refusal is not None:
+                reason, detail = refusal
+                logger.info("Blocked by run ownership: %s", reason)
+                self._action_blocked(reason, ev.VerdictCode.BLOCKED_ROLE, detail)
+                return None
             return method(self, *args, **kwargs)
 
     parameters = list(inspect.signature(method).parameters.values())
@@ -502,6 +563,11 @@ class Orchestrator(QObject):
         self._pending: _PendingCommand | None = None
         self._actor: ev.Actor | None = None
         self._acting_command: str | None = None
+        # The **takeover** record of the command in flight, when it was
+        # admitted over another actor's run ownership: {"owner", "reason"},
+        # held for the duration of the call by _acting_as() so the verdict
+        # and RunFinished both name it. None for every ordinary command.
+        self._takeover: dict[str, Any] | None = None
         self._seq = 0
         # The last command the engine ACCEPTED (see _remember_accepted()),
         # carried onto every operational-status record so the runtime log
@@ -645,6 +711,17 @@ class Orchestrator(QObject):
         self._active_run_manifest: dict[str, Any] | None = None
         self._run_counter = 0
 
+        # The **run owner**: the Actor that started the run in flight, taken
+        # at _start_run() and cleared on every teardown path. A fact, never a
+        # lease — nothing is reserved and nothing can be left locked — read
+        # by _run_owner_admission() and published on every StatusSnapshot.
+        self._run_owner: ev.Actor | None = None
+        # The owner a run pulled off a queue inherits: whoever queued it,
+        # remembered here between _take_queued()/_pull_next_run() and the
+        # _start_run() that follows. None when the next run is not a queued
+        # one, in which case the acting actor owns it.
+        self._next_run_owner: ev.Actor | None = None
+
         # run_summary() hand-off: collected from self._procedure by
         # _emit_run_finished() for the "done" path, where self._procedure is
         # still set. The abort/fail/emergency paths clear self._procedure in
@@ -774,6 +851,16 @@ class Orchestrator(QObject):
         checked at all — a kill switch that could lock the human out of
         their own instrument would be a hazard rather than a safeguard.
 
+        **Run ownership.** The four run-scoped commands in
+        ``OWNER_SCOPED_COMMANDS`` are admitted a second time, by the
+        ``command`` decorator: an ``agent`` that is not the **run owner** is
+        refused ``BLOCKED_ROLE`` unless it carries ``override_owner`` and a
+        ``reason``, in which case the action is recorded as a **takeover**.
+        The check lives in the decorator rather than here so that a direct
+        Python caller passes it too; see ``_run_owner_admission()`` for the
+        rule in full. The two arguments are absorbed there and never reach
+        the method.
+
         Args:
             command: The client's request.
 
@@ -847,6 +934,96 @@ class Orchestrator(QObject):
             "actor_kind": command.actor.kind.value,
             "actor_id": command.actor.id,
         }
+
+    def _run_owner_admission(
+        self, command_name: str, actor: ev.Actor, override: bool, reason: str
+    ) -> tuple[tuple[str, dict[str, Any]] | None, dict[str, Any] | None]:
+        """Judge one owner-scoped command against the **run-ownership standard**.
+
+        The standard, in full (GLOSSARY.md's *Run owner* and *Takeover*):
+
+        * The owner of a run is the ``Actor`` that started it. Ownership is a
+          FACT, not a lease — nothing is reserved, nothing expires, nothing
+          can be left locked, and there is no handover protocol.
+        * **The human is never gated.** An ``operator`` or ``system`` actor
+          is not checked at all, exactly as the kill switch does not check
+          them: a rule that could stand between the physicist and their own
+          cryostat would be a hazard rather than a safeguard.
+        * **Safety is never gated.** Only the four commands in
+          ``OWNER_SCOPED_COMMANDS`` reach here; emergency standby, stopping a
+          ramp, pausing, resuming, the gate and attendance never do.
+        * **Destructive run-scoped actions are owner-scoped for agents.** An
+          ``agent`` that is not the owner is refused ``BLOCKED_ROLE`` with
+          ``detail.rule == "run_owner"``, naming the owner and how to
+          proceed.
+        * **Refuse, then override.** The same command carrying
+          ``override_owner`` and a non-empty ``reason`` is admitted as a
+          **takeover** and recorded as one; an override with no reason is
+          refused with ``detail.rule == "override_reason_required"``, because
+          a takeover whose record does not say why is exactly the
+          unaccountable act this rule exists to prevent. ``BLOCKED_ROLE``
+          rather than ``FAILED`` for both: nothing was attempted, and the
+          verdict standard reserves ``FAILED`` for what was.
+
+        Args:
+            command_name: The owner-scoped command being admitted.
+            actor: Who is asking.
+            override: Whether the caller asked to take the run over.
+            reason: Why they are taking it over; required with *override*.
+
+        Returns:
+            ``(refusal, takeover)`` — exactly one of which is not ``None``,
+            or both ``None`` when ownership has nothing to say (the human,
+            the owner themselves, or no run at all). *refusal* is the
+            ``(reason, detail)`` pair ``_action_blocked()`` takes; *takeover*
+            is the ``{"owner", "reason"}`` record the verdict and
+            ``RunFinished`` carry.
+        """
+        owner = self._run_owner
+        if actor.kind is not ev.ActorKind.AGENT or owner is None:
+            return None, None
+        if owner.kind is actor.kind and owner.id == actor.id:
+            return None, None
+
+        detail: dict[str, Any] = {
+            "owner": owner.ref(),
+            "actor_id": actor.id,
+            "command": command_name,
+            "run_id": str((self._active_run_manifest or {}).get("run_id", "")),
+        }
+        if not override:
+            return (
+                (
+                    f"This run is owned by {owner.kind.value} {owner.id!r}, and "
+                    f"agent {actor.id!r} is not its owner, so {command_name!r} is "
+                    f"refused. Ask the owner or the operator to do it; if you "
+                    f"must do it yourself, re-send the same command with "
+                    f"override_owner=true and a reason saying why — the takeover "
+                    f"is recorded on the run and in the agent feed.",
+                    {**detail, "rule": "run_owner"},
+                ),
+                None,
+            )
+        if not reason.strip():
+            return (
+                (
+                    f"Taking over {owner.kind.value} {owner.id!r}'s run needs a "
+                    f"reason: re-send {command_name!r} with override_owner=true "
+                    f"and a non-empty reason saying why you are taking the run "
+                    f"over.",
+                    {**detail, "rule": "override_reason_required"},
+                ),
+                None,
+            )
+        logger.warning(
+            "Takeover: agent %r is taking %s %r's run over with %s — %s",
+            actor.id,
+            owner.kind.value,
+            owner.id,
+            command_name,
+            reason,
+        )
+        return None, {"owner": owner.ref(), "reason": reason}
 
     def _command_arguments(self, command: ev.Command) -> dict[str, Any]:
         """Convert one command's JSON ``args`` into the method's arguments.
@@ -1298,6 +1475,13 @@ class Orchestrator(QObject):
                 and the error message on setup failure.
         """
         self._procedure = procedure
+        # The **run owner** (GLOSSARY.md's *Run owner*): whoever started this
+        # run owns it. A run pulled off a queue is owned by whoever QUEUED
+        # it — the decision to run it was theirs, and the actor draining the
+        # queue may be the tick itself — so _next_run_owner, set when the run
+        # left the queue, wins over the actor in flight.
+        self._run_owner = self._next_run_owner or self._current_actor()
+        self._next_run_owner = None
         # Claims + admission gate: captured here, duck-typed (never
         # importing BaseProcedure/OperationBase — contract C5) so a test
         # double without claimed_vi_names() behaves exactly like the
@@ -1436,7 +1620,10 @@ class Orchestrator(QObject):
             The run that was waiting at the front.
         """
         run = queue.pop(0)
-        self._queued_actors.pop(id(run), None)
+        # Forgotten from the queue, remembered as the run's owner: the actor
+        # that committed the station to this run is the one that owns it once
+        # it starts (the run-ownership standard).
+        self._next_run_owner = self._queued_actors.pop(id(run), None)
         return run
 
     def _pull_next_run(self) -> Any:
@@ -1454,11 +1641,17 @@ class Orchestrator(QObject):
         if self.next_procedure is None:
             return None
         try:
-            return self.next_procedure()
+            run = self.next_procedure()
         except Exception as exc:  # noqa: BLE001 — a client queue never kills the engine
             logger.exception("next_procedure() failed; queue not advanced")
             self._action_blocked(f"Could not start the next queued run: {exc}")
             return None
+        # The **run owner** a queued run inherits, read off the built run
+        # duck-typed (contract C5 keeps this module from importing the queue
+        # that built it): whoever queued the spec owns the run it becomes.
+        queued_by = getattr(run, "queued_by", None)
+        self._next_run_owner = queued_by if isinstance(queued_by, ev.Actor) else None
+        return run
 
     @command
     def run_queue(self) -> None:
@@ -1517,6 +1710,7 @@ class Orchestrator(QObject):
             return
         run = self._pull_next_run()
         if run is None:
+            self._next_run_owner = None
             return
         self._emit_queue_changed()
         if getattr(run, "command_scope", "measurement") == "operation":
@@ -1742,6 +1936,11 @@ class Orchestrator(QObject):
         measurement safe-off commands, stops all active ramps with a hardware
         hold, and returns to IDLE. Ignored during EMERGENCY — the emergency
         flow owns cleanup there and is exited via acknowledge().
+
+        Owner-scoped for agents (the run-ownership standard, see
+        ``_run_owner_admission()``): an agent that did not start this run is
+        refused unless it takes the run over deliberately, with a reason. The
+        operator is never gated.
         """
         if self._state == OrchestratorState.EMERGENCY:
             logger.info("abort_procedure ignored during EMERGENCY")
@@ -1828,6 +2027,9 @@ class Orchestrator(QObject):
         STANDBY -> postcondition path. Refused with ``action_blocked`` if no
         operation is currently active (a duck-typed procedure without
         ``command_scope == "operation"`` does not count).
+
+        Owner-scoped for agents, exactly as ``abort_procedure()`` is: ending
+        somebody else's operation is ending their result.
         """
         if not self._is_operation_active():
             msg = "Cannot finish operation: no operation is currently running."
@@ -1856,6 +2058,10 @@ class Orchestrator(QObject):
         ``StepRecord`` can tell an autonomous client's self-confirmation of a
         physical step from the physicist's. An operation that predates the
         actor — or a duck-typed test double — is called with the key alone.
+
+        Owner-scoped for agents (the run-ownership standard): attesting to a
+        physical step of somebody else's operation is the accountability case
+        the whole rule exists for.
 
         Args:
             key: The confirmation key (e.g. ``"needle_valve"``), forwarded
@@ -1905,6 +2111,8 @@ class Orchestrator(QObject):
 
         The acting ``Actor`` is forwarded exactly as ``confirm_operation()``
         forwards it: a skip is an override, and the record names who took it.
+        Owner-scoped for agents for the same reason ``confirm_operation()``
+        is (the run-ownership standard).
 
         Args:
             key: The step key, forwarded verbatim to the operation's
@@ -2929,13 +3137,22 @@ class Orchestrator(QObject):
             summary = self._pending_run_summary
         self._pending_run_summary = {}
         manifest["summary"] = summary
+        # The run is over, so nobody owns it any more (the run-ownership
+        # standard: a fact about the run in flight, never a lease that
+        # outlives it).
+        self._run_owner = None
         self.run_finished.emit(manifest)
+        takeover = self._takeover
         self._emit_event(
             ev.RunFinished(
                 run_id=str(manifest.get("run_id", "")),
                 status=status,
                 reason=reason,
                 manifest=_json_safe(manifest),
+                actor=self._current_actor(),
+                overridden_owner=(
+                    dict(takeover["owner"]) if takeover is not None else None
+                ),
                 seq=self._next_seq(),
             )
         )
@@ -2978,7 +3195,12 @@ class Orchestrator(QObject):
     # ------------------------------------------------------------------
 
     @contextmanager
-    def _acting_as(self, actor: ev.Actor, command_name: str) -> Iterator[None]:
+    def _acting_as(
+        self,
+        actor: ev.Actor,
+        command_name: str,
+        takeover: dict[str, Any] | None = None,
+    ) -> Iterator[None]:
         """Hold *actor* and *command_name* for the duration of one command.
 
         The ``command`` decorator wraps every public command method in this,
@@ -2991,20 +3213,29 @@ class Orchestrator(QObject):
         Args:
             actor: Who is acting.
             command_name: The command method's own name.
+            takeover: The **takeover** record when this command was admitted
+                over another actor's run ownership, or ``None`` (every
+                ordinary command). Held the same way and for the same reason
+                the actor is: the verdict and the ``RunFinished`` this
+                command causes both have to name it, and neither is built
+                where the admission ran.
 
         Yields:
             ``None`` — used only for its side effect.
         """
         previous_actor = self._actor
         previous_command = self._acting_command
+        previous_takeover = self._takeover
         if actor is not ev.OPERATOR or previous_actor is None:
             self._actor = actor
         self._acting_command = command_name
+        self._takeover = takeover
         try:
             yield
         finally:
             self._actor = previous_actor
             self._acting_command = previous_command
+            self._takeover = previous_takeover
 
     def _current_actor(self) -> ev.Actor:
         """Return the actor to attribute what is happening right now to.
@@ -3066,6 +3297,12 @@ class Orchestrator(QObject):
         if pending is None or pending.resolved:
             return
         pending.resolved = True
+        if pending.takeover is not None:
+            # A command admitted over another actor's run ownership answers
+            # with the **takeover** in its detail, whatever else the detail
+            # says: an accepted takeover that looked like an ordinary OK
+            # would be exactly the silent act the rule exists to prevent.
+            detail = {**(detail or {}), "takeover": dict(pending.takeover)}
         try:
             verdict = ev.Verdict(
                 request_id=pending.request_id,
@@ -3113,7 +3350,10 @@ class Orchestrator(QObject):
             self._last_accepted = pending
 
     def _action_blocked(
-        self, reason: str, code: ev.VerdictCode = ev.VerdictCode.BLOCKED_STATE
+        self,
+        reason: str,
+        code: ev.VerdictCode = ev.VerdictCode.BLOCKED_STATE,
+        detail: dict[str, Any] | None = None,
     ) -> None:
         """Refuse the action in flight: the compat signal AND the verdict.
 
@@ -3121,9 +3361,14 @@ class Orchestrator(QObject):
             reason: Human-readable refusal, shown verbatim in the GUI.
             code: Which blocking code the refusal is (default
                 ``BLOCKED_STATE``, the state machine's own refusal).
+            detail: The structured half of the refusal, naming the ``rule``
+                that decided it — as ``_action_failed()`` carries a
+                control-limit's numbers — so a client decides from the dict
+                and never by parsing the prose. ``None`` for a refusal whose
+                code says everything there is to say.
         """
         self.action_blocked.emit(reason)
-        self._emit_verdict(code, reason=reason)
+        self._emit_verdict(code, reason=reason, detail=detail)
 
     def _action_failed(
         self,
@@ -3222,9 +3467,13 @@ class Orchestrator(QObject):
         """Return the active run's summary for a ``StatusSnapshot``.
 
         Returns:
-            ``{"id", "name", "kind", "progress", "step", "steps"}`` for the
-            run in flight — every optional key omitted rather than guessed —
-            or ``None`` when no run is active.
+            ``{"id", "name", "kind", "owner", "progress", "step", "steps"}``
+            for the run in flight — every optional key omitted rather than
+            guessed — or ``None`` when no run is active. ``owner`` is the
+            **run owner**'s ``Actor.ref()``, so every client can say whose
+            run this is and judge the run-ownership standard against the same
+            fact the engine enforces (``None`` only for a run started before
+            an owner could be taken, which nothing here does).
         """
         if self._procedure is None and self._active_run_manifest is None:
             return None
@@ -3233,6 +3482,7 @@ class Orchestrator(QObject):
             "id": str(manifest.get("run_id", "")),
             "name": str(manifest.get("procedure", "")),
             "kind": self.active_run_kind() or "",
+            "owner": self._run_owner.ref() if self._run_owner is not None else None,
         }
         get_progress = getattr(self._procedure, "get_progress", None)
         if callable(get_progress):
@@ -4157,6 +4407,7 @@ class Orchestrator(QObject):
             logger.exception("Stopping ramps during abort failed")
 
         self._procedure = None
+        self._run_owner = None
         self._active_claims = None
         self._active_system_vis.clear()
         self._standby_dispatched = False

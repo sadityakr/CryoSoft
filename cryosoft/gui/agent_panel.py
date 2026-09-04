@@ -76,9 +76,20 @@ OUTCOME_OK = "ok"
 OUTCOME_REFUSED = "refused"
 OUTCOME_EVENT = "event"
 OUTCOME_PENDING = "pending"
+#: An accepted action taken on ANOTHER actor's run — the **Takeover** the
+#: run-ownership standard records. Its own outcome because it is neither an
+#: ordinary success nor a refusal: the engine allowed it, and the physicist
+#: still has to be able to find it at a glance.
+OUTCOME_TAKEOVER = "takeover"
 
 #: What the panel says before any non-operator actor has acted.
 EMPTY_TEXT = "No agent has acted in this experiment."
+
+#: The run-owner line's two shapes (GLOSSARY.md's **Run owner**): who owns
+#: the run in flight, so a reader of this panel can tell at a glance whether
+#: an agent acting here is acting on its own run or somebody else's.
+RUN_OWNER_TEXT = "run owned by {owner}"
+NO_RUN_TEXT = "no run in flight"
 
 
 @dataclass(frozen=True)
@@ -102,6 +113,10 @@ class AgentAction:
         run_id: The run a pending **Draft entry** belongs to; ``""`` on every
             other row.
         kind: ``"verdict"``, ``"state"`` or ``"draft"``.
+        takeover_owner: The **Run owner** this action was taken over, id
+            only, read off the verdict's ``detail.takeover``; ``""`` on every
+            ordinary row. When it is set, ``reason`` is the reason the actor
+            gave for taking the run over.
     """
 
     ts: float
@@ -113,6 +128,7 @@ class AgentAction:
     reason: str = ""
     run_id: str = ""
     kind: str = "verdict"
+    takeover_owner: str = ""
 
     @property
     def refused(self) -> bool:
@@ -126,6 +142,8 @@ class AgentAction:
             return OUTCOME_PENDING
         if self.refused:
             return OUTCOME_REFUSED
+        if self.takeover_owner:
+            return OUTCOME_TAKEOVER
         if self.kind == "state":
             return OUTCOME_EVENT
         return OUTCOME_OK
@@ -135,13 +153,19 @@ class AgentAction:
 
         Returns:
             ``"HH:MM:SS  <actor> (<role>)  <what> → <code> — <reason>"``, with
-            the parts that do not apply left out rather than shown empty.
+            the parts that do not apply left out rather than shown empty. A
+            **Takeover** ends instead with ``"took over <owner>'s run:
+            <reason>"``, which is the whole of what happened in the words the
+            contract carried.
         """
         stamp = datetime.fromtimestamp(self.ts).strftime("%H:%M:%S")
         who = f"{self.actor_id} ({self.actor_role})" if self.actor_role else self.actor_id
         line = f"{stamp}  {who}  {self.what}"
         if self.code:
             line = f"{line} → {self.code}"
+        if self.takeover_owner:
+            took = f"took over {self.takeover_owner}'s run"
+            return f"{line} — {took}: {self.reason}" if self.reason else f"{line} — {took}"
         if self.reason:
             line = f"{line} — {self.reason}"
         return line
@@ -167,6 +191,28 @@ def _actor_fields(actor: Any) -> tuple[str, str, str]:
     )
 
 
+def _takeover_fields(detail: Any) -> tuple[str, str]:
+    """Return ``(owner id, reason)`` of a **Takeover**, or two empty strings.
+
+    Args:
+        detail: A ``Verdict.detail`` or an **Agent feed** record's ``detail``.
+            Anything that is not a takeover's mapping reads as no takeover —
+            a panel never judges an action, it renders what the contract
+            carried.
+
+    Returns:
+        The owner whose run was taken over and the reason given for it.
+    """
+    if not isinstance(detail, Mapping):
+        return "", ""
+    takeover = detail.get("takeover")
+    if not isinstance(takeover, Mapping):
+        return "", ""
+    owner = takeover.get("owner")
+    owner_id = str(owner.get("id") or "") if isinstance(owner, Mapping) else ""
+    return owner_id, str(takeover.get("reason") or "")
+
+
 def action_from_verdict(verdict: Verdict) -> AgentAction | None:
     """Build a row from one ``Verdict``, or ``None`` for the operator's own.
 
@@ -182,6 +228,7 @@ def action_from_verdict(verdict: Verdict) -> AgentAction | None:
     kind, actor_id, role = _actor_fields(verdict.actor)
     if kind == ActorKind.OPERATOR.value:
         return None
+    owner, took_because = _takeover_fields(verdict.detail)
     return AgentAction(
         ts=verdict.ts,
         actor_id=actor_id,
@@ -189,8 +236,9 @@ def action_from_verdict(verdict: Verdict) -> AgentAction | None:
         actor_kind=kind,
         what=verdict.command.value,
         code=verdict.code.value,
-        reason=verdict.reason,
+        reason=took_because or verdict.reason,
         kind="verdict",
+        takeover_owner=owner,
     )
 
 
@@ -248,6 +296,7 @@ def action_from_feed_record(record: Mapping[str, Any]) -> AgentAction | None:
         what = str(record.get("command") or record.get("tool") or "")
         code = str(verdict.get("code") or "")
         reason = str(verdict.get("reason") or "")
+    owner, took_because = ("", "") if kind == RECORD_EVENT else _takeover_fields(detail)
     return AgentAction(
         ts=float(ts) if isinstance(ts, (int, float)) and not isinstance(ts, bool) else 0.0,
         actor_id=actor_id,
@@ -255,8 +304,9 @@ def action_from_feed_record(record: Mapping[str, Any]) -> AgentAction | None:
         actor_kind=actor_kind or ActorKind.AGENT.value,
         what=what,
         code=code,
-        reason=reason,
+        reason=took_because or reason,
         kind="state" if kind == RECORD_EVENT else "verdict",
+        takeover_owner=owner,
     )
 
 
@@ -267,7 +317,8 @@ class AgentPanel(QWidget):
     ``agent_panel``, its scroll area ``agent_panel_scroll``, the widget
     holding the rows ``agent_panel_rows``, the empty-state label
     ``agent_panel_empty_label``, the system filter
-    ``agent_panel_system_checkbox``, and each pending draft's button
+    ``agent_panel_system_checkbox``, the run-owner line
+    ``agent_panel_run_owner_label``, and each pending draft's button
     ``agent_approve_<run_id>``. Rows themselves are not named: they are
     rebuilt whenever the filter changes, so an index-based name would point
     at a different action after every toggle. ``row_texts()`` is what a
@@ -365,7 +416,37 @@ class AgentPanel(QWidget):
         self._system_checkbox.toggled.connect(lambda _on: self._rebuild())
         row.addWidget(self._system_checkbox)
         row.addStretch()
+        self._run_owner_label = QLabel(NO_RUN_TEXT)
+        self._run_owner_label.setObjectName("agent_panel_run_owner_label")
+        self._run_owner_label.setProperty("class", "secondary_label")
+        self._run_owner_label.setToolTip(
+            "Who started the run in flight. Only that actor — or you — may "
+            "abort it or attest to its steps; anyone else has to take it "
+            "over deliberately, and the takeover is recorded."
+        )
+        row.addWidget(self._run_owner_label)
         return row
+
+    # ------------------------------------------------------------------
+    # The run in flight (forwarded in by the window, off the status mirror)
+    # ------------------------------------------------------------------
+
+    def set_run_owner(self, owner: Mapping[str, Any] | None) -> None:
+        """Show who owns the run in flight (GLOSSARY.md's **Run owner**).
+
+        Forwarded by the window on every status snapshot rather than read
+        here: the destruction-order rule keeps a panel off the engine's own
+        signals, and the window already holds the **Status mirror** this
+        comes from.
+
+        Args:
+            owner: The owner's ``{"kind", "id"}`` as the snapshot's run
+                summary carries it, or ``None`` when no run is in flight.
+        """
+        actor_id = str(owner.get("id") or "") if isinstance(owner, Mapping) else ""
+        self._run_owner_label.setText(
+            RUN_OWNER_TEXT.format(owner=actor_id) if actor_id else NO_RUN_TEXT
+        )
 
     # ------------------------------------------------------------------
     # Live stream (forwarded in by the window that owns the connection)

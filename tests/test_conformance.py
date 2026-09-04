@@ -4743,6 +4743,45 @@ def test_every_command_name_has_an_action_class() -> None:
     )
 
 
+def test_the_owner_scoped_command_set_is_the_same_on_both_sides() -> None:
+    """The engine enforces the run-ownership standard; the gateway mirrors it.
+
+    Two statements of one rule — the engine's, at the single writer, and the
+    gateway's, at the front door — so they are diffed rather than trusted.
+    The gateway may not import the engine's set (contract C11 keeps the
+    session layer off the engine's internals for this purpose), so the two
+    are written down twice and matched here.
+    """
+    from cryosoft.core.orchestrator import OWNER_SCOPED_COMMANDS as engine_set
+    from cryosoft.session.gateway.roles import OWNER_SCOPED_COMMANDS as gateway_set
+
+    assert {member.value for member in gateway_set} == set(engine_set)
+    assert {member.value for member in gateway_set} <= {
+        member.value for member in CommandName
+    }
+
+
+def test_every_owner_scoped_command_publishes_the_override_arguments() -> None:
+    """The refuse-then-override half must be reachable from the tool schema.
+
+    An agent is told to re-send with ``override_owner`` and a ``reason``; a
+    tool whose schema is closed against those two arguments would make the
+    instruction impossible to follow.
+    """
+    from cryosoft.session.gateway.roles import OWNER_SCOPED_COMMANDS
+    from cryosoft.session.gateway.tools import command_tool_spec
+
+    for member in OWNER_SCOPED_COMMANDS:
+        schema = command_tool_spec(member).input_schema
+        properties = schema["properties"]
+        assert properties["override_owner"]["type"] == "boolean", member.value
+        assert properties["reason"]["type"] == "string", member.value
+        # Optional, both of them: an ordinary action on one's own run asks
+        # for neither.
+        assert "override_owner" not in schema["required"], member.value
+        assert "reason" not in schema["required"], member.value
+
+
 def test_permission_matrix_has_a_cell_for_every_class_and_role() -> None:
     """Authority is never absent by omission — every (class, role) pair decided."""
     from cryosoft.session.gateway import PERMISSION_MATRIX, ActionClass, Role

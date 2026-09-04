@@ -1633,6 +1633,10 @@ class MonitorWindow(QMainWindow):
         self._takeover_strip.set_agents_active(
             self._agent_panel.active_agent_count()
         )
+        # Whose run is in flight (GLOSSARY.md's **Run owner**) — forwarded to
+        # the panel from here rather than read there, for the same
+        # destruction-order reason every other per-tick payload is.
+        self._agent_panel.set_run_owner(self._mirror.run_owner())
         # Each instrument card's Initiate/Standby toggle renders the
         # lifecycle state this snapshot carries (GLOSSARY.md's **Lifecycle
         # state**), so a stand-down nobody clicked — an emergency's blanket

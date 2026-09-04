@@ -33,13 +33,19 @@ from cryosoft.core import events as ev
 from cryosoft.core.orchestrator import OrchestratorState
 from cryosoft.gui.agent_panel import (
     MAX_ROWS,
+    NO_RUN_TEXT,
     OUTCOME_PENDING,
     OUTCOME_REFUSED,
+    OUTCOME_TAKEOVER,
     AgentAction,
     AgentPanel,
 )
 from cryosoft.gui.monitor_window import MonitorWindow
-from cryosoft.gui.theme import BANNER_ERROR_TEXT, build_stylesheet
+from cryosoft.gui.theme import (
+    BANNER_ERROR_TEXT,
+    BANNER_WARNING_TEXT,
+    build_stylesheet,
+)
 from cryosoft.session.gateway import Gateway, Role
 from tests.instrument_modes import build_host, engine_of, settled, shutdown_host
 
@@ -252,6 +258,92 @@ def test_a_refusal_row_is_visually_distinct_and_names_the_rule(themed_app, qtbot
     assert label.property("outcome") == OUTCOME_REFUSED
     assert "revoked" in label.text()
     assert label.palette().windowText().color().name() == BANNER_ERROR_TEXT
+
+
+def test_a_takeover_row_is_visually_distinct_and_says_whose_run_it_was(
+    themed_app, qtbot
+):
+    """An accepted action on another actor's run reads as the takeover it is."""
+    panel = AgentPanel()
+    qtbot.addWidget(panel)
+    panel.show()
+    panel.on_verdict(
+        _verdict(
+            command=ev.CommandName.ABORT_PROCEDURE,
+            actor_id="agent-B",
+            detail={
+                "takeover": {
+                    "owner": {"kind": "agent", "id": "agent-A"},
+                    "reason": "agent-A stopped answering",
+                }
+            },
+        )
+    )
+
+    qtbot.wait(1)  # Qt polishes a new row on the next event-loop turn
+    row = panel._row_widgets[-1]
+    label = row.layout().itemAt(0).widget()
+    assert label.property("outcome") == OUTCOME_TAKEOVER
+    assert "took over agent-A's run: agent-A stopped answering" in label.text()
+    assert "abort_procedure → OK" in label.text()
+    assert label.palette().windowText().color().name() == BANNER_WARNING_TEXT
+
+
+def test_a_takeover_seeded_from_the_feed_reads_the_same(panel):
+    """The row model is the same whether it came off the stream or the file."""
+    from cryosoft.gui.agent_panel import action_from_feed_record
+
+    action = action_from_feed_record(
+        {
+            "record": "verdict",
+            "ts": 1_760_000_000.0,
+            "actor": {"kind": "agent", "id": "agent-B", "role": "session"},
+            "command": "abort_procedure",
+            "verdict": {"code": "OK", "reason": ""},
+            "detail": {
+                "takeover": {
+                    "owner": {"kind": "agent", "id": "agent-A"},
+                    "reason": "the magnet was drifting",
+                }
+            },
+        }
+    )
+
+    assert action is not None
+    assert action.outcome == OUTCOME_TAKEOVER
+    assert action.takeover_owner == "agent-A"
+    assert action.text().endswith("took over agent-A's run: the magnet was drifting")
+
+
+def test_both_surfaces_say_who_owns_the_run_in_flight(window, panel, strip):
+    """The panel and the strip read the one owner off the same mirror.
+
+    Driven by the snapshot itself rather than by starting a run: the owner
+    is a published fact (``StatusSnapshot.run["owner"]``), and what is under
+    test here is that both surfaces render the fact the engine broadcast.
+    """
+    assert panel._run_owner_label.text() == NO_RUN_TEXT
+    assert strip._run_owner_label.text() == ""
+
+    window._mirror.on_event(
+        ev.StatusSnapshot(
+            state=OrchestratorState.RAMPING.value,
+            run={
+                "id": "20260904_000000_001_field_sweep",
+                "name": "Field Sweep",
+                "kind": "procedure",
+                "owner": {"kind": "agent", "id": "agent-A"},
+            },
+        )
+    )
+
+    assert panel._run_owner_label.text() == "run owned by agent-A"
+    assert strip._run_owner_label.text() == "run owned by agent-A"
+
+    window._mirror.on_event(ev.StatusSnapshot(state=OrchestratorState.IDLE.value))
+
+    assert panel._run_owner_label.text() == NO_RUN_TEXT
+    assert strip._run_owner_label.text() == ""
 
 
 # ── The gateway's own refusal, end to end ─────────────────────────────────────

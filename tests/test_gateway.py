@@ -522,3 +522,168 @@ def test_a_gateway_over_the_proxy_submits_and_is_answered(qtbot, engine):
     assert verdicts[-1].request_id == refused
     assert verdicts[-1].code is ev.VerdictCode.BLOCKED_ROLE
     assert orch.is_monitoring()
+
+
+# ── Run ownership: the same rule, mirrored at the front door ──────────────
+
+
+OWNER = {"kind": "agent", "id": "agent-A"}
+INTRUDER = ev.Actor(kind=ev.ActorKind.AGENT, id="agent-B", role=Role.SESSION.value)
+
+
+def _owner_scoped(name=ev.CommandName.ABORT_PROCEDURE, actor=INTRUDER, **args):
+    return ev.Command(name=name, actor=actor, args=args)
+
+
+def test_a_non_owner_agent_is_refused_by_the_ownership_rule(station_info):
+    """The gateway refuses in the engine's words, naming the owner."""
+    verdict = authorize(
+        INTRUDER,
+        _owner_scoped(),
+        station_info,
+        True,
+        ev.AgentGate.ACTIVE,
+        run_owner=OWNER,
+    )
+
+    assert verdict is not None
+    assert verdict.code is ev.VerdictCode.BLOCKED_ROLE
+    assert verdict.detail["rule"] == "run_owner"
+    assert verdict.detail["owner"] == OWNER
+    assert "override_owner" in verdict.reason
+
+
+def test_every_owner_scoped_command_is_judged_the_same_way(station_info):
+    """All four, and nothing else: a recovery action is untouched by ownership."""
+    from cryosoft.session.gateway.roles import OWNER_SCOPED_COMMANDS
+
+    for name in OWNER_SCOPED_COMMANDS:
+        verdict = authorize(
+            INTRUDER,
+            _owner_scoped(name, key="needle_valve"),
+            station_info,
+            True,
+            ev.AgentGate.ACTIVE,
+            run_owner=OWNER,
+        )
+        assert verdict is not None and verdict.detail["rule"] == "run_owner", name
+
+    for name in (ev.CommandName.PAUSE_PROCEDURE, ev.CommandName.RESUME_PROCEDURE):
+        assert (
+            authorize(
+                INTRUDER,
+                _owner_scoped(name),
+                station_info,
+                True,
+                ev.AgentGate.ACTIVE,
+                run_owner=OWNER,
+            )
+            is None
+        ), name
+
+
+def test_the_owner_and_an_unowned_run_are_not_refused(station_info):
+    """Ownership says nothing about the owner, or about a station at rest."""
+    owner_actor = ev.Actor(kind=ev.ActorKind.AGENT, id="agent-A", role=Role.SESSION.value)
+    assert (
+        authorize(
+            owner_actor,
+            _owner_scoped(actor=owner_actor),
+            station_info,
+            True,
+            ev.AgentGate.ACTIVE,
+            run_owner=OWNER,
+        )
+        is None
+    )
+    assert (
+        authorize(
+            INTRUDER, _owner_scoped(), station_info, True, ev.AgentGate.ACTIVE
+        )
+        is None
+    )
+
+
+def test_an_override_needs_a_reason_here_too(station_info):
+    """Refuse-then-override, with the same rule name the engine uses."""
+    verdict = authorize(
+        INTRUDER,
+        _owner_scoped(override_owner=True),
+        station_info,
+        True,
+        ev.AgentGate.ACTIVE,
+        run_owner=OWNER,
+    )
+    assert verdict is not None
+    assert verdict.detail["rule"] == "override_reason_required"
+
+    assert (
+        authorize(
+            INTRUDER,
+            _owner_scoped(override_owner=True, reason="agent-A stopped answering"),
+            station_info,
+            True,
+            ev.AgentGate.ACTIVE,
+            run_owner=OWNER,
+        )
+        is None
+    )
+
+
+def test_a_debug_agents_override_is_refused_by_the_matrix_not_by_ownership(
+    station_info,
+):
+    """Order is the model: authority it never had is refused on that ground.
+
+    A ``debug`` role may not take run-control actions at all, so it is told
+    that — not whose run it is, which would imply the override would work.
+    """
+    debug = ev.Actor(kind=ev.ActorKind.AGENT, id="fixer", role=Role.DEBUG.value)
+    verdict = authorize(
+        debug,
+        _owner_scoped(actor=debug, override_owner=True, reason="taking over"),
+        station_info,
+        True,
+        ev.AgentGate.ACTIVE,
+        run_owner=OWNER,
+    )
+
+    assert verdict is not None
+    assert verdict.detail["rule"] == "role_matrix"
+
+
+def test_the_gateway_mirrors_ownership_from_the_status_snapshot(qtbot, engine, tmp_path):
+    """End to end on one engine: agent B is refused locally, and it is in the feed."""
+    from cryosoft.session.agent_feed import AgentFeed, read_feed
+    from cryosoft.session.gateway import Gateway
+
+    orch, station = engine
+    feed = AgentFeed(tmp_path / "agent_actions.jsonl", "exp-1")
+    feed.attach(orch)
+    agent_a = _gateway(engine, Role.SESSION, "agent-A")
+    agent_b = Gateway(
+        orch, Role.SESSION, "agent-B", station_info=station.station_info, feed=feed
+    )
+
+    from tests.test_l3_orchestrator import QueueableOperation
+
+    orch.run_operation(QueueableOperation(station), actor=agent_a.actor)
+    orch._emit_status_snapshot()
+    assert agent_b.run_owner() == {"kind": "agent", "id": "agent-A"}
+
+    answer = agent_b.call_tool("abort_procedure")
+
+    assert answer["ok"] is False
+    assert answer["code"] == "BLOCKED_ROLE"
+    assert answer["detail"]["rule"] == "run_owner"
+    assert orch.state != "IDLE"
+
+    records = read_feed(feed.path)
+    # Both halves of the trail: what agent B asked for, and what it was told.
+    commands = [r for r in records if r["record"] == "command"]
+    verdicts = [r for r in records if r["record"] == "verdict"]
+    assert commands[-1]["actor"]["id"] == "agent-B"
+    assert commands[-1]["command"] == "abort_procedure"
+    assert verdicts[-1]["detail"]["rule"] == "run_owner"
+
+    orch.abort_procedure()

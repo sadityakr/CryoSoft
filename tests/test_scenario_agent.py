@@ -8,8 +8,10 @@
 #   assistant, and two agents at once. Each surface drives the same story —
 #   read status, read manifest, validate_run, probe_run, run a FieldSweep,
 #   watch it, then stop it — so a defect that shows up on one surface and not
-#   another is a real inconsistency, not a fluke of one harness.
-# last_updated: 2026-09-03
+#   another is a real inconsistency, not a fluke of one harness. Two of them
+#   also drive the run-ownership standard: a second actor is refused the
+#   first's run, and takes it over on the record.
+# last_updated: 2026-09-04
 # ---
 
 from __future__ import annotations
@@ -659,6 +661,66 @@ def test_ctl_offline_the_full_story(capsys, ctl_client):
     } <= request_ids
 
 
+def test_ctl_offline_refuses_a_second_client_the_owners_run(capsys, ctl_client):
+    """The **run-ownership standard** through the terminal client.
+
+    Two invocations of `cryosoft.ctl` are two actors, exactly as two agents
+    are: the second is refused the first's run by name, reads the override
+    off the published tool schema, and is then obeyed — on the record.
+    """
+    from cryosoft.ctl.client import CtlClient
+
+    client, manager = ctl_client
+    data_dir = str(manager.current_data_dir())
+
+    code, schema = _ctl(capsys, client, ["schema", "abort_procedure"])
+    assert code == EXIT_OK
+    properties = schema["schema"]["input_schema"]["properties"]
+    assert set(properties) == {"override_owner", "reason"}
+    assert properties["override_owner"]["type"] == "boolean"
+    assert schema["schema"]["input_schema"]["required"] == []
+
+    code, started = _ctl(
+        capsys,
+        client,
+        ["call", "run_procedure", "--args", json.dumps(_run_procedure_args(data_dir))],
+    )
+    assert (code, started["code"]) == (EXIT_OK, "OK")
+
+    other = CtlClient(
+        mode=client.mode,
+        engine=client.engine,
+        role=Role.SESSION,
+        actor_id="ctl-someone-else",
+        experiments=client.experiments,
+    )
+    code, refused = _ctl(capsys, other, ["call", "abort_procedure"])
+    assert code == EXIT_REFUSED
+    assert refused["code"] == "BLOCKED_ROLE"
+    assert refused["detail"]["rule"] == "run_owner"
+    assert refused["detail"]["owner"]["id"] == "ctl-scenario"
+    assert _ctl(capsys, client, ["status"])[1]["result"]["state"] != "IDLE"
+
+    code, took_over = _ctl(
+        capsys,
+        other,
+        [
+            "call",
+            "abort_procedure",
+            "--args",
+            json.dumps(
+                {"override_owner": True, "reason": "the physicist asked me to"}
+            ),
+        ],
+    )
+    assert (code, took_over["code"]) == (EXIT_OK, "OK")
+    assert took_over["detail"]["takeover"] == {
+        "owner": {"kind": "agent", "id": "ctl-scenario"},
+        "reason": "the physicist asked me to",
+    }
+    assert _ctl(capsys, client, ["status"])[1]["result"]["state"] == "IDLE"
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # 6. Request spool, live mode
 # ══════════════════════════════════════════════════════════════════════════
@@ -1171,16 +1233,25 @@ def two_agent_engine(qtbot):
 
 
 def test_two_agents_at_once(two_agent_engine, tmp_path):
-    """Two Gateways, two actor ids: both land in the feed; either may abort
-    the other's run, because the matrix judges the ACTING role, never who
-    started the run — the standard has no notion of run ownership at all.
+    """Two Gateways, two actor ids, one run — and the **run-ownership
+    standard** between them: agent A's run is agent A's, agent B is refused
+    by name and told how to proceed, and the override it then sends is
+    recorded as a takeover everywhere the story is told.
+
+    This scenario asserted the opposite until 2026-09-04: either agent could
+    end the other's run, and nothing anywhere said which of them had. That
+    was the defect the standard was written for.
     """
     orch, station = two_agent_engine
     feed = AgentFeed(tmp_path / "agent_actions.jsonl", "exp-1")
     feed.attach(orch)
     changes: list[ev.StateChange] = []
+    finished: list[ev.RunFinished] = []
     orch.event_emitted.connect(
         lambda e: changes.append(e) if isinstance(e, ev.StateChange) else None
+    )
+    orch.event_emitted.connect(
+        lambda e: finished.append(e) if isinstance(e, ev.RunFinished) else None
     )
     agent_a = Gateway(
         orch, Role.SESSION, "agent-A", station_info=station.station_info, feed=feed
@@ -1195,18 +1266,60 @@ def test_two_agents_at_once(two_agent_engine, tmp_path):
     assert started["code"] == "OK", started
     _tick_until(orch, lambda: orch.state != "IDLE")
 
+    # Reading is nobody's exclusive right, and the run's owner is published.
     read = agent_b.call_tool("read_status")
     assert read["ok"] is True
+    assert read["result"]["run"]["owner"] == {"kind": "agent", "id": "agent-A"}
+    assert agent_b.run_owner() == {"kind": "agent", "id": "agent-A"}
 
-    aborted = agent_b.call_tool("abort_procedure")
+    # Ending it is not. Agent B is refused by name, and the run carries on.
+    refused = agent_b.call_tool("abort_procedure")
+    assert refused["code"] == "BLOCKED_ROLE", refused
+    assert refused["detail"]["rule"] == "run_owner"
+    assert refused["detail"]["owner"] == {"kind": "agent", "id": "agent-A"}
+    assert "override_owner" in refused["reason"]
+    assert orch.state != "IDLE"
+
+    # An override with no reason is refused too: a takeover whose record
+    # cannot say why is the act the standard exists to prevent.
+    unexplained = agent_b.call_tool("abort_procedure", {"override_owner": True})
+    assert unexplained["detail"]["rule"] == "override_reason_required"
+    assert orch.state != "IDLE"
+
+    # Refuse, then override — deliberately, with a reason, on the record.
+    aborted = agent_b.call_tool(
+        "abort_procedure",
+        {"override_owner": True, "reason": "agent-A stopped answering"},
+    )
     assert aborted["code"] == "OK", aborted
+    assert aborted["detail"]["takeover"] == {
+        "owner": {"kind": "agent", "id": "agent-A"},
+        "reason": "agent-A stopped answering",
+    }
     _tick_until(orch, lambda: orch.state == "IDLE")
 
-    # Both commands are in the feed, under their own actor ids.
+    # The run's own ending names both actors: who ended it, and over whom.
+    assert finished[-1].status == "aborted"
+    assert finished[-1].actor.id == "agent-B"
+    assert finished[-1].overridden_owner == {"kind": "agent", "id": "agent-A"}
+
+    # Every command is in the feed under its own actor id — including the two
+    # that were refused, because what an agent TRIED to do is accountability
+    # too — and the takeover's verdict record carries the takeover.
     records = read_feed(feed.path)
     commands = {r["request_id"]: r for r in records if r["record"] == "command"}
+    verdicts = {r["request_id"]: r for r in records if r["record"] == "verdict"}
     assert commands[started["request_id"]]["actor"]["id"] == "agent-A"
-    assert commands[aborted["request_id"]]["actor"]["id"] == "agent-B"
+    assert commands[refused["request_id"]]["actor"]["id"] == "agent-B"
+    assert verdicts[refused["request_id"]]["detail"]["rule"] == "run_owner"
+    assert commands[aborted["request_id"]]["args"] == {
+        "override_owner": True,
+        "reason": "agent-A stopped answering",
+    }
+    assert verdicts[aborted["request_id"]]["detail"]["takeover"]["owner"] == {
+        "kind": "agent",
+        "id": "agent-A",
+    }
 
     # The panel-facing StateChange the abort caused names the second agent.
     abort_changes = [

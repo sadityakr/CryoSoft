@@ -243,6 +243,22 @@ class Actor(_ContractMessage):
             if not isinstance(getattr(self, name), str):
                 raise TypeError(f"Actor.{name} must be a str")
 
+    def ref(self) -> dict[str, str]:
+        """Render this actor as the identity half of itself: kind and id.
+
+        The shape every message that POINTS AT an actor rather than being
+        issued by one carries — the **run owner** on a ``StatusSnapshot``'s
+        run summary, the ``owner`` of an ownership refusal's detail, and
+        ``RunFinished.overridden_owner`` (see GLOSSARY.md's *Run owner*).
+        The role is deliberately absent: it is the authority a command was
+        taken under, which belongs to the acting message, not to a pointer at
+        who someone is.
+
+        Returns:
+            ``{"kind": ..., "id": ...}``, JSON-safe as it stands.
+        """
+        return {"kind": self.kind.value, "id": self.id}
+
 
 #: The default actor for every entry point: the human at the GUI. Public
 #: methods take ``actor=OPERATOR`` so no existing call site has to change.
@@ -600,7 +616,10 @@ class StatusSnapshot(_ContractMessage):
     Attributes:
         state: The engine's current state name.
         run: The active run's summary (``run_id``, ``kind``, ``name``,
-            ``progress``, ``step`` where available), or ``None`` when idle.
+            ``progress``, ``step`` where available) plus ``owner``, the
+            **run owner**'s ``Actor.ref()`` — who started this run, which is
+            what every client shows and what the ownership rule is judged
+            against. ``None`` when idle.
         instruments: ``{vi_name: {...}}`` of live per-instrument status —
             ``availability``, ``fault``, ``offline_reason``, ``held``,
             ``override_active`` and ``lifecycle`` (a ``LifecycleState``
@@ -1145,6 +1164,14 @@ class RunFinished(_ContractMessage):
         status: How it ended (``"completed"``, ``"aborted"``, ``"failed"``).
         reason: Human-readable explanation, ``""`` for a clean completion.
         manifest: The run manifest as finished, JSON-safe.
+        actor: Who ended it — the actor of the command that did, or the
+            ``system`` actor for a run that ended on its own (completed,
+            failed, contained). Paired with ``overridden_owner`` below, this
+            is what makes a **takeover** legible on the event alone.
+        overridden_owner: The **run owner** whose run this ended over their
+            head, as ``{"kind": ..., "id": ...}``, or ``None`` — which is
+            every ordinary ending. Written only when the ending command was
+            accepted as a takeover (see GLOSSARY.md's *Takeover*).
         seq: Monotonic sequence number.
         ts: Unix time of the end.
     """
@@ -1155,16 +1182,25 @@ class RunFinished(_ContractMessage):
     status: str = ""
     reason: str = ""
     manifest: dict[str, Any] = field(default_factory=dict)
+    actor: Actor = OPERATOR
+    overridden_owner: dict[str, Any] | None = None
     seq: int = 0
     ts: float = field(default_factory=time.time)
 
     def __post_init__(self) -> None:
-        """JSON-check the manifest.
+        """Coerce the actor and JSON-check the manifest and the owner.
 
         Raises:
-            TypeError: If it is not a mapping of JSON-safe values.
+            TypeError: If the manifest or the overridden owner is not a
+                mapping of JSON-safe values, or ``actor`` is neither an
+                ``Actor`` nor its dict.
         """
         object.__setattr__(self, "manifest", _checked_mapping(self.manifest))
+        object.__setattr__(self, "actor", _as_actor(self.actor))
+        if self.overridden_owner is not None:
+            object.__setattr__(
+                self, "overridden_owner", _checked_mapping(self.overridden_owner)
+            )
 
 
 @dataclass(frozen=True)

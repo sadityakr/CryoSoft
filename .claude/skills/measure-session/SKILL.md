@@ -57,6 +57,32 @@ every role, in every state, whatever the kill switch says. If you can see
 that the station is in danger, use it. Never hesitate over authority when
 the answer is "make it safe".
 
+## The run in flight belongs to whoever started it
+
+You are not the only actor here. Every run has an **owner** — the actor
+that started it (a queued run: whoever queued it) — and `read_status`
+publishes it as `run.owner`, so you can always see whose run you are looking
+at before you touch it. Ownership is a fact about the run, not a lock: it
+reserves nothing, expires never, and ends when the run does.
+
+On a run you do not own, four calls are refused: `abort_procedure`,
+`confirm_operation`, `skip_operation_step` and `finish_operation` — the ones
+that end somebody's result or attest that a physical step of it was carried
+out. The refusal names the owner (`detail.rule == "run_owner"`,
+`detail.owner`). Everything else is untouched: reads, pausing, resuming,
+stopping a ramp and emergency standby are never owner-scoped, because
+holding the cryostat where it stands destroys nobody's work.
+
+If you genuinely must act anyway, the same call takes `override_owner: true`
+and a `reason` — and that is a **takeover**: it is recorded on the run's own
+`RunFinished`, in the agent feed, and as a distinct row in the physicist's
+Agent panel reading "took over &lt;owner&gt;'s run: &lt;your reason&gt;". An
+override without a reason is refused (`override_reason_required`). So:
+**ask the physicist first.** Take a run over only when you cannot ask and
+the situation demands it, and say plainly, in the reason, why — that
+sentence is what someone reads months later when they ask what happened to
+that measurement.
+
 ## Read a refusal; do not retry it
 
 A refused call comes back as a normal result — `isError: true` with the
@@ -68,6 +94,8 @@ exactly what refused you:
 | `role_matrix` | Your role does not grant this class of action. | Report what you would do and why; ask the physicist to do it or to raise the ceiling. |
 | `attendance` | You are `debug` and a human is watching. | Diagnose and **report**. The human decides. |
 | `kill_switch` | The physicist set the gate to `read_only` or `revoked`. | Stop acting. Say what you were about to do. |
+| `run_owner` | The run in flight is another actor's, and this call would end it or attest to it. | Ask the owner or the physicist. Only if you cannot, re-send with `override_owner` and a `reason` — a recorded takeover. |
+| `override_reason_required` | You asked to take a run over without saying why. | Re-send with a reason that would satisfy the physicist reading it later. |
 | `unclassified_action` | The action has no declared class in the app. | A gap in the application, not something to work around. Report it. |
 | `schema` | An argument was out of bounds or the wrong shape. | Fix the argument; the message names the bound and its unit. |
 | `unknown_tool` | The surface has no such tool. | Re-read `tools/list`; an instrument may be disconnected. |
@@ -106,7 +134,8 @@ Do not start a run because you were asked to start a run. Do this:
    `abort_procedure` to end the run. Aborting discards nothing already
    written, but it does end the measurement — say what you are about to
    abort and why before you do it, unless the situation is unsafe, in which
-   case act first.
+   case act first. If the run is not yours, see "The run in flight belongs
+   to whoever started it" above before you reach for abort.
 
 ## Long runs, and being alone with the cryostat
 

@@ -4048,3 +4048,219 @@ def test_snapshot_reports_a_disconnected_instrument_as_idle(orchestrator, statio
     snapshot = orchestrator.status_snapshot()
     assert snapshot.instruments["magnet_z"]["lifecycle"] == "idle"
     assert snapshot.instruments["magnet_y"]["lifecycle"] == "initiated"
+
+
+# ══════════════════════════════════════════════════════════════════════
+# The run-ownership standard: who owns the run in flight, and who may end it
+# (GLOSSARY.md's "Run owner" / "Takeover")
+# ══════════════════════════════════════════════════════════════════════
+
+AGENT_A = ev.Actor(kind=ev.ActorKind.AGENT, id="agent-A", role="session")
+AGENT_B = ev.Actor(kind=ev.ActorKind.AGENT, id="agent-B", role="session")
+
+
+def _run_started_by(port, actor):
+    """Start a FieldSweep as *actor* and return its request id."""
+    orch, _recorder, tmp_path = port
+    command = _run_procedure_command(tmp_path)
+    started = ev.Command(
+        name=ev.CommandName.RUN_PROCEDURE, actor=actor, args=dict(command.args)
+    )
+    orch.submit(started)
+    assert orch.state != OrchestratorState.IDLE.value
+    return started.request_id
+
+
+def _verdict_for(recorder, request_id):
+    """Return the one verdict answering *request_id*."""
+    answers = [v for v in recorder.verdicts if v.request_id == request_id]
+    assert len(answers) == 1, answers
+    return answers[0]
+
+
+def _submit(orch, recorder, name, actor, **args):
+    """Submit one command and return the verdict that answered it."""
+    command = ev.Command(name=name, actor=actor, args=args)
+    orch.submit(command)
+    return _verdict_for(recorder, command.request_id)
+
+
+def test_the_run_owner_is_the_actor_that_started_it(port):
+    """The snapshot names the owner while a run is in flight, and nobody idle."""
+    orch, recorder, _tmp = port
+    assert orch.status_snapshot().run is None
+
+    _run_started_by(port, AGENT_A)
+
+    assert orch.status_snapshot().run["owner"] == AGENT_A.ref()
+    orch.abort_procedure()
+    assert orch.status_snapshot().run is None
+
+
+def test_another_agent_may_not_abort_the_owners_run(port):
+    """The refusal names the owner, the rule, and how to proceed."""
+    orch, recorder, _tmp = port
+    _run_started_by(port, AGENT_A)
+
+    verdict = _submit(orch, recorder, ev.CommandName.ABORT_PROCEDURE, AGENT_B)
+
+    assert verdict.code is ev.VerdictCode.BLOCKED_ROLE
+    assert verdict.detail["rule"] == "run_owner"
+    assert verdict.detail["owner"] == {"kind": "agent", "id": "agent-A"}
+    assert "agent-A" in verdict.reason and "override_owner" in verdict.reason
+    # Nothing happened: the run is still the owner's, still running.
+    assert orch.state != OrchestratorState.IDLE.value
+    orch.abort_procedure()
+
+
+def test_an_override_without_a_reason_is_refused(port):
+    """A takeover whose record cannot say why is the act the rule prevents."""
+    orch, recorder, _tmp = port
+    _run_started_by(port, AGENT_A)
+
+    verdict = _submit(
+        orch,
+        recorder,
+        ev.CommandName.ABORT_PROCEDURE,
+        AGENT_B,
+        override_owner=True,
+        reason="   ",
+    )
+
+    assert verdict.code is ev.VerdictCode.BLOCKED_ROLE
+    assert verdict.detail["rule"] == "override_reason_required"
+    assert orch.state != OrchestratorState.IDLE.value
+    orch.abort_procedure()
+
+
+def test_an_override_with_a_reason_takes_the_run_over_and_is_recorded(port):
+    """Refuse-then-override: the verdict and RunFinished both name the takeover."""
+    orch, recorder, _tmp = port
+    _run_started_by(port, AGENT_A)
+
+    verdict = _submit(
+        orch,
+        recorder,
+        ev.CommandName.ABORT_PROCEDURE,
+        AGENT_B,
+        override_owner=True,
+        reason="agent-A stopped answering",
+    )
+
+    assert verdict.code is ev.VerdictCode.OK
+    assert verdict.detail["takeover"] == {
+        "owner": {"kind": "agent", "id": "agent-A"},
+        "reason": "agent-A stopped answering",
+    }
+    assert orch.state == OrchestratorState.IDLE.value
+
+    finished = recorder.of_type(ev.RunFinished)[-1]
+    assert finished.status == "aborted"
+    assert finished.actor == AGENT_B
+    assert finished.overridden_owner == {"kind": "agent", "id": "agent-A"}
+
+
+def test_the_owners_own_abort_is_not_a_takeover(port):
+    """Ownership says nothing about the owner acting on their own run."""
+    orch, recorder, _tmp = port
+    _run_started_by(port, AGENT_A)
+
+    verdict = _submit(orch, recorder, ev.CommandName.ABORT_PROCEDURE, AGENT_A)
+
+    assert verdict.code is ev.VerdictCode.OK
+    assert (verdict.detail or {}).get("takeover") is None
+    assert recorder.of_type(ev.RunFinished)[-1].overridden_owner is None
+
+
+def test_the_operator_is_never_gated_by_run_ownership(port):
+    """The human's authority comes from standing at the cryostat."""
+    orch, recorder, _tmp = port
+    _run_started_by(port, AGENT_A)
+
+    verdict = _submit(orch, recorder, ev.CommandName.ABORT_PROCEDURE, ev.OPERATOR)
+
+    assert verdict.code is ev.VerdictCode.OK
+    assert (verdict.detail or {}).get("takeover") is None
+    finished = recorder.of_type(ev.RunFinished)[-1]
+    assert finished.overridden_owner is None
+    assert finished.actor == ev.OPERATOR
+
+
+def test_safety_and_recovery_commands_are_not_owner_scoped(port):
+    """Pause, resume, stop_ramp and emergency standby ignore ownership."""
+    orch, recorder, _tmp = port
+    _run_started_by(port, AGENT_A)
+
+    assert (
+        _submit(orch, recorder, ev.CommandName.PAUSE_PROCEDURE, AGENT_B).code
+        is ev.VerdictCode.OK
+    )
+    assert (
+        _submit(orch, recorder, ev.CommandName.RESUME_PROCEDURE, AGENT_B).code
+        is ev.VerdictCode.OK
+    )
+    # stop_ramp is refused by the CLAIM, never by ownership: a different rule,
+    # and the one that has always governed a run's instruments.
+    stop = _submit(
+        orch, recorder, ev.CommandName.STOP_RAMP, AGENT_B, vi_name="magnet_z"
+    )
+    assert (stop.detail or {}).get("rule") != "run_owner"
+
+    safe = _submit(
+        orch, recorder, ev.CommandName.EMERGENCY_STANDBY, AGENT_B, reason="quench"
+    )
+    assert safe.code is ev.VerdictCode.OK
+    assert orch.state == OrchestratorState.EMERGENCY.value
+
+
+def test_an_operations_steps_are_owner_scoped(station, qtbot, tmp_path):
+    """confirm / skip / finish are the owner's, exactly as abort is."""
+    orch = Orchestrator(station, tick_interval_ms=10)
+    recorder = _Recorder(orch)
+    try:
+        orch.run_operation(QueueableOperation(station), actor=AGENT_A)
+        assert orch.status_snapshot().run["owner"] == AGENT_A.ref()
+
+        for name in (
+            ev.CommandName.CONFIRM_OPERATION,
+            ev.CommandName.SKIP_OPERATION_STEP,
+        ):
+            verdict = _submit(orch, recorder, name, AGENT_B, key="needle_valve")
+            assert verdict.detail["rule"] == "run_owner", name
+
+        verdict = _submit(orch, recorder, ev.CommandName.FINISH_OPERATION, AGENT_B)
+        assert verdict.detail["rule"] == "run_owner"
+    finally:
+        orch.shutdown()
+
+
+def test_a_run_handed_to_the_queue_is_owned_by_whoever_queued_it(
+    orchestrator, station
+):
+    """The actor that committed the station to a run owns it once it starts.
+
+    The engine's own queue: ``run_queue()`` is called by somebody else (here
+    the operator), and the run is still agent-A's.
+    """
+    orchestrator.queue_procedure(MockProcedure(station), actor=AGENT_A)
+
+    orchestrator.run_queue()
+
+    assert orchestrator.status_snapshot().run["owner"] == AGENT_A.ref()
+    orchestrator.abort_procedure()
+
+
+def test_a_run_pulled_from_a_queued_spec_is_owned_by_the_queuing_actor(
+    orchestrator, station
+):
+    """The same rule through the pull seam, where the spec carries the actor."""
+    queue = RunQueue()
+    _pull_seam(orchestrator, station, queue)
+    queue.add(
+        RunSpec(kind="procedure", run_class="QueueableProcedure", actor=AGENT_A)
+    )
+
+    orchestrator.run_queue()
+
+    assert orchestrator.status_snapshot().run["owner"] == AGENT_A.ref()
+    orchestrator.abort_procedure()

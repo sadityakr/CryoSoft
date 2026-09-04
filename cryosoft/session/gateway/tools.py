@@ -404,6 +404,49 @@ def _run_properties(kind: str, *, probe: bool) -> dict[str, Any]:
     return properties
 
 
+#: The two arguments the four owner-scoped commands carry to take a run over
+#: (the **run-ownership standard**, GLOSSARY.md's *Run owner* and *Takeover*).
+#: They belong in this table rather than in the four signatures because the
+#: ``command`` decorator absorbs them before the method is called, exactly as
+#: it absorbs ``actor`` — so the wire shape and the Python signature differ,
+#: which is what this table is for. Publishing them here is what lets the
+#: CLI, the MCP adapter and the assistant offer the override with no client
+#: code of their own: they read it off the rendered schema.
+_OWNERSHIP_PROPERTIES: dict[str, Any] = {
+    "override_owner": {
+        "type": "boolean",
+        "default": False,
+        "description": (
+            "Take this run over even though another actor owns it. Leave it "
+            "out on your own run. Doing this to somebody else's run is "
+            "recorded as a takeover, on the run and in the agent feed; "
+            "prefer asking the owner or the physicist first."
+        ),
+    },
+    "reason": {
+        "type": "string",
+        "description": (
+            "Why you are taking the run over. Required with override_owner, "
+            "and refused if empty: it is what the takeover record says."
+        ),
+    },
+}
+
+#: The rationale every owner-scoped entry above carries, said once.
+_OWNERSHIP_RATIONALE = (
+    "The command decorator absorbs override_owner and reason (the "
+    "run-ownership standard's refuse-then-override) before the method sees "
+    "them, so the wire arguments are the method's own plus those two."
+)
+
+#: The step key the two operation-step commands take, said once.
+_STEP_KEY_PROPERTY: dict[str, Any] = {
+    "key": {
+        "type": "string",
+        "description": "The operation step's key, as the operation declares it.",
+    }
+}
+
 #: Commands whose JSON ``args`` are translated by ``Orchestrator.submit()``
 #: rather than being the method's own parameters, plus the one command whose
 #: parameter carries an enum. Every entry says why it deviates; a command
@@ -452,6 +495,26 @@ COMMAND_ARG_SCHEMAS: dict[CommandName, WireArguments] = {
             "The method takes an ExperimentEnvelope; a client sends the "
             "mapping ExperimentEnvelope.from_dict() reads."
         ),
+    ),
+    CommandName.ABORT_PROCEDURE: WireArguments(
+        properties=dict(_OWNERSHIP_PROPERTIES),
+        required=(),
+        rationale=_OWNERSHIP_RATIONALE,
+    ),
+    CommandName.FINISH_OPERATION: WireArguments(
+        properties=dict(_OWNERSHIP_PROPERTIES),
+        required=(),
+        rationale=_OWNERSHIP_RATIONALE,
+    ),
+    CommandName.CONFIRM_OPERATION: WireArguments(
+        properties={**_STEP_KEY_PROPERTY, **_OWNERSHIP_PROPERTIES},
+        required=("key",),
+        rationale=_OWNERSHIP_RATIONALE,
+    ),
+    CommandName.SKIP_OPERATION_STEP: WireArguments(
+        properties={**_STEP_KEY_PROPERTY, **_OWNERSHIP_PROPERTIES},
+        required=("key",),
+        rationale=_OWNERSHIP_RATIONALE,
     ),
     CommandName.SET_AGENT_GATE: WireArguments(
         properties={
