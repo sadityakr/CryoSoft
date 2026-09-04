@@ -656,10 +656,10 @@ def test_status_mirror_reflects_pause_pending_and_state_together(
     orchestrator, station, tmp_path
 ):
     """``StatusMirror``'s ``state``/``pause_pending()`` are always read from the
-    SAME ``StatusSnapshot`` — so once the deferred request finally reaches the
-    mirror (paired here with ``SWEEPING``, the tick that honours it — see the
-    ``DEFECT`` test right below for the gap in exactly when that happens),
-    every step through PAUSED and back out through resume is self-consistent.
+    SAME ``StatusSnapshot`` — so every step of a deferred pause, through
+    PAUSED and back out through resume, is self-consistent (the test right
+    below pins the other half: the request is broadcast the instant it is
+    accepted, while the state is still ``MEASURING``).
     """
     _fast_magnet(station)
     procedure = PauseProbeProcedure(station, tmp_path)
@@ -687,27 +687,17 @@ def test_status_mirror_reflects_pause_pending_and_state_together(
     assert mirror.state == "IDLE"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "DEFECT: pause_procedure()'s deferred branch (MEASURING) never calls "
-        "_emit_status_snapshot(), so StatusMirror can never show "
-        "{state: MEASURING, pause_pending: True} together even though "
-        "Orchestrator.pause_pending is already True — the mirror jumps "
-        "straight from {MEASURING, False} to {SWEEPING, True}."
-    ),
-)
 def test_status_mirror_shows_pause_pending_while_still_in_measuring(
     orchestrator, station, tmp_path
 ):
     """The GUI-facing counterpart of the engine-level deferred-pause guarantee.
 
-    ``Orchestrator.pause_pending`` (the private read) is already True the
-    instant ``pause_procedure()`` returns, but nothing pushes a fresh
-    ``StatusSnapshot`` for that — a mirror-driven "Pausing after this point…"
-    indicator can never actually appear while the Monitor window still reads
-    MEASURING; it would only appear once the state has already moved to
-    SWEEPING, one tick later.
+    ``Orchestrator.pause_pending`` is True the instant ``pause_procedure()``
+    returns, and accepting the request pushes a fresh ``StatusSnapshot`` for
+    it — so a mirror-driven "Pausing" indicator can appear while the window
+    still reads MEASURING, which is the whole interval it has to describe.
+    Withdrawing the request by resuming takes the indicator down again the
+    same way, without waiting for a tick.
     """
     _fast_magnet(station)
     procedure = PauseProbeProcedure(station, tmp_path)
@@ -723,6 +713,13 @@ def test_status_mirror_shows_pause_pending_while_still_in_measuring(
 
     assert mirror.state == "MEASURING"
     assert mirror.pause_pending() is True
+
+    # Cancelling the request is broadcast on the spot too — still MEASURING,
+    # no tick in between.
+    orchestrator.resume_procedure()
+    assert orchestrator.pause_pending is False
+    assert mirror.state == "MEASURING"
+    assert mirror.pause_pending() is False
 
     orchestrator.abort_procedure()
 

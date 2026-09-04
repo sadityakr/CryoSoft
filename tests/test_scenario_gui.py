@@ -361,6 +361,66 @@ def test_click_storm_during_a_long_datapoint(
     assert procedure.measured == 3
 
 
+def test_both_windows_read_pausing_between_the_click_and_the_pause_boundary(
+    qtbot, tmp_path
+):
+    """A pause requested in MEASURING is visible as "Pausing" until it lands.
+
+    The interval this covers is the one the operator sees: the click is
+    taken, the run keeps measuring the point it is on (GLOSSARY.md's **Pause
+    boundary**), and the state does not move. Both windows say so — the
+    Monitor's status bar reads ``MEASURING · Pausing`` and the Procedure
+    window's Pause button reads ``Pausing…`` — and both go back to their
+    resting wording once PAUSED lands and there is nothing pending any more.
+
+    Its own host, at a slower tick than the shared fixture's, so the click
+    lands inside the MEASURING tick-gap by a comfortable margin rather than
+    racing the engine's next tick.
+    """
+    host = build_host(CONFIG_PATH, tick_interval_ms=500)
+    try:
+        proxy = host.build_proxy()
+        on_engine(proxy, lambda: _fast_magnet(host.station))
+        monitor = MonitorWindow(host.station, proxy)
+        qtbot.addWidget(monitor)
+        monitor.show()
+        procedure_window = ProcedureWindow(
+            host.station,
+            proxy,
+            get_sample_info=lambda: dict(SAMPLE_INFO),
+            get_data_dir=lambda: str(tmp_path),
+        )
+        qtbot.addWidget(procedure_window)
+        procedure_window.show()
+        pause_btn = procedure_window.findChild(QPushButton, "pause_btn")
+        assert pause_btn.text() == "Pause"
+
+        proxy.run_procedure(_SlowDatapointProcedure(measure_seconds=0.0))
+        # MEASURING as the CLIENT sees it (a mirror read) — the same fact the
+        # operator's click would be based on.
+        qtbot.waitUntil(lambda: proxy.state == "MEASURING", timeout=15000)
+        pause_btn.click()
+        qtbot.waitUntil(lambda: procedure_window._mirror.pause_pending(), timeout=5000)
+
+        assert proxy.state == "MEASURING", "the pause is deferred, not taken yet"
+        assert monitor._state_label.text() == "State: MEASURING · Pausing"
+        assert pause_btn.text() == "Pausing…"
+        _screenshot(monitor, "01b_monitor_pausing")
+        _screenshot(procedure_window, "01b_procedure_pausing")
+
+        qtbot.waitUntil(lambda: proxy.state == "PAUSED", timeout=15000)
+        settled(proxy)
+        assert monitor._state_label.text() == "State: PAUSED"
+        assert pause_btn.text() == "Pause"
+
+        proxy.abort_procedure()
+        qtbot.waitUntil(lambda: proxy.state == "IDLE", timeout=15000)
+        monitor.close()
+        procedure_window.close()
+    finally:
+        shutdown_host(host)
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # Scenario 2 — disconnect an instrument mid-run
 # ══════════════════════════════════════════════════════════════════════════

@@ -1613,6 +1613,13 @@ class Orchestrator(QObject):
         other state pauses on the spot. Goes False again the moment the run
         enters PAUSED, or when the request is cancelled by
         ``resume_procedure()``/``abort_procedure()``.
+
+        Both edges are broadcast: raising and withdrawing the request each
+        emit a ``StatusSnapshot`` on the spot, so a client's status mirror
+        can show ``{state: MEASURING, pause_pending: True}`` — the state the
+        GUI renders as "Pausing" — for the whole interval between the click
+        and the pause boundary, rather than learning of it a tick later when
+        the state has already moved on.
         """
         return self._pause_requested
 
@@ -1652,6 +1659,11 @@ class Orchestrator(QObject):
                 return
             self._pause_requested = True
             self._emit_status("Pause requested - pausing after this point")
+            # The request is a client-visible fact the moment it is accepted,
+            # and no state change carries it: without this the mirror would
+            # only learn of it on the next tick, by which time the state has
+            # already left MEASURING and "pausing" has nothing left to say.
+            self._emit_status_snapshot()
             return
         if self._state in (OrchestratorState.INITIATING, OrchestratorState.RAMPING,
                            OrchestratorState.INITIATION_GATE, OrchestratorState.READING_GATE,
@@ -1699,6 +1711,11 @@ class Orchestrator(QObject):
             if self._pause_requested:
                 self._pause_requested = False
                 self._emit_status("Pause request cancelled")
+                # Symmetric with pause_procedure()'s deferred branch: the
+                # withdrawal is a client-visible fact with no state change of
+                # its own, so the "Pausing" indicator must be taken down by a
+                # snapshot rather than left standing until the next tick.
+                self._emit_status_snapshot()
                 return
             self._action_blocked(f"Cannot resume while {self._state.value}")
             return

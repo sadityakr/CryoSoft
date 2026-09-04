@@ -57,6 +57,11 @@ _GEOMETRY_KEY = "ProcedureWindow/geometry"  # QSettings key for saved window geo
 # Max lines kept in the concise Status log before old lines are trimmed
 # (matches the Monitor detailed log's cap; bounds a long run's memory use).
 _STATUS_MAX_LINES = 500
+# The Pause button's two captions: its resting one, and the one it wears
+# while a pause has been requested but not yet honoured (GLOSSARY.md's
+# **Pause boundary**).
+_PAUSE_CAPTION = "Pause"
+_PAUSING_CAPTION = "Pausing…"
 
 
 class ProcedureWindow(QMainWindow):
@@ -320,12 +325,15 @@ class ProcedureWindow(QMainWindow):
         """
         row = QHBoxLayout()
 
-        pause_btn = QPushButton("Pause")
+        pause_btn = QPushButton(_PAUSE_CAPTION)
         pause_btn.setObjectName("pause_btn")
         pause_btn.setProperty("class", BTN_CLASS_SECONDARY)
         pause_btn.setIcon(qta.icon("fa5s.pause", color=TEXT_PRIMARY))
         pause_btn.setToolTip("Pause the running procedure at the next safe point")
         pause_btn.clicked.connect(self._on_pause_clicked)
+        # Kept on the window because its caption reports a requested-but-
+        # deferred pause (see _refresh_pause_caption()).
+        self._pause_btn = pause_btn
 
         resume_btn = QPushButton("Resume")
         resume_btn.setObjectName("resume_btn")
@@ -362,6 +370,11 @@ class ProcedureWindow(QMainWindow):
             lambda msg: self._banner.show_message(msg, BANNER_SEVERITY_WARNING)
         )
         self._orchestrator.status_message.connect(self._on_status_message)
+        # A pause requested mid-datapoint is deferred to the pause boundary
+        # and changes no state, so the only thing that reports it is a fresh
+        # status snapshot. Connected to a WINDOW slot (the destruction-order
+        # rule, gui/README.md), like every other per-tick stream here.
+        self._mirror.status_updated.connect(self._on_status_snapshot)
 
         self._params_panel.add_to_queue_requested.connect(self._on_add_to_queue)
         self._params_panel.run_now_requested.connect(self._on_run_now)
@@ -370,6 +383,33 @@ class ProcedureWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Slot handlers
     # ------------------------------------------------------------------
+
+    def _on_status_snapshot(self, _snapshot: object) -> None:
+        """Refresh the snapshot-driven controls from the fresh mirror.
+
+        Args:
+            _snapshot: The ``StatusSnapshot`` the mirror just absorbed; the
+                controls read the mirror rather than the payload, so one slot
+                serves every read they make.
+        """
+        self._refresh_pause_caption()
+
+    def _refresh_pause_caption(self) -> None:
+        """Caption the Pause button "Pausing…" while a pause is deferred.
+
+        A pause asked for during ``MEASURING`` is honoured only at the pause
+        boundary (GLOSSARY.md's **Pause boundary**) — the datapoint being
+        read is finished and saved first. For that interval the engine's
+        state is unchanged and the run keeps producing points, so without
+        this the button looks exactly as it did before the click and the
+        request reads as ignored. The caption is the acknowledgement: the
+        engine took it, and it lands when the point does.
+
+        Text only — the button keeps its class, icon and palette, so no new
+        colour is introduced and the control cannot shift as it changes.
+        """
+        pausing = self._mirror.pause_pending()
+        self._pause_btn.setText(_PAUSING_CAPTION if pausing else _PAUSE_CAPTION)
 
     def _on_status_message(self, text: str) -> None:
         """Append one timestamped milestone line to the concise Status log.
