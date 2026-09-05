@@ -426,7 +426,7 @@ class ElnSettingsDialog(QDialog):
             base_url=self._base_url_input.text().strip().rstrip("/"),
             api_key=typed_key or self._settings.api_key,
             team_id=self._team_id_input.text().strip(),
-            template_id=self._template_combo.currentText().strip(),
+            template_id=self._template_id(),
             verify_tls=self._verify_tls_checkbox.isChecked(),
             auto_publish=self._auto_publish_checkbox.isChecked(),
             tags=tags,
@@ -446,6 +446,25 @@ class ElnSettingsDialog(QDialog):
                 attach_data_file=self._analysis_attach_checkbox.isChecked(),
             ),
         )
+
+    def _template_id(self) -> str:
+        """Return the template the form names, as the backend's own id.
+
+        The combo is editable and, once "Fetch templates" has filled it,
+        shows ``"<id> — <name>"`` per row. A row that is selected therefore
+        answers with its stored id; anything typed by hand answers with
+        itself, because a backend id is exactly what a person would type.
+
+        Returns:
+            The template id, or ``""`` for the backend's default.
+        """
+        index = self._template_combo.currentIndex()
+        text = self._template_combo.currentText().strip()
+        if index >= 0 and text == self._template_combo.itemText(index):
+            stored = self._template_combo.itemData(index)
+            if stored:
+                return str(stored)
+        return text
 
     # ------------------------------------------------------------------
     # Actions
