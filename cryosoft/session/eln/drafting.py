@@ -249,6 +249,10 @@ class DraftEntry:
         attachments: Extra files to attach to the entry, in order, as
             ``{"path": absolute path, "comment": caption}``. Empty for a
             model draft; an analysed entry lists its figures here.
+        attach_data_file: Whether the run's raw data file is attached too.
+            ``True`` is what a published run and a model draft have always
+            done; an analysed entry whose report asked for figures alone sets
+            it ``False``.
         source: Which stage produced this entry — ``"model"`` (an LLM draft),
             ``"analysis"`` (an analysed entry) or ``"facts"`` (the facts-only
             fallback). The entry that reaches the notebook says so.
@@ -267,6 +271,7 @@ class DraftEntry:
     cost_usd: float = 0.0
     prompt_digest: str = ""
     attachments: list[dict[str, Any]] = field(default_factory=list)
+    attach_data_file: bool = True
     source: str = SOURCE_MODEL
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -282,6 +287,7 @@ class DraftEntry:
             "cost_usd": self.cost_usd,
             "prompt_digest": self.prompt_digest,
             "attachments": [dict(item) for item in self.attachments],
+            "attach_data_file": self.attach_data_file,
             "source": self.source,
             "metadata": dict(self.metadata),
         }
@@ -308,6 +314,7 @@ class DraftEntry:
             cost_usd=_as_float(data.get("cost_usd")),
             prompt_digest=_as_str(data.get("prompt_digest")),
             attachments=_as_attachments(data.get("attachments")),
+            attach_data_file=_as_bool(data.get("attach_data_file"), True),
             source=_as_str(data.get("source"), SOURCE_MODEL) or SOURCE_MODEL,
             metadata=dict(data["metadata"]) if isinstance(data.get("metadata"), dict) else {},
         )
@@ -369,6 +376,11 @@ def _as_float(value: object, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _as_bool(value: object, default: bool) -> bool:
+    """Return ``value`` if it is a bool, else ``default`` (defensive parse)."""
+    return value if isinstance(value, bool) else default
 
 
 def _as_str_list(value: object) -> list[str]:

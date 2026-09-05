@@ -10,6 +10,7 @@ ever.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -785,9 +786,7 @@ def test_nothing_is_published_without_an_open_experiment(published_setup):
 def test_auto_publish_off_leaves_manual_export_as_the_only_trigger(published_setup):
     """With auto-publish off a finished run waits for an explicit export."""
     manager, publisher, adapter, manifest = published_setup
-    publisher._settings = ElnSettings(
-        **{**publisher.settings.to_dict(include_secret=True), "auto_publish": False}
-    )
+    publisher._settings = replace(publisher.settings, auto_publish=False)
     manager._orchestrator.run_finished.emit(manifest)
     assert publisher.pending_count() == 0
 
@@ -872,9 +871,7 @@ def test_an_unknown_backend_disables_publishing_rather_than_raising(published_se
     """A typo in the settings file switches the track off, loudly, not fatally."""
     manager, publisher, _, manifest = published_setup
     publisher._adapter = None
-    publisher._settings = ElnSettings(
-        **{**publisher.settings.to_dict(include_secret=True), "backend": "not_a_backend"}
-    )
+    publisher._settings = replace(publisher.settings, backend="not_a_backend")
     manager._orchestrator.run_finished.emit(manifest)
     assert publisher.drain_once().state == DRAIN_IDLE
     assert publisher.pending_count() == 1, "the job stays queued for a fixed settings file"
