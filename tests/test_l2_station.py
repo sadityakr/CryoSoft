@@ -1428,37 +1428,8 @@ def test_read_gateway_config_reads_the_declared_values(tmp_path):
     }
 
 
-def test_read_assistant_config_reads_the_declared_values(tmp_path):
-    """A setup that offers a chat assistant says so in its own monitor.yaml."""
-    from cryosoft.core.station import read_assistant_config
-
-    (tmp_path / "monitor.yaml").write_text(
-        "monitor:\n"
-        "  tick_interval_ms: 1000\n"
-        "  assistant: true\n"
-        "  assistant_max_role: session\n"
-    )
-    assert read_assistant_config(str(tmp_path)) == {
-        "assistant": True,
-        "assistant_max_role": "session",
-    }
 
 
-def test_read_assistant_config_defaults_to_the_closed_door(tmp_path):
-    """Absent, malformed or unreadable all mean off — never raises.
-
-    The empty ceiling is deliberate: it means "the same authority this setup
-    already grants an out-of-process client", which whoever wires the window
-    resolves from ``gateway_max_role`` rather than declaring twice.
-    """
-    from cryosoft.core.station import read_assistant_config
-
-    closed = {"assistant": False, "assistant_max_role": ""}
-    assert read_assistant_config(str(tmp_path / "nowhere")) == closed
-    (tmp_path / "monitor.yaml").write_text("monitor:\n  tick_interval_ms: 1000\n")
-    assert read_assistant_config(str(tmp_path)) == closed
-    (tmp_path / "monitor.yaml").write_text("monitor: not-a-mapping\n")
-    assert read_assistant_config(str(tmp_path)) == closed
 
 
 def test_read_gateway_config_defaults_to_the_closed_door(tmp_path):

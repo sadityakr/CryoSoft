@@ -443,7 +443,7 @@ def _run_properties(kind: str = "procedure", *, probe: bool = True) -> dict[str,
 #: ``command`` decorator absorbs them before the method is called, exactly as
 #: it absorbs ``actor`` — so the wire shape and the Python signature differ,
 #: which is what this table is for. Publishing them here is what lets the
-#: CLI, the MCP adapter and the assistant offer the override with no client
+#: CLI and the MCP adapter offer the override with no client
 #: code of their own: they read it off the rendered schema.
 _OWNERSHIP_PROPERTIES: dict[str, Any] = {
     "override_owner": {

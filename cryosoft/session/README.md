@@ -53,21 +53,6 @@ its function. See `session/gateway/README.md` and the **Role** / **Action
 class** / **Agent gateway** / **Tool surface** / **Tool spec** entries in
 `GLOSSARY.md`.
 
-Also hosts the **Embedded assistant** (`assistant/`): the physicist's chat
-client for one running experiment, and deliberately not a third client of the
-engine. It holds one `Gateway`, its tools ARE `Gateway.tool_schemas()` and its
-tool execution IS `Gateway.call_tool()`, so it acts under the same **Role**, is
-refused by the same matrix, is stopped by the same **Kill switch** and leaves
-the same **Agent feed** trail as an agent in another process. It adds two
-things of its own: a written system-prompt standard (probe before running,
-quote a refusal verbatim, never take over another actor's run without stating why, never claim an action without an `OK` verdict) and
-the **Assistant transcript**, the conversation half of the evidence the feed
-cannot hold. Its thread rule — model calls on a `QThreadPool` worker, tool
-calls on the thread that receives the answer — is what keeps the engine's
-single-hardware-thread invariant untouched. See
-`session/assistant/README.md` and the **Embedded assistant** / **Assistant
-transcript** entries in `GLOSSARY.md`.
-
 Not to be confused with `gui/form_autosave.py` (historically "the session
 model"): that is form persistence; this layer is experiment management.
 
@@ -112,9 +97,6 @@ GUI imports session).
   `<experiment>/analysis/<run_id>/report.json` by `analysis_runner.py` after
   its worker process exits, and handed straight to the publisher. The report
   is data written by another process; nothing in this layer runs a recipe.
-- Questions for the **Embedded assistant** (`AssistantRuntime.ask()`), and
-  the `ChatClient` its answers come from — injected, never built here, so a
-  deployment with no API key simply constructs no runtime.
 - Maintenance-log writes: `MaintenanceLogStore.add_entry`/`revise_entry`/
   `delete_entry`, from the GUI's add/edit dialogs.
 
@@ -359,5 +341,4 @@ file-format change, not a routine edit.
 | `analysis_runner.py` | The analysis stage's client half: builds an `AnalysisSpec` from one run record plus the experiment context and the settings, writes it into `<experiment>/analysis/<run_id>/`, runs `python -m cryosoft.analysis run --spec …` as a bounded `QProcess` (one at a time, FIFO queue, QTimer timeout, no blocking wait), and hands the report back to the ELN publisher — an **analysed entry** when it ran, the facts fallback when it did not. | `AnalysisRunner` (`start`, `cancel`, `is_running`, `recipe_dirs`; signals `analysis_started`, `analysis_finished`, `analysis_failed`) | `tests/test_analysis_runner.py` |
 | `agent_feed.py` | The **Agent feed**: one experiment's append-only trail of every command a non-operator actor submitted, every verdict answering one, every agent-caused `StateChange`, and every call of a tool declaring `ToolSpec.recorded` (with its cost line) — joined by `request_id`, tolerant on read, and never able to raise into the engine's emit path. | `AgentFeed` (`attach`, `record_command`, `record_verdict`, `record_event`, `record_tool_call`, `set_run_id`, `path`, `run_id`, `experiment_id`), `read_feed`, `SCHEMA_VERSION`, `RECORD_COMMAND`, `RECORD_VERDICT`, `RECORD_EVENT`, `RECORD_TOOL` | `tests/test_agent_feed.py` |
 | `gateway/` | The **Agent gateway** (sub-package, own README): the permission model in front of the control contract — `Role` × `ActionClass` as one `PERMISSION_MATRIX`, the PROVISIONAL per-command and per-capability classification tables, `authorize()`, and the in-process `Gateway` client that stamps an agent identity onto every command and answers a refusal on the engine's own verdict stream. Also renders the **Tool surface** from `CommandName` and the station declaration, answers `call_tool()` for every call, and — through the **Gateway server** — carries that same client to another PROCESS over a local socket, one `Gateway` per connection, without a thread. | `Gateway`, `EngineClient`, `GatewayServer`, `Role`, `Permission`, `PERMISSION_MATRIX`, `authorize`, `role_within_ceiling`, `ActionClass`, `ClassifiedAction`, `UnclassifiedActionError`, `COMMAND_ACTION_CLASSES`, `CONTROL_ACTION_CLASSES`, `LIFECYCLE_ACTION_CLASSES`, `classify_command`, `classify_control`, `ToolSpec`, `ToolContext`, `ToolError`, `SESSION_TOOLS`, `render_tools`, `capability_tool_name`, `validate_tool_args` | `tests/test_gateway.py`, `tests/test_gateway_tools.py`, `tests/test_gateway_server.py` + conformance |
-| `assistant/` | The **Embedded assistant** (sub-package, own README): the tool-use loop whose tools are the gateway's and whose execution is the gateway's, the system-prompt standard it runs under, the **Assistant transcript** it writes as evidence, the two **cost line**s it reports, and the thread rule that keeps every model call off the thread that drives the tick. | `AssistantRuntime`, `ASSISTANT_SYSTEM_PROMPT`, `ChatClient`, `ChatResult`, `ToolCall`, `AssistantError`, `FakeChatClient`, `AnthropicChatClient`, `AssistantTranscript`, `read_transcript`, `STATUS_*`, `empty_cost_line` | `tests/test_assistant.py` |
 | `maintenance_log.py` | The maintenance-log framework: declared log kinds (`maintenance` ships) and revisioned per-kind storage. | `LogKindSpec`, `DECLARED_LOG_KINDS`, `MaintenanceLogStore` (`add_entry`, `revise_entry`, `delete_entry`, `entries`, `revisions`) | `tests/test_maintenance_log.py` + conformance |

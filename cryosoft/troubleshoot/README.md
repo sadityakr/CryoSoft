@@ -85,7 +85,7 @@ hardening the triage skill).
 | `bench-l0 [--config X]` | L0 bench: idn + one passive getter per driver (zero excitation) | yes |
 | `status [--log P] [--last N] [--max-age S]` | summarize the RUNNING app's operational-status log (`status.jsonl`); the only command that reads the live app rather than the instruments | yes |
 | `session [EXPERIMENT_DIR]` | report on one experiment folder — its runs in order (kind, procedure, outcome, start/end, duration, data file), its session envelope, and any incident reports filed beside it; defaults to the most recently modified experiment under the measurement root | yes |
-| `trends [--config X] [--window 8h]` | evaluate the declared trend checks (temperature stability, helium consumption) plus the pull-only `trend_store_live` check, against the trend-history store on disk | yes |
+| `trends [--config X] [--window 8h]` | evaluate the declared trend checks (temperature stability) plus the pull-only `trend_store_live` check, against the trend-history store on disk | yes |
 | `methods <target>` | list a driver's public methods | yes |
 | `idn <target>` | identify one instrument via its driver | yes |
 | `read <target> <method> [args] [--repeat N] [--interval S]` | call a read-only driver method; repeats expose intermittent/timing faults | yes |

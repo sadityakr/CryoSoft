@@ -64,7 +64,7 @@ is.
   `submit(Command) -> request_id`, the two contract streams, and
   `station_info()`. Under the single hardware thread standard that object is
   the **Orchestrator proxy** for everything on the GUI thread (the gateway
-  server and the embedded assistant included) and the Orchestrator itself for
+  server included) and the Orchestrator itself for
   a caller already on the instrument thread; a proxy over a transport will be
   it later, with no change here. The streams answer to two names —
   `verdict_emitted`/`event_emitted` on the engine, `verdict`/`event` on a

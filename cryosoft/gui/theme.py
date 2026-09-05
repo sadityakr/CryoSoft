@@ -111,16 +111,6 @@ BTN_CLASS_PRIMARY = "primary"
 BTN_CLASS_SECONDARY = "secondary"
 BTN_CLASS_DANGER = "danger"
 
-# ---------------------------------------------------------------------------
-# Assistant dock (AssistantDock) — the speaker tags in the chat transcript.
-# No new colours: each is an already-validated token, and each is >=4.5:1 on
-# the BG_ELEVATED (#ffffff) surface the transcript view paints.
-# ---------------------------------------------------------------------------
-ASSISTANT_USER_TEXT = BTN_PRIMARY_PRESSED    # #184f95 on white, 8.1:1
-ASSISTANT_REPLY_TEXT = TEXT_SECONDARY        # #52514e on white, 7.9:1
-ASSISTANT_TOOL_OK_TEXT = STATUS_OK           # #0ca30c, the verdict badge's own
-ASSISTANT_TOOL_REFUSED_TEXT = BANNER_ERROR_TEXT  # #8f1d1d on white, 9.4:1
-
 
 def build_stylesheet() -> str:
     """Return the full application QSS string.
@@ -597,45 +587,15 @@ QLabel[class="lifecycle_dot"][status="initiated"] {{
     color: {STATUS_OK};
 }}
 
-/* ── Assistant status chip (AssistantDock) ──────────────────────────────── */
-/* Four states, one selector each. The base rule reserves the 2px transparent
-   border so a filled state never shifts the row — the same pattern the
-   QGroupBox[status] borders and the verdict badge follow. "thinking" and
-   "calling" share the one blue triple because they are the same fact to the
-   reader (the assistant is busy); the chip's TEXT says which, naming the tool.
-   Colours: BTN_SECONDARY_PRESSED fill with a BTN_PRIMARY_PRESSED foreground is
-   7.1:1 and the ACCENT border 3.9:1 against it; "refused" reuses the banner's
-   validated error triple. */
-QLabel[class="assistant_chip"] {{
-    font-weight: bold;
-    font-size: 9pt;
-    padding: 2px 8px;
-    border: 2px solid transparent;
-    border-radius: 4px;
-    color: {TEXT_MUTED};
-    background-color: transparent;
-}}
-QLabel[class="assistant_chip"][status="thinking"],
-QLabel[class="assistant_chip"][status="calling"] {{
-    background-color: {BTN_SECONDARY_PRESSED};
-    border-color: {ACCENT};
-    color: {BTN_PRIMARY_PRESSED};
-}}
-QLabel[class="assistant_chip"][status="refused"] {{
-    background-color: {BANNER_ERROR_BG};
-    border-color: {BANNER_ERROR_BORDER};
-    color: {BANNER_ERROR_TEXT};
-}}
-
 /* ── Publish-state chip (AnalysisPanel's eLab tab) ──────────────────────── */
 /* The four publish states of the ELN track, one selector each, and no new
    colour: "pending" reuses the banner's validated warning triple, "offline"
    its error triple, "synced" the verdict badge's existing STATUS_OK
    foreground, and "disabled" the muted base rule. The base rule reserves the
    2px transparent border so a filled state never shifts the header row — the
-   same pattern the QGroupBox[status] borders, the verdict badge and the
-   assistant chip follow. The chip's TEXT always names the state too, so it is
-   readable without the colour. */
+   same pattern the QGroupBox[status] borders and the verdict badge follow.
+   The chip's TEXT always names the state too, so it is readable without the
+   colour. */
 QLabel[class="publish_chip"] {{
     font-weight: bold;
     font-size: 9pt;
@@ -667,8 +627,8 @@ QLabel[class="publish_chip"][state="offline"] {{
    apart from the pending row that shares its fill. Its text says whose run
    was taken and why, so the row is legible without the colour at all.
    The base rule reserves the 2px transparent border so a filled row never
-   shifts the list — the same pattern the QGroupBox[status] borders, the
-   verdict badge and the assistant chip follow. A refusal must be
+   shifts the list — the same pattern the QGroupBox[status] borders and the
+   verdict badge follow. A refusal must be
    recognisable without colour too, which is why the row's own text always
    names the verdict code and the refusing rule. */
 QLabel[class="agent_row"] {{

@@ -20,7 +20,6 @@ from cryosoft.core.request_spool import RequestSpool
 from cryosoft.core.station import (
     Station,
     build_station_with_fallback,
-    read_assistant_config,
     read_gateway_config,
     read_instrument_thread,
     read_panels_config,
@@ -35,16 +34,10 @@ from cryosoft.gui.monitor_window import MonitorWindow
 from cryosoft.gui.procedure_discovery import discover_procedures
 from cryosoft.gui.theme import PLOT_AXIS, PLOT_BG, build_stylesheet
 from cryosoft.session.agent_feed import AgentFeed
-from cryosoft.session.assistant import (
-    AnthropicChatClient,
-    AssistantError,
-    AssistantRuntime,
-    AssistantTranscript,
-)
 from cryosoft.session.eln.publisher import ElnPublisher
 from cryosoft.session.gateway import authorize_spooled
 from cryosoft.session.eln.settings import load_eln_settings
-from cryosoft.session.gateway import Gateway, GatewayServer, ToolContext
+from cryosoft.session.gateway import GatewayServer, ToolContext
 from cryosoft.session.manager import ExperimentManager
 from cryosoft.session.models import GUEST_USER_ID, GUEST_USER_NAME, User
 from cryosoft.session.store import ExperimentStore, SessionStore, UserRoster
@@ -157,31 +150,6 @@ def _open_experiment_feed(manager: ExperimentManager) -> AgentFeed | None:
     )
 
 
-def _open_assistant_transcript(
-    manager: ExperimentManager,
-) -> AssistantTranscript | None:
-    """Return the **Assistant transcript** of whichever experiment is open now.
-
-    Resolved on demand, exactly like ``_open_experiment_feed()`` and for the
-    same reason: the conversation belongs to the experiment, not to the
-    process, so a question asked after the physicist opened a new experiment
-    is written into that experiment's folder.
-
-    Args:
-        manager: The session layer's experiment façade.
-
-    Returns:
-        The transcript for the open experiment, or ``None`` when none is open
-        (in which case the conversation still runs and simply keeps no
-        evidence, rather than inventing a folder to record into).
-    """
-    experiment = manager.current_experiment()
-    if experiment is None:
-        return None
-    return AssistantTranscript(
-        manager.store.assistant_transcript_path(experiment.experiment_id),
-        experiment.experiment_id,
-    )
 
 
 def _build_gateway_server(
@@ -485,64 +453,10 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
         # descriptor's sake.
         app.aboutToQuit.connect(app.gateway_server.stop)
 
-    # The Embedded assistant (cryosoft/session/assistant/, GLOSSARY.md's
-    # **Embedded assistant**): the physicist's chat client for this
-    # experiment, and deliberately NOT a third client of the engine — it holds
-    # one Gateway, its tools ARE that gateway's tool surface and its tool
-    # execution IS that gateway's call_tool(), so it is authorised, fed and
-    # seen exactly as an agent in another process. Off unless this setup's
-    # monitor.yaml says so, and never offering more authority than that file
-    # names (falling back to the ceiling it already grants an out-of-process
-    # client, since the assistant is one). Its Gateway is built over the
-    # PROXY, like the gateway server's: the assistant runs on the GUI thread,
-    # and the proxy is what a client on this side of the instrument thread
-    # holds — it satisfies the control contract's client surface
-    # (EngineClient: submit + the two streams) exactly as the engine does.
-    #
-    # Two things are resolved at call time rather than once: the experiment's
-    # Agent feed and its Assistant transcript, so a conversation had after the
-    # physicist opened a new experiment is recorded in that experiment's
-    # folder.
-    assistant_config = read_assistant_config(used_path)
-    assistant_max_role = (
-        assistant_config["assistant_max_role"] or gateway_config["gateway_max_role"]
-    )
-    # Read once and shared with the publisher below: the assistant's model,
-    # key, token cap and price table live in the same user-level settings file
-    # the notebook's do, and two reads could disagree.
+    # Read once and shared with the publisher below: the drafting model,
+    # key, token cap and price table live in the same user-level settings
+    # file the notebook's do, and two reads could disagree.
     eln_settings = load_eln_settings()
-
-    def _assistant_gateway(role: str) -> Gateway:
-        """Build the assistant's connection under one role."""
-        return Gateway(
-            orchestrator,
-            role,
-            "assistant",
-            station_info=station.station_info,
-            tool_context=ToolContext(
-                experiments=session_manager, run_catalog=run_catalog
-            ),
-            feed=_open_experiment_feed(session_manager),
-        )
-
-    app.assistant_runtime = None
-    if assistant_config["assistant"]:
-        try:
-            # The client first: with no key (or without the optional extra
-            # installed) there is nothing to connect a gateway for.
-            chat_client = AnthropicChatClient(eln_settings.assistant)
-            app.assistant_runtime = AssistantRuntime(
-                _assistant_gateway(assistant_max_role),
-                chat_client,
-                transcript=_open_assistant_transcript(session_manager),
-                parent=app,
-            )
-        except (AssistantError, ValueError):
-            # No key, no optional extra, or an unknown role in the config: the
-            # dock is still registered and says so in one line, because a
-            # missing key is a configuration fact and not a fault that should
-            # take the window with it.
-            logger.exception("Embedded assistant not started")
 
     # ELN publishing (cryosoft/session/eln/): entirely opt-in and entirely
     # GUI-side. With no user-level settings file — the default — the
@@ -594,10 +508,6 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
         session_store=session_store,
         panels_config=read_panels_config(used_path),
         mirror=mirror,
-        assistant_enabled=bool(assistant_config["assistant"]),
-        assistant_runtime=app.assistant_runtime,
-        assistant_max_role=assistant_max_role,
-        assistant_role_factory=_assistant_gateway,
     )
     monitor.show()
 

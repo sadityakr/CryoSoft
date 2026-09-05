@@ -95,11 +95,9 @@ class Gate:
 
         Runs ``action`` once (if not already run) exactly like ``step()``,
         then reads ``check()`` a single time and returns it verbatim — no
-        stability window, no holding, no timeout. Used by the Orchestrator's
-        operation-finish one-shot postcondition evaluation, where holding
-        for ``window_s`` would defeat "finish is immediate". Call
-        this instead of (never together with) ``step()`` on a given ``Gate``
-        instance.
+        stability window, no holding, no timeout. For a caller that needs a
+        gate's verdict at one instant rather than a wait. Call this instead
+        of (never together with) ``step()`` on a given ``Gate`` instance.
 
         Returns:
             ``True`` if there is no ``check`` (action-only gate), else the

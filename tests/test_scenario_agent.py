@@ -4,8 +4,8 @@
 #   agent", run through every client surface the Agent gateway offers: the
 #   in-process Gateway (threaded, over a real InstrumentHost), role and
 #   kill-switch and attendance refusals mid-run, cryosoft.ctl offline, the
-#   Request spool, the local socket and the MCP shim over it, the embedded
-#   assistant, and two agents at once. Each surface drives the same story —
+#   Request spool, the local socket and the MCP shim over it, and two agents
+#   at once. Each surface drives the same story —
 #   read status, read manifest, validate_run, probe_run, run a FieldSweep,
 #   watch it, then stop it — so a defect that shows up on one surface and not
 #   another is a real inconsistency, not a fluke of one harness. Two of them
@@ -36,14 +36,6 @@ from cryosoft.ctl.client import open_client
 from cryosoft.mcp import translate as mcp_translate
 from cryosoft.procedures.field_sweep import FieldSweep
 from cryosoft.session.agent_feed import AgentFeed, read_feed
-from cryosoft.session.assistant import (
-    AssistantRuntime,
-    AssistantTranscript,
-    ChatResult,
-    FakeChatClient,
-    ToolCall,
-    read_transcript,
-)
 from cryosoft.session.gateway import (
     Gateway,
     GatewayServer,
@@ -150,7 +142,7 @@ def threaded_stack(qtbot, tmp_path):
     """A real InstrumentHost in threaded mode — the wiring the app itself uses.
 
     The Gateway attaches to the **Orchestrator proxy**, exactly as
-    ``cryosoft.main`` wires the Gateway server and the embedded assistant, so
+    ``cryosoft.main`` wires the Gateway server, so
     a command tool answers ``PENDING`` until its verdict crosses back over
     the instrument thread — the asynchronous half of the client boundary a
     plain-Orchestrator fixture never exercises.
@@ -1029,191 +1021,6 @@ def test_mcp_shim_subprocess_against_the_running_app(qtbot, served):
         assert answer["tool"] == "read_status"
     finally:
         process.close()
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# 8. The embedded assistant
-# ══════════════════════════════════════════════════════════════════════════
-
-
-@pytest.fixture
-def assistant_bench(qtbot, tmp_path):
-    station = _fast_station()
-    orch = Orchestrator(
-        station, tick_interval_ms=10, run_catalog={"FieldSweep": FieldSweep}
-    )
-    roster = UserRoster(tmp_path / "users.json")
-    roster.add(User(user_id="jdoe", name="J. Doe", email="jdoe@example.org"))
-    store = ExperimentStore(tmp_path / "experiments")
-    manager = ExperimentManager(
-        store=store,
-        roster=roster,
-        orchestrator=orch,
-        config_name="sim_cryostat",
-        station=station,
-        run_catalog={"FieldSweep": FieldSweep},
-    )
-    manager.start_experiment("Scenario 8", "jdoe", dict(SAMPLE_INFO))
-    yield station, orch, manager, tmp_path
-    orch.shutdown()
-
-
-def _assistant_gateway(bench, role=Role.SESSION):
-    station, orch, manager, tmp_path = bench
-    return Gateway(
-        orch,
-        role,
-        "assistant",
-        station_info=station.station_info,
-        tool_context=ToolContext(
-            experiments=manager,
-            run_catalog={"FieldSweep": FieldSweep},
-            status_log_path=tmp_path / "status.jsonl",
-        ),
-    )
-
-
-def _tool_use(call_id, name, args=None):
-    return ChatResult(
-        text_blocks=(),
-        tool_calls=(ToolCall(id=call_id, name=name, args=dict(args or {})),),
-        model="claude-opus-5",
-        input_tokens=100,
-        output_tokens=10,
-        stop_reason="tool_use",
-    )
-
-
-def _run_turn(qtbot, runtime, question):
-    with qtbot.waitSignal(runtime.turn_finished, timeout=15000) as blocker:
-        assert runtime.ask(question) is True
-    return blocker.args[0]
-
-
-def test_assistant_the_full_story_and_narrates_the_verdict(qtbot, assistant_bench):
-    """read_status -> validate_run -> probe_run -> run_procedure, then narrated.
-
-    Also the assistant's thread rule: the model call happens off the caller's
-    thread, and every ``Gateway.call_tool()`` happens on it.
-    """
-    station, orch, manager, tmp_path = assistant_bench
-    orch.start_monitoring()
-    data_dir = str(manager.current_data_dir())
-
-    class _ThreadRecordingGateway(Gateway):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            self.call_threads: list[int] = []
-
-        def call_tool(self, name, args=None):  # noqa: D102
-            self.call_threads.append(threading.get_ident())
-            return super().call_tool(name, args)
-
-    gateway = _ThreadRecordingGateway(
-        orch,
-        Role.SESSION,
-        "assistant",
-        station_info=station.station_info,
-        tool_context=ToolContext(
-            experiments=manager,
-            run_catalog={"FieldSweep": FieldSweep},
-            status_log_path=tmp_path / "status.jsonl",
-        ),
-    )
-    transcript = AssistantTranscript(
-        manager.store.assistant_transcript_path(manager.current_experiment().experiment_id),
-        manager.current_experiment().experiment_id,
-    )
-    client = FakeChatClient(
-        replies=[
-            _tool_use("c1", "read_status"),
-            _tool_use(
-                "c2",
-                "validate_run",
-                {
-                    "procedure": "FieldSweep",
-                    "params": dict(FAST_PARAMS),
-                    "sample_info": dict(SAMPLE_INFO),
-                    "data_directory": data_dir,
-                },
-            ),
-            _tool_use("c3", "probe_run", _probe_run_args(data_dir)),
-            _tool_use("c4", "run_procedure", _run_procedure_args(data_dir)),
-            ChatResult(
-                text_blocks=("The run was accepted: the verdict was OK.",),
-                model="claude-opus-5",
-                input_tokens=400,
-                output_tokens=20,
-                stop_reason="end_turn",
-            ),
-        ]
-    )
-    runtime = AssistantRuntime(gateway, client, transcript=transcript)
-    caller = threading.get_ident()
-
-    final = _run_turn(qtbot, runtime, "Validate, probe and run the sweep.")
-
-    assert "OK" in final
-    assert len(client.requests) == 5
-    for request in client.requests:
-        assert request.thread != caller
-    assert gateway.call_threads == [caller] * 4
-
-    records = read_transcript(transcript.path)
-    kinds = [record["record"] for record in records]
-    assert kinds == [
-        "user",
-        "assistant",
-        "tool",
-        "assistant",
-        "tool",
-        "assistant",
-        "tool",
-        "assistant",
-        "tool",
-        "assistant",
-    ]
-    tools_called = [r["tool"] for r in records if r["record"] == "tool"]
-    assert tools_called == ["read_status", "validate_run", "probe_run", "run_procedure"]
-    assert [r["verdict"]["code"] for r in records if r["record"] == "tool"] == [
-        "OK",
-        "OK",
-        "OK",
-        "OK",
-    ]
-
-
-def test_assistant_a_refusal_reaches_the_model_verbatim(qtbot, assistant_bench):
-    """As observer, run_procedure's refusal is quoted in the reply, not summarised."""
-    gateway = _assistant_gateway(assistant_bench, Role.OBSERVER)
-    data_dir = str(assistant_bench[2].current_data_dir())
-    client = FakeChatClient(
-        replies=[
-            _tool_use("c1", "run_procedure", _run_procedure_args(data_dir)),
-            ChatResult(
-                text_blocks=(
-                    "Refused: The 'observer' role does not grant run_control "
-                    "actions, so 'run_procedure' is refused.",
-                ),
-                model="claude-opus-5",
-                input_tokens=200,
-                output_tokens=30,
-                stop_reason="end_turn",
-            ),
-        ]
-    )
-    runtime = AssistantRuntime(gateway, client)
-    refusals: list[tuple[str, str]] = []
-    runtime.status_changed.connect(lambda status, detail: refusals.append((status, detail)))
-
-    final = _run_turn(qtbot, runtime, "Start the sweep.")
-
-    tool_result = client.requests[1].messages[-1]["content"][0]
-    answer = json.loads(tool_result["content"])
-    assert answer["ok"] is False
-    assert answer["code"] == "BLOCKED_ROLE"
-    assert answer["detail"]["rule"] == "role_matrix"
-    assert answer["reason"] in final
 
 
 # ══════════════════════════════════════════════════════════════════════════
