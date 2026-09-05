@@ -2,18 +2,12 @@
 data_directory: "C:/CryoData"
 
 real_drivers:
-  ips_x:
+  ips_z:
     class: cryosoft.drivers.sim_oxford_ips120.SimOxfordIPS120
-    address: "SIM::IPS_X"
-  ips_y:
-    class: cryosoft.drivers.sim_oxford_ips120.SimOxfordIPS120
-    address: "SIM::IPS_Y"
-  itc_vti:
-    class: cryosoft.drivers.sim_oxford_itc503.SimOxfordITC503
-    address: "SIM::ITC_VTI"
-  itc_sample:
-    class: cryosoft.drivers.sim_oxford_itc503.SimOxfordITC503
-    address: "SIM::ITC_SAMPLE"
+    address: "SIM::IPS_Z"
+  lakeshore_vti:
+    class: cryosoft.drivers.sim_lakeshore_335.SimLakeshore335
+    address: "SIM::LS335"
   ilm:
     class: cryosoft.drivers.sim_oxford_ilm200.SimOxfordILM200
     address: "SIM::ILM"
@@ -23,20 +17,11 @@ real_drivers:
   keithley_2182a:
     class: cryosoft.drivers.sim_keithley_2182a.SimKeithley2182A
     address: "SIM::K2182A"
-  k705:
-    class: cryosoft.drivers.sim_keithley_705.SimKeithley705
-    address: "SIM::K705"
-  rotator_drv:
-    class: cryosoft.drivers.sim_rotator.SimRotator
-    address: "SIM::ROTATOR"
-  lockin_drv:
-    class: cryosoft.drivers.sim_lockin.SimLockIn
-    address: "SIM::LOCKIN"
 
 virtual_instruments:
   magnet_z:
     class: cryosoft.virtual_instruments.magnet.superconducting_magnet.SuperconductingMagnetVI
-    drivers: {main: ips_x}
+    drivers: {main: ips_z}
     vi_type: system
     init_params:
       amperes_per_tesla: 10.0
@@ -48,25 +33,12 @@ virtual_instruments:
         - {max_current_A: 70.0, rate_A_per_min: 3.0}
         - {max_current_A: 90.0, rate_A_per_min: 1.0}
     metadata:
-      role: X-axis magnet
-      manufacturer: Oxford Instruments
-      model: IPS120-10
-  magnet_y:
-    class: cryosoft.virtual_instruments.magnet.superconducting_magnet.SuperconductingMagnetVI
-    drivers: {main: ips_y}
-    vi_type: system
-    init_params:
-      amperes_per_tesla: 5.0
-      max_current: 20.0
-      min_current: -20.0
-      default_ramp_rate: 2.0
-    metadata:
-      role: Y-axis magnet
+      role: Z-axis magnet
       manufacturer: Oxford Instruments
       model: IPS120-10
   temperature_vti:
-    class: cryosoft.virtual_instruments.temperature.vti_temperature_controller.VTITemperatureControllerVI
-    drivers: {main: itc_vti}
+    class: cryosoft.virtual_instruments.temperature.lakeshore_335_sample_temperature_controller.Lakeshore335SampleTemperatureControllerVI
+    drivers: {main: lakeshore_vti}
     vi_type: system
     init_params:
       default_ramp_rate: 2.0
@@ -76,24 +48,9 @@ virtual_instruments:
       max_temperature_K: 320.0
       max_ramp_rate_K_per_min: 20.0
     metadata:
-      role: VTI temperature controller
-      manufacturer: Oxford Instruments
-      model: ITC503
-  temperature_sample:
-    class: cryosoft.virtual_instruments.temperature.sample_temperature_controller.SampleTemperatureControllerVI
-    drivers: {main: itc_sample}
-    vi_type: system
-    init_params:
-      default_ramp_rate: 1.0
-      tolerance: 0.3
-      # Setup limits enforced on user @control actions (control-validation standard)
-      min_temperature_K: 1.4
-      max_temperature_K: 320.0
-      max_ramp_rate_K_per_min: 20.0
-    metadata:
       role: Sample-space temperature controller
-      manufacturer: Oxford Instruments
-      model: ITC503
+      manufacturer: Lakeshore
+      model: 335
   level_meter:
     class: cryosoft.virtual_instruments.level.cryogen_level_meter.CryogenLevelMeterVI
     drivers: {main: ilm}
@@ -105,8 +62,8 @@ virtual_instruments:
       role: Helium/nitrogen level meter
       manufacturer: Oxford Instruments
       model: ILM200
-  keithley_delta_mode:
-    class: cryosoft.virtual_instruments.measurement.measurement_delta_mode.DeltaModeMeasurementVI
+  dc_measurement:
+    class: cryosoft.virtual_instruments.measurement.dc_separate_measurement.DCSeparateMeasurementVI
     drivers: {source: keithley_6221, meter: keithley_2182a}
     vi_type: measurement
     init_params:
@@ -117,81 +74,9 @@ virtual_instruments:
       # mistyped exponent rather than an operator's legitimate choice.
       max_source_current_A: 0.105
     metadata:
-      role: Delta-mode resistance measurement (source + nanovoltmeter pair)
-      manufacturer: Keithley
-      model: 6221 + 2182A
-
-  keithley_dc_mode:
-    class: cryosoft.virtual_instruments.measurement.measurement_dc_mode.DCModeMeasurementVI
-    drivers: {source: keithley_6221, meter: keithley_2182a}
-    vi_type: measurement
-    init_params:
-      max_source_current_A: 0.105   # Keithley 6221 maximum output current
-    metadata:
-      role: DC mode resistance measurement (source + nanovoltmeter pair)
-      manufacturer: Keithley
-      model: 6221 + 2182A
-  dc_measurement:
-    class: cryosoft.virtual_instruments.measurement.dc_separate_measurement.DCSeparateMeasurementVI
-    drivers: {source: keithley_6221, meter: keithley_2182a}
-    vi_type: measurement
-    init_params:
-      max_source_current_A: 0.105   # Keithley 6221 maximum output current
-    metadata:
       role: DC source-and-measure (source + nanovoltmeter pair)
       manufacturer: Keithley
       model: 6221 + 2182A
-  rotator:
-    class: cryosoft.virtual_instruments.rotator.rotator.RotatorVI
-    drivers: {main: rotator_drv}
-    vi_type: system
-    init_params:
-      default_rate_deg_per_min: 1.0
-      min_angle_deg: -180.0
-      max_angle_deg: 180.0
-      max_rate_deg_per_min: 10.0
-    metadata:
-      role: Sample rotation stage
-      manufacturer: CryoSoft
-      model: Sim rotator
-  lockin_harmonic:
-    class: cryosoft.virtual_instruments.measurement.lockin_harmonic.LockInHarmonicMeasurementVI
-    drivers: {lockin: lockin_drv}
-    vi_type: measurement
-    init_params:
-      series_resistance_ohm: 1.0e6
-      # The lock-in sources a VOLTAGE through series_resistance_ohm, so this
-      # ceiling becomes an oscillator-amplitude bound of
-      # max_source_current_A * series_resistance_ohm = 5 V RMS — the
-      # full-scale sine output of the modelled lock-in. Raising the series
-      # resistor without revisiting this would allow a higher amplitude than
-      # the instrument can produce; lowering it tightens the bound correctly.
-      max_source_current_A: 5.0e-6
-    metadata:
-      role: Lock-in 1f/2f harmonic measurement (internal source)
-      manufacturer: CryoSoft
-      model: Sim lock-in
-  switch_matrix:
-    class: cryosoft.virtual_instruments.switch.switch_matrix.SwitchMatrixVI
-    drivers: {main: k705}
-    vi_type: switch
-    init_params:
-      # 4-pole: one channel switches all four leads of a 4-wire measurement,
-      # mirroring the real 12t-cryo rack. This also halves the channel count
-      # (10 in 4-pole vs 20 in 2-pole), so route channels must be 1..10.
-      pole_mode: 4
-      # Keithley 705 channels are plain numbers (Cnnn), not crosspoint specs:
-      # verified against the manual and the instrument at bench commissioning.
-      routes:
-        Mux-Ch1: ["1"]
-        Mux-Ch2: ["2"]
-        Mux-Ch3: ["3"]
-        Mux-Ch4: ["4"]
-      settle_time_s: 0.0
-    metadata:
-      role: Sample multiplexer
-      manufacturer: Keithley
-      model: 705
 
 # Cryogenics management (see GLOSSARY.md's Cryogenics log): the helium
 # fill operation, the consumption display, and the automatic helium-record
