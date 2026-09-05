@@ -1,6 +1,6 @@
 # Analysis before the notebook — a dedicated analysis stage between a finished run and its eLab entry
 
-**Status:** Active — 2026-09-05. Builds on the shipped ELN track
+**Status:** Implemented — 2026-09-05 (`cryosoft/analysis/`, `session/eln/` + `session/analysis_runner.py`, `gui/analysis_panel.py` + `gui/eln_settings_dialog.py`, five gateway tools; import contracts C22/C23). Builds on the shipped ELN track
 (`cryosoft/session/eln/`) and the control contract.
 
 ## Problem

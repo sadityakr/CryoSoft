@@ -18,33 +18,23 @@ here needs a network or a real notebook account.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from typing import Any
 
 import pytest
 from PyQt6.QtWidgets import QLineEdit
 
 from cryosoft.gui.eln_settings_dialog import KEY_PLACEHOLDER, ElnSettingsDialog
-from cryosoft.session.eln.settings import ElnSettings
+from cryosoft.session.eln.settings import AnalysisSettings, ElnSettings
 from cryosoft.session.eln.sim_eln import SimElnAdapter
 
 
-@dataclass(frozen=True)
-class StubAnalysisSettings:
-    """The analysis block the ELN settings gain, as the dialog edits it."""
-
-    enabled: bool = False
-    timeout_s: float = 120.0
-    include_fact_tables: bool = False
-    attach_data_file: bool = False
-    recipes: dict[str, str] = field(default_factory=dict)
+#: The real analysis block — the stand-in from the parallel build is gone.
+StubAnalysisSettings = AnalysisSettings
 
 
-@dataclass(frozen=True)
-class SettingsWithAnalysis(ElnSettings):
-    """``ElnSettings`` plus the analysis block, as the merged build has it."""
-
-    analysis: StubAnalysisSettings = field(default_factory=StubAnalysisSettings)
+#: ``ElnSettings`` carries the analysis block itself now.
+SettingsWithAnalysis = ElnSettings
 
 
 class OfflineSimAdapter(SimElnAdapter):
@@ -176,17 +166,6 @@ def test_the_analysis_group_round_trips(dialog):
     assert analysis.include_fact_tables is True
     assert analysis.attach_data_file is True
 
-
-def test_a_record_without_an_analysis_block_is_left_alone(qtbot):
-    """An older settings record is never rewritten with a block it lacks."""
-    widget = ElnSettingsDialog(
-        ElnSettings(enabled=True), on_save=lambda _s: None, adapters={}
-    )
-    qtbot.addWidget(widget)
-    assert widget._analysis_enabled_checkbox.isChecked() is False
-    edited = widget.settings_from_form()
-    assert not hasattr(edited, "analysis")
-    assert "analysis settings" in widget._status_label.text()
 
 
 # ── The backend calls ─────────────────────────────────────────────────────────

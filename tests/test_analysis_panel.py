@@ -37,28 +37,18 @@ from cryosoft.gui.analysis_panel import (
     READY_TEXT,
     AnalysisPanel,
 )
-from cryosoft.session.eln.settings import ElnSettings
+from cryosoft.session.eln.settings import AnalysisSettings, ElnSettings
 
 
 # ── Stub collaborators ────────────────────────────────────────────────────────
 
 
-@dataclass(frozen=True)
-class StubAnalysisSettings:
-    """The analysis block the ELN settings gain, as the panel reads it."""
-
-    enabled: bool = False
-    timeout_s: float = 120.0
-    include_fact_tables: bool = False
-    attach_data_file: bool = False
-    recipes: dict[str, str] = field(default_factory=dict)
+#: The real analysis block — the stand-in from the parallel build is gone.
+StubAnalysisSettings = AnalysisSettings
 
 
-@dataclass(frozen=True)
-class SettingsWithAnalysis(ElnSettings):
-    """``ElnSettings`` plus the analysis block, as the merged build has it."""
-
-    analysis: StubAnalysisSettings = field(default_factory=StubAnalysisSettings)
+#: ``ElnSettings`` carries the analysis block itself now.
+SettingsWithAnalysis = ElnSettings
 
 
 @dataclass
@@ -560,12 +550,3 @@ def test_analysis_toggle_saves_through_the_publisher(wired, monkeypatch):
     assert saved and saved[0][0].analysis.enabled is True
     assert saved[0][1] is publisher
 
-
-def test_analysis_toggle_is_inert_without_an_analysis_block(tmp_path, qtbot):
-    """A settings record with no analysis block leaves the toggle disabled."""
-    manager = StubManager(StubExperiment(), StubStore(tmp_path))
-    panel = AnalysisPanel(
-        session_manager=manager, eln_publisher=StubPublisher(ElnSettings())
-    )
-    qtbot.addWidget(panel)
-    assert not panel._enabled_checkbox.isEnabled()
