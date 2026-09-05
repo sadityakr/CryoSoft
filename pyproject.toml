@@ -513,3 +513,51 @@ forbidden_modules = [
     "cryosoft.core.trend_checks",
     "cryosoft.core.trend_history",
 ]
+
+[[tool.importlinter.contracts]]
+name = "C22: cryosoft.analysis is a standalone analysis stage — it imports only the data reader, the events vocabulary and the exceptions from cryosoft (plus numpy/h5py/stdlib and matplotlib lazily); never the Station, Orchestrator, drivers, VIs, procedures, session layer, GUI, troubleshoot, ctl or mcp"
+type = "forbidden"
+# The whole argument for putting analysis in its own process is that the
+# module running USER-WRITTEN recipe code CANNOT touch an instrument, edit an
+# experiment record or publish anything — mechanically, not by convention. The
+# allowlist is exactly `cryosoft.core.data_reader`, `cryosoft.core.events` and
+# `cryosoft.core.exceptions`; the modules that would break the property are
+# enumerated below, because import-linter only matches a forbidden module that
+# is not an ancestor of the source (naming `cryosoft` or `cryosoft.core` here
+# would silently match nothing). A recipe added to the package later is covered
+# the moment its file exists, since it lives under this same source module.
+source_modules = ["cryosoft.analysis"]
+forbidden_modules = [
+    "cryosoft.core.station",
+    "cryosoft.core.orchestrator",
+    "cryosoft.core.instrument_host",
+    "cryosoft.core.orchestrator_proxy",
+    "cryosoft.core.data_manager",
+    "cryosoft.drivers",
+    "cryosoft.virtual_instruments",
+    "cryosoft.procedures",
+    "cryosoft.session",
+    "cryosoft.gui",
+    "cryosoft.main",
+    "cryosoft.troubleshoot",
+    "cryosoft.ctl",
+    "cryosoft.mcp",
+]
+
+[[tool.importlinter.contracts]]
+name = "C23: nothing below the session layer imports the analysis stage (only session, gui, ctl and main may)"
+type = "forbidden"
+# The mirror of C22, and the same shape as C12 (nothing below the GUI imports
+# the session layer): the analysis stage is a CONSUMER of a finished run, so it
+# sits beside the session layer and above everything the engine is made of. An
+# import of it from core, a driver, a VI or a procedure would put recipe code —
+# and, through it, matplotlib — on the instrument thread.
+source_modules = [
+    "cryosoft.core",
+    "cryosoft.drivers",
+    "cryosoft.virtual_instruments",
+    "cryosoft.procedures",
+    "cryosoft.troubleshoot",
+    "cryosoft.mcp",
+]
+forbidden_modules = ["cryosoft.analysis"]

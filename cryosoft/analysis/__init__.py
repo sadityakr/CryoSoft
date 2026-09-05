@@ -16,6 +16,19 @@ Orchestrator, a driver, a VI, a procedure, the session layer or the GUI, and
 nothing below the session layer imports it. See ``README.md`` here.
 """
 
+from cryosoft.analysis.base import (
+    AnalysisContext,
+    AnalysisError,
+    AnalysisRecipe,
+)
+from cryosoft.analysis.discovery import (
+    RECIPE_TEMPLATE,
+    RecipeInfo,
+    discover_recipes,
+    load_recipe,
+    recipe_for,
+    scaffold_recipe,
+)
 from cryosoft.analysis.report import (
     ANY_PROCEDURE,
     REPORT_FAILED,
@@ -30,16 +43,30 @@ from cryosoft.analysis.report import (
     TableSpec,
 )
 
+from cryosoft.analysis.runner import read_report, run_spec, write_report
+
 __all__ = [
     "ANY_PROCEDURE",
+    "RECIPE_TEMPLATE",
     "REPORT_FAILED",
     "REPORT_FILENAME",
     "REPORT_OK",
     "RECIPES_DIRNAME",
     "SPEC_FILENAME",
+    "AnalysisContext",
+    "AnalysisError",
+    "AnalysisRecipe",
     "AnalysisReport",
     "AnalysisSpec",
     "FigureRef",
+    "RecipeInfo",
     "ResultValue",
     "TableSpec",
+    "discover_recipes",
+    "load_recipe",
+    "read_report",
+    "recipe_for",
+    "run_spec",
+    "scaffold_recipe",
+    "write_report",
 ]
