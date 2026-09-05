@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import qtawesome as qta
 from PyQt6.QtCore import Qt
@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QSplitter,
+    QTabWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -28,6 +29,8 @@ from cryosoft.core.orchestrator_proxy import OrchestratorProxy
 from cryosoft.core.procedure import BaseProcedure
 from cryosoft.core.run_builder import PROCEDURE_BUILD_ERRORS, build_procedure
 from cryosoft.gui import window_geometry
+from cryosoft.gui.analysis_panel import AnalysisPanel
+from cryosoft.gui.eln_settings_dialog import ElnSettingsDialog, persist_eln_settings
 from cryosoft.gui.live_plot_panel import LivePlotPanel
 from cryosoft.gui.notification_banner import NotificationBanner
 from cryosoft.gui.form_autosave import FormAutosaveState
@@ -102,6 +105,14 @@ class ProcedureWindow(QMainWindow):
         mirror: The status mirror every read in this window is answered from
             (the status-mirror standard, ``gui/README.md``). Built from the
             proxy when none is given (the inline construction path).
+        session_manager: The L6 ``ExperimentManager`` the **eLab tab** reads
+            the open experiment's runs and pending entries from, and approves
+            through. ``None`` (unit tests, no session layer) leaves that tab
+            in its not-wired state.
+        eln_publisher: The ``ElnPublisher``, for the eLab tab's publish-state
+            chip and the analysis setting. ``None`` leaves both inert.
+        analysis_runner: The ``AnalysisRunner`` the eLab tab's "Run analysis"
+            submits to. ``None`` disables that button.
     """
 
     def __init__(
@@ -115,6 +126,9 @@ class ProcedureWindow(QMainWindow):
         get_experiment_info: Callable[[], dict[str, str]] | None = None,
         queue_host: RunQueueHost | None = None,
         mirror: StatusMirror | None = None,
+        session_manager: Any | None = None,
+        eln_publisher: Any | None = None,
+        analysis_runner: Any | None = None,
     ) -> None:
         super().__init__(parent)
         self._station = station
@@ -132,6 +146,11 @@ class ProcedureWindow(QMainWindow):
         # means "no experiment": procedures get an empty context.
         self._get_experiment_info = get_experiment_info
         self._queue_host = queue_host
+        # The eLab tab's three collaborators, all optional: with none of them
+        # the tab still builds and says in one line that nothing is wired.
+        self._session_manager = session_manager
+        self._eln_publisher = eln_publisher
+        self._analysis_runner = analysis_runner
 
         # Active procedure reference (set on run)
         self._active_procedure: BaseProcedure | None = None
@@ -219,20 +238,54 @@ class ProcedureWindow(QMainWindow):
         root.addLayout(self._build_control_buttons())
 
     def _build_queue_quadrant(self) -> QWidget:
-        """Build the top-right quadrant: the QueuePanel over the concise Status log.
+        """Build the top-right quadrant: the two tabs "Queue" and "eLab".
 
-        A vertical splitter stacks the Queue (list + management buttons) above
-        the Status log so the queue/status height ratio is draggable — the
-        quadrant has spare height that the status feed can use.
+        The quadrant is a ``QTabWidget`` (``right_tabs``) over two pages.
+        "Queue" is exactly what this quadrant always was — the QueuePanel over
+        the concise Status log, in a draggable vertical splitter. "eLab" is
+        the :class:`AnalysisPanel`: analyse a finished run and approve the
+        entry it produced. Tabs rather than a third split because the two are
+        read at different moments — the queue while a run is being set up,
+        the eLab tab once one has finished — and neither is worth halving the
+        other's height.
 
         Returns:
             QWidget containing the quadrant layout.
         """
         widget = QWidget()
         widget.setObjectName("queue_quadrant")
+        outer = QVBoxLayout(widget)
+        outer.setSpacing(0)
+        outer.setContentsMargins(4, 0, 0, 0)
+
+        self._right_tabs = QTabWidget()
+        self._right_tabs.setObjectName("right_tabs")
+        self._right_tabs.addTab(self._build_queue_tab(), "Queue")
+        self._analysis_panel = AnalysisPanel(
+            session_manager=self._session_manager,
+            eln_publisher=self._eln_publisher,
+            analysis_runner=self._analysis_runner,
+            open_settings=self.open_eln_settings,
+        )
+        self._right_tabs.addTab(self._analysis_panel, "eLab")
+        outer.addWidget(self._right_tabs)
+        return widget
+
+    def _build_queue_tab(self) -> QWidget:
+        """Build the "Queue" tab: the QueuePanel over the concise Status log.
+
+        A vertical splitter stacks the Queue (list + management buttons) above
+        the Status log so the queue/status height ratio is draggable — the
+        tab has spare height that the status feed can use.
+
+        Returns:
+            QWidget containing the tab's layout.
+        """
+        widget = QWidget()
+        widget.setObjectName("queue_tab")
         col = QVBoxLayout(widget)
         col.setSpacing(0)
-        col.setContentsMargins(4, 0, 0, 0)
+        col.setContentsMargins(0, 0, 0, 0)
 
         split = QSplitter(Qt.Orientation.Vertical)
         split.setObjectName("queue_status_splitter")
@@ -376,9 +429,53 @@ class ProcedureWindow(QMainWindow):
         # rule, gui/README.md), like every other per-tick stream here.
         self._mirror.status_updated.connect(self._on_status_snapshot)
 
+        # A finished run is the eLab tab's boundary: it is the moment a run
+        # becomes something to analyse. Connected to a WINDOW slot (the
+        # destruction-order rule, gui/README.md) rather than to the panel.
+        self._orchestrator.run_finished.connect(self._on_run_finished)
+
         self._params_panel.add_to_queue_requested.connect(self._on_add_to_queue)
         self._params_panel.run_now_requested.connect(self._on_run_now)
         self._params_panel.structure_changed.connect(self._populate_axis_selectors)
+
+    # ------------------------------------------------------------------
+    # The eLab tab
+    # ------------------------------------------------------------------
+
+    def _on_run_finished(self, manifest: dict) -> None:
+        """Point the eLab tab at the run that just finished.
+
+        Args:
+            manifest: The run manifest the Orchestrator emitted.
+        """
+        self._analysis_panel.on_run_finished(manifest)
+
+    def open_eln_settings(self) -> None:
+        """Open the **eLab setup dialog** over the publisher's settings.
+
+        The panel's "eLab setup…" button and the Monitor window's User menu
+        open the same dialog over the same record; saving writes the
+        user-level settings file, hands the new record to the publisher, and
+        refreshes the tab.
+        """
+        settings = getattr(self._eln_publisher, "settings", None)
+        if settings is None:
+            self._banner.show_message(
+                "No electronic lab notebook is wired into this session",
+                BANNER_SEVERITY_WARNING,
+            )
+            return
+
+        def _save(edited: Any) -> None:
+            """Write the edited settings, reload the publisher and the tab.
+
+            Args:
+                edited: The ``ElnSettings`` the dialog's form produced.
+            """
+            persist_eln_settings(edited, self._eln_publisher)
+            self._analysis_panel.reload()
+
+        ElnSettingsDialog(settings, on_save=_save, parent=self).exec()
 
     # ------------------------------------------------------------------
     # Slot handlers

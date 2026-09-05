@@ -41,6 +41,7 @@ from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QGridLayout,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -233,30 +234,50 @@ class AnalysisPanel(QWidget):
         row.addWidget(self._setup_btn)
         return row
 
-    def _build_run_row(self) -> QHBoxLayout:
+    def _build_run_row(self) -> QGridLayout:
         """Build the run selector, recipe selector and the two recipe buttons.
 
+        Two rows rather than one: this quadrant shares its width with the
+        parameter form, and a single row of two combos plus two buttons sets
+        a minimum width that would squeeze the form into a horizontal
+        scrollbar.
+
         Returns:
-            The run row's layout.
+            The run rows' layout.
         """
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Run:"))
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(6)
+        grid.setColumnStretch(1, 1)
+
+        grid.addWidget(QLabel("Run:"), 0, 0)
         self._run_combo = QComboBox()
         self._run_combo.setObjectName("analysis_run_combo")
-        self._run_combo.setMinimumWidth(220)
+        self._run_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
         self._run_combo.setToolTip("A finished run of the open experiment")
         self._run_combo.currentIndexChanged.connect(self._on_run_selected)
-        row.addWidget(self._run_combo, stretch=2)
+        grid.addWidget(self._run_combo, 0, 1)
 
-        row.addWidget(QLabel("Recipe:"))
+        self._run_btn = QPushButton("Run analysis")
+        self._run_btn.setObjectName("analysis_run_btn")
+        self._run_btn.setProperty("class", BTN_CLASS_SECONDARY)
+        self._run_btn.setToolTip("Analyse the selected run with the selected recipe")
+        self._run_btn.clicked.connect(self._on_run_analysis_clicked)
+        grid.addWidget(self._run_btn, 0, 2)
+
+        grid.addWidget(QLabel("Recipe:"), 1, 0)
         self._recipe_combo = QComboBox()
         self._recipe_combo.setObjectName("analysis_recipe_combo")
-        self._recipe_combo.setMinimumWidth(160)
+        self._recipe_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
         self._recipe_combo.setToolTip(
             "Which analysis recipe runs. Recipes marked (experiment) live in "
             "this experiment's own folder."
         )
-        row.addWidget(self._recipe_combo, stretch=1)
+        grid.addWidget(self._recipe_combo, 1, 1)
 
         self._new_recipe_btn = QPushButton("New recipe…")
         self._new_recipe_btn.setObjectName("analysis_new_recipe_btn")
@@ -266,15 +287,8 @@ class AnalysisPanel(QWidget):
             "and open it"
         )
         self._new_recipe_btn.clicked.connect(self._on_new_recipe_clicked)
-        row.addWidget(self._new_recipe_btn)
-
-        self._run_btn = QPushButton("Run analysis")
-        self._run_btn.setObjectName("analysis_run_btn")
-        self._run_btn.setProperty("class", BTN_CLASS_SECONDARY)
-        self._run_btn.setToolTip("Analyse the selected run with the selected recipe")
-        self._run_btn.clicked.connect(self._on_run_analysis_clicked)
-        row.addWidget(self._run_btn)
-        return row
+        grid.addWidget(self._new_recipe_btn, 1, 2)
+        return grid
 
     def _build_approval_row(self) -> QHBoxLayout:
         """Build the Publish / Discard row.
