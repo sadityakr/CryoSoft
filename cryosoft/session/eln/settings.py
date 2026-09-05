@@ -25,6 +25,17 @@ reasons: an LLM account is a property of the person and the installation, the
 key must never travel with a config directory, and it is redacted from
 ``repr()`` and ``to_dict()`` under the identical rule. Its own environment
 override is ``CRYOSOFT_ASSISTANT_APIKEY``.
+
+The analysis stage's own switches live under ``analysis``
+(``AnalysisSettings``): whether a finished run is analysed before it reaches
+the notebook, how long its worker may take, and which recipe each procedure
+prefers. They hold no credential, but they travel in the same file for the
+same reason — they are a property of the person and the installation, not of
+the cryostat.
+
+``save_eln_settings()`` is the write half of this module: the settings dialog
+hands it a record, it writes the file back atomically with the secrets and
+tightens the file mode, and ``load_eln_settings()`` reads exactly that back.
 """
 
 from __future__ import annotations
@@ -171,6 +182,28 @@ def _as_prices(value: object) -> dict[str, dict[str, float]]:
     return table
 
 
+def _as_recipes(value: object) -> dict[str, str]:
+    """Coerce a JSON value to a ``{procedure: recipe name}`` map.
+
+    Args:
+        value: Any parsed JSON value. A non-mapping yields an empty map, and a
+            row whose value is not a scalar name is dropped — a mangled
+            preference must never stop an analysis, only stop it preferring.
+
+    Returns:
+        ``{procedure class name: recipe name}``.
+    """
+    if not isinstance(value, dict):
+        return {}
+    recipes: dict[str, str] = {}
+    for procedure, recipe in value.items():
+        if recipe is None or isinstance(recipe, (list, tuple, dict, set)):
+            logger.warning("Ignoring malformed analysis recipe row for %r", procedure)
+            continue
+        recipes[str(procedure)] = str(recipe)
+    return recipes
+
+
 @dataclass(frozen=True)
 class AssistantSettings:
     """The drafting assistant's half of the user-level settings file.
@@ -259,6 +292,77 @@ class AssistantSettings:
 
 
 @dataclass(frozen=True)
+class AnalysisSettings:
+    """The analysis stage's half of the user-level settings file.
+
+    Lives under ``analysis`` in the same JSON file as the notebook's own
+    settings and follows the same rules: every field has a working default and
+    the whole record parses tolerantly, so a hand-mangled file degrades to
+    "analysis is off" rather than breaking startup. It carries no credential.
+
+    Attributes:
+        enabled: Master switch for the analysis stage. ``False`` (the default)
+            means a finished run is rendered from its facts and queued exactly
+            as it is today; ``True`` means it is analysed first and nothing
+            reaches the notebook until a human approves the result.
+        timeout_s: How long the analysis worker may run before it is killed
+            and its report synthesized as failed.
+        include_fact_tables: Default for a report's own flag — append the
+            run's full fact tables below the analysis.
+        attach_data_file: Default for a report's own flag — attach the raw
+            data file to the entry.
+        recipes: ``{procedure class name: recipe name}`` — which recipe a
+            procedure prefers. A procedure with no row lets discovery choose.
+    """
+
+    enabled: bool = False
+    timeout_s: float = 120.0
+    include_fact_tables: bool = False
+    attach_data_file: bool = False
+    recipes: dict[str, str] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-safe dict representation.
+
+        Returns:
+            A JSON-serialisable dict of every setting.
+        """
+        return {
+            "enabled": self.enabled,
+            "timeout_s": self.timeout_s,
+            "include_fact_tables": self.include_fact_tables,
+            "attach_data_file": self.attach_data_file,
+            "recipes": dict(self.recipes),
+        }
+
+    @classmethod
+    def from_dict(cls, data: object) -> AnalysisSettings:
+        """Build ``AnalysisSettings`` from a parsed dict, tolerating bad input.
+
+        Args:
+            data: Any parsed JSON value; junk degrades to defaults, and a
+                malformed recipe row is dropped rather than raised on.
+
+        Returns:
+            The settings record.
+        """
+        if not isinstance(data, dict):
+            return cls()
+        defaults = cls()
+        return cls(
+            enabled=_as_bool(data.get("enabled"), defaults.enabled),
+            timeout_s=_as_float(data.get("timeout_s"), defaults.timeout_s),
+            include_fact_tables=_as_bool(
+                data.get("include_fact_tables"), defaults.include_fact_tables
+            ),
+            attach_data_file=_as_bool(
+                data.get("attach_data_file"), defaults.attach_data_file
+            ),
+            recipes=_as_recipes(data.get("recipes")),
+        )
+
+
+@dataclass(frozen=True)
 class ElnSettings:
     """Everything the ELN track reads out of the user-level settings file.
 
@@ -292,6 +396,10 @@ class ElnSettings:
         assistant: The drafting assistant's own settings (model, key, token
             cap, price table). Off by default, so an installation that never
             drafts carries no LLM footprint at all.
+        analysis: The analysis stage's own settings (on/off, worker timeout,
+            the two report defaults, the per-procedure recipe preferences).
+            Off by default, so an installation that never analyses behaves
+            exactly as it does today.
     """
 
     enabled: bool = False
@@ -309,6 +417,7 @@ class ElnSettings:
     retry_max_s: float = 3600.0
     tags: tuple[str, ...] = ("cryosoft",)
     assistant: AssistantSettings = field(default_factory=AssistantSettings)
+    analysis: AnalysisSettings = field(default_factory=AnalysisSettings)
 
     def __repr__(self) -> str:
         """Return a repr with the API key redacted (never log the key)."""
@@ -321,7 +430,8 @@ class ElnSettings:
             f"max_attachment_bytes={self.max_attachment_bytes!r}, "
             f"drain_interval_s={self.drain_interval_s!r}, "
             f"retry_base_s={self.retry_base_s!r}, retry_max_s={self.retry_max_s!r}, "
-            f"tags={self.tags!r}, assistant={self.assistant!r})"
+            f"tags={self.tags!r}, assistant={self.assistant!r}, "
+            f"analysis={self.analysis!r})"
         )
 
     @property
@@ -356,6 +466,7 @@ class ElnSettings:
             "retry_max_s": self.retry_max_s,
             "tags": list(self.tags),
             "assistant": self.assistant.to_dict(include_secret=include_secret),
+            "analysis": self.analysis.to_dict(),
         }
 
     @classmethod
@@ -395,6 +506,7 @@ class ElnSettings:
             retry_max_s=_as_float(data.get("retry_max_s"), defaults.retry_max_s),
             tags=_as_tags(data.get("tags"), defaults.tags),
             assistant=AssistantSettings.from_dict(data.get("assistant")),
+            analysis=AnalysisSettings.from_dict(data.get("analysis")),
         )
 
 
@@ -440,3 +552,44 @@ def load_eln_settings(path: Path | None = None) -> ElnSettings:
             settings, assistant=replace(settings.assistant, api_key=assistant_key)
         )
     return settings
+
+
+def save_eln_settings(settings: ElnSettings, path: Path | None = None) -> Path:
+    """Write the user-level ELN settings back, secrets included.
+
+    The write half of this module, and the one place a key reaches a disk
+    file. Written atomically (a temporary file in the same directory, then a
+    replace), so a crash mid-write leaves the previous settings intact rather
+    than a truncated file that would silently switch publishing off. The
+    parent directory is created, and on POSIX the file mode is tightened to
+    ``0o600`` — the key is readable by its owner and by nobody else.
+
+    Never logs the file's content: the log line names the path and nothing
+    more.
+
+    Args:
+        settings: The record to write. Its real ``api_key`` (and the
+            assistant's) are written — ``to_dict(include_secret=True)`` — so
+            that ``load_eln_settings()`` reads back exactly this record.
+        path: Destination file. ``None`` uses ``eln_settings_path()``.
+
+    Returns:
+        The path written.
+
+    Raises:
+        OSError: If the directory cannot be created or the file written. The
+            caller (a settings dialog) reports it; there is no safe silent
+            fallback for "your key was not saved".
+    """
+    settings_path = eln_settings_path() if path is None else Path(path)
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = settings_path.with_name(settings_path.name + ".tmp")
+    tmp_path.write_text(
+        json.dumps(settings.to_dict(include_secret=True), indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    if os.name != "nt":
+        os.chmod(tmp_path, 0o600)
+    os.replace(tmp_path, settings_path)
+    logger.info("Wrote the ELN settings to %s", settings_path)
+    return settings_path
