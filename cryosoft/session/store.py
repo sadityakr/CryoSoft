@@ -1,4 +1,13 @@
-"""Disk persistence for sessions, experiments, and the user roster (L6)."""
+"""Disk persistence for sessions, experiments, and the user roster (L6).
+
+Every path helper here is PURE: it says where something belongs and creates
+nothing, so pointing a store at a directory that does not exist yet (or is on
+an unmounted drive) costs nothing until something is actually written. That
+includes the analysis stage's folders (``analysis_dir`` / ``recipes_dir`` /
+``report_dir``) — the analysis runner creates the report directory when it
+writes a spec into it, and the recipe folder appears when a recipe is first
+written.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +18,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+from cryosoft.analysis.report import RECIPES_DIRNAME
 from cryosoft.session.models import SCHEMA_VERSION, ExperimentRecord, Session, User
 
 logger = logging.getLogger(__name__)
@@ -21,6 +31,7 @@ _OUTBOX_FILENAME = "outbox.jsonl"
 _AGENT_FEED_FILENAME = "agent_actions.jsonl"
 _ASSISTANT_TRANSCRIPT_FILENAME = "assistant_transcript.jsonl"
 _DATA_DIRNAME = "data"
+_ANALYSIS_DIRNAME = "analysis"
 
 
 def _utc_now_iso() -> str:
@@ -76,6 +87,9 @@ class ExperimentStore:
                 gui_state.json              # GUI-authored, opaque to this store
                 outbox.jsonl                # the ELN publish journal
                 agent_actions.jsonl         # the Agent feed
+                analysis/                   # the analysis stage's own folder
+                    recipes/                # this experiment's recipe scripts
+                    <run_id>/               # one run's report.json + figures
                 data/                       # HDF5 files; sub-folders allowed
                     <sub-folders>/
 
@@ -235,6 +249,54 @@ class ExperimentStore:
             exist yet — nothing is written until somebody asks something).
         """
         return self._root / experiment_id / _ASSISTANT_TRANSCRIPT_FILENAME
+
+    def analysis_dir(self, experiment_id: str) -> Path:
+        """Return the experiment's analysis folder.
+
+        The analysis stage keeps everything it owns — the experiment's own
+        recipe scripts and one folder of results per run — inside the
+        experiment folder, for the same reason the **Outbox** and the **Agent
+        feed** do: the folder stays the complete, portable record, so copying
+        it copies the analysis that produced the entries with it.
+
+        Args:
+            experiment_id: The store key.
+
+        Returns:
+            ``<root>/<experiment_id>/analysis`` (may not exist yet — nothing
+            here creates it; the analysis runner does, when it writes a spec).
+        """
+        return self._root / experiment_id / _ANALYSIS_DIRNAME
+
+    def recipes_dir(self, experiment_id: str) -> Path:
+        """Return the experiment's own **Analysis recipe** folder.
+
+        The per-experiment half of recipe discovery: every ``*.py`` here is
+        offered beside the package recipes, and one whose ``name`` matches a
+        package recipe replaces it.
+
+        Args:
+            experiment_id: The store key.
+
+        Returns:
+            ``<root>/<experiment_id>/analysis/recipes`` (may not exist yet).
+        """
+        return self.analysis_dir(experiment_id) / RECIPES_DIRNAME
+
+    def report_dir(self, experiment_id: str, run_id: str) -> Path:
+        """Return where one run's analysis results are written.
+
+        One folder per run, holding the worker's ``spec.json``, its
+        ``report.json`` and every figure the recipe saved.
+
+        Args:
+            experiment_id: The store key.
+            run_id: The analysed run.
+
+        Returns:
+            ``<root>/<experiment_id>/analysis/<run_id>`` (may not exist yet).
+        """
+        return self.analysis_dir(experiment_id) / run_id
 
     def relativize_data_file(self, experiment_id: str, path: str | Path) -> str:
         """Return ``path`` relative to the experiment's session folder, when inside it.
