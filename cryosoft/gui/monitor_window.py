@@ -458,7 +458,7 @@ class MonitorWindow(QMainWindow):
 
         self._system_vi_names = [
             n for n in self._station.get_vi_names()
-            if self._station.get_vi_type(n) in {"system", "level"}
+            if self._station.get_vi_type(n) in {"system"}
         ]
         measurement_vis = [
             n for n in self._station.get_vi_names()

@@ -200,7 +200,7 @@ def test_probe_address_garbled_empty_reply() -> None:
 
 
 def test_probe_address_custom_idn_command() -> None:
-    instr = FakeInstrument(reply="ILM200 Version 1.08")
+    instr = FakeInstrument(reply="MODEL335 Version 1.08")
     rm = FakeResourceManager({"ASRL11::INSTR": instr})
     probe_address(rm, "ASRL11::INSTR", idn_command="V")
     assert instr.writes == ["V"]

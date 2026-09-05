@@ -617,7 +617,7 @@ def find_crossings(
     """Return timestamps where consecutive samples of ``key`` cross ``threshold``.
 
     The one query beyond aggregation an agent needs for operational
-    reasoning ("when did helium last drop below 30%").
+    reasoning ("when did this channel last drop below 30").
 
     Args:
         log_dir: Directory containing the trend-history JSONL files.

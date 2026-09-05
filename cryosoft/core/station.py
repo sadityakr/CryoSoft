@@ -154,7 +154,7 @@ class OfflineInstrument:
     Attributes:
         vi_name: The VI's configured name (e.g. ``"magnet_z"``).
         vi_type: The registry vi_type from config (``"system"``,
-            ``"measurement"``, ``"switch"``, ``"level"``).
+            ``"measurement"``).
         reason: Human-readable connection-failure description, suitable for
             direct display in the GUI.
         failed_drivers: Config aliases of the drivers that failed to
@@ -1256,7 +1256,7 @@ class Station:
 
         Args:
             key: The `Condition.key` to acknowledge, e.g.
-                ``"comm:magnet_z"`` or ``"safety:helium_low"``.
+                ``"comm:magnet_z"`` or ``"safety:quench"``.
 
         Returns:
             True if a condition with that key exists and was acknowledged;
@@ -1682,12 +1682,9 @@ class Station:
     def check_safety(self, state: dict[str, dict] | None = None) -> dict[str, bool]:
         """Aggregate every VI's safety verdict from a state snapshot.
 
-        Each VI judges its own state fragment via ``evaluate_safety()`` (the
-        level meter reports its debounced ``helium_low`` — including a
-        disconnected reading, which it folds into the same debounce buffer
-        as a low reading rather than tripping outright, so one bad
-        round-trip cannot force a false EMERGENCY; magnet VIs report
-        ``quench``). No hardware is polled here — pass the snapshot the
+        Each VI judges its own state fragment via ``evaluate_safety()``
+        (magnet VIs report ``quench``). No hardware is polled here — pass
+        the snapshot the
         monitor tick already collected, or omit it to use the cached one.
 
         Args:
@@ -1751,7 +1748,7 @@ class Station:
         that reported the flag (see ``safety_flag_sources()`` for that).
 
         Args:
-            flag: The safety flag name, e.g. ``"helium_low"``.
+            flag: The safety flag name, e.g. ``"coolant_low"``.
 
         Returns:
             VI names, in registration order, whose ``safety_concerns()``

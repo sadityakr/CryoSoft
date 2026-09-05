@@ -190,7 +190,7 @@ class Availability:
     Attributes:
         vi_name: The VI's configured name.
         vi_type: The registry vi_type from config (``"system"``,
-            ``"measurement"``, ``"switch"``, ``"level"``).
+            ``"measurement"``).
         state: One of `AVAILABILITY_STATES`, always equal to
             ``state_for(tags)``.
         tags: The availability tags currently held, a subset of

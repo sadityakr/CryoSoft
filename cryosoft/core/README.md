@@ -488,7 +488,7 @@ typed currency shared by all of them.
   critical severity has stopped the whole station — until
   `Orchestrator.acknowledge()` unlocks the front-panel override (time-boxed,
   GLOSSARY.md's **Hold acknowledge**); the same `acknowledge()` also unlocks
-  a plain hold-severity condition (e.g. `helium_low`) without ever entering
+  a plain hold-severity condition without ever entering
   EMERGENCY — and `_enforce_safety_holds()` treats an acknowledged hold
   exactly like `_manual_action_admissible()` does, skipping enforcement for
   as long as the override is live. `core/conditions.py` holds the pure

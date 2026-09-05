@@ -8,9 +8,6 @@ real_drivers:
   lakeshore_vti:
     class: cryosoft.drivers.sim_lakeshore_335.SimLakeshore335
     address: "SIM::LS335"
-  ilm:
-    class: cryosoft.drivers.sim_oxford_ilm200.SimOxfordILM200
-    address: "SIM::ILM"
   keithley_6221:
     class: cryosoft.drivers.sim_keithley_6221.SimKeithley6221
     address: "SIM::K6221"
@@ -51,17 +48,6 @@ virtual_instruments:
       role: Sample-space temperature controller
       manufacturer: Lakeshore
       model: 335
-  level_meter:
-    class: cryosoft.virtual_instruments.level.cryogen_level_meter.CryogenLevelMeterVI
-    drivers: {main: ilm}
-    vi_type: level
-    init_params:
-      helium_low_threshold: 20.0
-      buffer_size: 5
-    metadata:
-      role: Helium/nitrogen level meter
-      manufacturer: Oxford Instruments
-      model: ILM200
   dc_measurement:
     class: cryosoft.virtual_instruments.measurement.dc_separate_measurement.DCSeparateMeasurementVI
     drivers: {source: keithley_6221, meter: keithley_2182a}

@@ -543,19 +543,19 @@ def test_find_crossings_missing_dir_returns_empty(tmp_path: Path) -> None:
 
 #  Realistic-length flat state keys (f"{vi_name}_{monitored_method}", as
 # Station.last_state_flat() actually produces — see e.g.
-# trend_checks.py's _SAMPLE_TEMPERATURE_KEY/_HELIUM_LEVEL_KEY), not the
+# a trend check's declared keys), not the
 # short synthetic "key_0" style: file size (and therefore I/O cost) scales
 # with key-name length too, and a short-name fixture understated it.
 _REALISTIC_KEY_NAMES = [
     "temperature_sample_temperature", "temperature_vti_temperature",
     "magnet_z_get_field", "magnet_z_magnet_current", "magnet_z_persistent_switch_state",
-    "level_meter_helium_level", "level_meter_nitrogen_level",
+    "coolant_monitor_reservoir_level", "coolant_monitor_secondary_level",
     "pressure_gauge_still_pressure", "pressure_gauge_condenser_pressure",
     "source_measure_unit_output_voltage", "source_measure_unit_output_current",
     "lockin_amplifier_x_reading", "lockin_amplifier_y_reading",
     "temperature_probe_secondary_temperature", "flow_controller_mass_flow_rate",
     "heater_power_output_watts", "vacuum_gauge_chamber_pressure",
-    "rotator_angle_degrees", "compressor_helium_return_pressure",
+    "rotator_angle_degrees", "compressor_return_pressure",
     "compressor_water_flow_rate", "turbo_pump_rotation_speed_rpm",
     "ups_battery_charge_percent", "chiller_output_temperature",
     "gas_handling_system_manifold_pressure", "still_heater_power_output",

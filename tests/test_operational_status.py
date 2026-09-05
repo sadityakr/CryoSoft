@@ -143,13 +143,13 @@ def test_conditions_station_wide_reports_affected_all():
 
 def test_conditions_scoped_reports_sorted_affected_vis():
     condition = Condition(
-        key="safety:helium_low",
+        key="safety:coolant_low",
         origin="safety",
         severity="hold",
-        kind="helium_low",
-        source_vis=("helium_level",),
+        kind="coolant_low",
+        source_vis=("coolant_monitor",),
         affected_vis=frozenset({"magnet_z", "magnet_x"}),
-        message="helium low",
+        message="coolant low",
         since=50.0,
         acknowledged=True,
     )

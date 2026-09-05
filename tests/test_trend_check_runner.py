@@ -120,22 +120,20 @@ def test_trend_refresh_does_not_disturb_safety_conditions(
 ):
     """The 60 s trend cadence and the per-tick safety cadence never wipe each other."""
     monkeypatch.setenv("CRYOSOFT_LOG_DIR", str(tmp_path))
-    level_driver = sim_station.level_meter._driver
-    level_driver._simulate_error = True
-    safety: dict[str, bool] = {}
-    for _ in range(10):
-        state = sim_station.get_state()
-        safety = sim_station.check_safety(state)
-        if safety.get("helium_low"):
-            break
+    from tests import scenarios
+
+    hold_flag = scenarios.declare_hold_flag(monkeypatch, sim_station)
+    hold_flag.trip()
+    safety = sim_station.check_safety(sim_station.get_state())
+    assert safety[hold_flag.flag] is True
     sim_station.update_conditions(safety, tolerated_flags=frozenset())
-    assert "safety:helium_low" in sim_station.conditions()
+    assert hold_flag.key in sim_station.conditions()
 
     checks = [_fixed_verdict_check("always_fails", passed=False)]
     runner = TrendCheckRunner(sim_station, checks, refresh_interval_s=60.0)
     runner.run_once()
 
-    assert "safety:helium_low" in sim_station.conditions()
+    assert hold_flag.key in sim_station.conditions()
     assert "trend:always_fails" in sim_station.conditions()
 
     # The per-tick safety refresh must not wipe the trend condition either.

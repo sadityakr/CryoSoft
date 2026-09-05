@@ -141,19 +141,19 @@ def test_station_info_rebuilds_on_disconnect_and_connect(station: Station) -> No
     exactly why the snapshot has to be rebuilt on these two events.
     """
     before = station.station_info()
-    assert _instrument(before, "level_meter").availability == ()
+    assert _instrument(before, "temperature_vti").availability == ()
 
-    ok, _ = station.disconnect_instrument("level_meter")
+    ok, _ = station.disconnect_instrument("temperature_vti")
     assert ok
     disconnected = station.station_info()
     assert disconnected.seq > before.seq
-    assert _instrument(disconnected, "level_meter").availability == ("operator",)
+    assert _instrument(disconnected, "temperature_vti").availability == ("operator",)
 
-    ok, _ = station.connect_instrument("level_meter")
+    ok, _ = station.connect_instrument("temperature_vti")
     assert ok
     reconnected = station.station_info()
     assert reconnected.seq > disconnected.seq
-    assert _instrument(reconnected, "level_meter").availability == ()
+    assert _instrument(reconnected, "temperature_vti").availability == ()
 
 
 def test_offline_instrument_still_declares_its_capabilities(station: Station) -> None:

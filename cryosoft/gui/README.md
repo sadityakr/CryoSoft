@@ -50,7 +50,7 @@ is alive and not mid-tick.
 ## Entry (what comes in)
 
 - A `Station` instance: the registered VI names and each VI's `vi_type`
-  (`system` / `level` / `measurement`), plus the object procedures
+  (`system` / `measurement`), plus the object procedures
   are constructed against. No widget holds a VI: the
   instrument panels build from the **Station info** declaration snapshot
   (GLOSSARY.md), read off the `StatusMirror`, and `Station.get_vi()` is never

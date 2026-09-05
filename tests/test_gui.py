@@ -2482,7 +2482,7 @@ def test_ack_button_absent_from_procedure_window(procedure_win):
 
 
 def test_hold_banner_shows_message_and_dismisses_on_clear(monitor_win, orchestrator, monkeypatch):
-    """A plain hold condition (e.g. helium_low, NOT emergency) populates the banner.
+    """A plain hold condition (NOT emergency) populates the banner.
 
     Regression test: previously the ACK button appeared alone with no
     explanation on the banner above it (see _refresh_hold_banner()). Stubs
@@ -2499,11 +2499,11 @@ def test_hold_banner_shows_message_and_dismisses_on_clear(monitor_win, orchestra
         lambda: {
             "conditions": [
                 {
-                    "key": "safety:helium_low",
+                    "key": "safety:coolant_low",
                     "origin": "safety",
                     "severity": "hold",
-                    "kind": "helium_low",
-                    "message": "Safety flag 'helium_low' is tripped",
+                    "kind": "coolant_low",
+                    "message": "Safety flag 'coolant_low' is tripped",
                     "affected": sorted(held),
                     "since": 0.0,
                     "acknowledged": False,
@@ -2517,7 +2517,7 @@ def test_hold_banner_shows_message_and_dismisses_on_clear(monitor_win, orchestra
 
     assert monitor_win._ack_btn.isVisible()
     assert monitor_win._banner.isVisible()
-    assert "helium_low" in monitor_win._banner._label.text()
+    assert "coolant_low" in monitor_win._banner._label.text()
     assert "magnet_z" in monitor_win._banner._label.text()
 
     # Clearing the hold condition dismisses the banner it owns.
@@ -2820,25 +2820,37 @@ def test_monitor_states_updated_feeds_history_and_trend_combos(monitor_win, orch
 
 
 def test_monitor_default_trend_key_hints_prefer_readings_over_settings(monitor_win, orchestrator):
-    """The two default trend docks pick a temperature/level READING, not a setting/rate field.
+    """The two default trend docks pick a temperature READING, not a setting/rate field.
 
-    Regression pin: a plain substring search for "temperature"/"level" matches
-    the VI-name prefix on fields like temperature_vti_heater_output or
-    level_meter_get_refresh_rate before it reaches the actual reading. Which
-    specific VI wins alphabetically is not asserted here (real orchestrator
-    ticks may have already populated history for other VIs too) — only that
-    the FIELD chosen is the reading, not a setting/rate.
+    Regression pin: a plain substring search for "temperature" matches the
+    VI-name prefix on fields like temperature_vti_heater_output before it
+    reaches the actual reading. Which specific VI wins alphabetically is not
+    asserted here (real orchestrator ticks may have already populated
+    history for other VIs too) — only that the FIELD chosen is the reading,
+    not a setting/rate.
     """
     fake_state = {
         "temperature_vti": {"heater_output": 0.0, "temperature": 4.2, "setpoint": 4.2},
-        "level_meter": {"get_refresh_rate": 0.0, "helium_level": 77.0, "nitrogen_level": 88.0},
     }
     orchestrator.states_updated.emit(fake_state)
 
     trend_0 = monitor_win._trends._trend_panels["trend_0"]
-    trend_1 = monitor_win._trends._trend_panels["trend_1"]
     assert trend_0.selected_key().endswith("_temperature")
-    assert trend_1.selected_key().endswith(("_helium_level", "_nitrogen_level"))
+
+    # The picker itself, over a key list this test owns: the VI-name prefix
+    # must never win over the field name.
+    picked = monitor_win._trends._pick_default_trend_key(
+        "temperature",
+        sorted(
+            [
+                "temperature_vti_heater_output",
+                "temperature_vti_setpoint",
+                "temperature_vti_temperature",
+                "magnet_z_magnet_field_T",
+            ]
+        ),
+    )
+    assert picked == "temperature_vti_temperature"
 
 
 def test_monitor_persistence_roundtrip_splitters_and_trends(
@@ -4134,12 +4146,12 @@ def test_disconnect_mid_run_swaps_the_card_for_a_vi_the_run_does_not_claim(qtbot
         orch._state = OrchestratorState.MEASURING
         orch._procedure = object()
         orch._active_claims = {"magnet_z"}
-        win.findChild(QGroupBox, "level_meter_panel").findChild(
-            QPushButton, "level_meter_disconnect_btn"
+        win.findChild(QGroupBox, "temperature_vti_panel").findChild(
+            QPushButton, "temperature_vti_disconnect_btn"
         ).click()
 
-        assert station.has_vi("level_meter") is False
-        assert win.findChild(QGroupBox, "level_meter_offline_card") is not None
+        assert station.has_vi("temperature_vti") is False
+        assert win.findChild(QGroupBox, "temperature_vti_offline_card") is not None
         assert station.has_vi("magnet_z") is True
     finally:
         orch._state = OrchestratorState.IDLE

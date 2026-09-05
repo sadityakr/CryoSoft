@@ -136,7 +136,7 @@ def test_claims_only_the_reading_path(station, tmp_path):
     proc = _proc(station, tmp_path, DC)
     claimed = proc.claimed_vi_names()
     assert claimed == {"dc_measurement"}
-    for vi_name in ("magnet_z", "temperature_vti", "level_meter"):
+    for vi_name in ("magnet_z", "temperature_vti"):
         assert vi_name not in claimed
 
 

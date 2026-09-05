@@ -924,11 +924,11 @@ class InstrumentInfo(_ContractMessage):
         name: The VI's configured name (``"magnet_z"``), which every
             ``Command`` targeting it uses.
         vi_class: The VI class's name, e.g. ``"SuperconductingMagnetVI"``.
-        role: The config registry's role for this VI — ``"system"``,
-            ``"measurement"`` or ``"level"`` (GLOSSARY.md's
+        role: The config registry's role for this VI — ``"system"`` or
+            ``"measurement"`` (GLOSSARY.md's
             *vi_type (config/registry)*).
         kind: The VI class's own category — ``"magnet"``,
-            ``"temperature"``, ``"level"``, ``"measurement"`` …
+            ``"temperature"``, ``"measurement"`` …
             (GLOSSARY.md's *vi_type (class)*).
         availability: The Availability tags standing at snapshot time,
             sorted — empty for a fully usable instrument (see GLOSSARY.md's

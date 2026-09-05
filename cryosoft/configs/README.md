@@ -140,8 +140,7 @@ the same two files.
 - `sim_cryostat/` — fully simulated reference station, and the station every
   procedure/orchestrator test builds against: `magnet_z`
   (`SuperconductingMagnetVI` on `SimOxfordIPS120`), `temperature_vti`
-  (`Lakeshore335SampleTemperatureControllerVI` on `SimLakeshore335`),
-  `level_meter` (`CryogenLevelMeterVI` on `SimOxfordILM200`) and
+  (`Lakeshore335SampleTemperatureControllerVI` on `SimLakeshore335`) and
   `dc_measurement` (`DCSeparateMeasurementVI` on a `SimKeithley6221` +
   `SimKeithley2182A` pair).
   - `devices.yaml` — all `Sim*` drivers at `SIM::*` addresses; the canonical VI

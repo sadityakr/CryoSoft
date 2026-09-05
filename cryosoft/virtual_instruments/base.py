@@ -1,7 +1,7 @@
 """BaseVirtualInstrument and category base classes.
 
 All VIs inherit from BaseVirtualInstrument (and possibly one of the typed
-sub-bases: MagnetBase, TemperatureControllerBase, LevelMeterBase,
+sub-bases: MagnetBase, TemperatureControllerBase,
 MeasurementInstrumentBase).
 
 Do NOT import from Station, Orchestrator, or Procedure here.
@@ -316,9 +316,9 @@ class BaseVirtualInstrument:
     ``safety_flags`` is the single declaration point for a flag's
     severity — a flag's meaning never varies by which VI happens to
     report it. Declare it on the base class that owns the flag's physical
-    semantics (e.g. ``MagnetBase`` for ``"quench"``, ``LevelMeterBase``
-    for ``"helium_low"``), not on each concrete VI, so every VI of that
-    category inherits the correct classification automatically.
+    semantics (e.g. ``MagnetBase`` for ``"quench"``), not on each
+    concrete VI, so every VI of that category inherits the correct
+    classification automatically.
 
     Subclass manifests are MERGED over the MRO, exactly like
     ``control_limits`` — a subclass may ADD new flags but must NOT
@@ -1384,7 +1384,7 @@ class BaseVirtualInstrument:
         mechanism (GLOSSARY.md's **Safety hold**; see ``Station.
         update_conditions()``): a VI
         declares which flags — named exactly like ``evaluate_safety()``'s
-        keys, e.g. ``"quench"``, ``"helium_low"`` — must NOT be tripped for
+        keys, e.g. ``"coolant_low"`` — must NOT be tripped for
         this VI to operate safely. When any of them trips (on ANY VI's
         ``evaluate_safety()``, not necessarily this one's own), the Station
         records a hold against this VI, and the Orchestrator refuses manual
@@ -1400,13 +1400,13 @@ class BaseVirtualInstrument:
         VI (and every other) regardless of any per-VI concern declaration.
 
         This is a static declaration of an invariant, not a query of current
-        state — a magnet always depends on helium, independent of today's
-        level. The default (empty set) means this VI is never held by any
-        safety flag.
+        state — a VI that needs a coolant always depends on it, independent
+        of today's reading. The default (empty set) means this VI is never
+        held by any safety flag.
 
         Returns:
             Set of safety flag names this VI depends on, e.g.
-            ``{"quench", "helium_low"}``.
+            ``{"coolant_low"}``.
         """
         return set()
 
@@ -1460,10 +1460,6 @@ class MagnetBase(BaseVirtualInstrument):
     # once EMERGENCY has already stopped everything.
     safety_flags: ClassVar[dict[str, str]] = {"quench": "critical"}
 
-    def safety_concerns(self) -> set[str]:
-        """A magnet cannot ramp without helium."""
-        return {"helium_low"}
-
 
 class TemperatureControllerBase(BaseVirtualInstrument):
     """Base class for all temperature-controller VIs."""
@@ -1471,17 +1467,6 @@ class TemperatureControllerBase(BaseVirtualInstrument):
     setpoint_label: str = "temperature"
     setpoint_unit: str = "K"
     display_label: str = "temperature"
-
-
-class LevelMeterBase(BaseVirtualInstrument):
-    """Base class for all cryogen-level-meter VIs."""
-    vi_type: str = "level"
-
-    # helium_low is hold severity — see the "Safety-flag manifest standard".
-    # A level meter itself has no safety_concerns() (it keeps reading
-    # regardless of the level it reports); MagnetBase is the consumer that
-    # names this flag.
-    safety_flags: ClassVar[dict[str, str]] = {"helium_low": "hold"}
 
 
 class MeasurementInstrumentBase(BaseVirtualInstrument):

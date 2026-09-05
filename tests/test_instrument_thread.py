@@ -300,10 +300,10 @@ _COMMANDS: tuple[tuple[str, tuple[Any, ...], dict[str, Any]], ...] = (
     ("submit_global_action", ("initiate",), {}),
     ("stop_ramp", ("magnet_z",), {}),
     ("ping_instrument", ("magnet_z",), {}),
-    ("disconnect_instrument", ("level_meter",), {}),
-    ("connect_instrument", ("level_meter",), {}),
-    ("acknowledge_fault", ("level_meter",), {}),
-    ("retry_fault", ("level_meter",), {}),
+    ("disconnect_instrument", ("temperature_vti",), {}),
+    ("connect_instrument", ("temperature_vti",), {}),
+    ("acknowledge_fault", ("temperature_vti",), {}),
+    ("retry_fault", ("temperature_vti",), {}),
     ("set_experiment_envelope", (None,), {}),
     ("run_queue", (), {}),
     ("pause_procedure", (), {}),
@@ -664,14 +664,14 @@ def test_shutdown_is_bounded_when_an_instrument_read_never_returns(
 
     def _factory():
         station = build_station(CONFIG_PATH)
-        original = station.get_vi("level_meter").get_state
+        original = station.get_vi("temperature_vti").get_state
 
         def _never_returns():
             wedged.set()
             time.sleep(3.0)
             return original()
 
-        station.get_vi("level_meter").get_state = _never_returns
+        station.get_vi("temperature_vti").get_state = _never_returns
         return station
 
     host = build_threaded_host(_factory, tick_interval_ms=20, join_timeout_ms=300)
@@ -689,7 +689,7 @@ def test_shutdown_is_bounded_when_an_instrument_read_never_returns(
     critical = [r for r in caplog.records if r.levelno >= logging.CRITICAL]
     assert critical, "a wedged shutdown must say so at CRITICAL"
     message = critical[-1].getMessage()
-    assert "level_meter" in message, message
+    assert "temperature_vti" in message, message
     assert "300 ms" in message or "300" in message
 
     # The wedged thread outlives shutdown() by design; wait it out so pytest

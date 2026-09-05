@@ -35,16 +35,16 @@ a `drivers` dict of role → driver instance (e.g. `{"main": ...}`,
   condition** / **Safety-flag manifest** / **Safety concern**): the
   PRODUCER side is the `safety_flags` class attribute, mapping every flag
   this VI's `evaluate_safety()` can report to its severity — `"advisory"`
-  (reserved), `"hold"` (scoped to concerned VIs, e.g. `LevelMeterBase`'s
-  `"helium_low"`), or `"critical"` (station-wide EMERGENCY by construction,
+  (reserved), `"hold"` (scoped to the VIs that name it in
+  `safety_concerns()`), or `"critical"` (station-wide EMERGENCY by construction,
   e.g. `MagnetBase`'s `"quench"` — no VI may name a critical flag as a
   concern, since a per-VI hold would be meaningless once EMERGENCY has
   already stopped everything) — merged across the MRO by
   `merged_safety_flags()`, exactly like `control_limits`. The CONSUMER side
   is `safety_concerns()`: which HOLD-severity flags — by name, anyone's —
-  this VI depends on to operate safely (only `MagnetBase` overrides the
-  empty-set default, declaring `{"helium_low"}`; quench-concerned VIs
-  declare nothing, `quench` being critical). Both are static, declarative —
+  this VI depends on to operate safely (no shipped VI overrides the
+  empty-set default; quench-concerned VIs declare nothing, `quench` being
+  critical). Both are static, declarative —
   never a live reading — read by `Station.update_conditions()` once per
   tick, with no extra poll, to build that tick's safety-origin `Condition`s
   (GLOSSARY.md's **Safety hold** / **Critical safety flag**).
@@ -244,7 +244,7 @@ The written standards all live in this root and are enforced by
 ## How to add a new module
 1. Pick the `vi_type` and open that subfolder's README for the local recipe.
 2. Subclass the right base (`MagnetBase`, `TemperatureControllerBase`,
-   `LevelMeterBase`, `MeasurementInstrumentBase` / `DCMeasurementBase`, or
+   `MeasurementInstrumentBase` / `DCMeasurementBase`, or
    `BaseVirtualInstrument` directly for a category with no base yet),
    adding `RampableVI` if it ramps.
 3. Tag reads `@monitored(unit=..., description=...)` and actions `@control`;
@@ -265,7 +265,7 @@ The written standards all live in this root and are enforced by
 Shared contracts at the root; concrete classes live in the subfolders.
 
 - `base.py` — `BaseVirtualInstrument` plus the typed sub-bases `MagnetBase`,
-  `TemperatureControllerBase`, `LevelMeterBase`,
+  `TemperatureControllerBase`,
   `MeasurementInstrumentBase`, `DCMeasurementBase`. Provides `__init_subclass__` auto-wrapping of
   `@monitored`/`@control` (structured logging + declarative limit enforcement),
   `get_state()` (which also fills the monitor-cycle cache `last_monitored()`

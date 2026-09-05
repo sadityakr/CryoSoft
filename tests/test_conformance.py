@@ -160,7 +160,7 @@ VI_BASE_MODULES = {
 
 # Registry types accepted by Station.register_vi via config (distinct from a VI
 # class's own vi_type like "magnet" — see GLOSSARY.md).
-CONFIG_VI_TYPES = {"system", "measurement", "level"}
+CONFIG_VI_TYPES = {"system", "measurement"}
 
 
 # ── Discovery helpers ─────────────────────────────────────────────────────────
@@ -368,7 +368,7 @@ def test_sim_driver_safe_shutdown_reaches_a_declared_safe_state(module_name: str
     safe means for its instrument in ``_is_in_safe_state()`` — private, so
     the real/sim public-API parity contract stays intact, and documented in
     the sim's own docstring (a magnet's safe state is HOLD, not zero field; a
-    level meter's is pulsed refresh, not off). This test asserts the three
+    meter's is its idle input mode, not off). This test asserts the three
     properties the standard promises: the call works from the sim's
     as-constructed state, it leaves the instrument in that declared state,
     and calling it a second time changes nothing at all.
@@ -910,9 +910,9 @@ def test_safety_concerns_are_consumer_side_and_hold_only(vi_cls: type) -> None:
     tripped critical flag already forces station-wide EMERGENCY (the
     System-Condition standard, ``core/conditions.py``: critical scope is
     station-wide by construction), which stops this VI (and every other)
-    regardless of any per-VI concern declaration. MagnetBase is the one
-    concrete example today: it names "helium_low" (hold) but not "quench"
-    (critical), even though it is the VI that reports "quench".
+    regardless of any per-VI concern declaration. No shipped VI declares a
+    concern today; MagnetBase reports "quench" (critical) and deliberately
+    does NOT name it as a concern.
 
     A bare (``__init__``-less) instance is enough: every existing
     ``safety_concerns()`` override is a pure function of the class, never
@@ -1619,19 +1619,6 @@ def test_control_scope_is_a_valid_value(vi_cls: type) -> None:
         )
 
 
-def test_known_operation_scope_controls() -> None:
-    """``CryogenLevelMeterVI.set_refresh_rate`` is operation-scope.
-
-    Meter housekeeping an operation drives (the fill switches the meter to
-    FAST refresh for the duration), never a sample-facing setpoint.
-    """
-    from cryosoft.virtual_instruments.level.cryogen_level_meter import (
-        CryogenLevelMeterVI,
-    )
-
-    assert get_control_scope(CryogenLevelMeterVI.set_refresh_rate) == "operation"
-
-
 def test_reading_setters_are_measurement_scope() -> None:
     """Every reading_setters target method is measurement-scope.
 
@@ -1693,10 +1680,6 @@ def test_measurement_lifecycle_is_measurement_scope(vi_cls: type) -> None:
 CONTROL_LIMIT_EXEMPTIONS: dict[tuple[str, str, str], str] = {
     # -- Enumerated instrument settings: the value selects a mode, it is not a
     #    physical quantity a range could bound.
-    ("CryogenLevelMeterVI", "set_refresh_rate", "mode"): (
-        "ILM refresh-rate code (1=slow/2=fast/3=off), not a physical quantity; "
-        "the VI rejects any other value outright."
-    ),
     ("Lakeshore335SampleTemperatureControllerVI", "set_curve", "curve"): (
         "Calibration-curve slot index in the controller's own curve table; an "
         "index selects a stored curve and drives no output."
@@ -2865,7 +2848,7 @@ def test_declared_trend_checks_name_derivable_state_keys(config_dir: Path) -> No
     Covers every shipped config, including a real-hardware setup that
     `test_declared_trend_checks_name_real_state_keys` cannot reach, because
     it needs `get_state()`, a hardware poll. If a site renames the VI a
-    trend check names (`temperature_vti`, `level_meter`), the check's key
+    trend check names, the check's key
     stops resolving and `summarize()` reports `persisted=False` forever —
     an indeterminate result that publishes nothing, silently and
     permanently, with no signal that coverage was lost. This test moves

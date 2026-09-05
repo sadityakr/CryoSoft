@@ -62,7 +62,7 @@ Enforced mechanically by `tests/test_conformance.py`:
 - A real driver and its `sim_<name>.py` twin must expose **identical public
   APIs** (`test_sim_real_driver_api_parity`). This parity test pairs twins by
   the `sim_<name>` filename only, so a sim with no real twin of the same name
-  (`sim_keithley_6221`, `sim_oxford_ips120`, `sim_oxford_ilm200`) is simply not
+  (`sim_keithley_6221`, `sim_oxford_ips120`) is simply not
   auto-paired; its own L0 tests are what hold its API in place.
 
 ## The driver error-reporting standard
@@ -115,7 +115,6 @@ charged to the next, innocent command.
 | `sim_keithley_6221.py` | Error queue (`:SYST:ERR?`) after output/current/compliance/range writes, after the delta programming sequence, and after both `:SOUR:DELT:ARM` and `:INIT:IMM` | the SCPI code, e.g. `-221` |
 | `keithley_2182a.py` | Error queue (`:SYST:ERR?`) after the range and continuous-initiation writes | the SCPI code, e.g. `-222` |
 | `lakeshore_335.py` | Status byte (`*ESR?`) after every setter | `ESR:0x<bits>` |
-| `sim_oxford_ilm200.py` | ISOBUS acknowledgement on every command | `?` |
 
 **Sim twins model the refusal, not just the physics.** Each sim raises the
 same typed error with the same code its real twin would raise after reading
@@ -216,9 +215,4 @@ Real / sim twins are grouped; each `.py` lists its key methods and owning tests.
   freeze, and a QUENCH when the heater energises across a PSU/coil current
   mismatch; `reset_quench` test hook. Sim-only. tests:
   `tests/test_l0_simulated.py`, `tests/test_l0_driver_errors.py`.
-- `sim_oxford_ilm200.py` — `SimOxfordILM200`: cryogen level meter over the
-  Oxford ISOBUS protocol; `get_helium_level`, `get_nitrogen_level`,
-  `get/set_refresh_rate`, slowly drifting levels and a 3-mode refresh rate;
-  `_force_helium_level` hook for low-helium tests. Sim-only. tests:
-  `tests/test_l0_simulated.py` (`TestSimOxfordILM200`).
 - `__init__.py` — package marker (docstring only). tests: none.

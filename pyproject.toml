@@ -212,7 +212,6 @@ forbidden_modules = [
     "cryosoft.virtual_instruments.magnet",
     "cryosoft.virtual_instruments.temperature",
     "cryosoft.virtual_instruments.measurement",
-    "cryosoft.virtual_instruments.level",
 ]
 
 [[tool.importlinter.contracts]]

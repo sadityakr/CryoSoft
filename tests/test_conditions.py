@@ -56,9 +56,9 @@ def _condition(
 
 
 def test_valid_hold_condition_constructs():
-    c = _condition("safety:helium_low", severity="hold", affected_vis=frozenset({"level_1"}))
+    c = _condition("safety:coolant_low", severity="hold", affected_vis=frozenset({"monitor_1"}))
     assert c.severity == "hold"
-    assert c.affected_vis == frozenset({"level_1"})
+    assert c.affected_vis == frozenset({"monitor_1"})
 
 
 def test_valid_critical_condition_constructs():
@@ -118,11 +118,11 @@ def test_severities_and_origins_are_the_documented_tuples():
 
 
 def test_condition_is_frozen_and_hashable():
-    c = _condition("safety:helium_low", severity="hold", affected_vis=frozenset({"level_1"}))
+    c = _condition("safety:coolant_low", severity="hold", affected_vis=frozenset({"monitor_1"}))
     with pytest.raises(AttributeError):
         c.acknowledged = True  # type: ignore[misc]
     # Hashable: usable in a set/dict key, and equal conditions hash equal.
-    c2 = _condition("safety:helium_low", severity="hold", affected_vis=frozenset({"level_1"}))
+    c2 = _condition("safety:coolant_low", severity="hold", affected_vis=frozenset({"monitor_1"}))
     assert c == c2
     assert hash(c) == hash(c2)
     assert {c, c2} == {c}

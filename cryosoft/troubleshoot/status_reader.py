@@ -31,8 +31,8 @@ CODE_HELP: dict[str, str] = {
         "cabling, and address; run `troubleshoot check` with the app closed."
     ),
     "QUENCH": (
-        "A magnet reported a quench. The run should be in EMERGENCY; verify the "
-        "magnet state and helium level."
+        "A magnet reported a quench. The run should be in EMERGENCY; verify "
+        "the magnet state before doing anything else."
     ),
     "RAMP_STALLED": (
         "A ramp has not moved toward its target for several ticks. The setpoint "

@@ -22,7 +22,7 @@ decides is how much autonomy an agent is granted BEFORE those checks run.
 * ``CONTROL_ACTION_CLASSES`` — one row per ``(VI kind, @control name)``, for
   the one command whose class depends on its target, ``submit_vi_action``.
   The key's first half is ``InstrumentInfo.kind``, the VI CLASS's ``vi_type``
-  (``magnet``, ``temperature``, ``level``, ``measurement`` …), so a row is
+  (``magnet``, ``temperature``, ``measurement`` …), so a row is
   written once per capability rather than once per
   configured instrument.
 * ``LIFECYCLE_ACTION_CLASSES`` — ``initiate`` / ``standby``, the two
@@ -231,12 +231,6 @@ COMMAND_ACTION_CLASSES: dict[CommandName, ClassifiedAction] = {
 # config's manifest declares has a row, asserted by conformance.
 
 CONTROL_ACTION_CLASSES: dict[tuple[str, str], ClassifiedAction] = {
-    # ── level: cryogen level meters ──
-    ("level", "set_refresh_rate"): ClassifiedAction(
-        ActionClass.RECOVERY,
-        "Operation-scope meter housekeeping: how often the level is sampled, "
-        "never anything about the cryostat's own state.",
-    ),
     # ── magnet: superconducting magnets ──
     ("magnet", "set_field"): ClassifiedAction(
         ActionClass.RUN_CONTROL,

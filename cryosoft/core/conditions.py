@@ -35,8 +35,8 @@ failure) live above this module (Station, Orchestrator, and — for
 ``"trend"`` — `core/trend_check_runner.py`) and are out of scope here — see
 `core/README.md` for how those layers consume `decide()`'s `Verdict`.
 
-A tripped safety flag can be *tolerated* by an operation's
-``tolerated_safety_flags`` (see `GLOSSARY.md`'s **Helium fill (operation)**);
+A tripped safety flag can be *tolerated* by a run's
+``tolerated_safety_flags`` (see `GLOSSARY.md`'s **Tolerated safety flags**);
 that tolerance is applied by the producer at `Condition` construction time
 (a tolerated hold-severity safety flag is simply never constructed, or is
 constructed as ``"advisory"`` instead), never inside `decide()` — this
@@ -64,7 +64,7 @@ class Condition:
 
     Attributes:
         key: Stable identity for this condition, e.g. ``"comm:magnet_z"``,
-            ``"safety:helium_low"``, ``"envelope:<bound-description>"``,
+            ``"safety:coolant_low"``, ``"envelope:<bound-description>"``,
             ``"trend:sample_temperature_stable"``. Non-empty; used to sort
             and to deduplicate.
         origin: One of `ORIGINS` — which producer reported this.
