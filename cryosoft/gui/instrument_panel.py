@@ -97,7 +97,7 @@ class InstrumentPanel(QGroupBox):
     owns. No hardcoded per-instrument widget lists.
 
     Args:
-        vi_name: The VI's registered name (e.g. ``"magnet_z"``).
+        vi_name: The VI's registered name (e.g. ``"temperature"``).
         orchestrator: OrchestratorProxy every action is submitted to, and whose
             ``states_updated`` signal drives value updates.
         mirror: The status mirror this panel reads from — its declaration

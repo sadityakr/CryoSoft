@@ -35,10 +35,12 @@ _MIN_TREND_PANELS = 1
 _MAX_TREND_PANELS = 4
 _DEFAULT_TREND_PANEL_COUNT = 2
 
-# Default key-selection hints applied to the two default trend panels, in
+# Default key-selection hints applied to the default trend panels, in
 # creation order, once MonitorHistory has keys (first key whose flat name
-# contains the hint substring; falls back to the first available key).
-_DEFAULT_TREND_KEY_HINTS = ("temperature", "level")
+# contains the hint substring; falls back to the first available key). A
+# harmless heuristic: a setup with no matching key simply gets the first key
+# it does have, and the operator picks from there.
+_DEFAULT_TREND_KEY_HINTS = ("temperature",)
 
 # QSettings key for the persisted trend-panel list. Kept identical to the
 # pre-extraction MonitorWindow key so existing saved layouts still restore.
@@ -87,7 +89,7 @@ class TrendsQuadrant(QWidget):
         # harmless no-op that we retry from on_states_updated).
         self._pending_trend_keys: dict[str, str] = {}
         # Same retry pattern for the DEFAULT (non-restored) trend panels'
-        # opportunistic temperature/level key selection.
+        # opportunistic default key selection.
         self._default_trend_key_hints: dict[str, str] = {}
 
         outer = QVBoxLayout(self)
@@ -137,15 +139,8 @@ class TrendsQuadrant(QWidget):
             records = trend_history.read_tier(
                 self._log_dir, "raw", window_s=self._history.retention_s
             )
-            # Migrate old channel keys to new names during rehydration
-            key_migration = {
-                "magnet_z_get_field": "magnet_z_magnet_field_T",
-                "magnet_z_coil_current": "magnet_z_magnet_current",
-            }
             for timestamp, mapping in records:
-                # Apply migration to each recorded mapping
-                migrated = {key_migration.get(k, k): v for k, v in mapping.items()}
-                self._history.record_flat(migrated, timestamp)
+                self._history.record_flat(mapping, timestamp)
         except Exception:
             logger.exception(
                 "trends_quadrant: rehydration from %s failed; starting with empty history",
@@ -173,9 +168,10 @@ class TrendsQuadrant(QWidget):
         """(Re)create exactly the default number of trend panels.
 
         Replaces any existing trend panels, then creates
-        ``_DEFAULT_TREND_PANEL_COUNT`` fresh ones, with opportunistic
-        temperature/level default-key hints (applied once MonitorHistory has
-        data — see :meth:`on_states_updated`).
+        ``_DEFAULT_TREND_PANEL_COUNT`` fresh ones, with the opportunistic
+        default-key hints (applied once MonitorHistory has data — see
+        :meth:`on_states_updated`). A panel with no hint of its own simply
+        keeps the first key the setup has.
         """
         for panel_id in list(self._trend_panels.keys()):
             self._remove_trend_panel_widget(panel_id)
@@ -340,7 +336,7 @@ class TrendsQuadrant(QWidget):
         if nothing more specific matches.
 
         Args:
-            hint: Substring to look for (e.g. ``"temperature"``, ``"level"``).
+            hint: Substring to look for (e.g. ``"temperature"``).
             keys: Non-empty, sorted list of MonitorHistory flat keys.
 
         Returns:
@@ -399,12 +395,6 @@ class TrendsQuadrant(QWidget):
             self._remove_trend_panel_widget(panel_id)
         self._default_trend_key_hints.clear()
 
-        # Migrate old channel keys to new names (e.g., magnet_z_get_field -> magnet_z_magnet_field_T)
-        key_migration = {
-            "magnet_z_get_field": "magnet_z_magnet_field_T",
-            "magnet_z_coil_current": "magnet_z_magnet_current",
-        }
-
         for entry in valid_entries:
             panel_id = self._add_trend_panel()
             panel = self._trend_panels[panel_id]
@@ -415,7 +405,5 @@ class TrendsQuadrant(QWidget):
 
             key = entry.get("key")
             if isinstance(key, str) and key:
-                # Apply migration mapping for renamed channel keys
-                key = key_migration.get(key, key)
                 panel.set_selected_key(key)  # no-op now if history is still empty
                 self._pending_trend_keys[panel_id] = key

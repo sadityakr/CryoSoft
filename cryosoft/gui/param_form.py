@@ -163,7 +163,7 @@ def build_param_widget(param_name: str, spec: ParamSpec) -> QWidget:
     if spec.widget_hint == "datetime" and spec.type is str:
         # Still a QLineEdit (the type is str, an ISO 8601 string) — the hint
         # only changes the placeholder shown when the field is empty, so a
-        # log operator knows the expected format without needing a
+        # the operator knows the expected format without needing a
         # dedicated date-picker widget yet.
         field = QLineEdit(str(spec.default))
         field.setPlaceholderText("YYYY-MM-DDTHH:MM:SS+00:00 (UTC)")

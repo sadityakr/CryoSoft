@@ -589,9 +589,9 @@ class ProcedureWindow(QMainWindow):
                 experiment_info=self._experiment_info(),
             )
         except PROCEDURE_BUILD_ERRORS as exc:
-            # A procedure may refuse construction (e.g. a nonzero field
-            # requested on a magnet this station does not have). Surface it
-            # as a form error — an uncaught raise in a Qt slot kills the app.
+            # A procedure may refuse construction (e.g. a parameter the
+            # station has no instrument to serve). Surface it as a form
+            # error — an uncaught raise in a Qt slot kills the app.
             logger.warning("Procedure %s refused construction: %s", cls.name, exc)
             QMessageBox.warning(self, "Cannot Build Procedure", str(exc))
             return None

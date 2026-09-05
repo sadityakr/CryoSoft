@@ -30,10 +30,10 @@ def _slug(vi_name: str) -> str:
     """Return a lowercase, underscore-joined objectName fragment for *vi_name*.
 
     Args:
-        vi_name: A registered VI name (e.g. ``"magnet_z"``).
+        vi_name: A registered VI name (e.g. ``"temperature"``).
 
     Returns:
-        e.g. ``"magnet_z"`` — used to scope every widget objectName a row
+        e.g. ``"temperature"`` — used to scope every widget objectName a row
         creates so two rows never collide.
     """
     return re.sub(r"[^a-z0-9]+", "_", vi_name.lower()).strip("_")
@@ -46,8 +46,8 @@ def _row_title(record: RampRecord) -> str:
         record: The ramp the row shows.
 
     Returns:
-        e.g. ``"field · magnet_z"``, or just the VI name when the VI declares
-        no distinct setpoint label.
+        e.g. ``"setpoint · temperature"``, or just the VI name when the VI
+        declares no distinct setpoint label.
     """
     if record.label and record.label != record.vi_name:
         return f"{record.label} · {record.vi_name}"

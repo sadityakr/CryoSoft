@@ -2819,26 +2819,26 @@ def test_monitor_states_updated_feeds_history_and_trend_combos(monitor_win, orch
         assert combo.count() > 0
 
 
-def test_monitor_default_trend_key_hints_prefer_readings_over_settings(monitor_win, orchestrator):
-    """The two default trend docks pick a temperature/level READING, not a setting/rate field.
+def test_monitor_default_trend_key_hint_prefers_reading_over_setting(monitor_win, orchestrator):
+    """The hinted default trend dock picks a temperature READING, not a setting/rate field.
 
-    Regression pin: a plain substring search for "temperature"/"level" matches
-    the VI-name prefix on fields like temperature_vti_heater_output or
-    level_meter_get_refresh_rate before it reaches the actual reading. Which
-    specific VI wins alphabetically is not asserted here (real orchestrator
-    ticks may have already populated history for other VIs too) — only that
-    the FIELD chosen is the reading, not a setting/rate.
+    Regression pin: a plain substring search for "temperature" matches the
+    VI-name prefix on fields like temperature_vti_heater_output before it
+    reaches the actual reading. Which specific VI wins alphabetically is not
+    asserted here (real orchestrator ticks may have already populated history
+    for other VIs too) — only that the FIELD chosen is the reading, not a
+    setting/rate. The second dock has no hint of its own and simply takes the
+    first available key, which is the documented degradation.
     """
     fake_state = {
         "temperature_vti": {"heater_output": 0.0, "temperature": 4.2, "setpoint": 4.2},
-        "level_meter": {"get_refresh_rate": 0.0, "helium_level": 77.0, "nitrogen_level": 88.0},
     }
     orchestrator.states_updated.emit(fake_state)
 
     trend_0 = monitor_win._trends._trend_panels["trend_0"]
     trend_1 = monitor_win._trends._trend_panels["trend_1"]
     assert trend_0.selected_key().endswith("_temperature")
-    assert trend_1.selected_key().endswith(("_helium_level", "_nitrogen_level"))
+    assert trend_1.selected_key()
 
 
 def test_monitor_persistence_roundtrip_splitters_and_trends(
@@ -2888,42 +2888,6 @@ def test_monitor_persistence_roundtrip_splitters_and_trends(
     third_panel_2 = win2._trends._trend_panels[third_id_2]
     assert third_panel_2.selected_key() == "magnet_z_magnet_field_T"
     assert third_panel_2.selected_window_s() == 21600.0
-
-
-def test_monitor_restore_migrates_renamed_trend_channel_keys(
-    station, orchestrator, qtbot, isolated_settings
-):
-    """A layout saved under a channel's OLD name restores onto its CURRENT name.
-
-    ``TrendsQuadrant._apply_trend_restore()`` carries a key-migration map so
-    a user's saved trend selection survives a VI reading being renamed
-    (``magnet_z_get_field`` -> ``magnet_z_magnet_field_T``). Without it the
-    persisted key would simply never match a combo item, ``set_selected_key()``
-    would no-op, and the panel would silently fall back to a default channel —
-    the selection lost with no indication why.
-    """
-    import json
-
-    from cryosoft.gui.trends_quadrant import _TRENDS_KEY
-
-    # A settings blob written by an older build, before the rename.
-    _app_settings.get_settings().setValue(
-        _TRENDS_KEY,
-        json.dumps([{"key": "magnet_z_get_field", "window_s": 21600.0}]),
-    )
-
-    win = MonitorWindow(station, orchestrator)
-    qtbot.addWidget(win)
-    win.show()
-
-    # Feed the CURRENT key, so only the migrated name is ever selectable.
-    orchestrator.states_updated.emit(
-        {"magnet_z": {"magnet_field_T": 0.5, "magnet_current": 10.0}}
-    )
-
-    panel = next(iter(win._trends._trend_panels.values()))
-    assert panel.selected_key() == "magnet_z_magnet_field_T"
-    assert panel.selected_window_s() == 21600.0
 
 
 def test_monitor_default_layout_when_settings_empty(monitor_win, station):
