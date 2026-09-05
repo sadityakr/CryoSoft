@@ -18,8 +18,7 @@ class TemperatureSweep(SweepMeasureProcedure):
 
     This is a generic sweep procedure (see ``SweepMeasureProcedure``): the
     measurement method is chosen in the GUI, so the same procedure runs a DC
-    resistance measurement, a delta-mode IV, or any future measurement VI with
-    no new code.
+    resistance measurement or any future measurement VI with no new code.
 
     Procedure flow:
     1. ``initiate()``: ramp ``temperature_vti`` to the first temperature at

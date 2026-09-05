@@ -47,9 +47,8 @@ class MonitorHistory:
     paths, currently accepted but NOT deliberately designed the way the
     one above is: ``Station.last_state_flat()`` has no ``bool`` guard — it
     keeps anything passing ``isinstance(value, (int, float))``, and
-    ``bool`` is an ``int`` subclass, so a boolean ``@monitored`` field
-    (e.g. ``SwitchMatrixVI.hot_switching_enabled``) is coerced to
-    ``1.0``/``0.0`` and reaches the disk tiers. ``record()`` here
+    ``bool`` is an ``int`` subclass, so a boolean ``@monitored`` field is
+    coerced to ``1.0``/``0.0`` and reaches the disk tiers. ``record()`` here
     explicitly skips ``bool`` values, so the same field never enters the
     live in-RAM history. Net effect: that key *gains* a trend-plot entry
     after a restart or on a disk-backed window, the opposite direction of

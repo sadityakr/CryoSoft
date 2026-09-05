@@ -1,10 +1,9 @@
 ﻿# ---
 # description: |
-#   Test suite for the new behavior-based Virtual Instruments created in the
-#   VI refactor (Stage 2). Covers SuperconductingMagnetVI,
-#   SuperconductingMagnetPersistentVI, SampleTemperatureControllerVI,
-#   VTITemperatureControllerVI, CryogenLevelMeterVI, DCSeparateMeasurementVI,
-#   DCSingleInstrumentVI, and DCMeasurementBase.
+#   Test suite for the behavior-based Virtual Instruments. Covers
+#   SuperconductingMagnetVI, SampleTemperatureControllerVI,
+#   Lakeshore335SampleTemperatureControllerVI, DCSeparateMeasurementVI and
+#   DCMeasurementBase.
 # entry_point: pytest tests/test_l1_new_vis.py -v
 # last_updated: 2026-07-26
 # ---
@@ -17,7 +16,6 @@ import time
 
 import pytest
 
-from cryosoft.virtual_instruments.magnet.switch_heater import SwitchHeater
 from tests.mocks.bus_spy import spy_on_driver
 
 
@@ -32,21 +30,9 @@ def ips_driver():
 
 
 @pytest.fixture
-def itc_driver():
-    from cryosoft.drivers.sim_oxford_itc503 import SimOxfordITC503
-    return SimOxfordITC503("SIM")
-
-
-@pytest.fixture
 def ilm_driver():
     from cryosoft.drivers.sim_oxford_ilm200 import SimOxfordILM200
     return SimOxfordILM200("SIM")
-
-
-@pytest.fixture
-def rotator_driver():
-    from cryosoft.drivers.sim_rotator import SimRotator
-    return SimRotator("SIM")
 
 
 @pytest.fixture
@@ -59,18 +45,6 @@ def source_driver():
 def meter_driver():
     from cryosoft.drivers.sim_keithley_2182a import SimKeithley2182A
     return SimKeithley2182A("SIM")
-
-
-@pytest.fixture
-def smu_driver():
-    from cryosoft.drivers.sim_keithley_2400 import SimKeithley2400
-    return SimKeithley2400("SIM")
-
-
-@pytest.fixture
-def lockin_driver():
-    from cryosoft.drivers.sim_lockin import SimLockIn
-    return SimLockIn("SIM")
 
 
 @pytest.fixture
@@ -225,400 +199,6 @@ class TestSuperConductingMagnetVI:
 
 
 # ---------------------------------------------------------------------------
-# SuperconductingMagnetPersistentVI
-# ---------------------------------------------------------------------------
-
-class TestSuperConductingMagnetPersistentVI:
-    """Tests for SuperconductingMagnetPersistentVI (with switch heater)."""
-
-    def _make_vi(self, driver, warmup_s=0.0, cooldown_s=0.0):
-        from cryosoft.virtual_instruments.magnet.superconducting_magnet_persistent import (
-            SuperconductingMagnetPersistentVI,
-        )
-        vi = SuperconductingMagnetPersistentVI(
-            {"main": driver},
-            amperes_per_tesla=10.0,
-            default_ramp_rate=600.0,  # Fast for testing
-            max_current=90.0,
-            min_current=-90.0,
-            ramp_segments=[],
-            switch_heater_warmup_s=warmup_s,
-            switch_heater_cooldown_s=cooldown_s,
-        )
-        vi.vi_name = "magnet_z"
-        return vi
-
-    def test_initial_switch_heater_state(self, ips_driver):
-        vi = self._make_vi(ips_driver)
-        assert vi.switch_heater_state() == "OFF"
-
-    def test_initial_persistent_when_heater_cold(self, ips_driver):
-        # Physical persistent state is heater-derived (mirrors the real Mercury
-        # iPS): at startup the switch is cold, so the driver reports persistent.
-        vi = self._make_vi(ips_driver)
-        assert vi.is_persistent() is True
-
-    def test_persistent_mode_disabled_by_default(self, ips_driver):
-        vi = self._make_vi(ips_driver)
-        assert vi.persistent_mode_enabled() is False
-
-    def test_vi_type_is_magnet(self, ips_driver):
-        vi = self._make_vi(ips_driver)
-        assert vi.vi_type == "magnet"
-
-    def test_get_state_includes_persistent_fields(self, ips_driver):
-        vi = self._make_vi(ips_driver)
-        state = vi.get_state()
-        assert "switch_heater_state" in state
-        assert "is_persistent" in state
-        assert "persistent_mode_enabled" in state
-
-    def _drive_to_target_reached(self, vi, driver, max_ticks=100):
-        """Drive advance_ramp() to completion, rewinding the driver's simulated
-        clock each tick so the wall-clock PSU ramp jumps to its setpoint. The
-        switch-heater warmup is timed separately by SwitchHeater; tests that
-        need no warmup use warmup_s=0 so is_ready() is immediately true.
-        """
-        for _ in range(max_ticks):
-            driver._last_update = time.time() - 3600.0
-            if vi.ramp_status() == "TARGET_REACHED":
-                return True
-            vi.advance_ramp()
-        return False
-
-    # -- Normal mode: field changes keep the switch heater on ---------------
-
-    def test_start_ramp_normal_mode_transitions_to_ramping(self, ips_driver):
-        vi = self._make_vi(ips_driver)
-        vi.start_ramp(1.5)
-        assert vi.ramp_status() == "RAMPING"
-        assert vi.ramp_target() == pytest.approx(1.5)
-
-    def test_normal_ramp_completes_with_heater_on(self, ips_driver):
-        """Normal mode leaves the heater ON and the PSU holding the target
-        directly — no cooldown, no persistent park."""
-        vi = self._make_vi(ips_driver, warmup_s=0.0)
-        vi.start_ramp(1.0)  # 1 T * 10 A/T = 10 A
-        assert self._drive_to_target_reached(vi, ips_driver)
-        assert vi.switch_heater_state() == "ON"
-        assert vi.is_persistent() is False
-        assert vi.magnet_field_T() == pytest.approx(1.0, abs=0.01)
-        assert vi.magnet_current() == pytest.approx(10.0, abs=0.1)
-
-    def test_repeated_normal_ramps_keep_heater_on(self, ips_driver):
-        """A field sweep energises the heater once and keeps it on across
-        points (no per-point re-warm/park)."""
-        vi = self._make_vi(ips_driver, warmup_s=0.0)
-        vi.start_ramp(0.5)
-        assert self._drive_to_target_reached(vi, ips_driver)
-        assert vi.switch_heater_state() == "ON"
-        vi.start_ramp(0.8)
-        assert self._drive_to_target_reached(vi, ips_driver)
-        assert vi.switch_heater_state() == "ON"
-        assert vi.magnet_field_T() == pytest.approx(0.8, abs=0.01)
-
-    def test_normal_ramp_waits_for_warmup_then_completes(self, ips_driver):
-        """The first ramp blocks in warmup until the (wall-clock) switch heater
-        is ready, then completes — readiness is time-based, not tick-based."""
-        vi = self._make_vi(ips_driver, warmup_s=60.0)
-        # Swap in a fake-clock heater so the 60 s warmup is deterministic.
-        clock = {"t": 0.0}
-        vi._heater = SwitchHeater(warmup_s=60.0, clock=lambda: clock["t"])
-        vi.start_ramp(1.0)
-        # Heater energised but cold: the ramp cannot finish yet.
-        assert not self._drive_to_target_reached(vi, ips_driver, max_ticks=20)
-        assert vi.switch_heater_state() == "ON"
-        # Warm up, then it completes.
-        clock["t"] = 60.0
-        assert self._drive_to_target_reached(vi, ips_driver)
-        assert vi.magnet_field_T() == pytest.approx(1.0, abs=0.01)
-
-    def test_normal_ramp_completes_when_heater_already_on_at_construction(
-        self, ips_driver
-    ):
-        """Regression: an app restart leaves the heater ON at the driver while a
-        fresh VI's SwitchHeater tracks OFF. The ramp must adopt that state and
-        complete instead of spinning forever in the warmup wait."""
-        # Energise at the driver, matching how a prior session left the magnet,
-        # then build the VI — so its SwitchHeater starts out of sync.
-        ips_driver.set_switch_heater(True)
-        vi = self._make_vi(ips_driver, warmup_s=60.0)
-        clock = {"t": 0.0}
-        vi._heater = SwitchHeater(warmup_s=60.0, clock=lambda: clock["t"])
-
-        vi.start_ramp(1.0)
-        # First tick adopts the driver state and starts the warmup clock.
-        assert not self._drive_to_target_reached(vi, ips_driver, max_ticks=20)
-        assert vi.ramp_phase() == "warmup"
-        clock["t"] = 60.0
-        assert self._drive_to_target_reached(vi, ips_driver)
-        assert vi.magnet_field_T() == pytest.approx(1.0, abs=0.01)
-        assert vi.switch_heater_state() == "ON"
-
-    def test_manual_switch_heater_refused_in_normal_mode(self, ips_driver):
-        from cryosoft.core.exceptions import CryoSoftSafetyError
-
-        vi = self._make_vi(ips_driver)
-        with pytest.raises(CryoSoftSafetyError, match="persistent mode"):
-            vi.switch_heater_on()
-        with pytest.raises(CryoSoftSafetyError, match="persistent mode"):
-            vi.switch_heater_off()
-
-    # -- Persistent mode: manual switch-heater / PSU control ----------------
-
-    def test_switch_heater_on_off_in_persistent_mode(self, ips_driver):
-        vi = self._make_vi(ips_driver)
-        vi.enable_persistent_mode()
-        vi.switch_heater_on()   # fresh magnet: PSU 0 == coil 0, allowed
-        assert vi.switch_heater_state() == "ON"
-        vi.switch_heater_off()  # always allowed
-        assert vi.switch_heater_state() == "OFF"
-
-    def test_switch_heater_on_allowed_when_currents_match(self, ips_driver):
-        vi = self._make_vi(ips_driver)
-        vi.enable_persistent_mode()
-        vi.switch_heater_on()
-        assert vi.switch_heater_state() == "ON"
-
-    def test_disable_persistent_refused_when_heater_off(self, ips_driver):
-        from cryosoft.core.exceptions import CryoSoftSafetyError
-
-        vi = self._make_vi(ips_driver)
-        vi.enable_persistent_mode()  # heater still off
-        with pytest.raises(CryoSoftSafetyError, match="switch heater is off"):
-            vi.disable_persistent_mode()
-        assert vi.persistent_mode_enabled() is True
-
-    def test_disable_persistent_allowed_when_heater_on(self, ips_driver):
-        vi = self._make_vi(ips_driver)
-        vi.enable_persistent_mode()
-        vi.switch_heater_on()
-        vi.disable_persistent_mode()
-        assert vi.persistent_mode_enabled() is False
-
-    def test_manual_persistent_park_flow(self, ips_driver):
-        """The persistent dance: heater on, ramp field, heater off, ramp PSU to
-        zero -> magnet holds the field persistently with the PSU parked."""
-        vi = self._make_vi(ips_driver)
-        vi.enable_persistent_mode()
-        vi.switch_heater_on()
-        vi.start_ramp(2.0)                       # raw PSU ramp; heater on -> field moves
-        assert self._drive_to_target_reached(vi, ips_driver)
-        assert vi.magnet_field_T() == pytest.approx(2.0, abs=0.01)
-        vi.switch_heater_off()                   # freeze coil at 20 A, heater off
-        assert vi.is_persistent() is True
-        vi.start_ramp(0.0)                       # park PSU at zero; coil holds field
-        assert self._drive_to_target_reached(vi, ips_driver)
-        assert ips_driver.get_current() == pytest.approx(0.0, abs=0.01)
-        # Field reads back from the coil, not the parked PSU.
-        assert vi.magnet_field_T() == pytest.approx(2.0, abs=0.01)
-        assert vi.magnet_current() == pytest.approx(20.0, abs=0.1)
-
-    def test_exit_persistent_safely_then_ramp_normally(self, ips_driver):
-        """Leaving persistent mode: match the PSU to the coil, energise the
-        heater, disable the toggle, then a normal ramp works."""
-        vi = self._make_vi(ips_driver, warmup_s=0.0)
-        # Park persistent at 2 T (coil 20 A, PSU 0 A, heater off).
-        vi.enable_persistent_mode()
-        vi.switch_heater_on()
-        vi.start_ramp(2.0)
-        assert self._drive_to_target_reached(vi, ips_driver)
-        vi.switch_heater_off()
-        vi.start_ramp(0.0)
-        assert self._drive_to_target_reached(vi, ips_driver)
-        # Exit: match PSU back to the coil, then heater on, then leave the mode.
-        vi.start_ramp(2.0)                       # PSU -> 20 A == coil
-        assert self._drive_to_target_reached(vi, ips_driver)
-        vi.switch_heater_on()                    # matched -> allowed
-        vi.disable_persistent_mode()             # heater on -> allowed
-        assert vi.persistent_mode_enabled() is False
-        vi.start_ramp(1.0)                       # normal ramp
-        assert self._drive_to_target_reached(vi, ips_driver)
-        assert vi.magnet_field_T() == pytest.approx(1.0, abs=0.01)
-
-    # -- quench safety ------------------------------------------------------
-
-    def test_switch_heater_on_refused_across_current_mismatch(self, ips_driver):
-        """Energising the heater across a PSU/coil mismatch would quench; the
-        guard must refuse BEFORE any driver command."""
-        from cryosoft.core.exceptions import CryoSoftSafetyError
-
-        vi = self._make_vi(ips_driver)
-        vi.enable_persistent_mode()
-        vi.switch_heater_on()
-        vi.start_ramp(2.0)                       # field to 2 T, coil follows PSU
-        assert self._drive_to_target_reached(vi, ips_driver)
-        vi.switch_heater_off()                   # coil frozen at 20 A
-        vi.start_ramp(0.0)                       # PSU -> 0, coil still 20 (mismatch)
-        assert self._drive_to_target_reached(vi, ips_driver)
-        with pytest.raises(CryoSoftSafetyError, match="switch heater"):
-            vi.switch_heater_on()
-        assert ips_driver.get_status() != "QUENCH"
-
-    def test_quench_during_sequence_stops_commands(self, ips_driver):
-        """A QUENCH mid-ramp must stop the generator without further setpoint
-        commands (escalation to EMERGENCY is the safety chain's job)."""
-        vi = self._make_vi(ips_driver, warmup_s=0.0)
-        vi.start_ramp(1.0)
-        ips_driver._simulate_quench = True
-        for _ in range(10):
-            vi.advance_ramp()
-        assert vi.ramp_status() in ("TARGET_REACHED", "RAMPING", "IDLE")
-        sp_after = ips_driver._setpoint
-        for _ in range(5):
-            vi.advance_ramp()
-        assert ips_driver._setpoint == sp_after
-
-    # -- control-validation standard: declarative field limit --------------
-
-    def test_set_field_beyond_setup_limit_is_refused(self, ips_driver):
-        """set_field() outside the config-derived field limit must raise
-        (loud reject), not silently clamp."""
-        from cryosoft.core.exceptions import CryoSoftSafetyError
-
-        vi = self._make_vi(ips_driver)  # max_current 90 A / 10 A/T -> ±9 T
-        with pytest.raises(CryoSoftSafetyError, match="outside the allowed range"):
-            vi.set_field(12.0)
-        assert vi.ramp_status() == "IDLE"  # no ramp was started
-
-    def test_set_field_within_limit_still_works(self, ips_driver):
-        vi = self._make_vi(ips_driver, warmup_s=0.0)
-        vi.set_field(2.0)
-        assert vi.ramp_status() == "RAMPING"
-
-    # -- stop_ramp(): abort must freeze the autonomous PSU, not just kill
-    #    the software generator (review finding C3) ------------------------
-
-    def test_stop_ramp_holds_hardware(self, ips_driver):
-        vi = self._make_vi(ips_driver, warmup_s=0.0)
-        vi.start_ramp(5.0)
-        # Drive a few ticks so the generator has commanded the PSU setpoint.
-        for _ in range(5):
-            vi.advance_ramp()
-        assert ips_driver.get_status() == "RAMPING"
-
-        vi.stop_ramp()
-        assert vi.ramp_status() == "IDLE"
-        # The PSU itself must be held: setpoint pinned to the present output.
-        assert ips_driver.get_status() == "HOLD"
-        assert ips_driver.get_current_setpoint() == pytest.approx(
-            ips_driver.get_current(), abs=0.01
-        )
-
-    # -- standby(): heater-safe safe-park (bugfix — must never energise an
-    #    OFF heater for no reason, e.g. during EMERGENCY shutdown) ----------
-
-    def test_standby_with_heater_off_and_no_trapped_field_never_energises(
-        self, ips_driver
-    ):
-        """Fresh magnet: PSU and coil both already 0 A, heater off.
-
-        standby() must be a no-op on the heater — nothing needs to ramp.
-        """
-        vi = self._make_vi(ips_driver, warmup_s=0.0)
-        vi.standby()
-        self._drive_to_target_reached(vi, ips_driver)
-        assert vi.switch_heater_state() == "OFF"
-        assert ips_driver.get_current() == pytest.approx(0.0, abs=0.01)
-
-    def test_standby_parks_nonzero_psu_with_heater_off(self, ips_driver):
-        """Heater off, coil at 0 A, but the PSU itself is nonzero.
-
-        standby() must bring the PSU to zero without ever touching the
-        heater (ramping the PSU doesn't move the frozen coil field).
-        """
-        vi = self._make_vi(ips_driver, warmup_s=0.0)
-        ips_driver.set_current_setpoint(3.0)
-        self._drive_to_target_reached(vi, ips_driver)
-
-        vi.standby()
-        self._drive_to_target_reached(vi, ips_driver)
-        assert vi.switch_heater_state() == "OFF"
-        assert ips_driver.get_current() == pytest.approx(0.0, abs=0.01)
-
-    def test_standby_ramps_down_trapped_persistent_field_and_ends_deenergised(
-        self, ips_driver
-    ):
-        """Heater off with a nonzero trapped coil field (manually parked).
-
-        standby() must match the PSU to the coil, energise, ramp the field
-        to zero, then de-energise — a full park, never leaving the heater on.
-        """
-        vi = self._make_vi(ips_driver, warmup_s=0.0)
-        vi.enable_persistent_mode()
-        vi.switch_heater_on()
-        vi.start_ramp(2.0)  # 20 A
-        self._drive_to_target_reached(vi, ips_driver)
-        vi.switch_heater_off()  # freeze coil at 20 A, heater off
-        assert vi.magnet_current() == pytest.approx(20.0, abs=0.01)
-
-        vi.standby()
-        self._drive_to_target_reached(vi, ips_driver)
-        assert vi.switch_heater_state() == "OFF"
-        assert vi.magnet_current() == pytest.approx(0.0, abs=0.01)
-        assert ips_driver.get_current() == pytest.approx(0.0, abs=0.01)
-
-    def test_standby_with_heater_on_ramps_down_and_deenergises(self, ips_driver):
-        """Heater already on (normal mode, mid-operation): ramp straight to
-        zero with no re-energise, then de-energise for a full park."""
-        vi = self._make_vi(ips_driver, warmup_s=0.0)
-        vi.start_ramp(1.5)
-        self._drive_to_target_reached(vi, ips_driver)
-        assert vi.switch_heater_state() == "ON"
-
-        vi.standby()
-        self._drive_to_target_reached(vi, ips_driver)
-        assert vi.switch_heater_state() == "OFF"
-        assert ips_driver.get_current() == pytest.approx(0.0, abs=0.01)
-
-    # -- magnet_state(): standby / ramping / holding / persistent / quenched --
-
-    def test_magnet_state_standby_initially(self, ips_driver):
-        vi = self._make_vi(ips_driver)
-        assert vi.magnet_state() == "standby"
-
-    def test_magnet_state_ramping_while_normal_ramp_active(self, ips_driver):
-        vi = self._make_vi(ips_driver, warmup_s=0.0)
-        vi.start_ramp(1.5)
-        assert vi.magnet_state() == "ramping"
-
-    def test_magnet_state_holding_after_normal_ramp_completes(self, ips_driver):
-        """Regression: same _ramp_gen-never-reset issue as the base VI (see
-        TestSuperConductingMagnetVI.test_magnet_state_holding_after_ramp_completes)
-        applies to this VI's start_ramp() override too."""
-        vi = self._make_vi(ips_driver, warmup_s=0.0)
-        vi.start_ramp(1.5)
-        assert self._drive_to_target_reached(vi, ips_driver)
-        assert vi.switch_heater_state() == "ON"
-        assert vi.magnet_state() == "holding"
-
-    def test_magnet_state_persistent_after_parking(self, ips_driver):
-        vi = self._make_vi(ips_driver, warmup_s=0.0)
-        vi.enable_persistent_mode()
-        vi.switch_heater_on()
-        vi.start_ramp(2.0)  # 20 A
-        assert self._drive_to_target_reached(vi, ips_driver)
-        vi.switch_heater_off()  # freeze coil at 20 A, heater off
-        vi.start_ramp(0.0)  # park PSU at zero; coil holds field
-        assert self._drive_to_target_reached(vi, ips_driver)
-        assert vi.magnet_state() == "persistent"
-
-    def test_magnet_state_standby_after_standby_parks_fully(self, ips_driver):
-        vi = self._make_vi(ips_driver, warmup_s=0.0)
-        vi.start_ramp(1.5)
-        assert self._drive_to_target_reached(vi, ips_driver)
-        vi.standby()
-        assert self._drive_to_target_reached(vi, ips_driver)
-        assert vi.switch_heater_state() == "OFF"
-        assert vi.magnet_state() == "standby"
-
-    def test_magnet_state_quenched(self, ips_driver):
-        vi = self._make_vi(ips_driver)
-        ips_driver._simulate_quench = True
-        assert vi.magnet_state() == "quenched"
-
-
-# ---------------------------------------------------------------------------
 # SampleTemperatureControllerVI
 # ---------------------------------------------------------------------------
 
@@ -637,31 +217,31 @@ class TestSampleTemperatureControllerVI:
         vi.vi_name = "temperature_sample"
         return vi
 
-    def test_initial_temperature_returns_float(self, itc_driver):
-        vi = self._make_vi(itc_driver)
+    def test_initial_temperature_returns_float(self, lakeshore_driver):
+        vi = self._make_vi(lakeshore_driver)
         assert isinstance(vi.temperature(), float)
 
-    def test_initial_status_is_idle(self, itc_driver):
-        vi = self._make_vi(itc_driver)
+    def test_initial_status_is_idle(self, lakeshore_driver):
+        vi = self._make_vi(lakeshore_driver)
         assert vi.ramp_status() == "IDLE"
 
-    def test_start_ramp_transitions_to_ramping(self, itc_driver):
-        vi = self._make_vi(itc_driver)
+    def test_start_ramp_transitions_to_ramping(self, lakeshore_driver):
+        vi = self._make_vi(lakeshore_driver)
         vi.start_ramp(100.0)
         assert vi.ramp_status() == "RAMPING"
 
-    def test_ramp_completes(self, itc_driver):
-        vi = self._make_vi(itc_driver)
+    def test_ramp_completes(self, lakeshore_driver):
+        vi = self._make_vi(lakeshore_driver)
         # Driver starts at 300 K; ramp to 300.1 K with very fast rate
         vi.start_ramp(300.1, rate=9999.0)
         for _ in range(100):
             vi.advance_ramp()
         # After generator exhausts, hardware must settle within tolerance
-        itc_driver._temperature = 300.05  # Force within tolerance
-        itc_driver._setpoint = 300.1
+        lakeshore_driver._temperature = 300.05  # Force within tolerance
+        lakeshore_driver._setpoint = 300.1
         assert vi.ramp_status() in ("TARGET_REACHED", "RAMPING")
 
-    def test_temperature_and_rate_limits_from_init_params(self, itc_driver):
+    def test_temperature_and_rate_limits_from_init_params(self, lakeshore_driver):
         """Config-declared temperature / ramp-rate bounds are enforced on the
         @control entry points (control-validation standard)."""
         from cryosoft.core.exceptions import CryoSoftSafetyError
@@ -670,7 +250,7 @@ class TestSampleTemperatureControllerVI:
         )
 
         vi = SampleTemperatureControllerVI(
-            {"main": itc_driver},
+            {"main": lakeshore_driver},
             default_ramp_rate=2.0,
             tolerance=0.5,
             min_temperature_K=1.4,
@@ -693,106 +273,109 @@ class TestSampleTemperatureControllerVI:
         vi.set_temperature(250.0)
         assert vi.ramp_status() == "RAMPING"
 
-    def test_ramp_target_and_rate_none_when_idle(self, itc_driver):
-        vi = self._make_vi(itc_driver)
+    def test_ramp_target_and_rate_none_when_idle(self, lakeshore_driver):
+        vi = self._make_vi(lakeshore_driver)
         assert vi.ramp_target() is None
         assert vi.ramp_rate() is None
 
-    def test_ramp_target_and_rate_reported_during_ramp(self, itc_driver):
-        vi = self._make_vi(itc_driver)
+    def test_ramp_target_and_rate_reported_during_ramp(self, lakeshore_driver):
+        vi = self._make_vi(lakeshore_driver)
         vi.start_ramp(100.0, rate=5.0)
         assert vi.ramp_target() == pytest.approx(100.0)
         assert vi.ramp_rate() == pytest.approx(5.0)
 
-    def test_stop_ramp_clears_target_and_rate(self, itc_driver):
-        vi = self._make_vi(itc_driver)
+    def test_stop_ramp_clears_target_and_rate(self, lakeshore_driver):
+        vi = self._make_vi(lakeshore_driver)
         vi.start_ramp(100.0, rate=5.0)
         vi.stop_ramp()
         assert vi.ramp_target() is None
         assert vi.ramp_rate() is None
 
-    def test_no_limits_in_init_params_means_unbounded(self, itc_driver):
+    def test_no_limits_in_init_params_means_unbounded(self, lakeshore_driver):
         """A setup that declares no temperature bounds keeps working (open range)."""
-        vi = self._make_vi(itc_driver)
+        vi = self._make_vi(lakeshore_driver)
         vi.set_temperature(500.0)  # no max_temperature_K configured
         assert vi.ramp_status() == "RAMPING"
 
-    def test_stop_ramp_pins_setpoint_to_current_temperature(self, itc_driver):
+    def test_stop_ramp_pins_setpoint_to_current_temperature(self, lakeshore_driver):
         """stop_ramp() must go IDLE and pin the setpoint where the system is —
         otherwise the controller keeps regulating toward the last-commanded
         intermediate setpoint after an abort (review finding C3)."""
-        vi = self._make_vi(itc_driver)
+        vi = self._make_vi(lakeshore_driver)
         vi.start_ramp(100.0)
         vi.advance_ramp()
         vi.stop_ramp()
         assert vi.ramp_status() == "IDLE"
-        assert itc_driver.get_setpoint() == pytest.approx(
-            itc_driver.get_temperature(), abs=0.01
+        assert lakeshore_driver.get_setpoint() == pytest.approx(
+            lakeshore_driver.get_temperature(), abs=0.01
         )
 
-    def test_get_state_keys(self, itc_driver):
-        vi = self._make_vi(itc_driver)
+    def test_get_state_keys(self, lakeshore_driver):
+        vi = self._make_vi(lakeshore_driver)
         state = vi.get_state()
         assert "temperature" in state
         assert "setpoint" in state
         assert "heater_output" in state
 
-    def test_set_ramp_rate_control(self, itc_driver):
-        vi = self._make_vi(itc_driver)
+    def test_set_ramp_rate_control(self, lakeshore_driver):
+        vi = self._make_vi(lakeshore_driver)
         vi.set_ramp_rate(10.0)
         assert vi._default_ramp_rate == pytest.approx(10.0)
 
-    def test_set_temperature_control_starts_ramp(self, itc_driver):
-        vi = self._make_vi(itc_driver)
+    def test_set_temperature_control_starts_ramp(self, lakeshore_driver):
+        vi = self._make_vi(lakeshore_driver)
         vi.set_temperature(100.0)
         assert vi.ramp_status() == "RAMPING"
 
-    def test_vi_type_is_temperature(self, itc_driver):
-        vi = self._make_vi(itc_driver)
+    def test_vi_type_is_temperature(self, lakeshore_driver):
+        vi = self._make_vi(lakeshore_driver)
         assert vi.vi_type == "temperature"
 
-    def test_no_needle_valve_attribute(self, itc_driver):
+    def test_no_needle_valve_attribute(self, lakeshore_driver):
         """SampleTemperatureControllerVI must NOT expose needle valve."""
-        vi = self._make_vi(itc_driver)
+        vi = self._make_vi(lakeshore_driver)
         assert not hasattr(vi, "needle_valve")
 
     # -- heater mode (shared base: Lakeshore 335 and Oxford ITC503 both
     #    implement get/set_heater_mode with the same 'AUTO'/'MANUAL' values) --
 
-    def test_heater_mode_default_is_auto(self, itc_driver):
-        vi = self._make_vi(itc_driver)
+    def test_heater_mode_default_is_auto(self, lakeshore_driver):
+        vi = self._make_vi(lakeshore_driver)
         assert vi.heater_mode() == "AUTO"
 
-    def test_set_heater_mode_control(self, itc_driver):
-        vi = self._make_vi(itc_driver)
+    def test_set_heater_mode_control(self, lakeshore_driver):
+        vi = self._make_vi(lakeshore_driver)
         vi.set_heater_mode("MANUAL")
         assert vi.heater_mode() == "MANUAL"
-        assert itc_driver.get_heater_mode() == "MANUAL"
+        assert lakeshore_driver.get_heater_mode() == "MANUAL"
         vi.set_heater_mode("AUTO")
         assert vi.heater_mode() == "AUTO"
 
-    def test_set_heater_mode_rejects_invalid(self, itc_driver):
-        vi = self._make_vi(itc_driver)
+    def test_set_heater_mode_rejects_invalid(self, lakeshore_driver):
+        vi = self._make_vi(lakeshore_driver)
         with pytest.raises(ValueError):
             vi.set_heater_mode("INVALID")
 
-    def test_get_state_includes_heater_mode(self, itc_driver):
-        vi = self._make_vi(itc_driver)
+    def test_get_state_includes_heater_mode(self, lakeshore_driver):
+        vi = self._make_vi(lakeshore_driver)
         state = vi.get_state()
         assert state["heater_mode"] == "AUTO"
 
     # -- manual heater output (only meaningful, and only allowed, while
     #    heater mode is MANUAL) --
 
-    def test_set_heater_output_rejects_while_auto(self, itc_driver):
+    def test_set_heater_output_rejects_while_auto(self, lakeshore_driver):
         from cryosoft.core.exceptions import CryoSoftSafetyError
 
-        vi = self._make_vi(itc_driver)
+        vi = self._make_vi(lakeshore_driver)
         with pytest.raises(CryoSoftSafetyError, match="AUTO"):
             vi.set_heater_output(50.0)
 
-    def test_set_heater_output_control(self, itc_driver):
-        vi = self._make_vi(itc_driver)
+    def test_set_heater_output_control(self, lakeshore_driver):
+        vi = self._make_vi(lakeshore_driver)
+        # The 335 delivers no power while its heater range is Off, so the
+        # readback would stay at 0 % whatever output is programmed.
+        lakeshore_driver.set_heater_range("MEDIUM")
         vi.set_heater_mode("MANUAL")
         vi.set_heater_output(42.0)
         assert vi.heater_output() == pytest.approx(42.0)
@@ -800,170 +383,31 @@ class TestSampleTemperatureControllerVI:
     # -- lifecycle: initiate() -> heater AUTO, standby() -> heater MANUAL
     #    at zero output (standardised across temperature controller VIs) --
 
-    def test_initiate_sets_heater_mode_auto(self, itc_driver):
-        vi = self._make_vi(itc_driver)
+    def test_initiate_sets_heater_mode_auto(self, lakeshore_driver):
+        vi = self._make_vi(lakeshore_driver)
         vi.set_heater_mode("MANUAL")
         vi.initiate()
         assert vi.heater_mode() == "AUTO"
 
-    def test_initiate_pins_setpoint_to_rounded_current_temperature(self, itc_driver):
+    def test_initiate_pins_setpoint_to_rounded_current_temperature(self, lakeshore_driver):
         """A stale setpoint left over from before the heater was switched to
         MANUAL must not survive initiate() — otherwise flipping to AUTO hands
         the PID a far-off target and the heater immediately starts driving
         toward it."""
-        vi = self._make_vi(itc_driver)
+        vi = self._make_vi(lakeshore_driver)
         vi.set_heater_mode("MANUAL")
-        itc_driver._temperature = 42.3
-        itc_driver.set_setpoint(250.0)
+        lakeshore_driver._temperature = 42.3
+        lakeshore_driver.set_setpoint(250.0)
         vi.initiate()
-        assert itc_driver.get_setpoint() == pytest.approx(42.0)
+        assert lakeshore_driver.get_setpoint() == pytest.approx(42.0)
 
-    def test_standby_sets_heater_manual_and_zero_output(self, itc_driver):
-        vi = self._make_vi(itc_driver)
+    def test_standby_sets_heater_manual_and_zero_output(self, lakeshore_driver):
+        vi = self._make_vi(lakeshore_driver)
         vi.set_heater_mode("MANUAL")
-        itc_driver.set_heater_output(50.0)
+        lakeshore_driver.set_heater_output(50.0)
         vi.standby()
         assert vi.heater_mode() == "MANUAL"
         assert vi.heater_output() == pytest.approx(0.0)
-
-
-# ---------------------------------------------------------------------------
-# VTITemperatureControllerVI
-# ---------------------------------------------------------------------------
-
-class TestVTITemperatureControllerVI:
-    """Tests for VTITemperatureControllerVI (with needle valve)."""
-
-    def _make_vi(self, driver):
-        from cryosoft.virtual_instruments.temperature.vti_temperature_controller import (
-            VTITemperatureControllerVI,
-        )
-        vi = VTITemperatureControllerVI(
-            {"main": driver},
-            default_ramp_rate=600.0,
-            tolerance=0.5,
-        )
-        vi.vi_name = "temperature_vti"
-        return vi
-
-    def test_inherits_temperature_methods(self, itc_driver):
-        vi = self._make_vi(itc_driver)
-        assert isinstance(vi.temperature(), float)
-        assert isinstance(vi.setpoint(), float)
-        assert isinstance(vi.heater_output(), float)
-
-    def test_ramp_inherited(self, itc_driver):
-        vi = self._make_vi(itc_driver)
-        vi.start_ramp(100.0)
-        assert vi.ramp_status() == "RAMPING"
-
-    def test_needle_valve_initial_state(self, itc_driver):
-        vi = self._make_vi(itc_driver)
-        assert vi.needle_valve() == pytest.approx(0.0)
-
-    def test_set_needle_valve_control(self, itc_driver):
-        vi = self._make_vi(itc_driver)
-        vi.set_needle_valve_mode("MANUAL")
-        vi.set_needle_valve(50.0)
-        assert vi.needle_valve() == pytest.approx(50.0)
-
-    def test_needle_valve_full_range(self, itc_driver):
-        vi = self._make_vi(itc_driver)
-        vi.set_needle_valve_mode("MANUAL")
-        vi.set_needle_valve(0.0)
-        assert vi.needle_valve() == pytest.approx(0.0)
-        vi.set_needle_valve(100.0)
-        assert vi.needle_valve() == pytest.approx(100.0)
-
-    def test_get_state_includes_needle_valve(self, itc_driver):
-        vi = self._make_vi(itc_driver)
-        state = vi.get_state()
-        assert "needle_valve" in state
-        assert "temperature" in state
-        assert "setpoint" in state
-
-    def test_vi_type_is_temperature(self, itc_driver):
-        vi = self._make_vi(itc_driver)
-        assert vi.vi_type == "temperature"
-
-    def test_heater_mode_inherited(self, itc_driver):
-        """VTI (Oxford ITC503) also gets heater_mode from the shared base."""
-        vi = self._make_vi(itc_driver)
-        assert vi.heater_mode() == "AUTO"
-        vi.set_heater_mode("MANUAL")
-        assert vi.heater_mode() == "MANUAL"
-
-    # -- needle valve mode (AUTO/MANUAL — the instrument's gas-flow control
-    #    loop drives the valve in AUTO and ignores explicit position
-    #    commands, the real-hardware bug this mode standard fixes) --
-
-    def test_needle_valve_mode_default_is_auto(self, itc_driver):
-        vi = self._make_vi(itc_driver)
-        assert vi.needle_valve_mode() == "AUTO"
-
-    def test_set_needle_valve_rejects_while_auto(self, itc_driver):
-        from cryosoft.core.exceptions import CryoSoftSafetyError
-
-        vi = self._make_vi(itc_driver)
-        with pytest.raises(CryoSoftSafetyError, match="AUTO"):
-            vi.set_needle_valve(50.0)
-
-    def test_set_needle_valve_mode_control(self, itc_driver):
-        vi = self._make_vi(itc_driver)
-        vi.set_needle_valve_mode("MANUAL")
-        assert vi.needle_valve_mode() == "MANUAL"
-        vi.set_needle_valve(50.0)
-        assert vi.needle_valve() == pytest.approx(50.0)
-        vi.set_needle_valve_mode("AUTO")
-        assert vi.needle_valve_mode() == "AUTO"
-
-    def test_set_needle_valve_mode_rejects_invalid(self, itc_driver):
-        vi = self._make_vi(itc_driver)
-        with pytest.raises(ValueError):
-            vi.set_needle_valve_mode("INVALID")
-
-    def test_get_state_includes_needle_valve_mode(self, itc_driver):
-        vi = self._make_vi(itc_driver)
-        state = vi.get_state()
-        assert state["needle_valve_mode"] == "AUTO"
-
-    # -- lifecycle: standby() extends the inherited heater lifecycle to also
-    #    close the needle valve --
-
-    def test_initiate_sets_heater_mode_auto(self, itc_driver):
-        vi = self._make_vi(itc_driver)
-        vi.set_heater_mode("MANUAL")
-        vi.initiate()
-        assert vi.heater_mode() == "AUTO"
-
-    def test_initiate_pins_setpoint_to_rounded_current_temperature(self, itc_driver):
-        vi = self._make_vi(itc_driver)
-        vi.set_heater_mode("MANUAL")
-        itc_driver._temperature = 4.7
-        itc_driver.set_setpoint(300.0)
-        vi.initiate()
-        assert itc_driver.get_setpoint() == pytest.approx(5.0)
-
-    def test_standby_closes_needle_valve_and_sets_heater_manual(self, itc_driver):
-        vi = self._make_vi(itc_driver)
-        vi.set_heater_mode("AUTO")
-        vi.set_needle_valve_mode("MANUAL")
-        vi.set_needle_valve(75.0)
-        vi.standby()
-        assert vi.heater_mode() == "MANUAL"
-        assert vi.heater_output() == pytest.approx(0.0)
-        assert vi.needle_valve() == pytest.approx(0.0)
-
-    def test_standby_switches_needle_valve_to_manual_from_auto(self, itc_driver):
-        """The real-hardware bug this fixes: standby() must force the needle
-        valve into MANUAL mode before closing it — while it is left in AUTO
-        (the instrument's power-up default), the gas-flow control loop
-        ignores the bare position command."""
-        vi = self._make_vi(itc_driver)
-        assert vi.needle_valve_mode() == "AUTO"
-        vi.standby()
-        assert vi.needle_valve_mode() == "MANUAL"
-        assert vi.needle_valve() == pytest.approx(0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -1134,9 +578,10 @@ class TestLakeshore335SampleTemperatureControllerVI:
         state = vi.get_state()
         assert state["heater_range"] == "OFF"
 
-    # -- lifecycle: standby()/initiate() are inherited unchanged from
-    #    SampleTemperatureControllerVI and must not touch heater_range — it
-    #    is a separate, driver-specific power gate the operator controls --
+    # -- lifecycle: standby() is inherited unchanged and must not touch
+    #    heater_range (switching heater power back off is the operator's
+    #    call); initiate() selects the configured range, because the 335
+    #    delivers no power at all while the range is Off --
 
     def test_standby_does_not_touch_heater_range(self, lakeshore_driver):
         vi = self._make_vi(lakeshore_driver)
@@ -1145,6 +590,35 @@ class TestLakeshore335SampleTemperatureControllerVI:
         vi.standby()
         assert vi.heater_mode() == "MANUAL"
         assert vi.heater_range() == "HIGH"
+
+    def test_initiate_selects_the_configured_heater_range(self, lakeshore_driver):
+        """Without a range the closed loop is on but powerless (manual §4.5.1.7.8)."""
+        vi = self._make_vi(lakeshore_driver)
+        assert vi.heater_range() == "OFF"  # the instrument's power-up default
+        vi.initiate()
+        assert vi.heater_mode() == "AUTO"
+        assert vi.heater_range() == "MEDIUM"
+
+    def test_initiate_heater_range_comes_from_the_config(self, lakeshore_driver):
+        from cryosoft.virtual_instruments.temperature.lakeshore_335_sample_temperature_controller import (
+            Lakeshore335SampleTemperatureControllerVI,
+        )
+
+        vi = Lakeshore335SampleTemperatureControllerVI(
+            {"main": lakeshore_driver}, initiate_heater_range="HIGH"
+        )
+        vi.initiate()
+        assert vi.heater_range() == "HIGH"
+
+    def test_unknown_initiate_heater_range_is_refused(self, lakeshore_driver):
+        from cryosoft.virtual_instruments.temperature.lakeshore_335_sample_temperature_controller import (
+            Lakeshore335SampleTemperatureControllerVI,
+        )
+
+        with pytest.raises(ValueError, match="initiate_heater_range"):
+            Lakeshore335SampleTemperatureControllerVI(
+                {"main": lakeshore_driver}, initiate_heater_range="WARM"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -1263,120 +737,9 @@ class TestCryogenLevelMeterVI:
 
 
 # ---------------------------------------------------------------------------
-# RotatorVI
-# ---------------------------------------------------------------------------
-
-class TestRotatorVI:
-    """Tests for RotatorVI."""
-
-    def _make_vi(self, driver):
-        from cryosoft.virtual_instruments.rotator.rotator import RotatorVI
-        vi = RotatorVI(
-            {"main": driver},
-            default_rate_deg_per_min=1.0,
-            min_angle_deg=-180.0,
-            max_angle_deg=180.0,
-            max_rate_deg_per_min=10.0,
-        )
-        vi.vi_name = "rotator"
-        return vi
-
-    def test_initial_angle_is_zero(self, rotator_driver):
-        vi = self._make_vi(rotator_driver)
-        assert vi.get_sample_angle() == pytest.approx(0.0)
-
-    def test_initial_status_is_idle(self, rotator_driver):
-        vi = self._make_vi(rotator_driver)
-        assert vi.ramp_status() == "IDLE"
-
-    def test_start_ramp_transitions_to_ramping(self, rotator_driver):
-        vi = self._make_vi(rotator_driver)
-        vi.start_ramp(90.0)
-        assert vi.ramp_status() == "RAMPING"
-
-    def test_ramp_reaches_target(self, rotator_driver):
-        vi = self._make_vi(rotator_driver)
-        vi._rate_deg_per_min = 600.0  # bypass the config-limited control for a fast test ramp
-        rotator_driver.set_rate(600.0)
-        vi.start_ramp(90.0)
-        rotator_driver._last_update = time.time() - 10.0
-        for _ in range(20):
-            vi.advance_ramp()
-        assert vi.ramp_status() in ("TARGET_REACHED", "RAMPING")
-
-    def test_get_state_returns_monitored_keys(self, rotator_driver):
-        vi = self._make_vi(rotator_driver)
-        state = vi.get_state()
-        assert "get_sample_angle" in state
-        assert "get_rate_sample_angle" in state
-        assert "rotator_status" in state
-
-    def test_get_sample_angle_type(self, rotator_driver):
-        vi = self._make_vi(rotator_driver)
-        assert isinstance(vi.get_sample_angle(), float)
-
-    def test_set_sample_angle_control_starts_ramp(self, rotator_driver):
-        vi = self._make_vi(rotator_driver)
-        vi.set_sample_angle(45.0)
-        assert vi.ramp_status() == "RAMPING"
-
-    def test_start_ramp_accepts_persistent_kwarg_as_noop(self, rotator_driver):
-        """persistent= is accepted (ignored) so Station can forward it
-        uniformly to any system VI without special-casing which one it is."""
-        vi = self._make_vi(rotator_driver)
-        vi.start_ramp(45.0, persistent=False)
-        assert vi.ramp_status() == "RAMPING"
-
-    def test_standby_holds_current_angle(self, rotator_driver):
-        vi = self._make_vi(rotator_driver)
-        rotator_driver._position = 45.0
-        vi.standby()
-        assert vi.ramp_status() == "IDLE"
-        assert rotator_driver.get_position_setpoint() == pytest.approx(45.0)
-
-    def test_vi_type_is_rotator(self, rotator_driver):
-        vi = self._make_vi(rotator_driver)
-        assert vi.vi_type == "rotator"
-
-    def test_ramp_target_and_rate_none_when_idle(self, rotator_driver):
-        vi = self._make_vi(rotator_driver)
-        assert vi.ramp_target() is None
-        assert vi.ramp_rate() is None
-
-    def test_ramp_target_reports_angle_in_degrees(self, rotator_driver):
-        vi = self._make_vi(rotator_driver)
-        vi.start_ramp(90.0)
-        assert vi.ramp_target() == pytest.approx(90.0)
-        assert vi.ramp_rate() == pytest.approx(1.0)
-
-    def test_stop_ramp_clears_ramp_target(self, rotator_driver):
-        vi = self._make_vi(rotator_driver)
-        vi.start_ramp(90.0)
-        vi.stop_ramp()
-        assert vi.ramp_target() is None
-        assert vi.ramp_status() == "IDLE"
-
-    def test_set_rate_sample_angle_updates_rate(self, rotator_driver):
-        vi = self._make_vi(rotator_driver)
-        vi.set_rate_sample_angle(5.0)
-        assert vi.get_rate_sample_angle() == pytest.approx(5.0)
-
-    def test_set_sample_angle_rejects_out_of_range(self, rotator_driver):
-        from cryosoft.core.exceptions import CryoSoftSafetyError
-        vi = self._make_vi(rotator_driver)
-        with pytest.raises(CryoSoftSafetyError):
-            vi.set_sample_angle(200.0)
-
-    def test_set_rate_sample_angle_rejects_out_of_range(self, rotator_driver):
-        from cryosoft.core.exceptions import CryoSoftSafetyError
-        vi = self._make_vi(rotator_driver)
-        with pytest.raises(CryoSoftSafetyError):
-            vi.set_rate_sample_angle(20.0)
-
-
-# ---------------------------------------------------------------------------
 # DCSeparateMeasurementVI
 # ---------------------------------------------------------------------------
+
 
 class TestDCSeparateMeasurementVI:
     """Tests for DCSeparateMeasurementVI."""
@@ -1447,164 +810,3 @@ class TestDCSeparateMeasurementVI:
         """current_A is loopable via set_source_current (the reading loop)."""
         vi = self._make_vi(source_driver, meter_driver)
         assert vi.reading_setters == {"current_A": "set_source_current"}
-
-
-# ---------------------------------------------------------------------------
-# DCSingleInstrumentVI
-# ---------------------------------------------------------------------------
-
-class TestDCSingleInstrumentVI:
-    """Tests for DCSingleInstrumentVI (Keithley 2400 SMU)."""
-
-    def _make_vi(self, smu):
-        from cryosoft.virtual_instruments.measurement.dc_single_instrument import DCSingleInstrumentVI
-        vi = DCSingleInstrumentVI({"main": smu})
-        vi.vi_name = "dc_measurement"
-        return vi
-
-    def test_ping_returns_true(self, smu_driver):
-        vi = self._make_vi(smu_driver)
-        assert vi.ping() is True
-
-    def test_initiate_and_take_reading(self, smu_driver):
-        vi = self._make_vi(smu_driver)
-        vi.initiate_measurement(current_A=1e-6, compliance_A=1e-3, voltmeter_range_V=0.1, readings_per_point=5)
-        data = vi.take_reading()
-        assert "voltage_V" in data
-        assert "current_A" in data
-        assert len(data["voltage_V_array"]) == 5
-        assert len(data["current_A_array"]) == 5
-
-    def test_current_constant_across_readings(self, smu_driver):
-        vi = self._make_vi(smu_driver)
-        vi.initiate_measurement(current_A=3e-6, readings_per_point=10)
-        data = vi.take_reading()
-        assert all(abs(c - 3e-6) < 1e-12 for c in data["current_A_array"])
-        assert data["current_A"] == pytest.approx(3e-6)
-
-    def test_take_reading_without_initiate_raises(self, smu_driver):
-        vi = self._make_vi(smu_driver)
-        with pytest.raises(RuntimeError):
-            vi.take_reading()
-
-    def test_standby_resets_state(self, smu_driver):
-        vi = self._make_vi(smu_driver)
-        vi.initiate_measurement(current_A=1e-6)
-        vi.standby()
-        with pytest.raises(RuntimeError):
-            vi.take_reading()
-
-    def test_inherits_dc_measurement_base(self, smu_driver):
-        from cryosoft.virtual_instruments.base import DCMeasurementBase
-        vi = self._make_vi(smu_driver)
-        assert isinstance(vi, DCMeasurementBase)
-
-    def test_vi_type_is_measurement(self, smu_driver):
-        vi = self._make_vi(smu_driver)
-        assert vi.vi_type == "measurement"
-
-    def test_identical_interface_to_separate_vi(self, smu_driver, source_driver, meter_driver):
-        """Both DC VIs must accept identical initiate() and take_reading() signatures."""
-        from cryosoft.virtual_instruments.measurement.dc_separate_measurement import DCSeparateMeasurementVI
-        from cryosoft.virtual_instruments.measurement.dc_single_instrument import DCSingleInstrumentVI
-
-        vi_sep = DCSeparateMeasurementVI({"source": source_driver, "meter": meter_driver})
-        vi_sep.vi_name = "dc_sep"
-        vi_smu = DCSingleInstrumentVI({"main": smu_driver})
-        vi_smu.vi_name = "dc_smu"
-
-        for vi in (vi_sep, vi_smu):
-            vi.initiate_measurement(current_A=1e-6, compliance_A=1e-3, voltmeter_range_V=0.1, readings_per_point=3)
-            data = vi.take_reading()
-            assert set(data.keys()) == {
-                "voltage_V", "voltage_V_error", "voltage_V_array",
-                "current_A", "current_A_error", "current_A_array",
-            }
-            assert len(data["voltage_V_array"]) == 3
-
-
-# ---------------------------------------------------------------------------
-# LockInHarmonicMeasurementVI
-# ---------------------------------------------------------------------------
-
-class TestLockInHarmonicMeasurementVI:
-    """Tests for LockInHarmonicMeasurementVI (internal-source 1f/2f)."""
-
-    def _make_vi(self, lockin, series_resistance_ohm=1e6):
-        from cryosoft.virtual_instruments.measurement.lockin_harmonic import LockInHarmonicMeasurementVI
-        vi = LockInHarmonicMeasurementVI(
-            {"lockin": lockin}, series_resistance_ohm=series_resistance_ohm
-        )
-        vi.vi_name = "lockin_harmonic"
-        return vi
-
-    def test_ping_returns_true_when_driver_responds(self, lockin_driver):
-        vi = self._make_vi(lockin_driver)
-        assert vi.ping() is True
-
-    def test_take_reading_without_initiate_raises(self, lockin_driver):
-        vi = self._make_vi(lockin_driver)
-        with pytest.raises(RuntimeError):
-            vi.take_reading()
-
-    def test_initiate_sets_internal_reference(self, lockin_driver):
-        vi = self._make_vi(lockin_driver)
-        vi.initiate_measurement(oscillator_amplitude_V=0.5)
-        assert lockin_driver.get_reference_source() == "INT"
-        assert lockin_driver.get_oscillator_amplitude() == pytest.approx(0.5)
-
-    def test_initiate_sets_oscillator_frequency_and_time_constant(self, lockin_driver):
-        vi = self._make_vi(lockin_driver)
-        vi.initiate_measurement(oscillator_frequency_Hz=1234.0, time_constant_s=0.3)
-        assert lockin_driver.get_oscillator_frequency() == pytest.approx(1234.0)
-        assert lockin_driver.get_time_constant() == pytest.approx(0.3)
-
-    def test_take_reading_returns_correct_n_points(self, lockin_driver):
-        vi = self._make_vi(lockin_driver)
-        vi.initiate_measurement(n_readings=7)
-        data = vi.take_reading()
-        for key in ("x_1f_V", "y_1f_V", "x_2f_V", "y_2f_V", "current_A"):
-            assert key in data  # mean
-            assert f"{key}_error" in data
-            assert len(data[f"{key}_array"]) == 7
-
-    def test_take_reading_switches_harmonic_between_1f_and_2f(self, lockin_driver):
-        """A single-demodulator lock-in reports one harmonic at a time."""
-        vi = self._make_vi(lockin_driver)
-        lockin_driver._noise_std = 0.0  # deterministic
-        vi.initiate_measurement(oscillator_amplitude_V=1.0, n_readings=1)
-        data = vi.take_reading()
-        # 1f response is linear in amplitude, 2f is quadratic (see SimLockIn) —
-        # different values confirm take_reading() actually switched harmonics.
-        assert data["x_1f_V_array"][0] != pytest.approx(data["x_2f_V_array"][0])
-        assert lockin_driver.get_harmonic() == 2  # left on 2f after the last read
-
-    def test_current_computed_from_amplitude_and_series_resistance(self, lockin_driver):
-        vi = self._make_vi(lockin_driver, series_resistance_ohm=2e6)
-        vi.initiate_measurement(oscillator_amplitude_V=1.0, n_readings=3)
-        data = vi.take_reading()
-        assert all(c == pytest.approx(0.5e-6) for c in data["current_A_array"])
-        assert data["current_A"] == pytest.approx(0.5e-6)
-
-    def test_standby_zeros_oscillator_amplitude(self, lockin_driver):
-        vi = self._make_vi(lockin_driver)
-        vi.initiate_measurement(oscillator_amplitude_V=1.0)
-        vi.standby()
-        assert lockin_driver.get_oscillator_amplitude() == pytest.approx(0.0)
-
-    def test_standby_blocks_subsequent_take_reading(self, lockin_driver):
-        vi = self._make_vi(lockin_driver)
-        vi.initiate_measurement()
-        vi.standby()
-        with pytest.raises(RuntimeError):
-            vi.take_reading()
-
-    def test_vi_type_is_measurement(self, lockin_driver):
-        vi = self._make_vi(lockin_driver)
-        assert vi.vi_type == "measurement"
-
-    def test_data_arrays_matches_measurement_data_keys(self, lockin_driver):
-        vi = self._make_vi(lockin_driver)
-        arrays = vi.data_arrays({"n_readings": 5})
-        assert set(arrays) == set(vi.measurement_data_keys)
-        assert all(length == 5 for length in arrays.values())

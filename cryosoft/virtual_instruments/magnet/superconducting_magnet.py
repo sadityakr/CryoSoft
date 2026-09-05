@@ -90,10 +90,9 @@ class SuperconductingMagnetVI(MagnetBase, RampableVI):
             target: Target field in tesla.
             persistent: Ignored — this VI has no persistent-mode switch
                 heater. Accepted so callers (e.g. Station.process_system_targets,
-                or a Procedure written against either magnet VI flavor) can
-                pass ``persistent=`` uniformly regardless of whether the
-                configured magnet_z is this class or
-                ``SuperconductingMagnetPersistentVI``.
+                or a Procedure written against any magnet VI) can pass
+                ``persistent=`` uniformly, whatever magnet class the config
+                names.
         """
         _ = persistent
         target_A = self._clamp_target_A(target * self._amperes_per_tesla)

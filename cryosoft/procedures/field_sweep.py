@@ -15,8 +15,7 @@ class FieldSweep(SweepMeasureProcedure):
 
     This is a generic sweep procedure (see ``SweepMeasureProcedure``): the
     measurement method is chosen in the GUI, so the same procedure runs a DC
-    resistance measurement, a delta-mode IV, or any future measurement VI with
-    no new code. Adding a new *measurement* is adding a measurement VI, not a
+    resistance measurement or any future measurement VI with no new code. Adding a new *measurement* is adding a measurement VI, not a
     procedure; adding a new *sweep axis* is a small subclass like this one that
     supplies the ramp targets and the axis read-back.
 

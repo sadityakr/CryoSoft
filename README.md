@@ -70,23 +70,21 @@ CryoSoft is organized in six strict layers. Each layer only knows about the laye
   │  Typed wrappers with behavior-based names:                        │
   │    SuperconductingMagnetVI   ← any magnet PSU                    │
   │    SampleTemperatureVI       ← any temperature controller        │
-  │    DeltaModeMeasurementVI    ← any delta-mode source+meter pair  │
+  │    DCSeparateMeasurementVI   ← any source + voltmeter pair       │
   │    CryogenLevelMeterVI       ← any level meter                   │
   │  Decorated with @monitored / @control for auto GUI generation.   │
   │  Swap the underlying driver via YAML — the VI interface is fixed. │
   └────┬──────────────┬────────────────┬─────────────────────────────┘
        │              │                │
   ┌────▼─────┐  ┌─────▼──────┐  ┌─────▼────────────┐
-  │ Oxford   │  │ Oxford     │  │ Keithley 6221    │
-  │ Mercury  │  │ ITC 503 /  │  │ + 2182A  /  2400 │
-  │ iPS /    │  │ Lakeshore  │  │ (swap via YAML)  │
-  │ IPS 120  │  │ 335        │  └──────────────────┘
-  │ (swap    │  │ (swap      │
-  │ via YAML)│  │ via YAML)  │
+  │ Oxford   │  │ Lakeshore  │  │ Keithley 6221    │
+  │ IPS 120  │  │ 335        │  │ + 2182A          │
+  │ (swap    │  │ (swap      │  │ (swap via YAML)  │
+  │ via YAML)│  │ via YAML)  │  └──────────────────┘
   └──────────┘  └────────────┘
 
-  L0 — Real Drivers: any Python class wrapping PyVISA, PyMeasure, or
-  a custom protocol. A simulated version exists for every real driver.
+  L0 — Real Drivers: any Python class wrapping PyVISA or a custom
+  protocol. A simulated version exists for every real driver.
 ```
 
 **Layer boundary rules:**
@@ -135,7 +133,7 @@ Starts against `cryosoft/configs/sim_cryostat/` — all drivers are simulated.
 **Real hardware:**
 
 ```bash
-python -m cryosoft.main --config cryosoft/configs/a-sample-real-cryostat
+python -m cryosoft.main --config cryosoft/configs/your_cryostat
 ```
 
 Or edit the `config_path` line in `cryosoft/main.py` to point to your config directory.
@@ -160,12 +158,12 @@ pytest tests/ -q
 ```yaml
 real_drivers:
   my_magnet:
-    class: cryosoft.drivers.oxford_mercury_ips.OxfordMercuryiPS
+    class: cryosoft.drivers.my_magnet_psu.MyMagnetPSU
     address: "ASRL10::INSTR"
 
 virtual_instruments:
-  magnet:
-    class: cryosoft.virtual_instruments.magnet.superconducting_magnet_persistent.SuperconductingMagnetPersistentVI
+  magnet_z:
+    class: cryosoft.virtual_instruments.magnet.superconducting_magnet.SuperconductingMagnetVI
     drivers: {main: my_magnet}
     vi_type: system
     init_params:
@@ -178,11 +176,10 @@ virtual_instruments:
         - {max_current_A: 76.0, rate_A_per_min: 6.0}
         - {max_current_A: 84.0, rate_A_per_min: 2.4}
         - {max_current_A: 90.0, rate_A_per_min: 1.2}
-      switch_heater_warmup_ticks: 60    # ticks × tick_interval_ms = wall-clock wait
-      switch_heater_cooldown_ticks: 60
 ```
 
-See `cryosoft/configs/a-sample-real-cryostat/devices.yaml` for a complete real-hardware example.
+See `cryosoft/configs/sim_cryostat/devices.yaml` for the shipped example, and
+`cryosoft/configs/README.md` for every block's meaning.
 
 ---
 
@@ -227,10 +224,8 @@ class YourInstrument:
 
 | File | Instrument |
 |------|-----------|
-| `keithley_6221.py` / `sim_keithley_6221.py` | Keithley 6221 current source (delta mode) |
+| `sim_keithley_6221.py` | Keithley 6221 current source (sim only) |
 | `keithley_2182a.py` / `sim_keithley_2182a.py` | Keithley 2182A nanovoltmeter |
-| `sim_keithley_2400.py` | Keithley 2400 SMU (sim only) |
-| `oxford_mercury_ips.py` / `sim_oxford_ips120.py` | Oxford Mercury iPS-M / IPS 120-10 magnet PSU |
-| `oxford_itc503.py` / `sim_oxford_itc503.py` | Oxford ITC 503 temperature controller |
-| `oxford_ilm200.py` / `sim_oxford_ilm200.py` | Oxford ILM 200 cryogen level meter |
-| `lakeshore_335.py` | Lakeshore 335 temperature controller |
+| `sim_oxford_ips120.py` | Oxford IPS 120-10 magnet PSU (sim only) |
+| `sim_oxford_ilm200.py` | Oxford ILM 200 cryogen level meter (sim only) |
+| `lakeshore_335.py` / `sim_lakeshore_335.py` | Lakeshore 335 temperature controller |

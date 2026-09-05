@@ -26,13 +26,13 @@ CONFIG_PATH = "cryosoft/configs/sim_cryostat"
 SAMPLE_INFO = {"sample_name": "S", "sample_id": "S-1", "comments": ""}
 
 FIELD_SWEEP_PARAMS = {
-    "measurement_vi": "keithley_delta_mode",
+    "measurement_vi": "dc_measurement",
     "field_start": -1.0,
     "field_end": 1.0,
     "field_steps": 21,
     "temperature": 300.0,
-    "current": 1e-6,
-    "n_readings": 50,
+    "current_A": 1e-6,
+    "readings_per_point": 3,
     "init_wait": 300.0,
     "step_wait": 30.0,
 }

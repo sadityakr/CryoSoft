@@ -33,7 +33,7 @@ class SimLakeshore335:
             resource_string: VISA resource string (ignored).
         """
         _ = resource_string  # Explicitly ignored
-        self._temperature: float = 295.0
+        self._temperature: float = 300.0  # Kelvin (room-temperature start)
         self._setpoint: float = 0.0
         self._heater_output: float = 0.0
         self._heater_mode: str = "AUTO"

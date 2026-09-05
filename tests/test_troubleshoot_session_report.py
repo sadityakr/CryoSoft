@@ -54,7 +54,7 @@ def _write_experiment(
         title="Hall bar A3 — SOT switching vs T",
         user_id="jdoe",
         sample_info={"sample_name": "A3", "sample_id": "W12-A3"},
-        config_name="12t-cryo",
+        config_name="sim_cryostat",
         created_utc="2026-09-02T08:00:00+00:00",
         envelope=envelope or {},
         runs=runs or [],
@@ -136,7 +136,7 @@ def test_report_lists_runs_in_order_with_outcomes(experiment_dir, capsys) -> Non
 
     assert "Experiment: 20260902_hall_bar_a3  (open)" in out
     assert "Hall bar A3 — SOT switching vs T" in out
-    assert "12t-cryo" in out
+    assert "sim_cryostat" in out
     assert "sample_name=A3" in out
     # Runs appear in stored order, with kind, procedure, outcome and duration.
     first = out.index("[run] FieldSweep")
@@ -247,7 +247,7 @@ def test_json_payload_carries_every_run_field(experiment_dir, capsys) -> None:
     assert payload["experiment_id"] == "20260902_hall_bar_a3"
     assert payload["user_id"] == "jdoe"
     assert payload["status"] == "open"
-    assert payload["config_name"] == "12t-cryo"
+    assert payload["config_name"] == "sim_cryostat"
     assert payload["run_counts"] == {"done": 1, "failed": 1}
 
     first, second = payload["runs"]

@@ -19,7 +19,6 @@ logger = logging.getLogger(__name__)
 # value the operator sees on the monitor panel.
 _END_CHANNELS: dict[str, tuple[str, str, str]] = {
     "temperature_vti": ("temperature_vti", "temperature", "K"),
-    "temperature_sample": ("temperature_sample", "temperature", "K"),
     "magnet_z": ("magnet_z", "magnet_field_T", "T"),
 }
 
@@ -114,7 +113,6 @@ class TimeSeries(SweepMeasureProcedure):
             choices={
                 "Elapsed time only": "time",
                 "VTI temperature (K)": "temperature_vti",
-                "Sample temperature (K)": "temperature_sample",
                 "Field, magnet Z (T)": "magnet_z",
             },
             description=(

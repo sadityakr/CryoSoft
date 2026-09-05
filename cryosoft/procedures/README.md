@@ -122,10 +122,10 @@ the VI's arrays/scalars) and arms the VI; `measure()` runs the **reading loop**
 The reading loop is the standard for taking multiple readings at a single
 sweep point. It has up to TWO generic slots, each a **loopable parameter** —
 anything a reading-path VI advertises via its `reading_setters` class
-attribute: the switch VI's `route` (setter `select_route`, safe-off
-`open_all`) and the DC measurement VI's `current_A` (setter
-`set_source_current`) are the *same concept*, so a setup with no scanner
-simply has one fewer loopable parameter and no special case anywhere. Slot 1
+attribute — today the DC measurement VI's `current_A` (setter
+`set_source_current`). Every such parameter is the *same concept*, so a setup
+whose measurement VI declares none simply has no loopable parameter and no
+special case anywhere. Slot 1
 (loop1) is axis 0 (outer) of every measurement column's real loop axis, slot 2
 (loop2) axis 1 (inner).
 
@@ -222,7 +222,7 @@ directly and implement the five lifecycle methods and its own `DataManager`;
 **Magnet and temperature VI names are hardcoded in the procedures.**
 `FieldSweep` and `TemperatureSweep` address `magnet_z`, `magnet_y`,
 `temperature_vti` and `temperature_sample` as literal strings, and
-`TimeSeries` does the same for the three channels its end condition can
+`TimeSeries` does the same for the channels its end condition can
 watch (`_END_CHANNELS`). A setup that
 names its instruments differently cannot run the shipped procedures without
 editing them — which is what forced the 2026-07-20 global `magnet_x` ->
@@ -233,7 +233,7 @@ VI a procedure drives is a *setup* property and belongs in the config, exactly
 as `sample_load`/`sample_unload` already do it (`operations.sample_load.vti_vi`,
 defaulted in `station.py`). The intended fix is to derive the names from the Station
 (a `magnet_vi_names()` / `temperature_vi_names()` discovery pair, mirroring the
-existing `measurement_vi_names()` / `switch_vi_names()`) and expose them as
+existing `measurement_vi_names()`) and expose them as
 procedure parameters, so adding an axis or renaming a magnet needs no procedure
 change.
 
@@ -248,8 +248,8 @@ Each row: responsibility, key public class, and the test file(s) in `tests/`.
 | File | Responsibility | Key public API | Tests |
 |------|----------------|----------------|-------|
 | `__init__.py` | Package marker | (none) | none |
-| `field_sweep.py` | Sweeps magnetic field (`magnet_z`), optionally holding `temperature_vti` and/or `temperature_sample` (see Temperature channels below), running any selected measurement VI at each point; parks `magnet_z` at 0 T on standby. Requires `magnet_z`, at least one measurement VI, and a VI for each switched-on temperature channel. | `FieldSweep` (axis hooks over `SweepMeasureProcedure`) | `test_new_procedures.py`, `test_l4_procedure.py`, `test_field_voltage_procedure.py` |
-| `time_series.py` | Measures repeatedly against elapsed time, commanding no system hardware and claiming only the reading path, so the operator keeps manual control of the whole cryostat during the run. Ends on `max_duration_s`, or when a watched channel (`temperature_vti`, `temperature_sample`, `magnet_z`) reaches `end_value`. Requires at least one measurement VI; a watched channel's VI must exist. | `TimeSeries` (axis hooks + `axis_data_key`/`claimed_vi_names` over `SweepMeasureProcedure`) | `test_time_series_procedure.py`, `test_l3_orchestrator.py` (ramp scope) |
+| `field_sweep.py` | Sweeps magnetic field (`magnet_z`), optionally holding `temperature_vti` and/or `temperature_sample` (see Temperature channels below), running any selected measurement VI at each point; parks `magnet_z` at 0 T on standby. Requires `magnet_z`, at least one measurement VI, and a VI for each switched-on temperature channel. | `FieldSweep` (axis hooks over `SweepMeasureProcedure`) | `test_new_procedures.py`, `test_l4_procedure.py` |
+| `time_series.py` | Measures repeatedly against elapsed time, commanding no system hardware and claiming only the reading path, so the operator keeps manual control of the whole cryostat during the run. Ends on `max_duration_s`, or when a watched channel (`temperature_vti`, `magnet_z`) reaches `end_value`. Requires at least one measurement VI; a watched channel's VI must exist. | `TimeSeries` (axis hooks + `axis_data_key`/`claimed_vi_names` over `SweepMeasureProcedure`) | `test_time_series_procedure.py`, `test_l3_orchestrator.py` (ramp scope) |
 | `temperature_sweep.py` | Sweeps temperature (`temperature_vti`) at a per-sweep ramp rate, optionally holding `temperature_sample` and optional `magnet_z` / `magnet_y` fields, running any selected measurement VI at each stable point. Requires at least one measurement VI; magnets optional (skipped at 0, refused at nonzero when absent). | `TemperatureSweep` (axis hooks over `SweepMeasureProcedure`) | `test_new_procedures.py` |
 
 ### Temperature channels (on/off)

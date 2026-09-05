@@ -22,8 +22,8 @@ decides is how much autonomy an agent is granted BEFORE those checks run.
 * ``CONTROL_ACTION_CLASSES`` — one row per ``(VI kind, @control name)``, for
   the one command whose class depends on its target, ``submit_vi_action``.
   The key's first half is ``InstrumentInfo.kind``, the VI CLASS's ``vi_type``
-  (``magnet``, ``temperature``, ``level``, ``rotator``, ``measurement``,
-  ``switch``), so a row is written once per capability rather than once per
+  (``magnet``, ``temperature``, ``level``, ``measurement`` …), so a row is
+  written once per capability rather than once per
   configured instrument.
 * ``LIFECYCLE_ACTION_CLASSES`` — ``initiate`` / ``standby``, the two
   non-``@control`` methods the direct action path admits, for every VI kind.
@@ -228,10 +228,6 @@ COMMAND_ACTION_CLASSES: dict[CommandName, ClassifiedAction] = {
         ActionClass.RECOVERY,
         "Its inverse — stops polling and blinds every trend check with it.",
     ),
-    CommandName.SET_SCANNER_ENABLED: ClassifiedAction(
-        ActionClass.RECOVERY,
-        "A procedure-availability policy toggle; writes to no instrument.",
-    ),
     CommandName.SET_EXPERIMENT_ENVELOPE: ClassifiedAction(
         ActionClass.ENVELOPE,
         "Sets the sample's own safety bounds. The human mounts the sample "
@@ -268,90 +264,21 @@ CONTROL_ACTION_CLASSES: dict[tuple[str, str], ClassifiedAction] = {
         "Ramps the magnet to a new field — the archetypal setpoint, and the "
         "largest stored energy on the station.",
     ),
-    ("magnet", "enable_persistent_mode"): ClassifiedAction(
-        ActionClass.RUN_CONTROL,
-        "DEVIATES from the operation-scope default rule: it drives the "
-        "switch heater and ramps the leads, which is control over the "
-        "magnet's energy path, not housekeeping.",
-    ),
-    ("magnet", "disable_persistent_mode"): ClassifiedAction(
-        ActionClass.RUN_CONTROL,
-        "DEVIATES from the operation-scope default rule, as its inverse "
-        "does: re-energising the leads to the coil's trapped current.",
-    ),
-    ("magnet", "switch_heater_on"): ClassifiedAction(
-        ActionClass.RUN_CONTROL,
-        "DEVIATES from the operation-scope default rule: a mistimed switch "
-        "heater command across a PSU/coil mismatch is a quench, which is "
-        "the opposite of a recovery action.",
-    ),
-    ("magnet", "switch_heater_off"): ClassifiedAction(
-        ActionClass.RUN_CONTROL,
-        "DEVIATES from the operation-scope default rule, for the same reason "
-        "as switch_heater_on: it commits the coil to a persistent state.",
-    ),
     # ── measurement: source/measure electronics ──
     ("measurement", "initiate_measurement"): ClassifiedAction(
         ActionClass.RUN_CONTROL,
-        "Arms the instrument and, in DC and delta modes, begins sourcing "
-        "current into the sample.",
-    ),
-    ("measurement", "read_now"): ClassifiedAction(
-        ActionClass.READ,
-        "Takes one datapoint from an already-armed instrument and caches it "
-        "for display; changes no setting and sources nothing new.",
-    ),
-    ("measurement", "set_dc_current"): ClassifiedAction(
-        ActionClass.RUN_CONTROL, "Sets the current sourced through the sample."
-    ),
-    ("measurement", "set_delta_current"): ClassifiedAction(
-        ActionClass.RUN_CONTROL, "As set_dc_current, for delta mode."
+        "Arms the instrument and, on a current-sourcing method, begins "
+        "sourcing current into the sample.",
     ),
     ("measurement", "set_source_current"): ClassifiedAction(
         ActionClass.RUN_CONTROL,
-        "As set_dc_current, for a separate source/voltmeter pair.",
+        "Sets the current sourced through the sample by a separate "
+        "source/voltmeter pair.",
     ),
-    # ── rotator: sample rotation stages ──
-    ("rotator", "set_sample_angle"): ClassifiedAction(
-        ActionClass.RUN_CONTROL,
-        "Starts a ramp that physically moves the sample in the field.",
-    ),
-    ("rotator", "set_rate_sample_angle"): ClassifiedAction(
-        ActionClass.RECOVERY,
-        "Sets how fast a later rotation goes, never where it goes — the "
-        "framework's 'adjust waits' recovery action.",
-    ),
-    # ── switch: scanner / switch matrices ──
-    ("switch", "select_route"): ClassifiedAction(
-        ActionClass.RUN_CONTROL,
-        "Chooses which contacts the measurement flows through — it redefines "
-        "what is being measured.",
-    ),
-    ("switch", "close_channel"): ClassifiedAction(
-        ActionClass.RUN_CONTROL, "As select_route, addressed by raw channel."
-    ),
-    ("switch", "open_channel"): ClassifiedAction(
-        ActionClass.RUN_CONTROL,
-        "Breaks the path the run is measuring through. It de-energises, but "
-        "it does not keep the run alive — it ends its signal.",
-    ),
-    ("switch", "open_all"): ClassifiedAction(
-        ActionClass.RUN_CONTROL, "As open_channel, for every channel at once."
-    ),
-    ("switch", "set_hot_switching"): ClassifiedAction(
-        ActionClass.RECOVERY,
-        "A make-before-break / break-before-make policy setting: it selects "
-        "no route and energises nothing.",
-    ),
-    ("switch", "set_pole_mode"): ClassifiedAction(
-        ActionClass.RUN_CONTROL,
-        "Opens every channel and renumbers them, silently invalidating the "
-        "whole configured route table.",
-    ),
-    # ── temperature: VTI and sample temperature controllers ──
+    # ── temperature: sample temperature controllers ──
     ("temperature", "set_temperature"): ClassifiedAction(
         ActionClass.RUN_CONTROL,
-        "Ramps the sample or VTI to a new temperature — a setpoint.",
+        "Ramps the sample space to a new temperature — a setpoint.",
     ),
     ("temperature", "set_ramp_rate"): ClassifiedAction(
         ActionClass.RECOVERY,
@@ -376,16 +303,6 @@ CONTROL_ACTION_CLASSES: dict[tuple[str, str], ClassifiedAction] = {
         ActionClass.RUN_CONTROL,
         "Selects the decade of heater power, OFF included — it switches the "
         "heater on and off.",
-    ),
-    ("temperature", "set_needle_valve"): ClassifiedAction(
-        ActionClass.RUN_CONTROL,
-        "Commands helium flow through the VTI: the cryostat's temperature "
-        "and its cryogen consumption at once.",
-    ),
-    ("temperature", "set_needle_valve_mode"): ClassifiedAction(
-        ActionClass.RUN_CONTROL,
-        "AUTO to MANUAL takes the instrument's own gas-flow loop out of the "
-        "circuit, leaving the valve wherever it was.",
     ),
     ("temperature", "set_curve"): ClassifiedAction(
         ActionClass.RECOVERY,

@@ -253,7 +253,7 @@ def test_trends_fails_on_unstable_temperature(
 ) -> None:
     now = time.time()
     records = [
-        {"t": now - i * 60, "v": {"temperature_sample_temperature": v}}
+        {"t": now - i * 60, "v": {"temperature_vti_temperature": v}}
         for i, v in enumerate([4.0, 4.6, 4.0, 4.6])
     ]
     _write_trend_jsonl(isolated_trend_log_dir / "trend_history_raw.jsonl", records)
@@ -275,7 +275,7 @@ def test_trends_store_live_fails_when_stale(
     stale_t = now - 10_000.0
     path = isolated_trend_log_dir / "trend_history_raw.jsonl"
     path.write_text(
-        json.dumps({"t": stale_t, "v": {"temperature_sample_temperature": 4.2}}) + "\n",
+        json.dumps({"t": stale_t, "v": {"temperature_vti_temperature": 4.2}}) + "\n",
         encoding="utf-8",
     )
     os.utime(path, (stale_t, stale_t))
@@ -292,7 +292,7 @@ def test_trends_window_override_applies_to_every_declared_check(
     sim_config, isolated_trend_log_dir: Path, capsys
 ) -> None:
     now = time.time()
-    records = [{"t": now - i, "v": {"temperature_sample_temperature": 4.2}} for i in range(5)]
+    records = [{"t": now - i, "v": {"temperature_vti_temperature": 4.2}} for i in range(5)]
     _write_trend_jsonl(isolated_trend_log_dir / "trend_history_raw.jsonl", records)
 
     exit_code = cli.main(["trends", "--config", sim_config, "--window", "600", "--json"])

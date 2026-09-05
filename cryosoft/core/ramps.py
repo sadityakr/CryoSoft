@@ -21,7 +21,7 @@ class RampRecord:
 
     Every numeric field is in the VI's own user units (the units ``unit``
     names): tesla for a magnet, kelvin for a temperature controller, degrees
-    for a rotator — the SI-units-in-APIs rule, with display formatting left
+    for an angle — the SI-units-in-APIs rule, with display formatting left
     to the GUI.
 
     Attributes:

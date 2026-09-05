@@ -35,8 +35,8 @@ def _nanmean(values: Iterable[float]) -> float:
 
     Reduces a raw diagnostic block's row axis into one scalar per channel
     (see ``SweepMeasureProcedure._raw_block_channel_columns``) — the row
-    axis is the same "N readings at one measurement point" count as
-    ``measurement_delta_mode.py``'s ``n_readings``, just without a
+    axis is the same "N readings at one measurement point" count a
+    measurement VI's ``n_readings`` parameter declares, just without a
     companion SEM, since a diagnostic channel has no declared error column.
 
     Args:
@@ -840,7 +840,7 @@ class SweepMeasureProcedure(BaseProcedure):
       taken by up to TWO generic loop slots nested inside ``measure()`` (slot
       1 = loop1 = axis 0, outer; slot 2 = loop2 = axis 1, inner). A slot is a
       loopable parameter — anything a reading-path VI advertises via
-      ``reading_setters``: the switch VI's ``route`` and a measurement VI's
+      ``reading_setters``: a routing VI's channel and a measurement VI's
       ``current_A`` are the same concept — plus an ordered value list from
       the auto-rendered "Reading loop" form group (checkboxes for an
       enumerated parameter, comma-separated text otherwise). A slot with ONE
@@ -852,8 +852,7 @@ class SweepMeasureProcedure(BaseProcedure):
       metadata as ``procedure_params["loop1_values"]`` / ``["loop2_values"]``.
       All per-reading setup is dispatched as ``Command``s through the
       Station, never by direct VI calls; participating non-measurement VIs
-      get their ``reading_safe_off`` (e.g. the switch's ``open_all``) at
-      standby/abort.
+      get their ``reading_safe_off`` at standby/abort.
 
     A concrete axis procedure (``FieldSweep``, ``TemperatureSweep``) subclasses
     this and supplies only the axis-specific pieces via the hooks below:
@@ -954,8 +953,8 @@ class SweepMeasureProcedure(BaseProcedure):
 
         # ── Reading-loop resolution: up to two generic slots ─────────────────
         # Every loop level is the SAME thing: a loopable parameter (advertised
-        # by a VI's reading_setters — the switch's route and a source's
-        # current alike) plus an ordered value list. Slot 1 (labels A1, A2, …)
+        # by a VI's reading_setters — any reading-path VI's parameters and a
+        # source's current alike) plus an ordered value list. Slot 1 (labels A1, A2, …)
         # is the outer level, slot 2 (labels B1, B2, …) the inner one. A slot
         # with a single value is a STATIC setting (its setter is dispatched
         # once at initiate, no loop, no suffix); with two or more values it
@@ -1101,11 +1100,10 @@ class SweepMeasureProcedure(BaseProcedure):
         """Collect every loopable parameter the station's reading path offers.
 
         A loopable parameter is any ``reading_setters`` entry of a VI in the
-        reading path: the station's switch VI (when the scanner is enabled —
-        its ``route`` is a loopable parameter like any other) and the selected
-        measurement VI. Switch parameters come first, matching the typical
-        outer-level use. A setup with no switch and a measurement VI without
-        setters yields an empty registry — no Reading loop group, no loop.
+        reading path — today the selected measurement VI. A measurement VI
+        without setters yields an empty registry: no Reading loop group, no
+        loop. The registry is keyed by VI so a reading path that grows a
+        second participating VI needs no change here.
 
         Args:
             station: The active Station.
@@ -1114,15 +1112,14 @@ class SweepMeasureProcedure(BaseProcedure):
         Returns:
             Ordered ``{"vi_name.param": (vi_name, param, spec, setter)}``.
         """
-        switch_names = station.switch_vi_names() if station.scanner_enabled() else []
-        vi_names = ([switch_names[0]] if switch_names else []) + [measurement_vi_name]
+        vi_names = [measurement_vi_name]
         registry: dict[str, tuple[str, str, ParamSpec, str]] = {}
         for vi_name in vi_names:
             vi = station.get_vi(vi_name)
             specs = vi.reading_parameters
             for param_name, setter in vi.reading_setters.items():
                 spec = specs.get(param_name)
-                if spec is None:  # e.g. a switch configured with no routes
+                if spec is None:  # a setter with no matching parameter spec
                     continue
                 registry[f"{vi_name}.{param_name}"] = (
                     vi_name,
@@ -1262,8 +1259,7 @@ class SweepMeasureProcedure(BaseProcedure):
 
         # (b) The reading loop, rendered ABOVE the VI's own parameter group.
         # Two generic slots, each a loopable parameter (anything the station's
-        # reading path advertises via reading_setters — the switch's route and
-        # the measurement VI's parameters alike) plus its values input. The
+        # reading path advertises via reading_setters) plus its values input. The
         # values input is spec-driven: an enumerated parameter renders one
         # checkbox per choice ("{slot}_pick_{value}"), a free parameter a
         # comma-separated text field ("{slot}_values"). Everything here is
@@ -1523,8 +1519,8 @@ class SweepMeasureProcedure(BaseProcedure):
 
         Each declared raw-block channel becomes an ordinary scalar column —
         reduced from the block's row axis by ``measure()`` via ``_nanmean``,
-        the same "N readings at one measurement point" treatment
-        ``measurement_delta_mode.py``'s ``n_readings`` already gets via
+        the same "N readings at one measurement point" treatment a
+        measurement VI's ``n_readings`` already gets via
         ``mean_and_sem`` — so it is plottable and carries the real
         ``(n_loop1, n_loop2)`` loop grid like any other ``measurement_
         scalars`` entry.
@@ -1788,9 +1784,9 @@ class SweepMeasureProcedure(BaseProcedure):
             self._measurement_vi, "initiate_measurement", dict(self._measurement_params)
         )
         # Loop-slot setup around the arm (command order is semantically
-        # meaningful). Slots on OTHER VIs (e.g. the switch's route) dispatch
-        # their first value BEFORE the measurement VI arms, so arming happens
-        # with the channel connected — with a static (1-value) slot that
+        # meaningful). Slots on OTHER VIs dispatch their first value BEFORE
+        # the measurement VI arms, so arming happens with the reading path
+        # already set up — with a static (1-value) slot that
         # single dispatch is the whole story, with a looping slot measure()
         # re-dispatches per reading. Static slots on the measurement VI itself
         # dispatch AFTER the arm (their setters require an armed instrument);
@@ -1994,8 +1990,8 @@ class SweepMeasureProcedure(BaseProcedure):
 
         Shared by ``standby()`` and ``abort()``: disarm the measurement VI
         and, for every OTHER VI that took part in a loop slot (static or
-        looping) and declares a ``reading_safe_off`` method (e.g. the switch's
-        ``open_all``), dispatch it so nothing is left connected.
+        looping) and declares a ``reading_safe_off`` method, dispatch it so
+        nothing is left connected.
 
         Returns:
             Ordered ``tuple[Command, ...]`` — the measurement ``standby``

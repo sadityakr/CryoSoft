@@ -778,45 +778,42 @@ def test_spec_controls_emptied_field_falls_back_to_method_default(spec_panel):
 # initiate_measurement takes its parameters via **params, so the panel can only
 # type its widgets from the specs MeasurementInstrumentBase installs on it from
 # measurement_parameters. These pin that one declaration reaching the front
-# panel: a bare arming control rendered seven untyped text boxes.
+# panel: a bare arming control rendered untyped text boxes.
 
 
 @pytest.fixture
 def delta_front_panel(station, orchestrator, qtbot):
-    """InstrumentFrontPanel over the sim station's delta-mode measurement VI."""
-    vi_name = "keithley_delta_mode"
+    """InstrumentFrontPanel over the sim station's DC measurement VI."""
+    vi_name = "dc_measurement"
     panel = InstrumentFrontPanel(vi_name, orchestrator)
     qtbot.addWidget(panel)
     return vi_name, panel
 
 
 def test_arming_control_renders_typed_widgets(delta_front_panel):
-    """The arming control's declared choices and bools become combos/checkboxes."""
+    """Every declared arming parameter gets its own typed widget."""
     vi_name, panel = delta_front_panel
     prefix = f"{vi_name}_initiate_measurement"
-    assert isinstance(
-        panel.findChild(QWidget, f"{prefix}_voltmeter_range_V_input"), QComboBox
-    )
-    assert isinstance(
-        panel.findChild(QWidget, f"{prefix}_compliance_abort_input"), QCheckBox
-    )
-    assert isinstance(panel.findChild(QWidget, f"{prefix}_current_input"), QLineEdit)
+    for param in ("current_A", "compliance_A", "voltmeter_range_V", "readings_per_point"):
+        assert isinstance(
+            panel.findChild(QWidget, f"{prefix}_{param}_input"), QLineEdit
+        ), f"{param} should render its own input"
 
 
 def test_arming_control_labels_carry_units(delta_front_panel):
     """Every arming parameter with a unit is labelled with it."""
     _, panel = delta_front_panel
     labels = {lbl.text() for lbl in panel.findChildren(QLabel)}
-    assert "current (A):" in labels
-    assert "compliance_V (V):" in labels
-    assert "delay_s (s):" in labels
+    assert "current_A (A):" in labels
+    assert "compliance_A (A):" in labels
+    assert "voltmeter_range_V (V):" in labels
 
 
 def test_arming_control_fields_carry_descriptions(delta_front_panel):
     """The declared description reaches the widget tooltip, not just the schema."""
     vi_name, panel = delta_front_panel
     field = panel.findChild(
-        QWidget, f"{vi_name}_initiate_measurement_current_input"
+        QWidget, f"{vi_name}_initiate_measurement_current_A_input"
     )
     assert field.toolTip().strip()
 
@@ -824,7 +821,7 @@ def test_arming_control_fields_carry_descriptions(delta_front_panel):
 def test_reading_setter_renders_its_single_spec(delta_front_panel):
     """A reading_setters setter inherits the one measurement_parameters spec."""
     vi_name, panel = delta_front_panel
-    field = panel.findChild(QWidget, f"{vi_name}_set_delta_current_current_input")
+    field = panel.findChild(QWidget, f"{vi_name}_set_source_current_current_A_input")
     assert isinstance(field, QLineEdit)
     assert field.toolTip().strip()
 
@@ -892,7 +889,7 @@ def test_monitor_window_threads_panels_config(station, orchestrator, qtbot):
     win.show()
     assert win.findChild(QPushButton, "magnet_z_set_field_btn") is None
     # An unlisted VI keeps its declared defaults.
-    assert win.findChild(QPushButton, "magnet_y_set_field_btn") is not None
+    assert win.findChild(QPushButton, "temperature_vti_set_temperature_btn") is not None
 
 
 def _control_grid(panel, vi_name, method_name):
@@ -958,29 +955,6 @@ def test_two_param_control_stays_inline(orchestrator, qtbot):
     qtbot.addWidget(panel)
     assert _control_grid(panel, "mock_vi", "set_temperature") is None
 
-
-def test_switch_select_route_renders_route_dropdown(station, orchestrator, qtbot):
-    """select_route's route renders as a drop-down of the config's route names
-    (via the control_param_specs instance hook), and submits the chosen name."""
-    vi = station._virtual_instruments["switch_matrix"]
-    panel = InstrumentPanel("switch_matrix", orchestrator)
-    qtbot.addWidget(panel)
-
-    combo = panel.findChild(QComboBox, "switch_matrix_select_route_route_input")
-    assert combo is not None, "route input must be a QComboBox, not a text field"
-    items = [combo.itemText(i) for i in range(combo.count())]
-    assert items == vi.routes()
-
-    submitted: list[tuple] = []
-    orchestrator.submit_vi_action = lambda vi_name, method, **kw: submitted.append(
-        (vi_name, method, kw)
-    )
-    combo.setCurrentText(vi.routes()[1])
-    panel._submit_control("select_route")
-    assert submitted == [("switch_matrix", "select_route", {"route": vi.routes()[1]})]
-
-
-# ── Instrument front panel ────────────────────────────────────────────────────
 
 def test_front_panel_button_opens_full_control_surface(orchestrator, qtbot):
     """The card's sliders icon opens a window showing every control —
@@ -1118,48 +1092,39 @@ def _select_procedure(procedure_win, name):
     pytest.fail(f"{name!r} not found in procedure selector")
 
 
-def test_procedure_enum_and_bool_widgets_render(procedure_win):
-    """A 'choices' param renders a combobox of labels; a bool param a checkbox.
+def test_procedure_bool_widgets_render(procedure_win):
+    """A bool param renders as a checkbox carrying its declared default.
 
-    Covers the delta-mode measurement parameters of the default measurement VI
-    (keithley_delta_mode, first in the sim config): voltmeter_range_V
-    (enumerated 2182A range) and the compliance_abort / cold_switch booleans.
+    Covers the temperature-channel toggles FieldSweep declares — the generic
+    form must map them with no per-procedure code. (The full ParamSpec ->
+    widget mapping, enumerated choices included, is pinned against
+    ``param_form`` directly further down this file.)
     """
     from cryosoft.procedures.field_sweep import FieldSweep
 
     _select_procedure(procedure_win, FieldSweep.name)
 
-    combo = procedure_win.findChild(QComboBox, "param_voltmeter_range_V_input")
-    assert combo is not None, "voltmeter_range_V should render as a combobox"
-    labels = [combo.itemText(i) for i in range(combo.count())]
-    assert labels == ["10 mV", "100 mV", "1 V", "10 V", "100 V"]
-    # Default 0.01 -> "10 mV" preselected.
-    assert combo.currentText() == "10 mV"
-
-    abort_box = procedure_win.findChild(QCheckBox, "param_compliance_abort_input")
-    cold_box = procedure_win.findChild(QCheckBox, "param_cold_switch_input")
-    assert abort_box is not None and cold_box is not None
-    assert abort_box.isChecked() is True   # default True
-    assert cold_box.isChecked() is False   # default False
+    vti_box = procedure_win.findChild(QCheckBox, "param_set_vti_temperature_input")
+    sample_box = procedure_win.findChild(QCheckBox, "param_set_sample_temperature_input")
+    assert vti_box is not None and sample_box is not None
+    assert vti_box.isChecked() is True    # default True
+    assert sample_box.isChecked() is False  # default False
 
 
-def test_procedure_enum_and_bool_values_collected(procedure_win):
-    """_collect_params maps a combobox label to its value and reads checkboxes."""
+def test_procedure_bool_values_collected(procedure_win):
+    """_collect_params reads each checkbox back as a real bool."""
     from cryosoft.procedures.field_sweep import FieldSweep
 
     _select_procedure(procedure_win, FieldSweep.name)
 
-    procedure_win.findChild(QComboBox, "param_voltmeter_range_V_input").setCurrentText("1 V")
-    procedure_win.findChild(QCheckBox, "param_compliance_abort_input").setChecked(False)
-    procedure_win.findChild(QCheckBox, "param_cold_switch_input").setChecked(True)
+    procedure_win.findChild(QCheckBox, "param_set_vti_temperature_input").setChecked(False)
+    procedure_win.findChild(QCheckBox, "param_set_sample_temperature_input").setChecked(True)
 
     collected = procedure_win._collect_params()
     assert collected is not None
     param_values = collected[0]
-    # Combobox returns the *mapped* instrument value, not the label.
-    assert param_values["voltmeter_range_V"] == pytest.approx(1.0)
-    assert param_values["compliance_abort"] is False
-    assert param_values["cold_switch"] is True
+    assert param_values["set_vti_temperature"] is False
+    assert param_values["set_sample_temperature"] is True
 
 
 # ── Generic sweep procedure: structural measurement-VI re-render ──────────────
@@ -1225,25 +1190,25 @@ def _fully_inside_param_viewport(win, widget) -> bool:
 def test_generic_field_sweep_renders_measurement_select_and_default_group(procedure_win):
     """The form shows the measurement-method combo + the default VI's param group.
 
-    The default measurement VI is the first registered one (keithley_delta_mode
-    in the sim config), so its delta-mode parameters render inside the single
-    composite "Measurement" column.
+    The default measurement VI is the first registered one (dc_measurement in
+    the sim config), so its parameters render inside the single composite
+    "Measurement" column.
     """
     from cryosoft.procedures.field_sweep import FieldSweep
 
     _select_procedure(procedure_win, FieldSweep.name)
 
     combo = _measurement_combo(procedure_win)
-    assert combo.count() == 4  # keithley_delta_mode + keithley_dc_mode + dc_measurement + lockin_harmonic
-    # The default VI's params render (delta-mode).
-    assert procedure_win.findChild(QComboBox, "param_voltmeter_range_V_input") is not None
-    assert procedure_win.findChild(QLineEdit, "param_n_readings_input") is not None
+    assert combo.count() == 1  # dc_measurement, the one shipped measurement VI
+    # The default VI's params render.
+    assert procedure_win.findChild(QLineEdit, "param_readings_per_point_input") is not None
+    assert procedure_win.findChild(QLineEdit, "param_current_A_input") is not None
     # The selector + params live in ONE Measurement box (not a per-group column);
     # the composite box exists and the params key tracks the selected VI.
     assert procedure_win._params_panel._measurement_box is not None
-    assert procedure_win._params_panel._measurement_params_key == "measurement:keithley_delta_mode"
+    assert procedure_win._params_panel._measurement_params_key == "measurement:dc_measurement"
     # The Measurement box is NOT registered as an independent column.
-    assert "measurement:keithley_delta_mode" not in procedure_win._params_panel._group_boxes
+    assert "measurement:dc_measurement" not in procedure_win._params_panel._group_boxes
 
 
 def test_generic_field_sweep_all_four_columns_visible_no_hscroll(procedure_win, station):
@@ -1256,132 +1221,36 @@ def test_generic_field_sweep_all_four_columns_visible_no_hscroll(procedure_win, 
     """
     from cryosoft.procedures.field_sweep import FieldSweep
 
-    # scanner_enabled must be set before the form is (re)built for the
-    # Reading loop group to render; select_procedure_by_name forces a rebuild
-    # even when FieldSweep is already the current selection.
-    station.set_scanner_enabled(True)
     procedure_win._params_panel.select_procedure_by_name(FieldSweep.name)
-    # Put the (enumerated) route parameter in slot 1 so the pick checkboxes
-    # render — the widest state the Reading loop column takes.
-    _set_slot_parameter(procedure_win, "loop1_parameter", "switch_matrix.route")
+    # Put the loopable parameter in slot 1 so the values input renders — the
+    # widest state the Reading loop column takes.
+    _set_slot_parameter(procedure_win, "loop1_parameter", "dc_measurement.current_A")
     _settle_at_width(procedure_win, 1280, 800)
 
     # No horizontal scrollbar is needed for the parameter form.
     assert procedure_win._params_panel._param_scroll.horizontalScrollBar().maximum() == 0
 
     # The selected VI's first parameter widget is fully inside the viewport.
-    first_param = procedure_win.findChild(QLineEdit, "param_n_readings_input")
+    first_param = procedure_win.findChild(QLineEdit, "param_readings_per_point_input")
     assert first_param is not None
     assert _fully_inside_param_viewport(procedure_win, first_param)
 
-    # The first pick checkbox is fully inside the viewport (not off-screen).
-    first_pick = procedure_win.findChild(QCheckBox, "param_loop1_pick_Mux-Ch1_input")
-    assert first_pick is not None
-    assert _fully_inside_param_viewport(procedure_win, first_pick)
+    # The slot's values input is fully inside the viewport (not off-screen).
+    values_widget = procedure_win._params_panel._param_inputs.get("loop1_values")
+    assert values_widget is not None
+    assert _fully_inside_param_viewport(procedure_win, values_widget)
 
 
-def test_generic_field_sweep_switching_vi_swaps_only_measurement_group(procedure_win):
-    """Switching the measurement VI swaps the measurement widgets, preserving the rest."""
+def test_generic_field_sweep_collect_merges_params_for_the_selection(procedure_win):
+    """_collect_params merges the selected VI's params with the procedure's own."""
     from cryosoft.procedures.field_sweep import FieldSweep
 
     _select_procedure(procedure_win, FieldSweep.name)
 
-    # Capture the sweep axis widget, the System input, and the composite
-    # Measurement box + method drop-down BEFORE switching.
-    axis_before = procedure_win._params_panel._axis_widget
-    temp_before = procedure_win.findChild(QLineEdit, "param_temperature_input")
-    box_before = procedure_win._params_panel._measurement_box
-    combo_before = _measurement_combo(procedure_win)
-    assert temp_before is not None and box_before is not None
-
-    _select_measurement(procedure_win, "dc_measurement")
-
-    # The DC VI's params are now present; the delta-only params are gone.
-    assert procedure_win.findChild(QLineEdit, "param_readings_per_point_input") is not None
-    assert procedure_win.findChild(QLineEdit, "param_n_readings_input") is None
-    assert procedure_win.findChild(QComboBox, "param_voltmeter_range_V_input") is None  # dc's is a line edit
-    assert procedure_win.findChild(QLineEdit, "param_voltmeter_range_V_input") is not None
-    assert procedure_win._params_panel._measurement_params_key == "measurement:dc_measurement"
-
-    # Only the params sub-form was rebuilt: the Measurement box, its method
-    # drop-down, the sweep axis widget, and the System input are SAME instances.
-    assert procedure_win._params_panel._measurement_box is box_before
-    assert _measurement_combo(procedure_win) is combo_before
-    assert procedure_win._params_panel._axis_widget is axis_before
-    assert procedure_win.findChild(QLineEdit, "param_temperature_input") is temp_before
-
-
-def test_generic_field_sweep_collect_merges_params_for_both_selections(procedure_win):
-    """_collect_params returns the right merged params for each measurement VI."""
-    from cryosoft.procedures.field_sweep import FieldSweep
-
-    _select_procedure(procedure_win, FieldSweep.name)
-
-    # Default (delta) selection.
     values, *_ = procedure_win._collect_params()
-    assert values["measurement_vi"] == "keithley_delta_mode"
-    assert "n_readings" in values and "current" in values
+    assert values["measurement_vi"] == "dc_measurement"
+    assert "readings_per_point" in values and "current_A" in values
     assert "temperature" in values  # system param present too
-
-    # Switch to DC and collect again.
-    _select_measurement(procedure_win, "dc_measurement")
-    values2, *_ = procedure_win._collect_params()
-    assert values2["measurement_vi"] == "dc_measurement"
-    assert "readings_per_point" in values2 and "current_A" in values2
-    assert "n_readings" not in values2  # delta-only param is gone
-
-
-def test_generic_field_sweep_typed_values_survive_selection_round_trip(procedure_win):
-    """A value typed under one measurement VI is restored after switching away and back."""
-    from cryosoft.procedures.field_sweep import FieldSweep
-
-    _select_procedure(procedure_win, FieldSweep.name)
-
-    # Type a distinctive value into the delta VI's n_readings field.
-    n_field = procedure_win.findChild(QLineEdit, "param_n_readings_input")
-    n_field.setText("37")
-
-    # Switch to DC, then back to delta.
-    _select_measurement(procedure_win, "dc_measurement")
-    _select_measurement(procedure_win, "keithley_delta_mode")
-
-    restored = procedure_win.findChild(QLineEdit, "param_n_readings_input")
-    assert restored is not None
-    assert restored.text() == "37"
-
-
-def test_generic_field_sweep_renders_route_pick_checkboxes(procedure_win, station):
-    """Putting the route in a loop slot renders one pick checkbox per route."""
-    from cryosoft.procedures.field_sweep import FieldSweep
-
-    station.set_scanner_enabled(True)
-    procedure_win._params_panel.select_procedure_by_name(FieldSweep.name)
-    assert "reading_loop" in procedure_win._params_panel._group_boxes
-
-    _set_slot_parameter(procedure_win, "loop1_parameter", "switch_matrix.route")
-    for route in ("Mux-Ch1", "Mux-Ch2", "Mux-Ch3", "Mux-Ch4"):
-        box = procedure_win.findChild(QCheckBox, f"param_loop1_pick_{route}_input")
-        assert box is not None, f"pick checkbox for {route} should render"
-        assert box.isChecked() is False  # default False
-
-
-def test_generic_field_sweep_collect_returns_pick_bools(procedure_win, station):
-    """_collect_params returns the loop1_pick_<route> bools from the checkboxes."""
-    from cryosoft.procedures.field_sweep import FieldSweep
-
-    station.set_scanner_enabled(True)
-    procedure_win._params_panel.select_procedure_by_name(FieldSweep.name)
-    _set_slot_parameter(procedure_win, "loop1_parameter", "switch_matrix.route")
-
-    procedure_win.findChild(QCheckBox, "param_loop1_pick_Mux-Ch1_input").setChecked(True)
-    procedure_win.findChild(QCheckBox, "param_loop1_pick_Mux-Ch3_input").setChecked(True)
-
-    values, *_ = procedure_win._collect_params()
-    assert values["loop1_parameter"] == "switch_matrix.route"
-    assert values["loop1_pick_Mux-Ch1"] is True
-    assert values["loop1_pick_Mux-Ch2"] is False
-    assert values["loop1_pick_Mux-Ch3"] is True
-    assert values["loop1_pick_Mux-Ch4"] is False
 
 
 def test_generic_field_sweep_method_combo_shows_selector_labels(procedure_win, station):
@@ -1402,9 +1271,7 @@ def test_generic_field_sweep_method_combo_shows_selector_labels(procedure_win, s
         for n in station.measurement_vi_names()
     ]
     assert items == expected
-    assert items == [
-        "Delta mode (6221 + 2182A)", "DC mode (6221 + 2182A)", "DC (6221 + 2182A)", "Lock-in 1f/2f (internal source)",
-    ]
+    assert items == ["DC (6221 + 2182A)"]
 
     # Each item carries its vi_name as a tooltip (disambiguation).
     tips = [
@@ -1415,79 +1282,32 @@ def test_generic_field_sweep_method_combo_shows_selector_labels(procedure_win, s
 
     # The collected value stays the vi_name, not the label.
     values, *_ = procedure_win._collect_params()
-    assert values["measurement_vi"] == "keithley_delta_mode"
-
-
-def test_generic_field_sweep_pick_row_label_strips_prefix(procedure_win, station):
-    """The pick checkbox row label is the bare choice; the key keeps its slot.
-
-    Only the visible label is prettified — the parameter key (and thus the
-    HDF5 metadata key) remains ``loop1_pick_<value>`` so choices stay
-    namespaced per slot.
-    """
-    from cryosoft.procedures.field_sweep import FieldSweep
-
-    station.set_scanner_enabled(True)
-    procedure_win._params_panel.select_procedure_by_name(FieldSweep.name)
-    _set_slot_parameter(procedure_win, "loop1_parameter", "switch_matrix.route")
-
-    checkbox = procedure_win.findChild(QCheckBox, "param_loop1_pick_Mux-Ch1_input")
-    assert checkbox is not None
-    form = checkbox.parent().layout()
-    assert isinstance(form, QFormLayout)
-    row_label = form.labelForField(checkbox)
-    assert isinstance(row_label, QLabel)
-    assert row_label.text() == "Mux-Ch1:"  # bare choice, no slot prefix
-
-    checkbox.setChecked(True)
-    values, *_ = procedure_win._collect_params()
-    assert values["loop1_pick_Mux-Ch1"] is True  # prefixed key kept
-    assert "Mux-Ch1" not in values               # bare choice is not a key
+    assert values["measurement_vi"] == "dc_measurement"
 
 
 def test_live_plot_loop_selectors_follow_reading_loop(procedure_win, station):
     """The plots' two Loop selectors follow the reading-loop slots.
 
-    Hidden while nothing is loopable (lock-in VI, scanner off); visible but
-    disabled once something is loopable with the slots off; enabled with one
-    item per value — display text carrying the value, item data carrying the
-    0-based axis index — once a slot has two or more values.
+    Visible but disabled while something is loopable and the slots are off;
+    enabled with one item per value — display text carrying the value, item
+    data carrying the 0-based axis index — once a slot has two or more values.
     """
     from cryosoft.procedures.field_sweep import FieldSweep
 
     procedure_win._params_panel.select_procedure_by_name(FieldSweep.name)
-    # The lock-in is the only measurement VI with no reading_setters, so with
-    # the scanner off it is the one way to reach an empty loopable registry.
-    _select_measurement(procedure_win, "lockin_harmonic")
     sel1 = procedure_win.findChild(QComboBox, "plot1_loop1_selector")
     sel2 = procedure_win.findChild(QComboBox, "plot1_loop2_selector")
-    assert sel1 is not None and sel2 is not None
-    # Nothing loopable -> selectors hidden.
-    assert not sel1.isVisibleTo(procedure_win)
-    assert not sel2.isVisibleTo(procedure_win)
-
-    # Enable the scanner and rebuild: the route is loopable now, slots off ->
-    # both selectors visible but disabled.
-    station.set_scanner_enabled(True)
-    procedure_win._params_panel.select_procedure_by_name(FieldSweep.name)
-    sel1 = procedure_win.findChild(QComboBox, "plot1_loop1_selector")
-    sel2 = procedure_win.findChild(QComboBox, "plot1_loop2_selector")
+    # Something loopable, slots off -> both selectors visible but disabled.
     assert sel1.isVisibleTo(procedure_win) and not sel1.isEnabled()
     assert sel2.isVisibleTo(procedure_win) and not sel2.isEnabled()
 
-    # Slot 1: route with two channels ticked. Slot 2: DC current +/- pair.
-    _select_measurement(procedure_win, "dc_measurement")
-    _set_slot_parameter(procedure_win, "loop1_parameter", "switch_matrix.route")
-    procedure_win.findChild(QCheckBox, "param_loop1_pick_Mux-Ch1_input").setChecked(True)
-    procedure_win.findChild(QCheckBox, "param_loop1_pick_Mux-Ch2_input").setChecked(True)
-    _set_slot_parameter(
-        procedure_win, "loop2_parameter", "dc_measurement.current_A"
-    )
+    # Slot 1: the DC current +/- pair.
+    _set_slot_parameter(procedure_win, "loop1_parameter", "dc_measurement.current_A")
     # LoopValuesWidget doesn't have an objectName match by text — locate it
     # via the form's param-input registry instead and populate it directly.
-    loop2_values_widget = procedure_win._params_panel._param_inputs.get("loop2_values")
-    assert loop2_values_widget is not None, "loop2_values widget not found"
-    loop2_values_widget.set_raw("1e-6, -1e-6")
+    loop1_values_widget = procedure_win._params_panel._param_inputs.get("loop1_values")
+    assert loop1_values_widget is not None, "loop1_values widget not found"
+    loop1_values_widget.set_raw("1e-6, -1e-6")
     # Trigger structural re-render since the loop values widget is structural
     procedure_win._params_panel._on_structural_changed()
 
@@ -1495,13 +1315,11 @@ def test_live_plot_loop_selectors_follow_reading_loop(procedure_win, station):
     sel2 = procedure_win.findChild(QComboBox, "plot1_loop2_selector")
     assert sel1.isEnabled()
     assert [sel1.itemText(i) for i in range(sel1.count())] == [
-        "A1 = Mux-Ch1", "A2 = Mux-Ch2",
+        "A1 = 1e-06", "A2 = -1e-06",
     ]
     assert [sel1.itemData(i) for i in range(sel1.count())] == [0, 1]
-    assert sel2.isEnabled()
-    assert [sel2.itemText(i) for i in range(sel2.count())] == [
-        "B1 = 1e-06", "B2 = -1e-06",
-    ]
+    # Slot 2 is still off, so its selector stays visible but disabled.
+    assert sel2.isVisibleTo(procedure_win) and not sel2.isEnabled()
     # Axis keys stay plain — the Loop selectors pick the reading. Raw-sample
     # arrays are saved but never offered as a plot axis.
     x_sel = procedure_win.findChild(QComboBox, "x1_axis_selector")
@@ -2593,7 +2411,7 @@ def test_instrument_info_action_opens_dialog_with_config_metadata(
     monkeypatch.setattr(mw, "InstrumentInfoDialog", _FakeInstrumentInfoDialog)
     win._open_instrument_info()
 
-    assert captured["metadata"]["magnet_z"]["role"] == "X-axis magnet"
+    assert captured["metadata"]["magnet_z"]["role"] == "Z-axis magnet"
 
 
 def test_instrument_info_dialog_handles_empty_metadata(qtbot):
@@ -2673,7 +2491,7 @@ def test_hold_banner_shows_message_and_dismisses_on_clear(monitor_win, orchestra
     condition registry.
     """
     mirror = monitor_win._mirror
-    held = {"magnet_y", "magnet_z"}
+    held = {"magnet_z"}
     monkeypatch.setattr(mirror, "held_vi_names", lambda: frozenset(held))
     monkeypatch.setattr(
         mirror,
@@ -2700,7 +2518,7 @@ def test_hold_banner_shows_message_and_dismisses_on_clear(monitor_win, orchestra
     assert monitor_win._ack_btn.isVisible()
     assert monitor_win._banner.isVisible()
     assert "helium_low" in monitor_win._banner._label.text()
-    assert "magnet_y" in monitor_win._banner._label.text()
+    assert "magnet_z" in monitor_win._banner._label.text()
 
     # Clearing the hold condition dismisses the banner it owns.
     held.clear()
@@ -2902,7 +2720,7 @@ def test_monitor_quadrant_splitters_not_collapsible(monitor_win):
 
 
 def test_monitor_instrument_panels_exist_for_every_vi(monitor_win, station):
-    """One InstrumentPanel exists per VI — system/level, measurement, AND switch."""
+    """One InstrumentPanel exists per VI — system/level and measurement."""
     all_vis = set(station.get_vi_names())
     assert all_vis, "sim_cryostat should have VIs"
     panel_vi_names = {p._vi_name for p in monitor_win._panels}
@@ -2910,8 +2728,7 @@ def test_monitor_instrument_panels_exist_for_every_vi(monitor_win, station):
     for panel in monitor_win._panels:
         assert isinstance(panel, InstrumentPanel)
     # Non-system cards are tagged with their role.
-    assert monitor_win.findChild(QLabel, "keithley_delta_mode_type_tag").text() == "Measurement"
-    assert monitor_win.findChild(QLabel, "switch_matrix_type_tag").text() == "Scanner"
+    assert monitor_win.findChild(QLabel, "dc_measurement_type_tag").text() == "Measurement"
     # System cards carry no tag.
     assert monitor_win.findChild(QLabel, "magnet_z_type_tag") is None
 
@@ -2920,8 +2737,8 @@ def test_monitor_fixed_quadrants_exist_with_expected_content(monitor_win):
     """Sample Info and the Operations quadrant contain the expected widgets.
 
     The Log view moved to page 2 (ServicingLogPage) in Phase 5; the Other
-    Devices section is retired (measurement/switch VIs are instrument cards
-    now), so the bottom-right quadrant is Operations — a placeholder label
+    Devices section is retired (measurement VIs are instrument cards now),
+    so the bottom-right quadrant is Operations — a placeholder label
     when the setup declares no operations/cryogenics config.
     """
     sample_quadrant = monitor_win.findChild(QScrollArea, "session_info_scroll")
@@ -3010,33 +2827,6 @@ def test_monitor_page_switcher_swaps_pages(monitor_win):
     assert monitor_win._page_stack.currentWidget() is monitor_win._main_splitter
 
 
-def test_monitor_switch_card_has_scanner_toggle_and_live_route(monitor_win, station, orchestrator):
-    """The switch VI's card carries the Enable Scanner checkbox and tracks the route.
-
-    The switch VI is a full instrument card now; its @monitored active_route
-    value label must follow the live route across monitor ticks, and its
-    Enable Scanner checkbox drives Orchestrator.set_scanner_enabled().
-    """
-    chk = monitor_win.findChild(QCheckBox, "switch_matrix_enable_scanner_chk")
-    assert chk is not None
-    assert chk.isChecked() is False
-    chk.setChecked(True)
-    settled(orchestrator)
-    assert monitor_win._orchestrator.scanner_enabled() is True
-    chk.setChecked(False)
-
-    route_lbl = monitor_win.findChild(QLabel, "switch_matrix_active_route_value")
-    assert route_lbl is not None
-
-    station.switch_matrix.select_route("Mux-Ch2")
-    orchestrator.states_updated.emit(station.get_state())
-    assert route_lbl.text() == "Mux-Ch2"
-
-    station.switch_matrix.open_all()
-    orchestrator.states_updated.emit(station.get_state())
-    assert route_lbl.text() in ("", "—")
-
-
 def test_monitor_states_updated_feeds_history_and_trend_combos(monitor_win, orchestrator):
     """states_updated records into MonitorHistory and populates the trend Y combos."""
     fake_state = {"magnet_z": {"get_field": 0.25, "magnet_current": 12.0}}
@@ -3056,7 +2846,7 @@ def test_monitor_default_trend_key_hints_prefer_readings_over_settings(monitor_w
     """The two default trend docks pick a temperature/level READING, not a setting/rate field.
 
     Regression pin: a plain substring search for "temperature"/"level" matches
-    the VI-name prefix on fields like temperature_sample_heater_output or
+    the VI-name prefix on fields like temperature_vti_heater_output or
     level_meter_get_refresh_rate before it reaches the actual reading. Which
     specific VI wins alphabetically is not asserted here (real orchestrator
     ticks may have already populated history for other VIs too) — only that

@@ -38,7 +38,7 @@ _AGENT = ev.Actor(kind=ev.ActorKind.AGENT, id="runner-7", role="session")
 
 @pytest.fixture
 def station():
-    """Build a real simulated station (sim_cryostat: magnet_z, magnet_y, ...)."""
+    """Build a real simulated station (sim_cryostat: magnet_z, temperature_vti, ...)."""
     return build_station("cryosoft/configs/sim_cryostat")
 
 
@@ -62,15 +62,18 @@ def _fast_magnets(station) -> None:
 def _fast_vti(station) -> None:
     """Make the VTI's ramp instant and its thermal settling near-instant.
 
-    See the module docstring: the sim ITC503 starts at 300 K with a 60 s
-    time constant, so a test that perturbs it away from its target needs
-    both a fast ramp (setpoint reaches target immediately) and a shrunk
-    thermal time constant (the simulated temperature actually catches up to
-    the setpoint within a tick or two) to finish in test time.
+    The sim controller starts at room temperature with a 30 s time constant,
+    so a test that perturbs it away from its target needs both a fast ramp
+    (setpoint reaches target immediately) and a shrunk thermal time constant
+    (the simulated temperature actually catches up to the setpoint within a
+    tick or two) to finish in test time. Its heater range is also switched
+    on, because a Lakeshore 335 delivers no power at all while the range is
+    Off — the VI's own initiate() does this on a real run.
     """
     vti = station.temperature_vti
     vti._default_ramp_rate = 6000.0
     vti._driver._tau = 0.01
+    vti._driver.set_heater_range("HIGH")
 
 
 def _tick_until(orchestrator, predicate, *, max_ticks: int = 2000, sleep_s: float = 0.0) -> None:
@@ -265,7 +268,7 @@ def test_step_record_captures_conditions_including_non_numeric(op_cls, station):
     op.confirm("close_needle_valve")
 
     conditions = op.step_records()["close_needle_valve"].conditions
-    assert conditions["temperature_vti.needle_valve_mode"] in {"AUTO", "MANUAL"}
+    assert conditions["temperature_vti.heater_mode"] in {"AUTO", "MANUAL"}
     assert isinstance(conditions["temperature_vti.temperature"], (int, float))
     for magnet in station.magnet_vi_names():
         assert isinstance(conditions[f"{magnet}.magnet_state"], str)
@@ -383,11 +386,11 @@ def test_records_every_numeric_monitored_channel_on_the_station(
     # a sample change is when helium gets lost.
     assert "level_meter.helium_level" in channels
     assert "level_meter.nitrogen_level" in channels
-    assert "temperature_sample.temperature" in channels
-    assert "temperature_vti.needle_valve" in channels
+    assert "temperature_vti.temperature" in channels
+    assert "temperature_vti.heater_output" in channels
 
     # No string-valued channel leaked into the numeric trace.
-    assert "temperature_vti.needle_valve_mode" not in channels
+    assert "temperature_vti.heater_mode" not in channels
     assert "magnet_z.magnet_state" not in channels
 
     assert len(recording["unix_time"]) >= 1
@@ -588,10 +591,16 @@ def test_measurement_vis_get_standby(op_cls, orchestrator, station, qtbot):
     orchestrator.abort_procedure()
 
 
-def test_claimed_vi_names_excludes_switch(station):
-    """claimed_vi_names() no longer names the switch matrix (dropped from initiate())."""
+def test_claimed_vi_names_are_exactly_the_commanded_vis(station):
+    """claimed_vi_names() names only what initiate() actually commands."""
     op = SampleLoadOperation(station)
-    assert "switch_matrix" not in op.claimed_vi_names()
+    claimed = op.claimed_vi_names()
+    expected = {
+        *station.magnet_vi_names(),
+        "temperature_vti",
+        *station.measurement_vi_names(),
+    }
+    assert claimed == expected
 
 
 # ── disarm_measurement_vis pre-run toggle: default on, skippable per run ─────
@@ -717,7 +726,7 @@ def test_cryogenics_recorder_records_one_servicing_entry(op_cls, orchestrator, s
     assert steps["load_unload_sample"]["status"] == STEP_STATUS_SKIPPED
     # Non-numeric conditions, which the numeric series cannot hold, are
     # preserved on the step record instead.
-    assert steps["close_needle_valve"]["conditions"]["temperature_vti.needle_valve_mode"]
+    assert steps["close_needle_valve"]["conditions"]["temperature_vti.heater_mode"]
 
     # Neither legacy kind is written by the recorder anymore (Phase 2).
     assert servicing_store.entries("operations") == []

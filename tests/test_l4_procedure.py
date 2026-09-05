@@ -27,15 +27,15 @@ SAMPLE_INFO = {
 }
 
 # Minimal params that make the sweep fast in tests. The generic FieldSweep runs
-# the delta-mode measurement VI here (current / n_readings are its parameters).
+# the DC measurement VI here (current_A / readings_per_point are its parameters).
 FAST_PARAMS = {
-    "measurement_vi": "keithley_delta_mode",
+    "measurement_vi": "dc_measurement",
     "field_start": -0.1,
     "field_end": 0.1,
     "field_steps": 3,
     "temperature": 300.0,  # Room temperature — sim driver starts at 300 K (instant settle)
-    "current": 1e-6,
-    "n_readings": 5,
+    "current_A": 1e-6,
+    "readings_per_point": 5,
     "init_wait": 0.0,
     "step_wait": 0.0,
 }
@@ -294,7 +294,7 @@ def test_initiate_returns_correct_structure(procedure, tmp_path):
     assert "temperature_vti" in plan.targets
     assert plan.targets["temperature_vti"].target == pytest.approx(300.0)
 
-    arm = next(c for c in plan.commands if c.vi_name == "keithley_delta_mode")
+    arm = next(c for c in plan.commands if c.vi_name == "dc_measurement")
     assert arm.method == "initiate_measurement"
 
     assert plan.wait_s == pytest.approx(0.0)
@@ -310,15 +310,14 @@ def test_initiate_full_phaseplan_content_and_command_order(procedure, tmp_path):
     assert plan.targets["magnet_z"] == Target(-0.1)
     assert plan.targets["temperature_vti"] == Target(300.0)
 
-    # Exactly one command: arm the delta-mode measurement, first in order.
+    # Exactly one command: arm the DC measurement, first in order.
     assert len(plan.commands) == 1
     cmd = plan.commands[0]
     assert isinstance(cmd, Command)
-    assert cmd.vi_name == "keithley_delta_mode"
+    assert cmd.vi_name == "dc_measurement"
     assert cmd.method == "initiate_measurement"
-    assert cmd.kwargs["current"] == pytest.approx(1e-6)
-    assert cmd.kwargs["n_readings"] == 5
-    assert cmd.kwargs["voltmeter_range_V"] == pytest.approx(0.01)
+    assert cmd.kwargs["current_A"] == pytest.approx(1e-6)
+    assert cmd.kwargs["readings_per_point"] == 5
 
     assert plan.wait_s == pytest.approx(0.0)
 
@@ -427,8 +426,8 @@ def test_measure_saves_datapoint(procedure, tmp_path):
     """measure() writes data to the HDF5 file at the correct sweep index."""
     procedure.initiate()
     # Arm the measurement VI (normally done via station.send_measurement_commands)
-    procedure._station.keithley_delta_mode.initiate_measurement(
-        current=1e-6, n_readings=5
+    procedure._station.dc_measurement.initiate_measurement(
+        current_A=1e-6, readings_per_point=5
     )
 
     procedure.measure()
@@ -447,8 +446,8 @@ def test_measure_saves_datapoint(procedure, tmp_path):
 def test_measure_stores_snapshot(procedure, tmp_path):
     """measure() stores a JSON station snapshot."""
     procedure.initiate()
-    procedure._station.keithley_delta_mode.initiate_measurement(
-        current=1e-6, n_readings=5
+    procedure._station.dc_measurement.initiate_measurement(
+        current_A=1e-6, readings_per_point=5
     )
     procedure.measure()
     filepath = procedure._data_manager.filepath
@@ -469,7 +468,7 @@ def test_standby_returns_correct_structure(procedure, tmp_path):
 
     assert isinstance(plan, PhasePlan)
     assert plan.targets == {}
-    assert any(c.vi_name == "keithley_delta_mode" for c in plan.commands)
+    assert any(c.vi_name == "dc_measurement" for c in plan.commands)
     magnet_cmd = next(c for c in plan.commands if c.vi_name == "magnet_z")
     assert magnet_cmd.method == "standby"
     assert plan.wait_s == pytest.approx(0.0)
@@ -514,7 +513,7 @@ def test_full_orchestrator_loop(station, tmp_path, qtbot):
 
     orch = Orchestrator(station, tick_interval_ms=10)
 
-    # Pre-arm keithley_delta_mode (normally done by orchestrator via station)
+    # Pre-arm dc_measurement (normally done by orchestrator via station)
     # The Orchestrator calls station.send_measurement_commands from run_procedure,
     # which dispatches initiate(). That happens inside run_procedure → initiate().
     orch.run_procedure(procedure)
@@ -557,7 +556,7 @@ def test_last_datapoint_empty_before_measure(procedure, tmp_path):
     assert procedure.last_datapoint == {}
     procedure.initiate()
     assert procedure.last_datapoint == {}
-    procedure._station.keithley_delta_mode.initiate_measurement(current=1e-6, n_readings=5)
+    procedure._station.dc_measurement.initiate_measurement(current_A=1e-6, readings_per_point=5)
     procedure.measure()
     point = procedure.last_datapoint
     assert point, "expected a datapoint after measure()"
@@ -571,7 +570,7 @@ def test_get_params_returns_merged_copy(procedure):
     """get_params() has form values + resolved measurement selection, as a copy."""
     params = procedure.get_params()
     assert params["field_steps"] == 3
-    assert params["measurement_vi"] == "keithley_delta_mode"
+    assert params["measurement_vi"] == "dc_measurement"
     params["field_steps"] = 999
     assert procedure.get_params()["field_steps"] == 3
 

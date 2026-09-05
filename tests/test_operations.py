@@ -280,14 +280,12 @@ def test_operation_end_state_returns_to_emergency_when_flags_persist(
 
     Quench (not helium_low) is used here for the same reason as
     test_run_operation_allowed_from_emergency_iff_flags_tolerated above.
-    magnet_y (not magnet_z) is quenched: the sim driver freezes a quenched
-    magnet's own ramp physics forever (get_status() reports "QUENCH", never
-    "HOLD"), which would deadlock SimpleOperation's magnet_z ramp if it were
-    the quenched one — quenching a DIFFERENT magnet keeps "quench" tripped
-    station-wide (Station.check_safety() ORs across every VI) while leaving
-    magnet_z free to ramp to completion.
+    The sim driver freezes a quenched magnet's own ramp physics forever
+    (get_status() reports "QUENCH", never "HOLD"), so SimpleOperation's
+    magnet_z ramp cannot land while the quench stands — which is the point:
+    the operation must return to EMERGENCY rather than IDLE.
     """
-    station.magnet_y._driver._simulate_quench = True
+    station.magnet_z._driver._simulate_quench = True
     qtbot.waitUntil(
         lambda: orchestrator._state == OrchestratorState.EMERGENCY, timeout=2000
     )
@@ -710,21 +708,21 @@ def test_manual_action_on_unclaimed_vi_admitted_during_helium_fill(
     assert orchestrator._procedure is op
     assert orchestrator._active_claims == {"level_meter", *station.magnet_vi_names()}
 
-    # set_needle_valve is refused unless needle valve mode is MANUAL (the
+    # set_heater_output is refused unless the heater mode is MANUAL (the
     # instrument powers up in AUTO); switch it directly, bypassing the
     # claim/admission gate under test here.
-    station.get_vi("temperature_vti").set_needle_valve_mode("MANUAL")
+    station.get_vi("temperature_vti").set_heater_mode("MANUAL")
 
     blocked: list[str] = []
     succeeded: list[tuple[str, str]] = []
     orchestrator.action_blocked.connect(blocked.append)
     orchestrator.action_succeeded.connect(lambda vi, m: succeeded.append((vi, m)))
 
-    orchestrator.submit_vi_action("temperature_vti", "set_needle_valve", position=25.0)
+    orchestrator.submit_vi_action("temperature_vti", "set_heater_output", output_pct=25.0)
 
     qtbot.waitUntil(lambda: bool(succeeded), timeout=2000)
     assert not blocked
-    assert succeeded == [("temperature_vti", "set_needle_valve")]
+    assert succeeded == [("temperature_vti", "set_heater_output")]
 
     orchestrator.finish_operation()
     qtbot.waitUntil(lambda: orchestrator._procedure is None, timeout=5000)
@@ -772,10 +770,10 @@ def test_manual_action_refused_during_running_procedure_claim_all(
     blocked: list[str] = []
     orchestrator.action_blocked.connect(blocked.append)
 
-    # Even a VI the procedure never touches (magnet_y) is refused: a plain
+    # Even a VI the procedure never touches (level_meter) is refused: a plain
     # procedure claims everything.
     with qtbot.waitSignal(orchestrator.action_blocked, timeout=500):
-        orchestrator.submit_vi_action("magnet_y", "initiate")
+        orchestrator.submit_vi_action("level_meter", "initiate")
 
     assert blocked
     assert "blocking procedure" in blocked[0].lower()
@@ -873,10 +871,10 @@ def test_queued_action_drained_during_operation_gets_verdict(
     orchestrator.run_operation(op)
     assert orchestrator._procedure is op
 
-    # set_needle_valve is refused unless needle valve mode is MANUAL (the
+    # set_heater_output is refused unless the heater mode is MANUAL (the
     # instrument powers up in AUTO); switch it directly, bypassing the
     # claim/admission gate under test here.
-    station.get_vi("temperature_vti").set_needle_valve_mode("MANUAL")
+    station.get_vi("temperature_vti").set_heater_mode("MANUAL")
 
     blocked: list[str] = []
     succeeded: list[tuple[str, str]] = []
@@ -891,14 +889,14 @@ def test_queued_action_drained_during_operation_gets_verdict(
     orchestrator._gui_action_queue.append(
         {
             "vi_name": "temperature_vti",
-            "method_name": "set_needle_valve",
-            "kwargs": {"position": 10.0},
+            "method_name": "set_heater_output",
+            "kwargs": {"output_pct": 10.0},
         }
     )
 
     qtbot.waitUntil(lambda: bool(blocked) and bool(succeeded), timeout=2000)
     assert blocked and "level_meter" in blocked[0]
-    assert succeeded == [("temperature_vti", "set_needle_valve")]
+    assert succeeded == [("temperature_vti", "set_heater_output")]
 
     orchestrator.finish_operation()
     qtbot.waitUntil(lambda: orchestrator._procedure is None, timeout=5000)

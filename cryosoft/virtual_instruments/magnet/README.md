@@ -19,9 +19,8 @@ A driver dict `{"main": <PSU real driver>}` and optional `init_params`:
 `psu_current() → float (A)`, `magnet_status() → str` (the raw **PSU status** —
 HOLD/RAMPING/QUENCH/CLAMPED, read straight from the driver), `magnet_state() →
 str` (this VI's logical interpretation of PSU status plus the live current
-readings — "standby"/"ramping"/"holding"/"quenched"/"clamped", plus
-"persistent" on `SuperconductingMagnetPersistentVI`; see GLOSSARY.md's
-**Magnet state**). Operations gate readiness on `magnet_state()`, never on
+readings — "standby"/"ramping"/"holding"/"quenched"/"clamped"; see
+GLOSSARY.md's **Magnet state**). Operations gate readiness on `magnet_state()`, never on
 raw current thresholds — see GLOSSARY.md's **Magnet state**.
 `@control` actions: `set_field(target_T)` — bounded by the setup's field limit
 via the control-validation standard (`control_limits`); an out-of-range value
@@ -48,7 +47,7 @@ All classes here extend `SuperconductingMagnetVI` (itself inheriting from
 and `virtual_instruments/rampable.py`).
 
 ## How to add a new magnet VI
-1. Subclass `SuperconductingMagnetVI` (or `SuperconductingMagnetPersistentVI`).
+1. Subclass `SuperconductingMagnetVI`.
 2. Override only the methods that differ from the base behaviour.
 3. Follow the control-validation standard (see `BaseVirtualInstrument`):
    declare `control_limits` for any new bounded `@control` parameter and
@@ -66,17 +65,4 @@ and `virtual_instruments/rampable.py`).
   methods, `evaluate_safety()`. tests:
   `tests/test_l1_new_vis.py` (`TestSuperConductingMagnetVI`),
   `tests/test_l1_virtual_instruments.py`.
-- `superconducting_magnet_persistent.py` — `SuperconductingMagnetPersistentVI`:
-  extends above with switch heater control and the tick-count persistent-mode
-  sequence. Quench-safe ordering: the PSU is ramped to match the coil current
-  while the switch is still cold, and only then is the heater energised —
-  heating across a mismatch would quench the magnet. The manual
-  `switch_heater_on` control enforces the same rule (refuses on mismatch). tests:
-  `tests/test_l1_new_vis.py` (`TestSuperConductingMagnetPersistentVI`),
-  `tests/test_switch_heater.py`.
-- `switch_heater.py` — `SwitchHeater`: wall-clock state object owned by
-  `SuperconductingMagnetPersistentVI` that tracks heater on/off plus warmup /
-  cooldown readiness in seconds (tick-rate independent). Key API: `turn_on`,
-  `turn_off`, `is_on`, `is_ready`, `is_cold`, `seconds_until_ready`. Not a VI.
-  tests: `tests/test_switch_heater.py`.
 - `__init__.py` — package marker. tests: none.

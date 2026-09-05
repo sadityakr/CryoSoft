@@ -10,7 +10,7 @@ from cryosoft.core.exceptions import CryoSoftCommunicationError
 from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 from cryosoft.core.station import Station, build_station
 from cryosoft.drivers.sim_keithley_2182a import SimKeithley2182A
-from cryosoft.drivers.sim_oxford_itc503 import SimOxfordITC503
+from cryosoft.drivers.sim_lakeshore_335 import SimLakeshore335
 from cryosoft.virtual_instruments.base import BaseVirtualInstrument
 
 SIM_CONFIG = Path(__file__).parent.parent / "cryosoft" / "configs" / "sim_cryostat"
@@ -27,7 +27,7 @@ def station() -> Station:
 
 def test_close_releases_the_session_and_is_idempotent():
     """close() twice is fine; afterwards the instrument is unreachable."""
-    driver = SimOxfordITC503("SIM::TEST")
+    driver = SimLakeshore335("SIM::TEST")
     assert driver.get_temperature() > 0
     driver.close()
     driver.close()
@@ -41,7 +41,7 @@ def test_close_does_not_change_instrument_state():
     The sim records the setpoint it was given; a close() that "helpfully"
     stood the instrument down would have to overwrite it.
     """
-    driver = SimOxfordITC503("SIM::TEST")
+    driver = SimLakeshore335("SIM::TEST")
     driver.set_setpoint(4.2)
     assert driver.get_setpoint() == pytest.approx(4.2)
     driver.close()
@@ -83,7 +83,7 @@ def test_ping_is_false_once_the_session_is_released(station: Station):
 
 def test_disconnect_hook_sends_no_commands(station: Station):
     """The VI-level disconnect() hook must not command the instrument."""
-    vi = station.get_vi("temperature_sample")
+    vi = station.get_vi("temperature_vti")
     vi.set_temperature(10.0)
     setpoint_before = vi._driver.get_setpoint()
     vi.disconnect()
@@ -96,9 +96,9 @@ def test_disconnect_hook_sends_no_commands(station: Station):
 # detach_when_idle property; the base then releases the driver session
 # automatically — via __init_subclass__'s wrap of a directly defined
 # standby(), or via the base's own standby() for a VI that inherits it
-# unchanged. TensormeterRTM2MeasurementVI is the one production VI that
-# declares it; these tests use a plain double that does NOT hand-write the
-# release at all, to prove it really is framework behaviour.
+# unchanged. No shipped VI declares it today; these tests use a plain double
+# that does NOT hand-write the release at all, to prove it really is
+# framework behaviour whenever a VI does.
 
 
 def test_detach_when_idle_is_false_by_default():
@@ -298,28 +298,11 @@ def test_disconnected_vi_leaves_the_rest_of_the_station_working(station: Station
     assert all(not s.get("_stale") for s in state.values())
 
 
-def test_disconnect_closes_only_exclusively_owned_drivers(station: Station):
-    """A driver shared with a live VI stays open.
-
-    sim_cryostat wires the same 6221/2182A pair into three measurement VIs,
-    so disconnecting one must not break the other two.
-    """
-    dc_vi = station.get_vi("dc_measurement")
-    shared_source = dc_vi._drivers["source"]
-
-    station.disconnect_instrument("dc_measurement")
-
-    # Still open: keithley_delta_mode and keithley_dc_mode reference it.
-    assert shared_source.get_idn()
-    assert station.get_vi("keithley_delta_mode").ping() is True
-    assert station.get_vi("keithley_dc_mode").ping() is True
-
-
 def test_disconnect_closes_an_exclusively_owned_driver(station: Station):
     """The session really is released — that is what frees the front panel."""
-    driver = station.get_vi("level_meter")._drivers["main"]
+    driver = station.get_vi("dc_measurement")._drivers["source"]
 
-    station.disconnect_instrument("level_meter")
+    station.disconnect_instrument("dc_measurement")
 
     with pytest.raises(CryoSoftCommunicationError):
         driver.get_idn()
@@ -327,18 +310,18 @@ def test_disconnect_closes_an_exclusively_owned_driver(station: Station):
 
 def test_disconnect_then_connect_restores_the_vi(station: Station):
     """connect_instrument() is the one way back, for either offline origin."""
-    station.disconnect_instrument("level_meter")
-    assert "level_meter" not in station.get_vi_names()
+    station.disconnect_instrument("temperature_vti")
+    assert "temperature_vti" not in station.get_vi_names()
 
-    ok, message = station.connect_instrument("level_meter")
+    ok, message = station.connect_instrument("temperature_vti")
 
     assert ok is True
-    assert "level_meter" in message
-    assert "level_meter" in station.get_vi_names()
+    assert "temperature_vti" in message
+    assert "temperature_vti" in station.get_vi_names()
     assert station.offline_vi_names() == []
     # A freshly built driver, so the instrument answers again.
-    assert station.get_vi("level_meter").ping() is True
-    assert "level_meter" in station.get_state()
+    assert station.get_vi("temperature_vti").ping() is True
+    assert "temperature_vti" in station.get_state()
 
 
 def test_disconnect_rejects_unknown_and_already_offline_names(station: Station):
@@ -347,20 +330,20 @@ def test_disconnect_rejects_unknown_and_already_offline_names(station: Station):
     assert ok is False
     assert "not a registered VI" in message
 
-    station.disconnect_instrument("level_meter")
-    ok, message = station.disconnect_instrument("level_meter")
+    station.disconnect_instrument("temperature_vti")
+    ok, message = station.disconnect_instrument("temperature_vti")
     assert ok is False
     assert "already disconnected" in message
 
 
 def test_disconnect_clears_a_standing_comm_fault(station: Station):
     """A VI nobody polls cannot be in a fault — the banner must not name it."""
-    station._record_comm_condition("level_meter", "disconnected", "boom")
-    assert "level_meter" in station.vi_faults()
+    station._record_comm_condition("temperature_vti", "disconnected", "boom")
+    assert "temperature_vti" in station.vi_faults()
 
-    station.disconnect_instrument("level_meter")
+    station.disconnect_instrument("temperature_vti")
 
-    assert "level_meter" not in station.vi_faults()
+    assert "temperature_vti" not in station.vi_faults()
 
 
 def test_build_sends_only_the_identity_check(tmp_path):
@@ -448,8 +431,8 @@ def test_orchestrator_disconnect_allowed_mid_run_for_a_vi_it_does_not_claim(
         with qtbot.waitSignals(
             [orch.instrument_disconnected, orch.action_succeeded], timeout=500
         ):
-            orch.disconnect_instrument("level_meter")
-        assert station.has_vi("level_meter") is False
+            orch.disconnect_instrument("temperature_vti")
+        assert station.has_vi("temperature_vti") is False
         assert station.has_vi("magnet_z") is True
     finally:
         orch._state = OrchestratorState.IDLE
@@ -471,7 +454,7 @@ def test_orchestrator_disconnect_blocked_for_a_vi_the_run_is_ramping(
     try:
         orch._state = OrchestratorState.RAMPING
         orch._procedure = object()
-        orch._active_claims = {"level_meter"}  # deliberately NOT magnet_z
+        orch._active_claims = {"temperature_vti"}  # deliberately NOT magnet_z
         orch._active_system_vis = {"magnet_z"}
         with qtbot.waitSignal(orch.action_blocked, timeout=500) as blocker:
             orch.disconnect_instrument("magnet_z")
@@ -494,21 +477,6 @@ def test_orchestrator_disconnect_failure_emits_action_failed(
         with qtbot.waitSignal(orch.action_failed, timeout=500) as blocker:
             orch.disconnect_instrument("no_such_vi")
         assert blocker.args[1] == "disconnect"
-    finally:
-        orch.shutdown()
-
-
-def test_orchestrator_releases_the_scanner_slot_on_disconnect(
-    station: Station, qtbot
-):
-    """The scanner slot must not keep naming a VI that is gone."""
-    orch = Orchestrator(station, tick_interval_ms=10)
-    try:
-        assert orch._scanner_vi_name == "switch_matrix"
-        orch.disconnect_instrument("switch_matrix")
-        assert orch._scanner_vi_name is None
-        orch.connect_instrument("switch_matrix")
-        assert orch._scanner_vi_name == "switch_matrix"
     finally:
         orch.shutdown()
 
@@ -680,8 +648,7 @@ class _DetachWhenIdleNoOverrideVI(BaseVirtualInstrument):
     """Declares detach_when_idle but relies entirely on the inherited standby().
 
     Proves the release is framework behaviour — BaseVirtualInstrument's own
-    standby() and ping() — not something every declaring VI must hand-write,
-    the way TensormeterRTM2MeasurementVI no longer does.
+    standby() and ping() — not something every declaring VI must hand-write.
     """
 
     vi_type = "measurement"

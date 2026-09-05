@@ -1,7 +1,7 @@
 """BaseVirtualInstrument and category base classes.
 
 All VIs inherit from BaseVirtualInstrument (and possibly one of the typed
-sub-bases: MagnetBase, TemperatureControllerBase, LevelMeterBase, RotatorBase,
+sub-bases: MagnetBase, TemperatureControllerBase, LevelMeterBase,
 MeasurementInstrumentBase).
 
 Do NOT import from Station, Orchestrator, or Procedure here.
@@ -29,12 +29,11 @@ from cryosoft.virtual_instruments.rampable import RampableVI
 logger = logging.getLogger(__name__)
 
 #: Config key naming a setup's excitation-current ceiling, in amperes.
-#: Every VI that drives current through the sample reads it — directly (the
-#: DC and delta-mode VIs bound the sourced current by it) or derived (a
-#: voltage-sourced lock-in bounds its oscillator amplitude by
-#: ``max_source_current_A × series_resistance_ohm``). Limits are properties of
-#: the setup, so the VALUE always comes from the config; this module only
-#: names the key.
+#: Every VI that drives current through the sample reads it — directly (a
+#: current-sourcing VI bounds the sourced current by it) or derived (a
+#: voltage-sourcing VI converts it into an amplitude bound through the
+#: series resistance it drives). Limits are properties of the setup, so the
+#: VALUE always comes from the config; this module only names the key.
 MAX_SOURCE_CURRENT_KEY: str = "max_source_current_A"
 
 #: ``control_limits`` limit name for a directly sourced excitation current
@@ -49,14 +48,14 @@ def _populate_excitation_current_limit(
     """Set ``vi._limits[EXCITATION_CURRENT_LIMIT]`` from the setup config.
 
     The one place the excitation ceiling is turned into a bound, shared by
-    every VI that sources current directly, so the four DC/delta-mode VIs
-    cannot drift apart in how they read the same config key.
+    every VI that sources current directly, so no two current-sourcing VIs
+    can drift apart in how they read the same config key.
 
-    The bound is symmetric: reversing the current is routine in DC and
-    delta-mode resistance work (thermal-EMF cancellation), and the hazard is
-    the magnitude either way. A missing key leaves the limit populated but
-    unbounded on both sides — the same "absent means no bound" rule the
-    temperature, magnet and rotator VIs follow — so an older hand-written
+    The bound is symmetric: reversing the current is routine in resistance
+    work (thermal-EMF cancellation), and the hazard is the magnitude either
+    way. A missing key leaves the limit populated but unbounded on both
+    sides — the same "absent means no bound" rule the temperature and magnet
+    VIs follow — so an older hand-written
     config still builds; the conformance suite is what requires every SHIPPED
     config to declare it.
 
@@ -184,8 +183,9 @@ class BaseVirtualInstrument:
 
     A VI opts in by overriding the read-only ``detach_when_idle`` property
     with its own one-liner, e.g. ``return self._configured_externally`` (the
-    RTM2's whole opt-in — see ``MeasurementInstrumentBase``'s "Externally
-    configured instruments" section). Overriding this property is declaring
+    whole opt-in for an externally configured instrument — see
+    ``MeasurementInstrumentBase``'s "Externally configured instruments"
+    section). Overriding this property is declaring
     a FIRMWARE FACT — this instrument serves one client at a time — never a
     place to write behaviour: the release itself is entirely the base
     class's job, driven automatically by ``__init_subclass__``'s wrap of a
@@ -946,9 +946,9 @@ class BaseVirtualInstrument:
 
         The detach-when-idle declaration's opt-in (see the class docstring):
         a plain ``ClassVar[bool]`` cannot express it alone because the
-        decision may depend on INSTANCE state, not just the class — e.g.
-        the RTM2 detaches only when its ``configured_externally`` init
-        param is true, not for every instance of the class. A VI opts in by
+        decision may depend on INSTANCE state, not just the class — e.g. a
+        VI that detaches only when its ``configured_externally`` init param
+        is true, not for every instance of the class. A VI opts in by
         overriding this property with its own one-liner::
 
             @property
@@ -1484,14 +1484,6 @@ class LevelMeterBase(BaseVirtualInstrument):
     safety_flags: ClassVar[dict[str, str]] = {"helium_low": "hold"}
 
 
-class RotatorBase(BaseVirtualInstrument):
-    """Base class for all sample-rotator VIs."""
-    vi_type: str = "rotator"
-    setpoint_label: str = "sample angle"
-    setpoint_unit: str = "deg"
-    display_label: str = "rotator"
-
-
 class MeasurementInstrumentBase(BaseVirtualInstrument):
     """Base class and self-describing standard for all measurement-method VIs.
 
@@ -1505,10 +1497,10 @@ class MeasurementInstrumentBase(BaseVirtualInstrument):
     Self-description (class attributes)
     -----------------------------------
     * ``selector_label: ClassVar[str]`` — the SHORT human name shown in the GUI
-      method-selection drop-down (e.g. "Delta mode (6221 + 2182A)"). Optional:
+      method-selection drop-down (e.g. "DC (6221 + 2182A)"). Optional:
       when empty, the drop-down falls back to ``display_label``. Keep it terse —
       the combo's width tracks its longest label. This is distinct from
-      ``display_label``, which is the longer status-line label ("delta-mode
+      ``display_label``, which is the longer status-line label ("DC
       resistance") and is unchanged by this attribute. ``tests/test_conformance``
       checks it is a ``str``.
     * ``measurement_parameters: ClassVar[dict[str, ParamSpec]]`` — the VI's
@@ -1597,7 +1589,7 @@ class MeasurementInstrumentBase(BaseVirtualInstrument):
     Raw diagnostic blocks
     ----------------------
     Some instruments return far more raw data per reading than any single
-    physical quantity — e.g. a lock-in-style engine that reports dozens of
+    physical quantity — e.g. an engine that reports dozens of raw
     channels (voltages, ranges, setpoints, lock quality, …) alongside the
     one or two the operator actually derives a result from. The mean/error/
     array convention above cannot express this: it hard-requires every
@@ -2117,9 +2109,9 @@ class MeasurementInstrumentBase(BaseVirtualInstrument):
 class DCMeasurementBase(MeasurementInstrumentBase):
     """Base class for DC resistance measurement methods (defers to the standard).
 
-    Folds the shared DC-resistance self-description into one place so
-    DCSeparateMeasurementVI (Keithley 6221 + 2182A) and DCSingleInstrumentVI
-    (Keithley 2400 SMU) are interchangeable via the YAML config alone. Both
+    Folds the shared DC-resistance self-description into one place so any
+    two DC-resistance VIs — a separate source/voltmeter pair, a single SMU —
+    are interchangeable via the YAML config alone. Both
     inherit the ``measurement_parameters`` / ``measurement_data_keys`` /
     ``data_arrays`` declared here and implement only ``initiate_measurement()``
     / ``take_reading()`` / ``standby()``.

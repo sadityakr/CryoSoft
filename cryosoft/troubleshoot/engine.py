@@ -682,8 +682,8 @@ class DriverBench:
             The stripped response string.
 
         Raises:
-            ValueError: If the driver exposes no raw VISA handle (sim drivers
-                and pymeasure-wrapped drivers do not).
+            ValueError: If the driver exposes no raw VISA handle (sim
+                drivers do not).
         """
         instr = self._raw_handle()
         logger.info("Bench raw query: %s <- %r", self.alias, command)
@@ -709,8 +709,7 @@ class DriverBench:
         if instr is None:
             raise ValueError(
                 f"{self.alias} ({self.class_path}) exposes no raw VISA handle — "
-                f"simulated and pymeasure-wrapped drivers support driver-method "
-                f"calls only"
+                f"simulated drivers support driver-method calls only"
             )
         return instr
 

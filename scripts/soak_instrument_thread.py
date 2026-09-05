@@ -1,6 +1,6 @@
 """Soak the instrument thread under a click storm and report the worst GUI stall.
 
-Input: a config directory (default ``sim_real_cryostat``, whose 1 s tick and
+Input: a config directory (default ``sim_cryostat``, whose tick and
 slow simulated instruments are the closest thing to a real rig), a duration,
 and a mode (``threaded``, ``inline``, or ``both`` to run one after the other
 and print them side by side).
@@ -11,7 +11,7 @@ fires every 20 ms and records the gap since its last firing — anything much
 above 20 ms is the GUI thread being held by something. A **click storm** fires
 several times a second and does what an impatient operator does: toggles
 monitoring, initiates and standbys every instrument, queues a run, reorders
-it, asks for a ping, flips the scanner. Every one of those is a command that
+it, asks for a ping. Every one of those is a command that
 crosses to the engine.
 
 Output: on stdout, the heartbeat's worst and 99th-percentile stall, how many
@@ -47,7 +47,7 @@ from cryosoft.core.station import build_station
 from cryosoft.gui.monitor_window import MonitorWindow
 from cryosoft.gui.procedure_window import ProcedureWindow
 
-DEFAULT_CONFIG = "cryosoft/configs/sim_real_cryostat"
+DEFAULT_CONFIG = "cryosoft/configs/sim_cryostat"
 
 #: How often the heartbeat fires. Small enough that a stall of a tenth of a
 #: second is unmistakable, large enough not to be the load itself.
@@ -134,7 +134,6 @@ class ClickStorm:
             ),
             lambda: self._procedure._queue_panel._queue_list.setCurrentRow(0),
             lambda: self._procedure._queue_panel._queue_move_down(),
-            lambda: self._client.set_scanner_enabled(self._step % 2 == 0),
             lambda: self._client.submit_global_action("standby_all"),
         )
         actions[self._step % len(actions)]()

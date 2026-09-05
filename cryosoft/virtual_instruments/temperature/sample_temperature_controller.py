@@ -15,9 +15,8 @@ from cryosoft.virtual_instruments.rampable import RampableVI
 class SampleTemperatureControllerVI(TemperatureControllerBase, RampableVI):
     """Virtual Instrument for a single-sensor, single-loop sample temperature controller.
 
-    This VI controls the sample stage temperature. It has no needle valve.
-    Use ``VTITemperatureControllerVI`` for the VTI (bath) temperature, which
-    includes needle valve control.
+    This VI controls the sample stage temperature. It has no needle valve;
+    a controller that drives one adds those capabilities in a subclass.
 
     Ramp behaviour
     --------------

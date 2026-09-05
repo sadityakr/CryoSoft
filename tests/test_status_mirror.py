@@ -70,7 +70,6 @@ def test_reads_follow_the_event_stream(mirror, engine):
     assert set(mirror.availabilities()) == set(engine.availabilities())
     assert mirror.active_run_kind() is None
     assert mirror.held_vi_names() == frozenset(engine.held_vi_names())
-    assert mirror.scanner_enabled() is engine.scanner_enabled()
 
     engine.stop_monitoring()
     engine._tick()

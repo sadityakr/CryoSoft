@@ -147,7 +147,7 @@ def test_the_tool_surface_is_published_whole(capsys, offline):
     names = {tool["name"] for tool in answer["tools"]}
     assert code == EXIT_OK
     assert answer["mode"] == "offline"
-    assert answer["count"] == len(answer["tools"]) > 60
+    assert answer["count"] == len(answer["tools"]) > 40
     assert {"run_procedure", "read_status", "magnet_z__set_field"} <= names
 
 

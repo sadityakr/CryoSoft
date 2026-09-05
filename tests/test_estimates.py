@@ -29,11 +29,11 @@ CONFIG_PATH = "cryosoft/configs/sim_cryostat"
 SAMPLE_INFO = {"sample_name": "S", "sample_id": "S-1", "comments": ""}
 
 PARAMS = {
-    "measurement_vi": "keithley_delta_mode",
+    "measurement_vi": "dc_measurement",
     "field_start": -1.0,
     "field_end": 1.0,
     "field_steps": 21,
-    "n_readings": 100,
+    "readings_per_point": 100,
     "init_wait": 300.0,
     "step_wait": 5.0,
 }
@@ -64,7 +64,7 @@ def test_the_station_declares_a_nominal_rate_per_ramping_vi(station):
     # The sim magnet's slowest segment is 1 A/min at 10 A/T.
     assert rates["magnet_z"] == pytest.approx(0.1)
     assert rates["temperature_vti"] == pytest.approx(2.0)
-    assert "keithley_delta_mode" not in rates  # not a ramping system VI
+    assert "dc_measurement" not in rates  # not a ramping system VI
 
 
 def test_a_magnet_reports_its_slowest_segment_never_its_fastest(station):
@@ -88,11 +88,13 @@ def test_the_estimate_breaks_the_run_into_its_phases(station, tmp_path):
 
     assert isinstance(estimate, DurationEstimate)
     # -1 T -> 1 T at 0.1 T/min is 20 minutes of ramping; 300 s of initial
-    # settle; 20 later points at 5 s; 21 points of 100 x 10 ms readings.
+    # settle; 20 later points at 5 s. The shipped DC VI declares no
+    # seconds-valued measurement parameter, so no measurement time is
+    # counted — the honest answer, and the one the assumptions state.
     assert estimate.phases[PHASE_RAMP] == pytest.approx(1200.0)
     assert estimate.phases[PHASE_SETUP] == pytest.approx(300.0)
     assert estimate.phases[PHASE_SETTLE] == pytest.approx(100.0)
-    assert estimate.phases[PHASE_MEASURE] == pytest.approx(21.0)
+    assert estimate.phases[PHASE_MEASURE] == pytest.approx(0.0)
     assert estimate.total_s == pytest.approx(sum(estimate.phases.values()))
 
 
@@ -158,7 +160,9 @@ def test_every_estimate_names_its_assumptions(station, tmp_path):
     joined = " ".join(estimate.assumptions)
     assert "concurrently" in joined
     assert "not counted" in joined
-    assert "delay_s" in joined  # the measurement-time model names its inputs
+    # The measurement-time model states what it did with the selected VI's
+    # declarations, whether or not that VI declares a per-sample delay.
+    assert "no per-sample delay" in joined
 
 
 def test_a_vi_with_no_declared_rate_is_named_not_ignored(station, tmp_path):
@@ -221,7 +225,10 @@ def test_the_step_cost_comes_from_the_hooks_the_run_itself_uses(station, tmp_pat
 
     assert isinstance(cost, StepCost)
     assert (cost.points, cost.setup_s, cost.settle_s) == (21, 300.0, 5.0)
-    assert cost.measure_s == pytest.approx(1.0)  # 100 samples x 10 ms
+    # No seconds-valued measurement parameter on the selected VI -> nothing
+    # to count, and the assumption says so rather than implying zero cost.
+    assert cost.measure_s == pytest.approx(0.0)
+    assert any("no per-sample delay" in a for a in cost.assumptions)
 
 
 def test_the_default_hook_is_honest_about_what_it_does_not_know(station, tmp_path):

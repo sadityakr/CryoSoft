@@ -504,7 +504,7 @@ class ParamGroup:
 
     The GUI renders one ``QGroupBox`` per group, in list order. ``key`` is the
     stable identity used to cache the group's values across re-renders (e.g.
-    "system", "measurement:keithley_delta_mode"), so it must survive form
+    "system", "measurement:dc_measurement"), so it must survive form
     re-derivation even when titles change. The ``params`` dict is defensively
     copied.
 
@@ -924,8 +924,8 @@ class DataSchema:
 #: The setpoint-parameter convention: a ``@control`` parameter whose name
 #: starts with this prefix carries its VI's enveloped quantity — the same
 #: physical quantity ``RampableVI.start_ramp(target)`` takes and a ``Target``
-#: commands (tesla for a magnet, kelvin for a temperature controller, degrees
-#: for a rotator). Naming it this way is what lets the session envelope bind a
+#: commands (tesla for a magnet, kelvin for a temperature controller).
+#: Naming it this way is what lets the session envelope bind a
 #: manual action as well as a plan's ``Target``, with no per-VI table for the
 #: Orchestrator to keep in step: it asks the Station which of an action's
 #: keyword arguments is the setpoint and checks that one. A VI declares at

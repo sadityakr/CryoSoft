@@ -398,7 +398,6 @@ class CommandName(str, Enum):
     # Monitoring and policy
     START_MONITORING = "start_monitoring"
     STOP_MONITORING = "stop_monitoring"
-    SET_SCANNER_ENABLED = "set_scanner_enabled"
     SET_EXPERIMENT_ENVELOPE = "set_experiment_envelope"
     SET_ATTENDANCE = "set_attendance"
     SET_AGENT_GATE = "set_agent_gate"
@@ -627,7 +626,6 @@ class StatusSnapshot(_ContractMessage):
         is_monitoring: Whether the per-tick monitoring cycle is polling.
         pause_pending: Whether a pause is waiting for the current datapoint.
         active_run_kind: ``"procedure"``/``"operation"``, or ``None``.
-        scanner_enabled: Whether scanner-sensitive procedures may use it.
         override_active: Whether the EMERGENCY manual override is unlocked
             (the ``override_active(None)`` answer; the per-VI answers live in
             ``instruments[vi_name]["override_active"]``).
@@ -653,7 +651,6 @@ class StatusSnapshot(_ContractMessage):
     is_monitoring: bool = False
     pause_pending: bool = False
     active_run_kind: str | None = None
-    scanner_enabled: bool = False
     override_active: bool = False
     manual_override_expires_at: float | None = None
     held_vi_names: tuple[str, ...] = ()
@@ -686,7 +683,7 @@ class StatusSnapshot(_ContractMessage):
             "envelope_variables",
         ):
             object.__setattr__(self, name, _checked_mapping(getattr(self, name)))
-        for name in ("is_monitoring", "pause_pending", "scanner_enabled",
+        for name in ("is_monitoring", "pause_pending",
                      "override_active", "attended"):
             if not isinstance(getattr(self, name), bool):
                 raise TypeError(f"StatusSnapshot.{name} must be a bool")
@@ -935,11 +932,11 @@ class InstrumentInfo(_ContractMessage):
             ``Command`` targeting it uses.
         vi_class: The VI class's name, e.g. ``"SuperconductingMagnetVI"``.
         role: The config registry's role for this VI — ``"system"``,
-            ``"measurement"``, ``"switch"`` or ``"level"`` (GLOSSARY.md's
+            ``"measurement"`` or ``"level"`` (GLOSSARY.md's
             *vi_type (config/registry)*).
         kind: The VI class's own category — ``"magnet"``,
-            ``"temperature"``, ``"level"``, ``"rotator"``,
-            ``"measurement"`` … (GLOSSARY.md's *vi_type (class)*).
+            ``"temperature"``, ``"level"``, ``"measurement"`` …
+            (GLOSSARY.md's *vi_type (class)*).
         availability: The Availability tags standing at snapshot time,
             sorted — empty for a fully usable instrument (see GLOSSARY.md's
             **Availability tag**). This is the ONE live field in an

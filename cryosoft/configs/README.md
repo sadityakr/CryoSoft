@@ -22,7 +22,7 @@ resolve to a key in the `real_drivers` block.
 ## Exit (what goes out)
 A fully-wired `Station`: driver instances keyed by name, VIs constructed via
 `__init__(self, drivers, **init_params)` with their `init_params` (addresses,
-limits, ramp segments, mux routes) taken verbatim from `devices.yaml`, and a
+limits, ramp segments) taken verbatim from `devices.yaml`, and a
 monitor loop configured from `monitor.yaml`.
 
 ## Interface contract
@@ -128,7 +128,7 @@ write-up from the VI side is `cryosoft/virtual_instruments/README.md`
 1. Create `configs/<name>/` with a `devices.yaml` and a `monitor.yaml`.
 2. In `real_drivers`, list each instrument with its driver class and address.
 3. In `virtual_instruments`, build each VI on those drivers, setting `vi_type`
-   and the `init_params` limits/routes for that setup.
+   and the `init_params` limits for that setup.
 4. Conformance discovers the new directory automatically; run `make check`. For a
    guided setup with identity checks and a preflight report, use the
    `setup-commission` skill (writes a per-setup `setup.md`).

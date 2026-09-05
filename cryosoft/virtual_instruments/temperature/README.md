@@ -2,7 +2,7 @@
 
 ## Purpose
 Virtual instruments for temperature controllers. Abstracts away the model-specific
-driver (ITC503, ITC5, …) so procedures interact with a behaviour-named VI
+driver (Lakeshore 335, …) so procedures interact with a behaviour-named VI
 regardless of which controller is wired to which zone.
 
 ## Architecture layer
@@ -17,28 +17,21 @@ on that side).
 
 ## Exit (what goes out)
 `@monitored` readings: `temperature() → float (K)`, `setpoint() → float (K)`,
-`heater_output() → float (%)`, `heater_mode() → str` ('AUTO'/'MANUAL', shared
-base — both the Lakeshore 335 and Oxford ITC503 drivers implement it).
-`VTITemperatureControllerVI` adds `needle_valve() → float (%)` and
-`needle_valve_mode() → str` ('AUTO'/'MANUAL' — the ITC503's gas-flow control
-loop drives the valve in AUTO and ignores explicit position commands).
+`heater_output() → float (%)`, `heater_mode() → str` ('AUTO'/'MANUAL', on
+the shared base — the vocabulary every controller driver implements).
 `Lakeshore335SampleTemperatureControllerVI` adds `curve() → int` (the
 assigned calibration curve number) and `heater_range() → str`
 ('OFF'/'LOW'/'MEDIUM'/'HIGH' — the Lakeshore 335's heater powers up in range
 Off and delivers no power, regardless of `heater_mode` or setpoint, until
-this is set to Low/Medium/High; the ITC503 has no equivalent range concept,
-so it stays Lakeshore-specific).
+this is set to Low/Medium/High; a controller with no range concept simply
+has no such reading, so it stays Lakeshore-specific).
 `@control` actions: `set_temperature(K)`, `set_ramp_rate(K/min)` — both
 bounded by the config limits via `control_limits`; `set_heater_mode(str)` is
 a `panel=False` front-panel-only drop-down (choices AUTO/MANUAL, shared
 base); `set_heater_output(%)` (also `panel=False`, shared base) commands
 manual heater power and is refused with `CryoSoftSafetyError` unless
 `heater_mode` is MANUAL — the closed-loop PID would otherwise silently
-override it. `set_needle_valve(%)` on the VTI is bounded to the physical
-0–100 % and is likewise refused unless `needle_valve_mode` is MANUAL (the
-real-hardware bug this fixes: the ITC503's gas-flow loop ignores position
-commands while in AUTO); `set_needle_valve_mode(str)` (`panel=False`) is the
-AUTO/MANUAL drop-down that unlocks it. `set_curve(int)` and
+override it. `set_curve(int)` and
 `set_heater_range(str)` on the Lakeshore 335 variant are `panel=False`
 front-panel-only drop-downs (curve choices = the instrument's 0–59 curve
 numbering; heater range choices = OFF/LOW/MEDIUM/HIGH).
@@ -53,14 +46,15 @@ stale setpoint left over from before the heater was switched to MANUAL, so
 initiating never kicks off a surprise ramp to some old target; a subsequent
 `set_temperature()`/`start_ramp()` starts its ramp from this pinned point
 like any other resting state. `standby()` sets heater mode MANUAL and
-commands zero heater output, so no
-closed-loop setpoint can drive power while idle; on `VTITemperatureControllerVI`,
-`standby()` additionally switches needle valve mode to MANUAL before closing
-it (0 % open), cutting bath helium flow — the mode switch must happen first,
-since the ITC503's gas-flow control loop ignores a bare position command
-while gas flow is in AUTO (its power-up default). `Lakeshore335SampleTemperatureControllerVI`
-does not touch `heater_range` on standby/initiate — it is a separate,
-driver-specific power gate (see below) left as the operator set it.
+commands zero heater output, so no closed-loop setpoint can drive power
+while idle. `Lakeshore335SampleTemperatureControllerVI` EXTENDS `initiate()`
+with the one piece of operating state the 335 adds: its heater RANGE, taken
+from the setup's `initiate_heater_range` (default MEDIUM). Off delivers no
+power whatever the mode or setpoint is, so a 335 handed the loop without a
+range would be under closed-loop control and still not heat. `standby()`
+deliberately does NOT mirror it — switching heater power back off is the
+operator's call, and the inherited standby has already taken the loop out of
+circuit at zero output.
 
 `TemperatureControllerBase` does not override `safety_concerns()` — it
 keeps the empty-set default, so a temperature controller is never subject
@@ -89,25 +83,17 @@ All classes here extend `SampleTemperatureControllerVI` (itself inheriting from
   `@control set_temperature` / `set_ramp_rate` / `set_heater_mode`
   (`panel=False`) / `set_heater_output` (`panel=False`, refused unless
   `heater_mode` is MANUAL), the `RampableVI` methods. `heater_mode` lives
-  here (not on a driver-specific subclass) because both the Lakeshore 335
-  and Oxford ITC503 drivers implement `get_heater_mode`/`set_heater_mode`
-  with the same 'AUTO'/'MANUAL' vocabulary. `initiate()` pins the setpoint to
+  here (not on a driver-specific subclass) because every controller driver
+  implements `get_heater_mode`/`set_heater_mode` with the same
+  'AUTO'/'MANUAL' vocabulary. `initiate()` pins the setpoint to
   `round(temperature())` before setting heater mode AUTO; `standby()` sets
   heater mode MANUAL and zeroes heater output — the lifecycle standard.
   Declares two **UI groups** (`ui_groups`, tagged `group=` per method),
-  inherited by both subclasses below: `temperature_control` (the sensor
+  inherited by the subclass below: `temperature_control` (the sensor
   reading, the setpoint, and the target/rate controls that drive it) and
   `heater` (loop mode, manual output, and the PID gains behind them).
   tests: `tests/test_l1_new_vis.py`
   (`TestSampleTemperatureControllerVI`), `tests/test_l1_virtual_instruments.py`.
-- `vti_temperature_controller.py` — `VTITemperatureControllerVI`: extends above with
-  needle valve `@monitored needle_valve` / `needle_valve_mode` and
-  `@control set_needle_valve` (refused unless `needle_valve_mode` is MANUAL)
-  / `set_needle_valve_mode` (`panel=False`, AUTO/MANUAL drop-down) — the same
-  ITC503 auxiliary output and its own control-mode half of the combined
-  heater/gas register. `standby()` extends the inherited heater lifecycle by
-  switching needle valve mode to MANUAL, then closing it. tests:
-  `tests/test_l1_new_vis.py` (`TestVTITemperatureControllerVI`).
 - `lakeshore_335_sample_temperature_controller.py` —
   `Lakeshore335SampleTemperatureControllerVI`: extends
   `SampleTemperatureControllerVI` with `@monitored curve` / `@control
@@ -115,9 +101,12 @@ All classes here extend `SampleTemperatureControllerVI` (itself inheriting from
   `@monitored heater_range` / `@control set_heater_range` (`panel=False`)
   over the `RANGE` command — the heater's power-up default is Off, so no
   heater power is delivered (regardless of `heater_mode` or setpoint) until
-  this is set to Low/Medium/High. Both are driver-specific (only the
-  Lakeshore 335 driver/sim implement `get_sensor_curve`/`set_sensor_curve`
-  and `get_heater_range`/`set_heater_range`; the Oxford ITC503 has neither
-  concept), so they stay on this subclass rather than the shared base. tests:
+  this is set to Low/Medium/High — which is why `initiate()` is extended
+  here to select the setup's `initiate_heater_range` (default MEDIUM). Both
+  readings are driver-specific (only the Lakeshore 335 driver/sim implement
+  `get_sensor_curve`/`set_sensor_curve` and
+  `get_heater_range`/`set_heater_range`), so they stay on this subclass
+  rather than the shared base. It is also the shipped example of dynamic
+  `control_param_specs()` choices under the purity rule. tests:
   `tests/test_l1_new_vis.py` (`TestLakeshore335SampleTemperatureControllerVI`).
 - `__init__.py` — package marker. tests: none.

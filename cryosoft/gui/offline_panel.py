@@ -140,7 +140,7 @@ class OfflineInstrumentPanel(QGroupBox):
             reason from; built from the engine when none is given (the
             inline construction path).
         parent: Optional Qt parent widget.
-        type_tag: Optional role label ("Measurement", "Scanner"), mirroring
+        type_tag: Optional role label (e.g. "Measurement"), mirroring
             the live cards so the grid stays recognisable.
     """
 

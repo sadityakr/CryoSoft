@@ -10,7 +10,6 @@ import qtawesome as qta
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction, QCloseEvent
 from PyQt6.QtWidgets import (
-    QCheckBox,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -147,9 +146,8 @@ class MonitorWindow(QMainWindow):
     A slim page tab bar in the header switches between two pages held in a
     central QStackedWidget. Page 1 (Monitor) is the fixed 2x2 quadrant grid
     built from nested QSplitters: top-left is a scrollable 2-column grid of
-    :class:`InstrumentPanel` cards for EVERY VI — system/level first, then
-    measurement and switch cards tagged by role (the switch card carries the
-    station-wide Enable Scanner checkbox) — top-right is the
+    :class:`InstrumentPanel` cards for EVERY VI — system cards first, then
+    measurement cards tagged by role — top-right is the
     :class:`TrendsQuadrant`, bottom-left is the :class:`ExperimentInfoPanel`,
     and bottom-right splits vertically into a horizontal row of the
     :class:`RampTrackerPanel` (left) and the optional
@@ -257,10 +255,6 @@ class MonitorWindow(QMainWindow):
         self._panels_config = dict(panels_config or {})
         self._procedure_window = None  # lazily created
         self._diagnostics_window = None  # lazily created
-        # One Enable Scanner checkbox per switch card, kept in sync because
-        # scanner_enabled is a single Station-wide bit.
-        self._scanner_enable_checks: list[QCheckBox] = []
-
         # Cryogenics management,
         # all optional — every existing construction site (and every prior
         # test) keeps working with these left at their None defaults, which
@@ -575,10 +569,6 @@ class MonitorWindow(QMainWindow):
             n for n in self._station.get_vi_names()
             if self._station.get_vi_type(n) == "measurement"
         ]
-        switch_vis = [
-            n for n in self._station.get_vi_names()
-            if self._station.get_vi_type(n) == "switch"
-        ]
 
         # ── Header ────────────────────────────────────────────────────
         root.addLayout(self._build_header())
@@ -619,7 +609,7 @@ class MonitorWindow(QMainWindow):
         self._last_hold_message: str | None = None
 
         # ── Fixed 2x2 quadrant grid (Page 1 — Monitor) ───────────────
-        top_left = self._build_instruments_quadrant(measurement_vis, switch_vis)
+        top_left = self._build_instruments_quadrant(measurement_vis)
         self._trends = TrendsQuadrant(self._station, parent=self)
         self._session_info = ExperimentInfoPanel(session_manager=self._session_manager)
         bottom_right = self._build_operations_quadrant()
@@ -799,22 +789,17 @@ class MonitorWindow(QMainWindow):
             "instruments have been initiated)"
         )
 
-    def _build_instruments_quadrant(
-        self, measurement_vis: list[str], switch_vis: list[str]
-    ) -> QWidget:
+    def _build_instruments_quadrant(self, measurement_vis: list[str]) -> QWidget:
         """Build the top-left quadrant: a scrollable 2-column grid of ALL VI cards.
 
-        System/level VIs come first (config order, untagged), then
-        measurement and switch VIs as tagged cards — full citizens of the
-        instrument grid since the Other Devices section was retired. The
-        switch card carries the station-wide Enable Scanner checkbox as its
-        extra widget. Panels are built once and kept in self._panels for the
-        lifetime of the window — recreating them would drop their
-        Orchestrator signal connections.
+        System VIs come first (config order, untagged), then measurement VIs
+        as tagged cards — full citizens of the instrument grid since the Other
+        Devices section was retired. Panels are built once and kept in
+        self._panels for the lifetime of the window — recreating them would
+        drop their Orchestrator signal connections.
 
         Args:
             measurement_vis: Names of measurement VIs, rendered tagged.
-            switch_vis: Names of switch/scanner VIs, rendered tagged.
 
         Returns:
             A QWidget containing the title, and a QScrollArea of InstrumentPanels.
@@ -830,7 +815,6 @@ class MonitorWindow(QMainWindow):
             (n, None) for n in self._system_vi_names
         ]
         entries += [(n, "Measurement") for n in measurement_vis]
-        entries += [(n, "Scanner") for n in switch_vis]
 
         self._panels: list[InstrumentPanel] = []
         self._offline_cards: dict[str, OfflineInstrumentPanel] = {}
@@ -847,7 +831,7 @@ class MonitorWindow(QMainWindow):
         # Offline instruments (degraded build) render after the live cards as
         # control-free fault cards; a successful reconnect swaps the card for
         # a live panel in place (_on_instrument_reconnected).
-        tag_by_type = {"measurement": "Measurement", "switch": "Scanner"}
+        tag_by_type = {"measurement": "Measurement"}
         for offset, vi_name in enumerate(self._station.offline_vi_names()):
             card = OfflineInstrumentPanel(
                 vi_name,
@@ -877,17 +861,12 @@ class MonitorWindow(QMainWindow):
 
         Args:
             vi_name: The registered VI's name.
-            type_tag: Role label for tagged cards ("Measurement", "Scanner"),
-                None for system/level cards.
+            type_tag: Role label for tagged cards ("Measurement"), None for
+                system cards.
 
         Returns:
             The wired InstrumentPanel, size policy applied.
         """
-        extra = (
-            self._build_scanner_enable_checkbox(vi_name)
-            if self._role_of(vi_name) == "switch"
-            else None
-        )
         panel = InstrumentPanel(
             vi_name,
             self._orchestrator,
@@ -895,7 +874,6 @@ class MonitorWindow(QMainWindow):
             parent=self,
             panel_controls=self._panels_config.get(vi_name),
             type_tag=type_tag,
-            extra_widget=extra,
         )
         panel.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
@@ -909,7 +887,7 @@ class MonitorWindow(QMainWindow):
             vi_name: The VI's configured name.
 
         Returns:
-            ``"system"``/``"measurement"``/``"switch"``/``"level"``, or ``""``
+            ``"system"`` or ``"measurement"``, or ``""``
             when the declaration names no such instrument.
         """
         info = self._mirror.instrument_info(vi_name)
@@ -933,7 +911,7 @@ class MonitorWindow(QMainWindow):
         card = self._offline_cards.pop(vi_name, None)
         if card is None:
             return
-        tag_by_type = {"measurement": "Measurement", "switch": "Scanner"}
+        tag_by_type = {"measurement": "Measurement"}
         panel = self._make_live_panel(vi_name, tag_by_type.get(self._role_of(vi_name)))
         self._panels.append(panel)
         self._instruments_grid.replaceWidget(card, panel)
@@ -969,7 +947,7 @@ class MonitorWindow(QMainWindow):
         # mirror of the pop in _on_instrument_reconnected(): a re-entrant
         # disconnect signal then finds no panel and returns.
         self._panels.remove(panel)
-        tag_by_type = {"measurement": "Measurement", "switch": "Scanner"}
+        tag_by_type = {"measurement": "Measurement"}
         card = OfflineInstrumentPanel(
             vi_name,
             self._orchestrator,
@@ -984,43 +962,6 @@ class MonitorWindow(QMainWindow):
         panel.close_front_panel()
         retire_widget(panel, self._instruments_grid)
         logger.info("Live panel for '%s' replaced by offline card", vi_name)
-
-    def _build_scanner_enable_checkbox(self, vi_name: str) -> QCheckBox:
-        """Build one switch card's Enable Scanner checkbox.
-
-        scanner_enabled is a single Station-owned bit shared by every switch
-        VI (see GLOSSARY.md "scanner_enabled"), so with more than one switch
-        card every card's checkbox tracks the same state.
-
-        Args:
-            vi_name: The switch VI whose card hosts this checkbox.
-
-        Returns:
-            The wired QCheckBox.
-        """
-        enable_chk = QCheckBox("Enable Scanner")
-        enable_chk.setObjectName(f"{vi_name}_enable_scanner_chk")
-        enable_chk.setToolTip(
-            "Off by default. Required before the Procedure window offers "
-            "this scanner's routes as loopable measurement parameters."
-        )
-        enable_chk.setChecked(self._mirror.scanner_enabled())
-        enable_chk.toggled.connect(self._on_scanner_toggled)
-        self._scanner_enable_checks.append(enable_chk)
-        return enable_chk
-
-    def _on_scanner_toggled(self, checked: bool) -> None:
-        """Apply the station-wide scanner toggle and keep every switch card in sync.
-
-        Args:
-            checked: New state of the checkbox that was toggled.
-        """
-        self._orchestrator.set_scanner_enabled(checked)
-        for chk in self._scanner_enable_checks:
-            if chk.isChecked() != checked:
-                chk.blockSignals(True)
-                chk.setChecked(checked)
-                chk.blockSignals(False)
 
     def _build_operations_quadrant(self) -> QWidget:
         """Build the bottom-right quadrant: Ramps, Operations, and Agents.

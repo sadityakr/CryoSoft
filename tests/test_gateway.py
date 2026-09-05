@@ -125,18 +125,6 @@ def test_observer_is_refused_run_control_with_a_structured_reason(station_info):
     assert not verdict.ok
 
 
-def test_observer_may_read(station_info):
-    """A read-class capability is permitted to every role."""
-    command = _command(
-        ev.CommandName.SUBMIT_VI_ACTION,
-        actor=OBSERVER,
-        vi_name="keithley_dc_mode",
-        method_name="read_now",
-    )
-
-    assert _authorize(command, station_info) is None
-
-
 def test_debug_takes_recovery_only_while_unattended(station_info):
     """The attendance rule: with a human present the agent reports instead."""
     command = _command(ev.CommandName.PAUSE_PROCEDURE, actor=DEBUG)
@@ -205,21 +193,21 @@ def test_a_revoked_gate_refuses_even_the_session_role(station_info):
     assert verdict.detail["gate"] == "revoked"
 
 
-def test_a_read_only_gate_leaves_reads_alone(station_info):
-    """read_only is the middle rung: observe, but write nothing."""
-    read = _command(
-        ev.CommandName.SUBMIT_VI_ACTION,
-        vi_name="keithley_dc_mode",
-        method_name="read_now",
-    )
+def test_a_read_only_gate_refuses_every_write(station_info):
+    """read_only is the middle rung: observe, but write nothing.
+
+    No shipped VI declares a read-class capability today, so the READ rung
+    itself has no subject to dispatch here; what this pins is the half that
+    does have one — every non-read class is refused while the gate is closed
+    to writes.
+    """
     write = _command(ev.CommandName.PAUSE_PROCEDURE)
 
-    assert _authorize(read, station_info, gate=ev.AgentGate.READ_ONLY) is None
     refused = _authorize(write, station_info, gate=ev.AgentGate.READ_ONLY)
     assert refused is not None
     assert refused.detail["gate"] == "read_only"
 
-    assert _authorize(read, station_info, gate=ev.AgentGate.REVOKED) is not None
+    assert _authorize(write, station_info, gate=ev.AgentGate.REVOKED) is not None
 
 
 def test_the_human_path_is_never_judged_here(station_info):

@@ -46,13 +46,13 @@ CONFIG_PATH = "cryosoft/configs/sim_cryostat"
 SAMPLE_INFO = {"sample_name": "S", "sample_id": "S-1", "comments": ""}
 
 FULL_PARAMS = {
-    "measurement_vi": "keithley_delta_mode",
+    "measurement_vi": "dc_measurement",
     "field_start": -1.0,
     "field_end": 1.0,
     "field_steps": 21,
     "temperature": 300.0,
-    "current": 1e-6,
-    "n_readings": 50,
+    "current_A": 1e-6,
+    "readings_per_point": 50,
     "init_wait": 300.0,
     "step_wait": 30.0,
 }
@@ -94,11 +94,11 @@ def test_every_command_tool_is_rendered_from_the_engines_own_docstring(tools):
 
 def test_a_signature_becomes_a_schema(tools):
     """Scalar parameters render straight from the signature, with their docstring."""
-    schema = tools["set_scanner_enabled"].input_schema
+    schema = tools["set_attendance"].input_schema
 
-    assert schema["properties"]["enabled"]["type"] == "boolean"
-    assert schema["properties"]["enabled"]["description"]
-    assert schema["required"] == ["enabled"]
+    assert schema["properties"]["attended"]["type"] == "boolean"
+    assert schema["properties"]["attended"]["description"]
+    assert schema["required"] == ["attended"]
     assert tools["stop_ramp"].input_schema["properties"]["vi_name"]["type"] == "string"
 
 
@@ -160,14 +160,6 @@ def test_a_default_the_configured_bound_refuses_is_not_published(tools):
 
     assert target["minimum"] == 1.4
     assert "default" not in target
-
-
-def test_a_read_capability_is_rendered_read_class(tools):
-    """The one control that only reads keeps its class through the rendering."""
-    assert (
-        tools[capability_tool_name("keithley_dc_mode", "read_now")].action_class
-        is ActionClass.READ
-    )
 
 
 def test_the_surface_is_json_safe_and_uniquely_named(tools):

@@ -659,13 +659,6 @@ class Orchestrator(QObject):
         self._hold_enforcement_interval_s = float(hold_enforcement_interval_s)
         self._hold_enforcement_max_attempts = int(hold_enforcement_max_attempts)
 
-        # Scanner (switch VI) availability: an on/off flag procedures check
-        # via Station.scanner_enabled() rather than assuming the first switch
-        # VI a station exposes is theirs to use. Resolved once at construction
-        # (the Station is fully built before the Orchestrator is).
-        switch_names = station.switch_vi_names()
-        self._scanner_vi_name: str | None = switch_names[0] if switch_names else None
-
         # Operational-status reporting (runtime troubleshooting signal).
         # The setup name is resolved once here, from the fully built Station,
         # for the record standard's ``setup`` field.
@@ -1344,18 +1337,6 @@ class Orchestrator(QObject):
         stopped) and the Orchestrator degrades to ERROR instead of crashing
         the application.
         """
-        # A magnet in manual persistent mode means the user is driving its
-        # switch heater / PSU by hand; a procedure must not run over that.
-        persistent_magnets = self._station.persistent_mode_magnets()
-        if persistent_magnets:
-            msg = (
-                "Cannot start a procedure while a magnet is in persistent mode "
-                f"({', '.join(persistent_magnets)}). Disable persistent mode first."
-            )
-            logger.info("Blocked run_procedure: %s", msg)
-            self._action_blocked(msg)
-            return
-
         manual_ramping = (
             self._state == OrchestratorState.RAMPING and self._procedure is None
         )
@@ -2733,11 +2714,6 @@ class Orchestrator(QObject):
         self._emit_station_info()
         self._emit_status_snapshot()
         if ok:
-            # A reconnected switch VI must be adoptable as the scanner —
-            # re-run the same first-switch resolution done at construction.
-            if self._scanner_vi_name is None:
-                switch_names = self._station.switch_vi_names()
-                self._scanner_vi_name = switch_names[0] if switch_names else None
             logger.info("Connect succeeded for '%s'", vi_name)
             self.instrument_reconnected.emit(vi_name)
             self._action_succeeded(vi_name, "connect", result=message)
@@ -2805,10 +2781,6 @@ class Orchestrator(QObject):
         self._emit_station_info()
         self._emit_status_snapshot()
         if ok:
-            # The scanner slot must not keep naming a VI that is gone; the
-            # next connect re-resolves it (see connect_instrument()).
-            if self._scanner_vi_name == vi_name:
-                self._scanner_vi_name = None
             logger.info("Instrument '%s' disconnected by the operator", vi_name)
             self.instrument_disconnected.emit(vi_name)
             self._action_succeeded(vi_name, "disconnect", result=message)
@@ -2997,29 +2969,6 @@ class Orchestrator(QObject):
         else:
             logger.warning("Retry failed for faulted VI '%s': %s", vi_name, message)
             self._action_failed(vi_name, "retry_fault", message)
-
-    @command
-    def set_scanner_enabled(self, enabled: bool) -> None:
-        """Toggle scanner availability for scanner-sensitive procedures.
-
-        A no-op (logged at INFO) when the station has no switch VI, so
-        stations without a scanner can call this unconditionally.
-
-        Args:
-            enabled: True to make the scanner available to procedures.
-        """
-        if self._scanner_vi_name is None:
-            logger.info("set_scanner_enabled ignored: no switch VI in station")
-            self._action_blocked(
-                "Cannot change scanner availability: this station has no switch instrument"
-            )
-            return
-        self._station.set_scanner_enabled(bool(enabled))
-        self._emit_status_snapshot()  # not a state change; see start_monitoring()
-
-    def scanner_enabled(self) -> bool:
-        """Return whether scanner-sensitive procedures may use the switch VI."""
-        return self._station.scanner_enabled()
 
     # ------------------------------------------------------------------
     # Run manifests (consumed by the session layer)
@@ -3548,7 +3497,6 @@ class Orchestrator(QObject):
             is_monitoring=self._monitoring,
             pause_pending=self._pause_requested,
             active_run_kind=self.active_run_kind(),
-            scanner_enabled=self.scanner_enabled(),
             override_active=self.override_active(),
             manual_override_expires_at=self.manual_override_expires_at(),
             held_vi_names=tuple(sorted(held)),
