@@ -8,7 +8,8 @@ in ``tests/test_conformance.py``:
 1. **One class, three declarations, one method.** Subclass ``AnalysisRecipe``
    and declare a ``name`` (a unique snake_case identifier, the id the panel,
    the settings file and the agent's tools use), a one-line ``description``,
-   and ``procedures`` — the tuple of procedure CLASS NAMES the recipe serves,
+   and ``procedures`` — the tuple of procedure names the recipe serves (class
+   name or display name; matched case- and punctuation-insensitively),
    or ``(ANY_PROCEDURE,)`` for a recipe that serves every run. Then implement
    ``analyse(self, run, context) -> AnalysisReport``. A recipe is instantiated
    with no arguments, so it holds no constructor state; anything it needs
@@ -280,7 +281,8 @@ class AnalysisRecipe:
     Attributes:
         name: Unique snake_case id, e.g. ``"field_sweep_overview"``. A recipe
             with an empty name is an intermediate base and is not discovered.
-        procedures: The procedure class names this recipe serves, or
+        procedures: The procedures this recipe serves — class names or
+            display names, matched case- and punctuation-insensitively — or
             ``(ANY_PROCEDURE,)`` for every run.
         description: One line, shown in the panel and in the agent's recipe
             list.

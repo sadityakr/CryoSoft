@@ -76,7 +76,7 @@ Orchestrator ── run finished ──▶ session/eln publisher
 - **The recipe contract** is written in `base.py`'s module docstring and
   machine-checked by the analysis conformance tests: one class per recipe
   declaring a snake_case `name`, a non-empty `description` and a `procedures`
-  tuple of procedure class names (or `("*",)`); `analyse(self, run, context)
+  tuple of procedure names — class or display name, matched case- and punctuation-insensitively by `procedure_key()` (or `("*",)`); `analyse(self, run, context)
   -> AnalysisReport`; instantiated with no arguments; reading the run only
   through the **Run source** vocabulary; making figures and tables only
   through the context.

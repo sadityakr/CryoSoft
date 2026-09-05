@@ -34,6 +34,7 @@ from cryosoft.analysis.discovery import (
     RecipeInfo,
     discover_recipes,
     load_recipe,
+    procedure_key,
     recipe_for,
     scaffold_recipe,
 )
@@ -350,6 +351,20 @@ def test_recipe_for_preference_order(tmp_path):
 
     only_specific = (RecipeInfo(name="x", procedures=("FieldSweep",)),)
     assert recipe_for("TimeSeries", only_specific) is None
+
+
+def test_recipe_for_matches_the_display_name_and_the_class_name():
+    """The manifest names a procedure by its display name ("Field Sweep"), a
+    recipe author writes the class name ("FieldSweep"): both must match, and
+    the normalisation is symmetric."""
+    by_class = (RecipeInfo(name="x", procedures=("FieldSweep",)),)
+    by_display = (RecipeInfo(name="y", procedures=("Field Sweep",)),)
+    assert recipe_for("Field Sweep", by_class).name == "x"
+    assert recipe_for("FieldSweep", by_display).name == "y"
+    assert recipe_for("field_sweep", by_class).name == "x"
+    assert recipe_for("Temperature Sweep", by_class) is None
+    assert procedure_key("Field Sweep") == procedure_key("FieldSweep") == "fieldsweep"
+    assert procedure_key("---") == ""
 
 
 def test_load_recipe_refuses_a_vanished_source(tmp_path):

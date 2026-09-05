@@ -407,18 +407,38 @@ def discover_recipes(extra_dirs: Sequence[str | Path] = ()) -> tuple[RecipeInfo,
     return tuple(found.values())
 
 
+def procedure_key(name: str) -> str:
+    """Normalise a procedure name for matching.
+
+    The run manifest names a procedure by its display ``name`` (``"Field
+    Sweep"``) while a recipe author naturally writes the class name
+    (``"FieldSweep"``); both must match. Letters and digits are kept and
+    lower-cased, everything else is dropped, so ``"Field Sweep"``,
+    ``"FieldSweep"`` and ``"field_sweep"`` are the same key.
+
+    Args:
+        name: A procedure display name or class name.
+
+    Returns:
+        The normalised key; ``""`` for an empty or all-punctuation name.
+    """
+    return "".join(c for c in name.lower() if c.isalnum())
+
+
 def recipe_for(
     procedure: str, recipes: Sequence[RecipeInfo], preferred: str = ""
 ) -> RecipeInfo | None:
     """Return the recipe that should run for one procedure.
 
     The selection order: the ``preferred`` name when a recipe carries it, else
-    the first recipe naming this procedure in its ``procedures``, else the
-    first recipe declaring ``ANY_PROCEDURE``.
+    the first recipe naming this procedure in its ``procedures`` (compared
+    through ``procedure_key()``, so the manifest's display name matches a
+    recipe written against the class name), else the first recipe declaring
+    ``ANY_PROCEDURE``.
 
     Args:
-        procedure: The procedure CLASS NAME from the run manifest's
-            ``procedure`` field.
+        procedure: The procedure's name as the run manifest's ``procedure``
+            field carries it (the display name), or its class name.
         recipes: The candidates, as returned by ``discover_recipes()``.
         preferred: A recipe ``name`` to prefer — the eLab settings' per-
             procedure choice, or what the caller explicitly asked for.
@@ -430,9 +450,11 @@ def recipe_for(
         for info in recipes:
             if info.name == preferred:
                 return info
-    for info in recipes:
-        if procedure and procedure in info.procedures:
-            return info
+    key = procedure_key(procedure)
+    if key:
+        for info in recipes:
+            if any(procedure_key(p) == key for p in info.procedures):
+                return info
     for info in recipes:
         if ANY_PROCEDURE in info.procedures:
             return info

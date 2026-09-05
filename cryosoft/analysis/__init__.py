@@ -26,6 +26,7 @@ from cryosoft.analysis.discovery import (
     RecipeInfo,
     discover_recipes,
     load_recipe,
+    procedure_key,
     recipe_for,
     scaffold_recipe,
 )
@@ -65,6 +66,7 @@ __all__ = [
     "discover_recipes",
     "load_recipe",
     "read_report",
+    "procedure_key",
     "recipe_for",
     "run_spec",
     "scaffold_recipe",
