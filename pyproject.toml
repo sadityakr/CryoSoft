@@ -33,7 +33,13 @@ dependencies = [
 # checkout without this extra imports, lints, and tests unchanged. Only
 # `messages.create` is used, which both the 0.x and 1.x SDK lines provide.
 assistant = ["anthropic>=0.40"]
+# Figures in analysis recipes (cryosoft/analysis/). OPTIONAL for the same
+# reason: a recipe that draws nothing needs nothing, matplotlib is imported
+# lazily by the figure helper, and a checkout without it imports, lints and
+# tests unchanged. Listed under dev as well so CI exercises the figure path.
+analysis = ["matplotlib>=3.7"]
 dev = [
+    "matplotlib>=3.7",
     "pytest>=7.4",
     "pytest-qt>=4.2",
     "mypy>=1.5",
