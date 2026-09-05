@@ -22,7 +22,6 @@ one allowed exception). CI runs `make lint + make contracts + make test`.
 | `cryosoft/gui/experiment_dialogs.py` | Start/Close Experiment dialogs, shared `UserPickerWidget`, add-user dialog |
 | `cryosoft/gui/setup_dialogs.py` | Setup-tier dialogs: login (`LoginDialog`), read-only instrument info (`InstrumentInfoDialog`) |
 | `cryosoft/gui/log_panel.py` | Log widget + `QtLogHandler` (attach/detach lifecycle) |
-| `cryosoft/gui/config_menu.py` | Config menu controller (select/switch/restart, editor launcher) |
 | `cryosoft/gui/procedure_window.py` | Procedure window (composition shell): quadrants, run/queue/abort flows, two `LivePlotPanel`s |
 | `cryosoft/gui/procedure_params_panel.py` | Procedure selector + parameter form + param cache (the params quadrant) |
 | `cryosoft/gui/queue_panel.py` | Run-queue list, per-item status, Orchestrator queue sync |

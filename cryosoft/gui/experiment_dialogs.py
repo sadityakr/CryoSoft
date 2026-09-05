@@ -337,7 +337,7 @@ class EnvelopeEditorWidget(QGroupBox):
             self._rows[vi_name] = (min_edit, max_edit)
         layout.addLayout(form)
 
-        # Reuses DiagnosticsWindow's validated "verdict_badge" QSS class
+        # Reuses the validated "verdict_badge" QSS class
         # rather than inventing a colour for one message.
         self._error_label = QLabel("")
         self._error_label.setObjectName("envelope_error_label")

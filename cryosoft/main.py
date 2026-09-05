@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any, Callable
 
 import pyqtgraph as pg
-from PyQt6.QtCore import QProcess
 from PyQt6.QtWidgets import QApplication
 
 from cryosoft.core.config_catalog import ConfigCatalog
@@ -220,17 +219,6 @@ def _build_gateway_server(
     return server
 
 
-def _restart_application() -> None:
-    """Relaunch the app in a fresh process and quit this one.
-
-    Used after a config switch (which needs a clean rebuild of the whole
-    instrument stack). ``startDetached`` launches an independent process before
-    this one exits, so the window closes and reopens.
-    """
-    QProcess.startDetached(sys.executable, sys.argv)
-    QApplication.quit()
-
-
 def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
     """Start the CryoSoft application.
 
@@ -251,6 +239,9 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
     app.setStyleSheet(build_stylesheet())
     pg.setConfigOptions(background=PLOT_BG, foreground=PLOT_AXIS, antialias=True)
 
+    # The config catalog: used at startup only — to resolve the identity of
+    # whichever candidate actually loaded, so the next launch starts there
+    # even from a different clone or worktree.
     catalog = ConfigCatalog(
         app_settings.shipped_config_dir(), app_settings.user_config_dir()
     )
@@ -498,9 +489,7 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
     monitor = MonitorWindow(
         station,
         orchestrator,
-        catalog=catalog,
         active_config_path=used_path,
-        restart_callback=_restart_application,
         startup_warning="; ".join(warnings) if warnings else None,
         session_manager=session_manager,
         eln_publisher=app.eln_publisher,

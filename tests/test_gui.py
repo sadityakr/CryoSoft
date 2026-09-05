@@ -58,7 +58,6 @@ from cryosoft.gui import window_geometry
 from cryosoft.gui.instrument_front_panel import InstrumentFrontPanel
 from cryosoft.gui.instrument_panel import InstrumentPanel
 from cryosoft.gui.monitor_window import MonitorWindow
-from cryosoft.gui.diagnostics_window import DiagnosticsWindow
 from cryosoft.gui.notification_banner import NotificationBanner
 from cryosoft.gui.procedure_window import ProcedureWindow
 from cryosoft.gui.theme import (
@@ -165,15 +164,6 @@ def orchestrator(instrument_host):
 def monitor_win(station, orchestrator, qtbot):
     """MonitorWindow shown via qtbot."""
     win = MonitorWindow(station, orchestrator)
-    qtbot.addWidget(win)
-    win.show()
-    return win
-
-
-@pytest.fixture
-def diagnostics_win(orchestrator, qtbot):
-    """DiagnosticsWindow shown via qtbot."""
-    win = DiagnosticsWindow(orchestrator)
     qtbot.addWidget(win)
     win.show()
     return win
@@ -3488,60 +3478,33 @@ def test_queue_remove_drops_the_spec_from_the_run_queue(station, orchestrator, q
     assert len(win._queue_panel._host.snapshot()) == 1
 
 
-# ── Config management + geometry tests ─────────────────────────────────────────
+# ── Startup config resolution + geometry tests ────────────────────────────────
 
 def _catalog(tmp_path):
     return ConfigCatalog(_app_settings.shipped_config_dir(), tmp_path / "user")
 
 
-def test_monitor_no_config_menu_without_catalog(monitor_win):
-    """Without a catalog, no Config menu appears (backward compatible)."""
+def test_monitor_menu_bar_is_user_and_procedures_only(monitor_win):
+    """The operator menu bar is exactly User + Procedures."""
     titles = [a.text() for a in monitor_win.menuBar().actions()]
-    assert "Config" not in titles
+    assert titles == ["User", "Procedures"]
 
 
-def test_monitor_has_config_menu_with_catalog(station, orchestrator, qtbot, tmp_path):
-    """A catalog wires in a Config menu listing the shipped configs."""
-    win = MonitorWindow(station, orchestrator, catalog=_catalog(tmp_path))
-    qtbot.addWidget(win)
-    titles = [a.text() for a in win.menuBar().actions()]
-    assert "Config" in titles
+def test_instrument_info_lives_in_the_user_menu(monitor_win):
+    """The read-only instrument-info action now hangs off the User menu.
 
-
-def test_select_config_confirmed_triggers_restart(station, orchestrator, qtbot, tmp_path, monkeypatch):
-    """Confirming a config switch persists it and calls the restart callback."""
-    restarted = []
-    catalog = _catalog(tmp_path)
-    win = MonitorWindow(
-        station, orchestrator, catalog=catalog,
-        active_config_path="/nowhere/active",
-        restart_callback=lambda: restarted.append(True),
+    It used to sit under a Config menu that no longer exists; it describes
+    the rack the person in front of the app is using and writes nothing, so
+    it belongs beside the login.
+    """
+    user_menu = next(
+        a.menu() for a in monitor_win.menuBar().actions() if a.text() == "User"
     )
-    qtbot.addWidget(win)
-    monkeypatch.setattr(
-        QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes
-    )
-    entry = catalog.list_configs()[0]
-    win._config_controller._on_select_config(str(entry.path))
-    assert restarted == [True]
-    assert _app_settings.config_active() == (entry.name, entry.source)
-
-
-def test_select_config_cancelled_does_not_restart(station, orchestrator, qtbot, tmp_path, monkeypatch):
-    """Declining the switch warning does not restart."""
-    restarted = []
-    catalog = _catalog(tmp_path)
-    win = MonitorWindow(
-        station, orchestrator, catalog=catalog,
-        active_config_path="/nowhere/active",
-        restart_callback=lambda: restarted.append(True),
-    )
-    qtbot.addWidget(win)
-    monkeypatch.setattr(
-        QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.No
-    )
-    win._config_controller._on_select_config(str(catalog.list_configs()[0].path))
-    assert restarted == []
+    labels = [a.text() for a in user_menu.actions()]
+    assert "Instrument Info…" in labels
+    # No active config path in a unit-built window: the handler answers from
+    # an empty metadata mapping rather than reading a file.
+    assert monitor_win._active_config_path is None
 
 
 def test_startup_candidates_end_with_sim_and_dedup(monkeypatch):
@@ -3570,11 +3533,10 @@ def test_startup_candidates_inserts_shipped_baseline_for_user_config(tmp_path, m
     assert shipped_sim in candidates
 
 
-def test_startup_warning_shown_in_banner(station, orchestrator, qtbot, tmp_path):
+def test_startup_warning_shown_in_banner(station, orchestrator, qtbot):
     """A startup fallback warning is surfaced in the notification banner."""
     win = MonitorWindow(
-        station, orchestrator, catalog=_catalog(tmp_path),
-        startup_warning="active config was invalid",
+        station, orchestrator, startup_warning="active config was invalid"
     )
     qtbot.addWidget(win)
     assert not win._banner.isHidden()
@@ -3644,142 +3606,6 @@ def test_monitoring_button_snaps_back_when_stop_refused(
         assert orchestrator.is_monitoring() is True
         assert btn.isChecked(), "button must snap back to the confirmed state"
         set_on_engine(orchestrator, "_state", OrchestratorState.IDLE)
-
-
-# ── DiagnosticsWindow tests ─────────────────────────────────────────────────────────
-
-_STALLED_RECORD = {
-    "orch_state": "RAMPING",
-    "elapsed_in_state_s": 12.3,
-    "verdict": "RAMP_STALLED",
-    "alerts": ["magnet: ramp stalled (gap 0.5 not closing for 6 ticks)"],
-    "vis": [
-        {
-            "vi_name": "magnet", "value": 1.0, "target": 1.5, "gap": 0.5,
-            "closing": 0.0, "rate": 0.1, "eta_s": 300.0,
-            "ramp_status": "RAMPING", "phase": None,
-            "code": "RAMP_STALLED", "detail": "gap 0.5 not closing for 6 ticks",
-        },
-        {
-            "vi_name": "temp_ctrl", "value": 4.2, "target": 4.2, "gap": 0.0,
-            "closing": 0.0, "rate": 0.0, "eta_s": None,
-            "ramp_status": "TARGET_REACHED", "phase": None,
-            "code": "OK", "detail": "",
-        },
-    ],
-}
-
-
-def test_monitor_window_has_diagnostics_menu(monitor_win):
-    """The menu bar exposes a Diagnostics menu alongside Session/Procedures."""
-    menu_titles = {action.text() for action in monitor_win.menuBar().actions()}
-    assert "Diagnostics" in menu_titles
-
-
-def test_monitor_opens_diagnostics_window_from_menu(monitor_win):
-    """Triggering the Diagnostics menu's action lazily creates and shows DiagnosticsWindow."""
-    assert monitor_win._diagnostics_window is None
-    monitor_win._open_diagnostics_window()
-    assert monitor_win._diagnostics_window is not None
-    assert monitor_win._diagnostics_window.isVisible()
-
-
-def test_diagnostics_window_placeholder_before_first_tick(diagnostics_win):
-    """Before any operational_status tick, the window shows a neutral placeholder."""
-    assert "No live data yet" in diagnostics_win._state_label.text()
-    assert diagnostics_win._table.rowCount() == 0
-    assert diagnostics_win._alerts_view.toPlainText() == "No active alerts."
-
-
-def test_diagnostics_window_renders_operational_status(diagnostics_win, orchestrator):
-    """A live operational_status tick populates state, verdict, table, and alerts."""
-    orchestrator.operational_status.emit(_STALLED_RECORD)
-
-    assert "RAMPING" in diagnostics_win._state_label.text()
-    assert diagnostics_win._verdict_badge.text() == "RAMP_STALLED"
-    assert diagnostics_win._verdict_badge.property("severity") == "warning"
-
-    assert diagnostics_win._table.rowCount() == 2
-    assert diagnostics_win._table.item(0, 0).text() == "magnet"
-    assert diagnostics_win._table.item(0, 1).text() == "RAMP_STALLED"
-    assert "gap 0.5" in diagnostics_win._table.item(0, 2).text()
-    assert diagnostics_win._table.item(1, 0).text() == "temp_ctrl"
-    assert diagnostics_win._table.item(1, 1).text() == "OK"
-
-    assert "ramp stalled" in diagnostics_win._alerts_view.toPlainText()
-
-
-def test_diagnostics_window_verdict_badge_error_severity(diagnostics_win, orchestrator):
-    """A VI_DISCONNECTED verdict drives the badge to 'error' severity."""
-    record = dict(_STALLED_RECORD, verdict="VI_DISCONNECTED")
-    orchestrator.operational_status.emit(record)
-    assert diagnostics_win._verdict_badge.property("severity") == "error"
-
-
-def test_diagnostics_window_ok_verdict_clears_alerts_placeholder(diagnostics_win, orchestrator):
-    """An OK tick with no alerts restores the 'no active alerts' placeholder."""
-    ok_record = {
-        "orch_state": "IDLE", "elapsed_in_state_s": 1.0, "verdict": "OK",
-        "alerts": [], "vis": [],
-    }
-    orchestrator.operational_status.emit(_STALLED_RECORD)
-    orchestrator.operational_status.emit(ok_record)
-    assert diagnostics_win._verdict_badge.property("severity") == "ok"
-    assert diagnostics_win._alerts_view.toPlainText() == "No active alerts."
-    assert diagnostics_win._table.rowCount() == 0
-
-
-def test_diagnostics_window_seeds_from_existing_status(orchestrator, qtbot):
-    """A DiagnosticsWindow opened after ticks already happened seeds from get_operational_status()."""
-    # A raw signal emit does not update Orchestrator's stored record — only a
-    # real tick does that (_update_operational_status). Setting the private
-    # field directly is the same forcing pattern other GUI tests use for
-    # Orchestrator internals (e.g. `set_on_engine(orchestrator, "_state", ...)`),
-    # and the emit that follows is what carries it into the client's mirror,
-    # which is what a window opened later actually reads.
-    engine = engine_of(orchestrator)
-    set_on_engine(orchestrator, "_operational_status", _STALLED_RECORD)
-    on_engine(
-        orchestrator, lambda: engine.operational_status.emit(dict(_STALLED_RECORD))
-    )
-    win = DiagnosticsWindow(orchestrator)
-    qtbot.addWidget(win)
-    win.show()
-    assert win._verdict_badge.text() == "RAMP_STALLED"
-
-
-def test_diagnostics_window_copy_diagnostics_to_clipboard(diagnostics_win, orchestrator, qtbot):
-    """Copy Diagnostics puts a plain-text summary on the clipboard."""
-    orchestrator.operational_status.emit(_STALLED_RECORD)
-    copy_btn = diagnostics_win.findChild(QPushButton, "copy_diagnostics_btn")
-    assert copy_btn is not None
-    copy_btn.click()
-
-    clipboard_text = QApplication.clipboard().text()
-    assert "RAMP_STALLED" in clipboard_text
-    assert "magnet" in clipboard_text
-    assert "ramp stalled" in clipboard_text
-    assert diagnostics_win._status_bar.currentMessage() == "Diagnostics copied to clipboard"
-
-
-def test_diagnostics_window_copy_diagnostics_before_any_tick(diagnostics_win):
-    """Copy Diagnostics before any tick copies a clear placeholder, not a crash."""
-    copy_btn = diagnostics_win.findChild(QPushButton, "copy_diagnostics_btn")
-    copy_btn.click()
-    assert "No live status available" in QApplication.clipboard().text()
-
-
-def test_diagnostics_window_geometry_persists_on_close(orchestrator, qtbot, isolated_settings):
-    """DiagnosticsWindow geometry is saved under its own QSettings key on close."""
-    from PyQt6.QtCore import QSettings
-
-    win = DiagnosticsWindow(orchestrator)
-    qtbot.addWidget(win)
-    win.show()
-    win.close()
-
-    settings = QSettings(str(isolated_settings), QSettings.Format.IniFormat)
-    assert settings.value("DiagnosticsWindow/geometry") is not None
 
 
 # ── Offline instruments (degraded build) ───────────────────────────────────────

@@ -662,7 +662,7 @@ QLabel[class="agent_row"][outcome="pending"] {{
     color: {BANNER_WARNING_TEXT};
 }}
 
-/* ── Verdict badge (DiagnosticsWindow) ──────────────────────────────────── */
+/* ── Verdict badge ──────────────────────────────────────────────────────── */
 /* Base rule reserves the 2px transparent border so warning/error states
    (which add a coloured border) never shift layout — same pattern as the
    QGroupBox[status] borders above. Reuses the banner's validated bg/border/

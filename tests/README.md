@@ -153,7 +153,6 @@ config also has automatic `test_conformance.py` coverage on top of these.
 | `cryosoft/gui/form_autosave.py` | `tests/test_form_autosave.py` |
 | `cryosoft/gui/monitor_history.py` | `tests/test_monitor_history.py` |
 | `cryosoft/gui/trend_plot_panel.py` | `tests/test_trend_plot_panel.py` |
-| `cryosoft/gui/config_editor.py` | `tests/test_config_editor.py` |
 | `cryosoft/gui/agent_panel.py`, `takeover_strip.py`, the experiment header's envelope editor | `tests/test_agent_panel.py` |
 | `cryosoft/troubleshoot/*`, operational status / stall detection | `tests/test_troubleshoot_cli.py`, `tests/test_troubleshoot_engine.py`, `tests/test_operational_status.py`, `tests/test_status_reader.py`, `tests/test_stall_detection.py` |
 
@@ -175,5 +174,5 @@ config also has automatic `test_conformance.py` coverage on top of these.
 - **L4 procedures + planning:** `test_l4_procedure.py`, `test_new_procedures.py`, `test_time_series_procedure.py`, `test_plan.py`, `test_sweep_builder.py`.
 - **L5 data manager:** `test_l5_data_manager.py`.
 - **L6 session management:** `test_session_layer.py`, `test_maintenance_log.py`, `test_eln.py` (ELN publishing — sim adapter and a fake HTTP transport, never a live notebook).
-- **GUI (pytest-qt, offscreen):** `test_gui.py`, `test_sweep_axis_widget.py`, `test_lifecycle_toggle.py`, `test_form_autosave.py`, `test_monitor_history.py`, `test_trend_plot_panel.py`, `test_config_editor.py`, `test_agent_panel.py` (the **Agent panel**, the **Takeover strip** and the experiment header's envelope editor — built over an `InstrumentHost` like `test_gui.py`, so it runs in both instrument modes).
+- **GUI (pytest-qt, offscreen):** `test_gui.py`, `test_sweep_axis_widget.py`, `test_lifecycle_toggle.py`, `test_form_autosave.py`, `test_monitor_history.py`, `test_trend_plot_panel.py`, `test_trends_quadrant.py`, `test_agent_panel.py` (the **Agent panel**, the **Takeover strip** and the experiment header's envelope editor — built over an `InstrumentHost` like `test_gui.py`, so it runs in both instrument modes).
 - **Troubleshooting / operational status:** `test_troubleshoot_cli.py`, `test_troubleshoot_engine.py`, `test_operational_status.py`, `test_status_reader.py`, `test_stall_detection.py`.

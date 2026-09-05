@@ -33,8 +33,6 @@ from cryosoft.core.station import read_instrument_metadata
 from cryosoft.gui import app_settings  # import the module (not the function) so tests can monkeypatch the factory
 from cryosoft.gui import form_autosave  # module import keeps save/load monkeypatchable
 from cryosoft.gui import window_geometry
-from cryosoft.gui.config_menu import ConfigMenuController
-from cryosoft.gui.diagnostics_window import DiagnosticsWindow
 from cryosoft.gui.eln_settings_dialog import ElnSettingsDialog, persist_eln_settings
 from cryosoft.gui.experiment_info_panel import ExperimentInfoPanel
 from cryosoft.gui.agent_panel import AgentPanel
@@ -63,11 +61,7 @@ from cryosoft.session.models import GUEST_USER_ID
 from cryosoft.session.store import SessionStore
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from cryosoft.core.station import Station
-
-    from cryosoft.core.config_catalog import ConfigCatalog
 
 logger = logging.getLogger(__name__)
 
@@ -128,18 +122,17 @@ class MonitorWindow(QMainWindow):
     :class:`TrendsQuadrant`, bottom-left is the :class:`ExperimentInfoPanel`,
     and bottom-right splits vertically into the :class:`RampTrackerPanel`
     over the :class:`AgentPanel`. The header carries the
-    :class:`TakeoverStrip`.
-    Every splitter
-    boundary is draggable; nothing in the grid can be closed, detached, or
-    floated. Page 2 (Logs) hosts the relocated :class:`LogPanel`.
+    :class:`TakeoverStrip`. Every splitter boundary is draggable; nothing in
+    the grid can be closed, detached, or floated. Page 2 (Logs) hosts the
+    :class:`LogPanel` and nothing else.
 
     Args:
         station: The active Station instance.
         orchestrator: The active Orchestrator instance.
         parent: Optional Qt parent widget.
-        catalog: Optional ConfigCatalog enabling the Config menu.
-        active_config_path: Path of the currently-active config, or None.
-        restart_callback: Called after a confirmed config switch, or None.
+        active_config_path: Path of the currently-active config, or None —
+            the source the User menu's "Instrument Info…" reads each VI's
+            ``metadata:`` block from.
         startup_warning: Startup config-fallback warning to surface, or None.
         session_manager: Optional ExperimentManager (L6), forwarded to
             ExperimentInfoPanel and used for attribution prefills.
@@ -167,9 +160,7 @@ class MonitorWindow(QMainWindow):
         station: Station,
         orchestrator: OrchestratorProxy,
         parent: QWidget | None = None,
-        catalog: ConfigCatalog | None = None,
         active_config_path: str | None = None,
-        restart_callback: Callable[[], None] | None = None,
         startup_warning: str | None = None,
         session_manager: ExperimentManager | None = None,
         eln_publisher: Any | None = None,
@@ -189,7 +180,6 @@ class MonitorWindow(QMainWindow):
         self._mirror = mirror if mirror is not None else StatusMirror.of(orchestrator)
         self._panels_config = dict(panels_config or {})
         self._procedure_window = None  # lazily created
-        self._diagnostics_window = None  # lazily created
         #: Always built: every setup can ramp something, and the tracker
         #: shows its own empty state otherwise.
         self._ramp_tracker: RampTrackerPanel | None = None
@@ -214,14 +204,11 @@ class MonitorWindow(QMainWindow):
         # re-emit (attendance/findings edits).
         self._last_session_experiment_id: str | None = None
 
-        # Config management (optional — absent in unit tests that build the
-        # window without a catalog). The Config menu is only built when a
-        # catalog is provided.
-        self._catalog = catalog
+        # The active config directory, held only so "Instrument Info…" can
+        # read its ``metadata:`` blocks, and the startup fallback warning the
+        # banner shows once the UI exists.
         self._active_config_path = active_config_path
-        self._restart_callback = restart_callback
         self._startup_warning = startup_warning
-        self._config_controller: ConfigMenuController | None = None
 
         # Who's logged in (Setup tier, User menu). Identity only — governs which
         # form-autosave file the session *content* below is loaded from/saved to,
@@ -313,7 +300,7 @@ class MonitorWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _build_menu(self) -> None:
-        """Build the User / Config / Procedures / Diagnostics menus.
+        """Build the two operator menus: User and Procedures.
 
         There is no View menu: every quadrant is always visible and nothing
         can be hidden, so there is nothing to toggle. Trend plots are added
@@ -365,6 +352,16 @@ class MonitorWindow(QMainWindow):
         eln_action.triggered.connect(self._open_eln_settings)
         user_menu.addAction(eln_action)
 
+        # Setup-tier, read-only: what the active config says each instrument
+        # is. It lives beside the login because it describes the rack the
+        # person in front of the app is using, and it writes nothing.
+        instrument_info_action = QAction("Instrument Info…", self)
+        instrument_info_action.setToolTip(
+            "View each instrument's identity metadata from devices.yaml"
+        )
+        instrument_info_action.triggered.connect(self._open_instrument_info)
+        user_menu.addAction(instrument_info_action)
+
         user_menu.addSeparator()
         new_session_action = QAction("New Session", self)
         new_session_action.setToolTip(
@@ -377,39 +374,11 @@ class MonitorWindow(QMainWindow):
         save_session_action.triggered.connect(self._save_session)
         user_menu.addAction(save_session_action)
 
-        # Config menu (only when config management is wired in).
-        if self._catalog is not None:
-            config_menu = menu_bar.addMenu("Config")
-            self._config_controller = ConfigMenuController(
-                self,
-                config_menu,
-                self._catalog,
-                self._active_config_path,
-                self._restart_callback,
-                save_session=self._save_session,
-            )
-            config_menu.addSeparator()
-            instrument_info_action = QAction("Instrument Info…", self)
-            instrument_info_action.setToolTip(
-                "View each instrument's identity metadata from devices.yaml"
-            )
-            instrument_info_action.triggered.connect(self._open_instrument_info)
-            config_menu.addAction(instrument_info_action)
-
         proc_menu = menu_bar.addMenu("Procedures")
         open_action = QAction("Open Procedures…", self)
         open_action.setShortcut("Ctrl+P")
         open_action.triggered.connect(self._open_procedures)
         proc_menu.addAction(open_action)
-
-        diagnostics_menu = menu_bar.addMenu("Diagnostics")
-        open_diagnostics_action = QAction("Open Diagnostics…", self)
-        open_diagnostics_action.setToolTip(
-            "Live connection/progress status — for a device that stopped "
-            "responding or a run taking longer than expected"
-        )
-        open_diagnostics_action.triggered.connect(self._open_diagnostics_window)
-        diagnostics_menu.addAction(open_diagnostics_action)
 
     def _open_procedures(self) -> None:
         """Lazily create and show the ProcedureWindow."""
@@ -435,16 +404,6 @@ class MonitorWindow(QMainWindow):
         self._procedure_window.show()
         self._procedure_window.raise_()
         self._procedure_window.activateWindow()
-
-    def _open_diagnostics_window(self) -> None:
-        """Lazily create and show the DiagnosticsWindow."""
-        if self._diagnostics_window is None:
-            self._diagnostics_window = DiagnosticsWindow(
-                self._orchestrator, self._mirror
-            )
-        self._diagnostics_window.show()
-        self._diagnostics_window.raise_()
-        self._diagnostics_window.activateWindow()
 
     # ------------------------------------------------------------------
     # UI construction
@@ -474,10 +433,10 @@ class MonitorWindow(QMainWindow):
 
         # ── Acknowledge (single home; moved off ProcedureWindow) ────────
         # Unified control for both EMERGENCY and a plain hold-severity
-        # condition (e.g. helium_low) — see Orchestrator.acknowledge() and
-        # GLOSSARY.md's **Hold acknowledge**. Right-aligned in the top bar,
-        # next to the countdown that reports how long the override it
-        # grants stays unlocked.
+        # System condition — see Orchestrator.acknowledge() and GLOSSARY.md's
+        # **Hold acknowledge**. Right-aligned in the top bar, next to the
+        # countdown that reports how long the override it grants stays
+        # unlocked.
         self._in_emergency = False
         ack_row = QHBoxLayout()
         ack_row.addStretch()
@@ -1559,8 +1518,8 @@ class MonitorWindow(QMainWindow):
     def _refresh_hold_banner(self, held: frozenset[str]) -> None:
         """Show why the ACKNOWLEDGE & UNLOCK button appeared, on the banner.
 
-        A plain hold-severity condition (e.g. ``helium_low`` tripped without
-        triggering EMERGENCY) drives ``_ack_btn``'s visibility but never goes
+        A plain hold-severity condition (one that never escalated to
+        EMERGENCY) drives ``_ack_btn``'s visibility but never goes
         through ``Orchestrator._error()`` — that path is reserved for
         ``internal``/``run_failure``/EMERGENCY-severity events (see
         ``_on_error()``) — so nothing else ever puts its description on the
@@ -1623,9 +1582,8 @@ class MonitorWindow(QMainWindow):
         """Show a non-modal error banner when a submitted GUI action raises.
 
         This is the uniform failure verdict of the control-validation
-        standard: limit rejections and VI safety guards (e.g. the
-        switch-heater mismatch refusal) arrive here with the reason string
-        the VI wrote for the user.
+        standard: limit rejections and VI safety-interlock refusals arrive
+        here with the reason string the VI wrote for the user.
 
         Args:
             vi_name: The VI the action targeted.

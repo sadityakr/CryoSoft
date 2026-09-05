@@ -4124,12 +4124,11 @@ def test_the_proxy_re_exposes_every_engine_signal() -> None:
 
 
 #: GUI modules allowed to import ``cryosoft.core.station`` at RUNTIME, and
-#: what they take from it. Both are pure config-FILE readers that take no
-#: Station and touch no instrument; they are in that module for historical
-#: reasons and moving them is a separate change. Import contract C19 carries
-#: the matching ``ignore_imports`` entries.
+#: what they take from it. It is a pure config-FILE reader that takes no
+#: Station and touches no instrument; it is in that module for historical
+#: reasons and moving it is a separate change. Import contract C19 carries
+#: the matching ``ignore_imports`` entry.
 _RUNTIME_STATION_IMPORTS: dict[str, set[str]] = {
-    "cryosoft/gui/config_editor.py": {"validate_config_dir"},
     "cryosoft/gui/monitor_window.py": {"read_instrument_metadata"},
 }
 
@@ -4142,8 +4141,8 @@ def test_gui_imports_the_station_only_for_typing_or_config_helpers() -> None:
     existing modules in ``ignore_imports`` — import-linter counts an import
     inside ``if TYPE_CHECKING:`` like any other, so the contract alone cannot
     express "types are fine". This is the half that can: every ignored import
-    must be inside a type-checking guard, unless it is one of the two config
-    helpers named above.
+    must be inside a type-checking guard, unless it is the config helper
+    named above.
     """
     offenders: list[str] = []
     for path in sorted((PACKAGE_DIR / "gui").rglob("*.py")):

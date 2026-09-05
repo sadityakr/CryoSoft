@@ -413,13 +413,12 @@ allow_indirect_imports = "True"
 # below is therefore paired with the conformance test
 # `test_gui_imports_the_station_only_for_typing_or_config_helpers`, which is
 # what actually enforces the distinction: each ignored import must be inside a
-# type-checking guard, or be one of the two pure config-FILE helpers named
-# there (`validate_config_dir`, `read_instrument_metadata` — neither takes a
-# Station nor touches an instrument; they live in that module for historical
-# reasons and moving them is a separate change). A gui module NOT listed here
-# cannot import the Station at all, which is the property this contract keeps.
+# type-checking guard, or be the pure config-FILE helper named there
+# (`read_instrument_metadata` — it takes no Station and touches no instrument;
+# it lives in that module for historical reasons and moving it is a separate
+# change). A gui module NOT listed here cannot import the Station at all,
+# which is the property this contract keeps.
 ignore_imports = [
-    "cryosoft.gui.config_editor -> cryosoft.core.station",
     "cryosoft.gui.monitor_window -> cryosoft.core.station",
     "cryosoft.gui.procedure_params_panel -> cryosoft.core.station",
     "cryosoft.gui.procedure_window -> cryosoft.core.station",
