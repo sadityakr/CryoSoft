@@ -160,7 +160,7 @@ VI_BASE_MODULES = {
 
 # Registry types accepted by Station.register_vi via config (distinct from a VI
 # class's own vi_type like "magnet" — see GLOSSARY.md).
-CONFIG_VI_TYPES = {"system", "measurement", "level", "switch"}
+CONFIG_VI_TYPES = {"system", "measurement", "level"}
 
 
 # ── Discovery helpers ─────────────────────────────────────────────────────────
@@ -680,8 +680,8 @@ def test_tag_policy_states_and_precedence_stay_in_vocabulary() -> None:
 # overriding the detach_when_idle property; __init_subclass__'s wrap (or the
 # base's own standby()) then releases the driver session automatically. These
 # tests make the opt-in binding for every present and future VI that declares
-# it — currently only TensormeterRTM2MeasurementVI (12t-cryo's
-# tensormeter_measurement, configured_externally: true).
+# it. No shipped config declares it today, so the parametrisation is empty
+# until one does — which is the point: the checks arrive with the VI.
 
 
 def _sim_driver_class_for(real_dotted: str) -> type:
@@ -706,8 +706,7 @@ def _detach_when_idle_vi_specs() -> list[tuple[str, type, dict, dict[str, type]]
     configured VI whose REAL config build declares ``detach_when_idle``.
 
     Drawn from the shipped configs' real ``drivers`` role mapping and real
-    ``init_params`` — e.g. 12t-cryo's ``tensormeter_measurement``,
-    ``configured_externally: true`` — with each real driver class swapped
+    ``init_params`` — with each real driver class swapped
     for its sim twin so the checks run with no hardware. Filtering is done
     by actually constructing the VI and reading ``detach_when_idle``, so a
     future config declaring it is covered automatically, without this file
@@ -1621,28 +1620,16 @@ def test_control_scope_is_a_valid_value(vi_cls: type) -> None:
 
 
 def test_known_operation_scope_controls() -> None:
-    """The persistent-magnet heater/persistent-mode and level-meter refresh
-    controls are operation-scope — the switch-heater/persistent-mode
-    entry-exit methods on the persistent magnet VI, and
-    CryogenLevelMeterVI.set_refresh_rate.
+    """``CryogenLevelMeterVI.set_refresh_rate`` is operation-scope.
+
+    Meter housekeeping an operation drives (the fill switches the meter to
+    FAST refresh for the duration), never a sample-facing setpoint.
     """
-    from cryosoft.virtual_instruments.level.cryogen_level_meter import CryogenLevelMeterVI
-    from cryosoft.virtual_instruments.magnet.superconducting_magnet_persistent import (
-        SuperconductingMagnetPersistentVI,
+    from cryosoft.virtual_instruments.level.cryogen_level_meter import (
+        CryogenLevelMeterVI,
     )
 
     assert get_control_scope(CryogenLevelMeterVI.set_refresh_rate) == "operation"
-    for method_name in (
-        "enable_persistent_mode",
-        "disable_persistent_mode",
-        "switch_heater_on",
-        "switch_heater_off",
-    ):
-        method = getattr(SuperconductingMagnetPersistentVI, method_name)
-        assert get_control_scope(method) == "operation", (
-            f"SuperconductingMagnetPersistentVI.{method_name} must be "
-            f"operation-scope"
-        )
 
 
 def test_reading_setters_are_measurement_scope() -> None:
@@ -1714,66 +1701,22 @@ CONTROL_LIMIT_EXEMPTIONS: dict[tuple[str, str, str], str] = {
         "Calibration-curve slot index in the controller's own curve table; an "
         "index selects a stored curve and drives no output."
     ),
-    ("SwitchMatrixVI", "set_pole_mode", "poles"): (
-        "Wiring mode, 2 or 4 poles; the VI rejects any other value, and the "
-        "choice reconfigures relays rather than setting a level."
-    ),
     ("DCMeasurementBase", "initiate_measurement", "voltmeter_range_V"): (
         "Voltmeter full-scale input range: a receive-side setting that sources "
         "nothing, and the meter clamps it to its nearest supported range."
-    ),
-    ("DCModeMeasurementVI", "initiate_measurement", "voltmeter_range_V"): (
-        "Voltmeter full-scale input range (enumerated in its ParamSpec "
-        "choices); a receive-side setting that sources nothing."
-    ),
-    ("DeltaModeMeasurementVI", "initiate_measurement", "voltmeter_range_V"): (
-        "Voltmeter full-scale input range (enumerated in its ParamSpec "
-        "choices); a receive-side setting that sources nothing."
     ),
     # -- Dimensionless counts.
     ("DCMeasurementBase", "initiate_measurement", "readings_per_point"): (
         "Dimensionless sample count; it costs time, not energy in the sample."
     ),
-    ("DCModeMeasurementVI", "initiate_measurement", "n_readings"): (
-        "Dimensionless sample count, rejected below 1 by the method itself."
-    ),
-    ("DeltaModeMeasurementVI", "initiate_measurement", "n_readings"): (
-        "Dimensionless sample count, rejected below 1 by the method itself."
-    ),
-    ("LockInHarmonicMeasurementVI", "initiate_measurement", "n_readings"): (
-        "Dimensionless count of 1f/2f reading pairs per point."
-    ),
-    ("TensormeterRTM2MeasurementVI", "initiate_measurement", "readings_per_point"): (
-        "Dimensionless sample count taken from the instrument's data block."
-    ),
     # -- Timing: dwell and integration times change how long a measurement
     #    takes, never how hard it drives the sample.
-    ("DCModeMeasurementVI", "initiate_measurement", "delay_s"): (
-        "Inter-reading dwell; a timing parameter with no actuation."
-    ),
-    ("DeltaModeMeasurementVI", "initiate_measurement", "delay_s"): (
-        "Delta inter-transition delay; a timing parameter with no actuation."
-    ),
-    ("LockInHarmonicMeasurementVI", "initiate_measurement", "time_constant_s"): (
-        "Demodulator time constant; sets averaging bandwidth, drives nothing."
-    ),
-    ("TensormeterRTM2MeasurementVI", "initiate_measurement", "averaging_time_s"): (
-        "Per-point averaging window; a timing parameter with no actuation."
-    ),
     # -- Compliance ceilings: these are themselves protective limits. With the
     #    excitation current already bounded, they only decide how much voltage
     #    headroom the source may use to deliver that bounded current.
     ("DCMeasurementBase", "initiate_measurement", "compliance_A"): (
         "The source's own protective ceiling; the sourced current is already "
         "bounded, so this only sets headroom, and the instrument clamps it."
-    ),
-    ("DCModeMeasurementVI", "initiate_measurement", "compliance_V"): (
-        "The source's own voltage-compliance ceiling; the sourced current is "
-        "already bounded, so this only sets headroom."
-    ),
-    ("DeltaModeMeasurementVI", "initiate_measurement", "compliance_V"): (
-        "The source's own voltage-compliance ceiling; the sourced current is "
-        "already bounded, so this only sets headroom."
     ),
     # -- Closed-loop tuning constants and open-loop heater drive.
     ("SampleTemperatureControllerVI", "set_heater_output", "output_pct"): (
@@ -1794,11 +1737,6 @@ CONTROL_LIMIT_EXEMPTIONS: dict[tuple[str, str, str], str] = {
         "controller firmware, that commands no setpoint of its own."
     ),
     # -- Lock-in oscillator frequency.
-    ("LockInHarmonicMeasurementVI", "initiate_measurement", "oscillator_frequency_Hz"): (
-        "Excitation frequency, clamped to the oscillator's own range by the "
-        "instrument; the sample's power comes from the amplitude, which IS "
-        "bounded (by max_source_current_A through the series resistor)."
-    ),
 }
 
 
@@ -1947,13 +1885,12 @@ def test_shipped_config_bounds_the_excitation_current(
 ) -> None:
     """Every shipped config gives each excitation-sourcing VI a finite ceiling.
 
-    Covers the REAL setups too, not only the sim-buildable ones: the VI is
+    Covers a REAL setup too, not only the sim-buildable ones: the VI is
     constructed with stand-in drivers straight from the config's own
-    ``init_params``, so ``12t-cryo`` and ``a-sample-real-cryostat`` — the two
-    configs that actually drive current through a mounted sample — are checked
-    without hardware. A missing ``max_source_current_A`` leaves the VI able to
-    source anything its instrument can deliver, which is exactly the hazard
-    this step closes.
+    ``init_params``, so a config that actually drives current through a
+    mounted sample is checked without hardware. A missing
+    ``max_source_current_A`` leaves the VI able to source anything its
+    instrument can deliver, which is exactly the hazard this step closes.
     """
     from unittest.mock import MagicMock
 
@@ -2108,9 +2045,6 @@ def test_execute_vi_action_refuses_non_control_names(config_dir: Path) -> None:
 _SIM_MEASUREMENT_DRIVER_CLASSES = {
     "source": "cryosoft.drivers.sim_keithley_6221.SimKeithley6221",
     "meter": "cryosoft.drivers.sim_keithley_2182a.SimKeithley2182A",
-    "main": "cryosoft.drivers.sim_keithley_2400.SimKeithley2400",
-    "lockin": "cryosoft.drivers.sim_lockin.SimLockIn",
-    "tensormeter": "cryosoft.drivers.sim_tensormeter_rtm2.SimTensormeterRTM2",
 }
 
 
@@ -2824,9 +2758,8 @@ def test_reading_loop_standard_on_sim_station() -> None:
                 f"{vi_name}.reading_safe_off names method "
                 f"{vi.reading_safe_off!r}, which the VI does not have"
             )
-    # The sim station must exercise the standard: the switch's route and the
-    # DC VI's current at minimum.
-    assert checked >= 2, "sim station should declare at least two loopable parameters"
+    # The sim station must exercise the standard: the DC VI's sourced current.
+    assert checked >= 1, "sim station should declare at least one loopable parameter"
 
 
 # ── Trend check declarations ────────────────────────────────────────────────
@@ -2851,9 +2784,8 @@ def test_declared_trend_checks_name_real_state_keys(config_dir: Path) -> None:
 
     This is the precise runtime check, but it only reaches the two
     sim-buildable configs. `test_declared_trend_checks_name_derivable_state_keys`
-    below covers all four shipped configs, including the two real-hardware
-    setups, via the static derivation this test's own key set is verified
-    against.
+    below covers every shipped config, including any real-hardware setup,
+    via the static derivation this test's own key set is verified against.
     """
     from cryosoft.core.station import read_trends_config
     from cryosoft.core.trend_checks import declared_checks
@@ -2930,11 +2862,10 @@ def _static_flat_keys(config_dir: Path) -> set[str]:
 def test_declared_trend_checks_name_derivable_state_keys(config_dir: Path) -> None:
     """Every declared TrendCheck's `keys` exist in this config's DERIVABLE state.
 
-    Covers all four shipped configs, including `12t-cryo` and
-    `a-sample-real-cryostat` — the two real-hardware setups
+    Covers every shipped config, including a real-hardware setup that
     `test_declared_trend_checks_name_real_state_keys` cannot reach, because
     it needs `get_state()`, a hardware poll. If a site renames the VI a
-    trend check names (`temperature_sample`, `level_meter`), the check's key
+    trend check names (`temperature_vti`, `level_meter`), the check's key
     stops resolving and `summarize()` reports `persisted=False` forever —
     an indeterminate result that publishes nothing, silently and
     permanently, with no signal that coverage was lost. This test moves
@@ -3032,14 +2963,13 @@ def _contract_specimens() -> dict[str, object]:
             is_monitoring=True,
             pause_pending=True,
             active_run_kind="procedure",
-            scanner_enabled=True,
             override_active=True,
             manual_override_expires_at=1_700_000_300.0,
             held_vi_names=("magnet_z",),
             active_ramps=({"vi_name": "magnet_z", "label": "field", "unit": "T"},),
             availabilities={"magnet_z": {"state": "live", "tags": []}},
-            vi_faults={"level_meter": {"kind": "stale", "acknowledged": False}},
-            offline_reason={"rotator": "no response at GPIB0::12::INSTR"},
+            vi_faults={"temperature_vti": {"kind": "stale", "acknowledged": False}},
+            offline_reason={"dc_measurement": "no response at GPIB0::12::INSTR"},
             envelope_variables={
                 "magnet_z": {"param_name": "target_T", "config_max": 9.0}
             },
@@ -3188,10 +3118,10 @@ def _contract_specimens() -> dict[str, object]:
                     safety_flags={"quench": "critical"},
                 ),
                 InstrumentInfo(
-                    name="level_meter",
-                    vi_class="CryogenLevelMeterVI",
-                    role="level",
-                    kind="level",
+                    name="dc_measurement",
+                    vi_class="DCSeparateMeasurementVI",
+                    role="measurement",
+                    kind="measurement",
                     availability=("connect_failed",),
                 ),
             ),
@@ -3199,7 +3129,7 @@ def _contract_specimens() -> dict[str, object]:
             ts=1_700_000_004.0,
         ),
         "Readings": Readings(
-            values={"magnet_z": {"field_T": 0.5}, "level_meter": {"helium_pct": 61.0}},
+            values={"magnet_z": {"field_T": 0.5}, "temperature_vti": {"temperature": 4.2}},
             seq=11,
             ts=1_700_000_005.0,
         ),
@@ -3361,7 +3291,6 @@ ORCHESTRATOR_NON_COMMANDS: dict[str, str] = {
     "offline_reason": "read: why one VI is offline",
     "envelope_variables": "read: each VI's enveloped quantity and setup bounds",
     "override_active": "read: whether a manual override is in force",
-    "scanner_enabled": "read: whether the scanner is enabled",
     "vi_faults": "read: the current FaultRecord per VI",
     # ── The status mirror's two priming reads: taken once, by whoever
     #    BUILDS the engine, on the engine's own thread, to prime the client

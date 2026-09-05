@@ -33,7 +33,7 @@ class Lakeshore335:
     """Real Lakeshore 335 temperature controller.
 
     Reads temperature from input channel A and controls heater output 1.
-    Exposes the same public API as SimOxfordITC503 (excluding needle-valve
+    Exposes the temperature-controller driver API (excluding needle-valve
     methods, which are VTI-only), so SampleTemperatureControllerVI works
     with this driver without modification.
 
@@ -66,7 +66,7 @@ class Lakeshore335:
         self._instr.read_termination = "\n"
 
     # ------------------------------------------------------------------
-    # Public API  (matches SimOxfordITC503 subset used by SampleTemperatureControllerVI)
+    # Public API  (the subset SampleTemperatureControllerVI uses)
     # ------------------------------------------------------------------
 
     def get_temperature(self) -> float:

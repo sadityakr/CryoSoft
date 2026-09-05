@@ -12,13 +12,9 @@ behind it. The standard is defined and documented on
 L1 — Virtual Instruments.
 
 ## Entry (what comes in)
-Driver dicts and optional `init_params` (none required for current classes).
-- `DCSeparateMeasurementVI`: `{"source": <K6221>, "meter": <K2182A>}`
-- `DCSingleInstrumentVI`: `{"main": <K2400 SMU>}`
-- `DeltaModeMeasurementVI`: `{"source": <K6221>, "meter": <K2182A>}`
-- `LockInHarmonicMeasurementVI`: `{"lockin": <lock-in amplifier>}`,
-  `init_params: {series_resistance_ohm}` (the excitation series resistor, a
-  setup wiring constant).
+Driver dicts and `init_params` (the setup constants each class needs).
+- `DCSeparateMeasurementVI`: `{"source": <K6221>, "meter": <K2182A>}`,
+  `init_params: {max_source_current_A}` (the setup's excitation ceiling).
 
 ## Exit (what goes out)
 The measurement-method standard (all classes obey it):
@@ -35,7 +31,8 @@ Self-description (class attributes)
   error of the mean), both dtype "float"; plus optional VI-specific extras
   unrelated to any array, e.g. `n_valid`. Build both attributes with
   `MeasurementInstrumentBase.quantity_columns(*names)` rather than
-  hand-writing the suffixes — see the pattern in `measurement_dc_mode.py`.
+  hand-writing the suffixes — see the pattern in
+  `dc_separate_measurement.py`.
 
 Uniform lifecycle (methods)
 - `data_arrays(params) → {array_name: length}` — output shape (the `_array`
@@ -86,7 +83,7 @@ every measurement VI automatically.
 
 ## Raw diagnostic blocks
 Some instruments return far more raw data per reading than any single
-physical quantity — e.g. a lock-in-style engine reporting dozens of channels
+physical quantity — e.g. an engine reporting dozens of raw channels
 (voltages, ranges, setpoints, lock quality, …) alongside the one or two the
 operator actually derives a result from. The mean/error/array convention
 above cannot express this: it hard-requires every `_array` key to pair with
@@ -115,7 +112,7 @@ today. Its declared channels are independently plottable, though:
 `SweepMeasureProcedure` automatically derives one scalar column per
 channel (row axis reduced by a NaN-safe mean — the same "N readings at one
 measurement point" treatment `mean_and_sem` gives a quantity's own array
-column, also seen in `measurement_delta_mode.py`'s `n_readings`), merged
+column), merged
 into `DataSchema.measurement_scalars` and `live_plot_measurement_keys()`
 with zero VI-side code (`_raw_block_channel_columns`/`measure()` in
 `procedure.py`) — a `CryoSoftConfigError` at `initiate()` if a channel
@@ -129,9 +126,10 @@ adds that axis when a reading loop is actually configured for the run
 entirely at the procedure/schema layer (`SweepMeasureProcedure.measure()`
 squeezes the trivial axis away before saving) — a VI's own `take_reading()`
 always returns the block as a flat `rows x channels` list regardless of any
-loop. See `TensormeterRTM2MeasurementVI`'s `raw_channels_block` (all 44 raw
-driver columns, alongside the operator-selected `res_a_ohm`/`res_b_ohm`
-pair) for the pattern.
+loop. The shape the mechanism is built for is an instrument whose every
+reading is a wide record — a many-column diagnostic dump, or a camera frame
+whose rows and columns are pixels — where the block IS the datum and the
+scalar columns are derived from it.
 
 The declared `measurement_raw_blocks` label list is not just an in-memory
 contract — `DataManager` writes it to disk as the block dataset's own
@@ -165,9 +163,9 @@ letting CryoSoft run only the measurement — arm the data path, trigger,
 read, and save a fixed-shape data block — without touching that
 configuration. This is the `configured_externally` standard on
 `MeasurementInstrumentBase`, motivated by single-client instrument firmware
-where the vendor tool and CryoSoft are mutually exclusive at the instrument,
-and it applies to every externally configured VI, not just the one that
-first needed it.
+where the vendor tool and CryoSoft are mutually exclusive at the instrument.
+No shipped VI declares it today; the standard is stated here so the first VI
+that needs it inherits the whole mechanism rather than inventing one.
 
 `MeasurementInstrumentBase.__init__` reads the optional init param
 `configured_externally: bool` (default `False`) from `init_params` and
@@ -234,17 +232,17 @@ tool's session, not loudly. Full text: `MeasurementInstrumentBase`'s
 docstring, "Externally configured instruments".
 
 ## Shared-instrument mode discipline
-Several measurement methods here can be wired to the SAME physical driver
-instance (e.g. `dc_measurement` and `keithley_delta_mode` both reference the
-one `keithley_6221` entry in `devices.yaml`'s `real_drivers`), because only
-one measurement VI is armed at a time — but the underlying instrument can have
-more than one mutually exclusive SCPI/operating mode (plain DC output vs. the
-bipolar delta engine). A driver method that establishes one of these modes
-MUST be **idempotent and self-recovering**: it must reassert its own required
-mode unconditionally, never assume the instrument is already in a compatible
-state left over from whichever VI ran last. This is the primary defense (see
-`Keithley6221.set_current()`'s unconditional `:SOUR:CURR:MODE FIX`, mirroring
-how `_program_delta_mode()` already always leads with `:SOUR:SWE:ABOR`).
+Two measurement methods can be wired to the SAME physical driver instance
+(two VIs both naming the one `keithley_6221` entry in `devices.yaml`'s
+`real_drivers`), because only one measurement VI is armed at a time — but the
+underlying instrument can have more than one mutually exclusive SCPI/operating
+mode (plain DC output vs. the bipolar delta engine). A driver method that
+establishes one of these modes MUST be **idempotent and self-recovering**: it
+must reassert its own required mode unconditionally, never assume the
+instrument is already in a compatible state left over from whichever VI ran
+last. This is the primary defense (see `SimKeithley6221.set_current()`'s
+unconditional return to fixed DC output, mirroring how its delta programming
+always leads with an abort).
 `stop_delta_mode()`-style teardown methods should still also return the
 instrument to a documented idle baseline as defense-in-depth (useful for a
 human inspecting the instrument between runs), but a VI's
@@ -279,48 +277,12 @@ shared-6221 handoff test for the pattern.
 5. Register in `devices.yaml`; add behaviour tests to `tests/test_l1_new_vis.py`.
 
 ## Files
-- `measurement_dc_mode.py` — `DCModeMeasurementVI`: Keithley 6221 source + 2182A
-  nanovoltmeter, plain DC mode (current set once, voltage polled repeatedly —
-  contrast with `dc_separate_measurement.py`'s reference `reading_setters`
-  entry and `measurement_delta_mode.py`'s polarity-reversing delta engine).
-  Declares `reading_setters` `{"current": "set_dc_current"}`; the setter
-  reprograms the source in place with no re-arm cost. Also exposes
-  `read_now()`, a `@control(panel=False)` bench-test hook (front panel only,
-  never the compact card) distinct from `take_reading()`: it calls
-  `take_reading()` and caches the result in the `last_voltage_V` /
-  `last_mean_voltage_V` / `last_n_valid` `@monitored` fields so an operator
-  can confirm a configured current yields sane readings before running a
-  procedure. tests: `tests/test_l1_virtual_instruments.py`
-  (`test_dc_mode_measurement_vi_lifecycle`, `test_dc_mode_read_now_bench_test`).
 - `dc_separate_measurement.py` — `DCSeparateMeasurementVI`: Keithley 6221 source +
   2182A nanovoltmeter, simple DC mode. Declares the reference `reading_setters`
   entry `{"current_A": "set_source_current"}`, so the reading loop can measure
   a user-entered current list (e.g. `1e-6, -1e-6`) at every sweep point
-  (per-slot index-label columns). tests: `tests/test_measurement_dc_vi.py`,
+  (per-slot index-label columns); the setter reprograms the source in place
+  with no re-arm cost. tests: `tests/test_measurement_dc_vi.py`,
   `tests/test_l1_new_vis.py` (`TestDCSeparateMeasurementVI`),
   `tests/test_new_procedures.py` (reading loop).
-- `dc_single_instrument.py` — `DCSingleInstrumentVI`: Keithley 2400 SMU,
-  single-instrument DC mode with the same method contract. tests:
-  `tests/test_l1_new_vis.py` (`TestDCSingleInstrumentVI`).
-- `measurement_delta_mode.py` — `DeltaModeMeasurementVI`: Keithley 6221 + 2182A in
-  delta-mode (reverses current polarity each reading for offset cancellation).
-  Pads short delta returns to `n_readings` with NaN and reports `n_valid`.
-  Declares `reading_setters` `{"current": "set_delta_current"}`; unlike the DC
-  VI the setter **stops and re-arms** the engine (delta latches its peak current
-  at arm time), so each loop step pays a delta start-up and its first readings
-  include the settling transient. `current` is a peak amplitude that delta
-  reverses each cycle, so looping the sign is redundant. Declares the
-  **UI group** `delta_engine` (`ui_groups`, tagged `group=` on both
-  controls): arming and the peak-current setter are one workflow and are
-  titled together on the front panel instead of sitting alphabetically among
-  the lifecycle controls. tests: `tests/test_l1_virtual_instruments.py`.
-- `lockin_harmonic.py` — `LockInHarmonicMeasurementVI`: lock-in first/second
-  harmonic (1f/2f) measurement, sourced by the lock-in's own internal
-  oscillator through a series resistor. A single-demodulator lock-in reports
-  one harmonic at a time, so `take_reading()` switches `set_harmonic(1)` /
-  `set_harmonic(2)` between reads rather than assuming simultaneous
-  multi-harmonic hardware. External-source excitation (Keithley 6221 synced
-  to a common reference) is a scoped follow-up, not yet implemented — it
-  needs new AC/waveform driver capability on the 6221 that doesn't exist yet.
-  tests: `tests/test_l1_new_vis.py` (`TestLockInHarmonicMeasurementVI`).
 - `__init__.py` — package marker. tests: none.

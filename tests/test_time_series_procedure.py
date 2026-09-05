@@ -26,9 +26,9 @@ SAMPLE_INFO = {
 }
 
 DELTA = {
-    "measurement_vi": "keithley_delta_mode",
-    "current": 1e-6,
-    "n_readings": 5,
+    "measurement_vi": "dc_measurement",
+    "current_A": 1e-6,
+    "readings_per_point": 5,
     "voltmeter_range_V": 0.01,
     "compliance_V": 1.0,
     "delay_s": 0.01,
@@ -114,8 +114,8 @@ def test_initiate_commands_no_system_hardware(station, tmp_path, meas):
         assert [c.vi_name for c in plan.commands] == [meas["measurement_vi"]]
         assert plan.commands[0].method == "initiate_measurement"
         # Narrowed claim (see test_claims_only_the_reading_path below): only
-        # the measurement VI gets claim-initiated, never magnet_z/temperature_vti/
-        # temperature_sample, which stay exactly as the operator left them.
+        # the measurement VI gets claim-initiated, never magnet_z or
+        # temperature_vti, which stay exactly as the operator left them.
         assert [c.vi_name for c in plan.claim_commands] == [meas["measurement_vi"]]
         assert plan.claim_commands[0].method == "initiate"
     finally:
@@ -136,7 +136,7 @@ def test_claims_only_the_reading_path(station, tmp_path):
     proc = _proc(station, tmp_path, DC)
     claimed = proc.claimed_vi_names()
     assert claimed == {"dc_measurement"}
-    for vi_name in ("magnet_z", "temperature_vti", "temperature_sample"):
+    for vi_name in ("magnet_z", "temperature_vti", "level_meter"):
         assert vi_name not in claimed
 
 
@@ -231,10 +231,10 @@ def test_max_duration_caps_a_watched_run(station, tmp_path):
 
 def test_watched_channel_without_a_vi_is_refused_at_construction(station, tmp_path):
     """A station missing the watched instrument fails now, not silently mid-run."""
-    station._virtual_instruments.pop("temperature_sample")
-    station._vi_registry.pop("temperature_sample")
-    with pytest.raises(CryoSoftConfigError, match="temperature_sample"):
-        _proc(station, tmp_path, end_condition="temperature_sample", end_value=4.0)
+    station._virtual_instruments.pop("temperature_vti")
+    station._vi_registry.pop("temperature_vti")
+    with pytest.raises(CryoSoftConfigError, match="temperature_vti"):
+        _proc(station, tmp_path, end_condition="temperature_vti", end_value=4.0)
 
 
 # ── Cadence ──────────────────────────────────────────────────────────────────

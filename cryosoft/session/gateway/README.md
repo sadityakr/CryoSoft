@@ -347,9 +347,8 @@ physicist**. It was written from the VI docstrings, and the line between "an
 agent may do this alone overnight to keep a run alive" and "this commands
 the cryostat" is a judgement about a specific instrument rack, not something
 derivable from a method signature. Every row carries a one-line rationale
-for exactly that review, and four rows (the magnet's persistent-mode and
-switch-heater capabilities) say in their rationale that they deliberately
-deviate from the default rule below.
+for exactly that review, and a row that deliberately deviates from the
+default rule below says so in its own rationale.
 
 The default rule the rows were derived from:
 

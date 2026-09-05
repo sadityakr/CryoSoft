@@ -9,9 +9,9 @@ One pair of tests per instrument that has a real driver:
   raise the same typed error with the same code, so the mistake fails here
   instead of on hardware.
 
+A sim-only driver (no real twin ships) is covered by the sim half alone.
 The real drivers are exercised with their VISA session replaced by a mock —
-``object.__new__`` skips ``__init__``'s bus open, exactly as
-``test_l0_keithley_6221_error_queue.py`` already does. No test in this file
+``object.__new__`` skips ``__init__``'s bus open. No test in this file
 opens a resource; the bench counterparts carry the ``hardware`` marker and
 live in ``tests/test_bench_hardware.py``.
 """
@@ -22,10 +22,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from cryosoft.core.exceptions import (
-    CryoSoftCommunicationError,
-    CryoSoftInstrumentError,
-)
+from cryosoft.core.exceptions import CryoSoftInstrumentError
 
 # ── Keithley 6221 — SCPI error queue ──────────────────────────────────────────
 
@@ -47,36 +44,6 @@ def _fake_visa_driver(cls, query_replies):
     instr.timeout = 5_000
     driver._instr = instr
     return driver
-
-
-def test_keithley_6221_real_raises_typed_error_from_the_scpi_queue():
-    """A queued ``-221`` after an output write becomes the typed error."""
-    from cryosoft.drivers.keithley_6221 import Keithley6221
-
-    driver = _fake_visa_driver(Keithley6221, ['-221,"Settings conflict"'])
-    with pytest.raises(CryoSoftInstrumentError) as excinfo:
-        driver.set_source_enabled(True)
-    assert excinfo.value.code == "-221"
-    assert excinfo.value.instrument_message == "Settings conflict"
-
-
-def test_keithley_6221_real_unparseable_queue_reply_is_not_read_as_clean():
-    """Junk on the error queue is reported, never assumed to mean "no error"."""
-    from cryosoft.drivers.keithley_6221 import Keithley6221
-
-    driver = _fake_visa_driver(Keithley6221, ["<garbage>"])
-    with pytest.raises(CryoSoftInstrumentError) as excinfo:
-        driver.set_source_enabled(True)
-    assert excinfo.value.code == ""
-    assert "<garbage>" in excinfo.value.instrument_message
-
-
-def test_keithley_6221_real_clean_queue_raises_nothing():
-    """``0,"No error"`` is the one reply that means the write landed."""
-    from cryosoft.drivers.keithley_6221 import Keithley6221
-
-    driver = _fake_visa_driver(Keithley6221, ['0,"No error"'])
-    driver.set_source_enabled(True)
 
 
 def test_sim_keithley_6221_refuses_output_switch_while_delta_is_armed():
@@ -208,166 +175,7 @@ def test_sim_lakeshore_335_refuses_an_empty_user_curve_slot():
     assert controller.get_sensor_curve("A") == before  # assignment did NOT happen
 
 
-# ── Keithley 705 — explicit readback ──────────────────────────────────────────
-
-
-def test_keithley_705_real_raises_readback_mismatch_when_a_close_is_discarded():
-    """The 705 discards what it cannot do; only the readback can tell."""
-    from cryosoft.drivers.keithley_705 import Keithley705
-
-    driver = object.__new__(Keithley705)
-    instr = MagicMock()
-    # The G2 buffer dump the instrument answers with: nothing closed.
-    instr.query.return_value = "C001,S0,C002,S0"
-    driver._instr = instr
-    driver._closed = set()
-    driver._pole_mode = 2
-
-    with pytest.raises(CryoSoftInstrumentError) as excinfo:
-        driver.close_channel("1")
-    assert excinfo.value.code == "READBACK_MISMATCH"
-    assert "close_channel" in excinfo.value.context
-
-
-def test_sim_keithley_705_refuses_a_channel_past_the_installed_range():
-    """The wrong sequence: route through a channel this frame does not have."""
-    from cryosoft.drivers.sim_keithley_705 import SimKeithley705
-
-    scanner = SimKeithley705("SIM")
-    assert scanner.first_last_channel() == (1, 20)
-    with pytest.raises(CryoSoftInstrumentError) as excinfo:
-        scanner.close_channel("42")
-    assert excinfo.value.code == "READBACK_MISMATCH"
-    assert scanner.closed_channels() == []
-
-
-# ── Oxford ILM 200 / 210 — ISOBUS protocol acknowledgement ────────────────────
-
-
-@pytest.mark.parametrize(
-    ("module_name", "class_name"),
-    [
-        ("oxford_ilm200", "OxfordILM200"),
-        ("oxford_ilm210", "OxfordILM210"),
-    ],
-)
-def test_oxford_ilm_real_raises_typed_error_on_the_isobus_question_mark(
-    module_name: str, class_name: str
-) -> None:
-    """``?`` + the command is the ISOBUS way of saying "I did not do that"."""
-    import importlib
-
-    module = importlib.import_module(f"cryosoft.drivers.{module_name}")
-    driver = object.__new__(getattr(module, class_name))
-    instr = MagicMock()
-    instr.read.return_value = "?R1"
-    driver._instr = instr
-
-    with pytest.raises(CryoSoftInstrumentError) as excinfo:
-        driver._execute("R1")
-    assert excinfo.value.code == "?"
-    assert excinfo.value.instrument_message == "?R1"
-
-
-@pytest.mark.parametrize(
-    ("module_name", "class_name"),
-    [
-        ("sim_oxford_ilm200", "SimOxfordILM200"),
-        ("sim_oxford_ilm210", "SimOxfordILM210"),
-    ],
-)
-def test_sim_oxford_ilm_refuses_a_channel_with_no_probe_fitted(
-    module_name: str, class_name: str
-) -> None:
-    """The wrong sequence: read a level from a channel that has no probe.
-
-    The failure a config naming a nitrogen channel this meter does not carry
-    would otherwise produce — a plausible-looking number that is not a level.
-    """
-    import importlib
-
-    module = importlib.import_module(f"cryosoft.drivers.{module_name}")
-    meter = getattr(module, class_name)("SIM")
-    meter._channels_fitted = {1}  # helium only, no nitrogen probe
-
-    with pytest.raises(CryoSoftInstrumentError) as excinfo:
-        meter.get_nitrogen_level()
-    assert excinfo.value.code == "?"
-    # The helium channel, which IS fitted, keeps working.
-    assert isinstance(meter.get_helium_level(), float)
-
-
-# ── Oxford ITC 503 — ISOBUS acknowledgement, via pymeasure ────────────────────
-
-
-class _FakeOxfordVISAError(Exception):
-    """Stands in for pymeasure's ``OxfordVISAError`` (matched by class name).
-
-    The driver matches by name rather than by import, because pymeasure is
-    imported lazily in its ``__init__`` — so this fake reproduces the real
-    dispatch faithfully.
-    """
-
-
-_FakeOxfordVISAError.__name__ = "OxfordVISAError"
-
-
-def test_oxford_itc503_real_separates_a_refusal_from_a_broken_link():
-    """A refused command and a dead link are different facts, typed apart."""
-    from cryosoft.drivers.oxford_itc503 import OxfordITC503
-
-    driver = object.__new__(OxfordITC503)
-
-    refusal = driver._write_failure(
-        _FakeOxfordVISAError("?T4.2"), "set_setpoint", "ITC503: could not set setpoint"
-    )
-    assert isinstance(refusal, CryoSoftInstrumentError)
-    assert refusal.code == "?"
-
-    broken = driver._write_failure(
-        OSError("serial port vanished"), "set_setpoint", "ITC503: could not set setpoint"
-    )
-    assert isinstance(broken, CryoSoftCommunicationError)
-    assert not isinstance(broken, CryoSoftInstrumentError)
-
-
-def test_sim_oxford_itc503_refuses_control_commands_while_in_local():
-    """The wrong sequence: drive the controller without holding remote.
-
-    Without remote the ITC carries no control command at all, and says so
-    only with a ``?`` — the failure that otherwise reads as "the setpoint
-    just never moves".
-    """
-    from cryosoft.drivers.sim_oxford_itc503 import SimOxfordITC503
-
-    controller = SimOxfordITC503("SIM")
-    controller.set_setpoint(4.2)  # remote by default: fine
-    controller._control_mode = "LU"  # local & unlocked, e.g. front-panel LOCAL
-
-    with pytest.raises(CryoSoftInstrumentError) as excinfo:
-        controller.set_setpoint(10.0)
-    assert excinfo.value.code == "?"
-    assert controller.get_setpoint() == pytest.approx(4.2)  # unchanged
-
-
-# ── Oxford Mercury iPS / IPS 120 — protocol acknowledgement ───────────────────
-
-
-@pytest.mark.parametrize("refusal", ["DENIED", "INVALID"])
-def test_oxford_mercury_ips_real_raises_typed_error_on_a_refused_action(
-    refusal: str,
-) -> None:
-    """``DENIED``/``INVALID`` on the STAT: line means the PSU did not act."""
-    from cryosoft.drivers.oxford_mercury_ips import OxfordMercuryiPS
-
-    driver = object.__new__(OxfordMercuryiPS)
-    instr = MagicMock()
-    instr.query.return_value = f"STAT:SET:DEV:GRPZ:PSU:ACTN:RTOS:{refusal}"
-    driver._instr = instr
-
-    with pytest.raises(CryoSoftInstrumentError) as excinfo:
-        driver.hold()
-    assert excinfo.value.code == refusal
+# ── Oxford IPS 120 — protocol acknowledgement ─────────────────────────────────
 
 
 def test_sim_oxford_ips120_refuses_a_ramp_rate_while_clamped():
@@ -382,60 +190,3 @@ def test_sim_oxford_ips120_refuses_a_ramp_rate_while_clamped():
         psu.set_ramp_rate(1.0)
     assert excinfo.value.code == "DENIED"
     assert psu.get_ramp_rate() == pytest.approx(0.5)  # unchanged
-
-
-# ── Tensormeter RTM2 — protocol acknowledgement ───────────────────────────────
-
-
-def test_tensormeter_rtm2_real_raises_typed_error_on_a_protocol_error():
-    """A protocol-level error is the RTM2 saying it did not apply the value."""
-    from cryosoft.drivers.tensormeter_rtm2 import TensormeterRTM2
-
-    driver = object.__new__(TensormeterRTM2)
-    driver._timeout_s = 1.0
-    result = MagicMock()
-    result.error = "value out of range"
-    result.updates = []
-    rtm = MagicMock()
-    rtm.read_until.return_value = result
-    driver._rtm = rtm
-
-    with pytest.raises(CryoSoftInstrumentError) as excinfo:
-        driver._send_and_confirm("cudc", 1.0)
-    assert excinfo.value.code == "PROTOCOL"
-    assert excinfo.value.instrument_message == "value out of range"
-
-
-def test_tensormeter_rtm2_real_raises_typed_error_when_nothing_is_confirmed():
-    """No echo means the value cannot be assumed to be in force."""
-    from cryosoft.drivers.tensormeter_rtm2 import TensormeterRTM2
-
-    driver = object.__new__(TensormeterRTM2)
-    driver._timeout_s = 1.0
-
-    no_echo = MagicMock(error=None, updates=[])
-    # The `gass` fallback answers healthily, but with nothing that shows the
-    # requested value in force — so the driver still has no confirmation.
-    gass_reply = MagicMock(error=None, updates=[MagicMock(parameter="camp", value=0.0)])
-    rtm = MagicMock()
-    rtm.read_until.side_effect = [no_echo, gass_reply]
-    rtm.get_state.return_value = {}
-    driver._rtm = rtm
-
-    with pytest.raises(CryoSoftInstrumentError) as excinfo:
-        driver._send_and_confirm("cudc", 1.0)
-    assert excinfo.value.code == "NO_CONFIRMATION"
-
-
-def test_sim_tensormeter_rtm2_refuses_a_setpoint_beyond_the_protection_limit():
-    """The wrong sequence: source past the configured current protection."""
-    from cryosoft.drivers.sim_tensormeter_rtm2 import SimTensormeterRTM2
-
-    box = SimTensormeterRTM2("SIM")
-    limit = box._current_protection_A
-
-    with pytest.raises(CryoSoftInstrumentError) as excinfo:
-        box.set_current_dc(limit * 10)
-    assert excinfo.value.code == "PROTOCOL"
-    # Nothing was driven into the sample (no public DC-current getter exists).
-    assert box._current_dc_A == 0.0

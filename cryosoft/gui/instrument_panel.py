@@ -112,12 +112,11 @@ class InstrumentPanel(QGroupBox):
         show_front_panel_button: Whether the header carries the icon that
             opens the :class:`InstrumentFrontPanel`. False inside the front
             panel itself (a front panel must not open another one).
-        type_tag: Optional role label ("Measurement", "Scanner") shown next
+        type_tag: Optional role label (e.g. "Measurement") shown next
             to the VI name, so non-system cards in the instrument grid are
             recognisable at a glance.
         extra_widget: Optional caller-built widget appended below the control
-            rows — the hook for role-specific additions (e.g. the switch
-            card's station-wide Enable Scanner checkbox) without this class
+            rows — the hook for role-specific additions without this class
             learning any per-role logic.
         grouped: Whether to render the VI's declared ``ui_groups`` as titled
             boxes (see ``_build_capability_rows()``). False for the compact
@@ -511,8 +510,8 @@ class InstrumentPanel(QGroupBox):
         Layout scales with the parameter count: up to two parameters stay
         inline next to the button (compact, like ``set_temperature``); more
         stack beneath the button as a labelled grid — one column, or two once
-        the count exceeds ten — so a many-knob control (delta-mode arming,
-        lock-in arming) stays editable instead of stretching off-screen in a
+        the count exceeds ten — so a many-knob control (a measurement VI's
+        arming action, say) stays editable instead of stretching off-screen in a
         single row.
 
         Args:

@@ -435,7 +435,7 @@ def test_is_read_only_prefixes() -> None:
 
 def _write_raw_record(path: Path, t: float, value: float = 4.2) -> None:
     path.write_text(
-        json.dumps({"t": t, "v": {"temperature_sample_temperature": value}}) + "\n",
+        json.dumps({"t": t, "v": {"temperature_vti_temperature": value}}) + "\n",
         encoding="utf-8",
     )
 

@@ -109,8 +109,8 @@ def _exclusive_aliases(
 ) -> list[str]:
     """Return *vi_name*'s driver aliases that no OTHER live VI still needs.
 
-    Drivers are shared by config (a 6221 serving both a delta-mode and a
-    DC-mode VI, say), so disconnecting one instrument must never close a
+    Drivers are shared by config (one source serving two measurement VIs,
+    say), so disconnecting one instrument must never close a
     session another live instrument is using. This is the single place that
     decides which sessions a disconnect may actually release.
 
@@ -243,7 +243,6 @@ class Station:
         # report a wedged instrument (see `polling_vi()`).
         self._polling_vi: str | None = None
         self._max_errors: int = 3
-        self._scanner_enabled: bool = False
         # Degraded-build support: VIs whose hardware failed to connect at
         # build time, plus the build recipes and live driver instances that
         # connect_instrument() needs to bring one back without a restart.
@@ -351,24 +350,6 @@ class Station:
             if vi_type == "measurement"
         ]
 
-    def switch_vi_names(self) -> list[str]:
-        """Return the names of all registered switch VIs, in registration order.
-
-        A switch VI is one registered with ``vi_type == "switch"`` (a
-        matrix-switch / scanner that multiplexes measurement channels by route).
-        The order is config order, so a procedure that defaults to "the first
-        switch VI" gets a stable, config-controlled choice — mirroring
-        ``measurement_vi_names()``.
-
-        Returns:
-            List of switch VI names, registration order preserved.
-        """
-        return [
-            name
-            for name, vi_type in self._vi_registry.items()
-            if vi_type == "switch"
-        ]
-
     def magnet_vi_names(self) -> list[str]:
         """Return the names of all registered magnet VIs, in registration order.
 
@@ -377,9 +358,9 @@ class Station:
         subclasses — distinct from the registry's own "system" role string,
         see GLOSSARY.md's "vi_type (class)" / "vi_type (config/registry)"
         entries). The order is config order, so a caller that defaults to
-        "every magnet" (e.g. a run forcing all magnets to
-        zero field) gets a stable, config-controlled list —
-        mirrors ``switch_vi_names()``.
+        "every magnet" (e.g. a run forcing all magnets to zero field)
+        gets a stable, config-controlled list — mirrors
+        ``measurement_vi_names()``.
 
         Returns:
             List of magnet VI names, registration order preserved.
@@ -931,22 +912,6 @@ class Station:
             )
             return None
 
-    def set_scanner_enabled(self, enabled: bool) -> None:
-        """Toggle whether scanner-sensitive procedures may use the switch VI.
-
-        A plain availability bit: it does not touch the switch VI itself.
-        When disabled, a scanner-sensitive procedure behaves as if no switch
-        VI exists (see ``SweepMeasureProcedure``'s route discovery).
-
-        Args:
-            enabled: True to make the scanner available to procedures.
-        """
-        self._scanner_enabled = bool(enabled)
-
-    def scanner_enabled(self) -> bool:
-        """Return whether scanner-sensitive procedures may use the switch VI."""
-        return self._scanner_enabled
-
     def get_vi_type(self, vi_name: str) -> str:
         """Return the vi_type for the given VI name.
 
@@ -960,24 +925,6 @@ class Station:
             KeyError: If no VI with that name exists.
         """
         return self._vi_registry[vi_name]
-
-    def persistent_mode_magnets(self) -> list[str]:
-        """Return the names of magnet VIs currently in manual persistent mode.
-
-        Persistent mode means the user is driving that magnet's switch heater
-        and PSU by hand, so the Orchestrator refuses to start a procedure while
-        any magnet is in it. VIs without the ``persistent_mode_enabled``
-        accessor (every non-persistent VI) are skipped.
-        """
-        names: list[str] = []
-        for vi_name, vi in self._virtual_instruments.items():
-            checker = getattr(vi, "persistent_mode_enabled", None)
-            try:
-                if callable(checker) and checker():
-                    names.append(vi_name)
-            except Exception:  # noqa: BLE001 — a flaky VI must not block the check
-                continue
-        return names
 
     def system_setpoint_meta(self, vi_name: str) -> tuple[str, str]:
         """Return ``(label, unit)`` describing a VI's ramp setpoint.

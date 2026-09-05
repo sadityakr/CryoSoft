@@ -278,10 +278,6 @@ class StatusMirror(QObject):
         """Return ``"procedure"``, or ``None`` when idle."""
         return self._snapshot.active_run_kind
 
-    def scanner_enabled(self) -> bool:
-        """Return whether scanner-sensitive procedures may use the scanner."""
-        return self._snapshot.scanner_enabled
-
     def override_active(self, vi_name: str | None = None) -> bool:
         """Return whether the EMERGENCY manual override is in force.
 

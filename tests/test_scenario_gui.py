@@ -66,13 +66,13 @@ SAMPLE_INFO = {"sample_name": "S", "sample_id": "S-1", "comments": ""}
 #: A FieldSweep param set fast enough for a real run inside the ~20 s bound —
 #: real field steps, real code path, but no realistic thermal/settle waits.
 FAST_FIELD_SWEEP_PARAMS = {
-    "measurement_vi": "keithley_dc_mode",
+    "measurement_vi": "dc_measurement",
     "field_start": -0.05,
     "field_end": 0.05,
     "field_steps": 3,
     "temperature": 300.0,  # the sim VTI starts at 300 K -> instant settle
-    "current": 1e-6,
-    "n_readings": 2,
+    "current_A": 1e-6,
+    "readings_per_point": 2,
     "init_wait": 0.0,
     "step_wait": 0.0,
 }
@@ -1180,7 +1180,7 @@ def test_closing_the_monitor_window_mid_run_shuts_down_bounded_and_the_file_is_r
         station=station,
         sample_info=dict(SAMPLE_INFO),
         data_directory=str(tmp_path),
-        **dict(FAST_FIELD_SWEEP_PARAMS, field_steps=21, n_readings=1),
+        **dict(FAST_FIELD_SWEEP_PARAMS, field_steps=21, readings_per_point=1),
     )
     orchestrator.run_procedure(procedure)
     qtbot.waitUntil(lambda: orchestrator.state != "IDLE", timeout=5000)

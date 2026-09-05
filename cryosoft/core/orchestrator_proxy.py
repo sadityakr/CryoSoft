@@ -328,10 +328,6 @@ class OrchestratorProxy(QObject):
         """Return ``"procedure"``, or ``None`` when idle."""
         return self._mirror.active_run_kind()
 
-    def scanner_enabled(self) -> bool:
-        """Return whether scanner-sensitive procedures may use the scanner."""
-        return self._mirror.scanner_enabled()
-
     def override_active(self, vi_name: str | None = None) -> bool:
         """Return whether a manual override is in force.
 
@@ -848,19 +844,6 @@ class OrchestratorProxy(QObject):
             The command's request id.
         """
         return self._submit(ev.CommandName.STOP_MONITORING)
-
-    def set_scanner_enabled(self, enabled: bool) -> str:
-        """Toggle scanner availability for scanner-sensitive procedures.
-
-        Args:
-            enabled: True to make the scanner available.
-
-        Returns:
-            The command's request id.
-        """
-        return self._submit(
-            ev.CommandName.SET_SCANNER_ENABLED, enabled=bool(enabled)
-        )
 
     def set_attendance(self, attended: bool) -> str:
         """Record whether a human is watching the running experiment.

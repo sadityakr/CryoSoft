@@ -221,20 +221,6 @@ def test_connect_instrument_failure_emits_action_failed(tmp_path, qtbot):
         orch.shutdown()
 
 
-def test_connect_instrument_adopts_reconnected_scanner(tmp_path, qtbot):
-    """A reconnected switch VI becomes the scanner (same first-switch rule
-    the constructor applies)."""
-    orch = Orchestrator(
-        _degraded_station(tmp_path, vi_type="switch"), tick_interval_ms=10
-    )
-    try:
-        assert orch._scanner_vi_name is None
-        orch.connect_instrument("flaky_vi")
-        assert orch._scanner_vi_name == "flaky_vi"
-    finally:
-        orch.shutdown()
-
-
 def test_basic_ticking(orchestrator, qtbot):
     """Orchestrator starts, ticks at interval, emits states_updated.
 
@@ -456,10 +442,10 @@ def test_tick_emits_raw_trend_record(orchestrator, station, qtbot):
     assert all(isinstance(key, str) and isinstance(val, float) for key, val in v.items())
     assert set(v) == set(station.last_state_flat())
 
-    # keithley_dc_mode is vi_type: measurement in sim_cryostat/devices.yaml
-    # and exposes @monitored last_n_valid; last_state_flat() excludes every
-    # measurement VI, so this key must never reach the raw trend tier.
-    assert "keithley_dc_mode_last_n_valid" not in v
+    # dc_measurement is vi_type: measurement in sim_cryostat/devices.yaml;
+    # last_state_flat() excludes every measurement VI, so none of its keys
+    # may reach the raw trend tier.
+    assert not any(key.startswith("dc_measurement_") for key in v)
 
 
 def test_full_procedure_cycle(orchestrator, station, qtbot):
@@ -825,18 +811,20 @@ def test_stop_ramp_holds_that_vi_and_leaves_the_others_alone(
 ):
     """A manual ramp is stopped per instrument, unlike abort_procedure()."""
     station.get_vi("magnet_z").set_field(5.0)
-    station.get_vi("magnet_y").set_field(2.0)
+    station.get_vi("temperature_vti").set_temperature(200.0)
     orchestrator._tick()
-    assert {r.vi_name for r in orchestrator.active_ramps()} == {"magnet_z", "magnet_y"}
+    assert {r.vi_name for r in orchestrator.active_ramps()} == {
+        "magnet_z", "temperature_vti",
+    }
 
     with qtbot.waitSignal(orchestrator.action_succeeded, timeout=500) as blocker:
         orchestrator.stop_ramp("magnet_z")
     assert blocker.args == ["magnet_z", "stop_ramp"]
 
     assert station.get_vi("magnet_z").ramp_status() == "IDLE"
-    assert station.get_vi("magnet_y").ramp_status() == "RAMPING"
+    assert station.get_vi("temperature_vti").ramp_status() == "RAMPING"
     # The stopped row leaves the tracker immediately, not a tick later.
-    assert [r.vi_name for r in orchestrator.active_ramps()] == ["magnet_y"]
+    assert [r.vi_name for r in orchestrator.active_ramps()] == ["temperature_vti"]
 
 
 def test_stop_ramp_returns_the_machine_to_idle_on_the_next_tick(
@@ -1023,21 +1011,21 @@ def test_stale_unclaimed_vi_while_monitoring_is_warning_only(orchestrator, stati
     orchestrator.error_event.connect(lambda ev: events.append(ev))
 
     assert orchestrator._state == OrchestratorState.IDLE
-    station.temperature_sample._driver._simulate_error = True
+    station.level_meter._driver._simulate_error = True
 
     def has_fault():
-        return "temperature_sample" in station.vi_faults()
+        return "level_meter" in station.vi_faults()
 
     qtbot.waitUntil(has_fault, timeout=1000)
 
     # No state change at all.
     assert orchestrator._state == OrchestratorState.IDLE
 
-    fault_events = [e for e in events if e.kind == "fault" and e.vi_name == "temperature_sample"]
+    fault_events = [e for e in events if e.kind == "fault" and e.vi_name == "level_meter"]
     assert fault_events
     assert fault_events[-1].severity == "warning"
 
-    station.temperature_sample._driver._simulate_error = False
+    station.level_meter._driver._simulate_error = False
 
 
 def test_unhandled_tick_exception_still_enters_error(orchestrator, qtbot, monkeypatch):
@@ -1416,9 +1404,8 @@ def test_emergency_shutdown_runs_once_not_every_tick(orchestrator, station, qtbo
     _enter_emergency() always calls Station.standby_all() exactly once on
     entry (critical severity is station-wide scope by construction, so
     there is no "concerned VI" subset to narrow the shutdown to — see the
-    System-Condition standard). Repeating it every tick would restart a
-    persistent magnet's full switch-heater warmup/cooldown cycle every few
-    seconds.
+    System-Condition standard). Repeating it every tick would restart every
+    instrument's own safe-off sequence every few seconds.
     """
     calls = {"n": 0}
     original = station.magnet_z.standby
@@ -1668,40 +1655,6 @@ def test_queue_procedures(orchestrator, station, qtbot):
     orchestrator.abort_procedure()
 
 
-def test_run_procedure_refused_when_magnet_in_persistent_mode(qtbot):
-    """A magnet left in manual persistent mode blocks a procedure from starting:
-    action_blocked fires, the Orchestrator stays IDLE, nothing is dispatched."""
-    # sim_real_cryostat has a persistent (switch-heater) magnet.
-    station = build_station("cryosoft/configs/sim_real_cryostat")
-    station.magnet_z.enable_persistent_mode()
-    orch = Orchestrator(station, tick_interval_ms=10)
-
-    blocked: list[str] = []
-    orch.action_blocked.connect(blocked.append)
-
-    procedure = MockProcedure(station)
-    orch.run_procedure(procedure)
-
-    assert orch._state == OrchestratorState.IDLE
-    assert orch._procedure is None
-    assert blocked and "persistent mode" in blocked[0]
-
-    # With the magnet returned to normal mode, the procedure starts.
-    station.magnet_z.switch_heater_on()
-    station.magnet_z.disable_persistent_mode()
-    orch.run_procedure(procedure)
-    assert orch._procedure is procedure
-    orch.abort_procedure()
-    orch.shutdown()
-
-
-# ── Monitoring lifecycle (start/stop/shutdown) ────────────────────────────────
-# Monitoring is OFF at construction: the tick timer runs (it processes GUI
-# actions and the state machine), but no instrument is polled until
-# start_monitoring(). This is what keeps a freshly launched app quiet while
-# the instruments are still being initiated.
-
-
 def _spy_get_state(station, monkeypatch):
     """Wrap station.get_state with a call counter; returns the counter list."""
     calls: list[int] = []
@@ -1947,7 +1900,7 @@ def test_envelope_state_violation_enters_emergency(orchestrator, station, qtbot)
     # immediate violation on the next tick.
     orchestrator.set_experiment_envelope(
         _envelope(
-            temperature_sample=EnvelopeBound(min_value=400.0, state_key="temperature")
+            temperature_vti=EnvelopeBound(min_value=400.0, state_key="temperature")
         )
     )
     errors: list[str] = []
@@ -1955,7 +1908,7 @@ def test_envelope_state_violation_enters_emergency(orchestrator, station, qtbot)
 
     orchestrator._tick()
     assert orchestrator._state == OrchestratorState.EMERGENCY
-    assert any("session envelope" in e and "temperature_sample" in e for e in errors)
+    assert any("session envelope" in e and "temperature_vti" in e for e in errors)
 
     # Acknowledgement is refused while the violation persists...
     orchestrator._acknowledge_emergency()
@@ -1968,34 +1921,6 @@ def test_envelope_state_violation_enters_emergency(orchestrator, station, qtbot)
 
 
 # ── Scanner-enabled flag ──────────────────────────────────────────────────
-
-def test_scanner_enabled_default_false(orchestrator):
-    """Scanner is disabled by default on a fresh Orchestrator."""
-    assert orchestrator.scanner_enabled() is False
-
-
-def test_set_scanner_enabled_round_trips_with_switch_vi(orchestrator, station):
-    """set_scanner_enabled() forwards to the Station when a switch VI exists."""
-    assert station.switch_vi_names(), "sim_cryostat is expected to have a switch VI"
-    orchestrator.set_scanner_enabled(True)
-    assert orchestrator.scanner_enabled() is True
-    assert station.scanner_enabled() is True
-
-    orchestrator.set_scanner_enabled(False)
-    assert orchestrator.scanner_enabled() is False
-
-
-def test_set_scanner_enabled_is_noop_without_switch_vi(qtbot):
-    """A station with no switch VI: set_scanner_enabled() logs and does nothing."""
-    from cryosoft.core.station import Station
-
-    bare_station = Station()
-    orch = Orchestrator(bare_station, tick_interval_ms=10)
-    orch.set_scanner_enabled(True)
-    assert orch.scanner_enabled() is False
-
-
-# ── Gate framework ─────────────────────────────────────────────────────────
 
 def test_current_gates_empty_for_procedure_without_gate_methods(orchestrator, station):
     """A duck-typed procedure with no gate methods behaves like the no-op default."""
@@ -2971,18 +2896,6 @@ def test_recover_from_error_still_works_in_error(orchestrator, qtbot):
     assert orchestrator.state == OrchestratorState.IDLE.value
 
 
-def test_scanner_toggle_without_a_switch_is_refused_with_a_reason(orchestrator, qtbot):
-    """A station with no switch instrument says so instead of ignoring the click."""
-    saved = orchestrator._scanner_vi_name
-    orchestrator._scanner_vi_name = None
-    try:
-        with qtbot.waitSignal(orchestrator.action_blocked, timeout=500) as blocker:
-            orchestrator.set_scanner_enabled(True)
-        assert "no switch instrument" in blocker.args[0]
-    finally:
-        orchestrator._scanner_vi_name = saved
-
-
 # ══════════════════════════════════════════════════════════════════════
 # The engine port: submit(Command) -> one Verdict, and the event stream
 # (the verdict standard — see Orchestrator's class docstring)
@@ -2991,13 +2904,13 @@ def test_scanner_toggle_without_a_switch_is_refused_with_a_reason(orchestrator, 
 AGENT = ev.Actor(kind=ev.ActorKind.AGENT, id="drift-watch", role="operator")
 
 FIELD_SWEEP_PARAMS = {
-    "measurement_vi": "keithley_delta_mode",
+    "measurement_vi": "dc_measurement",
     "field_start": -0.1,
     "field_end": 0.1,
     "field_steps": 3,
     "temperature": 300.0,
-    "current": 1e-6,
-    "n_readings": 5,
+    "current_A": 1e-6,
+    "readings_per_point": 5,
     "init_wait": 0.0,
     "step_wait": 0.0,
 }
@@ -3331,7 +3244,7 @@ def test_every_command_is_answered_exactly_once(port):
         ev.Command(name=ev.CommandName.START_MONITORING, actor=AGENT),
         ev.Command(name=ev.CommandName.PAUSE_PROCEDURE, actor=AGENT),
         ev.Command(name=ev.CommandName.ACKNOWLEDGE, actor=AGENT),
-        ev.Command(name=ev.CommandName.SET_SCANNER_ENABLED, args={"enabled": True}),
+        ev.Command(name=ev.CommandName.SET_ATTENDANCE, args={"attended": True}),
         ev.Command(name=ev.CommandName.RECOVER_FROM_ERROR, actor=AGENT),
         _run_procedure_command(tmp_path, procedure="NoSuchProcedure"),
     ]
@@ -3920,7 +3833,7 @@ def test_a_closed_gate_never_touches_the_operator_path(port):
     orch.set_agent_gate(ev.AgentGate.REVOKED)
 
     orch.submit(
-        ev.Command(name=ev.CommandName.SET_SCANNER_ENABLED, args={"enabled": True})
+        ev.Command(name=ev.CommandName.START_MONITORING)
     )
 
     assert recorder.verdicts[-1].code is not ev.VerdictCode.BLOCKED_ROLE
@@ -3986,7 +3899,7 @@ def test_snapshot_reports_a_disconnected_instrument_as_idle(orchestrator, statio
 
     snapshot = orchestrator.status_snapshot()
     assert snapshot.instruments["magnet_z"]["lifecycle"] == "idle"
-    assert snapshot.instruments["magnet_y"]["lifecycle"] == "initiated"
+    assert snapshot.instruments["temperature_vti"]["lifecycle"] == "initiated"
 
 
 # ══════════════════════════════════════════════════════════════════════

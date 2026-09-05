@@ -274,10 +274,10 @@ def test_enumerable_false_for_connect_failed_vi(tmp_path):
 
 def test_enumerable_false_for_operator_disconnected_vi(station: Station):
     """An operator-released VI is absent from the roster, just like connect_failed."""
-    ok, _ = station.disconnect_instrument("magnet_y")
+    ok, _ = station.disconnect_instrument("level_meter")
     assert ok
-    assert "operator" in station.availability("magnet_y").tags
-    assert ("magnet_y" in station.get_vi_names()) == TAG_POLICY["operator"].enumerable
+    assert "operator" in station.availability("level_meter").tags
+    assert ("level_meter" in station.get_vi_names()) == TAG_POLICY["operator"].enumerable
 
 
 def test_enumerable_true_for_not_responding_vi(station: Station):
@@ -325,10 +325,10 @@ def test_controllable_false_for_absent_vi_cannot_be_dispatched_to(station: Stati
     assert TAG_POLICY["connect_failed"].controllable is False
     assert TAG_POLICY["operator"].controllable is False
 
-    ok, _ = station.disconnect_instrument("magnet_y")
+    ok, _ = station.disconnect_instrument("level_meter")
     assert ok
     with pytest.raises(KeyError):
-        station.execute_vi_action("magnet_y", "initiate")
+        station.execute_vi_action("level_meter", "initiate")
 
 
 # ----------------------------------------------------------------------
@@ -360,12 +360,12 @@ def test_fails_claimed_run_false_for_operator_and_detached(station: Station):
     ``detached`` is read straight off ``is_attached()`` — so a run
     "watching" either VI can never land in ``decide()``'s ``held_vis``.
     """
-    ok, _ = station.disconnect_instrument("magnet_y")
+    ok, _ = station.disconnect_instrument("level_meter")
     assert ok
     vi = station.get_vi("dc_measurement")
     vi.is_attached = lambda: False
     try:
-        for vi_name, tag in (("magnet_y", "operator"), ("dc_measurement", "detached")):
+        for vi_name, tag in (("level_meter", "operator"), ("dc_measurement", "detached")):
             verdict = decide(
                 station.conditions().values(), watched_vis=frozenset({vi_name}), run_active=True
             )
@@ -418,10 +418,10 @@ def test_raises_error_event_false_for_operator_and_detached_onset(
     events: list = []
     orchestrator.error_event.connect(lambda ev: events.append(ev))
 
-    ok, _ = station.disconnect_instrument("magnet_y")
+    ok, _ = station.disconnect_instrument("level_meter")
     assert ok
     orchestrator._tick()
-    raised = any(ev.vi_name == "magnet_y" for ev in events)
+    raised = any(ev.vi_name == "level_meter" for ev in events)
     assert raised == TAG_POLICY["operator"].raises_error_event
 
     events.clear()
@@ -459,14 +459,14 @@ def test_recovery_connect_clears_operator_tag(station: Station, orchestrator, qt
     """recovery="connect" for operator: Orchestrator.connect_instrument() clears it."""
     assert TAG_POLICY["operator"].recovery == "connect"
 
-    ok, _ = station.disconnect_instrument("magnet_y")
+    ok, _ = station.disconnect_instrument("level_meter")
     assert ok
-    assert "operator" in station.availability("magnet_y").tags
+    assert "operator" in station.availability("level_meter").tags
 
     with qtbot.waitSignal(orchestrator.instrument_reconnected, timeout=500):
-        orchestrator.connect_instrument("magnet_y")
+        orchestrator.connect_instrument("level_meter")
 
-    assert station.availability("magnet_y").tags == frozenset()
+    assert station.availability("level_meter").tags == frozenset()
 
 
 def test_recovery_connect_clears_connect_failed_tag(tmp_path, qtbot):

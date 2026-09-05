@@ -238,10 +238,10 @@ def build_form_layout(
     ``label_overrides`` lets the caller show a *prettier* visible label than the
     canonical parameter name WITHOUT changing the name the value is collected
     under (or its HDF5 metadata key). The ProcedureWindow uses this for the
-    scanner/mux column, where the parameter names are ``mux_<route>`` (kept
-    prefixed so route names cannot collide with measurement/system params) but
-    the visible row label is the bare ``<route>``. Only the label changes; the
-    ``objectName``, the collected key, and the metadata key stay ``mux_<route>``.
+    reading-loop column, where a parameter name is namespaced (kept prefixed so
+    a choice cannot collide with a measurement/system parameter) but the
+    visible row label is the bare choice. Only the label changes; the
+    ``objectName``, the collected key, and the metadata key are untouched.
 
     Args:
         params: A parameter-group mapping (name -> ``ParamSpec``).
@@ -266,7 +266,7 @@ def build_form_layout(
         # label+field — letting a capped column compress without a horizontal
         # scrollbar, and letting a wrapped field use the column's full width
         # (so long values are no longer clipped). Used for the Measurement /
-        # scanner columns, which the ProcedureWindow must fit four-across.
+        # reading-loop columns, which the ProcedureWindow must fit four-across.
         form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
     widgets: dict[str, QWidget] = {}
     for param_name, spec in params.items():

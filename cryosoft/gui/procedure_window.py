@@ -220,7 +220,7 @@ class ProcedureWindow(QMainWindow):
         self._main_splitter.addWidget(self._left_splitter)
         self._main_splitter.addWidget(self._right_splitter)
         # The left pane carries the four-column parameter form (Sweep, System,
-        # Measurement, scanner), which needs more width than the queue/plot-2
+        # Measurement, reading loop), which needs more width than the queue/plot-2
         # pane; bias the initial split left so all four columns are visible
         # without a horizontal scrollbar at a ~1280 px window. Still draggable.
         self._main_splitter.setSizes([880, 380])

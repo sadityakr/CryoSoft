@@ -126,7 +126,7 @@ def test_build_station_success(sim_station: Station):
     assert sim_station is not None
     # Check that expected VIs are registered
     vi_names = sim_station.get_vi_names()
-    expected = ["magnet_z", "magnet_y", "temperature_vti", "temperature_sample", "level_meter", "keithley_delta_mode", "dc_measurement"]
+    expected = ["magnet_z", "temperature_vti", "level_meter", "dc_measurement"]
     for name in expected:
         assert name in vi_names
 
@@ -140,7 +140,9 @@ def test_station_getattr(sim_station: Station):
     # Check another one to be sure
     temp_vti = sim_station.temperature_vti
     assert temp_vti.vi_name == "temperature_vti"
-    assert temp_vti.__class__.__name__ == "VTITemperatureControllerVI"
+    assert temp_vti.__class__.__name__ == (
+        "Lakeshore335SampleTemperatureControllerVI"
+    )
 
 
 def _registry_stub():
@@ -165,13 +167,10 @@ def test_station_get_vi_returns_named_instance(sim_station: Station):
 def test_station_measurement_vi_names_registration_order(sim_station: Station):
     """measurement_vi_names() returns only measurement VIs, in registration order.
 
-    sim_cryostat registers keithley_delta_mode, then dc_measurement, then
-    lockin_harmonic (all vi_type=measurement); the system/level VIs are
-    excluded.
+    sim_cryostat registers dc_measurement (vi_type=measurement); the
+    system/level VIs are excluded.
     """
-    assert sim_station.measurement_vi_names() == [
-        "keithley_delta_mode", "keithley_dc_mode", "dc_measurement", "lockin_harmonic",
-    ]
+    assert sim_station.measurement_vi_names() == ["dc_measurement"]
 
 
 def test_station_measurement_vi_names_empty_when_none_registered():
@@ -181,18 +180,6 @@ def test_station_measurement_vi_names_empty_when_none_registered():
     assert station.measurement_vi_names() == []
 
 
-def test_station_switch_vi_names_registration_order(sim_station: Station):
-    """switch_vi_names() returns only switch VIs (sim_cryostat has switch_matrix)."""
-    assert sim_station.switch_vi_names() == ["switch_matrix"]
-
-
-def test_station_switch_vi_names_empty_when_none_registered():
-    """A station with no switch VIs reports an empty list."""
-    station = Station()
-    station.register_vi("magnet_z", _registry_stub(), "system")
-    assert station.switch_vi_names() == []
-
-
 def test_get_ramp_status_covers_system_rampables(sim_station: Station):
     """get_ramp_status() returns a target/rate/ramp_status entry for every system
     VI that can ramp, excludes measurement VIs, and reports idle VIs as IDLE with
@@ -200,7 +187,7 @@ def test_get_ramp_status_covers_system_rampables(sim_station: Station):
     ramps = sim_station.get_ramp_status()
 
     assert "magnet_z" in ramps
-    assert "temperature_sample" in ramps
+    assert "temperature_vti" in ramps
     for entry in ramps.values():
         assert {"target", "rate", "ramp_status"} <= set(entry)
 
@@ -265,19 +252,27 @@ def test_last_state_flat_coerces_bool_to_float_unlike_monitor_history(sim_statio
     """Pin the bool-persistence asymmetry documented on MonitorHistory's docstring.
 
     ``last_state_flat()`` has no ``bool`` guard: since ``bool`` is a subclass
-    of ``int``, ``switch_matrix``'s boolean ``hot_switching_enabled`` field
-    passes ``isinstance(value, (int, float))`` and is coerced to a float,
-    so it IS written to the trend-history tiers. This is the opposite
-    direction from ``gui.monitor_history.MonitorHistory.record()``, which
-    explicitly excludes bools from the live in-RAM history (see that test
-    module's matching pin, and MonitorHistory's class docstring for the
-    full asymmetry writeup). Neither method should change to "fix" this —
-    ``last_state_flat()`` also feeds HDF5 sweep columns.
+    of ``int``, a VI's boolean monitored field passes
+    ``isinstance(value, (int, float))`` and is coerced to a float, so it IS
+    written to the trend-history tiers. This is the opposite direction from
+    ``gui.monitor_history.MonitorHistory.record()``, which explicitly excludes
+    bools from the live in-RAM history (see that test module's matching pin,
+    and MonitorHistory's class docstring for the full asymmetry writeup).
+    Neither method should change to "fix" this — ``last_state_flat()`` also
+    feeds HDF5 sweep columns.
     """
+
+    class _BoolVI:
+        vi_name = "bool_vi"
+
+        def get_state(self):
+            return {"flag": True}
+
+    sim_station.register_vi("bool_vi", _BoolVI(), "system")
     sim_station.get_state()  # populate _last_known_state
     flat = sim_station.last_state_flat()
 
-    key = "switch_matrix_hot_switching_enabled"
+    key = "bool_vi_flag"
     assert key in flat
     assert flat[key] == 1.0
     assert isinstance(flat[key], float)
@@ -307,10 +302,6 @@ def test_process_system_targets_dispatch(sim_station: Station):
     # Verify that the ramps have started
     assert sim_station.magnet_z.ramp_status() == "RAMPING"
     assert sim_station.temperature_vti.ramp_status() == "RAMPING"
-
-    # Verify that un-targeted system VIs are NOT ramping
-    assert sim_station.magnet_y.ramp_status() == "IDLE"
-    assert sim_station.temperature_sample.ramp_status() == "IDLE"
 
     # process_system_targets should raise if we pass a non-system VI
     with pytest.raises(ValueError):
@@ -876,7 +867,7 @@ def test_update_conditions_hold_flag_scopes_to_concerned_vis(sim_station: Statio
     sim_station.update_conditions(safety, tolerated_flags=frozenset())
     condition = sim_station.conditions()["safety:helium_low"]
     assert condition.severity == "hold"
-    assert condition.affected_vis == frozenset({"magnet_z", "magnet_y"})
+    assert condition.affected_vis == frozenset({"magnet_z"})
 
 
 def test_acknowledge_condition_acknowledges_a_safety_hold(sim_station: Station):
@@ -1004,20 +995,6 @@ def test_acknowledge_condition_unknown_key_returns_false(sim_station: Station):
     """acknowledge_condition() on a key with no active condition is a no-op."""
     assert sim_station.acknowledge_condition("safety:no_such_flag") is False
     assert sim_station.acknowledge_condition("comm:no_such_vi") is False
-
-
-def test_scanner_enabled_defaults_false(sim_station: Station):
-    """A freshly built Station has the scanner disabled by default."""
-    assert sim_station.scanner_enabled() is False
-
-
-def test_scanner_enabled_round_trip(sim_station: Station):
-    """set_scanner_enabled() is reflected by scanner_enabled()."""
-    sim_station.set_scanner_enabled(True)
-    assert sim_station.scanner_enabled() is True
-
-    sim_station.set_scanner_enabled(False)
-    assert sim_station.scanner_enabled() is False
 
 
 # ---------------------------------------------------------------------------
@@ -1497,7 +1474,7 @@ def test_lifecycle_state_of_one_vi_matches_the_vi_itself(sim_station):
     assert sim_station.lifecycle_state("magnet_z") == (
         sim_station.get_vi("magnet_z").lifecycle_state()
     )
-    assert sim_station.lifecycle_state("magnet_y") == "idle"
+    assert sim_station.lifecycle_state("temperature_vti") == "idle"
 
     with pytest.raises(KeyError):
         sim_station.lifecycle_state("no_such_instrument")

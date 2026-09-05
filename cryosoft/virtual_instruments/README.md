@@ -2,8 +2,8 @@
 
 ## Purpose
 Layer-1 standardised capability interfaces over the raw drivers. A **Virtual
-Instrument (VI)** presents behaviour-named methods (`set_field`, `set_temperature`,
-`take_reading`, `select_route`) to the layers above, so procedures and the
+Instrument (VI)** presents behaviour-named methods (`set_field`,
+`set_temperature`, `take_reading`) to the layers above, so procedures and the
 Orchestrator interact with a magnet or a thermometer regardless of which physical
 model is wired in. This root holds the shared contracts; each `vi_type` gets its
 own subfolder of concrete classes.
@@ -17,7 +17,7 @@ Orchestrator, or Procedure.
 The Station factory calls `__init__(self, drivers, **init_params)` on every VI:
 a `drivers` dict of role → driver instance (e.g. `{"main": ...}`,
 `{"source": ..., "meter": ...}`) and the `init_params` from `devices.yaml`
-(addresses already bound, plus limits, ramp segments, routes).
+(addresses already bound, plus limits and ramp segments).
 
 ## Exit (what goes out)
 - `@monitored` read-only methods, auto-collected by `get_state()` into a flat
@@ -115,10 +115,11 @@ Read this before adding or "hiding" a control — the split trips people up:
   and `control_limits` enforcement is untouched by visibility. Hiding is
   presentation, never a safety mechanism.
 - **Dynamic choices**: when a control's valid values only exist after
-  construction (a switch's config-named routes), override the instance hook
-  `control_param_specs(method_name)` to inject a ParamSpec with `choices` —
-  the GUI consults the hook, not the raw decorator metadata
-  (`SwitchMatrixVI.select_route` is the reference example).
+  construction (the calibration curves an instrument reports it holds, say),
+  override the instance hook `control_param_specs(method_name)` to inject a
+  ParamSpec with `choices` — the GUI consults the hook, not the raw decorator
+  metadata (`Lakeshore335SampleTemperatureControllerVI.set_curve` is the
+  reference example).
 - **The purity rule** binds every such override: `control_param_specs()` is
   a PURE READ of config and cached state and must send no command to any
   driver. It is a *describe* path — the front panel calls it on every
@@ -172,7 +173,7 @@ The written standards all live in this root and are enforced by
   config by `test_vi_lifecycle_state_is_declared_and_follows_the_verbs` and
   `test_vi_lifecycle_state_is_a_pure_read` (the latter watches the drivers, so
   a read that polled fails).
-- A `vi_type` class attribute (`system` / `measurement` / `level` / `switch`).
+- A `vi_type` class attribute (`system` / `measurement` / `level`).
 - The control-validation standard: bounded `@control` parameters declared in
   `control_limits`, limit values populated from `init_params`, enforced by the
   base class before the hardware call. Coverage is machine-checked, not
@@ -187,11 +188,10 @@ The written standards all live in this root and are enforced by
   READ side: how the Station reports what a setup allows (for an experiment's
   envelope to narrow) without reaching into `_limits`.
 - The excitation ceiling: every VI that drives current through the sample
-  reads `max_source_current_A` from its config `init_params` — directly (the
-  DC and delta-mode VIs bound the sourced current to ±that value, symmetric
-  because current reversal is routine) or derived (the voltage-sourced lock-in
-  bounds its oscillator amplitude by `max_source_current_A ×
-  series_resistance_ohm`). `base._populate_excitation_current_limit()` is the
+  reads `max_source_current_A` from its config `init_params` — directly (a
+  current-sourcing VI bounds the sourced current to ±that value, symmetric
+  because current reversal is routine) or derived (a voltage-sourcing VI turns
+  it into an amplitude bound through the series resistance it drives). `base._populate_excitation_current_limit()` is the
   one place the key becomes a bound. Every SHIPPED config must declare it —
   conformance-checked per config, real setups included — because the ceiling
   is a property of the sample wiring, not of the code.
@@ -202,8 +202,8 @@ The written standards all live in this root and are enforced by
   lives one layer up, in `Station.send_measurement_commands(commands,
   allowed_scope=...)` (`cryosoft.core.station`) — this folder only declares
   the scope. Give a method `scope="operation"` when automated misuse is
-  dangerous (switch-heater on/off, persistent-mode entry/exit, a future
-  needle-valve control); leave it at the default otherwise. Every
+  dangerous (a magnet's switch heater, a cryogen meter's refresh rate);
+  leave it at the default otherwise. Every
   `reading_setters` target and the measurement lifecycle
   (`initiate_measurement`/`standby`) must stay measurement-scope —
   conformance-checked.
@@ -244,8 +244,8 @@ The written standards all live in this root and are enforced by
 ## How to add a new module
 1. Pick the `vi_type` and open that subfolder's README for the local recipe.
 2. Subclass the right base (`MagnetBase`, `TemperatureControllerBase`,
-   `LevelMeterBase`, `RotatorBase`, `MeasurementInstrumentBase` /
-   `DCMeasurementBase`, or `BaseVirtualInstrument` directly for a switch),
+   `LevelMeterBase`, `MeasurementInstrumentBase` / `DCMeasurementBase`, or
+   `BaseVirtualInstrument` directly for a category with no base yet),
    adding `RampableVI` if it ramps.
 3. Tag reads `@monitored(unit=..., description=...)` and actions `@control`;
    declare `control_limits` for any bounded parameter and read the value from
@@ -265,7 +265,7 @@ The written standards all live in this root and are enforced by
 Shared contracts at the root; concrete classes live in the subfolders.
 
 - `base.py` — `BaseVirtualInstrument` plus the typed sub-bases `MagnetBase`,
-  `TemperatureControllerBase`, `LevelMeterBase`, `RotatorBase`,
+  `TemperatureControllerBase`, `LevelMeterBase`,
   `MeasurementInstrumentBase`, `DCMeasurementBase`. Provides `__init_subclass__` auto-wrapping of
   `@monitored`/`@control` (structured logging + declarative limit enforcement),
   `get_state()` (which also fills the monitor-cycle cache `last_monitored()`
@@ -297,16 +297,13 @@ Shared contracts at the root; concrete classes live in the subfolders.
   that `Station.get_ramp_status()` aggregates once per tick for the ramp
   tracker and the operational-status record — `ramp_setpoint()` is the NEXT
   setpoint (the intermediate value the hardware is driving to), distinct
-  from `ramp_target()`'s END setpoint. Mixed into magnet, temperature, and
-  rotator VIs. tests: `tests/test_l1_virtual_instruments.py`,
+  from `ramp_target()`'s END setpoint. Mixed into the magnet and temperature
+  VIs. tests: `tests/test_l1_virtual_instruments.py`,
   `tests/test_l1_new_vis.py` (via the concrete rampable VIs).
 - `__init__.py` — package marker (docstring only). tests: none.
-- `magnet/` — superconducting magnet PSU VIs (field ramp, persistent mode).
-- `temperature/` — temperature controller VIs (sample and VTI).
+- `magnet/` — superconducting magnet PSU VIs (field ramp).
+- `temperature/` — temperature controller VIs.
 - `level/` — cryogen level meter VIs.
-- `rotator/` — motorized sample-rotation stage VIs (uniaxial/2D magnet sample
-  orientation).
-- `measurement/` — electrical transport measurement-method VIs (DC, delta-mode).
-- `switch/` — matrix-switch / scanner VIs (exclusive-mux routing).
+- `measurement/` — electrical transport measurement-method VIs (DC).
 
 Each subfolder has its own `README.md` with the per-file map for that `vi_type`.

@@ -244,7 +244,7 @@ def _temperature_check(config: dict[str, float] | None = None) -> TrendCheck:
 def test_sample_temperature_stable_passes_for_flat_readings(tmp_path: Path):
     now = 2_000_000.0
     records = [
-        _raw_record(now - i, {"temperature_sample_temperature": 4.2}) for i in range(0, 3600, 100)
+        _raw_record(now - i, {"temperature_vti_temperature": 4.2}) for i in range(0, 3600, 100)
     ]
     _write_jsonl(tmp_path / "trend_history_raw.jsonl", records)
     result = run_check(_temperature_check(), tmp_path, now=now)
@@ -258,7 +258,7 @@ def test_sample_temperature_stable_fails_for_oscillating_readings(tmp_path: Path
     now = 2_000_000.0
     values = [4.0, 4.6, 4.0, 4.6, 4.0, 4.6]
     records = [
-        _raw_record(now - i * 60, {"temperature_sample_temperature": v})
+        _raw_record(now - i * 60, {"temperature_vti_temperature": v})
         for i, v in enumerate(values)
     ]
     _write_jsonl(tmp_path / "trend_history_raw.jsonl", records)
@@ -277,7 +277,7 @@ def test_sample_temperature_stable_indeterminate_on_empty_window(tmp_path: Path)
 def test_sample_temperature_stable_defined_verdict_on_single_sample(tmp_path: Path):
     now = 2_000_000.0
     _write_jsonl(
-        tmp_path / "trend_history_raw.jsonl", [_raw_record(now, {"temperature_sample_temperature": 4.2})]
+        tmp_path / "trend_history_raw.jsonl", [_raw_record(now, {"temperature_vti_temperature": 4.2})]
     )
     result = run_check(_temperature_check(), tmp_path, now=now)
     # One sample: std/range are both exactly zero, a defined (passing) verdict.

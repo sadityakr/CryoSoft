@@ -40,13 +40,13 @@ CONFIG_PATH = "cryosoft/configs/sim_cryostat"
 AGENT = ev.Actor(kind=ev.ActorKind.AGENT, id="scenario-agent", role="operator")
 
 FIELD_SWEEP_PARAMS = {
-    "measurement_vi": "keithley_delta_mode",
+    "measurement_vi": "dc_measurement",
     "field_start": -0.1,
     "field_end": 0.1,
     "field_steps": 3,
     "temperature": 300.0,  # sim VTI starts at 300 K -> instant settle
-    "current": 1e-6,
-    "n_readings": 3,
+    "current_A": 1e-6,
+    "readings_per_point": 3,
     "init_wait": 0.0,
     "step_wait": 0.0,
 }

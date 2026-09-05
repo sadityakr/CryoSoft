@@ -22,7 +22,7 @@ resolve to a key in the `real_drivers` block.
 ## Exit (what goes out)
 A fully-wired `Station`: driver instances keyed by name, VIs constructed via
 `__init__(self, drivers, **init_params)` with their `init_params` (addresses,
-limits, ramp segments, mux routes) taken verbatim from `devices.yaml`, and a
+limits, ramp segments) taken verbatim from `devices.yaml`, and a
 monitor loop configured from `monitor.yaml`.
 
 ## Interface contract
@@ -39,20 +39,20 @@ every `configs/<name>/` directory:
   sim configs swap in the `Sim*` class at the same address slot.
 - `virtual_instruments:` — map of VI name → `{class:, drivers: {role: driver_name},
   vi_type:, init_params: {...}}`. `vi_type` is the registry role
-  (`system` / `measurement` / `level` / `switch`). `init_params` carries the
+  (`system` / `measurement` / `level`). `init_params` carries the
   control-validation limits (`min/max_temperature_K`, `max_ramp_rate_K_per_min`,
-  `max_current`, field bounds), magnet `ramp_segments`, and switch `routes`.
+  `max_current`, field bounds) and instrument-specific setup constants such as
+  a magnet's `ramp_segments` or a Lakeshore 335's `initiate_heater_range`.
 - `max_source_current_A` — REQUIRED on every VI that drives current through the
-  sample (the DC, delta-mode and lock-in measurement VIs), in amperes.
-  Conformance-checked per shipped config, real setups included, because a
-  missing ceiling lets an action source whatever the instrument can deliver.
-  It bounds the sourced current symmetrically (±, current reversal is routine)
-  and, on the voltage-sourced lock-in, is converted to an oscillator-amplitude
-  bound by `max_source_current_A × series_resistance_ohm`. Choose it from the
-  SAMPLE WIRING where that figure is documented (`12t-cryo` records ±10 mA in
-  its `setup.md`) and from the source's own maximum output otherwise
-  (105 mA for a Keithley 6220/6221); narrow it when a sample's safe current is
-  measured. It is a property of the setup, so it lives here, never in the VI.
+  sample, in amperes. Conformance-checked per shipped config, real setups
+  included, because a missing ceiling lets an action source whatever the
+  instrument can deliver. It bounds the sourced current symmetrically (±,
+  current reversal is routine) and, on a voltage-sourcing VI, is converted to
+  an amplitude bound through the series resistance it drives. Choose it from
+  the SAMPLE WIRING where that figure is documented, and from the source's own
+  maximum output otherwise (105 mA for a Keithley 6220/6221); narrow it when a
+  sample's safe current is measured. It is a property of the setup, so it
+  lives here, never in the VI.
 
 `monitor.yaml` structure: a `monitor:` block with `tick_interval_ms` (the single
 QTimer tick period), `max_vi_errors` (consecutive VI-error tolerance before
@@ -89,9 +89,9 @@ monitor:
   instrument_thread: false
 ```
 
-The shipped configs stand as: both sims inherit the thread, and the two real
-setups (`12t-cryo`, `a-sample-real-cryostat`) carry an explicit `false` with
-the reason, until their rack has been soaked on hardware with it on.
+The shipped config inherits the thread. A real setup writes the line only
+after deciding its rack needs `inline` mode, and deletes it again once that
+rack has had a day of hardware soak with the thread on.
 
 ### `panels:` — which controls a VI's monitor card shows
 
@@ -110,7 +110,7 @@ edit; nobody edits a Virtual Instrument to customize their monitor:
 panels:
   temperature_vti:
     controls: [set_temperature, set_pid]  # card shows exactly these two
-  temperature_sample:
+  dc_measurement:
     controls: []                          # card shows no controls at all
 ```
 
@@ -128,32 +128,33 @@ write-up from the VI side is `cryosoft/virtual_instruments/README.md`
 1. Create `configs/<name>/` with a `devices.yaml` and a `monitor.yaml`.
 2. In `real_drivers`, list each instrument with its driver class and address.
 3. In `virtual_instruments`, build each VI on those drivers, setting `vi_type`
-   and the `init_params` limits/routes for that setup.
+   and the `init_params` limits for that setup.
 4. Conformance discovers the new directory automatically; run `make check`. For a
    guided setup with identity checks and a preflight report, use the
    `setup-commission` skill (writes a per-setup `setup.md`).
 
 ## Files
-Each config directory holds the same two files; contents differ per setup.
+One shipped config today; a real setup is added as a sibling directory with
+the same two files.
 
-- `sim_cryostat/` — fully simulated reference station (dual magnets X/Y, VTI +
-  sample temperature, level meter, delta-mode and DC measurement VIs, 4-route
-  switch matrix). The station the procedure/orchestrator tests build against.
+- `sim_cryostat/` — fully simulated reference station, and the station every
+  procedure/orchestrator test builds against: `magnet_z`
+  (`SuperconductingMagnetVI` on `SimOxfordIPS120`), `temperature_vti`
+  (`Lakeshore335SampleTemperatureControllerVI` on `SimLakeshore335`),
+  `level_meter` (`CryogenLevelMeterVI` on `SimOxfordILM200`) and
+  `dc_measurement` (`DCSeparateMeasurementVI` on a `SimKeithley6221` +
+  `SimKeithley2182A` pair).
   - `devices.yaml` — all `Sim*` drivers at `SIM::*` addresses; the canonical VI
     graph and `init_params`.
   - `monitor.yaml` — `tick_interval_ms: 3000`, `max_vi_errors: 3`.
-- `a-sample-real-cryostat/` — real Kläui Lab station: Oxford Mercury iPS-M magnet,
-  Oxford ITC 503 (VTI), Lakeshore 335 (sample), Oxford ILM 200 levels, Keithley
-  6221 + 2182A delta-mode. Addresses partly placeholder pending bench check.
-  - `devices.yaml` — real `cryosoft.drivers.*` classes at PyVISA addresses.
-  - `monitor.yaml` — monitor loop settings.
-- `sim_real_cryostat/` — digital twin of `a-sample-real-cryostat/`: identical VI
-  graph, names, and `init_params`, with each real driver swapped for its `Sim*`
-  equivalent (Lakeshore 335 stands in as a second `SimOxfordITC503`, since no
-  `SimLakeshore335` exists). Lets the real setup be exercised end-to-end without
-  hardware.
-  - `devices.yaml` — sim drivers, real-config topology.
-  - `monitor.yaml` — monitor loop settings.
+
+**A real setup and its sim twin.** The intended shape for a real cryostat is a
+pair of config directories: one naming the real `cryosoft.drivers.*` classes at
+their PyVISA addresses, and a digital twin with an IDENTICAL VI graph, VI names
+and `init_params`, each real driver swapped for its `Sim*` equivalent. Nothing
+above the driver layer changes between them, so the twin exercises the real
+setup end to end with no hardware — and a config error shows up in the twin's
+conformance run rather than at the rack.
 
 tests: `tests/test_conformance.py` (schema), `tests/test_config_catalog.py`
 (discovery / copy-on-edit fork / named versions), `tests/test_config_validation.py`

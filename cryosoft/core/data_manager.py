@@ -429,8 +429,8 @@ class DataManager:
         once the measurement VI has armed.
 
         Args:
-            snapshot: The externally configured VI's arming-time settings
-                (e.g. ``TensormeterRTM2MeasurementVI.last_settings_snapshot``).
+            snapshot: The externally configured VI's arming-time settings,
+                read from the instrument at arming time.
 
         Raises:
             RuntimeError: If called on a closed DataManager.

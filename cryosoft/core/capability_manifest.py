@@ -333,13 +333,13 @@ MANIFEST_SCHEMA: dict[str, Any] = {
                 "vi_class": {"type": "string"},
                 "role": {
                     "type": "string",
-                    "description": "Config registry role: system, measurement, "
-                    "switch or level.",
+                    "description": "Config registry role: system, "
+                    "measurement or level.",
                 },
                 "kind": {
                     "type": "string",
                     "description": "VI class category: magnet, temperature, "
-                    "level, rotator, measurement, switch …",
+                    "level, measurement …",
                 },
                 "availability": {
                     "type": "array",

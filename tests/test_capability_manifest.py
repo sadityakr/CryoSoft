@@ -92,16 +92,18 @@ def test_station_info_carries_configured_limit_bounds(station: Station) -> None:
 def test_station_info_captures_instance_aware_control_choices(
     station: Station,
 ) -> None:
-    """A switch's config-named routes reach the snapshot as drop-down choices.
+    """An instrument-reported default reaches the snapshot as the control's default.
 
-    ``SwitchMatrixVI.control_param_specs()`` injects them per instance, so
-    this is what proves the snapshot consults the instance hook rather than
-    the raw decorator metadata.
+    ``Lakeshore335SampleTemperatureControllerVI.control_param_specs()``
+    injects the currently-assigned calibration curve per instance, so this is
+    what proves the snapshot consults the instance hook rather than the raw
+    decorator metadata.
     """
-    switch = _instrument(station.station_info(), "switch_matrix")
-    route = _control(switch, "select_route").params[0]
-    assert route["name"] == "route"
-    assert route["choices"] == {name: name for name in station.switch_matrix.routes()}
+    station.get_state()  # populate the cache control_param_specs() reads
+    controller = _instrument(station.station_info(), "temperature_vti")
+    curve = _control(controller, "set_curve").params[0]
+    assert curve["name"] == "curve"
+    assert curve["default"] == station.temperature_vti.curve()
 
 
 def test_station_info_lists_capabilities_in_declared_order(station: Station) -> None:
@@ -139,19 +141,19 @@ def test_station_info_rebuilds_on_disconnect_and_connect(station: Station) -> No
     exactly why the snapshot has to be rebuilt on these two events.
     """
     before = station.station_info()
-    assert _instrument(before, "magnet_y").availability == ()
+    assert _instrument(before, "level_meter").availability == ()
 
-    ok, _ = station.disconnect_instrument("magnet_y")
+    ok, _ = station.disconnect_instrument("level_meter")
     assert ok
     disconnected = station.station_info()
     assert disconnected.seq > before.seq
-    assert _instrument(disconnected, "magnet_y").availability == ("operator",)
+    assert _instrument(disconnected, "level_meter").availability == ("operator",)
 
-    ok, _ = station.connect_instrument("magnet_y")
+    ok, _ = station.connect_instrument("level_meter")
     assert ok
     reconnected = station.station_info()
     assert reconnected.seq > disconnected.seq
-    assert _instrument(reconnected, "magnet_y").availability == ()
+    assert _instrument(reconnected, "level_meter").availability == ()
 
 
 def test_offline_instrument_still_declares_its_capabilities(station: Station) -> None:
@@ -161,8 +163,8 @@ def test_offline_instrument_still_declares_its_capabilities(station: Station) ->
     only the two things an instance knows are missing — the configured limit
     bounds, which report null.
     """
-    station.disconnect_instrument("magnet_y")
-    magnet = _instrument(station.station_info(), "magnet_y")
+    station.disconnect_instrument("magnet_z")
+    magnet = _instrument(station.station_info(), "magnet_z")
 
     assert magnet.vi_class == "SuperconductingMagnetVI"
     assert magnet.kind == "magnet"
@@ -179,13 +181,13 @@ def test_offline_instrument_still_declares_its_capabilities(station: Station) ->
 
 
 def test_manifest_groups_equal_the_vis_declared_ui_groups(station: Station) -> None:
-    """The delta-mode VI's manifest groups ARE its ``ui_groups`` declaration.
+    """The temperature VI's manifest groups ARE its ``ui_groups`` declaration.
 
     Key, title, description and member order all come from the one
     declaration on the VI; the manifest adds nothing and reorders nothing.
     """
-    vi = station.keithley_delta_mode
-    entry = _manifest_instrument(build_manifest(station), "keithley_delta_mode")
+    vi = station.temperature_vti
+    entry = _manifest_instrument(build_manifest(station), "temperature_vti")
 
     assert [group["key"] for group in entry["groups"]] == [
         group.key for group in vi.ui_groups
@@ -263,20 +265,18 @@ def test_measurement_arming_controls_carry_params_units_and_choices(
                 dict(spec.choices) if spec.choices else None
             )
         checked += 1
-    assert checked >= 3, "the sim station configures several measurement VIs"
+    assert checked >= 1, "the sim station configures a measurement VI"
 
 
-def test_delta_mode_arming_renders_its_enumerated_range(station: Station) -> None:
+def test_enumerated_control_renders_its_choice_map(station: Station) -> None:
     """A concrete enumerated knob reaches the manifest as a label -> value map."""
-    entry = _manifest_instrument(build_manifest(station), "keithley_delta_mode")
+    entry = _manifest_instrument(build_manifest(station), "temperature_vti")
     params = {
         item["name"]: item
-        for item in _manifest_control(entry, "initiate_measurement")["params"]
+        for item in _manifest_control(entry, "set_heater_range")["params"]
     }
-    assert params["voltmeter_range_V"]["unit"] == "V"
-    assert params["voltmeter_range_V"]["choices"]["10 mV"] == pytest.approx(0.01)
-    assert params["current"]["unit"] == "A"
-    assert params["n_readings"]["kind"] == "int"
+    assert params["range_setting"]["kind"] == "str"
+    assert params["range_setting"]["choices"]["Medium"] == "MEDIUM"
 
 
 def test_manifest_header_names_its_schema_and_setup(manifest: dict) -> None:

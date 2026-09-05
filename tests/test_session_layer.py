@@ -38,13 +38,13 @@ CONFIG_PATH = "cryosoft/configs/sim_cryostat"
 SAMPLE_INFO = {"sample_name": "Hall bar A3", "sample_id": "A3", "comments": "test"}
 
 FAST_PARAMS = {
-    "measurement_vi": "keithley_delta_mode",
+    "measurement_vi": "dc_measurement",
     "field_start": -0.1,
     "field_end": 0.1,
     "field_steps": 3,
     "temperature": 300.0,
-    "current": 1e-6,
-    "n_readings": 5,
+    "current_A": 1e-6,
+    "readings_per_point": 5,
     "init_wait": 0.0,
     "step_wait": 0.0,
 }
@@ -543,7 +543,7 @@ def test_experiment_context_includes_instrument_metadata_from_config(
     )
     instruments = manager.experiment_context()["setup"]["instruments"]
     assert instruments  # sim_cryostat/devices.yaml carries metadata for every VI
-    assert instruments["magnet_z"]["role"] == "X-axis magnet"
+    assert instruments["magnet_z"]["role"] == "Z-axis magnet"
 
 
 def test_experiment_context_tolerates_missing_config_path(store, roster, orchestrator, station):

@@ -221,7 +221,7 @@ def measurement_error(
         driver_attr: Name of the driver attribute to fault. Defaults to
             ``"_meter"`` (the voltmeter ``take_reading()`` actually calls
             for the standard source+voltmeter pairing, e.g.
-            ``dc_measurement``, ``keithley_dc_mode``); pass ``"_source"``
+            ``dc_measurement``); pass ``"_source"``
             to instead fault current-source setup calls, or ``"_driver"``
             for a single-instrument measurement VI.
     """

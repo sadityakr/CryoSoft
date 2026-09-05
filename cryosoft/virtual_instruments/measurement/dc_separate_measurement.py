@@ -60,8 +60,8 @@ class DCSeparateMeasurementVI(DCMeasurementBase):
         #         "voltage_V_array": list[float](50,), "current_A": float,
         #         "current_A_error": float, "current_A_array": list[float](50,)}
 
-    To swap to a single-instrument SMU, replace this VI with
-    ``DCSingleInstrumentVI`` in the YAML config. The procedure is unchanged.
+    To swap to a single-instrument SMU, name that SMU's VI in the YAML
+    config instead of this one. The procedure is unchanged.
 
     Driver contract
     ---------------
@@ -76,8 +76,8 @@ class DCSeparateMeasurementVI(DCMeasurementBase):
     * ``get_idn() -> str``
     """
 
-    # Short drop-down name: separate current source + nanovoltmeter, versus the
-    # single-SMU DCSingleInstrumentVI.
+    # Short drop-down name: a separate current source + nanovoltmeter, as
+    # opposed to a single SMU doing both.
     selector_label: ClassVar[str] = "DC (6221 + 2182A)"
 
     # Reading-loop declaration: the source current can be reprogrammed between

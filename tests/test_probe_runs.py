@@ -26,13 +26,13 @@ CONFIG_PATH = "cryosoft/configs/sim_cryostat"
 SAMPLE_INFO = {"sample_name": "S", "sample_id": "S-1", "comments": ""}
 
 FULL_PARAMS = {
-    "measurement_vi": "keithley_delta_mode",
+    "measurement_vi": "dc_measurement",
     "field_start": -1.0,
     "field_end": 1.0,
     "field_steps": 21,
     "temperature": 300.0,
-    "current": 1e-6,
-    "n_readings": 50,
+    "current_A": 1e-6,
+    "readings_per_point": 50,
     "init_wait": 300.0,
     "step_wait": 30.0,
 }
@@ -133,8 +133,8 @@ def test_probe_caps_the_measurement_averaging(station, tmp_path):
     """Rule 3: a repeat count is found by declaration and cut to `averaging`."""
     params = _build(station, tmp_path, probe=ProbeSpec(averaging=2)).get_params()
 
-    assert params["n_readings"] == 2
-    assert params["current"] == 1e-6  # not a repeat count: untouched
+    assert params["readings_per_point"] == 2
+    assert params["current_A"] == 1e-6  # not a repeat count: untouched
 
 
 def test_probe_declares_itself_and_records_its_spec(station, tmp_path):
@@ -152,7 +152,7 @@ def test_a_run_built_without_a_probe_spec_is_unchanged(station, tmp_path):
 
     assert run.run_kind == "run"
     assert "probe_spec" not in run.get_params()
-    assert run.get_params()["n_readings"] == 50
+    assert run.get_params()["readings_per_point"] == 50
 
 
 def test_probe_targets_still_reach_the_extremes(station, tmp_path):
@@ -307,7 +307,7 @@ def test_a_probe_submitted_as_a_command_runs_and_writes_a_probe_file(
         "averaging": 2,
         "max_wait_s": 0.0,
     }
-    assert metadata["params"]["n_readings"] == 2
+    assert metadata["params"]["readings_per_point"] == 2
     assert {"field_T", "voltage_V"} <= columns
     # The reduced point count, end to end: 51 requested, 3 measured, and the
     # extremes of the requested sweep still reached.

@@ -22,8 +22,8 @@ class Gate:
       e.g. "temperature within tolerance for the last 5 minutes").
     - Both: runs ``action`` once, then starts the stability clock — the
       action's effect only counts once observed via ``check``, so an
-      orchestration-level command (e.g. "settle the scanner on this
-      route") can be followed by a wait for its effect to be confirmed.
+      orchestration-level command (e.g. "settle the reading path on this
+      setting") can be followed by a wait for its effect to be confirmed.
 
     Attributes:
         name: Human-readable identifier, surfaced in operational-status

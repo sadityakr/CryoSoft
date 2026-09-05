@@ -38,13 +38,13 @@ AGENT = Actor(kind=ActorKind.AGENT, id="drift-watch", role="operator")
 SAMPLE_INFO = {"sample_name": "S", "sample_id": "S-1", "comments": ""}
 
 FAST_PARAMS = {
-    "measurement_vi": "keithley_delta_mode",
+    "measurement_vi": "dc_measurement",
     "field_start": -0.1,
     "field_end": 0.1,
     "field_steps": 3,
     "temperature": 300.0,
-    "current": 1e-6,
-    "n_readings": 5,
+    "current_A": 1e-6,
+    "readings_per_point": 5,
     "init_wait": 0.0,
     "step_wait": 0.0,
 }

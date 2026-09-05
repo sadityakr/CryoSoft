@@ -56,6 +56,64 @@ class Lakeshore335SampleTemperatureControllerVI(SampleTemperatureControllerVI):
         "High": "HIGH",
     }
 
+    #: Heater range selected by ``initiate()`` when the config names none.
+    #: Medium is the middle decade step — enough power for the sample space
+    #: without committing the heater to its highest range unasked.
+    _DEFAULT_INITIATE_HEATER_RANGE: ClassVar[str] = "MEDIUM"
+
+    def __init__(self, drivers: dict[str, object], **init_params: Any) -> None:
+        """Build the VI and read the heater range ``initiate()`` selects.
+
+        Args:
+            drivers: Role -> driver mapping; ``"main"`` is the Lakeshore 335.
+            **init_params: The inherited temperature-controller parameters
+                plus ``initiate_heater_range`` (``"OFF"``/``"LOW"``/
+                ``"MEDIUM"``/``"HIGH"``), the range ``initiate()`` selects.
+                Which range this setup's heater and sample space want is a
+                property of the setup, so it comes from the config.
+
+        Raises:
+            ValueError: If ``initiate_heater_range`` is not one of the four
+                ranges the instrument offers.
+        """
+        super().__init__(drivers, **init_params)
+        requested = str(
+            init_params.get(
+                "initiate_heater_range", self._DEFAULT_INITIATE_HEATER_RANGE
+            )
+        ).upper()
+        if requested not in set(self._HEATER_RANGE_CHOICES.values()):
+            raise ValueError(
+                f"initiate_heater_range must be one of "
+                f"{sorted(self._HEATER_RANGE_CHOICES.values())}, got {requested!r}"
+            )
+        self._initiate_heater_range: str = requested
+
+    # ------------------------------------------------------------------
+    # Lifecycle — the heater range is part of the 335's operating state
+    # ------------------------------------------------------------------
+
+    def initiate(self) -> None:
+        """Hand the loop to CryoSoft AND switch heater power on.
+
+        Extends ``SampleTemperatureControllerVI.initiate()`` (setpoint pinned
+        to the current reading, then heater mode AUTO) with the one piece of
+        operating state that is specific to the 335: its heater RANGE. The
+        instrument powers up with the range Off, and Off delivers no power
+        whatever the mode or setpoint is (335 manual §4.5.1.7.8) — so without
+        this the closed loop would be handed over and still not heat.
+
+        Ordering mirrors the inherited method's reasoning: the loop is put in
+        order first, and only then is power allowed to reach the heater.
+        ``standby()`` is deliberately NOT the mirror of this: it leaves the
+        range where it stands, because switching heater power back off is the
+        operator's call (the range is also the gate they use by hand), and
+        the inherited standby has already taken the loop out of circuit and
+        commanded zero output.
+        """
+        super().initiate()
+        self._driver.set_heater_range(self._initiate_heater_range)  # type: ignore[attr-defined]
+
     def _cached_choice(
         self, field: str, choices: dict[str, Any], fallback: Any
     ) -> Any:

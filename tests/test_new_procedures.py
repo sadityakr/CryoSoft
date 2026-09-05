@@ -4,13 +4,8 @@ import pytest
 
 from cryosoft.core.plan import Command, PhasePlan, StepPlan, Target
 from cryosoft.core.station import build_station
-from cryosoft.drivers.sim_tensormeter_rtm2 import SimTensormeterRTM2
 from cryosoft.procedures.field_sweep import FieldSweep
 from cryosoft.procedures.temperature_sweep import TemperatureSweep
-from cryosoft.virtual_instruments.measurement.tensormeter_rtm2_measurement import (
-    _RAW_CHANNEL_NAMES,
-    TensormeterRTM2MeasurementVI,
-)
 
 CONFIG_PATH = "cryosoft/configs/sim_cryostat"
 
@@ -22,16 +17,6 @@ SAMPLE_INFO = {
 
 # ── Per-measurement-VI parameter sets ────────────────────────────────────────
 # Each dict names the measurement VI plus its own measurement parameters.
-DELTA = {
-    "measurement_vi": "keithley_delta_mode",
-    "current": 1e-6,
-    "n_readings": 5,
-    "voltmeter_range_V": 0.01,
-    "compliance_V": 1.0,
-    "delay_s": 0.01,
-    "compliance_abort": True,
-    "cold_switch": False,
-}
 DC = {
     "measurement_vi": "dc_measurement",
     "current_A": 1e-6,
@@ -41,7 +26,6 @@ DC = {
 }
 # The current parameter name and per-VI expectations, keyed by measurement VI.
 MEAS_META = {
-    "keithley_delta_mode": {"current_key": "current", "n": 5, "has_n_valid": True},
     "dc_measurement": {"current_key": "current_A", "n": 5, "has_n_valid": False},
 }
 
@@ -61,8 +45,8 @@ FAST_TEMP = {
     "point_wait": 0.0,
 }
 
-FIELD_MEAS = [pytest.param(DELTA, id="delta"), pytest.param(DC, id="dc")]
-TEMP_MEAS = [pytest.param(DC, id="dc"), pytest.param(DELTA, id="delta")]
+FIELD_MEAS = [pytest.param(DC, id="dc")]
+TEMP_MEAS = [pytest.param(DC, id="dc")]
 
 
 @pytest.fixture
@@ -127,7 +111,7 @@ def test_field_sweep_defaults_to_first_measurement_vi(station, tmp_path):
         station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
         **FAST_FIELD,
     )
-    assert proc._measurement_vi == station.measurement_vi_names()[0] == "keithley_delta_mode"
+    assert proc._measurement_vi == station.measurement_vi_names()[0] == "dc_measurement"
 
 
 def test_field_sweep_rejects_non_measurement_vi(station, tmp_path):
@@ -291,9 +275,8 @@ def test_temp_sweep_initiate_full_phaseplan(station, tmp_path, meas):
     proc.standby()
 
     assert plan.targets["temperature_vti"] == Target(300.0, rate=6000.0)
-    # sim_cryostat has magnet_z + magnet_y; field_z/field_y default 0.0.
+    # sim_cryostat has magnet_z; field_z defaults to 0.0.
     assert plan.targets["magnet_z"] == Target(0.0)
-    assert plan.targets["magnet_y"] == Target(0.0)
 
     # TemperatureSweep keeps the default claim too — every station VI.
     assert [c.vi_name for c in plan.claim_commands] == station.get_vi_names()
@@ -453,126 +436,12 @@ def test_wrong_shape_reading_degrades_to_error(station, tmp_path, qtbot, monkeyp
     with h5py.File(h5_files[0], "r") as f:
         assert np.all(np.isnan(f["data"]["field_T"][:]))
 
-# ── The reading loop: two generic slots (channels x value list) ──────────────
+# ── The reading loop: two generic slots ──────────────────────────────────────
 # Slot 1 (labels A1, A2, ...) is the outer level, slot 2 (B1, B2, ...) the
-# inner one. The switch's route and the DC VI's current are the SAME concept:
-# loopable parameters advertised via reading_setters.
+# inner one. Every slot is the same concept: a loopable parameter the reading
+# path advertises via reading_setters, plus an ordered value list.
 
-ROUTES2 = {
-    "loop1_parameter": "switch_matrix.route",
-    "loop1_pick_Mux-Ch1": True,
-    "loop1_pick_Mux-Ch2": True,
-}
-ROUTES1 = {"loop1_parameter": "switch_matrix.route", "loop1_pick_Mux-Ch1": True}
 CURRENTS2 = {"loop1_parameter": "dc_measurement.current_A", "loop1_values": "1e-6, -1e-6"}
-BOTH = {
-    "loop1_parameter": "switch_matrix.route",
-    "loop1_pick_Mux-Ch1": True,
-    "loop1_pick_Mux-Ch2": True,
-    "loop2_parameter": "dc_measurement.current_A",
-    "loop2_values": "1e-6, -1e-6",
-}
-
-
-def _field_proc_scanner(station, tmp_path, meas, loop):
-    station.set_scanner_enabled(True)
-    return FieldSweep(
-        station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
-        **FAST_FIELD, **meas, **loop,
-    )
-
-
-# ── Channel slot alone (the old mux behaviour, now generic) ──────────────────
-
-def test_channel_slot_initiate_selects_first_route_before_arming(station, tmp_path):
-    """A looping channel slot dispatches its first route BEFORE the arm."""
-    proc = _field_proc_scanner(station, tmp_path, DELTA, ROUTES2)
-    plan = proc.initiate()
-    proc.standby()
-
-    assert len(plan.commands) == 2
-    assert plan.commands[0].vi_name == "switch_matrix"
-    assert plan.commands[0].method == "select_route"
-    assert plan.commands[0].kwargs == {"route": "Mux-Ch1"}
-    assert plan.commands[1].vi_name == "keithley_delta_mode"
-    assert plan.commands[1].method == "initiate_measurement"
-
-
-def test_channel_slot_schema_uses_index_labels(station, tmp_path):
-    """Arrays AND scalar columns carry a real loop1 axis (2 routes), not suffixes."""
-    proc = _field_proc_scanner(station, tmp_path, DELTA, ROUTES2)
-    proc.initiate()
-    schema = proc._data_schema
-    proc.standby()
-
-    assert set(schema.measurement_arrays) == {"voltage_V_array", "current_A_array"}
-    assert "n_valid" in schema.measurement_scalars
-    assert "field_T" in schema.sweep_columns
-    assert schema.loop_shape == (2, 1)  # 2 routes on loop1, loop2 off
-    # Axis index -> route value ties back through the metadata.
-    assert proc._params["loop1_values"] == ["Mux-Ch1", "Mux-Ch2"]
-
-
-def test_channel_slot_measure_writes_labelled_keys(station, tmp_path):
-    """measure() loops the routes and writes them along the loop1 axis."""
-    proc = _field_proc_scanner(station, tmp_path, DELTA, ROUTES2)
-    proc.initiate()
-    _arm(station, DELTA, proc)
-    proc.measure()
-    filepath = proc._data_manager.filepath
-    proc.standby()
-
-    with h5py.File(filepath, "r") as f:
-        assert f["data"]["voltage_V_array"].shape == (1, 2, 1, 5)
-        assert not np.any(np.isnan(f["data"]["voltage_V_array"][0, 0, 0]))
-        assert not np.any(np.isnan(f["data"]["voltage_V_array"][0, 1, 0]))
-        assert f["data"]["n_valid"][0, 0, 0] == 5
-        assert f["data"]["n_valid"][0, 1, 0] == 5
-
-
-def test_channel_slot_standby_and_abort_dispatch_safe_off(station, tmp_path):
-    """standby() and abort() append the switch's reading_safe_off (open_all)."""
-    proc = _field_proc_scanner(station, tmp_path, DELTA, ROUTES2)
-    proc.initiate()
-    standby_plan = proc.standby()
-    open_cmds = [
-        c for c in standby_plan.commands
-        if c.vi_name == "switch_matrix" and c.method == "open_all"
-    ]
-    assert len(open_cmds) == 1
-
-    proc2 = _field_proc_scanner(station, tmp_path, DELTA, ROUTES2)
-    proc2.initiate()
-    abort_cmds = proc2.abort()
-    assert any(
-        c.vi_name == "switch_matrix" and c.method == "open_all" for c in abort_cmds
-    )
-    assert any(
-        c.vi_name == "keithley_delta_mode" and c.method == "standby" for c in abort_cmds
-    )
-
-
-def test_single_value_slot_is_static(station, tmp_path):
-    """One value = static setting: dispatched once at initiate, trivial axis."""
-    proc = _field_proc_scanner(station, tmp_path, DELTA, ROUTES1)
-    plan = proc.initiate()
-    schema = proc._data_schema
-
-    # Selected once before arming; schema carries a trivial (1, 1) loop shape.
-    assert plan.commands[0].vi_name == "switch_matrix"
-    assert plan.commands[0].method == "select_route"
-    assert set(schema.measurement_arrays) == {"voltage_V_array", "current_A_array"}
-    assert "n_valid" in schema.measurement_scalars
-    assert schema.loop_shape == (1, 1)
-    assert proc._params["loop1_values"] == ["Mux-Ch1"]
-
-    # measure() takes a plain reading (no re-selection, trivial grid).
-    _arm(station, DELTA, proc)
-    proc.measure()
-    filepath = proc._data_manager.filepath
-    proc.standby()
-    with h5py.File(filepath, "r") as f:
-        assert f["data"]["voltage_V_array"].shape == (1, 1, 1, 5)
 
 
 def test_static_measurement_slot_dispatches_after_arm(station, tmp_path):
@@ -595,85 +464,17 @@ def test_static_measurement_slot_dispatches_after_arm(station, tmp_path):
 
 def test_loop_off_is_unchanged(station, tmp_path):
     """No slot selected: single plain reading; stray values text is ignored."""
-    proc = _field_proc_scanner(
-        station, tmp_path, DELTA, {"loop1_values": "1e-6, -1e-6"}
+    proc = _field_proc(
+        station, tmp_path, {**DC, "loop1_values": "1e-6, -1e-6"}
     )
     assert proc._loop_slots == []
     plan = proc.initiate()
     proc.standby()
     assert len(plan.commands) == 1
-    assert plan.commands[0].vi_name == "keithley_delta_mode"
+    assert plan.commands[0].vi_name == "dc_measurement"
     assert set(proc._data_schema.measurement_arrays) == {"voltage_V_array", "current_A_array"}
     assert proc._data_schema.loop_shape == (1, 1)
 
-
-def test_unknown_pick_refused(station, tmp_path):
-    """A pick naming a choice the parameter lacks fails at construction."""
-    from cryosoft.core.exceptions import CryoSoftConfigError
-
-    station.set_scanner_enabled(True)
-    with pytest.raises(CryoSoftConfigError, match="Mux-Ch9"):
-        FieldSweep(
-            station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
-            **FAST_FIELD, **DELTA,
-            loop1_parameter="switch_matrix.route", **{"loop1_pick_Mux-Ch9": True},
-        )
-
-
-def test_channel_slot_measure_dispatches_select_route_as_command(station, tmp_path):
-    """Per-route switching goes through send_measurement_commands.
-
-    Regression guard for the layering rule: measure() must never call
-    select_route() directly on the switch VI; it goes through the same
-    Command/send_measurement_commands path initiate() uses.
-    """
-    proc = _field_proc_scanner(station, tmp_path, DELTA, ROUTES2)
-    proc.initiate()
-    _arm(station, DELTA, proc)
-
-    calls = []
-    original = station.send_measurement_commands
-
-    def spy(commands):
-        calls.append(list(commands))
-        return original(commands)
-
-    station.send_measurement_commands = spy
-    try:
-        proc.measure()
-    finally:
-        station.send_measurement_commands = original
-        proc.standby()
-
-    route_calls = [
-        c for batch in calls for c in batch
-        if c.vi_name == "switch_matrix" and c.method == "select_route"
-    ]
-    assert [c.kwargs["route"] for c in route_calls] == ["Mux-Ch1", "Mux-Ch2"]
-
-
-def test_scanner_disabled_removes_channel_parameter(station, tmp_path):
-    """Scanner disabled: the switch's route is not loopable — refused loudly."""
-    from cryosoft.core.exceptions import CryoSoftConfigError
-
-    assert station.scanner_enabled() is False
-    with pytest.raises(CryoSoftConfigError, match="switch_matrix.route"):
-        FieldSweep(
-            station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
-            **FAST_FIELD, **DELTA, **ROUTES2,
-        )
-    # And the form offers no channel parameter. The delta VI's own current is
-    # still loopable, so the group itself remains — what must be absent is the
-    # switch route among the slot choices.
-    groups = FieldSweep.get_param_groups(station, {"measurement_vi": "keithley_delta_mode"})
-    loop_group = next((g for g in groups if g.key == "reading_loop"), None)
-    assert loop_group is not None
-    choices = loop_group.params["loop1_parameter"].choices
-    assert "switch_matrix.route" not in choices.values()
-    assert "keithley_delta_mode.current" in choices.values()
-
-
-# ── Value-list slot alone (± current) ────────────────────────────────────────
 
 def test_value_slot_labels_and_suffixed_keys(station, tmp_path):
     """A two-value current loop resolves a loop1 axis of length 2, plain keys."""
@@ -700,36 +501,6 @@ def test_value_slot_measure_writes_signed_current(station, tmp_path):
         assert f["data"]["voltage_V_array"].shape == (1, 2, 1, 5)
         assert np.allclose(f["data"]["current_A"][0, 0, 0], 1e-6)
         assert np.allclose(f["data"]["current_A"][0, 1, 0], -1e-6)
-
-
-def test_value_slot_measure_rearms_delta_between_readings(station, tmp_path):
-    """The delta VI loops its peak current end-to-end through measure().
-
-    Delta re-arms the engine per loop step rather than setting the current in
-    place, so this covers the path the DC test cannot: each label's readings
-    must carry that label's current, and the engine must still be armed (in
-    DELTA mode) at the last looped value when measure() returns.
-    """
-    delta_currents = {
-        "loop1_parameter": "keithley_delta_mode.current",
-        "loop1_values": "1e-6, 5e-6",
-    }
-    proc = _field_proc(station, tmp_path, {**DELTA, **delta_currents})
-    assert proc._params["loop1_values"] == [1e-6, 5e-6]
-
-    proc.initiate()
-    _arm(station, DELTA, proc)
-    proc.measure()
-    filepath = proc._data_manager.filepath
-
-    source = station.get_vi("keithley_delta_mode")._source
-    assert source._mode == "DELTA"
-    assert source._delta_high_current == pytest.approx(5e-6)
-
-    proc.standby()
-    with h5py.File(filepath, "r") as f:
-        assert np.allclose(f["data"]["current_A"][0, 0, 0], 1e-6)
-        assert np.allclose(f["data"]["current_A"][0, 1, 0], 5e-6)
 
 
 def test_value_slot_metadata_carries_label_map(station, tmp_path):
@@ -788,218 +559,52 @@ def test_same_parameter_in_both_slots_refused(station, tmp_path):
 
 # ── Both slots: channels (outer) x currents (inner) ──────────────────────────
 
-def test_both_slots_compose(station, tmp_path):
-    """Slot 1 x slot 2: a real (n_loop1, n_loop2) axis, route outer, value inner."""
-    proc = _field_proc_scanner(station, tmp_path, DC, BOTH)
-    proc.initiate()
-    schema = proc._data_schema
-    _arm(station, DC, proc)
-
-    assert set(schema.measurement_arrays) == {"voltage_V_array", "current_A_array"}
-    assert schema.loop_shape == (2, 2)  # 2 routes (loop1) x 2 currents (loop2)
-    assert proc._params["loop1_values"] == ["Mux-Ch1", "Mux-Ch2"]
-    assert proc._params["loop2_values"] == [1e-6, -1e-6]
-
-    calls = []
-    original = station.send_measurement_commands
-
-    def spy(commands):
-        calls.append(list(commands))
-        return original(commands)
-
-    station.send_measurement_commands = spy
-    try:
-        proc.measure()
-    finally:
-        station.send_measurement_commands = original
-
-    filepath = proc._data_manager.filepath
-    proc.standby()
-
-    flat = [
-        (c.method, c.kwargs.get("route") or c.kwargs.get("current_A"))
-        for batch in calls for c in batch
-    ]
-    assert flat == [
-        ("select_route", "Mux-Ch1"),
-        ("set_source_current", 1e-6), ("set_source_current", -1e-6),
-        ("select_route", "Mux-Ch2"),
-        ("set_source_current", 1e-6), ("set_source_current", -1e-6),
-    ]
-
-    with h5py.File(filepath, "r") as f:
-        assert f["data"]["voltage_V_array"].shape == (1, 2, 2, 5)
-        # loop1 index 1 (Mux-Ch2) x loop2 index 1 (-1e-6).
-        assert np.allclose(f["data"]["current_A"][0, 1, 1], -1e-6)
-
-
-# ── Form group + live-plot hooks ─────────────────────────────────────────────
-
 def test_reading_loop_group_offers_all_loopable_parameters(station):
     """One group, two slots; selecting a slot reveals its values input."""
-    station.set_scanner_enabled(True)
     groups = FieldSweep.get_param_groups(
         station, {"measurement_vi": "dc_measurement"}
     )
     loop = next(g for g in groups if g.key == "reading_loop")
-    # Both slot drop-downs offer Off + route + current_A.
+    # Both slot drop-downs offer Off + every loopable parameter on the
+    # reading path — here the DC VI's own sourced current.
     spec = loop.params["loop1_parameter"]
-    assert set(spec.choices.values()) == {
-        "", "switch_matrix.route", "dc_measurement.current_A",
-    }
+    assert set(spec.choices.values()) == {"", "dc_measurement.current_A"}
     assert spec.structural is True
     # No slot selected -> no values inputs yet.
     assert set(loop.params) == {"loop1_parameter", "loop2_parameter"}
 
-    # Selecting the (enumerated) route reveals per-choice pick checkboxes;
-    # selecting the (free) current reveals the comma-separated text field.
+    # Selecting the (free) current reveals the comma-separated text field.
     groups = FieldSweep.get_param_groups(
         station,
         {"measurement_vi": "dc_measurement",
-         "loop1_parameter": "switch_matrix.route",
-         "loop2_parameter": "dc_measurement.current_A"},
+         "loop1_parameter": "dc_measurement.current_A"},
     )
     loop = next(g for g in groups if g.key == "reading_loop")
     names = list(loop.params)
     assert names[0] == "loop1_parameter"
-    assert [n for n in names if n.startswith("loop1_pick_")] == [
-        "loop1_pick_Mux-Ch1", "loop1_pick_Mux-Ch2",
-        "loop1_pick_Mux-Ch3", "loop1_pick_Mux-Ch4",
-    ]
-    assert "loop2_values" in names
+    assert "loop1_values" in names
     # The loop group sits ABOVE the selected VI's own parameter group.
     keys = [g.key for g in groups]
     assert keys.index("reading_loop") < keys.index("measurement:dc_measurement")
 
 
-def test_reading_loop_group_absent_when_nothing_loopable(station):
-    """Scanner off + a VI without setters (lock-in): no Reading loop group.
-
-    The lock-in is the station's only measurement VI declaring no
-    ``reading_setters``; delta and DC both declare one, so an empty registry
-    can only be reached through this VI with the scanner off.
-    """
-    groups = FieldSweep.get_param_groups(
-        station, {"measurement_vi": "lockin_harmonic"}
-    )
-    assert not any(g.key == "reading_loop" for g in groups)
-    # Scanner on: even the setter-less lock-in gets the group (route is loopable).
-    station.set_scanner_enabled(True)
-    groups = FieldSweep.get_param_groups(
-        station, {"measurement_vi": "lockin_harmonic"}
-    )
-    assert any(g.key == "reading_loop" for g in groups)
-
-
 def test_live_plot_keys_stay_plain_and_loop_labels_drive_the_selectors(station):
     """Axis keys stay plain (arrays excluded); loop_labels map axis index -> display."""
-    station.set_scanner_enabled(True)
     on = {
         "measurement_vi": "dc_measurement",
-        "loop1_parameter": "switch_matrix.route",
-        "loop1_pick_Mux-Ch1": True,
-        "loop1_pick_Mux-Ch2": True,
-        "loop2_parameter": "dc_measurement.current_A",
-        "loop2_values": "1e-6, -1e-6",
+        "loop1_parameter": "dc_measurement.current_A",
+        "loop1_values": "1e-6, -1e-6",
     }
     assert FieldSweep.live_plot_measurement_keys(station, on) == [
         "voltage_V", "voltage_V_error", "current_A", "current_A_error",
     ]
     labels1, labels2 = FieldSweep.live_plot_loop_labels(station, on)
-    assert labels1 == {0: "A1 = Mux-Ch1", 1: "A2 = Mux-Ch2"}
-    assert labels2 == {0: "B1 = 1e-06", 1: "B2 = -1e-06"}
+    assert labels1 == {0: "A1 = 1e-06", 1: "A2 = -1e-06"}
+    assert labels2 == {}
     # Slots off -> ({}, {}) (selectors visible, disabled).
     assert FieldSweep.live_plot_loop_labels(
         station, {"measurement_vi": "dc_measurement"}
     ) == ({}, {})
-
-
-def test_live_plot_loop_labels_none_when_nothing_loopable(station):
-    """No switch (scanner off) + no setters (lock-in): (None, None) — hidden."""
-    assert FieldSweep.live_plot_loop_labels(
-        station, {"measurement_vi": "lockin_harmonic"}
-    ) == (None, None)
-
-
-# ── Externally-configured standard: the measurement group self-filters ──────
-# The RTM2 measurement VI isn't in sim_cryostat's devices.yaml (its driver
-# needs a real TCP address), so it's registered directly onto the station
-# fixture with Station.register_vi() — the same dependency-injection path
-# build_station() itself uses — rather than editing any config.
-
-_RTM2_OWNED = {
-    "current_amplitude_A", "averaging_time_s", "analysis_mode", "switch_sequence",
-}
-
-
-def _register_rtm2(station, configured_externally: bool) -> TensormeterRTM2MeasurementVI:
-    vi = TensormeterRTM2MeasurementVI(
-        {"tensormeter": SimTensormeterRTM2("SIM")},
-        configured_externally=configured_externally,
-    )
-    station.register_vi("tensormeter_measurement", vi, "measurement")
-    return vi
-
-
-def test_measurement_group_full_set_and_plain_title_when_not_external(station):
-    """Default (configured_externally False): every declared param renders, plain title."""
-    _register_rtm2(station, False)
-    groups = FieldSweep.get_param_groups(
-        station, {"measurement_vi": "tensormeter_measurement"}
-    )
-    meas_group = next(
-        g for g in groups if g.key == "measurement:tensormeter_measurement"
-    )
-    assert set(meas_group.params) == set(TensormeterRTM2MeasurementVI.measurement_parameters)
-    assert meas_group.title == "Resistance tensor (RTM2)"
-
-
-def test_measurement_group_hides_owned_params_and_marks_title_when_external(station):
-    """configured_externally True: the group omits the owned four; title says why."""
-    _register_rtm2(station, True)
-    groups = FieldSweep.get_param_groups(
-        station, {"measurement_vi": "tensormeter_measurement"}
-    )
-    meas_group = next(
-        g for g in groups if g.key == "measurement:tensormeter_measurement"
-    )
-    assert (
-        set(meas_group.params)
-        == set(TensormeterRTM2MeasurementVI.measurement_parameters) - _RTM2_OWNED
-    )
-    # Data-path parameters stay visible — they write nothing to the instrument.
-    assert "tensor_component" in meas_group.params
-    assert "readings_per_point" in meas_group.params
-    for name in _RTM2_OWNED:
-        assert name not in meas_group.params
-    assert meas_group.title == "Resistance tensor (RTM2) — externally configured"
-
-
-# ── End-to-end Orchestrator runs ─────────────────────────────────────────────
-
-def test_full_orchestrator_run_channel_slot(station, tmp_path, qtbot):
-    """A 2-route channel-slot sweep completes to IDLE with a real loop1 axis."""
-    from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
-
-    station.magnet_z._default_ramp_rate = 6000.0
-    station.magnet_z._ramp_segments = []
-
-    proc = _field_proc_scanner(station, tmp_path, DELTA, ROUTES2)
-    orch = Orchestrator(station, tick_interval_ms=10)
-    orch.run_procedure(proc)
-
-    with qtbot.waitSignal(orch.procedure_finished, timeout=10000):
-        pass
-
-    assert proc._index == 3
-    assert orch._state == OrchestratorState.IDLE
-    h5_files = list(tmp_path.glob("*.h5"))
-    assert len(h5_files) == 1
-    with h5py.File(h5_files[0], "r") as f:
-        assert f["data"]["field_T"].shape[0] == 3
-        assert f["data"]["voltage_V_array"].shape == (3, 2, 1, 5)
-        assert not np.any(np.isnan(f["data"]["voltage_V_array"][:, 0, 0]))
-        assert not np.any(np.isnan(f["data"]["voltage_V_array"][:, 1, 0]))
 
 
 def test_full_orchestrator_run_value_slot(station, tmp_path, qtbot):
@@ -1025,169 +630,6 @@ def test_full_orchestrator_run_value_slot(station, tmp_path, qtbot):
         assert np.allclose(f["data"]["current_A"][:, 1, 0], -1e-6)
 
 
-def test_full_orchestrator_run_releases_the_rtm2_session_on_standby(
-    station, tmp_path, qtbot
-):
-    """The RTM2's detach-when-idle release fires through a real Orchestrator run.
-
-    Every other check of this standard (test_tensormeter_measurement_vi.py,
-    test_connection_lifecycle.py, test_conformance.py) exercises the VI
-    directly. This is the end-to-end gap: SweepMeasureProcedure.standby(),
-    dispatched by a real Orchestrator at the end of a real run, must really
-    release the externally configured RTM2's driver session — proof the
-    declaration (BaseVirtualInstrument.detach_when_idle, see its class
-    docstring) is framework behaviour all the way through the tick loop,
-    not something the procedure or Orchestrator special-cases for this one
-    VI.
-    """
-    from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
-
-    station.magnet_z._default_ramp_rate = 6000.0
-    station.magnet_z._ramp_segments = []
-
-    vi = _register_rtm2(station, configured_externally=True)
-    driver = vi._main
-    driver._averaging_time_s = 0.0  # keep the test fast
-    assert driver._closed is True  # born detached
-    assert vi.is_attached() is False
-
-    proc = _field_proc(station, tmp_path, {"measurement_vi": "tensormeter_measurement"})
-    orch = Orchestrator(station, tick_interval_ms=10)
-    orch.run_procedure(proc)
-
-    with qtbot.waitSignal(orch.procedure_finished, timeout=10000):
-        pass
-
-    assert orch._state == OrchestratorState.IDLE
-    assert vi.is_attached() is False
-    assert driver._closed is True
-
-
-# ── Raw diagnostic blocks: loop-axis skip standard ───────────────────────────
-# See MeasurementInstrumentBase's "Raw diagnostic blocks" standard and
-# DataSchema.measurement_blocks: unlike every other measurement column, a
-# raw block carries the (n_loop1, n_loop2) loop axis only when a reading
-# loop is actually configured for the run.
-
-RTM2_FAST = {
-    "measurement_vi": "tensormeter_measurement",
-    "averaging_time_s": 0.0,
-    "readings_per_point": 2,
-}
-
-
-def test_raw_block_no_loop_axis_when_no_reading_loop(station, tmp_path):
-    """No reading loop configured: raw_channels_block is stored bare (N, rows, cols).
-
-    Only sweep_index 0 is ever measure()'d (a single call, not a full sweep
-    loop), so standby()'s close() trims the file's declared 3 points down to
-    the 1 actually saved — same trimming test_field_sweep_measure_saves_data
-    relies on for its own single-point shape assertion.
-    """
-    _register_rtm2(station, False)
-    proc = _field_proc(station, tmp_path, RTM2_FAST)
-    proc.initiate()
-    _arm(station, RTM2_FAST, proc)
-    proc.measure()
-    filepath = proc._data_manager.filepath
-    proc.standby()
-
-    with h5py.File(filepath, "r") as f:
-        assert f["data"]["raw_channels_block"].shape == (1, 2, 44)
-        assert not np.any(np.isnan(f["data"]["raw_channels_block"][0]))
-
-
-def test_raw_block_carries_loop_axis_when_reading_loop_active(station, tmp_path):
-    """A configured reading loop (switch route): the block gains the (n_loop1, n_loop2) axis."""
-    _register_rtm2(station, False)
-    proc = _field_proc_scanner(station, tmp_path, RTM2_FAST, ROUTES2)
-    proc.initiate()
-    _arm(station, RTM2_FAST, proc)
-    proc.measure()
-    filepath = proc._data_manager.filepath
-    proc.standby()
-
-    with h5py.File(filepath, "r") as f:
-        assert f["data"]["raw_channels_block"].shape == (1, 2, 1, 2, 44)
-        assert not np.any(np.isnan(f["data"]["raw_channels_block"][0, 0, 0]))
-        assert not np.any(np.isnan(f["data"]["raw_channels_block"][0, 1, 0]))
-
-
-# ── Raw diagnostic blocks: per-channel plot columns ──────────────────────────
-# See MeasurementInstrumentBase's "Raw diagnostic blocks" standard's
-# plot-column extension: SweepMeasureProcedure derives one row-mean scalar
-# column per declared raw-block channel, alongside the untouched block.
-
-def test_live_plot_keys_include_raw_block_channels(station):
-    """Every RTM2 raw-block channel is an independently selectable plot key."""
-    _register_rtm2(station, False)
-    keys = FieldSweep.live_plot_measurement_keys(
-        station, {"measurement_vi": "tensormeter_measurement"}
-    )
-    assert set(_RAW_CHANNEL_NAMES) <= set(keys)
-    assert "res_a_ohm" in keys
-    assert "res_a_ohm_array" not in keys  # arrays stay excluded
-
-
-def test_raw_block_channels_saved_as_scalars_matching_block_mean(station, tmp_path):
-    """Each channel is saved as its own (N, 1, 1) scalar, equal to the block's
-    row-mean for that channel — the block itself is unchanged."""
-    _register_rtm2(station, False)
-    proc = _field_proc(station, tmp_path, RTM2_FAST)
-    proc.initiate()
-    _arm(station, RTM2_FAST, proc)
-    proc.measure()
-    filepath = proc._data_manager.filepath
-    proc.standby()
-
-    with h5py.File(filepath, "r") as f:
-        block = f["data"]["raw_channels_block"][0]  # (rows, cols)
-        assert block.shape == (2, 44)
-        for col_index, label in enumerate(_RAW_CHANNEL_NAMES):
-            assert f["data"][label].shape == (1, 1, 1)
-            expected = np.nanmean(block[:, col_index])
-            assert f["data"][label][0, 0, 0] == pytest.approx(expected)
-
-
-def test_raw_block_channels_carry_loop_axis_when_reading_loop_active(station, tmp_path):
-    """Channel columns get the real (n_loop1, n_loop2) grid, same as res_a_ohm —
-    unlike the block itself, which only gains that axis conditionally."""
-    _register_rtm2(station, False)
-    proc = _field_proc_scanner(station, tmp_path, RTM2_FAST, ROUTES2)
-    proc.initiate()
-    _arm(station, RTM2_FAST, proc)
-    proc.measure()
-    filepath = proc._data_manager.filepath
-    proc.standby()
-
-    with h5py.File(filepath, "r") as f:
-        label = _RAW_CHANNEL_NAMES[0]
-        assert f["data"][label].shape == (1, 2, 1)
-        block = f["data"]["raw_channels_block"]
-        for i1 in range(2):
-            expected = np.nanmean(block[0, i1, 0, :, 0])
-            assert f["data"][label][0, i1, 0] == pytest.approx(expected)
-
-
-def test_raw_block_channel_collision_raises_config_error(station, tmp_path):
-    """A raw-block channel label colliding with an existing scalar column is refused."""
-    from cryosoft.core.exceptions import CryoSoftConfigError
-
-    vi = _register_rtm2(station, False)
-    # Shadow the class-level declaration for this instance only: a raw block
-    # whose one channel collides with the VI's own res_a_ohm scalar column.
-    vi.measurement_raw_blocks = {"raw_channels_block": ["res_a_ohm"]}
-    proc = _field_proc(station, tmp_path, RTM2_FAST)
-    with pytest.raises(CryoSoftConfigError, match="res_a_ohm"):
-        proc.initiate()
-
-
-# ── Temperature-channel on/off toggles ───────────────────────────────────────
-# Both sweep procedures expose set_vti_temperature / set_sample_temperature.
-# "Off" means the procedure emits no Target for that VI, so the Orchestrator
-# never ramps it and the controller holds where the operator left it. Reading
-# is unaffected — it comes from the monitor pass, not from targets.
-
 def test_field_sweep_sets_vti_and_not_sample_by_default(station, tmp_path):
     """Default toggles preserve the pre-toggle behaviour exactly."""
     proc = _field_proc(station, tmp_path, DC)
@@ -1206,19 +648,6 @@ def test_field_sweep_vti_off_emits_no_vti_target(station, tmp_path):
     targets = proc.initiate().targets
     assert "temperature_vti" not in targets
     assert "magnet_z" in targets
-    proc.standby()
-
-
-def test_field_sweep_sample_on_emits_sample_target(station, tmp_path):
-    """set_sample_temperature=True ramps temperature_sample to its own setpoint."""
-    proc = FieldSweep(
-        station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
-        **{**FAST_FIELD, **DC,
-           "set_sample_temperature": True, "sample_temperature": 42.0},
-    )
-    targets = proc.initiate().targets
-    assert targets["temperature_sample"].target == pytest.approx(42.0)
-    assert targets["temperature_vti"].target == pytest.approx(FAST_FIELD["temperature"])
     proc.standby()
 
 
@@ -1267,25 +696,3 @@ def test_temp_sweep_vti_off_emits_no_targets_on_initiate_or_step(station, tmp_pa
     step = proc.change_sweep_step()
     assert step is not None and "temperature_vti" not in step.targets
     proc.standby()
-
-
-def test_temp_sweep_holds_sample_setpoint_only_on_initiate(station, tmp_path):
-    """The sample stage is set once at initiate, not re-sent at every step."""
-    from cryosoft.core.exceptions import CryoSoftConfigError
-
-    proc = TemperatureSweep(
-        station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
-        **{**FAST_TEMP, **DC,
-           "set_sample_temperature": True, "sample_temperature": 7.5},
-    )
-    assert proc.initiate().targets["temperature_sample"].target == pytest.approx(7.5)
-    step = proc.change_sweep_step()
-    assert step is not None and "temperature_sample" not in step.targets
-    proc.standby()
-    station = _partial_station("magnet_z", "temperature_vti", "dc_measurement")
-    with pytest.raises(CryoSoftConfigError, match="temperature_sample"):
-        FieldSweep(
-            station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
-            **{**FAST_FIELD, **DC, "set_sample_temperature": True},
-        )
-

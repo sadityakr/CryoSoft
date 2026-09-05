@@ -246,19 +246,23 @@ def test_setpoint_parameters_are_reported_only_for_capabilities(station):
 def test_envelope_ignores_non_setpoint_parameters(orchestrator, station):
     """A bounded VI's NON-setpoint controls are untouched by the envelope.
 
-    The envelope bounds a quantity, not a VI: with a field envelope active,
-    the rotator's rate control and a magnet's lifecycle actions still pass.
+    The envelope bounds a quantity, not a VI: with a temperature envelope
+    active, the controller's rate control still passes.
     """
     orchestrator.set_experiment_envelope(
-        ExperimentEnvelope(bounds={"rotator": EnvelopeBound(min_value=-1.0, max_value=1.0)})
+        ExperimentEnvelope(
+            bounds={"temperature_vti": EnvelopeBound(min_value=-1.0, max_value=1.0)}
+        )
     )
     succeeded: list[tuple[str, str]] = []
     orchestrator.action_succeeded.connect(lambda vi, m: succeeded.append((vi, m)))
 
-    orchestrator.submit_vi_action("rotator", "set_rate_sample_angle", rate_deg_per_min=2.0)
+    orchestrator.submit_vi_action(
+        "temperature_vti", "set_ramp_rate", rate_K_per_min=2.0
+    )
     orchestrator._tick()
 
-    assert succeeded == [("rotator", "set_rate_sample_angle")]
+    assert succeeded == [("temperature_vti", "set_ramp_rate")]
 
 
 # ── The excitation-current fence ──────────────────────────────────────────────
@@ -267,10 +271,6 @@ def test_envelope_ignores_non_setpoint_parameters(orchestrator, station):
 @pytest.mark.parametrize(
     "vi_name, method_name, param_name",
     [
-        ("keithley_dc_mode", "initiate_measurement", "current"),
-        ("keithley_dc_mode", "set_dc_current", "current"),
-        ("keithley_delta_mode", "initiate_measurement", "current"),
-        ("keithley_delta_mode", "set_delta_current", "current"),
         ("dc_measurement", "initiate_measurement", "current_A"),
         ("dc_measurement", "set_source_current", "current_A"),
     ],
@@ -290,16 +290,6 @@ def test_excitation_current_is_bounded_both_ways(
         with pytest.raises(CryoSoftSafetyError) as exc:
             station.execute_vi_action(vi_name, method_name, **{param_name: value})
         assert "outside the allowed range" in str(exc.value)
-
-
-def test_lockin_amplitude_bound_is_derived_from_the_current_ceiling(station):
-    """The lock-in's voltage bound is I_max x R_series, from the config alone."""
-    vi = station.get_vi("lockin_harmonic")
-    assert vi._limits["oscillator_amplitude_V"] == (0.0, pytest.approx(5.0))
-    with pytest.raises(CryoSoftSafetyError):
-        station.execute_vi_action(
-            "lockin_harmonic", "initiate_measurement", oscillator_amplitude_V=6.0
-        )
 
 
 # ── emergency_standby(): the unconditional S0 path ───────────────────────────

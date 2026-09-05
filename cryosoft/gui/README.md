@@ -36,7 +36,7 @@ running right now, each with its own Abort), the `AgentPanel` (always built)
 underneath — stacked because each agent row is one wide line that a column
 would only wrap. The header carries the `TakeoverStrip` (kill switch,
 attendance, "agents active", and the **Run owner** of the run in flight). The former Other Devices section is retired:
-measurement and switch VIs are full, role-tagged `InstrumentPanel` cards in
+measurement VIs are full, role-tagged `InstrumentPanel` cards in
 the instrument grid. Tables refresh on log-page-shown and `run_finished` — never on a
 timer. Child panels keep the established single-receiver `states_updated`
 forwarding pattern (`MonitorWindow` receives the tick and forwards to
@@ -50,7 +50,7 @@ is alive and not mid-tick.
 ## Entry (what comes in)
 
 - A `Station` instance: the registered VI names and each VI's `vi_type`
-  (`system` / `level` / `measurement` / `switch`), plus the object procedures
+  (`system` / `level` / `measurement`), plus the object procedures
   are constructed against. No widget holds a VI: the
   instrument panels build from the **Station info** declaration snapshot
   (GLOSSARY.md), read off the `StatusMirror`, and `Station.get_vi()` is never
@@ -58,7 +58,7 @@ is alive and not mid-tick.
 - A `StatusMirror` (`core/status_mirror.py`) — the proxy's own, reached as
   `proxy.status` and passed down to every panel. It is the GUI's ONLY read surface: `state`,
   `is_monitoring()`, `active_run_kind()`, `held_vi_names()`,
-  `manual_override_expires_at()`, `scanner_enabled()`, `availability_tags()`,
+  `manual_override_expires_at()`, `availability_tags()`,
   `vi_faults()`, `offline_reason()`, `lifecycle_state()`,
   `get_operational_status()` and
   `station_info()`/`instrument_info()` all answer from the last event the
