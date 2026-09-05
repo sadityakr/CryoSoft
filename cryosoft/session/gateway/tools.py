@@ -1313,6 +1313,13 @@ class ToolContext:
             (``export_draft(run_id, draft)``), duck-typed so this package
             imports neither it nor the Qt object that owns its drain timer.
             ``None`` means nothing can be published from here.
+        analysis_runner: The **Analysis runner** ``run_analysis`` starts and
+            ``read_analysis_report`` asks whether a run is still being
+            analysed — duck-typed on ``start(run_id, recipe=..., options=...)``,
+            ``is_running(run_id)`` and ``recipe_dirs()``, so this package
+            imports neither it nor the Qt object that owns its worker
+            process. ``None`` means nothing can be analysed from here, and
+            the two tools that need it are refused by name.
     """
 
     experiments: Any | None = None
@@ -1323,6 +1330,7 @@ class ToolContext:
     draft_client: Any | None = None
     assistant_settings: AssistantSettings | None = None
     publisher: Any | None = None
+    analysis_runner: Any | None = None
 
     def require_experiments(self, tool_name: str) -> Any:
         """Return the experiment façade, or refuse by name.
@@ -1383,6 +1391,26 @@ class ToolContext:
                 {"rule": "missing_collaborator", "collaborator": "publisher"},
             )
         return self.publisher
+
+    def require_analysis_runner(self, tool_name: str) -> Any:
+        """Return the **Analysis runner**, or refuse by name.
+
+        Args:
+            tool_name: The tool asking, for the message.
+
+        Returns:
+            The analysis runner.
+
+        Raises:
+            ToolError: If this gateway was built without one.
+        """
+        if self.analysis_runner is None:
+            raise ToolError(
+                f"{tool_name} needs the analysis runner, and this gateway was "
+                f"built without one — analysis is off for this connection",
+                {"rule": "missing_collaborator", "collaborator": "analysis_runner"},
+            )
+        return self.analysis_runner
 
     def store(self, tool_name: str) -> Any:
         """Return the experiment store, or refuse by name.
