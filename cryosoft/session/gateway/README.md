@@ -23,9 +23,10 @@ arguments. Nothing on it is hand-written. A command tool is rendered from
 capability tool is rendered from the station's declaration snapshot, one per
 `(instrument, @control)`, with that control's `ParamSpec`s as the schema and
 the CONFIG's limit as the bound. Only the session tools — the reads over the
-experiment store, the run files and the two audit trails, and the two that
-draft and publish this experiment's notebook entries — are declared by hand,
-because they are not commands.
+experiment store, the run files and the two audit trails, the two that draft
+and publish this experiment's notebook entries, and the five that read, write
+and run the **analysis recipes** a finished run is analysed with — are
+declared by hand, because they are not commands.
 
 The folder's third job is the **transport**. `local_server.py`'s
 `GatewayServer` is a `QLocalServer` on the GUI thread's own event loop — the
@@ -81,8 +82,11 @@ is.
   choices and bounds.
 - **A `ToolContext`** (optional): the collaborators the session tools read
   through — the experiment façade, the run catalog a proposed run's class
-  name is resolved through, the operational log to tail, and, for the ELN
-  tools, the **Draft client** to ask and the publisher to queue through.
+  name is resolved through, the operational log to tail, for the ELN
+  tools the **Draft client** to ask and the publisher to queue through, and
+  for the analysis tools the **Analysis runner** to start. It also carries
+  the connection's own `Actor`, set by the `Gateway` from its identity, so a
+  tool that leaves a file behind stamps who left it.
   Without it every command tool still works and the three declaration reads
   still answer from the mirror; a tool whose collaborator is absent is
   refused BY NAME saying which one. Whether an LLM is in the loop at all is
@@ -267,15 +271,18 @@ is.
   is refused rather than dropped.
 - **Session tools are hand-declared because they are not commands.** They
   read the store, the run files, the operational log and the agent feed,
-  answer "may I run this, and how long will it take?" without dispatching, or
-  draft and publish this experiment's notebook entries. Every one is
-  `read`-class except `probe_run`, which really is a `run_procedure` with a
-  `ProbeSpec` and is classified — and refused — as one, and
-  `publish_eln_entry`, which puts a permanent record of the experiment into
-  the outside world on its behalf and is `run_control` for it. A run file is
-  always reached through `ExperimentStore.resolve_data_file()`, never a
-  caller-supplied path: a read tool that accepted an arbitrary path would be
-  a file reader wearing an instrument's name.
+  answer "may I run this, and how long will it take?" without dispatching,
+  draft and publish this experiment's notebook entries, or read, write and
+  run its **analysis recipes**. Every one is `read`-class except `probe_run`,
+  which really is a `run_procedure` with a `ProbeSpec` and is classified — and
+  refused — as one; `publish_eln_entry`, which puts a permanent record of the
+  experiment into the outside world on its behalf; and
+  `write_analysis_recipe` / `run_analysis`, which put code on the measurement
+  machine and start the process that executes it. All three are `run_control`.
+  A run file is always reached through `ExperimentStore.resolve_data_file()`,
+  and a recipe or a report through the store's own `recipes_dir()` /
+  `report_dir()`, never a caller-supplied path: a read tool that accepted an
+  arbitrary path would be a file reader wearing an instrument's name.
 - **Drafting reads; publishing acts; a human gates the two apart.**
   `draft_eln_entry` renders one finished run's facts into the draft prompt,
   asks one model, and returns the **draft entry** as data — it writes
@@ -287,12 +294,45 @@ is.
   discarding it. Unattended, the matrix decides as usual: `session`
   publishes, `debug` and `observer` are refused as they are for any other
   `run_control` action.
+### The analysis tools, and the trust boundary they sit on
+
+| Tool | Class | What it answers |
+|---|---|---|
+| `list_analysis_recipes` | read | Every recipe this experiment can be analysed with — the package's and its own — plus which one would run for each procedure it has recorded a run of |
+| `read_analysis_recipe` | read | One recipe's whole source, its origin and its digest |
+| `write_analysis_recipe` | run_control, recorded | Writes `<experiment>/analysis/recipes/<name>.py`, stamped; executes nothing |
+| `run_analysis` | run_control, recorded | Starts the analysis worker on one recorded run; the report arrives later |
+| `read_analysis_report` | read | That run's report, or `running` / `none` |
+
+**A recipe is code, trusted like a procedure.** An agent-written recipe is a
+Python module that the **analysis worker** executes on the measurement
+machine — in a SEPARATE process that holds the run's data file and reaches no
+instrument, no Station and no Orchestrator, so the worst it can do is write a
+bad report. That is the boundary, and it is the same one the plain
+`python -m cryosoft.analysis` worker gives a human's own recipe.
+
+Writing one is therefore not a read: `write_analysis_recipe` is
+`run_control`, so only the `session` role reaches it, the kill switch closes
+it, and the call is written to the **Agent feed** with the digest and byte
+count of the source (the file on disk is the copy of the text). The file
+itself opens with a header naming the actor and the UTC time it was written,
+so the folder says who wrote what without the feed beside it. The tool
+COMPILES what it is given so an agent learns of a syntax error at write time,
+and it executes nothing: running is the separate `run_analysis` action, also
+`run_control` and also recorded, and a human sees the recipe in the eLab tab
+before either of them starts a worker. A human running whatever is in that
+folder with one button is the same trust they extend to the procedures they
+start.
+
 - **A tool that spends or changes something leaves a trail.** A session tool
   is answered inside this client, so no **Verdict** record would ever name
-  it; the two ELN tools therefore declare `ToolSpec.recorded` and the gateway
-  writes each call, its arguments, its answer and — for a draft — its cost
-  line (`model`, `input_tokens`, `output_tokens`, `cost_usd`) to the **Agent
-  feed**. Declared per tool, never derived from the action class: a `read`
+  it; the two ELN tools and the two analysis tools that act therefore declare
+  `ToolSpec.recorded` and the gateway writes each call, its arguments, its
+  answer and — for a draft — its cost line (`model`, `input_tokens`,
+  `output_tokens`, `cost_usd`) to the **Agent feed**. An argument too big for
+  an append-only record travels as its size and its SHA-256 instead
+  (`tools.FEED_DIGESTED_ARGS`, `feed_arguments()`): a written recipe's source
+  is already on disk, and the digest is what proves which text it was. Declared per tool, never derived from the action class: a `read`
   tool an agent polls every tick would drown the trail in observations, while
   a `read` tool that spends model tokens is exactly what the trail is for.
 - **The three-way test.** Conformance diffs the rendered surface against
@@ -366,4 +406,4 @@ The default rule the rows were derived from:
 | `gateway.py` | The in-process client an agent holds: one connection, one `Role`, one actor id. Stamps `Actor(kind="agent", ...)` on every command, runs `authorize()`, and either forwards to the engine or answers the request itself with a `BLOCKED_ROLE` verdict on the engine's OWN `verdict_emitted` stream. Mirrors the latest `StatusSnapshot`/`StationInfo` so every read — attendance, the gate and the **run owner** included — is answered locally. Duck-typed on `EngineClient` and reaching the two streams through `verdict_stream()`/`event_stream()`, so it holds the **Orchestrator proxy** on the GUI thread, the Orchestrator on the instrument thread, and a transport proxy later, without noticing. No Qt import, no network, no thread. Also publishes the rendered surface: `tools()` / `tool_schemas()` re-render whenever the mirrored declaration is replaced, and `call_tool()` validates a call against its schema before routing it — a command tool through `submit()`, a session tool to its function after the same kill-switch and matrix checks. It answers every call and raises at none. | `Gateway` (`submit(name, args)`, `permits(name, args)`, optional `feed=` (the **Agent feed** every submitted command is written to before it is forwarded or refused), `call_tool(name, args)`, `tools()`, `tool_schemas()`, `tool(name)`, `status()`, `station()`, `state()`, `attended()`, `agent_gate()`, `run_owner()`, `role`, `actor`), `EngineClient`, `verdict_stream`, `event_stream` | `tests/test_gateway.py`, `tests/test_gateway_tools.py` |
 | `local_server.py` | The **Gateway server**: a `QLocalServer` on the GUI thread's event loop that accepts local-socket connections and gives each one its own `Gateway`, built with the role and actor id its `hello` declared. Speaks newline-delimited JSON-RPC 2.0 (`hello`, `tools/list`, `tools/call`, `status`, `station`, `events/subscribe`, plus `event`/`verdict` notifications), publishes `gateway.json` with the socket name, pid, schema version and per-launch token at 0600, and refuses a bad token, an unknown role or a role above the deployment's ceiling at the handshake. Buffers partial reads, caps a frame, and answers every malformed thing as a JSON-RPC error rather than raising into the loop. No thread. | `GatewayServer` (`start()`, `stop()`, `socket_name`, `descriptor`, `token`, `max_role`), `SCHEMA_VERSION`, `MAX_FRAME_BYTES`, `descriptor_path()`, `default_socket_name()` | `tests/test_gateway_server.py` |
 | `roles.py` | Who may take an action of a given class: the `Role` enum, the `Permission` cell values, the one `PERMISSION_MATRIX` table that is the standard, and `authorize()` — the ordered checks (emergency standby, actor kind, role validity, classification, kill switch, matrix, and last the **run-ownership standard** against the mirrored owner) that answer with `None` or one `BLOCKED_ROLE` verdict. `authorize_spooled()` is the same model with the **Request spool**'s role cap in front of it, injected into `core.request_spool` as its permission hook. | `Role`, `Permission`, `PERMISSION_MATRIX`, `ROLE_LADDER`, `OWNER_SCOPED_COMMANDS`, `authorize()`, `authorize_spooled()` | `tests/test_gateway.py`, `tests/test_request_spool.py` + conformance |
-| `tools.py` | The **Tool surface**, rendered not written: one command tool per `CommandName` (description from the Orchestrator method's docstring, schema from its signature or its `COMMAND_ARG_SCHEMAS` entry), one capability tool per `(instrument, @control)` the station declares (schema from the `ParamSpec`s, bounds from the config), and the hand-declared session tools that read the store, the run files and the two audit trails, and that draft and publish notebook entries. Validates a call against its schema and names the bound it violated. | `ToolSpec`, `ToolContext`, `ToolError`, `SESSION_TOOLS`, `COMMAND_ARG_SCHEMAS`, `render_tools()`, `render_command_tools()`, `render_capability_tools()`, `capability_tool_name()`, `validate_tool_args()`, `call_session_tool()` | `tests/test_gateway_tools.py` + conformance |
+| `tools.py` | The **Tool surface**, rendered not written: one command tool per `CommandName` (description from the Orchestrator method's docstring, schema from its signature or its `COMMAND_ARG_SCHEMAS` entry), one capability tool per `(instrument, @control)` the station declares (schema from the `ParamSpec`s, bounds from the config), and the hand-declared session tools that read the store, the run files and the two audit trails, that draft and publish notebook entries, and that read, write and run the experiment's analysis recipes. Validates a call against its schema and names the bound it violated. | `ToolSpec`, `ToolContext`, `ToolError`, `SESSION_TOOLS`, `COMMAND_ARG_SCHEMAS`, `MAX_RECIPE_BYTES`, `FEED_DIGESTED_ARGS`, `render_tools()`, `render_command_tools()`, `render_capability_tools()`, `capability_tool_name()`, `validate_tool_args()`, `call_session_tool()`, `feed_arguments()` | `tests/test_gateway_tools.py` + conformance |

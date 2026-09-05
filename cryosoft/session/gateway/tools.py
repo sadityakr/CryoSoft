@@ -35,12 +35,28 @@ on.
 * **Session tools** — hand-declared, because they are NOT commands: they read
   the experiment store, the run files, the operational log and the agent
   feed, they answer "may I run this, and how long will it take?" without
-  dispatching anything, or they draft and publish this experiment's notebook
-  entries. Every one of them is ``ActionClass.READ`` except ``probe_run``,
-  which really is a ``run_procedure`` with a ``ProbeSpec`` and is classified
-  (and refused) as one, and ``publish_eln_entry``, which puts a permanent
-  record of this experiment into the outside world on the experiment's
-  behalf and is classified ``run_control`` for it.
+  dispatching anything, they draft and publish this experiment's notebook
+  entries, and they read, write and run the **analysis recipes** a finished
+  run is analysed with. Every one of them is ``ActionClass.READ`` except
+  ``probe_run``, which really is a ``run_procedure`` with a ``ProbeSpec`` and
+  is classified (and refused) as one; ``publish_eln_entry``, which puts a
+  permanent record of this experiment into the outside world on the
+  experiment's behalf; and ``write_analysis_recipe`` / ``run_analysis``, which
+  put code on the measurement machine and start the process that executes it.
+  All three are classified ``run_control``.
+
+**Five tools reach the analysis stage**, and the trust boundary they sit on is
+written down in this folder's README. A recipe is code, trusted like a
+procedure: ``write_analysis_recipe`` compiles what it is given, stamps it with
+a header naming the actor and the UTC time, and writes it into the
+experiment's own ``analysis/recipes`` folder — it executes nothing. The
+analysis worker does that, in a separate process that holds the run's data
+file and reaches no instrument, and only when ``run_analysis`` (or a human's
+button) starts it. Both are ``run_control`` and both declare ``recorded``, so
+the **Agent feed** carries the call, the digest of the source written and the
+run analysed, and the eLab tab shows the recipe before anybody runs it. The
+other three — listing recipes, reading one, and reading a report — change
+nothing and are ``read``.
 
 **Two tools reach the ELN track**, and they divide exactly where the money
 and the authority divide. ``draft_eln_entry`` renders one finished run's
@@ -77,6 +93,7 @@ three-way test: contract, engine, tool surface.
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 import logging
@@ -85,9 +102,11 @@ import os
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from cryosoft.analysis.report import REPORT_FILENAME, AnalysisReport
 from cryosoft.core import data_reader
 from cryosoft.core.capability_manifest import build_manifest, validate_manifest
 from cryosoft.core.events import CommandName, StationInfo
@@ -127,6 +146,22 @@ TOOL_NAME_SEPARATOR = "__"
 
 #: The largest number of trailing records any log-tailing tool will return.
 MAX_LOG_RECORDS = 500
+
+#: The largest recipe source ``write_analysis_recipe`` will write, in bytes.
+#: A recipe is one readable script a physicist reviews in the eLab tab before
+#: anybody runs it; a file past this size is not that, and it would also be
+#: quoted into the **Agent feed**'s digest line for as long as the experiment
+#: folder lives.
+MAX_RECIPE_BYTES = 200_000
+
+#: Arguments too big to belong in the **Agent feed** verbatim, per tool. Each
+#: named argument is replaced in the recorded call by its byte count and the
+#: SHA-256 of its text, so the feed says exactly WHICH source was written —
+#: and can be checked against the file on disk — without carrying a copy of
+#: it in every line. The file itself is the record of the text.
+FEED_DIGESTED_ARGS: dict[str, tuple[str, ...]] = {
+    "write_analysis_recipe": ("source",),
+}
 
 #: The JSON Schema type each ``ParamSpec.type`` name and each scalar
 #: annotation renders as.
@@ -975,10 +1010,24 @@ def _read_tool(
     )
 
 
+#: The experiment an analysis tool works in; defaults to the open one, like
+#: every other session tool that names an experiment.
+_ANALYSIS_EXPERIMENT: dict[str, Any] = {
+    "experiment_id": {
+        "type": "string",
+        "description": "Experiment to work in; defaults to the open one.",
+    }
+}
+
 #: The session tools, in the order a client meets them: the live picture, the
-#: stored runs, the "may I run this?" question, then the two audit trails.
-#: Every one is ``read`` except ``probe_run``, which dispatches a real (if
-#: cheap) run and is classified as the run control it is.
+#: stored runs, the "may I run this?" question, the two audit trails, the two
+#: that reach the notebook, a probe run, and the five that read, write and run
+#: the **Analysis recipe**s an experiment is analysed with. Every one is
+#: ``read`` except ``probe_run``, which dispatches a real (if cheap) run and is
+#: classified as the run control it is; ``publish_eln_entry``, which puts a
+#: permanent record into the outside world; and ``write_analysis_recipe`` /
+#: ``run_analysis``, which put code on the measurement machine and start the
+#: process that executes it.
 SESSION_TOOLS: tuple[ToolSpec, ...] = (
     _read_tool(
         "read_status",
@@ -1176,6 +1225,152 @@ SESSION_TOOLS: tuple[ToolSpec, ...] = (
         action_class=COMMAND_ACTION_CLASSES[CommandName.RUN_PROCEDURE].action_class,
         command=CommandName.RUN_PROCEDURE,
     ),
+    _read_tool(
+        "list_analysis_recipes",
+        "Every analysis recipe this experiment can be analysed with: the ones "
+        "shipped with CryoSoft and the ones written into the experiment's own "
+        "analysis/recipes folder, each with its name, description, the "
+        "procedures it serves, its source path and the digest of its source. "
+        "Also answers, under 'selected', which recipe would run for each "
+        "procedure this experiment has already recorded a run of — the "
+        "notebook settings' per-procedure preference first, then the recipe "
+        "declaring that procedure, then a recipe that serves any procedure. "
+        "Refused when no experiment is open and none was named.",
+        _ANALYSIS_EXPERIMENT,
+    ),
+    _read_tool(
+        "read_analysis_recipe",
+        "The whole source of one analysis recipe, by name — an experiment "
+        "recipe from this experiment's analysis/recipes folder, a shipped one "
+        "from the package. Returns the name, the file it lives in, its source "
+        "text, whether it is a 'package' or an 'experiment' recipe, and the "
+        "digest of the file. A name no recipe answers to is refused "
+        "(rule 'unknown_recipe'); list_analysis_recipes says which names there "
+        "are.",
+        {
+            "name": {
+                "type": "string",
+                "description": "The recipe's name, as list_analysis_recipes gives it.",
+            },
+            **_ANALYSIS_EXPERIMENT,
+        },
+        ("name",),
+    ),
+    ToolSpec(
+        name="write_analysis_recipe",
+        description=(
+            "Write one analysis recipe into this experiment's own "
+            "analysis/recipes folder, as <name>.py. The source is checked to "
+            "COMPILE and is stamped with a header naming who wrote it and "
+            "when; it is not executed here. The analysis worker executes it "
+            "later — in its own process, with no access to any instrument — "
+            "when run_analysis is called or a human presses Run, and it is "
+            "visible in the eLab tab, and recorded in this experiment's agent "
+            "feed, before that happens. Returns the name, the path written, "
+            "the file's size in bytes and its digest. Refused for a name that "
+            "is not a plain Python identifier (rule 'invalid_name'), a source "
+            "that does not compile ('syntax_error', with the line), a source "
+            "over 200 kB ('too_large'), and an existing file unless overwrite "
+            "is true ('exists')."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": (
+                        "The recipe's name: a plain Python identifier that "
+                        "does not start with '_'. It names the file and it is "
+                        "what run_analysis's 'recipe' takes."
+                    ),
+                },
+                "source": {
+                    "type": "string",
+                    "description": (
+                        "The recipe's whole source — a module defining an "
+                        "AnalysisRecipe subclass. Capped at 200 kB."
+                    ),
+                },
+                "overwrite": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Replace an existing recipe of this name. Without it "
+                        "an existing file is refused rather than overwritten."
+                    ),
+                },
+                **_ANALYSIS_EXPERIMENT,
+            },
+            "required": ["name", "source"],
+            "additionalProperties": False,
+        },
+        action_class=ActionClass.RUN_CONTROL,
+        session_function="write_analysis_recipe",
+        recorded=True,
+    ),
+    ToolSpec(
+        name="run_analysis",
+        description=(
+            "Analyse one recorded run: start the analysis worker on it, in a "
+            "separate process that reads the run's data file and reaches no "
+            "instrument. This returns as soon as the worker has been STARTED, "
+            "not when it has finished — the result arrives later, so read it "
+            "with read_analysis_report, which answers {'status': 'running'} "
+            "until it is there. Refused while that run is already being "
+            "analysed (rule 'already_running'), when nothing could be started "
+            "('not_started': no experiment open, an unknown run, or a run with "
+            "no data file), and when this connection was wired without an "
+            "analysis runner."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "run_id": {
+                    "type": "string",
+                    "description": "The recorded run to analyse.",
+                },
+                "recipe": {
+                    "type": "string",
+                    "description": (
+                        "Recipe name to use; omit to let the runner choose the "
+                        "one list_analysis_recipes reports under 'selected'."
+                    ),
+                },
+                "options": {
+                    "type": "object",
+                    "description": (
+                        "Options passed to the recipe verbatim, as scalars."
+                    ),
+                    "additionalProperties": {
+                        "type": ["string", "number", "integer", "boolean", "null"]
+                    },
+                },
+                **_ANALYSIS_EXPERIMENT,
+            },
+            "required": ["run_id"],
+            "additionalProperties": False,
+        },
+        action_class=ActionClass.RUN_CONTROL,
+        session_function="run_analysis",
+        recorded=True,
+    ),
+    _read_tool(
+        "read_analysis_report",
+        "The analysis report of one recorded run: the recipe that ran, its "
+        "summary paragraphs, derived values, figures and small tables, its "
+        "warnings and — when the recipe failed — its error, plus the path of "
+        "the report file. Answers {'status': 'running'} while the worker is "
+        "still on that run and {'status': 'none'} when the run has not been "
+        "analysed yet.",
+        {
+            "run_id": {
+                "type": "string",
+                "description": "The recorded run whose report to read.",
+            },
+            **_ANALYSIS_EXPERIMENT,
+        },
+        ("run_id",),
+    ),
 )
 
 
@@ -1313,6 +1508,20 @@ class ToolContext:
             (``export_draft(run_id, draft)``), duck-typed so this package
             imports neither it nor the Qt object that owns its drain timer.
             ``None`` means nothing can be published from here.
+        analysis_runner: The **Analysis runner** ``run_analysis`` starts and
+            ``read_analysis_report`` asks whether a run is still being
+            analysed — duck-typed on ``start(run_id, recipe=..., options=...)``,
+            ``is_running(run_id)`` and ``recipe_dirs()``, so this package
+            imports neither it nor the Qt object that owns its worker
+            process. ``None`` means nothing can be analysed from here, and
+            the two tools that need it are refused by name.
+        actor: The ``Actor`` of the connection calling the tool — the same one
+            it stamps on every ``Command`` — set by the ``Gateway`` from its
+            own identity, so a tool that leaves something behind on disk can
+            stamp WHO left it. ``None`` outside a gateway (a direct
+            ``call_session_tool()`` in a test), which stamps an unknown
+            actor rather than refusing: the stamp is a record, not a
+            permission.
     """
 
     experiments: Any | None = None
@@ -1323,6 +1532,8 @@ class ToolContext:
     draft_client: Any | None = None
     assistant_settings: AssistantSettings | None = None
     publisher: Any | None = None
+    analysis_runner: Any | None = None
+    actor: Any | None = None
 
     def require_experiments(self, tool_name: str) -> Any:
         """Return the experiment façade, or refuse by name.
@@ -1383,6 +1594,26 @@ class ToolContext:
                 {"rule": "missing_collaborator", "collaborator": "publisher"},
             )
         return self.publisher
+
+    def require_analysis_runner(self, tool_name: str) -> Any:
+        """Return the **Analysis runner**, or refuse by name.
+
+        Args:
+            tool_name: The tool asking, for the message.
+
+        Returns:
+            The analysis runner.
+
+        Raises:
+            ToolError: If this gateway was built without one.
+        """
+        if self.analysis_runner is None:
+            raise ToolError(
+                f"{tool_name} needs the analysis runner, and this gateway was "
+                f"built without one — analysis is off for this connection",
+                {"rule": "missing_collaborator", "collaborator": "analysis_runner"},
+            )
+        return self.analysis_runner
 
     def store(self, tool_name: str) -> Any:
         """Return the experiment store, or refuse by name.
@@ -1506,6 +1737,29 @@ def _tail_records(path: Path, count: int) -> list[dict[str, Any]]:
     return records
 
 
+def _experiment_record(context: ToolContext, tool_name: str, experiment_id: str) -> Any:
+    """Load one experiment record, refusing by name when it is not there.
+
+    Args:
+        context: The tool context.
+        tool_name: The tool asking, for the message.
+        experiment_id: The experiment to load.
+
+    Returns:
+        The ``ExperimentRecord``.
+
+    Raises:
+        ToolError: If this store holds no such experiment.
+    """
+    record = context.store(tool_name).load(experiment_id)
+    if record is None:
+        raise ToolError(
+            f"no experiment {experiment_id!r} in this store",
+            {"rule": "unknown_experiment", "experiment_id": experiment_id},
+        )
+    return record
+
+
 def _run_record(context: ToolContext, tool_name: str, args: Mapping[str, Any]) -> Any:
     """Find one recorded run, refusing by name when it is not there.
 
@@ -1524,12 +1778,7 @@ def _run_record(context: ToolContext, tool_name: str, args: Mapping[str, Any]) -
         ToolError: If the experiment or the run cannot be found.
     """
     experiment_id = context.experiment_id(tool_name, str(args.get("experiment_id", "")))
-    record = context.store(tool_name).load(experiment_id)
-    if record is None:
-        raise ToolError(
-            f"no experiment {experiment_id!r} in this store",
-            {"rule": "unknown_experiment", "experiment_id": experiment_id},
-        )
+    record = _experiment_record(context, tool_name, experiment_id)
     run_id = str(args["run_id"])
     run = record.find_run(run_id)
     if run is None:
@@ -2090,6 +2339,452 @@ def _tool_publish_eln_entry(args: Mapping[str, Any], context: ToolContext) -> An
     }
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# The analysis tools: the recipes an experiment is analysed with, and the
+# reports the analysis worker leaves behind
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _analysis_discovery(tool_name: str) -> Any:
+    """Import the recipe-discovery module, refusing by name when it is absent.
+
+    Imported here rather than at module import time so this package still
+    loads — and every other tool still answers — in an installation without
+    the analysis stage.
+
+    Args:
+        tool_name: The tool asking, for the message.
+
+    Returns:
+        The ``cryosoft.analysis.discovery`` module.
+
+    Raises:
+        ToolError: If the analysis package cannot be imported.
+    """
+    try:
+        from cryosoft.analysis import discovery
+    except ImportError as error:
+        raise ToolError(
+            f"{tool_name} needs cryosoft.analysis, which this installation "
+            f"does not provide: {error}",
+            {"rule": "missing_collaborator", "collaborator": "analysis"},
+        ) from error
+    return discovery
+
+
+def _store_directory(
+    context: ToolContext, tool_name: str, method_name: str, *args: Any
+) -> Path:
+    """Ask the experiment store for one of its directories, by name.
+
+    Directories are the store's to lay out — an analysis tool never joins a
+    path of its own, the same rule ``ExperimentStore.resolve_data_file()``
+    already imposes on every run file.
+
+    Args:
+        context: The tool context.
+        tool_name: The tool asking, for the message.
+        method_name: The store method to call (``recipes_dir``/``report_dir``).
+        *args: Its arguments.
+
+    Returns:
+        The directory, which this function does not create.
+
+    Raises:
+        ToolError: If the store does not offer that method.
+    """
+    store = context.store(tool_name)
+    method = getattr(store, method_name, None)
+    if not callable(method):
+        raise ToolError(
+            f"{tool_name} needs ExperimentStore.{method_name}(), which this "
+            f"store does not offer",
+            {"rule": "missing_collaborator", "collaborator": f"store.{method_name}"},
+        )
+    return Path(method(*args))
+
+
+def _discovered_recipes(
+    context: ToolContext, tool_name: str, experiment_id: str
+) -> tuple[Path, tuple[Any, ...]]:
+    """Discover every recipe available to one experiment.
+
+    Args:
+        context: The tool context.
+        tool_name: The tool asking, for the message.
+        experiment_id: The experiment whose own recipes are added to the
+            package's.
+
+    Returns:
+        ``(recipes_dir, recipes)`` — the experiment's recipe folder (which may
+        not exist yet) and the ``RecipeInfo``s, package recipes first.
+
+    Raises:
+        ToolError: If the analysis package or the store method is absent.
+    """
+    discovery = _analysis_discovery(tool_name)
+    recipes_dir = _store_directory(context, tool_name, "recipes_dir", experiment_id)
+    return recipes_dir, tuple(discovery.discover_recipes([recipes_dir]))
+
+
+def _recipe_preferences(context: ToolContext) -> dict[str, str]:
+    """Return the notebook settings' per-procedure recipe preference.
+
+    Read through ``getattr`` at every step: a gateway wired without a
+    publisher, or one whose publisher predates the analysis settings, has no
+    preference rather than a failure — the preference decides which of
+    several recipes runs, never whether the question can be answered.
+
+    Args:
+        context: The tool context.
+
+    Returns:
+        ``{procedure: recipe name}``, empty when nothing declares one.
+    """
+    settings = getattr(context.publisher, "settings", None)
+    preferences = getattr(getattr(settings, "analysis", None), "recipes", None)
+    if not isinstance(preferences, Mapping):
+        return {}
+    return {str(key): str(value) for key, value in preferences.items() if value}
+
+
+def _actor_stamp(context: ToolContext) -> str:
+    """Render the calling actor as ``<kind> '<id>'`` for a written-file header.
+
+    Args:
+        context: The tool context, carrying the connection's ``Actor``.
+
+    Returns:
+        The two words a header line names the writer with; an unknown actor
+        renders as ``unknown '?'`` rather than as nothing, so a stamp is
+        never silently empty.
+    """
+    actor = context.actor
+    kind = getattr(getattr(actor, "kind", None), "value", None) or "unknown"
+    identity = str(getattr(actor, "id", "") or "?")
+    return f"{kind} {identity!r}"
+
+
+def _digest(text: str) -> str:
+    """Return the SHA-256 of a text, the same digest a ``RecipeInfo`` carries.
+
+    Args:
+        text: The text to digest.
+
+    Returns:
+        The hex digest.
+    """
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _tool_list_analysis_recipes(args: Mapping[str, Any], context: ToolContext) -> Any:
+    """Answer ``list_analysis_recipes``.
+
+    Args:
+        args: The call's arguments — optionally the experiment.
+        context: The tool context.
+
+    Returns:
+        ``{"recipes", "recipes_dir", "selected"}`` — every discovered recipe,
+        the folder this experiment's own recipes live in, and the recipe that
+        would run for each procedure the experiment has recorded a run of.
+
+    Raises:
+        ToolError: If the experiment cannot be resolved or the analysis
+            package is absent.
+    """
+    tool_name = "list_analysis_recipes"
+    experiment_id = context.experiment_id(tool_name, str(args.get("experiment_id", "")))
+    record = _experiment_record(context, tool_name, experiment_id)
+    recipes_dir, recipes = _discovered_recipes(context, tool_name, experiment_id)
+    discovery = _analysis_discovery(tool_name)
+    preferences = _recipe_preferences(context)
+
+    selected: dict[str, str] = {}
+    for run in getattr(record, "runs", ()) or ():
+        procedure = str(getattr(run, "procedure", "") or "")
+        if not procedure or procedure in selected:
+            continue
+        chosen = discovery.recipe_for(
+            procedure, recipes, preferences.get(procedure, "")
+        )
+        if chosen is not None:
+            selected[procedure] = chosen.name
+    return {
+        "recipes": [info.to_dict() for info in recipes],
+        "recipes_dir": str(recipes_dir),
+        "selected": selected,
+    }
+
+
+def _tool_read_analysis_recipe(args: Mapping[str, Any], context: ToolContext) -> Any:
+    """Answer ``read_analysis_recipe``.
+
+    An experiment recipe is read from the experiment's own folder and a
+    package recipe from the file the discovery reported, so no caller-supplied
+    path is ever opened — the rule every run-file read already follows.
+
+    Args:
+        args: The call's arguments — the recipe name and optionally the
+            experiment.
+        context: The tool context.
+
+    Returns:
+        ``{"name", "path", "source", "origin", "digest"}``.
+
+    Raises:
+        ToolError: If no recipe answers to that name, or its file cannot be
+            read.
+    """
+    tool_name = "read_analysis_recipe"
+    experiment_id = context.experiment_id(tool_name, str(args.get("experiment_id", "")))
+    name = str(args["name"])
+    recipes_dir, recipes = _discovered_recipes(context, tool_name, experiment_id)
+    info = next((item for item in recipes if item.name == name), None)
+    if info is None:
+        raise ToolError(
+            f"no analysis recipe named {name!r} for experiment "
+            f"{experiment_id!r}; list_analysis_recipes says which there are",
+            {"rule": "unknown_recipe", "name": name, "experiment_id": experiment_id},
+        )
+    path = (
+        recipes_dir / f"{name}.py"
+        if info.origin == "experiment"
+        else Path(info.source_path)
+    )
+    try:
+        source = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise ToolError(
+            f"the recipe {name!r} at {path} cannot be read: {error}",
+            {"rule": "unreadable_recipe", "name": name, "path": str(path)},
+        ) from error
+    return {
+        "name": info.name,
+        "path": str(path),
+        "source": source,
+        "origin": info.origin,
+        "digest": info.digest,
+    }
+
+
+def _tool_write_analysis_recipe(args: Mapping[str, Any], context: ToolContext) -> Any:
+    """Answer ``write_analysis_recipe``: put one recipe in the experiment folder.
+
+    The source is compiled but never executed here — writing a recipe and
+    running one are two actions, and the second is ``run_analysis``, in the
+    analysis worker's own process. What this leaves behind is a stamped file:
+    a header naming the actor and the UTC time above the source the caller
+    sent, so the folder itself says who wrote what, beside the **Agent feed**
+    record of the same call.
+
+    Args:
+        args: The call's arguments — the name, the source, whether an existing
+            file may be replaced, and optionally the experiment.
+        context: The tool context.
+
+    Returns:
+        ``{"name", "path", "bytes", "digest"}`` — the digest is of the file as
+        written, header included, which is the digest a ``RecipeInfo`` for it
+        will carry.
+
+    Raises:
+        ToolError: If the name is not a plain identifier, the source does not
+            compile or is too large, the file exists and may not be replaced,
+            or it cannot be written.
+    """
+    tool_name = "write_analysis_recipe"
+    experiment_id = context.experiment_id(tool_name, str(args.get("experiment_id", "")))
+    name = str(args["name"])
+    source = str(args["source"])
+
+    if not name.isidentifier() or name.startswith("_"):
+        raise ToolError(
+            f"{name!r} is not a usable recipe name: it must be a plain Python "
+            f"identifier that does not start with an underscore",
+            {"rule": "invalid_name", "name": name},
+        )
+    size = len(source.encode("utf-8"))
+    if size > MAX_RECIPE_BYTES:
+        raise ToolError(
+            f"the recipe {name!r} is {size} bytes, over the "
+            f"{MAX_RECIPE_BYTES}-byte limit a reviewable recipe is held to",
+            {"rule": "too_large", "name": name, "bytes": size,
+             "limit": MAX_RECIPE_BYTES},
+        )
+    try:
+        compile(source, f"<{name}.py>", "exec")
+    except SyntaxError as error:
+        raise ToolError(
+            f"the recipe {name!r} does not compile: {error.msg} "
+            f"(line {error.lineno})",
+            {
+                "rule": "syntax_error",
+                "name": name,
+                "line": int(error.lineno or 0),
+                "message": str(error.msg),
+            },
+        ) from error
+
+    recipes_dir = _store_directory(context, tool_name, "recipes_dir", experiment_id)
+    path = recipes_dir / f"{name}.py"
+    if path.exists() and not bool(args.get("overwrite", False)):
+        raise ToolError(
+            f"the recipe {name!r} already exists at {path}; call it again with "
+            f"overwrite true to replace it",
+            {"rule": "exists", "name": name, "path": str(path)},
+        )
+
+    stamped_at = datetime.now(timezone.utc).isoformat()
+    header = (
+        f"# Written by {_actor_stamp(context)} via {tool_name} at {stamped_at}\n"
+        f"# The analysis worker executes this file in its own process; it is "
+        f"visible\n"
+        f"# in the eLab tab, and recorded in the agent feed, before anybody "
+        f"runs it.\n\n"
+    )
+    content = header + source
+    try:
+        recipes_dir.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    except OSError as error:
+        raise ToolError(
+            f"the recipe {name!r} could not be written to {path}: {error}",
+            {"rule": "unwritable_recipe", "name": name, "path": str(path)},
+        ) from error
+    logger.info(
+        "analysis recipe %r written to %s by %s", name, path, _actor_stamp(context)
+    )
+    return {
+        "name": name,
+        "path": str(path),
+        "bytes": len(content.encode("utf-8")),
+        "digest": _digest(content),
+    }
+
+
+def _tool_run_analysis(args: Mapping[str, Any], context: ToolContext) -> Any:
+    """Answer ``run_analysis``: start the analysis worker on one recorded run.
+
+    Starting is all this does. The worker is a separate process with the data
+    file and no instrument, and its report arrives on disk later — which is
+    why the answer carries the path the report WILL be at and why
+    ``read_analysis_report`` is the tool that reads it.
+
+    Args:
+        args: The call's arguments — the run, optionally its experiment, the
+            recipe and the options.
+        context: The tool context.
+
+    Returns:
+        ``{"run_id", "started", "report_path", "recipe"}``.
+
+    Raises:
+        ToolError: If the run is unknown, no runner was wired in, that run is
+            already being analysed, or the runner started nothing.
+    """
+    tool_name = "run_analysis"
+    _experiment_id, _record, run = _run_record(context, tool_name, args)
+    runner = context.require_analysis_runner(tool_name)
+    recipe = str(args.get("recipe", ""))
+    options = dict(args.get("options") or {})
+
+    if runner.is_running(run.run_id):
+        raise ToolError(
+            f"run {run.run_id!r} is being analysed already; read its report "
+            f"with read_analysis_report rather than starting a second worker",
+            {"rule": "already_running", "run_id": run.run_id},
+        )
+    report_dir = str(runner.start(run.run_id, recipe=recipe, options=options) or "")
+    if not report_dir:
+        raise ToolError(
+            f"nothing was started for run {run.run_id!r}: no experiment is "
+            f"open, the run is not known to the runner, or it wrote no data "
+            f"file",
+            {"rule": "not_started", "run_id": run.run_id},
+        )
+    return {
+        "run_id": run.run_id,
+        "started": True,
+        "report_path": str(Path(report_dir) / REPORT_FILENAME),
+        "recipe": recipe,
+    }
+
+
+def _tool_read_analysis_report(args: Mapping[str, Any], context: ToolContext) -> Any:
+    """Answer ``read_analysis_report``: the report of one run, or why there is none.
+
+    Args:
+        args: The call's arguments — the run and optionally its experiment.
+        context: The tool context.
+
+    Returns:
+        The **analysis report** as its dict, plus ``report_path``; or
+        ``{"status": "running"}`` while the worker is still on that run, or
+        ``{"status": "none"}`` when nothing has been analysed yet.
+
+    Raises:
+        ToolError: If the run is unknown or the report file cannot be read.
+    """
+    tool_name = "read_analysis_report"
+    experiment_id, _record, run = _run_record(context, tool_name, args)
+    runner = context.analysis_runner
+    if runner is not None and runner.is_running(run.run_id):
+        return {"status": "running", "run_id": run.run_id}
+
+    path = (
+        _store_directory(context, tool_name, "report_dir", experiment_id, run.run_id)
+        / REPORT_FILENAME
+    )
+    if not path.is_file():
+        return {"status": "none", "run_id": run.run_id}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise ToolError(
+            f"the analysis report for run {run.run_id!r} at {path} cannot be "
+            f"read: {error}",
+            {"rule": "unreadable_report", "run_id": run.run_id, "path": str(path)},
+        ) from error
+    if not isinstance(payload, Mapping):
+        raise ToolError(
+            f"the analysis report for run {run.run_id!r} at {path} is not an "
+            f"object",
+            {"rule": "unreadable_report", "run_id": run.run_id, "path": str(path)},
+        )
+    report = AnalysisReport.from_dict(payload).to_dict()
+    report["report_path"] = str(path)
+    return report
+
+
+def feed_arguments(tool: ToolSpec, args: Mapping[str, Any]) -> dict[str, Any]:
+    """Render one tool call's arguments for the **Agent feed**.
+
+    Everything a call was made with is recorded, except an argument named in
+    ``FEED_DIGESTED_ARGS``, which is replaced by its byte count and the
+    SHA-256 of its text. The feed is an append-only record that lives as long
+    as the experiment does, and a recipe's whole source in every line would
+    make it unreadable while adding nothing the file itself does not already
+    hold — the digest is what proves WHICH text was written.
+
+    Args:
+        tool: The tool that was called.
+        args: The arguments it was called with.
+
+    Returns:
+        The arguments as the feed should carry them.
+
+    """
+    recorded = dict(args)
+    for name in FEED_DIGESTED_ARGS.get(tool.name, ()):
+        if name not in recorded:
+            continue
+        text = str(recorded.pop(name))
+        recorded[f"{name}_bytes"] = len(text.encode("utf-8"))
+        recorded[f"{name}_digest"] = _digest(text)
+    return recorded
+
+
 #: One implementation per session tool answered here, keyed by
 #: ``ToolSpec.session_function``. ``probe_run`` is deliberately absent: it
 #: wraps ``run_procedure`` and is submitted like any other command.
@@ -2108,6 +2803,11 @@ SESSION_TOOL_FUNCTIONS: dict[str, Callable[[Mapping[str, Any], ToolContext], Any
     "read_agent_feed": _tool_read_agent_feed,
     "draft_eln_entry": _tool_draft_eln_entry,
     "publish_eln_entry": _tool_publish_eln_entry,
+    "list_analysis_recipes": _tool_list_analysis_recipes,
+    "read_analysis_recipe": _tool_read_analysis_recipe,
+    "write_analysis_recipe": _tool_write_analysis_recipe,
+    "run_analysis": _tool_run_analysis,
+    "read_analysis_report": _tool_read_analysis_report,
 }
 
 
