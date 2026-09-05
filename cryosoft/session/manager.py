@@ -984,6 +984,34 @@ class ExperimentManager(QObject):
         run = self._open_run(run_id, "read a pending draft of")
         return {} if run is None else dict(run.pending_eln_draft)
 
+    def discard_pending_eln_draft(self, run_id: str) -> bool:
+        """Drop the **Pending entry** waiting on one run, publishing nothing.
+
+        The other half of the approval gate: a proposal a human read and did
+        not want. The run keeps its data and its record — only the proposed
+        entry goes — so the run can be analysed or drafted again afterwards.
+
+        Args:
+            run_id: The run whose pending entry is discarded, in the open
+                experiment.
+
+        Returns:
+            ``True`` when something was discarded; ``False`` when no
+            experiment is open, the run is unknown, or nothing was pending
+            (all logged, never raised: discarding is a GUI action).
+        """
+        run = self._open_run(run_id, "discard a pending entry of")
+        if run is None:
+            return False
+        if not run.pending_eln_draft:
+            logger.info("Run %s has no pending ELN entry to discard", run_id)
+            return False
+        run.pending_eln_draft = {}
+        self._save_current()
+        self.run_recorded.emit(run.to_dict())
+        logger.info("Discarded the pending ELN entry for run %s", run_id)
+        return True
+
     def approve_eln_draft(self, run_id: str) -> str:
         """Approve the **draft entry** waiting on one run and queue it.
 

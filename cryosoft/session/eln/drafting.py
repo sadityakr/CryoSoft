@@ -8,6 +8,17 @@ prompt, asks one model for prose, and returns a ``DraftEntry`` that the caller
 may show a human or hand to the **Outbox** — the write half stays exactly
 where it already was.
 
+``DraftEntry`` is also the shape of every **Pending entry**, not only of an
+LLM draft. The run record's ``pending_eln_draft`` slot holds whatever is
+waiting for a human: a model draft (``source="model"``), an analysed entry
+built from an **Analysis report** (``source="analysis"``), or the facts-only
+fallback parked when the analysis stage failed or was never asked
+(``source="facts"``). One shape, one approval gate, one enqueue — the stage
+that produced the entry is a field on it, never a second write path. An entry
+may carry its own ``attachments`` (an analysed entry's figures) and its own
+``metadata`` (the recipe and its digest), both travelling with it into the
+outbox job.
+
 The draft prompt standard
 -------------------------
 
@@ -86,6 +97,17 @@ COST_FIELDS: tuple[str, ...] = ("model", "input_tokens", "output_tokens", "cost_
 #: The tag every drafted entry carries, so a notebook can find the entries
 #: that began as machine drafts however they were later edited.
 DRAFT_TAG = "draft"
+
+#: ``DraftEntry.source`` of an entry an LLM drafted from a run's facts.
+SOURCE_MODEL = "model"
+
+#: ``DraftEntry.source`` of an entry the analysis stage produced from a
+#: recipe's **Analysis report**.
+SOURCE_ANALYSIS = "analysis"
+
+#: ``DraftEntry.source`` of the facts-only entry parked when analysis is off
+#: for this entry, failed, or timed out — the fallback that loses nothing.
+SOURCE_FACTS = "facts"
 
 #: The system half of the draft prompt standard. A constant, so it is part of
 #: every draft's ``prompt_digest`` and a change to it is visible in the record.
@@ -205,11 +227,18 @@ class DraftEntry:
     experiment parks it on the run record as ``pending_eln_draft`` until a
     human approves it, and that record may be read back by a later process.
 
+    It is also the shape EVERY **Pending entry** takes, not only a model
+    draft: an analysed entry and a facts-only fallback are parked in the same
+    slot and say which they are in ``source``, so the approval gate has one
+    kind of thing to approve and the notebook one kind of thing to queue.
+
     Attributes:
         title: The entry title, plain text.
         body_html: The rendered body — the drafted prose above the run's own
-            escaped, self-contained fact tables (``render_draft_body()``).
-        tags: Tags to set on the entry; always carries ``DRAFT_TAG``.
+            escaped, self-contained fact tables (``render_draft_body()``), or
+            the analysed entry's own body.
+        tags: Tags to set on the entry; a model draft always carries
+            ``DRAFT_TAG``.
         model: The model that answered, as the vendor reported it.
         input_tokens: Tokens the prompt consumed.
         output_tokens: Tokens the completion generated.
@@ -217,6 +246,20 @@ class DraftEntry:
             ``0.0`` when the model has no price row (never a guess).
         prompt_digest: SHA-256 of the exact prompt that produced this draft,
             so two drafts of one run are provably the same question.
+        attachments: Extra files to attach to the entry, in order, as
+            ``{"path": absolute path, "comment": caption}``. Empty for a
+            model draft; an analysed entry lists its figures here.
+        attach_data_file: Whether the run's raw data file is attached too.
+            ``True`` is what a published run and a model draft have always
+            done; an analysed entry whose report asked for figures alone sets
+            it ``False``.
+        source: Which stage produced this entry — ``"model"`` (an LLM draft),
+            ``"analysis"`` (an analysed entry) or ``"facts"`` (the facts-only
+            fallback). The entry that reaches the notebook says so.
+        metadata: Extra JSON-safe provenance stamped into the entry's
+            metadata block when it is queued (an analysed entry's ``recipe``
+            and ``recipe_digest``). Never a credential and never a live
+            object.
     """
 
     title: str = ""
@@ -227,6 +270,10 @@ class DraftEntry:
     output_tokens: int = 0
     cost_usd: float = 0.0
     prompt_digest: str = ""
+    attachments: list[dict[str, Any]] = field(default_factory=list)
+    attach_data_file: bool = True
+    source: str = SOURCE_MODEL
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-safe dict representation."""
@@ -239,6 +286,10 @@ class DraftEntry:
             "output_tokens": self.output_tokens,
             "cost_usd": self.cost_usd,
             "prompt_digest": self.prompt_digest,
+            "attachments": [dict(item) for item in self.attachments],
+            "attach_data_file": self.attach_data_file,
+            "source": self.source,
+            "metadata": dict(self.metadata),
         }
 
     @classmethod
@@ -262,6 +313,10 @@ class DraftEntry:
             output_tokens=_as_int(data.get("output_tokens")),
             cost_usd=_as_float(data.get("cost_usd")),
             prompt_digest=_as_str(data.get("prompt_digest")),
+            attachments=_as_attachments(data.get("attachments")),
+            attach_data_file=_as_bool(data.get("attach_data_file"), True),
+            source=_as_str(data.get("source"), SOURCE_MODEL) or SOURCE_MODEL,
+            metadata=dict(data["metadata"]) if isinstance(data.get("metadata"), dict) else {},
         )
 
     def cost_line(self) -> dict[str, Any]:
@@ -323,11 +378,40 @@ def _as_float(value: object, default: float = 0.0) -> float:
         return default
 
 
+def _as_bool(value: object, default: bool) -> bool:
+    """Return ``value`` if it is a bool, else ``default`` (defensive parse)."""
+    return value if isinstance(value, bool) else default
+
+
 def _as_str_list(value: object) -> list[str]:
     """Return ``value`` as a list of strings, or ``[]`` when it is not a list."""
     if not isinstance(value, list):
         return []
     return [str(item) for item in value if item is not None]
+
+
+def _as_attachments(value: object) -> list[dict[str, Any]]:
+    """Return ``value`` as a list of ``{"path", "comment"}`` dicts.
+
+    Args:
+        value: Any parsed JSON value; anything but a list of mappings with a
+            non-empty ``path`` is dropped rather than raised on — a mangled
+            attachment must cost the entry its file, never its approval.
+
+    Returns:
+        The attachments, in order.
+    """
+    if not isinstance(value, list):
+        return []
+    attachments: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        path = _as_str(item.get("path"))
+        if not path:
+            continue
+        attachments.append({"path": path, "comment": _as_str(item.get("comment"))})
+    return attachments
 
 
 def manifest_from_run(run: Any) -> dict[str, Any]:
