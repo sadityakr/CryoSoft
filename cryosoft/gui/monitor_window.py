@@ -36,6 +36,7 @@ from cryosoft.gui import form_autosave  # module import keeps save/load monkeypa
 from cryosoft.gui import window_geometry
 from cryosoft.gui.config_menu import ConfigMenuController
 from cryosoft.gui.diagnostics_window import DiagnosticsWindow
+from cryosoft.gui.eln_settings_dialog import ElnSettingsDialog, persist_eln_settings
 from cryosoft.gui.experiment_info_panel import ExperimentInfoPanel
 from cryosoft.gui.agent_panel import AgentPanel
 from cryosoft.gui.instrument_panel import InstrumentPanel
@@ -169,6 +170,12 @@ class MonitorWindow(QMainWindow):
         startup_warning: Startup config-fallback warning to surface, or None.
         session_manager: Optional ExperimentManager (L6), forwarded to
             ExperimentInfoPanel and used for attribution prefills.
+        eln_publisher: Optional ``ElnPublisher``, passed through to the
+            procedure window's **eLab tab** and edited by the User menu's
+            "eLab notebook…" action. ``None`` leaves both inert.
+        analysis_runner: Optional ``AnalysisRunner``, passed through to the
+            procedure window's **eLab tab**. ``None`` disables its "Run
+            analysis" button.
         session_store: Optional SessionStore (the L6 Session tier above
             ``session_manager``), used by the User menu's "Resume Session…"
             action to list/create sessions and persist the active one.
@@ -222,6 +229,8 @@ class MonitorWindow(QMainWindow):
         restart_callback: Callable[[], None] | None = None,
         startup_warning: str | None = None,
         session_manager: ExperimentManager | None = None,
+        eln_publisher: Any | None = None,
+        analysis_runner: Any | None = None,
         session_store: SessionStore | None = None,
         cryogenics_config: dict[str, Any] | None = None,
         operations_config: dict[str, dict[str, Any]] | None = None,
@@ -284,6 +293,11 @@ class MonitorWindow(QMainWindow):
         # stamps built procedures; the experiment start/close/attendance/findings
         # controls live on the ExperimentInfoPanel, which owns session_manager directly.
         self._session_manager = session_manager
+        # The ELN/analysis pair: held only to hand on to the procedure
+        # window's eLab tab and to open the eLab setup dialog. This window
+        # neither publishes nor analyses anything itself.
+        self._eln_publisher = eln_publisher
+        self._analysis_runner = analysis_runner
         # The L6 Session tier above session_manager, used only by the User
         # menu's Resume Session… action (see _open_resume_session_dialog) —
         # session_manager's own ExperimentStore stays fixed for this run
@@ -450,6 +464,18 @@ class MonitorWindow(QMainWindow):
         resume_session_action.triggered.connect(self._open_resume_session_dialog)
         user_menu.addAction(resume_session_action)
 
+        # The notebook account is a property of the PERSON, like the login
+        # above and unlike a config: an API key must never travel with a
+        # config directory (session/eln/settings.py), so the eLab setup
+        # dialog belongs in this Setup-tier menu.
+        eln_action = QAction("eLab notebook…", self)
+        eln_action.setToolTip(
+            "Notebook address, credentials, and whether a finished run is "
+            "analysed before its entry is written"
+        )
+        eln_action.triggered.connect(self._open_eln_settings)
+        user_menu.addAction(eln_action)
+
         user_menu.addSeparator()
         new_session_action = QAction("New Session", self)
         new_session_action.setToolTip(
@@ -513,6 +539,9 @@ class MonitorWindow(QMainWindow):
                     else None
                 ),
                 mirror=self._mirror,
+                session_manager=self._session_manager,
+                eln_publisher=self._eln_publisher,
+                analysis_runner=self._analysis_runner,
             )
         self._procedure_window.show()
         self._procedure_window.raise_()
@@ -1288,6 +1317,36 @@ class MonitorWindow(QMainWindow):
         if self._procedure_window is not None:
             self._procedure_window.reset_session()
         self._save_session()
+
+    def _open_eln_settings(self) -> None:
+        """Open the **eLab setup dialog** over the publisher's settings.
+
+        The same dialog the procedure window's **eLab tab** opens, over the
+        same record. Saving writes the user-level settings file and hands
+        the new record to the publisher; with no publisher wired there is
+        nothing to edit, and the window says so rather than showing a form
+        that could not be applied.
+        """
+        settings = getattr(self._eln_publisher, "settings", None)
+        if settings is None:
+            QMessageBox.information(
+                self,
+                "eLab notebook",
+                "No electronic lab notebook is wired into this session.",
+            )
+            return
+
+        def _save(edited: Any) -> None:
+            """Write the edited settings and reload the publisher.
+
+            Args:
+                edited: The ``ElnSettings`` the dialog's form produced.
+            """
+            persist_eln_settings(edited, self._eln_publisher)
+            if self._procedure_window is not None:
+                self._procedure_window.reload_analysis_panel()
+
+        ElnSettingsDialog(settings, on_save=_save, parent=self).exec()
 
     def _open_login_dialog(self) -> None:
         """Open LoginDialog and switch to the picked user, if any."""

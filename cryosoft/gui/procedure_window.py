@@ -450,6 +450,14 @@ class ProcedureWindow(QMainWindow):
         """
         self._analysis_panel.on_run_finished(manifest)
 
+    def reload_analysis_panel(self) -> None:
+        """Re-read the **eLab tab** (the settings behind it just changed).
+
+        Called by the Monitor window after its own "eLab notebook…" save, so
+        both entry points to the same dialog leave the same tab up to date.
+        """
+        self._analysis_panel.reload()
+
     def open_eln_settings(self) -> None:
         """Open the **eLab setup dialog** over the publisher's settings.
 
