@@ -21,9 +21,11 @@ from PyQt6.QtWidgets import (
 )
 
 from cryosoft.core.operational_status import RunFaultCode
-from cryosoft.core.orchestrator import Orchestrator
+from cryosoft.core.orchestrator_proxy import OrchestratorProxy
 from cryosoft.gui import window_geometry
+from cryosoft.core.status_mirror import StatusMirror
 from cryosoft.gui.theme import BTN_CLASS_SECONDARY, STATUS_ERROR, STATUS_OK, STATUS_WARN
+from cryosoft.gui.widget_lifecycle import hold_window, release_window
 
 logger = logging.getLogger(__name__)
 
@@ -85,12 +87,22 @@ class DiagnosticsWindow(QMainWindow):
 
     Args:
         orchestrator: The active Orchestrator instance.
+        mirror: The status mirror the seed record is read from; built from
+            the engine when none is given (the inline construction path).
         parent: Optional Qt parent widget.
     """
 
-    def __init__(self, orchestrator: Orchestrator, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        orchestrator: OrchestratorProxy,
+        mirror: StatusMirror | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self._orchestrator = orchestrator
+        self._mirror = (
+            mirror if mirror is not None else StatusMirror.of(orchestrator)
+        )
         self._latest_record: dict = {}
         self._badge_severity = ""
 
@@ -100,9 +112,14 @@ class DiagnosticsWindow(QMainWindow):
         self._build_ui()
         self._orchestrator.operational_status.connect(self._on_operational_status)
 
-        seed = self._orchestrator.get_operational_status()
+        seed = self._mirror.get_operational_status()
         if seed:
             self._on_operational_status(seed)
+
+        # The window-liveness standard (gui/widget_lifecycle.py): the window
+        # holds its own reference from here until closeEvent(), so its
+        # lifetime never depends on the caller keeping one.
+        hold_window(self)
 
     # ------------------------------------------------------------------
     # UI construction
@@ -276,3 +293,5 @@ class DiagnosticsWindow(QMainWindow):
         """Persist geometry before closing."""
         window_geometry.save_geometry(self, _GEOMETRY_KEY)
         super().closeEvent(event)
+        if event.isAccepted():
+            release_window(self)

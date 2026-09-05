@@ -17,6 +17,9 @@ _EXPERIMENT_FILENAME = "experiment.json"
 _SESSION_FILENAME = "session.json"
 _ACTIVE_FILENAME = "active.json"
 _GUI_STATE_FILENAME = "gui_state.json"
+_OUTBOX_FILENAME = "outbox.jsonl"
+_AGENT_FEED_FILENAME = "agent_actions.jsonl"
+_ASSISTANT_TRANSCRIPT_FILENAME = "assistant_transcript.jsonl"
 _DATA_DIRNAME = "data"
 
 
@@ -71,6 +74,8 @@ class ExperimentStore:
             <experiment_id>/
                 experiment.json
                 gui_state.json              # GUI-authored, opaque to this store
+                outbox.jsonl                # the ELN publish journal
+                agent_actions.jsonl         # the Agent feed
                 data/                       # HDF5 files; sub-folders allowed
                     <sub-folders>/
 
@@ -180,6 +185,57 @@ class ExperimentStore:
         """
         return self._root / experiment_id / _GUI_STATE_FILENAME
 
+    def outbox_path(self, experiment_id: str) -> Path:
+        """Return the experiment's ELN publish-journal file path.
+
+        The **Outbox** lives inside the experiment folder, not in a global
+        queue, so the folder stays the complete, portable record: copy it and
+        its unpublished runs travel with it.
+
+        Args:
+            experiment_id: The store key.
+
+        Returns:
+            ``<root>/<experiment_id>/outbox.jsonl`` (may not exist yet —
+            nothing is written until a run is actually queued).
+        """
+        return self._root / experiment_id / _OUTBOX_FILENAME
+
+    def agent_feed_path(self, experiment_id: str) -> Path:
+        """Return the experiment's **Agent feed** file path.
+
+        The trail of everything a non-operator actor asked for and got lives
+        inside the experiment folder for the same reason the **Outbox**
+        does: the folder stays the complete, portable record, so copying it
+        copies the accountability trail with it.
+
+        Args:
+            experiment_id: The store key.
+
+        Returns:
+            ``<root>/<experiment_id>/agent_actions.jsonl`` (may not exist yet
+            — nothing is written until a non-operator actor acts).
+        """
+        return self._root / experiment_id / _AGENT_FEED_FILENAME
+
+    def assistant_transcript_path(self, experiment_id: str) -> Path:
+        """Return the experiment's **Assistant transcript** file path.
+
+        The conversation the physicist had with the **Embedded assistant**
+        lives inside the experiment folder for the same reason the **Agent
+        feed** and the **Outbox** do: the folder stays the complete, portable
+        record, so copying it copies the question, the answer and every tool
+        call in between.
+
+        Args:
+            experiment_id: The store key.
+
+        Returns:
+            ``<root>/<experiment_id>/assistant_transcript.jsonl`` (may not
+            exist yet — nothing is written until somebody asks something).
+        """
+        return self._root / experiment_id / _ASSISTANT_TRANSCRIPT_FILENAME
+
     def relativize_data_file(self, experiment_id: str, path: str | Path) -> str:
         """Return ``path`` relative to the experiment's session folder, when inside it.
 
@@ -274,8 +330,8 @@ class SessionStore:
     """One-folder-per-session store rooted at ``<measurement_root>/sessions``.
 
     The tier above ``ExperimentStore``: a session is a named, resumable,
-    per-user folder holding multiple experiments (see
-    ``docs/plans/session-tier-and-terminology.md``, "Filesystem layout").
+    per-user folder holding multiple experiments (see ``GLOSSARY.md``'s
+    **Session** for the tier and its filesystem layout).
     Sessions nest one level deeper than the store's own root, under their
     owner's ``user_id`` — ownership is structural (a directory), not just a
     field inside ``session.json`` that has to be read to be known. Each

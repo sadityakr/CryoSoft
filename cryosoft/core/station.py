@@ -9,8 +9,10 @@ Do NOT import from Orchestrator, Procedures, or GUI here.
 from __future__ import annotations
 
 import importlib
+import inspect
 import logging
 import time
+import typing
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -18,16 +20,54 @@ from typing import Any
 
 from cryosoft.core.availability import Availability, state_for
 from cryosoft.core.conditions import Condition
+from cryosoft.core.decorators import (
+    get_control_methods,
+    get_control_panel,
+    get_control_scope,
+    get_control_specs,
+    get_monitored_description,
+    get_monitored_unit,
+    get_ui_group,
+)
+from cryosoft.core.events import (
+    ControlInfo,
+    GroupInfo,
+    InstrumentInfo,
+    LifecycleState,
+    MonitoredInfo,
+    StationInfo,
+)
 from cryosoft.core.exceptions import (
+    CryoSoftActionScopeError,
     CryoSoftCommunicationError,
     CryoSoftConfigError,
+    CryoSoftPrivateActionError,
     CryoSoftSafetyError,
+    CryoSoftUndeclaredActionError,
 )
-from cryosoft.core.plan import Command, Target
+from cryosoft.core.request_spool import DEFAULT_MAX_ROLE
+from cryosoft.core.plan import (
+    SETPOINT_PARAM_PREFIX,
+    Command,
+    EnvelopeVariable,
+    ParamSpec,
+    Target,
+)
 from cryosoft.virtual_instruments.base import BaseVirtualInstrument
 from cryosoft.virtual_instruments.rampable import RampableVI
 
 logger = logging.getLogger(__name__)
+
+#: The two connection-lifecycle operating-state methods (see
+#: ``BaseVirtualInstrument``'s "Connection-lifecycle standard"). They carry no
+#: ``@control`` — every VI inherits or defines them as plain methods — but they
+#: ARE capabilities of the direct action path: the per-panel lifecycle toggle
+#: and "Initiate All"/"Standby All" dispatch nothing else. Listing them here is
+#: what lets ``execute_vi_action()`` refuse every OTHER undecorated method
+#: without breaking the lifecycle path. They are measurement-scope, the same
+#: default an undecorated method gets in
+#: ``Station.send_measurement_commands()``.
+LIFECYCLE_ACTIONS: frozenset[str] = frozenset({"initiate", "standby"})
 
 # The one reason string used wherever an instrument opened a session but did
 # not answer the identity query — the single connection check of the
@@ -189,10 +229,19 @@ class Station:
     """
 
     def __init__(self) -> None:
+        # Setup identity: the name of the config directory this Station was
+        # built from (`build_station()` sets it). None for a Station assembled
+        # in-process without a config folder, e.g. in a unit test.
+        self._setup_name: str | None = None
         self._vi_registry: dict[str, str] = {}            # {vi_name: vi_type}
         self._virtual_instruments: dict[str, BaseVirtualInstrument] = {}
         self._last_known_state: dict[str, dict] = {}       # Stale value cache
         self._error_counts: dict[str, int] = {}
+        # The read currently in flight, for the shutdown diagnostic: the name
+        # of the VI `get_state()` is inside, or None between polls. Written
+        # only by the thread that owns this Station and read by whoever has to
+        # report a wedged instrument (see `polling_vi()`).
+        self._polling_vi: str | None = None
         self._max_errors: int = 3
         self._scanner_enabled: bool = False
         # Degraded-build support: VIs whose hardware failed to connect at
@@ -216,6 +265,19 @@ class Station:
         # already been logged once by update_conditions() — logged only on
         # first occurrence per flag, not on every tick it stays unconsumed.
         self._warned_unconsumed_flags: set[str] = set()
+        # The setup's monitor tick period, in seconds — a config property
+        # (`monitor.yaml`'s tick_interval_ms), carried in the station
+        # declaration snapshot so a client knows the cadence readings arrive
+        # at. `build_station()` sets it; the Orchestrator's own mirrored
+        # default stands in for a Station assembled without a config.
+        self._tick_interval_s: float = _DEFAULT_TICK_INTERVAL_MS / 1000.0
+        # The cached station declaration snapshot (core/events.py's
+        # StationInfo) and the number of times it has been built.
+        # _invalidate_station_info() drops it whenever the station's
+        # membership or an offline record changes — every connect and
+        # disconnect — so the next read rebuilds.
+        self._station_info: StationInfo | None = None
+        self._station_info_seq: int = 0
 
     # ------------------------------------------------------------------
     # VI registration and access
@@ -233,7 +295,22 @@ class Station:
         self._vi_registry[vi_name] = vi_type
         self._virtual_instruments[vi_name] = vi
         self._error_counts[vi_name] = 0
+        self._invalidate_station_info()
         logger.info("Registered VI '%s' (type=%s)", vi_name, vi_type)
+
+    def setup_name(self) -> str | None:
+        """Return the setup name this Station was built from.
+
+        The setup's identity is its config directory's name (the same string
+        the app stores as the active config and an `ExperimentRecord` stores
+        as ``config_name``) — a setup property, so it comes from the config
+        rather than from anything in code.
+
+        Returns:
+            The config directory's name, or None for a Station built without
+            one (constructed directly rather than through `build_station()`).
+        """
+        return self._setup_name
 
     def get_vi_names(self) -> list[str]:
         """Return a list of all registered VI names."""
@@ -333,6 +410,7 @@ class Station:
             info: The offline record (name, type, human-readable reason).
         """
         self._offline_vis[info.vi_name] = info
+        self._invalidate_station_info()
         logger.warning(
             "VI '%s' registered OFFLINE (type=%s): %s",
             info.vi_name,
@@ -448,6 +526,47 @@ class Station:
         names = list(self._virtual_instruments.keys()) + list(self._offline_vis.keys())
         return {name: self._build_availability(name) for name in names}
 
+    def lifecycle_state(self, vi_name: str) -> str:
+        """Return what one configured instrument is DOING (the lifecycle-state standard).
+
+        The Station's read side of the standard (GLOSSARY.md's **Lifecycle
+        state**; full text in ``BaseVirtualInstrument``'s docstring): a pure
+        passthrough to the VI's own cached answer, so this costs nothing and
+        can be asked for every VI on every tick.
+
+        Args:
+            vi_name: Name of a configured VI — live or offline.
+
+        Returns:
+            One of ``LifecycleState``'s values. An OFFLINE instrument is
+            reported ``"idle"``: CryoSoft holds nothing of it, so it cannot
+            be initiated as far as any client is concerned, and the VI a
+            later ``connect_instrument()`` builds starts there too.
+
+        Raises:
+            KeyError: If `vi_name` is not a configured VI at all, mirroring
+                ``availability()`` / ``get_vi()``.
+        """
+        vi = self._virtual_instruments.get(vi_name)
+        if vi is None:
+            if vi_name in self._offline_vis:
+                return LifecycleState.IDLE.value
+            raise KeyError(vi_name)
+        return vi.lifecycle_state()
+
+    def lifecycle_states(self) -> dict[str, str]:
+        """Return every configured instrument's lifecycle state.
+
+        Covers the live and the offline registry, exactly as
+        ``availabilities()`` does, so the status-snapshot assembly can carry
+        one entry per VI a client renders a card for. Polls nothing.
+
+        Returns:
+            ``{vi_name: lifecycle state}`` for every configured VI.
+        """
+        names = list(self._virtual_instruments.keys()) + list(self._offline_vis.keys())
+        return {name: self.lifecycle_state(name) for name in names}
+
     def connect_instrument(self, vi_name: str) -> tuple[bool, str]:
         """Bring an offline VI online: rebuild its drivers, the VI, then verify.
 
@@ -502,6 +621,7 @@ class Station:
                     reason=reason,
                     failed_drivers=still_failed,
                 )
+                self._invalidate_station_info()
                 logger.warning("Connect of '%s' failed: %s", vi_name, reason)
                 return False, reason
 
@@ -517,6 +637,7 @@ class Station:
                 reason=str(exc),
                 failed_drivers=(),
             )
+            self._invalidate_station_info()
             logger.warning(
                 "Connect of '%s' failed in VI construction: %s", vi_name, exc
             )
@@ -533,6 +654,7 @@ class Station:
                 reason=reason,
                 failed_drivers=(),
             )
+            self._invalidate_station_info()
             self._release_drivers(_exclusive_aliases(role_aliases, self._vi_specs, vi_name))
             logger.warning("Connect of '%s' failed the identity check", vi_name)
             return False, reason
@@ -640,6 +762,174 @@ class Station:
                 closer()
             except Exception:  # noqa: BLE001 — a disconnect must always succeed
                 logger.exception("close() failed on driver '%s'", alias)
+
+    # ------------------------------------------------------------------
+    # The station declaration snapshot (core/events.py's StationInfo)
+    # ------------------------------------------------------------------
+
+    def station_info(self) -> StationInfo:
+        """Return the frozen declaration snapshot of this whole station.
+
+        The Station is the only layer holding both halves of the
+        declaration — the VI classes' ``@monitored`` / ``@control`` /
+        ``ui_groups`` / ``safety_flags`` declarations and the config the
+        ``control_limits`` bounds come from — so it is where the snapshot is
+        assembled. ``core.events`` defines the shape and
+        ``core.capability_manifest`` renders it; both clients build from
+        THIS, never from ``get_vi()``, so neither carries a description of
+        its own.
+
+        Built from declarations and config alone: it sends NO command to any
+        instrument, which is what lets it describe an offline VI as fully as
+        a live one and lets a client ask for the picture at any time,
+        outside the tick loop. Every ``control_param_specs()`` override is a
+        pure read for exactly this reason (see the purity rule in
+        ``virtual_instruments/base.py``), and
+        ``tests/test_conformance.py`` builds this against spied drivers to
+        keep it that way.
+
+        The snapshot is cached and rebuilt when the station's membership
+        changes — a VI joining the live registry or degrading to the offline
+        one, i.e. every connect and disconnect — so repeated reads are free
+        and ``seq`` counts real rebuilds. Its one live field is each
+        instrument's ``availability``, captured at rebuild time; the
+        moment-to-moment picture is ``StatusSnapshot``'s job, not this one's.
+
+        Returns:
+            The current :class:`~cryosoft.core.events.StationInfo`.
+        """
+        if self._station_info is None:
+            self._station_info_seq += 1
+            self._station_info = StationInfo(
+                setup=self._setup_name or "",
+                tick_interval_s=self._tick_interval_s,
+                instruments=tuple(
+                    self._instrument_info(vi_name)
+                    for vi_name in self._configured_vi_names()
+                ),
+                seq=self._station_info_seq,
+                ts=time.time(),
+            )
+        return self._station_info
+
+    def _invalidate_station_info(self) -> None:
+        """Drop the cached declaration snapshot so the next read rebuilds it.
+
+        Called wherever the station's membership or an offline record
+        changes. Cheap and idempotent: the rebuild itself is pure Python
+        over already-loaded declarations.
+        """
+        self._station_info = None
+
+    def _configured_vi_names(self) -> list[str]:
+        """Return every configured VI name — live and offline — in config order.
+
+        Config order is ``devices.yaml``'s order, retained in
+        ``_vi_specs``; a Station assembled in-process without a config (a
+        test, say) has no specs, so registration order stands in.
+
+        Returns:
+            The ordered names, each appearing exactly once.
+        """
+        known = set(self._virtual_instruments) | set(self._offline_vis)
+        ordered = [name for name in self._vi_specs if name in known]
+        for name in list(self._virtual_instruments) + list(self._offline_vis):
+            if name not in ordered:
+                ordered.append(name)
+        return ordered
+
+    def _instrument_info(self, vi_name: str) -> InstrumentInfo:
+        """Assemble one configured VI's declaration, live or offline.
+
+        An offline VI is described from its CLASS (imported from the
+        retained build recipe, which is a pure import — the class was
+        already imported once when the station was built), so an instrument
+        nobody can reach still says what it would offer. The two things only
+        an instance knows are therefore absent for it: a
+        ``control_param_specs()`` override's dynamic choices fall back to
+        the decorator's own declaration, and the ``control_limits`` bounds
+        report ``None``, since those are computed by the VI's ``__init__``
+        from the config.
+
+        Args:
+            vi_name: A configured VI's name — in the live registry, the
+                offline registry, or both sources of its identity.
+
+        Returns:
+            The assembled :class:`~cryosoft.core.events.InstrumentInfo`.
+        """
+        vi = self._virtual_instruments.get(vi_name)
+        offline = self._offline_vis.get(vi_name)
+        spec = self._vi_specs.get(vi_name) or {}
+        cls = self._declaring_class(vi_name)
+
+        role = self._vi_registry.get(vi_name) or (offline.vi_type if offline else "")
+        vi_class = (
+            cls.__name__
+            if cls is not None
+            else str(spec.get("class", "")).rsplit(".", 1)[-1]
+        )
+        availability = tuple(sorted(self._build_availability(vi_name).tags))
+
+        if cls is None:
+            # No importable class: the config named one that cannot be
+            # resolved. Report the identity and say nothing it cannot back up.
+            return InstrumentInfo(
+                name=vi_name,
+                vi_class=vi_class,
+                role=role,
+                availability=availability,
+            )
+
+        return InstrumentInfo(
+            name=vi_name,
+            vi_class=vi_class,
+            role=role,
+            kind=str(getattr(cls, "vi_type", "")),
+            availability=availability,
+            monitored=_monitored_infos(cls),
+            controls=_control_infos(cls, vi),
+            limits=_limit_infos(cls, vi),
+            ui_groups=tuple(
+                GroupInfo(
+                    key=group.key,
+                    title=group.title,
+                    description=group.description,
+                    members=tuple(group.members),
+                )
+                for group in getattr(cls, "ui_groups", ())
+            ),
+            safety_flags=dict(cls.merged_safety_flags()),
+        )
+
+    def _declaring_class(self, vi_name: str) -> type | None:
+        """Return the VI class declaring *vi_name*'s capabilities.
+
+        Args:
+            vi_name: A configured VI's name.
+
+        Returns:
+            ``type(vi)`` for a live VI; the class named by the retained
+            build recipe for an offline one; ``None`` when neither is
+            available or the recipe's class cannot be imported (a config
+            fault that must not stop the rest of the station describing
+            itself).
+        """
+        vi = self._virtual_instruments.get(vi_name)
+        if vi is not None:
+            return type(vi)
+        dotted = (self._vi_specs.get(vi_name) or {}).get("class")
+        if not dotted:
+            return None
+        try:
+            return _import_class(str(dotted))
+        except CryoSoftConfigError:
+            logger.warning(
+                "Cannot import class '%s' to describe offline VI '%s'",
+                dotted,
+                vi_name,
+            )
+            return None
 
     def set_scanner_enabled(self, enabled: bool) -> None:
         """Toggle whether scanner-sensitive procedures may use the switch VI.
@@ -817,6 +1107,7 @@ class Station:
         full_state: dict[str, dict] = {}
 
         for vi_name, vi in self._virtual_instruments.items():
+            self._polling_vi = vi_name
             try:
                 state = vi.get_state()
                 self._error_counts[vi_name] = 0
@@ -847,8 +1138,24 @@ class Station:
                     )
                     self._record_comm_condition(vi_name, "stale", str(exc))
                 full_state[vi_name] = stale
+            finally:
+                self._polling_vi = None
 
         return full_state
+
+    def polling_vi(self) -> str | None:
+        """Return the VI whose read is in flight right now, or ``None``.
+
+        A diagnostic, not a state: it names the one instrument ``get_state()``
+        is waiting on, so a read that never returns can be reported by name
+        rather than as an anonymous hang. Read by
+        ``core/instrument_host.py`` when a bounded shutdown join expires.
+
+        Returns:
+            The VI's configured name while a poll is in progress, else
+            ``None``.
+        """
+        return self._polling_vi
 
     # ------------------------------------------------------------------
     # Unified condition registry — the System-Condition standard's
@@ -1391,6 +1698,36 @@ class Station:
                 }
         return result
 
+    def nominal_ramp_rates(self) -> dict[str, float]:
+        """Return each system VI's declared ramp rate, in user units per minute.
+
+        The declaration counterpart of ``get_ramp_status()``: what every
+        ramping VI WOULD ramp at, read from config alone (see
+        ``RampableVI.nominal_ramp_rate``) rather than from an active ramp, so
+        it can be answered before any run exists and without touching the bus.
+        The **duration estimate** (``core/estimates.py``) turns a proposed
+        run's declared setpoints into a time with exactly this mapping; a VI
+        that declares no rate is simply absent, which the estimate then
+        reports as an explicit assumption instead of counting as instant.
+
+        Returns:
+            ``{vi_name: rate_per_minute}`` for every system VI that declares
+            one — tesla/min, kelvin/min, degrees/min, matching each VI's own
+            ``ramp_target()`` units.
+        """
+        rates: dict[str, float] = {}
+        for vi_name, vi_type in self._vi_registry.items():
+            if vi_type != "system":
+                continue
+            vi = self._virtual_instruments[vi_name]
+            if not isinstance(vi, RampableVI):
+                continue
+            rate = vi.nominal_ramp_rate()
+            if rate is None or rate <= 0:
+                continue
+            rates[vi_name] = float(rate)
+        return rates
+
     # ------------------------------------------------------------------
     # Safety
     # ------------------------------------------------------------------
@@ -1693,30 +2030,182 @@ class Station:
     # VI action dispatch
     # ------------------------------------------------------------------
 
-    def execute_vi_action(self, vi_name: str, method_name: str, **kwargs: Any) -> Any:
-        """Call a @control method on a named VI directly.
+    def execute_vi_action(
+        self,
+        vi_name: str,
+        method_name: str,
+        *,
+        allowed_scope: str = "measurement",
+        **kwargs: Any,
+    ) -> Any:
+        """Call one capability on a named VI — the direct action path.
+
+        The single entry point through which a manual action (a GUI click, an
+        agent call) reaches an instrument, as opposed to a procedure's
+        ``Command`` batch, which goes through
+        ``send_measurement_commands()``. See GLOSSARY.md's **Direct action
+        path**.
+
+        Three admission checks run BEFORE the method is called, mirroring the
+        read/write split ``troubleshoot.engine.DriverBench.call()`` enforces
+        one layer down. Each raises its own subclass of
+        ``CryoSoftActionRefusedError`` with its own reason string, so a caller
+        gets a specific verdict rather than an undifferentiated failure:
+
+        1. **Private name** — a leading underscore is a VI's internal API and
+           is never a capability.
+        2. **Undeclared capability** — the method must carry ``@control`` or
+           be one of ``LIFECYCLE_ACTIONS`` (``initiate``/``standby``). A
+           ``@monitored`` poller, a procedure-only helper such as
+           ``take_reading()``, or any other public method is refused.
+        3. **Capability scope** — an ``@control(scope="operation")`` method is
+           refused unless *allowed_scope* is ``"operation"`` too, exactly as
+           ``send_measurement_commands()`` refuses an operation-scope command
+           in a measurement-scope plan.
+
+        *allowed_scope* defaults to the RESTRICTIVE ``"measurement"``, so a
+        caller that never thinks about scope cannot reach an operation-scope
+        capability by accident. A human at the instrument front panel is the
+        operation authority, so the Orchestrator's manual-action path passes
+        ``"operation"`` explicitly (see ``Orchestrator.submit_vi_action()``);
+        that opt-in is the deliberate, single place where the wider scope is
+        granted.
+
+        Beyond these checks the method's own guards still apply: the
+        control-validation standard's ``control_limits`` wrapper raises
+        ``CryoSoftSafetyError`` for an out-of-limit value before any hardware
+        command is sent. The session envelope is checked one layer up, by the
+        Orchestrator, which is where it lives.
 
         Args:
             vi_name: Name of the target VI.
-            method_name: Name of the method to call.
+            method_name: Name of the capability to call.
+            allowed_scope: The caller's capability scope — ``"measurement"``
+                (default) or ``"operation"``.
             **kwargs: Keyword arguments forwarded to the method.
 
         Returns:
             Return value of the method (if any).
 
         Raises:
-            AttributeError: If the VI or method does not exist.
+            KeyError: If no VI named *vi_name* is registered (an absent or
+                disconnected instrument — there is nothing to dispatch to).
+            CryoSoftPrivateActionError: If *method_name* starts with ``_``.
+            AttributeError: If the VI has no such method.
+            CryoSoftUndeclaredActionError: If the method is neither
+                ``@control`` nor a lifecycle action.
+            CryoSoftActionScopeError: If the method's capability scope is
+                outside *allowed_scope*.
+            CryoSoftSafetyError: If the method's own ``control_limits`` guard
+                refuses the value. Nothing is sent to the instrument.
         """
         vi = self._virtual_instruments[vi_name]
+        if method_name.startswith("_"):
+            raise CryoSoftPrivateActionError(
+                f"execute_vi_action: '{vi_name}.{method_name}' is a private "
+                f"name — the direct action path dispatches capabilities only, "
+                f"never a VI's internal API. Action refused."
+            )
         method = getattr(vi, method_name)
+        is_control = getattr(method, "_is_control", False)
+        if not is_control and method_name not in LIFECYCLE_ACTIONS:
+            raise CryoSoftUndeclaredActionError(
+                f"execute_vi_action: '{vi_name}.{method_name}' is not a "
+                f"declared capability — it carries no @control and is not one "
+                f"of {sorted(LIFECYCLE_ACTIONS)}. Action refused."
+            )
+        required_scope = get_control_scope(method) if is_control else "measurement"
+        if required_scope == "operation" and allowed_scope != "operation":
+            raise CryoSoftActionScopeError(
+                f"execute_vi_action: '{vi_name}.{method_name}' requires "
+                f"operation-scope access, but this caller is "
+                f"{allowed_scope}-scope. Action refused."
+            )
+        logger.debug("Dispatching %s.%s(%s)", vi_name, method_name, kwargs)
         return method(**kwargs)
+
+    # ------------------------------------------------------------------
+    # Setpoint capabilities (the setpoint-parameter convention)
+    # ------------------------------------------------------------------
+
+    def setpoint_parameters(self, vi_name: str, method_name: str) -> tuple[str, ...]:
+        """Return one capability's setpoint parameters, in declaration order.
+
+        The setpoint-parameter convention (see ``core/plan.py``'s
+        ``SETPOINT_PARAM_PREFIX`` and ``ExperimentEnvelope``): a ``@control``
+        parameter named ``target_*`` carries the VI's enveloped quantity — the
+        same quantity ``RampableVI.start_ramp(target)`` takes and a ``Target``
+        commands. It is what lets the session envelope bind a manual action as
+        well as a procedure's target, without the Orchestrator having to know
+        what any particular instrument measures.
+
+        Args:
+            vi_name: Name of the VI.
+            method_name: Name of the capability.
+
+        Returns:
+            The matching parameter names, or ``()`` when the VI, the method,
+            or a setpoint parameter is absent.
+        """
+        vi = self._virtual_instruments.get(vi_name)
+        if vi is None:
+            return ()
+        method = getattr(vi, method_name, None)
+        if method is None or not getattr(method, "_is_control", False):
+            return ()
+        return tuple(
+            name
+            for name in getattr(method, "_control_params", {})
+            if name.startswith(SETPOINT_PARAM_PREFIX)
+        )
+
+    def envelope_variables(self) -> dict[str, EnvelopeVariable]:
+        """Return the enveloped quantity of every system VI that declares one.
+
+        The read side of the setpoint-parameter convention, and the source
+        the Start Experiment dialog's envelope editor pre-fills from: for each
+        registered VI with a ``target_*`` ``@control`` parameter, the
+        capability that commands it and the setup's own bounds on it, taken
+        from the ``control_limits`` limit the config populated. An experiment's
+        envelope NARROWS those bounds, so the operator adjusts numbers that
+        are already there rather than composing them from nothing.
+
+        Returns:
+            ``{vi_name: EnvelopeVariable}``, empty when no VI declares a
+            setpoint capability. A VI whose setpoint parameter is not covered
+            by ``control_limits`` still appears, with ``None`` bounds.
+        """
+        variables: dict[str, EnvelopeVariable] = {}
+        for vi_name, vi in self._virtual_instruments.items():
+            limits = type(vi).control_limits
+            for method_name in get_control_methods(vi):
+                params = self.setpoint_parameters(vi_name, method_name)
+                if not params:
+                    continue
+                param_name = params[0]
+                limit_name = limits.get(method_name, {}).get(param_name)
+                lo, hi = vi.limit_bounds(limit_name) if limit_name else (None, None)
+                variables[vi_name] = EnvelopeVariable(
+                    vi_name=vi_name,
+                    method_name=method_name,
+                    param_name=param_name,
+                    config_min=lo,
+                    config_max=hi,
+                )
+                break
+        return variables
 
     # ------------------------------------------------------------------
     # Bulk lifecycle
     # ------------------------------------------------------------------
 
     def initiate_all(self) -> None:
-        """Call ``initiate()`` on every registered VI."""
+        """Call ``initiate()`` on every registered VI.
+
+        Each successful call records that VI's lifecycle state (the
+        lifecycle-state standard), so a bulk bring-up that dispatches no
+        per-VI action still reaches every client on the next snapshot.
+        """
         for vi_name, vi in self._virtual_instruments.items():
             logger.info("Initiating VI '%s'", vi_name)
             try:
@@ -1725,13 +2214,268 @@ class Station:
                 logger.exception("Error initiating VI '%s'", vi_name)
 
     def standby_all(self) -> None:
-        """Call ``standby()`` on every registered VI."""
+        """Call ``standby()`` on every registered VI.
+
+        The blanket stand-down an emergency takes (``Orchestrator.
+        _enter_emergency()``). It deliberately bypasses the per-VI action
+        queue, so it emits no ``action_succeeded`` — which is exactly why
+        each VI records its own lifecycle state (the lifecycle-state
+        standard) instead: the next ``StatusSnapshot`` reports every
+        instrument as stood down whether or not any client saw an action.
+        """
         for vi_name, vi in self._virtual_instruments.items():
             logger.info("Putting VI '%s' into standby", vi_name)
             try:
                 vi.standby()
             except Exception:
                 logger.exception("Error during standby of VI '%s'", vi_name)
+
+
+# ── The station declaration snapshot's builders ───────────────────────────────
+#
+# Module-level and class-driven: everything below reads a VI CLASS's
+# declarations (plus, where an instance exists, its config-derived bounds and
+# instance-aware ParamSpecs), so an offline instrument describes itself as
+# fully as a live one. Nothing here touches a driver — see
+# `Station.station_info()`.
+
+
+def _declared_names(cls: type, marker: str) -> list[str]:
+    """Return *cls*'s capability method names carrying *marker*, in declared order.
+
+    Declared order is base-class-first, definition order within each class,
+    which is the order a reader of the source meets them and the order a
+    manifest lists them. A method a subclass overrides keeps the position
+    where it was FIRST declared; one a subclass redefines without the
+    decorator drops out, since the check is against the resolved attribute.
+
+    ``decorators.get_monitored_methods()`` / ``get_control_methods()`` answer
+    the same question over ``dir()``, which sorts alphabetically — fine for
+    "which are there", wrong for "in what order do they read".
+
+    Args:
+        cls: The Virtual Instrument class.
+        marker: The decorator's marker attribute, ``"_is_monitored"`` or
+            ``"_is_control"``.
+
+    Returns:
+        The method names, in declared order, each once.
+    """
+    ordered: list[str] = []
+    for klass in reversed(cls.__mro__):
+        for name, attr in vars(klass).items():
+            if name in ordered or not callable(attr):
+                continue
+            if getattr(attr, marker, False):
+                ordered.append(name)
+    return [
+        name for name in ordered if getattr(getattr(cls, name, None), marker, False)
+    ]
+
+
+def _type_name(annotation: Any) -> str:
+    """Render a type annotation as the manifest's plain-string type name.
+
+    Args:
+        annotation: A resolved annotation (``float``, ``float | None``,
+            ``dict[str, float]``), or ``None`` for an undeclared one.
+
+    Returns:
+        ``"float"``, ``"float | None"``, …; ``""`` when undeclared.
+    """
+    if annotation is None:
+        return ""
+    name = getattr(annotation, "__name__", None)
+    if isinstance(name, str):
+        return name
+    return str(annotation).replace("typing.", "")
+
+
+def _return_type_name(method: Any) -> str:
+    """Return the declared return type of one ``@monitored`` method.
+
+    Unwraps the decorator's ``functools.wraps`` chain first: the wrapper
+    carries the original's ``__annotations__`` but this module's globals,
+    so resolving a string annotation on the wrapper would fail.
+
+    Args:
+        method: The bound or unbound monitored method.
+
+    Returns:
+        The rendered type name, or ``""`` when it declares none or the
+        annotation cannot be resolved.
+    """
+    try:
+        hints = typing.get_type_hints(inspect.unwrap(method))
+    except Exception:  # noqa: BLE001 — an unresolvable hint is simply undeclared
+        return ""
+    return _type_name(hints.get("return"))
+
+
+def _json_scalar(value: Any) -> Any:
+    """Return *value* if it is a JSON scalar the contract can carry, else ``None``.
+
+    Only reached for a control that declares no ``ParamSpec`` and whose
+    signature default is something exotic; the declaration standard makes
+    that impossible on a shipped VI, and reporting ``None`` beats failing
+    the whole snapshot over one oddity.
+
+    Args:
+        value: A candidate default.
+
+    Returns:
+        The value, or ``None``.
+    """
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return None
+
+
+def _param_json(
+    param_name: str, spec: ParamSpec | None, signature_info: Mapping[str, Any] | None
+) -> dict[str, Any]:
+    """Render one ``@control`` parameter for the declaration snapshot.
+
+    Args:
+        param_name: The parameter's name.
+        spec: Its declared ``ParamSpec``, or ``None`` when the control
+            declared none (which the declaration standard forbids on a
+            shipped VI — the signature is then all there is to go on).
+        signature_info: The decorator's signature record for the parameter
+            (``type``, ``default``), used only when there is no spec.
+
+    Returns:
+        A JSON-safe dict carrying ``name``, ``declared``, ``kind``, ``unit``,
+        ``description``, ``default``, ``min``, ``max`` and ``choices``.
+        ``declared`` says whether a ``ParamSpec`` is behind the rest: a
+        parameter known only from its signature reports the same empty unit
+        and absent bounds a spec that declares none would, so a renderer
+        needs the flag to tell "declared nothing" from "declared none of it"
+        — and only a declared parameter can be rendered as the typed widget
+        (or the tool schema) its spec describes.
+    """
+    if spec is not None:
+        return {
+            "name": param_name,
+            "declared": True,
+            "kind": spec.type.__name__,
+            "unit": spec.unit,
+            "description": spec.description,
+            "default": spec.default,
+            "min": spec.min,
+            "max": spec.max,
+            "choices": dict(spec.choices) if spec.choices else None,
+        }
+    info = signature_info or {}
+    return {
+        "name": param_name,
+        "declared": False,
+        "kind": _type_name(info.get("type")),
+        "unit": "",
+        "description": "",
+        "default": _json_scalar(info.get("default")),
+        "min": None,
+        "max": None,
+        "choices": None,
+    }
+
+
+def _monitored_infos(cls: type) -> tuple[MonitoredInfo, ...]:
+    """Render every ``@monitored`` reading *cls* declares.
+
+    Args:
+        cls: The Virtual Instrument class.
+
+    Returns:
+        One ``MonitoredInfo`` per reading, in declared order. An UNDECLARED
+        unit renders as ``""`` — the declaration standard forbids it on a
+        shipped VI, and `tests/test_conformance.py` is where that is caught.
+    """
+    infos: list[MonitoredInfo] = []
+    for name in _declared_names(cls, "_is_monitored"):
+        method = getattr(cls, name)
+        infos.append(
+            MonitoredInfo(
+                name=name,
+                unit=get_monitored_unit(method) or "",
+                description=get_monitored_description(method),
+                group=get_ui_group(method),
+                returns=_return_type_name(method),
+            )
+        )
+    return tuple(infos)
+
+
+def _control_infos(
+    cls: type, vi: BaseVirtualInstrument | None
+) -> tuple[ControlInfo, ...]:
+    """Render every ``@control`` action *cls* declares.
+
+    Args:
+        cls: The Virtual Instrument class.
+        vi: The live instance, when there is one. Its
+            ``control_param_specs()`` is consulted so an instance-aware
+            override's dynamic choices (a switch's config-named routes) are
+            captured; an offline VI falls back to the decorator's own
+            declaration.
+
+    Returns:
+        One ``ControlInfo`` per action, in declared order, its ``params`` in
+        signature order.
+    """
+    infos: list[ControlInfo] = []
+    for name in _declared_names(cls, "_is_control"):
+        method = getattr(cls, name)
+        signature_info: Mapping[str, Any] = getattr(method, "_control_params", {})
+        if vi is not None:
+            specs = vi.control_param_specs(name)
+        else:
+            specs = get_control_specs(method)
+        infos.append(
+            ControlInfo(
+                name=name,
+                scope=get_control_scope(method),
+                panel=get_control_panel(method),
+                group=get_ui_group(method),
+                params=tuple(
+                    _param_json(
+                        param_name, specs.get(param_name), signature_info.get(param_name)
+                    )
+                    for param_name in signature_info
+                ),
+            )
+        )
+    return tuple(infos)
+
+
+def _limit_infos(cls: type, vi: BaseVirtualInstrument | None) -> dict[str, Any]:
+    """Render the control-validation standard's declared limits and their bounds.
+
+    Args:
+        cls: The Virtual Instrument class, whose ``control_limits`` names
+            which parameter each limit guards.
+        vi: The live instance, whose ``control_limit_bounds()`` supplies the
+            values its ``__init__`` derived from the config. ``None`` for an
+            offline VI, whose bounds were never computed.
+
+    Returns:
+        ``{method: {param: {"limit": name, "min": lo, "max": hi}}}``.
+        ``min``/``max`` are ``None`` where that side is unbounded and for
+        every parameter of an offline VI.
+    """
+    bounds = vi.control_limit_bounds() if vi is not None else {}
+    limits: dict[str, Any] = {}
+    for method_name, param_map in (getattr(cls, "control_limits", {}) or {}).items():
+        method_bounds = bounds.get(method_name, {})
+        limits[method_name] = {
+            param_name: {
+                "limit": limit_name,
+                "min": method_bounds.get(param_name, (None, None))[0],
+                "max": method_bounds.get(param_name, (None, None))[1],
+            }
+            for param_name, limit_name in param_map.items()
+        }
+    return limits
 
 
 # ── Factory ───────────────────────────────────────────────────────────────────
@@ -1810,10 +2554,23 @@ def build_station(config_path: str) -> Station:
         monitor_config: dict = dict(yaml.load(f))
 
     station = Station()
+    # Setup identity for anything that reports which setup it is running
+    # (the operational-status record's ``setup`` field).
+    station._setup_name = config_dir.name
 
     # Apply monitor config
     mon = monitor_config.get("monitor", {})
     station._max_errors = int(mon.get("max_vi_errors", 3))
+    try:
+        station._tick_interval_s = (
+            float(mon.get("tick_interval_ms", _DEFAULT_TICK_INTERVAL_MS)) / 1000.0
+        )
+    except (TypeError, ValueError):
+        logger.warning(
+            "monitor.tick_interval_ms in '%s' is not a number; the station "
+            "declaration snapshot reports the default cadence",
+            config_dir,
+        )
 
     # --- Build all real drivers ---
     # A driver __init__'s job is to open the hardware connection, so ANY
@@ -2252,6 +3009,76 @@ def read_tick_interval_ms(config_path: str) -> int:
         return _DEFAULT_TICK_INTERVAL_MS
 
 
+def read_request_spool_config(config_path: str) -> dict[str, Any]:
+    """Read ``monitor.yaml``'s **Request spool** settings, GUI-safe, defaulted.
+
+    Whether this setup offers a file-based write path into the running
+    application, and how much authority that door may grant, are properties
+    of the SETUP — a shared rig in a student lab and a single-user
+    development machine want different answers — so they live in the config
+    like every other limit. Expected shape::
+
+        monitor:
+          request_spool: true
+          spool_max_role: session
+
+    ``request_spool`` is ``false`` by default: an installation that has not
+    asked for the door does not have one. ``spool_max_role`` is
+    ``observer`` by default, the safe end of the role ladder, so turning the
+    spool on without a second thought grants reads and nothing more.
+
+    Args:
+        config_path: Path to the config directory containing ``monitor.yaml``.
+
+    Returns:
+        ``{"enabled": bool, "max_role": str}``, fully defaulted. Never
+        raises: a missing, unreadable or malformed file reads as "off".
+    """
+    settings: dict[str, Any] = {"enabled": False, "max_role": DEFAULT_MAX_ROLE}
+    monitor_config = _load_monitor_yaml(config_path)
+    if monitor_config is None:
+        return settings
+    block = monitor_config.get("monitor")
+    if not isinstance(block, dict):
+        return settings
+    settings["enabled"] = bool(block.get("request_spool", False))
+    max_role = block.get("spool_max_role", DEFAULT_MAX_ROLE)
+    if isinstance(max_role, str) and max_role:
+        settings["max_role"] = max_role
+    return settings
+
+
+def read_instrument_thread(config_path: str) -> bool:
+    """Read ``monitor.yaml``'s ``instrument_thread`` flag, GUI-safe, defaulted.
+
+    The setup's own answer to "does the instrument stack get its own thread?"
+    — a property of the machine (how patient its instruments are, whether its
+    VISA layer has been exercised under a second thread), so it lives in the
+    config like every other setup property.
+    ``core/instrument_host.py``'s ``resolve_mode()`` turns it into a mode, and
+    lets ``CRYOSOFT_INSTRUMENT_THREAD`` override it for one launch.
+
+    Defaulted to ``True``: the instrument thread is the standard, so a setup
+    that says nothing inherits it, and a setup that wants the temporary
+    ``inline`` mode back says ``instrument_thread: false`` deliberately.
+
+    Args:
+        config_path: Path to the config directory containing ``monitor.yaml``.
+
+    Returns:
+        ``False`` only when the file says so explicitly; ``True`` when it asks
+        for the thread, omits the key, or is missing or unreadable — never
+        raises.
+    """
+    monitor_config = _load_monitor_yaml(config_path)
+    if monitor_config is None:
+        return True
+    mon = monitor_config.get("monitor")
+    if not isinstance(mon, dict):
+        return True
+    return bool(mon.get("instrument_thread", True))
+
+
 def read_panels_config(config_path: str) -> dict[str, list[str]]:
     """Read the optional ``panels:`` block of ``monitor.yaml``, GUI-safe.
 
@@ -2292,6 +3119,110 @@ def read_panels_config(config_path: str) -> dict[str, list[str]]:
         if isinstance(controls, list):
             result[str(vi_name)] = [str(name) for name in controls]
     return result
+
+
+#: The **Gateway server**'s defaults: off, and — when a setup does switch it
+#: on — handing out no more than the role that reads and changes nothing.
+#: Both are deliberately the most restrictive value: opening a process to
+#: autonomous clients is a decision a setup makes explicitly, in its config,
+#: exactly like every safety limit.
+_GATEWAY_DEFAULTS: dict[str, Any] = {
+    "gateway_server": False,
+    "gateway_max_role": "observer",
+}
+
+
+def read_gateway_config(config_path: str) -> dict[str, Any]:
+    """Read ``monitor.yaml``'s gateway keys, GUI-safe, always defaulted.
+
+    Whether this setup accepts out-of-process clients, and how much authority
+    it hands one, is a property of the setup rather than of the code — the
+    same rule every limit follows — so both live in the config beside the
+    tick interval. Like ``read_safety_config()``, an absent block means "use
+    the defaults", and the defaults are the closed door.
+
+    Expected shape::
+
+        monitor:
+          tick_interval_ms: 3000
+          gateway_server: true
+          gateway_max_role: session
+
+    Args:
+        config_path: Path to the config directory containing ``monitor.yaml``.
+
+    Returns:
+        ``_GATEWAY_DEFAULTS`` with any declared override merged in:
+        ``gateway_server`` as a bool and ``gateway_max_role`` as a string.
+        Falls back to the defaults untouched if the file or YAML is
+        unreadable or the keys are absent — never raises.
+    """
+    merged = dict(_GATEWAY_DEFAULTS)
+    monitor_config = _load_monitor_yaml(config_path)
+    if monitor_config is None:
+        return merged
+    block = monitor_config.get("monitor")
+    if not isinstance(block, dict):
+        return merged
+    if "gateway_server" in block:
+        merged["gateway_server"] = bool(block["gateway_server"])
+    if "gateway_max_role" in block:
+        merged["gateway_max_role"] = str(block["gateway_max_role"])
+    return merged
+
+
+#: The **Embedded assistant**'s defaults: off, and — when a setup does switch
+#: it on — offering no more authority than the role that reads and changes
+#: nothing. ``assistant_max_role`` is empty by default rather than
+#: ``"observer"`` so that a setup which has already declared a
+#: ``gateway_max_role`` does not have to declare its ceiling twice: empty means
+#: "the same ceiling this setup already grants an autonomous client", which is
+#: the honest answer, since the assistant IS one.
+_ASSISTANT_DEFAULTS: dict[str, Any] = {
+    "assistant": False,
+    "assistant_max_role": "",
+}
+
+
+def read_assistant_config(config_path: str) -> dict[str, Any]:
+    """Read ``monitor.yaml``'s assistant keys, GUI-safe, always defaulted.
+
+    Whether this setup offers a chat assistant at the window, and how much
+    authority its role selector may hand out, is a property of the setup rather
+    than of the code — the same rule every limit follows — so both live in the
+    config beside the gateway's own keys. Like ``read_gateway_config()``, an
+    absent block means "use the defaults", and the defaults are the closed
+    door.
+
+    Expected shape::
+
+        monitor:
+          tick_interval_ms: 3000
+          assistant: true
+          assistant_max_role: session
+
+    Args:
+        config_path: Path to the config directory containing ``monitor.yaml``.
+
+    Returns:
+        ``_ASSISTANT_DEFAULTS`` with any declared override merged in:
+        ``assistant`` as a bool and ``assistant_max_role`` as a string, where
+        ``""`` means "fall back to this setup's ``gateway_max_role``". Falls
+        back to the defaults untouched if the file or YAML is unreadable or the
+        keys are absent — never raises.
+    """
+    merged = dict(_ASSISTANT_DEFAULTS)
+    monitor_config = _load_monitor_yaml(config_path)
+    if monitor_config is None:
+        return merged
+    block = monitor_config.get("monitor")
+    if not isinstance(block, dict):
+        return merged
+    if "assistant" in block:
+        merged["assistant"] = bool(block["assistant"])
+    if "assistant_max_role" in block:
+        merged["assistant_max_role"] = str(block["assistant_max_role"])
+    return merged
 
 
 def read_cryogenics_config(config_path: str) -> dict[str, Any]:

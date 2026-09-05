@@ -4,6 +4,7 @@ See ``cryosoft/session/README.md`` for the layer standard, and ``GLOSSARY.md``
 for the Servicing Log vocabulary.
 """
 
+from cryosoft.session.agent_feed import AgentFeed, read_feed
 from cryosoft.session.manager import ExperimentManager
 from cryosoft.session.models import ElnLink, ExperimentRecord, RunRecord, ServiceLogEntry, User
 from cryosoft.session.servicing_log import (
@@ -17,6 +18,8 @@ from cryosoft.session.servicing_log import (
 from cryosoft.session.store import ExperimentStore, UserRoster
 
 __all__ = [
+    "AgentFeed",
+    "read_feed",
     "ExperimentManager",
     "ExperimentStore",
     "UserRoster",

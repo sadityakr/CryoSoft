@@ -11,6 +11,9 @@ from cryosoft.core.decorators import (
     monitored,
     control,
     get_monitored_methods,
+    get_monitored_description,
+    get_monitored_unit,
+    get_ui_group,
     get_control_methods,
     get_control_panel,
     get_control_specs,
@@ -51,6 +54,34 @@ class TestExceptionHierarchy:
         assert err.vi_name == ""
         assert err.original_error is None
 
+    def test_safety_error_structured_fields_default_to_none(self):
+        """A message-only raise site keeps working; the fields are optional."""
+        err = CryoSoftSafetyError("quench detected")
+        assert str(err) == "quench detected"
+        assert (err.param, err.value, err.lo, err.hi, err.limit_name) == (
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+
+    def test_safety_error_carries_a_structured_limit_rejection(self):
+        """The limit wrapper's fields survive onto the exception."""
+        err = CryoSoftSafetyError(
+            "refused",
+            param="current_A",
+            value=0.05,
+            lo=-1e-3,
+            hi=1e-3,
+            limit_name="max_current",
+        )
+        assert err.param == "current_A"
+        assert err.value == 0.05
+        assert err.lo == -1e-3
+        assert err.hi == 1e-3
+        assert err.limit_name == "max_current"
+
     def test_catch_all_cryosoft_errors(self):
         """Verify that catching CryoSoftError catches all subtypes."""
         with pytest.raises(CryoSoftError):
@@ -89,8 +120,77 @@ class TestMonitoredDecorator:
         assert vi.temperature() == 4.2
 
 
+    def test_declaration_keywords_are_stored(self):
+        """The parametrized form stores unit, description and group verbatim."""
+        @monitored(unit="K", description="Sample temperature", group="loop")
+        def temperature(self) -> float:
+            return 4.2
+
+        assert temperature._is_monitored is True
+        assert get_monitored_unit(temperature) == "K"
+        assert get_monitored_description(temperature) == "Sample temperature"
+        assert get_ui_group(temperature) == "loop"
+
+    def test_bare_form_declares_nothing(self):
+        """The bare form still works; its unit is undeclared, not empty."""
+        @monitored
+        def temperature(self) -> float:
+            return 4.2
+
+        assert get_monitored_unit(temperature) is None
+        assert get_monitored_description(temperature) == ""
+        assert get_ui_group(temperature) == ""
+
+    def test_dimensionless_unit_is_distinct_from_undeclared(self):
+        @monitored(unit="", description="Heater mode")
+        def heater_mode(self) -> str:
+            return "AUTO"
+
+        assert get_monitored_unit(heater_mode) == ""
+
+    def test_rejects_non_string_unit(self):
+        with pytest.raises(TypeError, match="unit"):
+            @monitored(unit=1)  # type: ignore[arg-type]
+            def temperature(self) -> float:
+                return 4.2
+
+    def test_rejects_empty_group(self):
+        with pytest.raises(ValueError, match="group"):
+            @monitored(unit="K", description="T", group="")
+            def temperature(self) -> float:
+                return 4.2
+
+    def test_parametrized_form_stays_callable(self):
+        class FakeVI:
+            @monitored(unit="K", description="Sample temperature")
+            def temperature(self) -> float:
+                return 4.2
+
+        assert FakeVI().temperature() == 4.2
+
+
 class TestControlDecorator:
     """Verify @control marks methods and extracts parameters."""
+
+    def test_group_tag_is_stored(self):
+        @control(group="heater")
+        def set_heater(self, output_pct: float) -> None:
+            pass
+
+        assert get_ui_group(set_heater) == "heater"
+
+    def test_bare_control_has_no_group(self):
+        @control
+        def set_heater(self, output_pct: float) -> None:
+            pass
+
+        assert get_ui_group(set_heater) == ""
+
+    def test_rejects_empty_group(self):
+        with pytest.raises(ValueError, match="group"):
+            @control(group="")
+            def set_heater(self) -> None:
+                pass
 
     def test_marks_method(self):
         @control

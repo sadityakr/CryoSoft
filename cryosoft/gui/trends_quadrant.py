@@ -6,6 +6,7 @@ import json
 import logging
 import math
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import qtawesome as qta
 from PyQt6.QtWidgets import (
@@ -20,10 +21,12 @@ from PyQt6.QtWidgets import (
 
 from cryosoft.core import trend_history
 from cryosoft.core.paths import log_directory
-from cryosoft.core.station import Station
 from cryosoft.gui import app_settings  # import the module (not the function) so tests can monkeypatch the factory
 from cryosoft.gui.monitor_history import MonitorHistory
 from cryosoft.gui.theme import TEXT_PRIMARY
+
+if TYPE_CHECKING:  # the GUI holds a Station only as a type (contract C19)
+    from cryosoft.core.station import Station
 from cryosoft.gui.trend_plot_panel import TrendPlotPanel
 
 logger = logging.getLogger(__name__)

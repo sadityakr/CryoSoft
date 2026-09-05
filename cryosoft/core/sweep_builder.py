@@ -208,7 +208,15 @@ def sweep_axis_param_specs(axis: SweepAxis) -> dict[str, ParamSpec]:
     k = axis.key
     lower_desc = axis.description[0].lower() + axis.description[1:]
     return {
-        f"{k}_mode": ParamSpec(type=str, default="linear"),
+        f"{k}_mode": ParamSpec(
+            type=str,
+            default="linear",
+            description=(
+                f"How the {lower_desc} points are generated: linear "
+                f"(start/end/steps), segments (a breakpoint table), or csv "
+                f"(a file of values)"
+            ),
+        ),
         f"{k}_start": ParamSpec(
             type=float,
             default=axis.default_start,
@@ -227,8 +235,19 @@ def sweep_axis_param_specs(axis: SweepAxis) -> dict[str, ParamSpec]:
             min=2,
             description=f"Number of {lower_desc} steps",
         ),
-        f"{k}_csv_path": ParamSpec(type=str, default=""),
-        f"{k}_hysteresis": ParamSpec(type=bool, default=False),
+        f"{k}_csv_path": ParamSpec(
+            type=str,
+            default="",
+            description=f"Path to the CSV of {lower_desc} values, in csv mode",
+        ),
+        f"{k}_hysteresis": ParamSpec(
+            type=bool,
+            default=False,
+            description=(
+                f"Sweep the {lower_desc} back down to the start after reaching "
+                f"the end"
+            ),
+        ),
     }
 
 

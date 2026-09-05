@@ -109,7 +109,13 @@ virtual_instruments:
     class: cryosoft.virtual_instruments.measurement.measurement_delta_mode.DeltaModeMeasurementVI
     drivers: {source: keithley_6221, meter: keithley_2182a}
     vi_type: measurement
-    init_params: {}
+    init_params:
+      # Excitation ceiling enforced on every @control that commands current
+      # (control-validation standard). 105 mA is the Keithley 6221's own
+      # maximum output — this simulated bench has no sample-specific limit
+      # documented, so the bound is the instrument's, which is what stops a
+      # mistyped exponent rather than an operator's legitimate choice.
+      max_source_current_A: 0.105
     metadata:
       role: Delta-mode resistance measurement (source + nanovoltmeter pair)
       manufacturer: Keithley
@@ -119,7 +125,8 @@ virtual_instruments:
     class: cryosoft.virtual_instruments.measurement.measurement_dc_mode.DCModeMeasurementVI
     drivers: {source: keithley_6221, meter: keithley_2182a}
     vi_type: measurement
-    init_params: {}
+    init_params:
+      max_source_current_A: 0.105   # Keithley 6221 maximum output current
     metadata:
       role: DC mode resistance measurement (source + nanovoltmeter pair)
       manufacturer: Keithley
@@ -128,7 +135,8 @@ virtual_instruments:
     class: cryosoft.virtual_instruments.measurement.dc_separate_measurement.DCSeparateMeasurementVI
     drivers: {source: keithley_6221, meter: keithley_2182a}
     vi_type: measurement
-    init_params: {}
+    init_params:
+      max_source_current_A: 0.105   # Keithley 6221 maximum output current
     metadata:
       role: DC source-and-measure (source + nanovoltmeter pair)
       manufacturer: Keithley
@@ -152,6 +160,13 @@ virtual_instruments:
     vi_type: measurement
     init_params:
       series_resistance_ohm: 1.0e6
+      # The lock-in sources a VOLTAGE through series_resistance_ohm, so this
+      # ceiling becomes an oscillator-amplitude bound of
+      # max_source_current_A * series_resistance_ohm = 5 V RMS — the
+      # full-scale sine output of the modelled lock-in. Raising the series
+      # resistor without revisiting this would allow a higher amplitude than
+      # the instrument can produce; lowering it tightens the bound correctly.
+      max_source_current_A: 5.0e-6
     metadata:
       role: Lock-in 1f/2f harmonic measurement (internal source)
       manufacturer: CryoSoft
@@ -178,7 +193,7 @@ virtual_instruments:
       manufacturer: Keithley
       model: 705
 
-# Cryogenics management (docs/plans/archive/cryogenics-logbook.md §9): the helium
+# Cryogenics management (see GLOSSARY.md's Cryogenics log): the helium
 # fill operation, the consumption display, and the automatic helium-record
 # recorder are all built around this block. Absent on a setup that doesn't
 # need the feature -> zero footprint, zero code changes.
@@ -196,7 +211,7 @@ cryogenics:
 servicing_logs:                  # which declared log kinds this setup keeps
   - servicing
 
-# Cryostat-servicing operations (docs/plans/archive/cryogenics-logbook.md §9). Each
+# Cryostat-servicing operations (see GLOSSARY.md's Operation). Each
 # named sub-block configures one OperationBase subclass; a setup that omits
 # an operation's block still gets that operation's class-level defaults
 # (read_operations_config() only fills in what's declared here).

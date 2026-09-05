@@ -1,8 +1,35 @@
 """Simulated Keithley 6221 AC/DC Current Source driver."""
 
+import logging
 from typing import TYPE_CHECKING
 
-from cryosoft.core.exceptions import CryoSoftCommunicationError
+from cryosoft.core.exceptions import (
+    CryoSoftCommunicationError,
+    CryoSoftInstrumentError,
+)
+
+log = logging.getLogger(__name__)
+
+# The 622x's fixed current ranges (A, full scale). Delta mode pins the source
+# to the smallest range that fits its configured high current and leaves
+# autorange OFF, which is the whole mechanism behind the -221 incident this
+# sim models — see _refuse_out_of_range().
+_CURRENT_RANGES = (2e-9, 20e-9, 200e-9, 2e-6, 20e-6, 200e-6, 2e-3, 20e-3, 100e-3)
+
+
+def _range_for(current: float) -> float:
+    """Return the smallest 622x current range that holds *current*.
+
+    Args:
+        current: Absolute source current in Amperes.
+
+    Returns:
+        The full-scale value of the range the instrument would select.
+    """
+    for full_scale in _CURRENT_RANGES:
+        if current <= full_scale:
+            return full_scale
+    return _CURRENT_RANGES[-1]
 
 if TYPE_CHECKING:
     from cryosoft.drivers.sim_keithley_2182a import SimKeithley2182A
@@ -39,6 +66,24 @@ class SimKeithley6221:
         # in virtual_instruments/measurement/README.md). Private test/model
         # hook, not part of the public API parity check.
         self._mode: str = "DC"
+
+        # Instrument-error model (the driver error-reporting standard,
+        # drivers/README.md). The real 6221 records a refused command in its
+        # SCPI error queue and answers the bus normally; the sim skips the
+        # queue and raises the same typed error the real driver raises after
+        # reading it, so a wrong command sequence fails in a test instead of
+        # silently on hardware.
+        #
+        # Autorange OFF with a pinned range is exactly what delta mode leaves
+        # behind (live commissioning 2026-07-22): a later source current
+        # outside that leftover range is refused with -221 "Settings
+        # conflict" and the source silently keeps its old value.
+        self._autorange: bool = True
+        self._fixed_range_A: float = _CURRENT_RANGES[-1]
+        # True between configure_and_start_delta() and stop_delta_mode(): the
+        # delta engine owns the source, so source-setting commands that do
+        # not abort it first are refused.
+        self._delta_armed: bool = False
 
         # Delta-mode configuration
         self._delta_high_current: float = 0.0
@@ -81,9 +126,26 @@ class SimKeithley6221:
     def set_source_enabled(self, enabled: bool) -> None:
         """Enable or disable the current source output.
 
+        Models the instrument-error half of the driver error-reporting
+        standard: while the delta engine is armed it owns the output, and an
+        ``OUTP`` written by hand is a settings conflict. The real driver is
+        immune by construction, which is why its ordering is what it is —
+        :meth:`stop_delta_mode` sends ``:SOUR:SWE:ABOR`` *before* ``OUTP
+        OFF``, never the other way round. A caller that skips the abort is
+        the wrong sequence this refusal exists to catch.
+
         Args:
-            enabled: True to enable, False to disable.
+            enabled: True to turn the output on.
+
+        Raises:
+            CryoSoftInstrumentError: ``-221 Settings conflict`` if the delta
+                engine is armed.
         """
+        if self._delta_armed:
+            self._refuse(
+                f"set_source_enabled({enabled!r})",
+                "the delta engine owns the output; abort it first",
+            )
         self._source_enabled = bool(enabled)
 
     def get_current(self) -> float:
@@ -92,21 +154,33 @@ class SimKeithley6221:
         return self._current
 
     def set_current(self, current: float) -> None:
-        """Set the source current.
+        """Set the source current, recovering from any leftover mode first.
 
-        Unconditionally reasserts fixed-current mode first, regardless of
-        whether the instrument was previously left armed in delta mode by
-        another measurement VI sharing this driver — mirrors the real
-        driver's defensive ``:SOUR:CURR:MODE FIX``.
+        Mirrors the real driver command for command: abort whatever engine is
+        running (``:SOUR:SWE:ABOR``) and reassert autorange
+        (``:SOUR:CURR:RANG:AUTO ON``) BEFORE writing the value. That order is
+        what makes the call self-recovering: it is immune to the fixed range
+        and armed engine another measurement VI sharing this same driver may
+        have left behind (the "shared-instrument mode discipline" standard in
+        ``virtual_instruments/measurement/README.md``). Reverse the order and
+        the sim reproduces the -221 incident exactly.
 
         Args:
             current: Desired current in Amperes.
         """
+        self._delta_armed = False
         self._mode = "DC"
-        self._current = float(current)
+        self._autorange = True
+        self._fixed_range_A = _CURRENT_RANGES[-1]
+        self._apply_current(f"set_current({current!r})", float(current))
 
     def set_compliance(self, compliance_v: float) -> None:
         """Set the voltage compliance limit.
+
+        Deliberately NOT refused while the delta engine is armed: the real
+        driver's own delta sequence writes ``:SOUR:CURR:COMP`` as part of
+        programming delta mode, so compliance is demonstrably writable in
+        that state and modelling a refusal here would be fiction.
 
         Args:
             compliance_v: Maximum output voltage in Volts.
@@ -206,6 +280,13 @@ class SimKeithley6221:
                 vi_name="SimKeithley6221",
             )
         self._mode = "DELTA"
+        # Delta mode pins the current range to the smallest one that fits its
+        # high current and leaves autorange OFF, with nothing to undo it
+        # afterwards. This side effect is the -221 incident's root cause, so
+        # the sim models it rather than the tidy behaviour one might assume.
+        self._autorange = False
+        self._fixed_range_A = _range_for(abs(float(high_current)))
+        self._delta_armed = True
         self._delta_high_current = float(high_current)
         self._delta_n_readings = int(n_readings)
         self._delta_delay = float(delay)
@@ -247,7 +328,15 @@ class SimKeithley6221:
         return list(self._delta_readings)
 
     def stop_delta_mode(self) -> None:
-        """Abort the simulated delta engine and reset source to a plain idle state."""
+        """Abort the simulated delta engine and reset source to a plain idle state.
+
+        Mirrors the real driver's ``:SOUR:SWE:ABOR`` + ``OUTP OFF``. Leaves
+        autorange off and the range still pinned, exactly as the real
+        instrument does — undoing delta's range side effect is
+        :meth:`set_current`'s and :meth:`safe_shutdown`'s job, and pretending
+        otherwise here would hide the very bug this sim exists to catch.
+        """
+        self._delta_armed = False
         self._mode = "DC"
         self._current = 0.0
         self._source_enabled = False
@@ -283,6 +372,94 @@ class SimKeithley6221:
         if self._paired_meter is not None:
             return self._paired_meter.get_range()
         return 0.01
+
+    # ------------------------------------------------------------------
+    # Instrument-error model (the driver error-reporting standard)
+    # ------------------------------------------------------------------
+
+    def _refuse(self, context: str, why: str) -> None:
+        """Raise the -221 the real instrument would queue for *context*.
+
+        Args:
+            context: The driver call being refused, e.g. ``"set_compliance(1.0)"``.
+            why: Plain-English reason, appended for the reader; the ``code``
+                and ``instrument_message`` carried on the error stay exactly
+                what the real 622x reports.
+
+        Raises:
+            CryoSoftInstrumentError: Always.
+        """
+        raise CryoSoftInstrumentError(
+            f"Simulated Keithley 6221 refused {context}: "
+            f'-221,"Settings conflict" ({why})',
+            code="-221",
+            instrument_message="Settings conflict",
+            context=context,
+            vi_name="SimKeithley6221",
+        )
+
+    def _apply_current(self, context: str, current: float) -> None:
+        """Apply a source current, refusing it if a pinned range cannot hold it.
+
+        Models the exact silent-rejection path found on real hardware
+        (2026-07-22): with autorange OFF and the range pinned by a previous
+        delta run, a larger requested current is refused with -221 and the
+        source keeps its OLD value — no exception on the bus, nothing in the
+        log, visible only on the front panel or by polling the error queue.
+
+        Args:
+            context: The driver call being applied.
+            current: Requested current in Amperes.
+
+        Raises:
+            CryoSoftInstrumentError: ``-221`` if the pinned range is too small.
+        """
+        if not self._autorange and abs(current) > self._fixed_range_A:
+            # The source value deliberately does NOT change — that silence is
+            # the bug being modelled.
+            self._refuse(
+                context,
+                f"{abs(current):.3e} A exceeds the fixed "
+                f"{self._fixed_range_A:.3e} A range left with autorange off",
+            )
+        self._current = float(current)
+
+    # ------------------------------------------------------------------
+    # Safe state (the safe-shutdown standard)
+    # ------------------------------------------------------------------
+
+    def safe_shutdown(self) -> None:
+        """Put the simulated source in its safe idle state; never raises.
+
+        Mirrors the real driver's sequence: abort the engine, reassert
+        autorange, zero the current, output off, error state cleared.
+
+        Safe idle for this instrument is: DC mode, delta engine disarmed,
+        autorange on with no pinned range, zero source current, output off —
+        the state :meth:`_is_in_safe_state` checks for.
+        """
+        log.info("SimKeithley6221: safe shutdown — engine aborted, output off.")
+        self._delta_armed = False
+        self._mode = "DC"
+        self._autorange = True
+        self._fixed_range_A = _CURRENT_RANGES[-1]
+        self._current = 0.0
+        self._source_enabled = False
+        self._delta_readings = []
+
+    def _is_in_safe_state(self) -> bool:
+        """Return True when the sim is in the safe idle state defined above.
+
+        The sim half of the safe-shutdown standard (``drivers/README.md``):
+        the conformance test calls :meth:`safe_shutdown` and asserts this.
+        """
+        return (
+            not self._delta_armed
+            and self._mode == "DC"
+            and self._autorange
+            and self._current == 0.0
+            and not self._source_enabled
+        )
 
     # ------------------------------------------------------------------
     # Connection lifecycle (the connection-lifecycle standard)

@@ -144,13 +144,17 @@ def test_sensor_curve_selection():
     d = SimLakeshore335("SIM")
     assert d.get_sensor_curve("A") == 22
     assert d.get_sensor_curve("B") == 2
-    
+
+    # Slots 21 and 23 are USER slots, so they must hold a curve before the
+    # instrument will accept them (see test_user_curve_slot_must_be_loaded).
+    d._loaded_user_curves.update({21, 23})
+
     d.set_sensor_curve(21, "A")
     assert d.get_sensor_curve("A") == 21
-    
+
     d.set_sensor_curve(23, "B")
     assert d.get_sensor_curve("B") == 23
-    
+
     with pytest.raises(ValueError):
         d.set_sensor_curve(60, "A")
     with pytest.raises(ValueError):

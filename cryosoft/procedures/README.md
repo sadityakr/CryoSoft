@@ -80,9 +80,8 @@ axis hooks.
   selected VI's own `measurement_parameters`, and, when anything is loopable,
   the Reading loop slot group (see below).
 - SI units everywhere: tesla, kelvin, amperes, volts, seconds.
-- `claimed_vi_names() -> set[str] | None` (`BaseProcedure`, docs/plans/
-  operation-concurrency-and-error-scoping.md §1's **Claim** — see
-  GLOSSARY.md): declares which VIs a running procedure exclusively owns, so
+- `claimed_vi_names() -> set[str] | None` (`BaseProcedure`; the **Claim**
+  standard — see GLOSSARY.md): declares which VIs a running procedure exclusively owns, so
   the Orchestrator knows what a manual front-panel action may touch while
   it runs. Default `None` (claim everything) — procedures stay exclusive in
   this iteration; only `TimeSeries` narrows it (see below). The same
@@ -91,6 +90,25 @@ axis hooks.
   and dispatched first — so a claimed VI an operator left in a non-standard
   state (heater switched to MANUAL, say) is always reset to standard before
   this run's own targets/commands assume it.
+
+- `planned_targets() -> dict[str, list[float]]` (`BaseProcedure`): every system
+  setpoint the built run would command, per VI, so a queued run is validated
+  before anything reaches hardware. `SweepMeasureProcedure` derives it from the
+  same target hooks its plans are built from, so it cannot drift.
+- `apply_probe(ProbeSpec)` and `estimate_step_seconds() -> StepCost`
+  (`BaseProcedure`) are the two run-economics hooks, and a procedure normally
+  inherits both. `apply_probe()` reduces a *built* run in place to a **probe
+  run** (GLOSSARY.md) — the sweep subsampled keeping first and last, declared
+  seconds-valued parameters capped, averaging cut, `run_kind = "probe"` — by
+  the rules written in `ProbeSpec`'s docstring; `estimate_step_seconds()`
+  reports the points, waits and measurement time behind a **duration
+  estimate**, defaulting to the built sweep length with the omission named as
+  an assumption. `SweepMeasureProcedure` implements both fully from the hooks
+  the tick loop already uses (`_initiate_wait_s()`, `_step_wait_s()`,
+  `_loop_shape`, the selected VI's `data_arrays()`), so an axis procedure that
+  supplies only its axis hooks gets a probe and an estimate for free. Override
+  `estimate_step_seconds()` only when the run's cost does not come from those
+  hooks; override `apply_probe()` only to reduce something the base cannot see.
 
 ### Generic sweep and the reading loop (owned by the base, no per-procedure code)
 
@@ -171,8 +189,8 @@ driven by the same Orchestrator tick loop — but carries operation-scope
 command access, tolerated safety flags, a verified `postcondition_gates()`
 phase, and higher submission priority; it is never returned among the
 measurement procedures discovered from this folder. See
-`docs/plans/archive/cryogenics-logbook.md` §2/§4 for the design and
-`procedures/operations/README.md` for its own entry/exit/interface contract.
+`procedures/operations/README.md` for its own entry/exit/interface contract,
+and GLOSSARY.md's **Operation**.
 
 ## How to add a new module
 

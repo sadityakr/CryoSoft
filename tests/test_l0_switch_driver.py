@@ -85,17 +85,24 @@ def test_pole_mode_change_reopens_channels():
 
 
 def test_channel_valid_in_2_pole_is_out_of_range_in_4_pole():
-    """Channel 15 exists in 2-pole but not 4-pole, and closes silently nowhere.
+    """Channel 15 exists in 2-pole but not 4-pole, and the driver says so.
 
-    This is the failure a config carried over from 2-pole would hit: the route
-    never connects and the instrument reports nothing.
+    This is the failure a config carried over from 2-pole would hit: the
+    instrument discards the close and reports nothing on the bus. Under the
+    driver error-reporting standard the 705's verification is explicit
+    readback, so the discarded close surfaces as a typed error at the call
+    site instead of as an unrouted measurement hours later.
     """
+    from cryosoft.core.exceptions import CryoSoftInstrumentError
+
     d = SimKeithley705("SIM")
     d.set_pole_mode(2)
     d.close_channel("15")
     assert d.closed_channels() == ["015"]
     d.set_pole_mode(4)
-    d.close_channel("15")
+    with pytest.raises(CryoSoftInstrumentError) as excinfo:
+        d.close_channel("15")
+    assert excinfo.value.code == "READBACK_MISMATCH"
     assert d.closed_channels() == []
 
 
@@ -122,19 +129,26 @@ def test_channel_specs_are_normalised_to_three_digits():
     assert d.closed_channels() == []
 
 
-def test_out_of_range_channel_is_silently_dropped():
-    """A channel past the installed range never closes — and never errors.
+def test_out_of_range_channel_is_reported_by_readback():
+    """A channel past the installed range never closes — and now says so.
 
     Models the real 705's worst failure mode: an out-of-range channel raises
-    IDDCO on the instrument, which is reported nowhere on the bus. The close is
-    discarded silently, so a config naming a non-existent channel must surface
-    here rather than as an unrouted measurement on hardware.
+    IDDCO on the instrument, which is reported nowhere on the bus, so the
+    close is discarded in silence. The driver's readback verification (the
+    driver error-reporting standard) is the only thing that can see it, and
+    it raises ``READBACK_MISMATCH`` — so a config naming a non-existent
+    channel fails here rather than as an unrouted measurement on hardware.
     """
+    from cryosoft.core.exceptions import CryoSoftInstrumentError
+
     d = SimKeithley705("SIM")
     assert d.first_last_channel() == (1, 20)
-    d.close_channels(["21"])
+    with pytest.raises(CryoSoftInstrumentError) as excinfo:
+        d.close_channels(["21"])
+    assert excinfo.value.code == "READBACK_MISMATCH"
     assert d.closed_channels() == []
-    d.close_channel("99")
+    with pytest.raises(CryoSoftInstrumentError):
+        d.close_channel("99")
     assert d.closed_channels() == []
 
 

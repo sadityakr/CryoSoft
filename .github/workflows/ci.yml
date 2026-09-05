@@ -44,6 +44,9 @@ jobs:
       - name: Tests (pytest)
         run: make test
 
+      - name: GUI tests in the temporary inline mode
+        run: make test-instrument-inline
+
       - name: Type check (mypy, advisory)
         run: make typecheck
         continue-on-error: true

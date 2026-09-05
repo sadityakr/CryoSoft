@@ -11,7 +11,15 @@ The full test suite for CryoSoft. Two kinds of tests live here:
    checks. They iterate over the drivers, VI, procedures, and configs packages
    at runtime, so any *new* module is tested automatically the moment it
    exists. This is the safety net that lets coding agents add drivers and
-   procedures without silently breaking the system's contracts.
+   procedures without silently breaking the system's contracts. Two of them
+   check the tree itself rather than a package:
+   `test_no_plan_document_citation_under_cryosoft` (the code-reference
+   standard — no `.py` file and no folder `README.md` under `cryosoft/` cites
+   a document in `docs/plans/`; a vendor manual's section number is not a
+   citation and never trips it, and the allowlist is empty by construction,
+   held there by `test_plan_citation_allowlist_is_empty`) and
+   `test_no_blocking_sleep_in_gui_sources` (nothing under `cryosoft/gui/`
+   blocks the one shared thread with `time.sleep`).
 
 Layer *import* boundaries are not tested here — they are enforced by
 import-linter (`make contracts`, config in `pyproject.toml`).
@@ -39,6 +47,43 @@ Tests requiring physical instruments must be marked `@pytest.mark.hardware`;
 `make test` and CI exclude them. Everything else must pass on a bare machine.
 Shared fixtures belong in `conftest.py`.
 
+`instrument_modes.py` (not itself a test file) is what lets one suite run in
+both instrument modes. **A plain `pytest` run is threaded**, like the
+application: the Station and the Orchestrator live on the **Instrument
+thread**, and `CRYOSOFT_INSTRUMENT_THREAD=0` is what takes a run back to the
+temporary **Inline mode**. `tests/test_gui.py`'s fixtures build through an
+`InstrumentHost` in whichever mode is selected and hand the windows the
+`OrchestratorProxy` the application hands them, so the same 190-odd assertions
+are checked both ways (`make test-instrument-inline`, which CI runs after
+`make test`). Write a new GUI test against the threaded default — a test that
+asserts on the mirror immediately after a click passes inline and fails
+threaded, which is the bug, not the suite. It carries
+the **tick helper** family a test needs once it is behind the client boundary:
+`on_engine()` runs a call where the engine lives and waits for it,
+`set_on_engine()` forces one engine attribute, `tick_engine()` replaces a bare
+`orchestrator._tick()`, `ticks_paused()` holds the tick timer while a test
+forces a state the next tick would undo, and `settled()` waits out the round
+trip a GUI action makes — all no-ops or direct calls inline, so a test reads
+the same either way.
+
+**Every wait in those helpers is bounded.** `drain()` runs the client's event
+loop until the queue is dry, until `max_events` (20 000) deliveries have
+landed, or until `timeout_s` is up — and the last of those raises
+`EngineNotSettled` (a `TimeoutError`) naming how many events it drained, the
+engine's state and its tick interval. Without the bound, an engine that keeps
+its client fed — a fast tick with a visible `MonitorWindow` attached — left
+`drain()` spinning at 100 % CPU until the run was killed, with nothing in the
+report to say why. The default bound is 10 s and comes from
+`CRYOSOFT_TEST_SETTLE_TIMEOUT_S`, so a slow machine can widen every helper at
+once (`CRYOSOFT_TEST_SETTLE_TIMEOUT_S=30 pytest tests/test_gui.py`); a single
+call that legitimately needs longer passes its own `timeout_s`
+(`settled(orchestrator, timeout_s=30)`, `on_engine(orchestrator, call,
+timeout_s=30)`, likewise `tick_engine()`, `set_on_engine()` and
+`ticks_paused()`). The deadline is read between passes of the event loop, so
+a drain can overrun it by one pass: the bound guarantees that a wait ends and
+says why, not when. `test_instrument_modes.py` is the helper family's own
+test file.
+
 `scenarios.py` (not itself a test file) names the sim-driver state-injection
 recipes every hazard/fault test needs — helium low, quench, a disconnected
 instrument, a measurement instrument erroring instead of returning data, a
@@ -56,6 +101,15 @@ that also waits. See `test_scenarios.py` for usage.
 - **A conformance test fails on your new module:** fix the module to match the
   contract (the assertion message says what is expected). Do not weaken or
   special-case the conformance tests.
+- **Your new VI has an unbounded numeric `@control` parameter:**
+  `test_every_numeric_control_param_is_bounded_or_exempt` fails until that
+  parameter is either declared in `control_limits` (its value coming from the
+  config's `init_params`, never from code) or written into
+  `CONTROL_LIMIT_EXEMPTIONS` in `test_conformance.py` with a one-line physical
+  reason a range cannot bound it — an enumerated mode, a dimensionless count, a
+  timing parameter, a tuning constant. The table is checked in both directions:
+  `test_no_stale_control_limit_exemptions` fails on a row whose parameter has
+  since gained a limit, so the exemptions stay as short as the code allows.
 - **Adding a new contract:** extend `test_conformance.py` with a discovery
   helper + parametrized test, and document the contract in GLOSSARY.md.
 
@@ -83,8 +137,9 @@ config also has automatic `test_conformance.py` coverage on top of these.
 |------------|---------------------|
 | `cryosoft/drivers/*` | `tests/test_l0_simulated.py`, `tests/test_l0_new_drivers.py`, `tests/test_l0_switch_driver.py` |
 | `cryosoft/virtual_instruments/*` | `tests/test_l1_virtual_instruments.py`, `tests/test_l1_new_vis.py`, `tests/test_l1_switch_vi.py`, `tests/test_measurement_dc_vi.py` |
-| `cryosoft/core/station.py`, config loading | `tests/test_l2_station.py`, `tests/test_config_validation.py`, `tests/test_config_catalog.py` |
-| `cryosoft/core/orchestrator.py` | `tests/test_l3_orchestrator.py`, `tests/test_operations.py` |
+| `cryosoft/core/station.py`, config loading | `tests/test_l2_station.py`, `tests/test_config_validation.py`, `tests/test_config_catalog.py`, `tests/test_direct_action_path.py` (`execute_vi_action()`'s refusals) |
+| `cryosoft/core/orchestrator.py` | `tests/test_l3_orchestrator.py`, `tests/test_operations.py`, `tests/test_direct_action_path.py` |
+| `cryosoft/core/instrument_host.py`, `orchestrator_proxy.py`, `status_mirror.py` | `tests/test_orchestrator_proxy.py` (the temporary inline mode), `tests/test_instrument_thread.py` (the threaded default), `tests/test_status_mirror.py` |
 | `cryosoft/core/operation.py` | `tests/test_operations.py` |
 | `cryosoft/core/procedure.py`, `cryosoft/procedures/*` | `tests/test_l4_procedure.py`, `tests/test_new_procedures.py`, `tests/test_field_voltage_procedure.py` |
 | `cryosoft/procedures/operations/*` (concrete operations) | `tests/test_helium_fill.py`, `tests/test_sample_access.py` |
@@ -93,6 +148,7 @@ config also has automatic `test_conformance.py` coverage on top of these.
 | `cryosoft/core/data_manager.py` (L5) | `tests/test_l5_data_manager.py` |
 | `cryosoft/session/` (L6) | `tests/test_session_layer.py` + session-model conformance |
 | `cryosoft/session/servicing_log.py` (L6) | `tests/test_servicing_log.py` + log-kind conformance |
+| `cryosoft/session/eln/` (L6) | `tests/test_eln.py` + ELN-adapter conformance |
 | `cryosoft/gui/param_form.py`, `monitor_window.py`, `procedure_window.py`, `instrument_panel.py`, `notification_banner.py`, `theme.py`, `live_plot_panel.py`, `app_settings.py` | `tests/test_gui.py` |
 | `cryosoft/gui/sweep_axis_widget.py` | `tests/test_sweep_axis_widget.py` |
 | `cryosoft/gui/lifecycle_toggle.py` | `tests/test_lifecycle_toggle.py` |
@@ -102,21 +158,27 @@ config also has automatic `test_conformance.py` coverage on top of these.
 | `cryosoft/gui/config_editor.py` | `tests/test_config_editor.py` |
 | `cryosoft/gui/operations_panel.py`, `procedure_discovery.py` (`discover_operations`) | `tests/test_operations_panel.py` |
 | `cryosoft/gui/servicing_log_page.py` | `tests/test_servicing_log_page.py` |
+| `cryosoft/gui/agent_panel.py`, `takeover_strip.py`, the experiment header's envelope editor | `tests/test_agent_panel.py` |
 | `cryosoft/troubleshoot/*`, operational status / stall detection | `tests/test_troubleshoot_cli.py`, `tests/test_troubleshoot_engine.py`, `tests/test_operational_status.py`, `tests/test_status_reader.py`, `tests/test_stall_detection.py` |
 
 ## Files
 
-- `conftest.py` — shared fixtures (logging setup).
-- `mocks/` — shared mock objects.
+- `conftest.py` — shared fixtures (logging setup, an isolated measurement root).
+- `instrument_modes.py` — building a host in the session's instrument mode, and the tick helpers a test needs to reach the engine across the boundary (see above).
+- `test_instrument_modes.py` — the harness testing itself: the settle bound on `drain()`, `on_engine()` and `settled()`, its `CRYOSOFT_TEST_SETTLE_TIMEOUT_S` default and per-call override, and the two ways a drain ends without hanging (`max_events` reached, or `EngineNotSettled` with the engine named). Runs in both instrument modes.
+- `mocks/` — shared mock objects, including `bus_spy.py`: recording shims over a
+  live driver's public methods, for proving a path issues no instrument traffic
+  (an empty call log, rather than trust).
 - `test_foundation.py` — core exceptions, decorators, logging config.
 - `test_conformance.py` — auto-discovering interface conformance (see above).
 - **L0 drivers:** `test_l0_simulated.py`, `test_l0_new_drivers.py`, `test_l0_switch_driver.py`.
 - **L1 virtual instruments:** `test_l1_virtual_instruments.py`, `test_l1_new_vis.py`, `test_l1_switch_vi.py`, `test_measurement_dc_vi.py`, `test_switch_heater.py`.
-- **L2 station + config:** `test_l2_station.py`, `test_config_validation.py`, `test_config_catalog.py`.
-- **L3 orchestrator:** `test_l3_orchestrator.py`.
+- **L2 station + config:** `test_l2_station.py`, `test_config_validation.py`, `test_config_catalog.py`, `test_capability_manifest.py` (the **Station info** declaration snapshot and its **Capability manifest** rendering: declared order, group resolution, the offline branch, the JSON Schema and its validator, and the `python -m cryosoft.core.capability_manifest` entry point).
+- **The client boundary:** `test_orchestrator_proxy.py` (the `OrchestratorProxy` and the `InstrumentHost` in the temporary `inline` mode, whose tests go with it); `test_instrument_thread.py` (the same seam across a real `QThread`, which is the default the application ships in — GLOSSARY.md's **Instrument thread**: thread affinity, one verdict per command posted across the boundary, the frozen-GUI detector, payload ownership, the run queue's two crossings, the pause boundary and a quench end to end, and a bounded shutdown over a read that never returns). A test that used to call `orchestrator._tick()` directly must not do so across the boundary: `test_instrument_thread.py`'s `_tick_on_engine()` is the **tick helper** — it runs the tick where the engine lives and waits for it, so the caller still gets the synchronous "that tick has happened" it relied on.
+- **L3 orchestrator:** `test_l3_orchestrator.py`; `test_direct_action_path.py` (the direct action path: the five refusals a manual action can meet — private name, non-capability, out-of-scope capability, out-of-limit value, out-of-envelope setpoint — plus `emergency_standby()` from every state).
 - **L3/L4 operations:** `test_operations.py` (`OperationBase`, `run_operation`/`queue_operation`/`finish_operation`, tolerated safety flags, postcondition gates, capability-scope dispatch); `test_operation_readiness.py` (the readiness/next-due contract — `ReadinessCondition`/`NextDue`, `OperationBase` defaults, `HeliumFillOperation`'s and the shared `_SampleAccessOperationBase`'s (via `SampleLoadOperation`/`SampleUnloadOperation`) concrete `readiness_conditions()`/`next_due()`, Qt-free); `test_helium_fill.py` (`HeliumFillOperation` end-to-end against a real Orchestrator + `sim_cryostat`, including the `CryogenicsRecorder` wiring); `test_sample_access.py` (`SampleLoadOperation`/`SampleUnloadOperation` end-to-end against a real Orchestrator + `sim_cryostat`, parametrized over both, including `confirm_operation()`'s operator-confirmation gate and postcondition timeout).
 - **L4 procedures + planning:** `test_l4_procedure.py`, `test_new_procedures.py`, `test_field_voltage_procedure.py`, `test_plan.py`, `test_sweep_builder.py`.
 - **L5 data manager:** `test_l5_data_manager.py`.
-- **L6 session management:** `test_session_layer.py`, `test_servicing_log.py`.
-- **GUI (pytest-qt, offscreen):** `test_gui.py`, `test_sweep_axis_widget.py`, `test_lifecycle_toggle.py`, `test_form_autosave.py`, `test_monitor_history.py`, `test_trend_plot_panel.py`, `test_config_editor.py`, `test_operations_panel.py`, `test_servicing_log_page.py`.
+- **L6 session management:** `test_session_layer.py`, `test_servicing_log.py`, `test_eln.py` (ELN publishing — sim adapter and a fake HTTP transport, never a live notebook).
+- **GUI (pytest-qt, offscreen):** `test_gui.py`, `test_sweep_axis_widget.py`, `test_lifecycle_toggle.py`, `test_form_autosave.py`, `test_monitor_history.py`, `test_trend_plot_panel.py`, `test_config_editor.py`, `test_operations_panel.py`, `test_servicing_log_page.py`, `test_agent_panel.py` (the **Agent panel**, the **Takeover strip** and the experiment header's envelope editor — built over an `InstrumentHost` like `test_gui.py`, so it runs in both instrument modes).
 - **Troubleshooting / operational status:** `test_troubleshoot_cli.py`, `test_troubleshoot_engine.py`, `test_operational_status.py`, `test_status_reader.py`, `test_stall_detection.py`.

@@ -7,6 +7,7 @@ from statistics import mode
 from typing import Any
 
 from cryosoft.core.decorators import control, monitored
+from cryosoft.core.plan import ParamSpec
 from cryosoft.virtual_instruments.base import LevelMeterBase
 
 
@@ -14,6 +15,15 @@ from cryosoft.virtual_instruments.base import LevelMeterBase
 STANDBY = 0
 SLOW = 1
 FAST = 2
+
+# The three-mode standard as a GUI/manifest drop-down (see the VI's "Refresh
+# mode standard"): the labels an operator picks from, mapped to the values
+# set_refresh_rate() accepts.
+REFRESH_MODE_CHOICES: dict[str, int] = {
+    "Standby (measurements paused)": STANDBY,
+    "Slow (normal operation)": SLOW,
+    "Fast (helium fill)": FAST,
+}
 
 
 class CryogenLevelMeterVI(LevelMeterBase):
@@ -67,19 +77,30 @@ class CryogenLevelMeterVI(LevelMeterBase):
     # @monitored methods
     # ------------------------------------------------------------------
 
-    @monitored
+    @monitored(
+        unit="%",
+        description="Liquid helium level in the cryostat reservoir",
+    )
     def helium_level(self) -> float:
         """Return the current helium level in percent and update safety buffer."""
         level = self._driver.get_helium_level()  # type: ignore[attr-defined]
         self._helium_buffer.append(level < self._helium_low_threshold)
         return level
 
-    @monitored
+    @monitored(
+        unit="%",
+        description="Liquid nitrogen level in the cryostat jacket",
+    )
     def nitrogen_level(self) -> float:
         """Return the current nitrogen level in percent."""
         return self._driver.get_nitrogen_level()  # type: ignore[attr-defined]
 
-    @monitored
+    # Dimensionless: a mode code from the three-mode standard, not a
+    # measured quantity.
+    @monitored(
+        unit="",
+        description="Refresh mode code: 0 standby, 1 slow, 2 fast",
+    )
     def get_refresh_rate(self) -> int:
         """Return the current refresh rate mode (0=STANDBY, 1=SLOW, 2=FAST)."""
         return self._driver.get_refresh_rate()  # type: ignore[attr-defined]
@@ -88,7 +109,17 @@ class CryogenLevelMeterVI(LevelMeterBase):
     # @control methods
     # ------------------------------------------------------------------
 
-    @control(scope="operation")
+    @control(
+        scope="operation",
+        params={
+            "mode": ParamSpec(
+                type=int,
+                default=SLOW,
+                choices=REFRESH_MODE_CHOICES,
+                description="Level-meter refresh mode (three-mode standard)",
+            ),
+        },
+    )
     def set_refresh_rate(self, mode: int) -> None:
         """Set the refresh rate mode.
 

@@ -7,7 +7,10 @@ import time
 
 import pyvisa
 
-from cryosoft.core.exceptions import CryoSoftCommunicationError
+from cryosoft.core.exceptions import (
+    CryoSoftCommunicationError,
+    CryoSoftInstrumentError,
+)
 
 log = logging.getLogger(__name__)
 
@@ -184,6 +187,34 @@ class OxfordILM210:
             log.debug("ILM 210: error closing VISA session: %s", exc)
 
     # ------------------------------------------------------------------
+    # Safe state (the safe-shutdown standard)
+    # ------------------------------------------------------------------
+
+    def safe_shutdown(self) -> None:
+        """Take the level probe off continuous drive; never raises.
+
+        The ILM 210's half of the **safe-shutdown standard** (see
+        ``drivers/README.md``): idempotent, callable from any leftover state.
+
+        Safe idle for a cryogen level meter is the pulsed refresh rate, not
+        "off": the meter must keep reporting a level (that reading is a
+        safety input for everything above it), but the FAST/continuous mode
+        keeps the superconducting probe energised and boils helium, so it is
+        the one state that must never be left behind. This drops the probe
+        back to pulsed and hands the front panel back (``C2``, local
+        unlocked).
+
+        Recovers from: a probe left in FAST/continuous mode by an abandoned
+        helium fill, and a meter left remote-locked.
+        """
+        log.info("ILM 210: safe shutdown — probe back to pulsed refresh.")
+        try:
+            self.set_refresh_rate(0)
+        except Exception as exc:  # noqa: BLE001 — safe shutdown must never raise
+            log.warning("ILM 210: safe shutdown could not set the refresh rate: %s", exc)
+        self._set_remote(2)   # local & unlocked — _set_remote swallows its own failures
+
+    # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
 
@@ -214,9 +245,43 @@ class OxfordILM210:
         try:
             self._instr.write(full_cmd)
             time.sleep(0.07)        # 70 ms settling
-            return self._instr.read().strip()
+            reply = self._instr.read().strip()
         except pyvisa.VisaIOError as exc:
             raise CryoSoftCommunicationError(
                 f"ILM210 execute failed ({cmd!r}): {exc}",
                 vi_name="OxfordILM210",
             ) from exc
+        self._check_acknowledgement(cmd, reply)
+        return reply
+
+    def _check_acknowledgement(self, cmd: str, reply: str) -> None:
+        """Raise if the ISOBUS reply says the instrument refused *cmd*.
+
+        The ILM 210's half of the **driver error-reporting standard** (see
+        ``drivers/README.md``). ISOBUS has no error queue and no status byte;
+        its verification is the **protocol acknowledgement**: every command is
+        echoed back, and a command the instrument will not carry out — an
+        unrecognised command, a channel that has no probe fitted, a control
+        command it is not in a state to accept — is answered with ``?``
+        followed by the command instead of the echo. Without this check that
+        reply parses as garbage several lines later, or worse, as a level.
+
+        Args:
+            cmd: The command sent, without the ISOBUS ``@n`` prefix.
+            reply: The instrument's stripped reply.
+
+        Raises:
+            CryoSoftInstrumentError: If the reply is a ``?`` refusal.
+        """
+        if not reply.startswith("?"):
+            return
+        log.error("ILM 210: refused command %r (reply %r)", cmd, reply)
+        raise CryoSoftInstrumentError(
+            f"ILM 210 refused command {cmd!r}: replied {reply!r}. An ISOBUS "
+            f"'?' reply means the instrument did not carry the command out "
+            f"(unknown command, unfitted channel, or wrong control mode).",
+            code="?",
+            instrument_message=reply,
+            context=f"_execute({cmd!r})",
+            vi_name="OxfordILM210",
+        )

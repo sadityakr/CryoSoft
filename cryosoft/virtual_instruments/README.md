@@ -52,13 +52,39 @@ a `drivers` dict of role → driver instance (e.g. `{"main": ...}`,
   `stop_ramp` generator API the Orchestrator drives each tick, plus the
   optional **ramp-introspection standard** — `ramp_value()` /
   `ramp_setpoint()` / `ramp_target()` / `ramp_rate()` / `ramp_phase()`, each
-  with a safe `None` default. Implementing them is what puts a VI on the
+  with a safe `None` default — and its declaration-only sibling
+  `nominal_ramp_rate()`: the rate a ramp from rest WOULD use, in the same
+  user units per minute, read from config with no bus traffic and no active
+  ramp, so a **duration estimate** can be computed before any run exists
+  (`Station.nominal_ramp_rates()` aggregates it; a VI whose rate varies along
+  the ramp reports its slowest, so the estimate is never optimistic). Implementing them is what puts a VI on the
   Monitor window's Ramps sub-panel (current value, next setpoint, end
   setpoint, rate) and into the operational-status record; no GUI or
   Orchestrator code changes for a new rampable VI. `ramp_setpoint()` in
   particular must be a pure accessor over what the generator last commanded
   — never a hardware read — and must be cleared in `stop_ramp()` alongside
   the target.
+- `lifecycle_state()` — what this instrument is DOING, as a fact rather than
+  a history: `"idle"`, `"initiated"` or `"standby"` (the contract's
+  `LifecycleState` vocabulary, `core/events.py`). The **lifecycle-state
+  standard** (full text in `BaseVirtualInstrument`'s docstring; GLOSSARY.md's
+  **Lifecycle state**) in three rules, none of which a VI author writes
+  anything to obey: (1) *the verbs own the fact* — `initiate()` records
+  `"initiated"`, `standby()` records `"standby"`, `disconnect()` resets to
+  `"idle"`, and a measurement VI's `initiate_measurement()` records
+  `"initiated"` exactly like the plain verb, each only AFTER the call returns
+  without raising, maintained by the same `__init_subclass__` wrap the
+  standby-provenance standard uses; (2) *the read is pure* — `lifecycle_state()`
+  answers from the cached value and sends nothing on the bus, because
+  `Station.lifecycle_states()` reads it for every VI on every status snapshot;
+  (3) *hardware may correct it* — a VI whose instrument reports what it is
+  doing overrides `observe_lifecycle_state()`, which the monitor cycle
+  consults once per poll off the values it already read, refreshing the cache
+  without becoming the read. This is what an instrument card renders, so an
+  emergency's blanket `Station.standby_all()` — which emits no per-VI action —
+  still reaches the operator's card on the next snapshot. Distinct from
+  `standby_status()` below, which answers the narrower hold-enforcement
+  question from command provenance.
 - `standby_status()` — whether this VI is at the safe idle state its own
   `standby()` drives it to (`"reached"`), on its way there
   (`"converging"`), or neither (`"away"`). Derived entirely from command
@@ -93,6 +119,20 @@ Read this before adding or "hiding" a control — the split trips people up:
   `control_param_specs(method_name)` to inject a ParamSpec with `choices` —
   the GUI consults the hook, not the raw decorator metadata
   (`SwitchMatrixVI.select_route` is the reference example).
+- **The purity rule** binds every such override: `control_param_specs()` is
+  a PURE READ of config and cached state and must send no command to any
+  driver. It is a *describe* path — the front panel calls it on every
+  render, and `Station.station_info()` calls it to build the station
+  declaration snapshot, which must work for an offline instrument — and the
+  Orchestrator is the sole writer to hardware, so a read issued here would
+  sit outside the one tick loop that serialises bus access. An override that
+  wants a widget defaulted to the instrument's current setting reads it with
+  `last_monitored(name, fallback)`, the monitor cycle's cache
+  (`Lakeshore335SampleTemperatureControllerVI` is the reference example);
+  the fallback covers the not-yet-polled case, and a `ParamSpec` default
+  must be one of its own `choices`, so the fallback must be too.
+  `tests/test_conformance.py` builds the whole station declaration against
+  spied drivers and fails on any call this path makes.
 
 ## Interface contract
 The written standards all live in this root and are enforced by
@@ -125,10 +165,36 @@ The written standards all live in this root and are enforced by
   release branch in `standby()` to get this — see
   `virtual_instruments/measurement/README.md`'s "Externally configured
   instruments" section for the motivating case.
+- The lifecycle-state standard (see "Exit" above and
+  `BaseVirtualInstrument`'s docstring): `lifecycle_state()` returns one of the
+  contract's `LifecycleState` values, a freshly built VI reads `"idle"`, and
+  `initiate()`/`standby()` move it. Machine-checked over every VI of every sim
+  config by `test_vi_lifecycle_state_is_declared_and_follows_the_verbs` and
+  `test_vi_lifecycle_state_is_a_pure_read` (the latter watches the drivers, so
+  a read that polled fails).
 - A `vi_type` class attribute (`system` / `measurement` / `level` / `switch`).
 - The control-validation standard: bounded `@control` parameters declared in
   `control_limits`, limit values populated from `init_params`, enforced by the
-  base class before the hardware call.
+  base class before the hardware call. Coverage is machine-checked, not
+  optional: every numeric (`float`/`int`) `@control` parameter of every VI
+  must appear in `control_limits` or in `test_conformance.py`'s
+  `CONTROL_LIMIT_EXEMPTIONS` with a one-line physical reason a range cannot
+  bound it (an enumerated mode code, a dimensionless count, a dwell time, a
+  compliance ceiling that is itself protective). A stale exemption — one whose
+  parameter has since gained a limit, been renamed or been deleted — fails
+  too, so the list stays as short as honesty allows.
+  `BaseVirtualInstrument.limit_bounds(limit_name)` is the standard's public
+  READ side: how the Station reports what a setup allows (for an experiment's
+  envelope to narrow) without reaching into `_limits`.
+- The excitation ceiling: every VI that drives current through the sample
+  reads `max_source_current_A` from its config `init_params` — directly (the
+  DC and delta-mode VIs bound the sourced current to ±that value, symmetric
+  because current reversal is routine) or derived (the voltage-sourced lock-in
+  bounds its oscillator amplitude by `max_source_current_A ×
+  series_resistance_ohm`). `base._populate_excitation_current_limit()` is the
+  one place the key becomes a bound. Every SHIPPED config must declare it —
+  conformance-checked per config, real setups included — because the ceiling
+  is a property of the sample wiring, not of the code.
 - The capability-scope standard: `@control` (bare, or `@control(scope=...)`)
   carries a scope — `"measurement"` (default, usable by any plan) or
   `"operation"` (usable only by an operation's plan; a human in IDLE can still
@@ -144,6 +210,30 @@ The written standards all live in this root and are enforced by
 - The control-declaration standard: `params=` ParamSpecs must match the
   method signature exactly (checked at import) and agree with its type
   annotations (conformance-checked); `panel=` must be a bool.
+- The **declaration standard**: a VI describes its whole capability surface
+  on the decorators, because the same declaration feeds the GUI, the
+  tooltips and the capability manifest an agent reads. Every `@monitored`
+  method declares `unit=` (the SI unit of the value it returns — `""` only
+  for a genuinely dimensionless, boolean or string reading, and never
+  omitted) and `description=` (one sentence). Every `@control` method that
+  takes parameters declares a `params=` ParamSpec for each of them. A
+  measurement VI gets both of its parameter-bearing controls for free: the
+  base class installs `measurement_parameters` as `initiate_measurement`'s
+  specs, and the matching single spec on each `reading_setters` setter, so
+  the arming control renders the same drop-downs and units the procedure
+  form does (an explicit `params=` still wins). Conformance-checked by
+  `test_capability_manifest_is_complete`, which has no exemption list.
+- The **UI-group standard** (GLOSSARY.md's **UI group**; full text in
+  `BaseVirtualInstrument`'s docstring): a VI may declare
+  `ui_groups: ClassVar[tuple[UIGroup, ...]]`, each `UIGroup` a `key`,
+  `title`, optional `description` and an explicit ordered `members` tuple of
+  its own `@monitored`/`@control` method names; a method may carry the
+  matching `group="key"` tag. Declared order is render and manifest order.
+  Groups are presentation and description ONLY — nothing about a group
+  crosses the action queue, and a group implies no atomicity. Validated at
+  class creation: unique keys, every member a real capability of the class,
+  every tag naming a declared group, tag and membership agreeing; each
+  failure raises at import naming the class and the method.
 - Measurement VIs additionally obey the self-describing measurement-method
   standard (`measurement_parameters` / `measurement_data_keys` /
   `measurement_scalar_columns` plus the `data_arrays` /
@@ -157,12 +247,17 @@ The written standards all live in this root and are enforced by
    `LevelMeterBase`, `RotatorBase`, `MeasurementInstrumentBase` /
    `DCMeasurementBase`, or `BaseVirtualInstrument` directly for a switch),
    adding `RampableVI` if it ramps.
-3. Tag reads `@monitored` and actions `@control`; declare `control_limits` for any
-   bounded parameter and read the value from `init_params`. Give each control
-   its GUI metadata: `params={name: ParamSpec}` for typed widgets (unit,
-   bounds, choices, tooltips) and `panel=False` for anything that belongs in
-   the front panel rather than the compact card (see "GUI presentation"
-   above).
+3. Tag reads `@monitored(unit=..., description=...)` and actions `@control`;
+   declare `control_limits` for any bounded parameter and read the value from
+   `init_params` (a numeric control with no limit fails conformance unless
+   you write down why a range cannot bound it). Give each control its GUI
+   metadata: `params={name: ParamSpec}` for typed widgets (unit, bounds,
+   choices, tooltips) and `panel=False` for anything that belongs in the
+   front panel rather than the compact card (see "GUI presentation" above).
+   Where several capabilities form one workflow (a heater's mode, output and
+   PID; a measurement's arming and its per-reading setter), declare a
+   `UIGroup` in `ui_groups` naming them in `members` and tag each with
+   `group=`.
 4. Register the VI in a config `devices.yaml`; add behaviour tests to the
    subfolder's test file. Conformance covers the contract automatically.
 
@@ -173,12 +268,20 @@ Shared contracts at the root; concrete classes live in the subfolders.
   `TemperatureControllerBase`, `LevelMeterBase`, `RotatorBase`,
   `MeasurementInstrumentBase`, `DCMeasurementBase`. Provides `__init_subclass__` auto-wrapping of
   `@monitored`/`@control` (structured logging + declarative limit enforcement),
-  `get_state()`, `evaluate_safety()`/`safety_flags`/`merged_safety_flags()`/
+  `get_state()` (which also fills the monitor-cycle cache `last_monitored()`
+  serves), `control_limit_bounds()` (the read side of the control-validation
+  standard, resolving `control_limits` against the config-populated bounds so
+  a caller that must REPORT limits never reaches into `self._limits`),
+  `evaluate_safety()`/`safety_flags`/`merged_safety_flags()`/
   `safety_concerns()` (the System-Condition standard's producer/consumer
   declarations — GLOSSARY.md's **Safety-flag manifest** / **Safety concern**
   / **Safety hold** / **Critical safety flag**), the full
   measurement-method standard in
-  `MeasurementInstrumentBase`'s docstring, and `standby_status()` — the
+  `MeasurementInstrumentBase`'s docstring (whose `__init_subclass__` also
+  installs `measurement_parameters` as the declared `params=` of
+  `initiate_measurement` and of each `reading_setters` setter), the
+  UI-group standard's `ui_groups` declaration and its class-creation
+  validation, and `standby_status()` — the
   command-provenance accessor answering "reached" / "converging" / "away"
   for whether a VI is at, heading to, or away from its own `standby()`'s
   safe idle state, maintained automatically by the same `__init_subclass__`

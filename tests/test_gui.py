@@ -1,14 +1,31 @@
 """GUI smoke tests — Layer 6.
 
 These tests use pytest-qt (qtbot fixture). They run against the sim_cryostat
-config with no hardware. All 121 prior tests must pass before this file is run.
+config with no hardware.
+
+They run in BOTH instrument modes. The shared fixtures build the engine
+through an ``InstrumentHost`` whose mode comes from
+``CRYOSOFT_INSTRUMENT_THREAD`` (``tests/instrument_modes.py``), and the
+``orchestrator`` fixture hands the windows an ``OrchestratorProxy`` — which is
+what ``main.py`` hands them — so the same 190-odd assertions hold with the
+engine on this thread and with it on its own:
+
+    pytest tests/test_gui.py
+    CRYOSOFT_INSTRUMENT_THREAD=1 pytest tests/test_gui.py
+
+A test that reaches past the client boundary — forcing a state, setting a
+private the engine only writes inside a tick — goes through the **tick
+helper** family (``on_engine()``, ``set_on_engine()``, ``tick_engine()``)
+rather than touching the engine from this thread.
 """
 
+import gc
 import logging
 from pathlib import Path
 
 import pytest
-from PyQt6.QtCore import Qt, QSettings
+from PyQt6 import sip
+from PyQt6.QtCore import Qt, QEvent, QSettings
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -38,6 +55,7 @@ from cryosoft.core.station import build_station
 from cryosoft.gui import app_settings as _app_settings
 from cryosoft.gui import form_autosave as session_store
 from cryosoft.gui import window_geometry
+from cryosoft.gui.instrument_front_panel import InstrumentFrontPanel
 from cryosoft.gui.instrument_panel import InstrumentPanel
 from cryosoft.gui.monitor_window import MonitorWindow
 from cryosoft.gui.diagnostics_window import DiagnosticsWindow
@@ -51,7 +69,17 @@ from cryosoft.gui.theme import (
     build_stylesheet,
 )
 from cryosoft.gui.trend_plot_panel import TrendPlotPanel
+from cryosoft.gui import widget_lifecycle
 from cryosoft.virtual_instruments.base import BaseVirtualInstrument
+from tests.instrument_modes import (
+    build_host,
+    engine_of,
+    on_engine,
+    set_on_engine,
+    settled,
+    shutdown_host,
+    ticks_paused,
+)
 
 
 CONFIG_PATH = "cryosoft/configs/sim_cryostat"
@@ -97,24 +125,40 @@ def isolated_settings(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def station():
-    """Real simulated station from sim_cryostat config."""
-    return build_station(CONFIG_PATH)
+def instrument_host(qtbot):
+    """A started host over the sim station, in this session's instrument mode.
+
+    The one place the mode enters this suite: ``inline`` builds the stack on
+    the test's own thread, ``threaded`` builds it inside a ``QThread``, and
+    every fixture below is written so nothing else in the file can tell.
+
+    The teardown stops the tick timer and cuts the engine's connections
+    before qtbot destroys the widget tree — a tick or a queued delivery
+    landing in a half-destroyed tree is the historical source of the rare
+    RuntimeError/segfault flakes.
+    """
+    host = build_host(CONFIG_PATH, tick_interval_ms=50)
+    yield host
+    shutdown_host(host)
 
 
 @pytest.fixture
-def orchestrator(station, qtbot):
-    """Orchestrator with a short tick for fast tests.
+def station(instrument_host):
+    """The simulated station the host built."""
+    return instrument_host.station
 
-    Monitoring stays OFF (the production launch state): GUI tests drive
-    updates by emitting Orchestrator signals directly, so they need no real
-    polling ticks. The teardown stops the tick timer entirely, so a tick can
-    never fire into the half-destroyed widget tree while qtbot tears the
-    windows down (the historical source of rare RuntimeError/segfault flakes).
+
+@pytest.fixture
+def orchestrator(instrument_host):
+    """The client adapter the windows are handed, as ``main.py`` hands it.
+
+    An ``OrchestratorProxy``: one typed method per command, the engine's
+    signals re-exposed, and every read answered from the status mirror.
+    Monitoring stays OFF (the production launch state) — these tests drive
+    updates by emitting the proxy's signals directly, so they need no real
+    polling ticks.
     """
-    orch = Orchestrator(station, tick_interval_ms=50)
-    yield orch
-    orch.shutdown()
+    return instrument_host.build_proxy()
 
 
 @pytest.fixture
@@ -154,6 +198,65 @@ def procedure_win(station, orchestrator, qtbot):
     return win
 
 
+def _publish_state(orchestrator, state):
+    """Publish one station-state snapshot the way a real tick does.
+
+    A tick refreshes the client's status mirror and THEN emits
+    ``states_updated``; a test that emits only the latter leaves every
+    mirror read (fault rows, availability tags) answering from the previous
+    tick. Order matters — the panels read the mirror inside their
+    ``states_updated`` slot.
+
+    Args:
+        orchestrator: The engine to publish from.
+        state: The ``{vi_name: {field: value}}`` snapshot to emit.
+    """
+    engine = engine_of(orchestrator)
+    on_engine(orchestrator, engine._emit_status_snapshot)
+    orchestrator.states_updated.emit(state)
+
+
+def _mock_mirror(orchestrator, vi_name, vi):
+    """A status mirror whose declaration names one ad-hoc mock VI.
+
+    The panels build from the station declaration, so a test VI that is not
+    in the sim config needs one declared for it. Built by the same machinery
+    production uses — an in-process `Station` with the VI registered — so the
+    test exercises the real rendering path rather than a hand-written
+    `InstrumentInfo`.
+
+    Args:
+        orchestrator: The engine the mirror otherwise mirrors.
+        vi_name: The name to declare the VI under.
+        vi: The mock VI instance.
+
+    Returns:
+        The primed StatusMirror.
+    """
+    from cryosoft.core.station import Station
+    from cryosoft.core.status_mirror import StatusMirror
+
+    declaring = Station()
+    declaring.register_vi(vi_name, vi, "measurement")
+    engine = engine_of(orchestrator)
+    # The priming reads happen where the engine is; the mirror itself is
+    # built here, so its own connections deliver on this thread.
+    mirror = StatusMirror()
+    mirror.prime(
+        *on_engine(
+            orchestrator,
+            lambda: (
+                engine.station_info(),
+                engine.status_snapshot(),
+                engine.get_operational_status(),
+            ),
+        )
+    )
+    mirror.attach(engine)
+    mirror.prime(station_info=declaring.station_info())
+    return mirror
+
+
 # ── MonitorWindow tests ───────────────────────────────────────────────────────
 
 def test_monitor_window_has_global_buttons(monitor_win):
@@ -178,7 +281,7 @@ def test_instrument_panel_creates_value_labels(station, orchestrator, qtbot):
 
     vi_name = "magnet_z"
     vi = station._virtual_instruments[vi_name]
-    panel = InstrumentPanel(vi_name, vi, orchestrator)
+    panel = InstrumentPanel(vi_name, orchestrator)
     qtbot.addWidget(panel)
 
     monitored = get_monitored_methods(vi)
@@ -193,7 +296,7 @@ def test_instrument_panel_creates_control_buttons(station, orchestrator, qtbot):
 
     vi_name = "magnet_z"
     vi = station._virtual_instruments[vi_name]
-    panel = InstrumentPanel(vi_name, vi, orchestrator)
+    panel = InstrumentPanel(vi_name, orchestrator)
     qtbot.addWidget(panel)
 
     controls = get_control_methods(vi)
@@ -205,8 +308,7 @@ def test_instrument_panel_creates_control_buttons(station, orchestrator, qtbot):
 def test_instrument_panel_lifecycle_buttons_exist(station, orchestrator, qtbot):
     """InstrumentPanel has a single lifecycle toggle button (Initiate/Standby)."""
     vi_name = "temperature_vti"
-    vi = station._virtual_instruments[vi_name]
-    panel = InstrumentPanel(vi_name, vi, orchestrator)
+    panel = InstrumentPanel(vi_name, orchestrator)
     qtbot.addWidget(panel)
 
     assert panel.findChild(QPushButton, f"{vi_name}_lifecycle_btn") is not None
@@ -214,11 +316,82 @@ def test_instrument_panel_lifecycle_buttons_exist(station, orchestrator, qtbot):
     assert panel.findChild(QPushButton, f"{vi_name}_standby_btn") is None
 
 
+# ── The lifecycle toggle renders the snapshot (the lifecycle-state standard;
+#    GLOSSARY.md's Lifecycle state) ─────────────────────────────────────────
+
+
+def _publish_snapshot(orchestrator):
+    """Emit one status snapshot from the engine and let it reach this thread."""
+    engine = engine_of(orchestrator)
+    on_engine(orchestrator, engine._emit_status_snapshot)
+
+
+def test_a_card_renders_the_lifecycle_state_the_snapshot_carries(
+    monitor_win, station, orchestrator, qtbot
+):
+    """The toggle follows the engine, including a stand-down nobody clicked.
+
+    ``standby_all()`` is the path an emergency takes: it bypasses the per-VI
+    action queue and emits no ``action_succeeded``, so the only thing that
+    can reach the card is the lifecycle state on the snapshot.
+    """
+    panel = next(p for p in monitor_win._panels if p.vi_name == "magnet_z")
+    assert panel._lifecycle.is_initiated() is False
+
+    on_engine(orchestrator, station.initiate_all)
+    _publish_snapshot(orchestrator)
+    assert panel._lifecycle.is_initiated() is True
+
+    on_engine(orchestrator, station.standby_all)
+    _publish_snapshot(orchestrator)
+    assert panel._lifecycle.is_initiated() is False
+
+
+def test_the_next_snapshot_corrects_an_optimistic_lifecycle_flip(
+    monitor_win, station, orchestrator, qtbot
+):
+    """``_on_action_succeeded()`` may flip early; it no longer owns the truth."""
+    panel = next(p for p in monitor_win._panels if p.vi_name == "magnet_z")
+    panel._lifecycle.set_initiated(True)  # as the optimistic flip would
+    assert panel._lifecycle.is_initiated() is True
+
+    _publish_snapshot(orchestrator)
+    assert panel._lifecycle.is_initiated() is False, (
+        "the snapshot says magnet_z is idle, so the card must stop claiming "
+        "it is initiated"
+    )
+
+
+def test_a_card_opens_showing_an_already_initiated_instrument(
+    station, orchestrator, qtbot
+):
+    """A card built mid-experiment starts on the truth, not on 'Initiate'."""
+    on_engine(orchestrator, station.initiate_all)
+    _publish_snapshot(orchestrator)
+
+    panel = InstrumentPanel("magnet_z", orchestrator)
+    qtbot.addWidget(panel)
+
+    assert panel._lifecycle.is_initiated() is True
+
+
+def test_the_front_panels_toggle_follows_the_snapshot_too(
+    station, orchestrator, qtbot
+):
+    """The front panel's embedded card cannot disagree with the monitor card."""
+    win = InstrumentFrontPanel("magnet_z", orchestrator)
+    qtbot.addWidget(win)
+    assert win._panel._lifecycle.is_initiated() is False
+
+    on_engine(orchestrator, station.initiate_all)
+    _publish_snapshot(orchestrator)
+    assert win._panel._lifecycle.is_initiated() is True
+
+
 def test_instrument_panel_updates_values_on_signal(station, orchestrator, qtbot):
     """states_updated signal → value labels reflect new state."""
     vi_name = "magnet_z"
-    vi = station._virtual_instruments[vi_name]
-    panel = InstrumentPanel(vi_name, vi, orchestrator)
+    panel = InstrumentPanel(vi_name, orchestrator)
     qtbot.addWidget(panel)
 
     # Emit a fake state with known field value
@@ -236,8 +409,7 @@ def test_instrument_panel_updates_values_on_signal(station, orchestrator, qtbot)
 def test_instrument_panel_stale_border(station, orchestrator, qtbot):
     """Stale state sets the 'stale' status property (amber border via QSS)."""
     vi_name = "magnet_z"
-    vi = station._virtual_instruments[vi_name]
-    panel = InstrumentPanel(vi_name, vi, orchestrator)
+    panel = InstrumentPanel(vi_name, orchestrator)
     qtbot.addWidget(panel)
 
     orchestrator.states_updated.emit({vi_name: {"_stale": True}})
@@ -248,8 +420,7 @@ def test_instrument_panel_stale_border(station, orchestrator, qtbot):
 def test_instrument_panel_disconnected_border(station, orchestrator, qtbot):
     """Disconnected state sets the 'disconnected' status property (red border via QSS)."""
     vi_name = "magnet_z"
-    vi = station._virtual_instruments[vi_name]
-    panel = InstrumentPanel(vi_name, vi, orchestrator)
+    panel = InstrumentPanel(vi_name, orchestrator)
     qtbot.addWidget(panel)
 
     orchestrator.states_updated.emit({vi_name: {"_stale": True, "_disconnected": True}})
@@ -263,8 +434,7 @@ def test_instrument_panel_disconnected_border(station, orchestrator, qtbot):
 def test_instrument_panel_status_resets_to_ok(station, orchestrator, qtbot):
     """A stale panel returns to 'ok' status (plain title) when state is healthy again."""
     vi_name = "magnet_z"
-    vi = station._virtual_instruments[vi_name]
-    panel = InstrumentPanel(vi_name, vi, orchestrator)
+    panel = InstrumentPanel(vi_name, orchestrator)
     qtbot.addWidget(panel)
 
     orchestrator.states_updated.emit({vi_name: {"_stale": True}})
@@ -284,7 +454,7 @@ def test_instrument_panel_fault_row_disables_controls_and_wires_ack_retry(
     """
     vi_name = "magnet_z"
     vi = station._virtual_instruments[vi_name]
-    panel = InstrumentPanel(vi_name, vi, orchestrator)
+    panel = InstrumentPanel(vi_name, orchestrator)
     qtbot.addWidget(panel)
     panel.show()
     assert not panel._fault_row.isVisible()
@@ -296,7 +466,7 @@ def test_instrument_panel_fault_row_disables_controls_and_wires_ack_retry(
     # states_updated payload) so Orchestrator.vi_faults() actually reports it.
     vi._driver._simulate_error = True
     state = station.get_state()
-    orchestrator.states_updated.emit(state)
+    _publish_state(orchestrator, state)
 
     assert panel._fault_row.isVisible()
     for btn in panel._control_buttons.values():
@@ -307,10 +477,11 @@ def test_instrument_panel_fault_row_disables_controls_and_wires_ack_retry(
     assert retry_btn is not None
 
     ack_btn.click()
+    settled(orchestrator)
     assert station.vi_faults()[vi_name].acknowledged is True
     # Re-emit the same tick's snapshot: the Acknowledge button reflects the
     # now-acknowledged fault (disabled — nothing left to acknowledge).
-    orchestrator.states_updated.emit(state)
+    _publish_state(orchestrator, state)
     assert not ack_btn.isEnabled()
 
     # Retry while still broken: action_failed, fault stands (still faulted).
@@ -325,7 +496,7 @@ def test_instrument_panel_fault_row_disables_controls_and_wires_ack_retry(
         retry_btn.click()
     assert vi_name not in station.vi_faults()
     state = station.get_state()
-    orchestrator.states_updated.emit(state)
+    _publish_state(orchestrator, state)
     assert not panel._fault_row.isVisible()
     for btn in panel._control_buttons.values():
         assert btn.isEnabled()
@@ -409,7 +580,7 @@ def test_instrument_panel_retry_button_rebuilds_a_disconnected_instrument(
     try:
         vi_name = "toggle_vi"
         original_driver = station.get_vi(vi_name)._drivers["main"]
-        panel = InstrumentPanel(vi_name, station.get_vi(vi_name), orch)
+        panel = InstrumentPanel(vi_name, orch)
         qtbot.addWidget(panel)
         panel.show()
         assert not panel._fault_row.isVisible()
@@ -419,7 +590,7 @@ def test_instrument_panel_retry_button_rebuilds_a_disconnected_instrument(
         _ToggleableFaultDriver.broken = True
         for _ in range(3):
             state = station.get_state()
-            orch.states_updated.emit(state)
+            _publish_state(orch, state)
         assert station.vi_faults()[vi_name].kind == "disconnected"
         assert panel._fault_row.isVisible()
         for btn in panel._control_buttons.values():
@@ -446,7 +617,7 @@ def test_instrument_panel_retry_button_rebuilds_a_disconnected_instrument(
         assert station.get_vi(vi_name)._drivers["main"] is not original_driver
 
         state = station.get_state()
-        orch.states_updated.emit(state)
+        _publish_state(orch, state)
         assert not panel._fault_row.isVisible()
         for btn in panel._control_buttons.values():
             assert btn.isEnabled()
@@ -467,14 +638,14 @@ def test_instrument_panel_retry_button_blocked_while_run_claims_the_instrument(
     try:
         vi_name = "toggle_vi"
         original_driver = station.get_vi(vi_name)._drivers["main"]
-        panel = InstrumentPanel(vi_name, station.get_vi(vi_name), orch)
+        panel = InstrumentPanel(vi_name, orch)
         qtbot.addWidget(panel)
         panel.show()
 
         _ToggleableFaultDriver.broken = True
         for _ in range(3):
             state = station.get_state()
-            orch.states_updated.emit(state)
+            _publish_state(orch, state)
         assert station.vi_faults()[vi_name].kind == "disconnected"
 
         _ToggleableFaultDriver.broken = False  # hardware IS fixed now...
@@ -516,7 +687,7 @@ def test_monitor_window_banner_shows_and_clears_vi_fault_warning(
 
     vi._driver._simulate_error = False
     station.get_state()  # clears the Station-side fault record
-    orchestrator.states_updated.emit(state)  # MonitorWindow polls vi_faults() here
+    _publish_state(orchestrator, state)  # MonitorWindow polls vi_faults() here
     assert not monitor_win._banner.isVisible()
 
 
@@ -548,7 +719,7 @@ class _SpecControlVI(BaseVirtualInstrument):
 def spec_panel(orchestrator, qtbot):
     """InstrumentPanel over the spec-declaring mock VI, plus a submit spy."""
     vi = _SpecControlVI({})
-    panel = InstrumentPanel("mock_vi", vi, orchestrator)
+    panel = InstrumentPanel("mock_vi", orchestrator, _mock_mirror(orchestrator, "mock_vi", vi))
     qtbot.addWidget(panel)
     submitted: list[tuple] = []
     orchestrator.submit_vi_action = lambda vi_name, method, **kw: submitted.append(
@@ -603,6 +774,61 @@ def test_spec_controls_emptied_field_falls_back_to_method_default(spec_panel):
     assert "target_K" not in submitted[0][2]
 
 
+# ── Arming controls render from measurement_parameters ───────────────────────
+# initiate_measurement takes its parameters via **params, so the panel can only
+# type its widgets from the specs MeasurementInstrumentBase installs on it from
+# measurement_parameters. These pin that one declaration reaching the front
+# panel: a bare arming control rendered seven untyped text boxes.
+
+
+@pytest.fixture
+def delta_front_panel(station, orchestrator, qtbot):
+    """InstrumentFrontPanel over the sim station's delta-mode measurement VI."""
+    vi_name = "keithley_delta_mode"
+    panel = InstrumentFrontPanel(vi_name, orchestrator)
+    qtbot.addWidget(panel)
+    return vi_name, panel
+
+
+def test_arming_control_renders_typed_widgets(delta_front_panel):
+    """The arming control's declared choices and bools become combos/checkboxes."""
+    vi_name, panel = delta_front_panel
+    prefix = f"{vi_name}_initiate_measurement"
+    assert isinstance(
+        panel.findChild(QWidget, f"{prefix}_voltmeter_range_V_input"), QComboBox
+    )
+    assert isinstance(
+        panel.findChild(QWidget, f"{prefix}_compliance_abort_input"), QCheckBox
+    )
+    assert isinstance(panel.findChild(QWidget, f"{prefix}_current_input"), QLineEdit)
+
+
+def test_arming_control_labels_carry_units(delta_front_panel):
+    """Every arming parameter with a unit is labelled with it."""
+    _, panel = delta_front_panel
+    labels = {lbl.text() for lbl in panel.findChildren(QLabel)}
+    assert "current (A):" in labels
+    assert "compliance_V (V):" in labels
+    assert "delay_s (s):" in labels
+
+
+def test_arming_control_fields_carry_descriptions(delta_front_panel):
+    """The declared description reaches the widget tooltip, not just the schema."""
+    vi_name, panel = delta_front_panel
+    field = panel.findChild(
+        QWidget, f"{vi_name}_initiate_measurement_current_input"
+    )
+    assert field.toolTip().strip()
+
+
+def test_reading_setter_renders_its_single_spec(delta_front_panel):
+    """A reading_setters setter inherits the one measurement_parameters spec."""
+    vi_name, panel = delta_front_panel
+    field = panel.findChild(QWidget, f"{vi_name}_set_delta_current_current_input")
+    assert isinstance(field, QLineEdit)
+    assert field.toolTip().strip()
+
+
 def test_spec_controls_unparseable_value_aborts_submit(spec_panel, monkeypatch):
     """A non-numeric entry in a float field warns and submits nothing."""
     from PyQt6.QtWidgets import QMessageBox
@@ -635,7 +861,9 @@ class _PanelFlagVI(BaseVirtualInstrument):
 
 def test_panel_false_control_hidden_by_default(orchestrator, qtbot):
     """Without a config allowlist, panel=False controls stay off the card."""
-    panel = InstrumentPanel("mock_vi", _PanelFlagVI({}), orchestrator)
+    panel = InstrumentPanel(
+        "mock_vi", orchestrator, _mock_mirror(orchestrator, "mock_vi", _PanelFlagVI({}))
+    )
     qtbot.addWidget(panel)
     assert panel.findChild(QPushButton, "mock_vi_set_temperature_btn") is not None
     assert panel.findChild(QPushButton, "mock_vi_set_heater_power_btn") is None
@@ -644,8 +872,9 @@ def test_panel_false_control_hidden_by_default(orchestrator, qtbot):
 def test_config_allowlist_overrides_panel_defaults(orchestrator, qtbot):
     """A panels: allowlist wins in both directions: it can surface a
     panel=False control and hide a panel=True one."""
+    vi = _PanelFlagVI({})
     panel = InstrumentPanel(
-        "mock_vi", _PanelFlagVI({}), orchestrator,
+        "mock_vi", orchestrator, _mock_mirror(orchestrator, "mock_vi", vi),
         panel_controls=["set_heater_power"],
     )
     qtbot.addWidget(panel)
@@ -689,7 +918,9 @@ def test_multi_param_control_stacks_in_one_column(orchestrator, qtbot):
                 e: float = 5, f: float = 6, g: float = 7):
             pass
 
-    panel = InstrumentPanel("mock_vi", _SevenParamVI({}), orchestrator)
+    panel = InstrumentPanel(
+        "mock_vi", orchestrator, _mock_mirror(orchestrator, "mock_vi", _SevenParamVI({}))
+    )
     qtbot.addWidget(panel)
     grid = _control_grid(panel, "mock_vi", "arm")
     assert grid is not None, "7-param control must stack, not render inline"
@@ -709,7 +940,9 @@ def test_many_param_control_uses_two_columns(orchestrator, qtbot):
                 p9: float = 1, p10: float = 1, p11: float = 1):
             pass
 
-    panel = InstrumentPanel("mock_vi", _ElevenParamVI({}), orchestrator)
+    panel = InstrumentPanel(
+        "mock_vi", orchestrator, _mock_mirror(orchestrator, "mock_vi", _ElevenParamVI({}))
+    )
     qtbot.addWidget(panel)
     grid = _control_grid(panel, "mock_vi", "arm")
     assert grid is not None
@@ -719,7 +952,9 @@ def test_many_param_control_uses_two_columns(orchestrator, qtbot):
 
 def test_two_param_control_stays_inline(orchestrator, qtbot):
     """Up to two parameters keep the compact inline row (no grid)."""
-    panel = InstrumentPanel("mock_vi", _PanelFlagVI({}), orchestrator)
+    panel = InstrumentPanel(
+        "mock_vi", orchestrator, _mock_mirror(orchestrator, "mock_vi", _PanelFlagVI({}))
+    )
     qtbot.addWidget(panel)
     assert _control_grid(panel, "mock_vi", "set_temperature") is None
 
@@ -728,7 +963,7 @@ def test_switch_select_route_renders_route_dropdown(station, orchestrator, qtbot
     """select_route's route renders as a drop-down of the config's route names
     (via the control_param_specs instance hook), and submits the chosen name."""
     vi = station._virtual_instruments["switch_matrix"]
-    panel = InstrumentPanel("switch_matrix", vi, orchestrator)
+    panel = InstrumentPanel("switch_matrix", orchestrator)
     qtbot.addWidget(panel)
 
     combo = panel.findChild(QComboBox, "switch_matrix_select_route_route_input")
@@ -750,7 +985,9 @@ def test_switch_select_route_renders_route_dropdown(station, orchestrator, qtbot
 def test_front_panel_button_opens_full_control_surface(orchestrator, qtbot):
     """The card's sliders icon opens a window showing every control —
     including panel=False ones the card hides — and reuses it on re-click."""
-    card = InstrumentPanel("mock_vi", _PanelFlagVI({}), orchestrator)
+    card = InstrumentPanel(
+        "mock_vi", orchestrator, _mock_mirror(orchestrator, "mock_vi", _PanelFlagVI({}))
+    )
     qtbot.addWidget(card)
 
     fp_btn = card.findChild(QPushButton, "mock_vi_front_panel_btn")
@@ -775,8 +1012,9 @@ def test_front_panel_button_opens_full_control_surface(orchestrator, qtbot):
 def test_front_panel_ignores_config_allowlist(orchestrator, qtbot):
     """A monitor.yaml allowlist trims only the card; the front panel opened
     from that card still shows everything."""
+    vi = _PanelFlagVI({})
     card = InstrumentPanel(
-        "mock_vi", _PanelFlagVI({}), orchestrator,
+        "mock_vi", orchestrator, _mock_mirror(orchestrator, "mock_vi", vi),
         panel_controls=["set_temperature"],
     )
     qtbot.addWidget(card)
@@ -791,8 +1029,7 @@ def test_instrument_panel_status_not_restyled_when_unchanged(
 ):
     """The status property is only re-set when it changes, not on every tick."""
     vi_name = "magnet_z"
-    vi = station._virtual_instruments[vi_name]
-    panel = InstrumentPanel(vi_name, vi, orchestrator)
+    panel = InstrumentPanel(vi_name, orchestrator)
     qtbot.addWidget(panel)
 
     status_sets: list[object] = []
@@ -1367,14 +1604,18 @@ def monitor_win_session(station, orchestrator, session_manager, qtbot):
 class _FakeStartDialog:
     """Stand-in for StartExperimentDialog that auto-accepts fixed values."""
 
-    def __init__(self, values: tuple[str, str, bool, str | None]) -> None:
+    def __init__(self, values: tuple[str, str, bool, str | None], envelope=None) -> None:
         self._values = values
+        self._envelope = envelope
 
     def exec(self):
         return QDialog.DialogCode.Accepted
 
     def result_values(self):
         return self._values
+
+    def envelope(self):
+        return self._envelope
 
 
 class _FakeCloseDialog:
@@ -1390,14 +1631,18 @@ class _FakeCloseDialog:
         return self._findings_text
 
 
-def _stub_start_dialog(monkeypatch, title, user_id, attended=True, dirname=None):
+def _stub_start_dialog(
+    monkeypatch, title, user_id, attended=True, dirname=None, envelope=None
+):
     """Replace StartExperimentDialog with a fake that auto-accepts ``values``."""
     from cryosoft.gui import experiment_info_panel as sip
 
     monkeypatch.setattr(
         sip,
         "StartExperimentDialog",
-        lambda roster, parent=None: _FakeStartDialog((title, user_id, attended, dirname)),
+        lambda roster, parent=None, envelope_variables=None: _FakeStartDialog(
+            (title, user_id, attended, dirname), envelope
+        ),
     )
 
 
@@ -1594,6 +1839,203 @@ def test_start_experiment_with_invalid_dirname_shows_warning_and_stays_closed(
 
     assert warned
     assert session_manager.current_experiment() is None
+
+
+# ── The envelope editor (Start Experiment dialog) ────────────────────────────
+
+
+def _envelope_variables_dict(station):
+    """The sim station's envelope variables in the DICT form a client sees.
+
+    The editor is fed what crossed the client boundary — the JSON-safe
+    rendering a ``StatusSnapshot`` carries — never the engine's typed
+    ``EnvelopeVariable``, which no client ever holds.
+    """
+    import dataclasses
+
+    return {
+        name: dataclasses.asdict(variable)
+        for name, variable in station.envelope_variables().items()
+    }
+
+
+def _envelope_dialog(qtbot, tmp_path, station):
+    """A Start Experiment dialog carrying the sim station's envelope editor."""
+    from cryosoft.gui.experiment_dialogs import StartExperimentDialog
+
+    dialog = StartExperimentDialog(
+        _start_dialog_roster(tmp_path),
+        envelope_variables=_envelope_variables_dict(station),
+    )
+    qtbot.addWidget(dialog)
+    dialog._title_input.setText("Hall bar A3")
+    return dialog
+
+
+def test_envelope_editor_is_prefilled_from_the_config_limits(qtbot, tmp_path, station):
+    """Every enveloped quantity starts at the setup's own bounds, not blank."""
+    dialog = _envelope_dialog(qtbot, tmp_path, station)
+    editor = dialog._envelope_editor
+
+    assert editor is not None
+    magnet_min, magnet_max = editor._rows["magnet_z"]
+    lo, hi = station.get_vi("magnet_z").limit_bounds("field_T")
+    assert (float(magnet_min.text()), float(magnet_max.text())) == (lo, hi)
+    assert "magnet_z" in dialog.envelope().bounds
+
+
+def test_envelope_editor_absent_without_variables(qtbot, tmp_path):
+    """A dialog built with no station (a unit test, say) carries no editor."""
+    from cryosoft.gui.experiment_dialogs import StartExperimentDialog
+
+    dialog = StartExperimentDialog(_start_dialog_roster(tmp_path))
+    qtbot.addWidget(dialog)
+
+    assert dialog._envelope_editor is None
+    assert dialog.envelope() is None
+
+
+def test_envelope_editor_narrowed_bounds_reach_the_envelope(qtbot, tmp_path, station):
+    """A narrowed field becomes the experiment's bound on that VI."""
+    dialog = _envelope_dialog(qtbot, tmp_path, station)
+    dialog._envelope_editor._rows["magnet_z"][1].setText("2")
+
+    bound = dialog.envelope().bounds["magnet_z"]
+    assert bound.max_value == 2.0
+    assert bound.violation(3.0) is not None
+
+
+def test_envelope_editor_refuses_to_widen_the_setup_limit(qtbot, tmp_path, station):
+    """An envelope narrows the config's limits; it may never widen them."""
+    dialog = _envelope_dialog(qtbot, tmp_path, station)
+    _lo, hi = station.get_vi("magnet_z").limit_bounds("field_T")
+    dialog._envelope_editor._rows["magnet_z"][1].setText(f"{hi + 1:g}")
+
+    assert "narrows the setup's limits" in dialog._envelope_editor.error()
+    # isHidden(), not isVisible(): the dialog itself is never shown in tests.
+    assert not dialog._envelope_editor._error_label.isHidden()
+    assert not dialog._ok_button.isEnabled(), "OK must not accept a widened envelope"
+
+
+def test_envelope_editor_refuses_a_non_numeric_bound(qtbot, tmp_path, station):
+    """Junk in a field is named as such rather than silently dropped."""
+    dialog = _envelope_dialog(qtbot, tmp_path, station)
+    dialog._envelope_editor._rows["magnet_z"][0].setText("cold")
+
+    assert "is not a number" in dialog._envelope_editor.error()
+    assert not dialog._ok_button.isEnabled()
+
+
+def test_envelope_editor_can_be_switched_off(qtbot, tmp_path, station):
+    """Unticking the box means no envelope at all, and re-enables OK."""
+    dialog = _envelope_dialog(qtbot, tmp_path, station)
+    dialog._envelope_editor._rows["magnet_z"][0].setText("cold")
+    dialog._envelope_editor._enabled_checkbox.setChecked(False)
+
+    assert dialog.envelope() is None
+    assert dialog._envelope_editor.error() == ""
+    assert dialog._ok_button.isEnabled()
+
+
+def test_envelope_editor_blank_fields_mean_unbounded(qtbot, tmp_path, station):
+    """A VI with both fields cleared contributes no bound."""
+    dialog = _envelope_dialog(qtbot, tmp_path, station)
+    for edit in dialog._envelope_editor._rows["magnet_z"]:
+        edit.setText("")
+
+    assert "magnet_z" not in dialog.envelope().bounds
+
+
+def test_started_experiment_installs_the_dialog_envelope(
+    monitor_win_session, session_manager, orchestrator, monkeypatch
+):
+    """The envelope the dialog returns is installed on the Orchestrator."""
+    from cryosoft.core.plan import EnvelopeBound, ExperimentEnvelope
+
+    envelope = ExperimentEnvelope(
+        bounds={"magnet_z": EnvelopeBound(min_value=-0.5, max_value=0.5)}
+    )
+    _stub_start_dialog(monkeypatch, "Hall bar A3", "jdoe", envelope=envelope)
+    monitor_win_session._session_info._start_close_btn.click()
+
+    assert session_manager.current_experiment() is not None
+    settled(orchestrator)  # the envelope command has to land before the action
+    blocked = []
+    orchestrator.action_blocked.connect(blocked.append)
+    orchestrator.submit_vi_action("magnet_z", "set_field", target_T=2.0)
+    settled(orchestrator)
+    assert blocked and "session envelope" in blocked[0]
+
+
+def test_start_dialog_is_offered_the_setups_envelope_variables(
+    monitor_win_session, session_manager, monkeypatch
+):
+    """The panel hands the dialog the setup's bounds, not an empty editor."""
+    seen: list[dict] = []
+
+    from cryosoft.gui import experiment_info_panel as sip
+
+    def _capture(roster, parent=None, envelope_variables=None):
+        seen.append(envelope_variables)
+        return _FakeStartDialog(("Hall bar A3", "jdoe", True, None))
+
+    monkeypatch.setattr(sip, "StartExperimentDialog", _capture)
+    monitor_win_session._session_info._start_close_btn.click()
+
+    assert seen and "magnet_z" in seen[0]
+    # What the panel hands on is what the CLIENT's mirror answers — the
+    # JSON-safe dict form of each envelope variable, not the typed record the
+    # engine holds. This suite asserts the production shape because the panel
+    # is now given the proxy the application gives it.
+    assert seen[0]["magnet_z"]["param_name"] == "target_T"
+
+
+def test_start_dialog_opens_with_a_populated_envelope_editor(
+    monitor_win_session, session_manager, qtbot
+):
+    """The real dialog builds on the production dict form and is pre-filled.
+
+    The regression this guards: the manager answers the mirror's JSON dict
+    form, and an editor doing attribute access on it crashed the Start
+    Experiment dialog for every setup with an enveloped quantity. This opens
+    the real dialog on the sim station, through the manager the window holds.
+    """
+    from cryosoft.gui.experiment_dialogs import StartExperimentDialog
+
+    dialog = StartExperimentDialog(
+        session_manager.roster,
+        envelope_variables=session_manager.envelope_variables(),
+    )
+    qtbot.addWidget(dialog)
+    editor = dialog._envelope_editor
+
+    assert editor is not None, "the sim setup declares an enveloped quantity"
+    assert "magnet_z" in editor._rows
+    lo, hi = monitor_win_session._station.get_vi("magnet_z").limit_bounds("field_T")
+    magnet_min, magnet_max = editor._rows["magnet_z"]
+    assert (float(magnet_min.text()), float(magnet_max.text())) == (lo, hi)
+    # The unit label is derived from the setpoint parameter's own name, which
+    # is a property the dict form cannot carry.
+    assert editor._variables["magnet_z"].unit_suffix == "T"
+    assert "magnet_z" in dialog.envelope().bounds
+
+
+def test_envelope_editor_shows_an_envelope_already_in_force(qtbot, tmp_path, station):
+    """set_bounds() replaces the setup defaults with the stored envelope."""
+    from cryosoft.gui.experiment_dialogs import EnvelopeEditorWidget
+
+    editor = EnvelopeEditorWidget(_envelope_variables_dict(station))
+    qtbot.addWidget(editor)
+    editor.set_bounds({"magnet_z": {"min_value": -1.0, "max_value": 1.5}})
+
+    magnet_min, magnet_max = editor._rows["magnet_z"]
+    assert (magnet_min.text(), magnet_max.text()) == ("-1", "1.5")
+    bound = editor.envelope().bounds["magnet_z"]
+    assert (bound.min_value, bound.max_value) == (-1.0, 1.5)
+
+    editor.set_bounds(None)
+    assert editor.envelope() is None
+    assert float(magnet_max.text()) == station.get_vi("magnet_z").limit_bounds("field_T")[1]
 
 
 # ── Setup tier: login and instrument info (User / Config menus) ───────────────
@@ -2196,7 +2638,14 @@ def test_ack_button_visible_when_window_opened_after_emergency_already_active(
     without an explicit sync at construction time the button stayed hidden
     — the operator had no way to acknowledge from a freshly opened window.
     """
-    orchestrator._state = OrchestratorState.EMERGENCY  # simulate a pre-existing emergency
+    # Forced through the tick helper: `orchestrator` is the client adapter,
+    # so a bare assignment would set an attribute on the proxy and change
+    # nothing at all — and the engine may be on its own thread. The snapshot
+    # that follows is what carries the forced state into the client's mirror,
+    # which is what a window opened afterwards reads.
+    engine = engine_of(orchestrator)
+    set_on_engine(orchestrator, "_state", OrchestratorState.EMERGENCY)
+    on_engine(orchestrator, engine._emit_status_snapshot)
 
     win = MonitorWindow(station, orchestrator)
     qtbot.addWidget(win)
@@ -2219,13 +2668,15 @@ def test_hold_banner_shows_message_and_dismisses_on_clear(monitor_win, orchestra
 
     Regression test: previously the ACK button appeared alone with no
     explanation on the banner above it (see _refresh_hold_banner()). Stubs
-    the Orchestrator's public API (held_vi_names / get_operational_status)
-    rather than reaching into the Station's private condition registry.
+    the window's own read surface — the status mirror (held_vi_names /
+    get_operational_status) — rather than reaching into the Station's private
+    condition registry.
     """
+    mirror = monitor_win._mirror
     held = {"magnet_y", "magnet_z"}
-    monkeypatch.setattr(orchestrator, "held_vi_names", lambda: frozenset(held))
+    monkeypatch.setattr(mirror, "held_vi_names", lambda: frozenset(held))
     monkeypatch.setattr(
-        orchestrator,
+        mirror,
         "get_operational_status",
         lambda: {
             "conditions": [
@@ -2253,8 +2704,8 @@ def test_hold_banner_shows_message_and_dismisses_on_clear(monitor_win, orchestra
 
     # Clearing the hold condition dismisses the banner it owns.
     held.clear()
-    monkeypatch.setattr(orchestrator, "held_vi_names", lambda: frozenset())
-    monkeypatch.setattr(orchestrator, "get_operational_status", lambda: {"conditions": []})
+    monkeypatch.setattr(mirror, "held_vi_names", lambda: frozenset())
+    monkeypatch.setattr(mirror, "get_operational_status", lambda: {"conditions": []})
 
     monitor_win._refresh_ack_controls()
 
@@ -2275,6 +2726,9 @@ def test_add_to_queue_appends_item(procedure_win, qtbot):
         procedure_win.findChild(QPushButton, "add_to_queue_btn"),
         __import__("PyQt6.QtCore", fromlist=["Qt"]).Qt.MouseButton.LeftButton,
     )
+    # The panel is a VIEW of the queue: what redraws it is the QueueChanged
+    # the engine broadcasts, so the round trip has to complete first.
+    settled(procedure_win._orchestrator)
     assert procedure_win._queue_panel._queue_list.count() == initial_count + 1
 
 
@@ -2288,8 +2742,9 @@ def test_add_to_queue_captures_current_file_prefix(procedure_win, qtbot):
 
     procedure_win._params_panel._file_prefix_input.setText("run_b")
     qtbot.mouseClick(add_btn, Qt.MouseButton.LeftButton)
+    settled(procedure_win._orchestrator)
 
-    prefixes = [entry.file_prefix for entry in procedure_win._queue_panel._queue]
+    prefixes = [entry.spec.file_prefix for entry in procedure_win._queue_panel._queue]
     assert prefixes[-2:] == ["run_a", "run_b"]
     assert "run_a" in procedure_win._queue_panel._queue_list.item(len(prefixes) - 2).text()
     assert "run_b" in procedure_win._queue_panel._queue_list.item(len(prefixes) - 1).text()
@@ -2302,11 +2757,119 @@ def test_blank_file_prefix_omitted_from_queue_label(procedure_win, qtbot):
 
     procedure_win._params_panel._file_prefix_input.setText("")
     qtbot.mouseClick(add_btn, Qt.MouseButton.LeftButton)
+    settled(procedure_win._orchestrator)
 
     entry = procedure_win._queue_panel._queue[-1]
-    assert entry.file_prefix == ""
+    assert entry.spec.file_prefix == ""
     assert "[" not in procedure_win._queue_panel._queue_list.item(procedure_win._queue_panel._queue_list.count() - 1).text()
-    assert entry.cls.name in procedure_win._queue_panel._queue_list.item(procedure_win._queue_panel._queue_list.count() - 1).text()
+    queued_cls = procedure_win._queue_panel._classes[entry.spec.run_class]
+    assert queued_cls.name in procedure_win._queue_panel._queue_list.item(procedure_win._queue_panel._queue_list.count() - 1).text()
+
+
+def test_probe_first_queues_a_reduced_run_ahead_of_the_item(procedure_win, qtbot):
+    """A probe of the selected run goes in FRONT of it, validated like any run."""
+    from cryosoft.gui.queue_panel import DEFAULT_PROBE_SPEC
+
+    panel = procedure_win._queue_panel
+    procedure_win._on_add_to_queue()
+    settled(procedure_win._orchestrator)
+    queued = panel._host.snapshot()[-1]
+    panel._select_spec(queued.spec_id)
+
+    procedure_win.findChild(QPushButton, "queue_probe_btn").click()
+    settled(procedure_win._orchestrator)
+
+    order = panel._host.snapshot()
+    assert [spec.probe_spec != {} for spec in order[-2:]] == [True, False], (
+        "the probe comes first — that is the whole point of probing"
+    )
+    probe = order[-2]
+    assert probe.run_class == queued.run_class and probe.params == queued.params
+    assert probe.probe_spec == DEFAULT_PROBE_SPEC.to_json()
+
+    row = panel._queue_list.item(panel._queue_list.count() - 2)
+    assert "probe" in row.text(), "a probe is never science data and says so"
+    assert "probe" in row.toolTip()
+    assert panel._probe_label.isVisible()
+    assert "probe" in panel._probe_label.text()
+
+
+def test_a_probe_row_says_so_once(procedure_win):
+    """The label names the probe once — a prefix that already says it is enough."""
+    import dataclasses
+
+    from cryosoft.gui.queue_panel import QueueEntry
+
+    panel = procedure_win._queue_panel
+    procedure_win._on_add_to_queue()
+    settled(procedure_win._orchestrator)
+    queued = panel._host.snapshot()[-1]
+    reduction = {"n_points": 3, "averaging": 1, "max_wait_s": 5.0}
+    prefixed = dataclasses.replace(
+        queued, file_prefix="probe", probe_spec=reduction, spec_id="p1"
+    )
+    plain = dataclasses.replace(
+        queued, file_prefix="", probe_spec=reduction, spec_id="p2"
+    )
+
+    assert panel._entry_summary(QueueEntry(spec=prefixed)).count("probe") == 1
+    assert "(probe)" in panel._entry_summary(QueueEntry(spec=plain))
+
+
+def test_probe_first_shows_the_estimate_and_the_findings(procedure_win, qtbot):
+    """The caveats travel with the probe: inline, and on the row's tooltip."""
+    panel = procedure_win._queue_panel
+    procedure_win._on_add_to_queue()
+    settled(procedure_win._orchestrator)
+    panel._select_spec(panel._host.snapshot()[-1].spec_id)
+
+    procedure_win.findChild(QPushButton, "queue_probe_btn").click()
+    settled(procedure_win._orchestrator)
+
+    note = panel._probe_label.text()
+    probe = panel._host.snapshot()[-2]
+    assert panel._spec_notes[probe.spec_id] == note
+    # An estimate is never shown bare: it is qualified by what it assumed.
+    if "≈" in note:
+        assert "assuming" in note
+
+
+def test_probe_first_does_nothing_without_a_selected_waiting_row(procedure_win):
+    """Nothing selected, nothing queued — the action is per-row."""
+    panel = procedure_win._queue_panel
+    procedure_win._on_add_to_queue()
+    settled(procedure_win._orchestrator)
+    before = len(panel._host.snapshot())
+    panel._queue_list.setCurrentRow(-1)
+
+    procedure_win.findChild(QPushButton, "queue_probe_btn").click()
+    settled(procedure_win._orchestrator)
+
+    assert len(panel._host.snapshot()) == before
+    assert not panel._probe_label.isVisible()
+
+
+def test_probe_first_refuses_an_operation_row(procedure_win, monkeypatch):
+    """An operation is a servicing action, not a measurement to reduce."""
+    from cryosoft.session.run_queue import KIND_OPERATION, RunSpec
+
+    panel = procedure_win._queue_panel
+    spec = panel._host.add_spec(
+        RunSpec(kind=KIND_OPERATION, run_class="HeliumFillOperation", params={})
+    )
+    settled(procedure_win._orchestrator)
+    panel._sync_from_queue()
+    panel._select_spec(spec.spec_id)
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox, "warning", lambda *args, **kwargs: warnings.append(args[2])
+    )
+
+    procedure_win.findChild(QPushButton, "queue_probe_btn").click()
+    settled(procedure_win._orchestrator)
+
+    assert warnings and "operation" in warnings[0]
+    assert len(panel._host.snapshot()) == 1, "nothing was queued"
 
 
 def test_run_now_passes_file_prefix_to_procedure_instance(procedure_win, qtbot):
@@ -2458,6 +3021,7 @@ def test_monitor_switch_card_has_scanner_toggle_and_live_route(monitor_win, stat
     assert chk is not None
     assert chk.isChecked() is False
     chk.setChecked(True)
+    settled(orchestrator)
     assert monitor_win._orchestrator.scanner_enabled() is True
     chk.setChecked(False)
 
@@ -2646,11 +3210,12 @@ class _StubOperation:
 def test_status_log_stays_empty_while_operation_runs(procedure_win, orchestrator):
     """_emit_status() routes to operation_status, never status_message, for an operation run."""
     status_log = procedure_win.findChild(QTextEdit, "status_log")
-    orchestrator._procedure = _StubOperation()
+    engine = engine_of(orchestrator)
+    set_on_engine(orchestrator, "_procedure", _StubOperation())
     try:
-        orchestrator._emit_status("Ramping magnet_z to 0 T")
+        on_engine(orchestrator, lambda: engine._emit_status("Ramping magnet_z to 0 T"))
     finally:
-        orchestrator._procedure = None
+        set_on_engine(orchestrator, "_procedure", None)
     assert status_log.toPlainText() == ""
 
 
@@ -2658,11 +3223,16 @@ def test_abort_button_does_not_act_while_operation_runs(procedure_win, orchestra
     """The Abort button no-ops (no confirmation dialog, no abort_procedure()) for an operation."""
     called = []
     monkeypatch.setattr(orchestrator, "abort_procedure", lambda: called.append(True))
-    orchestrator._procedure = _StubOperation()
+    engine = engine_of(orchestrator)
+    set_on_engine(orchestrator, "_procedure", _StubOperation())
+    # The window reads the run kind off its mirror, so the snapshot has to
+    # have crossed back before the click.
+    on_engine(orchestrator, engine._emit_status_snapshot)
     try:
         procedure_win._on_abort()
     finally:
-        orchestrator._procedure = None
+        set_on_engine(orchestrator, "_procedure", None)
+        on_engine(orchestrator, engine._emit_status_snapshot)
     assert called == []
 
 
@@ -2672,12 +3242,15 @@ def test_pause_resume_do_not_act_while_operation_runs(procedure_win, orchestrato
     resume_calls = []
     monkeypatch.setattr(orchestrator, "pause_procedure", lambda: pause_calls.append(True))
     monkeypatch.setattr(orchestrator, "resume_procedure", lambda: resume_calls.append(True))
-    orchestrator._procedure = _StubOperation()
+    engine = engine_of(orchestrator)
+    set_on_engine(orchestrator, "_procedure", _StubOperation())
+    on_engine(orchestrator, engine._emit_status_snapshot)
     try:
         procedure_win._on_pause_clicked()
         procedure_win._on_resume_clicked()
     finally:
-        orchestrator._procedure = None
+        set_on_engine(orchestrator, "_procedure", None)
+        on_engine(orchestrator, engine._emit_status_snapshot)
     assert pause_calls == []
     assert resume_calls == []
 
@@ -2752,8 +3325,14 @@ def test_closing_window_aborts_active_run(monitor_win, orchestrator):
     active, with nothing to send the abort/standby commands. closeEvent()
     must now call abort_procedure() whenever state is not already IDLE.
     """
-    orchestrator._state = OrchestratorState.SWEEPING
+    # Through _change_state, not a bare assignment: the window reads state
+    # off its status mirror, which is fed by the engine's event stream.
+    engine = engine_of(orchestrator)
+    on_engine(
+        orchestrator, lambda: engine._change_state(OrchestratorState.SWEEPING)
+    )
     monitor_win.close()
+    settled(orchestrator)
     assert orchestrator.state == OrchestratorState.IDLE.value
 
 
@@ -2852,8 +3431,7 @@ def test_procedure_error_signal_drives_banner(procedure_win, orchestrator):
 def test_instrument_panel_has_no_action_blocked_handler(station, orchestrator, qtbot):
     """The per-panel modal warning handler was removed (banner replaces it)."""
     vi_name = "magnet_z"
-    vi = station._virtual_instruments[vi_name]
-    panel = InstrumentPanel(vi_name, vi, orchestrator)
+    panel = InstrumentPanel(vi_name, orchestrator)
     qtbot.addWidget(panel)
     assert not hasattr(panel, "_on_action_blocked")
 
@@ -3017,11 +3595,12 @@ def test_procedure_window_restores_selection_and_params(station, orchestrator, q
 
 
 def test_procedure_window_exports_and_restores_queue(station, orchestrator, qtbot):
-    """A queued procedure round-trips through a session and is re-armed on restore."""
+    """A queued run round-trips through a session and is re-queued on restore."""
     info, ddir = _sample_stub(), _data_dir_stub()
     win = ProcedureWindow(station, orchestrator, info, ddir)
     qtbot.addWidget(win)
     win._on_add_to_queue()
+    settled(orchestrator)
     assert win._queue_panel._queue_list.count() == 1, "default form params should be valid to queue"
 
     state = session_store.FormAutosaveState()
@@ -3030,8 +3609,10 @@ def test_procedure_window_exports_and_restores_queue(station, orchestrator, qtbo
 
     win2 = ProcedureWindow(station, orchestrator, info, ddir, initial_session=state)
     qtbot.addWidget(win2)
+    settled(orchestrator)
     assert win2._queue_panel._queue_list.count() == 1
-    assert len(orchestrator._procedure_queue) == 1
+    # The queue is data in the session layer, not procedures in the engine.
+    assert len(win2._queue_panel._host.snapshot()) == 1
 
 
 def test_procedure_window_skips_unknown_procedure_in_queue(station, orchestrator, qtbot):
@@ -3052,19 +3633,23 @@ def test_run_queue_marks_running_then_done(station, orchestrator, qtbot, monkeyp
     qtbot.addWidget(win)
     win._on_add_to_queue()
     win._on_add_to_queue()
+    settled(orchestrator)
     assert [e.status for e in win._queue_panel._queue] == ["pending", "pending"]
 
     # Stub the actual run: exercise only the GUI's per-item status logic.
     monkeypatch.setattr(orchestrator, "run_queue", lambda: None)
     win._queue_panel._on_run_queue()
+    settled(orchestrator)
     assert win._queue_panel._queue[0].status == "running"
     assert win._queue_panel._queue_running is True
 
     orchestrator.procedure_finished.emit()
+    settled(orchestrator)
     assert win._queue_panel._queue[0].status == "done"
     assert win._queue_panel._queue[1].status == "running"
 
     orchestrator.procedure_finished.emit()
+    settled(orchestrator)
     assert win._queue_panel._queue[1].status == "done"
     assert win._queue_panel._queue_running is False
 
@@ -3076,31 +3661,111 @@ def test_abort_marks_running_item_failed(station, orchestrator, qtbot, monkeypat
     qtbot.addWidget(win)
     win._on_add_to_queue()
     win._on_add_to_queue()
+    settled(orchestrator)
     monkeypatch.setattr(orchestrator, "run_queue", lambda: None)
     monkeypatch.setattr(orchestrator, "abort_procedure", lambda: None)
     win._queue_panel._on_run_queue()
+    settled(orchestrator)
     assert win._queue_panel._queue[0].status == "running"
 
     monkeypatch.setattr(
         QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes
     )
     win._on_abort()
+    settled(orchestrator)
     assert win._queue_panel._queue[0].status == "failed"
     assert win._queue_panel._queue[1].status == "running"
 
 
-def test_queue_remove_resyncs_orchestrator(station, orchestrator, qtbot):
-    """Removing a pending queue item keeps the Orchestrator queue in sync."""
+def test_queue_holds_specs_not_procedures(station, orchestrator, qtbot):
+    """Nothing waiting in the queue holds a live procedure object."""
+    info, ddir = _sample_stub(), _data_dir_stub()
+    win = ProcedureWindow(station, orchestrator, info, ddir)
+    qtbot.addWidget(win)
+    win._on_add_to_queue()
+    settled(orchestrator)
+
+    entry = win._queue_panel._queue[0]
+    assert not hasattr(entry, "proc")
+    assert entry.spec.run_class in win._queue_panel._classes
+    assert entry.spec.actor.id == "operator"
+
+
+def test_an_out_of_bounds_run_is_refused_when_it_is_queued(
+    station, orchestrator, qtbot, monkeypatch
+):
+    """Validation happens at add time, with the findings on screen."""
+    info, ddir = _sample_stub(), _data_dir_stub()
+    win = ProcedureWindow(station, orchestrator, info, ddir)
+    qtbot.addWidget(win)
+    shown: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox, "warning", lambda parent, title, text, *a, **k: shown.append(text)
+    )
+    end_input = win.findChild(QLineEdit, "sweep_field_end_input")
+    assert end_input is not None, "the field sweep renders a sweep-axis widget"
+    end_input.setText("50")
+
+    win._on_add_to_queue()
+
+    assert win._queue_panel._queue_list.count() == 0
+    assert shown and "magnet_z" in shown[0]
+    assert win._queue_panel._host.snapshot() == ()
+
+
+def test_the_panel_renders_a_run_queued_by_someone_else(station, orchestrator, qtbot):
+    """The panel is a view: a QueueChanged it did not cause still updates it."""
+    info, ddir = _sample_stub(), _data_dir_stub()
+    win = ProcedureWindow(station, orchestrator, info, ddir)
+    qtbot.addWidget(win)
+    cls = win._params_panel.current_class()
+
+    params, sample_info, data_dir, _prefix = win._collect_params()
+    win._queue_panel._host.add(
+        cls, params, sample_info=sample_info, data_directory=data_dir
+    )
+    settled(orchestrator)
+
+    assert win._queue_panel._queue_list.count() == 1
+
+
+def test_reordering_moves_the_spec_in_the_run_queue(station, orchestrator, qtbot):
+    """Up/down reorder the queue itself, not a GUI-only copy of it."""
+    info, ddir = _sample_stub(), _data_dir_stub()
+    win = ProcedureWindow(station, orchestrator, info, ddir)
+    qtbot.addWidget(win)
+    win._params_panel._file_prefix_input.setText("first")
+    win._on_add_to_queue()
+    win._params_panel._file_prefix_input.setText("second")
+    win._on_add_to_queue()
+    settled(orchestrator)
+
+    win._queue_panel._queue_list.setCurrentRow(1)
+    win._queue_panel._queue_move_up()
+    settled(orchestrator)
+
+    assert [
+        spec.file_prefix for spec in win._queue_panel._host.snapshot()
+    ] == ["second", "first"]
+    assert win._queue_panel._queue_list.currentRow() == 0
+
+
+def test_queue_remove_drops_the_spec_from_the_run_queue(station, orchestrator, qtbot):
+    """Removing a pending row removes the spec itself — there is one queue now."""
     info, ddir = _sample_stub(), _data_dir_stub()
     win = ProcedureWindow(station, orchestrator, info, ddir)
     qtbot.addWidget(win)
     win._on_add_to_queue()
     win._on_add_to_queue()
-    assert len(orchestrator._procedure_queue) == 2
+    settled(orchestrator)
+    assert len(win._queue_panel._host.snapshot()) == 2
+    removed = win._queue_panel._queue[0].spec.spec_id
     win._queue_panel._queue_list.setCurrentRow(0)
     win._queue_panel._queue_remove()
+    settled(orchestrator)
     assert win._queue_panel._queue_list.count() == 1
-    assert len(orchestrator._procedure_queue) == 1
+    assert [s.spec_id for s in win._queue_panel._host.snapshot()] != [removed]
+    assert len(win._queue_panel._host.snapshot()) == 1
 
 
 # ── Config management + geometry tests ─────────────────────────────────────────
@@ -3221,11 +3886,13 @@ def test_monitoring_button_starts_and_stops_monitoring(monitor_win, orchestrator
     assert btn.text() == "Start Monitoring"
 
     btn.click()
+    settled(orchestrator)
     assert orchestrator.is_monitoring() is True
     assert btn.isChecked()
     assert btn.text() == "Stop Monitoring"
 
     btn.click()  # IDLE, so the stop is allowed
+    settled(orchestrator)
     assert orchestrator.is_monitoring() is False
     assert btn.text() == "Start Monitoring"
 
@@ -3234,23 +3901,29 @@ def test_monitoring_button_mirrors_orchestrator_state(monitor_win, orchestrator)
     """Starting monitoring on the Orchestrator directly updates the toggle."""
     btn = monitor_win.findChild(QPushButton, "monitoring_btn")
     orchestrator.start_monitoring()
+    settled(orchestrator)
     assert btn.isChecked()
     assert btn.text() == "Stop Monitoring"
 
 
-def test_monitoring_button_snaps_back_when_stop_refused(monitor_win, orchestrator):
+def test_monitoring_button_snaps_back_when_stop_refused(
+    monitor_win, orchestrator, qtbot
+):
     """A refused stop (non-IDLE state) re-syncs the button and warns via banner."""
     btn = monitor_win.findChild(QPushButton, "monitoring_btn")
     orchestrator.start_monitoring()
-    # Force a non-IDLE state so stop_monitoring() is refused.
-    orchestrator._state = OrchestratorState.RAMPING
+    qtbot.waitUntil(lambda: btn.isChecked(), timeout=2000)
 
-    btn.click()  # attempt to stop
-
-    assert orchestrator.is_monitoring() is True
-    assert btn.isChecked(), "button must snap back to the confirmed state"
-    assert monitor_win._banner.isVisible()
-    orchestrator._state = OrchestratorState.IDLE
+    # Force a non-IDLE state so stop_monitoring() is refused — with the tick
+    # held, since the very next tick would put the state machine back in IDLE
+    # and the refusal would never happen.
+    with ticks_paused(orchestrator):
+        set_on_engine(orchestrator, "_state", OrchestratorState.RAMPING)
+        btn.click()  # attempt to stop
+        qtbot.waitUntil(lambda: monitor_win._banner.isVisible(), timeout=2000)
+        assert orchestrator.is_monitoring() is True
+        assert btn.isChecked(), "button must snap back to the confirmed state"
+        set_on_engine(orchestrator, "_state", OrchestratorState.IDLE)
 
 
 # ── DiagnosticsWindow tests ─────────────────────────────────────────────────────────
@@ -3341,8 +4014,14 @@ def test_diagnostics_window_seeds_from_existing_status(orchestrator, qtbot):
     # A raw signal emit does not update Orchestrator's stored record — only a
     # real tick does that (_update_operational_status). Setting the private
     # field directly is the same forcing pattern other GUI tests use for
-    # Orchestrator internals (e.g. `orchestrator._state = ...`).
-    orchestrator._operational_status = _STALLED_RECORD
+    # Orchestrator internals (e.g. `set_on_engine(orchestrator, "_state", ...)`),
+    # and the emit that follows is what carries it into the client's mirror,
+    # which is what a window opened later actually reads.
+    engine = engine_of(orchestrator)
+    set_on_engine(orchestrator, "_operational_status", _STALLED_RECORD)
+    on_engine(
+        orchestrator, lambda: engine.operational_status.emit(dict(_STALLED_RECORD))
+    )
     win = DiagnosticsWindow(orchestrator)
     qtbot.addWidget(win)
     win.show()
@@ -3662,11 +4341,18 @@ def test_connect_click_swaps_the_offline_card_back(qtbot):
         orch.shutdown()
 
 
-def test_disconnect_is_blocked_while_a_run_is_active(qtbot):
-    """The refusal reaches the operator through the banner, not a dialog."""
+def test_disconnect_is_blocked_for_a_vi_the_running_run_claims(qtbot):
+    """The refusal reaches the operator through the banner, not a dialog.
+
+    Disconnect is gated by the claim, not by the state (see
+    ``Orchestrator.disconnect_instrument()``), so the card that gets the
+    refusal is the one the active run owns.
+    """
     station, orch, win = _sim_monitor(qtbot)
     try:
         orch._state = OrchestratorState.MEASURING
+        orch._procedure = object()  # any non-None value marks a run active
+        orch._active_claims = {"magnet_z"}
         win.findChild(QGroupBox, "magnet_z_panel").findChild(
             QPushButton, "magnet_z_disconnect_btn"
         ).click()
@@ -3676,4 +4362,137 @@ def test_disconnect_is_blocked_while_a_run_is_active(qtbot):
         assert "magnet_z" in win._banner._label.text()
     finally:
         orch._state = OrchestratorState.IDLE
+        orch._procedure = None
+        orch._active_claims = None
+        orch.shutdown()
+
+
+def test_disconnect_mid_run_swaps_the_card_for_a_vi_the_run_does_not_claim(qtbot):
+    """An unclaimed instrument stays the operator's to release, run or no run.
+
+    The GUI half of the claim gate: the card swaps to its offline form
+    exactly as it does at IDLE, and the run carries on.
+    """
+    station, orch, win = _sim_monitor(qtbot)
+    try:
+        orch._state = OrchestratorState.MEASURING
+        orch._procedure = object()
+        orch._active_claims = {"magnet_z"}
+        win.findChild(QGroupBox, "level_meter_panel").findChild(
+            QPushButton, "level_meter_disconnect_btn"
+        ).click()
+
+        assert station.has_vi("level_meter") is False
+        assert win.findChild(QGroupBox, "level_meter_offline_card") is not None
+        assert station.has_vi("magnet_z") is True
+    finally:
+        orch._state = OrchestratorState.IDLE
+        orch._procedure = None
+        orch._active_claims = None
+        orch.shutdown()
+
+
+# ── Widget-lifetime standards: window liveness + card retirement ─────────────
+# See cryosoft/gui/widget_lifecycle.py. A shown window whose creator kept no
+# reference used to be destroyed by whichever generational garbage-collection
+# pass happened to reach it — including one triggered by an allocation inside
+# that same window's paintEvent, which destroyed the paint device mid-paint and
+# segfaulted the process on a half-freed pyqtgraph scene.
+
+
+def _build_and_forget_a_monitor_window() -> None:
+    """Show a MonitorWindow while deliberately keeping no reference to it.
+
+    The station, the Orchestrator and the window are all locals here, so once
+    this returns the only thing that can keep the still-shown window alive is
+    the window-liveness hold it takes on itself. The Orchestrator is shut down
+    before returning so no tick outlives these locals either.
+    """
+    station = build_station(CONFIG_PATH)
+    orch = Orchestrator(station, tick_interval_ms=50)
+    win = MonitorWindow(station, orch)
+    win.show()
+    orch.shutdown()
+
+
+def test_a_shown_window_survives_a_collection_that_frees_its_creator(qtbot):
+    """A shown window outlives a GC pass that finds no other reference to it."""
+    _build_and_forget_a_monitor_window()
+
+    gc.collect()
+
+    shown = [
+        w
+        for w in QApplication.topLevelWidgets()
+        if isinstance(w, MonitorWindow) and w.isVisible()
+    ]
+    assert shown, "a shown window must not be garbage-collected"
+    win = shown[-1]
+    qtbot.addWidget(win)
+    plot = win.findChild(QWidget, "trend_plot_trend_0")
+    assert plot is not None
+
+    # The paint that used to run into a freed AxisItem and segfault.
+    QApplication.processEvents()
+
+    assert not sip.isdeleted(plot)
+    assert plot.isVisible()
+    win.close()
+    assert not any(w is win for w in widget_lifecycle.held_windows())
+
+
+def test_closing_a_window_releases_its_liveness_hold(qtbot):
+    """The hold is not a leak: closing the window drops it again."""
+    station, orch, win = _sim_monitor(qtbot)
+    try:
+        assert any(w is win for w in widget_lifecycle.held_windows())
+
+        win.close()
+
+        assert not any(w is win for w in widget_lifecycle.held_windows())
+    finally:
+        orch.shutdown()
+
+
+def test_repeated_card_swaps_retire_every_replaced_card(qtbot):
+    """Twenty Disconnect/Connect round trips leave nothing painting behind.
+
+    The card-retirement standard end to end: every replaced card is hidden and
+    out of the instrument grid before its deferred delete, the grid never grows
+    a slot, and every retired card is really destroyed once the deferred
+    deletes are delivered.
+    """
+    station, orch, win = _sim_monitor(qtbot)
+    try:
+        grid = win._instruments_grid
+        slots = grid.count()
+        retired = []
+
+        for _ in range(20):
+            live = next(p for p in win._panels if p.vi_name == "magnet_z")
+            live.findChild(QPushButton, "magnet_z_disconnect_btn").click()
+            QApplication.processEvents()
+            assert live.isHidden()
+            assert grid.indexOf(live) == -1
+            assert grid.count() == slots
+            retired.append(live)
+
+            offline = win._offline_cards["magnet_z"]
+            offline.findChild(QPushButton, "magnet_z_connect_btn").click()
+            QApplication.processEvents()
+            assert offline.isHidden()
+            assert grid.indexOf(offline) == -1
+            assert grid.count() == slots
+            retired.append(offline)
+
+        assert station.has_vi("magnet_z") is True
+        assert win._offline_cards == {}
+        assert sum(p.vi_name == "magnet_z" for p in win._panels) == 1
+
+        # deleteLater() is deferred, and pytest-qt never runs an event loop
+        # that would deliver it, so ask for those events explicitly: every
+        # retired card must then be gone, not merely hidden.
+        QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        assert all(sip.isdeleted(card) for card in retired)
+    finally:
         orch.shutdown()

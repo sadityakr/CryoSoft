@@ -1,8 +1,11 @@
 """Simulated motorized sample-rotation stage driver."""
 
+import logging
 import time
 
 from cryosoft.core.exceptions import CryoSoftCommunicationError
+
+log = logging.getLogger(__name__)
 
 
 class SimRotator:
@@ -126,6 +129,28 @@ class SimRotator:
         else:
             direction = 1 if remaining > 0 else -1
             self._position += direction * max_step
+
+    # ------------------------------------------------------------------
+    # Safe state (the safe-shutdown standard)
+    # ------------------------------------------------------------------
+
+    def safe_shutdown(self) -> None:
+        """Freeze the stage where it is; idempotent, never raises.
+
+        Safe idle for a rotator is stopped, not homed: an unattended move to
+        zero is itself a motion nobody is watching, and the sample's present
+        angle is never a hazard. This only removes the hazard that IS one —
+        a stage still travelling toward a setpoint after whatever commanded
+        it has gone away.
+        """
+        log.info("SimRotator: safe shutdown — stage held where it is.")
+        self._update_simulation()
+        self._setpoint = self._position
+        self._status = "HOLD"
+
+    def _is_in_safe_state(self) -> bool:
+        """Return True when the stage is not moving."""
+        return self._status == "HOLD" and self._setpoint == self._position
 
     # ------------------------------------------------------------------
     # Connection lifecycle (the connection-lifecycle standard)

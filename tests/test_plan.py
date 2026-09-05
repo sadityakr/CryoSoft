@@ -1,4 +1,6 @@
 import dataclasses
+import hashlib
+import json
 
 import pytest
 
@@ -9,10 +11,12 @@ from cryosoft.core.plan import (
     EnvelopeBound,
     ExperimentEnvelope,
     ParamGroup,
+    UIGroup,
     ParamSpec,
     PhasePlan,
     StepPlan,
     Target,
+    params_digest,
 )
 
 
@@ -346,6 +350,64 @@ def test_paramgroup_params_defensive_copy():
     g = ParamGroup(key="k", title="T", params=params)
     params["b"] = ParamSpec(type=int, default=1)
     assert "b" not in g.params
+
+
+# ── UIGroup ───────────────────────────────────────────────────────────────────
+
+
+def test_uigroup_happy():
+    g = UIGroup(
+        key="heater",
+        title="Heater",
+        description="Heater readback and control.",
+        members=("heater_output", "set_heater_output"),
+    )
+    assert g.key == "heater"
+    assert g.members == ("heater_output", "set_heater_output")
+
+
+def test_uigroup_empty_key():
+    with pytest.raises(ValueError, match="UIGroup.key"):
+        UIGroup(key="", title="T", members=("x",))
+
+
+def test_uigroup_empty_title():
+    with pytest.raises(ValueError, match="UIGroup.title"):
+        UIGroup(key="k", title="", members=("x",))
+
+
+def test_uigroup_requires_members():
+    """A group with no members declares nothing, so it is refused."""
+    with pytest.raises(ValueError, match="at least one member"):
+        UIGroup(key="k", title="T")
+
+
+def test_uigroup_members_must_be_strings():
+    with pytest.raises(TypeError, match="member must be a str"):
+        UIGroup(key="k", title="T", members=(1,))  # type: ignore[arg-type]
+
+
+def test_uigroup_members_reject_a_bare_string():
+    """A bare string would silently become a group of single characters."""
+    with pytest.raises(TypeError, match="UIGroup.members"):
+        UIGroup(key="k", title="T", members="set_heater")  # type: ignore[arg-type]
+
+
+def test_uigroup_members_reject_duplicates():
+    with pytest.raises(ValueError, match="lists a member twice"):
+        UIGroup(key="k", title="T", members=("x", "x"))
+
+
+def test_uigroup_members_coerced_to_tuple():
+    """A list is accepted and frozen, so declared order cannot be mutated."""
+    g = UIGroup(key="k", title="T", members=["a", "b"])
+    assert g.members == ("a", "b")
+
+
+def test_uigroup_frozen():
+    g = UIGroup(key="k", title="T", members=("x",))
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        g.title = "other"  # type: ignore[misc]
 
 
 # ── DataSchema ────────────────────────────────────────────────────────────────
@@ -736,6 +798,30 @@ class TestExperimentEnvelope:
         message = env.check_target("magnet_z", 3.0)
         assert "session envelope" in message and "magnet_z" in message
 
+    def test_from_dict_builds_the_typed_envelope(self):
+        """The dict form a JSON-speaking client sends becomes the typed value."""
+        env = ExperimentEnvelope.from_dict(
+            {
+                "magnet_z": {"min_value": -2.0, "max_value": 2.0, "state_key": "field_T"},
+                "temperature_sample": {"max_value": 320.0},
+            }
+        )
+        assert env.bounds["magnet_z"] == EnvelopeBound(
+            min_value=-2.0, max_value=2.0, state_key="field_T"
+        )
+        assert env.bounds["temperature_sample"] == EnvelopeBound(max_value=320.0)
+
+    def test_from_dict_is_strict_about_malformed_input(self):
+        """A malformed envelope raises rather than silently narrowing to junk."""
+        with pytest.raises(TypeError):
+            ExperimentEnvelope.from_dict({"magnet_z": 2.0})
+        with pytest.raises(TypeError):
+            ExperimentEnvelope.from_dict("magnet_z")
+        with pytest.raises(ValueError):
+            ExperimentEnvelope.from_dict({})
+        with pytest.raises(ValueError):
+            ExperimentEnvelope.from_dict({"magnet_z": {}})  # no bound at all
+
     def test_check_state_uses_state_key_and_skips_missing(self):
         env = ExperimentEnvelope(
             bounds={
@@ -753,3 +839,67 @@ class TestExperimentEnvelope:
         # VI or key absent from the snapshot -> staleness, not a violation.
         assert env.check_state({}) == []
         assert env.check_state({"temperature_sample": {}}) == []
+
+
+# ── params_digest (the Params digest standard) ────────────────────────────────
+#
+# The digest is what makes a confirmation record evidence: two records agree
+# about the parameters exactly when their digests match. So the tests are
+# written against that promise — same parameters, same digest, whatever order
+# the mapping happens to be in; different parameters, different digest — plus
+# the canonicalisation the docstring publishes, which callers on the far side
+# of a JSON file depend on being reproducible.
+
+
+def test_params_digest_ignores_key_order():
+    """Two mappings with the same pairs digest identically, however they were built."""
+    one = params_digest({"field_T": 1.5, "averaging": 4, "label": "sweep"})
+    other = params_digest({"label": "sweep", "averaging": 4, "field_T": 1.5})
+    assert one == other
+
+
+def test_params_digest_is_a_lowercase_sha256_hex_string():
+    digest = params_digest({"field_T": 1.5})
+    assert len(digest) == 64
+    assert digest == digest.lower()
+    assert all(c in "0123456789abcdef" for c in digest)
+
+
+def test_params_digest_matches_the_published_canonicalisation():
+    """The canonical text is part of the standard, not an implementation detail."""
+    params = {"b": 2, "a": 1.5}
+    canonical = '{"a":1.5,"b":2}'
+    assert params_digest(params) == hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def test_params_digest_treats_none_and_empty_as_the_same_fact():
+    """"No parameters" is one fact, so it cannot have two digests."""
+    assert params_digest(None) == params_digest({})
+
+
+def test_params_digest_separates_a_changed_value_a_renamed_key_and_a_new_key():
+    base = params_digest({"field_T": 1.5})
+    assert params_digest({"field_T": 1.6}) != base
+    assert params_digest({"field_t": 1.5}) != base
+    assert params_digest({"field_T": 1.5, "rate": 0.1}) != base
+
+
+def test_params_digest_separates_a_float_from_the_equal_int():
+    """Floats are written as repr gives them, so 1.0 is not the integer 1."""
+    assert params_digest({"n": 1.0}) != params_digest({"n": 1})
+
+
+def test_params_digest_degrades_a_value_json_cannot_render_rather_than_raising():
+    """A stray non-JSON value still yields a digest — accountability, not control flow."""
+
+    class _Opaque:
+        def __str__(self) -> str:
+            return "opaque"
+
+    assert params_digest({"x": _Opaque()}) == params_digest({"x": "opaque"})
+
+
+def test_params_digest_survives_a_round_trip_through_json():
+    """The digest a record stores must still match after the record is reread."""
+    params = {"field_T": 1.5, "points": 21, "note": "µ-metal shield"}
+    assert params_digest(json.loads(json.dumps(params))) == params_digest(params)

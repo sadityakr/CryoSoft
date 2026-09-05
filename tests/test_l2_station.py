@@ -1410,3 +1410,145 @@ def test_availability_failed_reconnect_of_operator_disconnected_vi_adds_connect_
     avail = station.availability("bad_vi")
     assert avail.state == "absent"
     assert avail.tags == frozenset({"operator", "connect_failed"})
+
+
+def test_read_gateway_config_reads_the_declared_values(tmp_path):
+    """A setup that opens itself to agents says so in its own monitor.yaml."""
+    from cryosoft.core.station import read_gateway_config
+
+    (tmp_path / "monitor.yaml").write_text(
+        "monitor:\n"
+        "  tick_interval_ms: 1000\n"
+        "  gateway_server: true\n"
+        "  gateway_max_role: session\n"
+    )
+    assert read_gateway_config(str(tmp_path)) == {
+        "gateway_server": True,
+        "gateway_max_role": "session",
+    }
+
+
+def test_read_assistant_config_reads_the_declared_values(tmp_path):
+    """A setup that offers a chat assistant says so in its own monitor.yaml."""
+    from cryosoft.core.station import read_assistant_config
+
+    (tmp_path / "monitor.yaml").write_text(
+        "monitor:\n"
+        "  tick_interval_ms: 1000\n"
+        "  assistant: true\n"
+        "  assistant_max_role: session\n"
+    )
+    assert read_assistant_config(str(tmp_path)) == {
+        "assistant": True,
+        "assistant_max_role": "session",
+    }
+
+
+def test_read_assistant_config_defaults_to_the_closed_door(tmp_path):
+    """Absent, malformed or unreadable all mean off — never raises.
+
+    The empty ceiling is deliberate: it means "the same authority this setup
+    already grants an out-of-process client", which whoever wires the window
+    resolves from ``gateway_max_role`` rather than declaring twice.
+    """
+    from cryosoft.core.station import read_assistant_config
+
+    closed = {"assistant": False, "assistant_max_role": ""}
+    assert read_assistant_config(str(tmp_path / "nowhere")) == closed
+    (tmp_path / "monitor.yaml").write_text("monitor:\n  tick_interval_ms: 1000\n")
+    assert read_assistant_config(str(tmp_path)) == closed
+    (tmp_path / "monitor.yaml").write_text("monitor: not-a-mapping\n")
+    assert read_assistant_config(str(tmp_path)) == closed
+
+
+def test_read_gateway_config_defaults_to_the_closed_door(tmp_path):
+    """Absent, malformed or unreadable all mean off — never raises."""
+    from cryosoft.core.station import read_gateway_config
+
+    closed = {"gateway_server": False, "gateway_max_role": "observer"}
+    assert read_gateway_config(str(tmp_path / "nowhere")) == closed
+    (tmp_path / "monitor.yaml").write_text("monitor:\n  tick_interval_ms: 1000\n")
+    assert read_gateway_config(str(tmp_path)) == closed
+    (tmp_path / "monitor.yaml").write_text("monitor: not-a-mapping\n")
+    assert read_gateway_config(str(tmp_path)) == closed
+
+
+def test_read_instrument_thread_defaults_to_the_thread(tmp_path):
+    """Silence means the instrument thread: it is the standard, not an opt-in.
+
+    Absent, malformed or unreadable all inherit it too — the fallback of a
+    file nobody can read must be the shape every other setup runs in.
+    """
+    from cryosoft.core.station import read_instrument_thread
+
+    assert read_instrument_thread(str(tmp_path / "nowhere")) is True
+    (tmp_path / "monitor.yaml").write_text("monitor:\n  tick_interval_ms: 1000\n")
+    assert read_instrument_thread(str(tmp_path)) is True
+    (tmp_path / "monitor.yaml").write_text("monitor: not-a-mapping\n")
+    assert read_instrument_thread(str(tmp_path)) is True
+
+
+def test_read_instrument_thread_honours_a_deliberate_refusal(tmp_path):
+    """A setup that wants the temporary inline mode back says so explicitly."""
+    from cryosoft.core.station import read_instrument_thread
+
+    (tmp_path / "monitor.yaml").write_text(
+        "monitor:\n  tick_interval_ms: 1000\n  instrument_thread: false\n"
+    )
+    assert read_instrument_thread(str(tmp_path)) is False
+    (tmp_path / "monitor.yaml").write_text(
+        "monitor:\n  tick_interval_ms: 1000\n  instrument_thread: true\n"
+    )
+    assert read_instrument_thread(str(tmp_path)) is True
+
+
+# ── Lifecycle-state standard: the Station's read (GLOSSARY.md's Lifecycle
+#    state; the VI half lives in BaseVirtualInstrument) ────────────────────
+
+
+def test_lifecycle_states_cover_every_vi_and_follow_the_verbs(sim_station):
+    """Every configured VI is reported, and initiate_all/standby_all move all of them."""
+    states = sim_station.lifecycle_states()
+    assert set(states) == set(sim_station.get_vi_names())
+    assert set(states.values()) == {"idle"}
+
+    sim_station.initiate_all()
+    assert set(sim_station.lifecycle_states().values()) == {"initiated"}
+
+    sim_station.standby_all()
+    assert set(sim_station.lifecycle_states().values()) == {"standby"}
+
+
+def test_lifecycle_state_of_one_vi_matches_the_vi_itself(sim_station):
+    """The Station's per-VI read is a passthrough, never a second copy."""
+    sim_station.execute_vi_action("magnet_z", "initiate")
+    assert sim_station.lifecycle_state("magnet_z") == "initiated"
+    assert sim_station.lifecycle_state("magnet_z") == (
+        sim_station.get_vi("magnet_z").lifecycle_state()
+    )
+    assert sim_station.lifecycle_state("magnet_y") == "idle"
+
+    with pytest.raises(KeyError):
+        sim_station.lifecycle_state("no_such_instrument")
+
+
+def test_lifecycle_state_reads_idle_for_a_disconnected_instrument(sim_station):
+    """A released instrument is not initiated as far as any client is concerned."""
+    sim_station.execute_vi_action("magnet_z", "initiate")
+    assert sim_station.lifecycle_state("magnet_z") == "initiated"
+
+    ok, _message = sim_station.disconnect_instrument("magnet_z")
+    assert ok
+    assert sim_station.lifecycle_state("magnet_z") == "idle"
+    assert sim_station.lifecycle_states()["magnet_z"] == "idle"
+
+
+def test_lifecycle_states_send_no_instrument_traffic(sim_station):
+    """The snapshot assembly reads this every tick, so it must not poll."""
+    from tests.mocks.bus_spy import spy_on_station
+
+    sim_station.initiate_all()
+    calls: list[str] = []
+    spy_on_station(sim_station, calls)
+    assert sim_station.lifecycle_states()
+    assert not calls, f"lifecycle_states() polled the bus: {sorted(set(calls))}"

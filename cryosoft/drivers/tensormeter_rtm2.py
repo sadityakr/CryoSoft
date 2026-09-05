@@ -7,7 +7,10 @@ import math
 
 import rtm2
 
-from cryosoft.core.exceptions import CryoSoftCommunicationError
+from cryosoft.core.exceptions import (
+    CryoSoftCommunicationError,
+    CryoSoftInstrumentError,
+)
 
 log = logging.getLogger(__name__)
 
@@ -202,6 +205,43 @@ class TensormeterRTM2:
             ) from exc
 
     # ------------------------------------------------------------------
+    # Safe state (the safe-shutdown standard)
+    # ------------------------------------------------------------------
+
+    def safe_shutdown(self) -> None:
+        """Unconditionally zero every source setpoint; never raises.
+
+        The RTM2's half of the **safe-shutdown standard** (see
+        ``drivers/README.md``): idempotent, callable from any leftover state.
+
+        This box sources on four independent knobs — AC current, DC current,
+        AC voltage, DC voltage — and Control Mode 1 keeps the current AND
+        voltage setpoints simultaneously live, whichever is reached first
+        governing (vendor doc §3.2). Zeroing one is therefore not enough:
+        safe idle means all four at zero, so nothing is driven into the
+        sample whatever mode the instrument is left in. Ranges, analysis
+        mode, averaging time and the switch matrix are left alone — they
+        drive nothing on their own, and an operator or an external tool may
+        own them.
+
+        Recovers from: any leftover excitation on any of the four source
+        knobs, including one left by an abandoned run or an external tool.
+        """
+        log.info("Tensormeter RTM2: safe shutdown — zeroing all four source setpoints.")
+        for name, apply in (
+            ("cudc", lambda: self.set_current_dc(0.0)),
+            ("camp", lambda: self.set_current_amplitude(0.0)),
+            ("vodc", lambda: self.set_voltage_dc(0.0)),
+            ("vamp", lambda: self.set_voltage_amplitude(0.0)),
+        ):
+            try:
+                apply()
+            except Exception as exc:  # noqa: BLE001 — safe shutdown must never raise
+                log.warning(
+                    "Tensormeter RTM2: safe shutdown could not zero %s: %s", name, exc
+                )
+
+    # ------------------------------------------------------------------
     # Low-level command primitives
     # ------------------------------------------------------------------
 
@@ -223,9 +263,20 @@ class TensormeterRTM2:
             The confirmed value (echoed, possibly range-coerced by the
             instrument — never assume the value sent is the value applied).
 
+        Verification method under the **driver error-reporting standard**
+        (see ``drivers/README.md``): **protocol acknowledgement**. The RTM2
+        echoes every accepted setting back as a state update, so a command it
+        did not apply is one that produced no echo — and, because the
+        instrument is free to coerce a value into range, the echo is also the
+        only truthful answer to "what did it actually apply". This method
+        never assumes the value sent is the value in force.
+
         Raises:
-            CryoSoftCommunicationError: On a transport failure, a
-                protocol-level error, or a missing confirmation.
+            CryoSoftCommunicationError: On a transport failure.
+            CryoSoftInstrumentError: ``PROTOCOL`` if the device reports a
+                protocol-level error, or ``NO_CONFIRMATION`` if it never
+                confirmed the value (and the ``gass`` fallback below does not
+                show the value already in force).
         """
         wait_for = wait_for or cmd
         try:
@@ -237,8 +288,11 @@ class TensormeterRTM2:
                 f"Tensormeter RTM2 {cmd!r} failed: {exc}", vi_name="TensormeterRTM2"
             ) from exc
         if result.error:
-            raise CryoSoftCommunicationError(
-                f"Tensormeter RTM2 {cmd!r} protocol error: {result.error}",
+            raise CryoSoftInstrumentError(
+                f"Tensormeter RTM2 refused {cmd!r}: protocol error {result.error}",
+                code="PROTOCOL",
+                instrument_message=str(result.error),
+                context=f"{cmd}{args!r}",
                 vi_name="TensormeterRTM2",
             )
         for upd in result.updates:
@@ -258,8 +312,12 @@ class TensormeterRTM2:
         if cached is not None and _values_match(cached, args):
             return cached
 
-        raise CryoSoftCommunicationError(
-            f"Tensormeter RTM2: no confirmation received for {cmd!r}",
+        raise CryoSoftInstrumentError(
+            f"Tensormeter RTM2: no confirmation received for {cmd!r} — the "
+            f"value cannot be assumed to have been applied",
+            code="NO_CONFIRMATION",
+            instrument_message="",
+            context=f"{cmd}{args!r}",
             vi_name="TensormeterRTM2",
         )
 
@@ -786,8 +844,11 @@ class TensormeterRTM2:
                 f"Tensormeter RTM2 {cmd!r} failed: {exc}", vi_name="TensormeterRTM2"
             ) from exc
         if result.error:
-            raise CryoSoftCommunicationError(
-                f"Tensormeter RTM2 {cmd!r} protocol error: {result.error}",
+            raise CryoSoftInstrumentError(
+                f"Tensormeter RTM2 refused {cmd!r}: protocol error {result.error}",
+                code="PROTOCOL",
+                instrument_message=str(result.error),
+                context=f"_read_data({cmd!r})",
                 vi_name="TensormeterRTM2",
             )
         return [dict(zip(_DATA_COLUMNS, (float(v) for v in row))) for row in result.data.tolist()]

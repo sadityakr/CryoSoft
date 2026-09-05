@@ -9,7 +9,11 @@ from typing import Any, ClassVar
 
 from cryosoft.core.decorators import control, monitored
 from cryosoft.core.plan import ParamSpec
-from cryosoft.virtual_instruments.base import MeasurementInstrumentBase
+from cryosoft.virtual_instruments.base import (
+    EXCITATION_CURRENT_LIMIT,
+    MeasurementInstrumentBase,
+    _populate_excitation_current_limit,
+)
 
 # Sentinel to detect the un-armed state.
 _NOT_INITIATED = object()
@@ -50,6 +54,15 @@ class DCModeMeasurementVI(MeasurementInstrumentBase):
 
     # Reading-loop declaration: the DC current. Can be changed in-place cheaply.
     reading_setters: ClassVar[dict[str, str]] = {"current": "set_dc_current"}
+
+    # Control-validation standard (see BaseVirtualInstrument): both ways of
+    # commanding the excitation current — arming it and reprogramming it
+    # between readings — are bounded by the setup's own ceiling, populated in
+    # __init__ from the config's max_source_current_A.
+    control_limits: ClassVar[dict[str, dict[str, str]]] = {
+        "initiate_measurement": {"current": EXCITATION_CURRENT_LIMIT},
+        "set_dc_current": {"current": EXCITATION_CURRENT_LIMIT},
+    }
 
     _ARRAY_KEYS, _SCALAR_COLUMNS = MeasurementInstrumentBase.quantity_columns(
         "voltage_V", "current_A"
@@ -104,9 +117,18 @@ class DCModeMeasurementVI(MeasurementInstrumentBase):
     }
 
     def __init__(self, drivers: dict[str, object], **init_params: Any) -> None:
+        """Wire the source/meter pair and read the setup's excitation ceiling.
+
+        Args:
+            drivers: ``{"source": <current source>, "meter": <voltmeter>}``.
+            **init_params: Setup parameters; ``max_source_current_A`` bounds
+                the sourced current to ``±`` that value (see
+                ``_populate_excitation_current_limit``).
+        """
         super().__init__(drivers, **init_params)
         self._source = drivers["source"]
         self._meter = drivers["meter"]
+        _populate_excitation_current_limit(self, init_params)
 
         # Configuration state — set by initiate_measurement().
         self._armed: object = _NOT_INITIATED
@@ -246,14 +268,20 @@ class DCModeMeasurementVI(MeasurementInstrumentBase):
     # @monitored — last manual read_now() result, for front-panel bench testing
     # ------------------------------------------------------------------
 
-    @monitored
+    @monitored(
+        unit="V",
+        description="Most recent valid voltage sample from the last manual read",
+    )
     def last_voltage_V(self) -> float | None:
         """Most recent valid voltage from the last read_now() call, or None."""
         if self._last_reading is None or self._last_reading["n_valid"] == 0:
             return None
         return self._last_reading["voltage_V_array"][self._last_reading["n_valid"] - 1]
 
-    @monitored
+    @monitored(
+        unit="V",
+        description="Mean voltage over the samples of the last manual read",
+    )
     def last_mean_voltage_V(self) -> float | None:
         """Mean voltage from the last read_now() call, or None.
 
@@ -265,7 +293,11 @@ class DCModeMeasurementVI(MeasurementInstrumentBase):
             return None
         return self._last_reading["voltage_V"]
 
-    @monitored
+    # Dimensionless: a sample count, not a measured quantity.
+    @monitored(
+        unit="",
+        description="Number of valid samples returned by the last manual read",
+    )
     def last_n_valid(self) -> int | None:
         """Valid-reading count from the last read_now() call, or None."""
         if self._last_reading is None:

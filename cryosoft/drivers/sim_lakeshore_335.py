@@ -6,9 +6,18 @@ import logging
 import math
 import time
 
-from cryosoft.core.exceptions import CryoSoftCommunicationError
+from cryosoft.core.exceptions import (
+    CryoSoftCommunicationError,
+    CryoSoftInstrumentError,
+)
 
 log = logging.getLogger(__name__)
+
+# Curve slots 1-20 are the instrument's built-in standard curves and 0 means
+# "no curve"; 21-59 are USER slots, empty until somebody uploads a curve into
+# them. Assigning an empty user slot is refused (execution error) — see
+# set_sensor_curve().
+_STANDARD_CURVE_SLOTS = frozenset(range(0, 21))
 
 
 class SimLakeshore335:
@@ -34,6 +43,10 @@ class SimLakeshore335:
         self._derivative_action_time: float = 0.0
         self._auto_pid: bool = False
         self._sensor_curves: dict[str, int] = {"A": 22, "B": 2}
+        # Instrument-error model (the driver error-reporting standard,
+        # drivers/README.md): which USER curve slots actually hold a curve.
+        # 22 is loaded because input A is already assigned to it above.
+        self._loaded_user_curves: set[int] = {22}
         
         # Simulation physics
         self._last_update: float = time.time()
@@ -177,14 +190,63 @@ class SimLakeshore335:
         return self._sensor_curves[ch]
 
     def set_sensor_curve(self, curve: int, sensor_input: str = "A") -> None:
-        """Assign a temperature sensor curve to a sensor input."""
+        """Assign a temperature sensor curve to a sensor input.
+
+        Models the instrument-error half of the driver error-reporting
+        standard: assigning a USER curve slot (21-59) that holds no curve is
+        an execution error — the instrument flags ``*ESR?`` bit 4 and leaves
+        the input on the curve it already had. Nothing else on the bus
+        changes, which is precisely why the real driver reads ``*ESR?`` after
+        every state-changing write.
+
+        Args:
+            curve: Curve number (0 = None, 1-20 = Standard, 21-59 = User).
+            sensor_input: Sensor input channel ('A' or 'B', default 'A').
+
+        Raises:
+            ValueError: If the input or curve number is outside the
+                instrument's addressable range (a programming error, caught
+                before anything reaches the bus).
+            CryoSoftInstrumentError: ``ESR:0x10`` if the named user-curve slot
+                holds no curve.
+        """
         self._check_error()
         ch = str(sensor_input).upper()
         if ch not in ("A", "B"):
             raise ValueError(f"Sensor input must be 'A' or 'B', got {sensor_input}")
         if not (0 <= curve <= 59):
             raise ValueError(f"Curve number must be in [0, 59], got {curve}")
+        if int(curve) not in _STANDARD_CURVE_SLOTS and int(curve) not in self._loaded_user_curves:
+            # The assignment deliberately does NOT happen.
+            context = f"set_sensor_curve({curve!r}, {sensor_input!r})"
+            raise CryoSoftInstrumentError(
+                f"Simulated Lakeshore 335 refused {context}: Execution error "
+                f"(ESR:0x10) — user curve slot {int(curve)} holds no curve",
+                code="ESR:0x10",
+                instrument_message="Execution error",
+                context=context,
+                vi_name="SimLakeshore335",
+            )
         self._sensor_curves[ch] = int(curve)
+
+    # ------------------------------------------------------------------
+    # Safe state (the safe-shutdown standard)
+    # ------------------------------------------------------------------
+
+    def safe_shutdown(self) -> None:
+        """Take the simulated heater off; idempotent, never raises.
+
+        Safe idle is heater range ``OFF`` with the manual output zeroed, so a
+        later range change cannot resume heating at a leftover percentage.
+        The setpoint is deliberately preserved — see the real driver.
+        """
+        log.info("SimLakeshore335: safe shutdown — heater range OFF, output 0 %%.")
+        self._heater_range = "OFF"
+        self._heater_output = 0.0
+
+    def _is_in_safe_state(self) -> bool:
+        """Return True when no power can reach the heater."""
+        return self._heater_range == "OFF" and self._heater_output == 0.0
 
     # ------------------------------------------------------------------
     # Connection lifecycle (the connection-lifecycle standard)

@@ -30,8 +30,8 @@ class ResumeSessionDialog(QDialog):
     dialog is built (see ``cryosoft.session.models.GUEST_USER_ID``).
     ``selected_session_id()`` is only meaningful after ``exec()`` returns
     ``Accepted``. Switching sessions is deferred-until-restart (see
-    ``docs/plans/session-tier-and-terminology.md``, "Startup wiring") —
-    this dialog only picks or creates the record; the caller persists it as
+    ``GLOSSARY.md``'s **Session**) — this dialog only picks or creates the
+    record; the caller persists it as
     active and tells the operator to restart.
     """
 

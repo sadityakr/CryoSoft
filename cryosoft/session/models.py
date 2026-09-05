@@ -13,6 +13,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+from cryosoft.core.events import OPERATOR, Actor
 from cryosoft.core.plan import EnvelopeBound, ExperimentEnvelope
 
 logger = logging.getLogger(__name__)
@@ -78,6 +79,32 @@ def _as_int(value: object, default: int) -> int:
 def _as_dict(value: object) -> dict[str, Any]:
     """Return ``value`` if it is a dict, else an empty dict (defensive parse)."""
     return dict(value) if isinstance(value, dict) else {}
+
+
+def _as_actor(value: object) -> tuple[Actor, bool]:
+    """Read a stored actor, saying whether it had to be invented.
+
+    The tolerant-parse contract applied to accountability: a record written
+    before actors were stamped, or one whose actor field is junk, must still
+    load — but it must NOT quietly claim the physicist did it. So the pair
+    is ``(actor, legacy)``: the ``OPERATOR`` sentinel with ``legacy`` true
+    means "this record predates actor recording (or lost it), and nobody
+    should read the operator here as a fact".
+
+    Args:
+        value: The record's stored ``actor`` value (any junk tolerated).
+
+    Returns:
+        ``(actor, legacy)`` — the parsed ``Actor`` and ``False``, or
+        ``(OPERATOR, True)`` when there was nothing usable to parse.
+    """
+    if not isinstance(value, dict):
+        return OPERATOR, True
+    try:
+        return Actor.from_json(value), False
+    except (TypeError, ValueError) as exc:
+        logger.warning("stored actor %r is invalid (%s); reading it as legacy", value, exc)
+        return OPERATOR, True
 
 
 def _as_dict_list(value: object) -> list[dict[str, Any]]:
@@ -245,25 +272,60 @@ class RunRecord:
         procedure: The procedure's display name.
         kind: ``"run"`` for science runs; probe runs will carry ``"probe"``.
         params: Merged parameter values the run executed with.
+        params_digest: The **Params digest** of ``params``, stamped when the
+            run was opened (``core.plan.params_digest``). Stored rather than
+            recomputed on read, so it fixes what the run actually started
+            with even if the record is later amended, and so a confirmation
+            record carrying the same digest proves the two agree without
+            either holding a copy of the other's parameters. Empty on a
+            record written before digests were stamped.
         data_file: Absolute path of the run's HDF5 file.
+        actor: Who started the run, taken from the ``RunStarted`` event's
+            own actor — so an agent-started run is distinguishable from the
+            physicist's forever after, not only while the process lives.
+        actor_legacy: ``True`` when ``actor`` was not read from the record
+            but supplied as the ``OPERATOR`` sentinel because the file
+            predates actor recording (or its actor field was unreadable). A
+            reader must not treat a legacy actor as evidence of who acted.
         started_utc: ISO 8601 start time (UTC).
         finished_utc: ISO 8601 end time; empty while running.
         status: ``running`` → ``done`` / ``failed`` / ``aborted``.
         reason: Error text for a failed run; empty otherwise.
         published: Whether this run has been mirrored to the ELN entry yet
             (written by the publishing track).
+        eln_link: The ELN entry this run was published to, or ``None`` while
+            it is unpublished. Written once, by the publisher, after the
+            backend confirms the entry — so a run that carries a link really
+            is in the notebook. One run maps to one entry (see the **Outbox**
+            and `session/eln/README.md`); the experiment-level ``eln_link`` on
+            ``ExperimentRecord`` is a separate, coarser link.
+        pending_eln_draft: A **draft entry** awaiting a human's approval, as
+            its JSON dict (``session/eln/drafting.py``'s
+            ``DraftEntry.to_dict()``), or ``{}`` when none is pending. Written
+            when an agent drafts an entry for an ATTENDED experiment, where
+            publishing is the human's to authorise: the draft is parked here
+            and ``ExperimentManager.approve_eln_draft()`` is what enqueues it.
+            Deliberately NOT a ``SCHEMA_VERSION`` bump — a pending draft is an
+            unapproved proposal that can be redrawn at any time, so an older
+            app dropping one on resave loses nothing authoritative, which is
+            the only thing that rule protects.
     """
 
     run_id: str = ""
     procedure: str = ""
     kind: str = "run"
     params: dict[str, Any] = field(default_factory=dict)
+    params_digest: str = ""
     data_file: str = ""
+    actor: Actor = OPERATOR
+    actor_legacy: bool = False
     started_utc: str = ""
     finished_utc: str = ""
     status: str = RUN_STATUS_RUNNING
     reason: str = ""
     published: bool = False
+    eln_link: ElnLink | None = None
+    pending_eln_draft: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-safe dict representation."""
@@ -272,12 +334,17 @@ class RunRecord:
             "procedure": self.procedure,
             "kind": self.kind,
             "params": dict(self.params),
+            "params_digest": self.params_digest,
             "data_file": self.data_file,
+            "actor": self.actor.to_json(),
+            "actor_legacy": self.actor_legacy,
             "started_utc": self.started_utc,
             "finished_utc": self.finished_utc,
             "status": self.status,
             "reason": self.reason,
             "published": self.published,
+            "eln_link": self.eln_link.to_dict() if self.eln_link else None,
+            "pending_eln_draft": dict(self.pending_eln_draft),
         }
 
     @classmethod
@@ -286,24 +353,37 @@ class RunRecord:
 
         An unrecognised ``status`` degrades to ``failed`` (never silently back
         to ``running`` — a record whose status cannot be trusted must not look
-        like live work).
+        like live work). A record with no readable ``actor`` — every run
+        written before actors were stamped — loads as the ``OPERATOR``
+        sentinel with ``actor_legacy`` set, so "old file" stays
+        distinguishable from "the physicist did it".
         """
         if not isinstance(data, dict):
             return cls()
         status = _as_str(data.get("status"), RUN_STATUS_RUNNING)
         if status not in _VALID_RUN_STATUSES:
             status = RUN_STATUS_FAILED
+        actor, actor_legacy = _as_actor(data.get("actor"))
         return cls(
             run_id=_as_str(data.get("run_id")),
             procedure=_as_str(data.get("procedure")),
             kind=_as_str(data.get("kind"), "run"),
             params=_as_dict(data.get("params")),
+            params_digest=_as_str(data.get("params_digest")),
             data_file=_as_str(data.get("data_file")),
+            actor=actor,
+            actor_legacy=actor_legacy or _as_bool(data.get("actor_legacy"), False),
             started_utc=_as_str(data.get("started_utc")),
             finished_utc=_as_str(data.get("finished_utc")),
             status=status,
             reason=_as_str(data.get("reason")),
             published=_as_bool(data.get("published"), False),
+            eln_link=(
+                ElnLink.from_dict(data["eln_link"])
+                if isinstance(data.get("eln_link"), dict)
+                else None
+            ),
+            pending_eln_draft=_as_dict(data.get("pending_eln_draft")),
         )
 
 
@@ -327,8 +407,9 @@ class ExperimentRecord:
         closed_utc: ISO 8601 close time; empty while open.
         status: ``open`` or ``closed``.
         attended: The attendance flag — ``True`` when a human is present.
-            Governs how much autonomy debug agents get (recovery actions are
-            reserved for unattended sessions; see the agent-native plan).
+            An input to the agent gateway's permission matrix (GLOSSARY.md's
+            **Attendance**): a ``debug`` role may take ``recovery`` actions
+            only while unattended.
         envelope: The session envelope in its JSON form
             (``envelope_to_dict()``); ``{}`` means no envelope.
         runs: The experiment's runs, oldest first.
@@ -528,8 +609,8 @@ class Session:
 
     A named, resumable, per-user folder holding multiple experiments —
     ``<measurement_root>/sessions/<user_id>/<session_id>/``, one level above
-    ``<experiment_id>/`` (see ``docs/plans/session-tier-and-terminology.md``,
-    "Filesystem layout"). One user can own several sessions; a session is not
+    ``<experiment_id>/`` (the filesystem layout in ``GLOSSARY.md``'s
+    **Session**). One user can own several sessions; a session is not
     identified by its owner alone. Persisted as ``session.json`` by
     ``SessionStore``.
 

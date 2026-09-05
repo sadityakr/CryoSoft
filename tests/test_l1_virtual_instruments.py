@@ -1,6 +1,6 @@
 import pytest
 import time
-from cryosoft.core.exceptions import CryoSoftCommunicationError
+from cryosoft.core.exceptions import CryoSoftCommunicationError, CryoSoftSafetyError
 
 # Assuming we have valid sim drivers from L0 test phase
 from cryosoft.drivers.sim_oxford_ips120 import SimOxfordIPS120
@@ -74,6 +74,55 @@ def test_control_specs_must_be_paramspec_instances():
             @control(params={"power_W": {"type": float, "default": 0.0}})
             def set_heater_power(self, power_W: float = 0.0):
                 return power_W
+
+
+class LimitedVI(BaseVirtualInstrument):
+    """A VI declaring one control limit, for the limit-wrapper tests below."""
+
+    vi_type = "limited"
+    control_limits = {"set_current": {"current_A": "max_current"}}
+
+    def __init__(self):
+        super().__init__({})
+        self._limits["max_current"] = (-1e-3, 1e-3)
+
+    @control
+    def set_current(self, current_A):
+        return current_A
+
+
+def test_limit_wrapper_allows_a_value_inside_the_declared_range():
+    """A control call within its declared limit reaches the method untouched."""
+    vi = LimitedVI()
+    vi.vi_name = "source"
+
+    assert vi.set_current(5e-4) == 5e-4
+
+
+def test_limit_wrapper_refusal_carries_structured_fields():
+    """An out-of-range control call is refused with fields AND the same prose.
+
+    Two assertions, deliberately together: a verdict is built from the
+    structured fields, never by parsing the message, and the message itself is
+    the operator's banner, so it must not drift when the fields are added.
+    """
+    vi = LimitedVI()
+    vi.vi_name = "source"
+
+    with pytest.raises(CryoSoftSafetyError) as excinfo:
+        vi.set_current(0.05)
+    err = excinfo.value
+
+    assert str(err) == (
+        "source.set_current: current_A=0.05 is outside the allowed range "
+        "[-0.001, 0.001] for this setup (limit 'max_current' from the station "
+        "config). Command refused."
+    )
+    assert err.param == "current_A"
+    assert err.value == 0.05
+    assert err.lo == -1e-3
+    assert err.hi == 1e-3
+    assert err.limit_name == "max_current"
 
 
 def test_base_vi_error_pass_through():
@@ -1029,3 +1078,286 @@ def test_standby_status_inherited_standby_still_tracked():
         driver._last_update = time.time() - 0.5
         driver._update_simulation()
     assert vi.standby_status() == "reached"
+
+
+# 3c. The declaration standard: measurement_parameters reaches the controls
+# One declaration on the VI has to render in two places — the procedure form
+# and the instrument front panel — so MeasurementInstrumentBase installs it as
+# the specs of the two controls whose parameters ARE measurement parameters.
+
+
+def _minimal_measurement_vi(**namespace):
+    """Build a throwaway MeasurementInstrumentBase subclass for spec checks.
+
+    Args:
+        **namespace: Class attributes and methods to place on the subclass.
+
+    Returns:
+        The freshly created class (never constructed or registered).
+    """
+    from cryosoft.virtual_instruments.base import MeasurementInstrumentBase
+
+    return type("ThrowawayMeasurementVI", (MeasurementInstrumentBase,), namespace)
+
+
+def test_measurement_parameters_install_on_arming_control():
+    """A bare initiate_measurement inherits every measurement_parameters spec."""
+    from cryosoft.core.decorators import control, get_control_specs
+    from cryosoft.core.plan import ParamSpec
+
+    specs = {
+        "current_A": ParamSpec(type=float, default=1e-6, unit="A", description="I"),
+        "n_readings": ParamSpec(type=int, default=10, description="N"),
+    }
+
+    @control
+    def initiate_measurement(self, current_A=1e-6, n_readings=10):
+        pass
+
+    vi_cls = _minimal_measurement_vi(
+        measurement_parameters=specs,
+        initiate_measurement=initiate_measurement,
+    )
+    assert get_control_specs(vi_cls.initiate_measurement) == specs
+
+
+def test_measurement_parameters_install_on_reading_setter():
+    """A reading_setters setter inherits exactly its own single spec."""
+    from cryosoft.core.decorators import control, get_control_specs
+    from cryosoft.core.plan import ParamSpec
+
+    current_spec = ParamSpec(type=float, default=1e-6, unit="A", description="I")
+    specs = {
+        "current_A": current_spec,
+        "n_readings": ParamSpec(type=int, default=10, description="N"),
+    }
+
+    @control
+    def initiate_measurement(self, current_A=1e-6, n_readings=10):
+        pass
+
+    @control
+    def set_source_current(self, current_A=1e-6):
+        pass
+
+    vi_cls = _minimal_measurement_vi(
+        measurement_parameters=specs,
+        reading_setters={"current_A": "set_source_current"},
+        initiate_measurement=initiate_measurement,
+        set_source_current=set_source_current,
+    )
+    assert get_control_specs(vi_cls.set_source_current) == {"current_A": current_spec}
+
+
+def test_explicit_control_specs_are_not_overwritten():
+    """An explicit params= wins; the install only fills a control that declared none."""
+    from cryosoft.core.decorators import control, get_control_specs
+    from cryosoft.core.plan import ParamSpec
+
+    declared = ParamSpec(type=float, default=0.0, unit="A", description="Declared")
+
+    @control(params={"current_A": declared})
+    def set_source_current(self, current_A=0.0):
+        pass
+
+    @control
+    def initiate_measurement(self, current_A=1e-6):
+        pass
+
+    vi_cls = _minimal_measurement_vi(
+        measurement_parameters={
+            "current_A": ParamSpec(
+                type=float, default=1e-6, unit="A", description="Installed"
+            ),
+        },
+        reading_setters={"current_A": "set_source_current"},
+        initiate_measurement=initiate_measurement,
+        set_source_current=set_source_current,
+    )
+    assert get_control_specs(vi_cls.set_source_current) == {"current_A": declared}
+
+
+def test_arming_signature_must_match_measurement_parameters():
+    """A signature that drifts from measurement_parameters fails at import."""
+    from cryosoft.core.decorators import control
+    from cryosoft.core.plan import ParamSpec
+
+    @control
+    def initiate_measurement(self, current_A=1e-6, stray=1):
+        pass
+
+    with pytest.raises(ValueError, match="measurement_parameters"):
+        _minimal_measurement_vi(
+            measurement_parameters={
+                "current_A": ParamSpec(type=float, default=1e-6, description="I"),
+            },
+            initiate_measurement=initiate_measurement,
+        )
+
+
+# 18. Lifecycle-state standard: lifecycle_state() (see BaseVirtualInstrument's
+#     "Lifecycle-state standard" — the verbs own the fact, the read is pure,
+#     and an observing VI may correct the cache from the monitor cycle)
+
+
+def test_lifecycle_state_starts_idle_and_follows_the_verbs():
+    """A fresh VI is idle; initiate() and standby() move it, in either order."""
+    from cryosoft.virtual_instruments.magnet.superconducting_magnet import (
+        SuperconductingMagnetVI,
+    )
+
+    driver = SimOxfordIPS120("SIM")
+    vi = SuperconductingMagnetVI({"main": driver}, amperes_per_tesla=10.0)
+
+    assert vi.lifecycle_state() == "idle"
+    vi.initiate()
+    assert vi.lifecycle_state() == "initiated"
+    vi.standby()
+    assert vi.lifecycle_state() == "standby"
+    vi.initiate()
+    assert vi.lifecycle_state() == "initiated"
+
+
+def test_lifecycle_state_resets_to_idle_on_disconnect():
+    """The release hook drops the fact with the session (the standard's rule 1)."""
+    from cryosoft.virtual_instruments.magnet.superconducting_magnet import (
+        SuperconductingMagnetVI,
+    )
+
+    driver = SimOxfordIPS120("SIM")
+    vi = SuperconductingMagnetVI({"main": driver}, amperes_per_tesla=10.0)
+    vi.initiate()
+    assert vi.lifecycle_state() == "initiated"
+
+    vi.disconnect()
+    assert vi.lifecycle_state() == "idle"
+
+
+def test_lifecycle_state_is_untouched_when_initiate_raises():
+    """A refused initiate() must never leave a card claiming the instrument runs."""
+
+    class RaisingInitiateVI(BaseVirtualInstrument):
+        vi_type = "mock"
+
+        def __init__(self):
+            super().__init__({})
+
+        def initiate(self):
+            raise RuntimeError("could not initiate")
+
+    vi = RaisingInitiateVI()
+    with pytest.raises(RuntimeError):
+        vi.initiate()
+    assert vi.lifecycle_state() == "idle"
+
+
+def test_lifecycle_state_inherited_verbs_are_still_tracked():
+    """A subclass that overrides neither verb inherits the already-wrapped ones."""
+    from cryosoft.virtual_instruments.magnet.superconducting_magnet import (
+        SuperconductingMagnetVI,
+    )
+
+    class UnmodifiedMagnetVI(SuperconductingMagnetVI):
+        """Adds nothing; initiate()/standby() are both inherited."""
+
+    vi = UnmodifiedMagnetVI({"main": SimOxfordIPS120("SIM")}, amperes_per_tesla=10.0)
+
+    assert vi.lifecycle_state() == "idle"
+    vi.initiate()
+    assert vi.lifecycle_state() == "initiated"
+    vi.standby()
+    assert vi.lifecycle_state() == "standby"
+
+
+def test_measurement_vi_arming_counts_as_initiated():
+    """initiate_measurement() is a measurement VI's own initiate (the standard).
+
+    Its plain ``initiate()`` is only a connection check, so a VI armed by a
+    procedure would otherwise still read "idle" while it is sourcing current.
+    """
+    from cryosoft.virtual_instruments.measurement.measurement_dc_mode import (
+        DCModeMeasurementVI,
+    )
+
+    source = SimKeithley6221("SIM")
+    meter = SimKeithley2182A("SIM")
+    source._paired_meter = meter
+    vi = DCModeMeasurementVI({"source": source, "meter": meter})
+
+    assert vi.lifecycle_state() == "idle"
+    vi.initiate_measurement(current=1e-6)
+    assert vi.lifecycle_state() == "initiated"
+    vi.standby()
+    assert vi.lifecycle_state() == "standby"
+
+
+def test_measurement_vi_plain_initiate_also_counts_as_initiated():
+    """The connection-check ``initiate()`` still records the operator's verb."""
+    from cryosoft.virtual_instruments.measurement.measurement_dc_mode import (
+        DCModeMeasurementVI,
+    )
+
+    source = SimKeithley6221("SIM")
+    meter = SimKeithley2182A("SIM")
+    source._paired_meter = meter
+    vi = DCModeMeasurementVI({"source": source, "meter": meter})
+
+    vi.initiate()
+    assert vi.lifecycle_state() == "initiated"
+
+
+def test_observe_lifecycle_state_refreshes_the_cache_on_the_monitor_cycle():
+    """A VI that can read the instrument corrects the cached value at poll time."""
+
+    class ObservingVI(BaseVirtualInstrument):
+        vi_type = "mock"
+
+        def __init__(self):
+            super().__init__({})
+            self.output_on = False
+
+        @monitored
+        def output(self):
+            return self.output_on
+
+        def observe_lifecycle_state(self):
+            return "initiated" if self.last_monitored("output") else "standby"
+
+    vi = ObservingVI()
+    vi.initiate()
+    assert vi.lifecycle_state() == "initiated"
+
+    # Somebody turned the output off at the instrument's own front panel.
+    vi.get_state()
+    assert vi.lifecycle_state() == "standby"
+
+    vi.output_on = True
+    vi.get_state()
+    assert vi.lifecycle_state() == "initiated"
+
+
+def test_observe_lifecycle_state_failures_never_break_the_monitor_cycle():
+    """A raising or out-of-vocabulary observation is ignored, not propagated."""
+
+    class BadObserverVI(BaseVirtualInstrument):
+        vi_type = "mock"
+
+        def __init__(self, answer):
+            super().__init__({})
+            self._answer = answer
+
+        @monitored
+        def reading(self):
+            return 1.0
+
+        def observe_lifecycle_state(self):
+            if self._answer is RuntimeError:
+                raise RuntimeError("cannot tell")
+            return self._answer
+
+    for answer in (RuntimeError, "armed"):
+        vi = BadObserverVI(answer)
+        vi.initiate()
+        state = vi.get_state()
+        assert state["reading"] == 1.0
+        assert vi.lifecycle_state() == "initiated"

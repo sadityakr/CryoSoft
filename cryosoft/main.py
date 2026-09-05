@@ -4,23 +4,29 @@ from __future__ import annotations
 
 import logging
 import sys
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import pyqtgraph as pg
 from PyQt6.QtCore import QProcess
 from PyQt6.QtWidgets import QApplication
 
 from cryosoft.core.config_catalog import ConfigCatalog
+from cryosoft.core.instrument_host import InstrumentHost, resolve_mode
 from cryosoft.core.logging_config import setup_logging
-from cryosoft.core.orchestrator import Orchestrator
 from cryosoft.core.paths import measurement_root
+from cryosoft.core.request_spool import RequestSpool
 from cryosoft.core.station import (
     Station,
     build_station_with_fallback,
     read_cryogenics_config,
+    read_assistant_config,
+    read_gateway_config,
+    read_instrument_thread,
     read_operations_config,
     read_panels_config,
+    read_request_spool_config,
     read_safety_config,
     read_servicing_logs_config,
     read_trends_config,
@@ -29,7 +35,19 @@ from cryosoft.core.trend_check_runner import TrendCheckRunner
 from cryosoft.core.trend_checks import declared_checks
 from cryosoft.gui import app_settings
 from cryosoft.gui.monitor_window import MonitorWindow
+from cryosoft.gui.procedure_discovery import discover_operations, discover_procedures
 from cryosoft.gui.theme import PLOT_AXIS, PLOT_BG, build_stylesheet
+from cryosoft.session.agent_feed import AgentFeed
+from cryosoft.session.assistant import (
+    AnthropicChatClient,
+    AssistantError,
+    AssistantRuntime,
+    AssistantTranscript,
+)
+from cryosoft.session.eln.publisher import ElnPublisher
+from cryosoft.session.gateway import authorize_spooled
+from cryosoft.session.eln.settings import load_eln_settings
+from cryosoft.session.gateway import Gateway, GatewayServer, ToolContext
 from cryosoft.session.manager import ExperimentManager
 from cryosoft.session.models import GUEST_USER_ID, GUEST_USER_NAME, User
 from cryosoft.session.servicing_log import (
@@ -99,8 +117,8 @@ def _resolve_active_session(store: SessionStore) -> tuple[str, str]:
     """Return the active ``(user_id, session_id)``, auto-creating a bootstrap session if needed.
 
     The app must never fail to start for lack of an explicit session choice
-    (see ``docs/plans/session-tier-and-terminology.md``, "Startup wiring
-    (decided)"): when the store's active pointer is unset, points at a
+    (the startup-wiring rule behind the Session tier — see ``GLOSSARY.md``'s
+    **Session**): when the store's active pointer is unset, points at a
     session record that fails to load, or is in the pre-per-user-nesting
     shape (first-ever launch, a corrupt pointer, or an older install), a
     bootstrap session is created and activated on the spot, owned by
@@ -120,6 +138,126 @@ def _resolve_active_session(store: SessionStore) -> tuple[str, str]:
     session = store.create_session(name=user_id, user_id=user_id)
     store.set_active(user_id, session.session_id)
     return user_id, session.session_id
+
+
+def _open_experiment_feed(manager: ExperimentManager) -> AgentFeed | None:
+    """Return the **Agent feed** of whichever experiment is open right now.
+
+    Resolved on demand rather than once at startup, so a client that
+    connects after the physicist opened a new experiment leaves its trail in
+    that experiment's folder — the feed belongs to the experiment, not to
+    the process.
+
+    Args:
+        manager: The session layer's experiment façade.
+
+    Returns:
+        The feed for the open experiment, or ``None`` when none is open (in
+        which case a connection records nothing rather than inventing a
+        folder to record into).
+    """
+    experiment = manager.current_experiment()
+    if experiment is None:
+        return None
+    return AgentFeed(
+        manager.store.agent_feed_path(experiment.experiment_id),
+        experiment.experiment_id,
+    )
+
+
+def _open_assistant_transcript(
+    manager: ExperimentManager,
+) -> AssistantTranscript | None:
+    """Return the **Assistant transcript** of whichever experiment is open now.
+
+    Resolved on demand, exactly like ``_open_experiment_feed()`` and for the
+    same reason: the conversation belongs to the experiment, not to the
+    process, so a question asked after the physicist opened a new experiment
+    is written into that experiment's folder.
+
+    Args:
+        manager: The session layer's experiment façade.
+
+    Returns:
+        The transcript for the open experiment, or ``None`` when none is open
+        (in which case the conversation still runs and simply keeps no
+        evidence, rather than inventing a folder to record into).
+    """
+    experiment = manager.current_experiment()
+    if experiment is None:
+        return None
+    return AssistantTranscript(
+        manager.store.assistant_transcript_path(experiment.experiment_id),
+        experiment.experiment_id,
+    )
+
+
+def _build_gateway_server(
+    engine: Any,
+    gateway_config: Mapping[str, Any],
+    *,
+    station_info: Callable[[], Any],
+    tool_context: ToolContext,
+    feed: Callable[[], AgentFeed | None],
+    socket_name: str | None = None,
+    descriptor: Path | str | None = None,
+    token: str | None = None,
+) -> GatewayServer | None:
+    """Build and start the **Gateway server**, if this setup asks for one.
+
+    Factored out of ``main()`` so the wiring itself is testable: the object
+    handed in is the **Orchestrator proxy**, not the engine, because this
+    server lives on the GUI thread and under the single hardware thread
+    standard the engine does not. The proxy satisfies the gateway's
+    ``EngineClient`` — ``submit()`` posts the command across, and the two
+    contract streams arrive queued under their client-side names.
+
+    Args:
+        engine: The engine client every connection's ``Gateway`` attaches to.
+        gateway_config: ``read_gateway_config()``'s answer for this setup —
+            ``gateway_server`` gates the whole thing, ``gateway_max_role``
+            caps what any connection may claim.
+        station_info: The station's declaration snapshot, or a callable
+            returning it.
+        tool_context: The collaborators the session tools read through.
+        feed: Resolves the open experiment's **Agent feed** at connection
+            time, so a client that connects later records into whichever
+            experiment is open then.
+        socket_name: The local-socket name to listen on; defaults to the
+            installation's.
+        descriptor: Where to write the descriptor file; defaults to the
+            installation's.
+        token: The secret to require in ``hello``; a fresh random one when
+            omitted, which is the production path.
+
+    Returns:
+        The listening server, or ``None`` when this setup does not ask for
+        one or names a ``gateway_max_role`` that is not a **Role** — an
+        unknown ceiling closes the door rather than guessing at it, and the
+        window opens regardless.
+    """
+    if not gateway_config["gateway_server"]:
+        return None
+    try:
+        server = GatewayServer(
+            engine,
+            max_role=gateway_config["gateway_max_role"],
+            station_info=station_info,
+            tool_context=tool_context,
+            feed=feed,
+            socket_name=socket_name,
+            descriptor=descriptor,
+            token=token,
+        )
+    except ValueError:
+        logger.exception(
+            "Gateway server not started: monitor.yaml declares the unknown "
+            "gateway_max_role %r",
+            gateway_config["gateway_max_role"],
+        )
+        return None
+    server.start()
+    return server
 
 
 def _restart_application() -> None:
@@ -156,9 +294,105 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
     catalog = ConfigCatalog(
         app_settings.shipped_config_dir(), app_settings.user_config_dir()
     )
-    station, used_path, warnings = build_station_with_fallback(_startup_candidates())
-    if on_station_built is not None:
-        on_station_built(station)
+
+    # The run catalog: {class __name__: class} for every discovered procedure
+    # and operation. Discovery lives up here because neither the engine
+    # (contract C5) nor the session layer (C11) may import
+    # cryosoft.procedures — whoever owns discovery hands the catalog down, so
+    # a client that speaks the control contract can name a run by class and
+    # the run queue can resolve a stored spec back to its class.
+    run_catalog: dict[str, type] = {
+        cls.__name__: cls for cls in (*discover_procedures(), *discover_operations())
+    }
+
+    # The instrument stack is built by the InstrumentHost, not here: which
+    # THREAD owns the Station and the Orchestrator is the host's decision, and
+    # `inline` mode is exactly today's behaviour with that decision named. The
+    # station factory therefore carries the whole build — including the config
+    # fallback, whose resolved path the Orchestrator's own safety settings
+    # come from, which is why the options are a callable too.
+    build: dict[str, Any] = {}
+
+    def _build_station() -> Station:
+        """Build the Station from the first usable startup config."""
+        station, used_path, warnings = build_station_with_fallback(
+            _startup_candidates()
+        )
+        build["used_path"] = used_path
+        build["warnings"] = warnings
+        if on_station_built is not None:
+            on_station_built(station)
+        return station
+
+    def _orchestrator_options(_station: Station) -> dict[str, Any]:
+        """Read the engine's settings from the config the build resolved."""
+        safety_config = read_safety_config(build["used_path"])
+        # The Request spool (GLOSSARY.md's **Request spool**): off unless the
+        # setup asks for it, and capped at the role the setup declares. The
+        # permission hook is wired HERE because the role model is the session
+        # layer's and the engine may not import it (contract C12) — the same
+        # reason the run catalog is handed down rather than discovered below.
+        spool_config = read_request_spool_config(build["used_path"])
+        request_spool = (
+            RequestSpool(
+                max_role=spool_config["max_role"], authorizer=authorize_spooled
+            )
+            if spool_config["enabled"]
+            else None
+        )
+        return {
+            "tick_interval_ms": 3000,
+            "manual_override_timeout_s": safety_config["manual_override_timeout_s"],
+            "stall_seconds": safety_config["stall_seconds"],
+            "hold_enforcement_interval_s": safety_config[
+                "hold_enforcement_interval_s"
+            ],
+            "hold_enforcement_max_attempts": safety_config[
+                "hold_enforcement_max_attempts"
+            ],
+            "run_catalog": run_catalog,
+            "request_spool": request_spool,
+        }
+
+    # The instrument-thread flag. Read from the config the app is ABOUT to
+    # load rather than the one it ends up with, because which thread owns the
+    # stack has to be decided before anything is built; a fallback to another
+    # config does not change the mode. `CRYOSOFT_INSTRUMENT_THREAD` overrides
+    # it for one launch, which is how CI runs the GUI suite in both modes.
+    mode = resolve_mode(read_instrument_thread(_startup_candidates()[0]))
+
+    # Trend-check standard (core/trend_checks.py, GLOSSARY.md's **Trend
+    # check**): a small, single-purpose scheduler independent of the
+    # Orchestrator — it holds only a Station, never an Orchestrator — that
+    # evaluates this setup's declared checks on its own slow timer and
+    # publishes failing ones as advisory-severity conditions. It is a STATION
+    # COMPANION: it holds the Station, so the host builds it wherever the
+    # Station lives and stops it there too.
+    def _build_trend_check_runner(station: Station) -> TrendCheckRunner:
+        """Build the trend-check scheduler beside the Station it publishes into."""
+        trends_config = read_trends_config(build["used_path"])
+        return TrendCheckRunner(
+            station,
+            declared_checks(trends_config),
+            refresh_interval_s=trends_config["refresh_interval_s"],
+        )
+
+    app.instrument_host = InstrumentHost(
+        _build_station,
+        mode=mode,
+        orchestrator_options=_orchestrator_options,
+        station_companions=(_build_trend_check_runner,),
+    )
+    app.instrument_host.start()
+    # Process lifecycle, owned here: the host stops the tick timer on the
+    # thread that owns it and, in threaded mode, joins the instrument thread
+    # with a bounded wait, so a wedged instrument read can never leave the
+    # application unexitable.
+    app.aboutToQuit.connect(app.instrument_host.shutdown)
+    station = app.instrument_host.station
+    used_path = build["used_path"]
+    warnings = build["warnings"]
+
     # Persist the config that actually loaded (by identity, not path) so the
     # next launch starts there even from a different clone/worktree.
     used_entry = catalog.get_by_path(used_path)
@@ -174,30 +408,12 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
             station.get_offline_info(offline_name).reason,
         )
 
-    safety_config = read_safety_config(used_path)
-    orchestrator = Orchestrator(
-        station,
-        tick_interval_ms=3000,
-        manual_override_timeout_s=safety_config["manual_override_timeout_s"],
-        stall_seconds=safety_config["stall_seconds"],
-        hold_enforcement_interval_s=safety_config["hold_enforcement_interval_s"],
-        hold_enforcement_max_attempts=safety_config["hold_enforcement_max_attempts"],
-    )
-
-    # Trend-check standard (core/trend_checks.py, GLOSSARY.md's **Trend
-    # check**): a small, single-purpose scheduler independent of the
-    # Orchestrator — it holds only a Station, never an Orchestrator — that
-    # evaluates this setup's declared checks on its own slow timer and
-    # publishes failing ones as advisory-severity conditions. Attached to
-    # `app` (rather than left as a bare local) so its ownership is explicit:
-    # a QObject with no Python reference is eligible for GC regardless of
-    # Qt-side parenting, and `app` outlives everything else built in main().
-    trends_config = read_trends_config(used_path)
-    app.trend_check_runner = TrendCheckRunner(
-        station,
-        declared_checks(trends_config),
-        refresh_interval_s=trends_config["refresh_interval_s"],
-    )
+    # The control contract, rendered for this process's clients: one typed
+    # method per command, the engine's signals re-exposed, and every read
+    # answered from a status mirror the host primed on the engine's own
+    # thread. Nothing above this line hands the engine itself to anyone.
+    orchestrator = app.instrument_host.build_proxy()
+    mirror = orchestrator.status
 
     # Session layer (L6 + the Session tier above it). measurement_root() is
     # the fixed, machine-level, admin-set root (never derived from the Data
@@ -214,10 +430,11 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
     # two levels deeper, inside that one active session's own folder —
     # switching sessions (User menu, Resume Session…) only updates
     # SessionStore's active pointer and takes effect on the next launch;
-    # ExperimentManager keeps this ExperimentStore for the process lifetime
-    # (see "Startup wiring (decided)" in
-    # docs/plans/session-tier-and-terminology.md). The user roster relocates
-    # to measurement_root()/"users.json", alongside "sessions/" and
+    # ExperimentManager keeps this ExperimentStore for the process lifetime:
+    # it is always constructed with one real, already-resolved
+    # ExperimentStore and grows no live rebind machinery (GLOSSARY.md's
+    # Session). The user roster relocates to
+    # measurement_root()/"users.json", alongside "sessions/" and
     # "servicing/".
     roster = UserRoster(measurement_root() / "users.json")
     _ensure_guest_user_registered(roster)
@@ -230,7 +447,129 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
         config_name=used_entry.name if used_entry is not None else Path(used_path).name,
         config_path=used_path,
         session_store=session_store,
+        station=station,
+        run_catalog=run_catalog,
     )
+
+    # The pull seam (GLOSSARY.md's **Run queue**): the engine ASKS the session
+    # layer's queue for the next run rather than holding one of its own, and
+    # reads the waiting entries from it for every QueueChanged event. Wired
+    # here because this is the one place that owns both objects — the queue
+    # cannot exist before the engine it broadcasts through, and the engine
+    # must not import the session layer (contract C12). It is installed
+    # through the proxy, like every other call a client makes here.
+    orchestrator.install_run_queue(
+        next_run=session_manager.next_run,
+        queue_entries=session_manager.queue_entries,
+        take_next_spec=session_manager.take_next_spec,
+        build_spec=session_manager.build_spec,
+    )
+
+    # The Gateway server (cryosoft/session/gateway/local_server.py,
+    # GLOSSARY.md's **Gateway server**): a local socket carrying the same
+    # Gateway an in-process client holds, one per connection, so an agent in
+    # its own process is authorised, fed and seen exactly as an in-process
+    # one. Off unless this setup's monitor.yaml turns it on, and never
+    # handing out more than the role that file names — opening a station to
+    # autonomous clients is a setup decision, so it lives in the config like
+    # every limit. It is a QLocalServer on THIS event loop, and it is built
+    # over the PROXY: the server runs on the GUI thread while the engine runs
+    # on the instrument thread, so a frame is parsed in a slot that posts its
+    # command across like every other client — no thread of its own, and no
+    # second writer to the bus. Wired here because this is the one place that
+    # owns both the proxy and the session layer; attached to `app` so its
+    # ownership is explicit, like every other QObject built in main().
+    gateway_config = read_gateway_config(used_path)
+    app.gateway_server = _build_gateway_server(
+        orchestrator,
+        gateway_config,
+        station_info=station.station_info,
+        tool_context=ToolContext(experiments=session_manager, run_catalog=run_catalog),
+        feed=lambda: _open_experiment_feed(session_manager),
+    )
+    if app.gateway_server is not None:
+        # Stopping on quit is what keeps the descriptor honest: a gateway.json
+        # left behind names a socket that is gone and a token that means
+        # nothing, and an adapter reading it reports "cannot connect" instead
+        # of "the app is not running". The socket itself is reclaimed either
+        # way — start() removes a stale one — so this exists for the
+        # descriptor's sake.
+        app.aboutToQuit.connect(app.gateway_server.stop)
+
+    # The Embedded assistant (cryosoft/session/assistant/, GLOSSARY.md's
+    # **Embedded assistant**): the physicist's chat client for this
+    # experiment, and deliberately NOT a third client of the engine — it holds
+    # one Gateway, its tools ARE that gateway's tool surface and its tool
+    # execution IS that gateway's call_tool(), so it is authorised, fed and
+    # seen exactly as an agent in another process. Off unless this setup's
+    # monitor.yaml says so, and never offering more authority than that file
+    # names (falling back to the ceiling it already grants an out-of-process
+    # client, since the assistant is one). Its Gateway is built over the
+    # PROXY, like the gateway server's: the assistant runs on the GUI thread,
+    # and the proxy is what a client on this side of the instrument thread
+    # holds — it satisfies the control contract's client surface
+    # (EngineClient: submit + the two streams) exactly as the engine does.
+    #
+    # Two things are resolved at call time rather than once: the experiment's
+    # Agent feed and its Assistant transcript, so a conversation had after the
+    # physicist opened a new experiment is recorded in that experiment's
+    # folder.
+    assistant_config = read_assistant_config(used_path)
+    assistant_max_role = (
+        assistant_config["assistant_max_role"] or gateway_config["gateway_max_role"]
+    )
+    # Read once and shared with the publisher below: the assistant's model,
+    # key, token cap and price table live in the same user-level settings file
+    # the notebook's do, and two reads could disagree.
+    eln_settings = load_eln_settings()
+
+    def _assistant_gateway(role: str) -> Gateway:
+        """Build the assistant's connection under one role."""
+        return Gateway(
+            orchestrator,
+            role,
+            "assistant",
+            station_info=station.station_info,
+            tool_context=ToolContext(
+                experiments=session_manager, run_catalog=run_catalog
+            ),
+            feed=_open_experiment_feed(session_manager),
+        )
+
+    app.assistant_runtime = None
+    if assistant_config["assistant"]:
+        try:
+            # The client first: with no key (or without the optional extra
+            # installed) there is nothing to connect a gateway for.
+            chat_client = AnthropicChatClient(eln_settings.assistant)
+            app.assistant_runtime = AssistantRuntime(
+                _assistant_gateway(assistant_max_role),
+                chat_client,
+                transcript=_open_assistant_transcript(session_manager),
+                parent=app,
+            )
+        except (AssistantError, ValueError):
+            # No key, no optional extra, or an unknown role in the config: the
+            # dock is still registered and says so in one line, because a
+            # missing key is a configuration fact and not a fault that should
+            # take the window with it.
+            logger.exception("Embedded assistant not started")
+
+    # ELN publishing (cryosoft/session/eln/): entirely opt-in and entirely
+    # GUI-side. With no user-level settings file — the default — the
+    # publisher is built, finds nothing configured, and does nothing: the
+    # drain timer never starts and on_run_finished() returns immediately, so
+    # a setup that has no notebook carries no footprint. The timer lives HERE,
+    # in the application entry point, rather than in the Orchestrator, for the
+    # same reason all network I/O does: it must never share the tick that
+    # writes to hardware. Attached to `app` so its ownership is explicit — a QObject with no Python reference is eligible
+    # for GC regardless of Qt-side parenting.
+    app.eln_publisher = ElnPublisher(session_manager, eln_settings)
+    orchestrator.run_finished.connect(app.eln_publisher.on_run_finished)
+    # The other direction of the same seam: the manager holds the publisher so
+    # that approving a **draft entry** parked on a run record can queue it.
+    session_manager.attach_eln_publisher(app.eln_publisher)
+    app.eln_publisher.start()
 
     # Cryogenics management:
     # config-gated like every optional feature — a setup without a
@@ -296,6 +635,11 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
         servicing_log_kinds=servicing_log_kinds,
         cryogenics_recorder=cryogenics_recorder,
         panels_config=read_panels_config(used_path),
+        mirror=mirror,
+        assistant_enabled=bool(assistant_config["assistant"]),
+        assistant_runtime=app.assistant_runtime,
+        assistant_max_role=assistant_max_role,
+        assistant_role_factory=_assistant_gateway,
     )
     monitor.show()
 

@@ -25,8 +25,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from cryosoft.core.orchestrator import Orchestrator
-from cryosoft.core.station import Station
+from cryosoft.core.orchestrator_proxy import OrchestratorProxy
 from cryosoft.gui.procedure_discovery import discover_operations
 from cryosoft.core.operation import STEP_STATUS_SKIPPED
 from cryosoft.gui.theme import (
@@ -43,6 +42,8 @@ from cryosoft.session.servicing_log import consumption_rate_pct_per_h
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from cryosoft.core.station import Station
 
     from cryosoft.core.operation import OperationBase
     from cryosoft.session.servicing_log import HeliumRecordStore, ServicingLogStore
@@ -164,7 +165,7 @@ class OperationCard(QGroupBox):
 
     def __init__(
         self,
-        orchestrator: Orchestrator,
+        orchestrator: OrchestratorProxy,
         display_instance: OperationBase,
         factory: Callable[..., OperationBase],
         get_current_person: Callable[[], str] | None = None,
@@ -222,9 +223,9 @@ class OperationCard(QGroupBox):
         self._next_due_label.hide()
         details_layout.addWidget(self._next_due_label)
 
-        # Live status line (design doc operation-concurrency-and-error-
-        # scoping.md §2's hard status separation): shows this operation's own
-        # operation_status milestones while it is the active run — never the
+        # Live status line (the hard status separation, see GLOSSARY.md):
+        # shows this operation's own operation_status milestones while it is
+        # the active run — never the
         # Procedure window. Elided (single line) rather than word-wrapped —
         # a status line grows unboundedly less than a checklist detail.
         self._status_label = QLabel("")
@@ -770,7 +771,7 @@ class OperationsPanel(QWidget):
     def __init__(
         self,
         station: Station,
-        orchestrator: Orchestrator,
+        orchestrator: OrchestratorProxy,
         cryogenics_config: dict[str, Any] | None,
         operations_config: dict[str, dict[str, Any]] | None,
         helium_store: HeliumRecordStore | None,

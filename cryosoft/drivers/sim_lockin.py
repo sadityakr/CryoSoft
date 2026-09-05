@@ -1,8 +1,11 @@
 """Simulated phase-sensitive lock-in amplifier driver (base/internal-source only)."""
 
+import logging
 import random
 
 from cryosoft.core.exceptions import CryoSoftCommunicationError
+
+log = logging.getLogger(__name__)
 
 
 class SimLockIn:
@@ -181,6 +184,25 @@ class SimLockIn:
         if self._harmonic == 2:
             return self._response_2f_ratio * amplitude**2
         return 0.0
+
+    # ------------------------------------------------------------------
+    # Safe state (the safe-shutdown standard)
+    # ------------------------------------------------------------------
+
+    def safe_shutdown(self) -> None:
+        """Zero the drive oscillator; idempotent, never raises.
+
+        Safe idle for a lock-in is no excitation on its oscillator output —
+        the one thing it drives into the sample. Frequency, harmonic, time
+        constant and reference source are left alone: they shape a
+        measurement, they do not energise anything.
+        """
+        log.info("SimLockIn: safe shutdown — oscillator amplitude to zero.")
+        self._oscillator_amplitude_v = 0.0
+
+    def _is_in_safe_state(self) -> bool:
+        """Return True when the drive oscillator is at zero amplitude."""
+        return self._oscillator_amplitude_v == 0.0
 
     # ------------------------------------------------------------------
     # Connection lifecycle (the connection-lifecycle standard)

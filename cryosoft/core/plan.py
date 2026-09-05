@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -16,10 +18,60 @@ __all__ = [
     "StepPlan",
     "ParamSpec",
     "ParamGroup",
+    "UIGroup",
     "DataSchema",
+    "DurationEstimate",
     "EnvelopeBound",
+    "EnvelopeVariable",
     "ExperimentEnvelope",
+    "ProbeSpec",
+    "StepCost",
+    "SETPOINT_PARAM_PREFIX",
+    "params_digest",
 ]
+
+
+def params_digest(params: Mapping[str, Any] | None) -> str:
+    """Return the **Params digest** of one parameter set.
+
+    A record that says a physical step was confirmed is only evidence if it
+    also says WHAT was confirmed. Parameters live in several places by then —
+    a run manifest, a queue entry, an operation's own defaults — and a
+    dispute months later cannot tell whether the values in one of them are
+    the values that were actually in force. So a confirmation stores this
+    digest of the parameters as they stood at that instant: two records agree
+    about the parameters exactly when their digests match, without either
+    having to carry a copy of them.
+
+    **The canonicalisation**, which is what makes the digest stable and is
+    therefore part of the standard rather than an implementation detail: the
+    mapping is rendered by ``json.dumps`` with keys sorted, no whitespace
+    (``", "``/``": "`` collapsed to ``","``/``":"``), floats written as
+    ``repr()`` gives them (the shortest text that round-trips back to the
+    same double, which is what ``json`` does for a float by construction),
+    non-ASCII characters left as themselves, and any value JSON cannot
+    render itself (a numpy scalar, an enum, a path) replaced by its
+    ``str()`` — the same degrade-never-fail rule the contract's own
+    rendering follows. That UTF-8 text is hashed with SHA-256 and returned
+    as its 64-character lowercase hex digest. Key ORDER therefore never matters and key SPELLING always
+    does; ``None`` and an empty mapping give the same digest, because "no
+    parameters" is one fact, not two.
+
+    Args:
+        params: The parameter mapping to digest, or ``None`` for "none".
+
+    Returns:
+        The 64-character lowercase SHA-256 hex digest of the canonical JSON.
+    """
+    canonical = json.dumps(
+        dict(params or {}),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        default=str,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
 
 # Scalar Python types accepted for GUI-facing parameters and their HDF5 dtypes.
 _PARAM_TYPES: tuple[type, ...] = (float, int, str, bool)
@@ -495,6 +547,93 @@ class ParamGroup:
         object.__setattr__(self, "params", dict(self.params))
 
 
+@dataclass(frozen=True)
+class UIGroup:
+    """One titled group of a Virtual Instrument's own capabilities.
+
+    The VI-side counterpart of ``ParamGroup``, and deliberately a separate
+    type: ``ParamGroup`` groups the *parameters of one procedure run* and
+    carries ``ParamSpec``s, whereas a ``UIGroup`` groups the *methods of one
+    instrument* — its ``@monitored`` readings and ``@control`` actions — by
+    naming them in ``members``. A VI declares its groups in the
+    ``ui_groups`` class attribute (see the UI-group standard in
+    ``virtual_instruments/base.py``), and the base class validates every
+    group and every ``group=`` tag at class creation.
+
+    Groups are presentation and description only: they order and title what
+    the instrument front panel renders and what the capability manifest
+    describes. Nothing about a group crosses the action queue — a control is
+    still submitted on its own, by method name, with flat scalar kwargs.
+
+    ``members`` is explicit rather than derived from the ``group=`` tags,
+    because its order IS the render order and it doubles as documentation of
+    the workflow order for an agent reading the manifest. A method may also
+    carry the matching ``group=`` tag; the base class checks the two agree.
+
+    Attributes:
+        key: Stable identity, the value a method's ``group=`` tag names.
+            Non-empty string, unique within one VI.
+        title: Human-readable heading. Non-empty string.
+        description: Optional sentence saying what the group is for.
+        members: Ordered ``@monitored`` / ``@control`` method names, at least
+            one, no duplicates. Coerced to a tuple.
+    """
+
+    key: str
+    title: str
+    description: str = ""
+    members: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Validate the declaration and freeze ``members`` as a tuple.
+
+        Raises:
+            TypeError: If ``key``, ``title`` or ``description`` is not a
+                string, if ``members`` is not a sequence of strings, or if a
+                member name is not a string.
+            ValueError: If ``key``, ``title`` or a member name is empty, if
+                ``members`` is empty, or if a member name repeats.
+        """
+        for name, val in (("key", self.key), ("title", self.title)):
+            if not isinstance(val, str):
+                raise TypeError(f"UIGroup.{name} must be a str, got {val!r}")
+            if not val:
+                raise ValueError(f"UIGroup.{name} must be a non-empty str")
+
+        if not isinstance(self.description, str):
+            raise TypeError(
+                f"UIGroup.description must be a str, got {self.description!r}"
+            )
+
+        if isinstance(self.members, str) or not isinstance(
+            self.members, (tuple, list)
+        ):
+            raise TypeError(
+                f"UIGroup.members must be a tuple of method names, got "
+                f"{self.members!r}"
+            )
+        members = tuple(self.members)
+        if not members:
+            raise ValueError(
+                f"UIGroup {self.key!r} must name at least one member — a group "
+                f"with no members declares nothing"
+            )
+        for member in members:
+            if not isinstance(member, str):
+                raise TypeError(
+                    f"UIGroup {self.key!r} member must be a str, got {member!r}"
+                )
+            if not member:
+                raise ValueError(
+                    f"UIGroup {self.key!r} member must be a non-empty str"
+                )
+        if len(set(members)) != len(members):
+            raise ValueError(
+                f"UIGroup {self.key!r} lists a member twice: {list(members)}"
+            )
+        object.__setattr__(self, "members", members)
+
+
 def _validate_dtype_columns(field_name: str, columns: Any) -> dict[str, str]:
     """Validate a ``{name: "float"|"int"}`` mapping and return a defensive copy."""
     if not isinstance(columns, dict):
@@ -782,6 +921,59 @@ class DataSchema:
             )
 
 
+#: The setpoint-parameter convention: a ``@control`` parameter whose name
+#: starts with this prefix carries its VI's enveloped quantity — the same
+#: physical quantity ``RampableVI.start_ramp(target)`` takes and a ``Target``
+#: commands (tesla for a magnet, kelvin for a temperature controller, degrees
+#: for a rotator). Naming it this way is what lets the session envelope bind a
+#: manual action as well as a plan's ``Target``, with no per-VI table for the
+#: Orchestrator to keep in step: it asks the Station which of an action's
+#: keyword arguments is the setpoint and checks that one. A VI declares at
+#: most one such parameter, on the single capability that commands its
+#: setpoint; machine-checked for every rampable VI by
+#: ``tests/test_conformance.py``.
+SETPOINT_PARAM_PREFIX: str = "target_"
+
+
+@dataclass(frozen=True)
+class EnvelopeVariable:
+    """One VI's enveloped quantity: the capability that sets it and its bounds.
+
+    The read side of the setpoint-parameter convention
+    (``SETPOINT_PARAM_PREFIX``), assembled by
+    ``Station.envelope_variables()``. It answers the two questions the
+    envelope editor and the Orchestrator's manual-action check both ask about
+    a VI: *which* keyword argument carries the enveloped value, and *what
+    range does the setup itself already allow* — the ``control_limits`` bound
+    the config populated, which an experiment's ``EnvelopeBound`` narrows.
+
+    Attributes:
+        vi_name: The VI this variable belongs to.
+        method_name: The ``@control`` capability that commands it.
+        param_name: That capability's setpoint parameter (``target_*``).
+        config_min: Setup lower bound in the quantity's SI unit, or ``None``
+            when the setup leaves it unbounded below.
+        config_max: Setup upper bound, or ``None`` when unbounded above.
+    """
+
+    vi_name: str
+    method_name: str
+    param_name: str
+    config_min: float | None = None
+    config_max: float | None = None
+
+    @property
+    def unit_suffix(self) -> str:
+        """Return the parameter's trailing unit token, or ``""``.
+
+        Derived from the setpoint parameter's own name — ``target_T`` → ``T``,
+        ``target_K`` → ``K``, ``target_deg`` → ``deg`` — which the SI-units
+        rule already makes the authoritative unit marker on a VI's API. Used
+        only to label the envelope editor's fields.
+        """
+        return self.param_name[len(SETPOINT_PARAM_PREFIX):]
+
+
 @dataclass(frozen=True)
 class EnvelopeBound:
     """One session-envelope limit on a system VI's swept quantity.
@@ -873,6 +1065,11 @@ class ExperimentEnvelope:
     — a human slip in the GUI is caught by the same check as an agent call:
 
     * every submitted ``Target`` for a bounded VI is validated before dispatch;
+    * every manual action on the **direct action path** is validated the same
+      way, on the setpoint parameter the setpoint-parameter convention
+      identifies (``SETPOINT_PARAM_PREFIX``), so a bounded VI's setpoint is
+      refused outside the envelope whether it arrives as a ``Target`` or as an
+      action — at submission AND again when the tick drains the queue;
     * every tick, each bound with a ``state_key`` is checked against the VI's
       live reading, entering EMERGENCY on a violation exactly like a tripped
       safety flag.
@@ -915,6 +1112,50 @@ class ExperimentEnvelope:
                 )
             copied[vi_name] = bound
         object.__setattr__(self, "bounds", copied)
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> ExperimentEnvelope:
+        """Build an envelope from its plain-dict form.
+
+        The dict form is what a client that speaks JSON rather than Python
+        sends — ``{vi_name: {"min_value": ..., "max_value": ...,
+        "state_key": ...}}``, one entry per bounded VI, each key optional
+        beyond the requirement that at least one bound is present. Strict by
+        design: a malformed envelope raises here so the caller can refuse the
+        request outright. (The session layer keeps its own *tolerant* reader
+        for records loaded from disk, where a corrupt stored envelope must
+        degrade to "no envelope" rather than block loading.)
+
+        Args:
+            data: The mapping described above. Must be non-empty — pass
+                ``None`` to ``Orchestrator.set_experiment_envelope()`` for
+                "no envelope" rather than an empty mapping.
+
+        Returns:
+            The typed envelope.
+
+        Raises:
+            TypeError: If *data* is not a mapping, or an entry is not a
+                mapping of the ``EnvelopeBound`` fields.
+            ValueError: If *data* is empty, or a bound is invalid (see
+                ``EnvelopeBound``).
+        """
+        if not isinstance(data, Mapping):
+            raise TypeError(
+                f"ExperimentEnvelope.from_dict expects a mapping, got {data!r}"
+            )
+        bounds: dict[str, EnvelopeBound] = {}
+        for vi_name, entry in data.items():
+            if not isinstance(entry, Mapping):
+                raise TypeError(
+                    f"envelope bound for {vi_name!r} must be a mapping, got {entry!r}"
+                )
+            bounds[str(vi_name)] = EnvelopeBound(
+                min_value=entry.get("min_value"),
+                max_value=entry.get("max_value"),
+                state_key=str(entry.get("state_key") or ""),
+            )
+        return cls(bounds=bounds)
 
     def check_target(self, vi_name: str, value: float) -> str | None:
         """Validate one submitted target value against the envelope.
@@ -961,3 +1202,288 @@ class ExperimentEnvelope:
                     f"session envelope: {vi_name} {bound.state_key} {message}"
                 )
         return violations
+
+
+@dataclass(frozen=True)
+class ProbeSpec:
+    """How a cheap **probe run** is derived from a requested run.
+
+    A probe is the same procedure class driving the same instruments through
+    the same code path, reduced until it costs minutes instead of hours: it
+    answers "would this run actually work, and does the signal look sane?"
+    before the full run is committed to. It is never science data — the run it
+    produces declares ``run_kind = "probe"``, which travels into the run
+    manifest, the session layer's run record, and the data file's
+    ``/metadata.run_kind``, so a probe file can never be mistaken for the real
+    thing.
+
+    **The reduction rules** (the standard; applied by
+    ``BaseProcedure.apply_probe()`` to an already-built run, so a probe is
+    only ever a reduction of a run that was built and validated as requested):
+
+    1. **Sweep length.** The built sweep array is subsampled to at most
+       ``n_points`` points, evenly spaced and ALWAYS keeping the first and the
+       last — a probe must exercise the extremes the full run would ramp to,
+       because that is where a limit, a quench or a lost lock shows up.
+       ``n_points=3`` therefore means first/middle/last. A sweep already at or
+       below ``n_points`` is left alone.
+    2. **Waits.** Every declared parameter whose ``ParamSpec`` carries the
+       unit ``"s"`` — settle waits, inter-reading delays — is capped at
+       ``max_wait_s``. Values already below the cap are left alone; a probe
+       never raises a wait.
+    3. **Averaging.** Every declared repeat count is capped at ``averaging``.
+       A repeat count is identified by declaration, never by name: it is a
+       measurement parameter whose value sets the length of one of the
+       measurement VI's declared data arrays (``data_arrays()``), so a new
+       measurement VI's averaging knob is reduced with no new code.
+    4. **Kind and provenance.** The reduced run declares ``run_kind =
+       "probe"`` and records this spec as its ``probe_spec`` parameter, so the
+       file says which reduction produced it. The sweep-shape parameters keep
+       the values that were requested (``field_steps`` still reads 101); the
+       saved point count and ``probe_spec`` together are what say what ran.
+
+    Nothing else changes: same procedure class, same targets, same measurement
+    VI, same claim, and the same setup limits and session envelope apply.
+
+    Attributes:
+        n_points: Maximum number of sweep points the probe keeps. Must be
+            ``>= 1``; the default 3 gives first/middle/last.
+        averaging: Maximum repeat count per measurement point. Must be
+            ``>= 1``.
+        max_wait_s: Upper bound, in seconds, on every declared wait. Must be
+            ``>= 0``.
+    """
+
+    n_points: int = 3
+    averaging: int = 1
+    max_wait_s: float = 5.0
+
+    def __post_init__(self) -> None:
+        """Validate the three reduction bounds.
+
+        Raises:
+            TypeError: If a field is not a real number (``bool`` rejected).
+            ValueError: If ``n_points``/``averaging`` is below 1, or
+                ``max_wait_s`` is negative or non-finite.
+        """
+        for name in ("n_points", "averaging"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"ProbeSpec.{name} must be an int, got {value!r}")
+            if value < 1:
+                raise ValueError(f"ProbeSpec.{name} must be >= 1, got {value!r}")
+        if not _is_real_number(self.max_wait_s):
+            raise TypeError(
+                f"ProbeSpec.max_wait_s must be a real number, got {self.max_wait_s!r}"
+            )
+        if not math.isfinite(self.max_wait_s) or self.max_wait_s < 0:
+            raise ValueError(
+                f"ProbeSpec.max_wait_s must be finite and >= 0, "
+                f"got {self.max_wait_s!r}"
+            )
+        object.__setattr__(self, "max_wait_s", float(self.max_wait_s))
+
+    def to_json(self) -> dict[str, Any]:
+        """Render this spec as a JSON-safe dict.
+
+        Returns:
+            ``{"n_points": int, "averaging": int, "max_wait_s": float}``.
+        """
+        return {
+            "n_points": self.n_points,
+            "averaging": self.averaging,
+            "max_wait_s": self.max_wait_s,
+        }
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> ProbeSpec:
+        """Rebuild a spec from its dict form.
+
+        The form a JSON-speaking client sends: every key optional, unknown
+        keys ignored so a newer producer never breaks an older consumer.
+
+        Args:
+            data: A mapping as produced by ``to_json()``.
+
+        Returns:
+            The typed spec.
+
+        Raises:
+            TypeError: If *data* is not a mapping, or a value has the wrong
+                type.
+            ValueError: If a value is out of range (see ``__post_init__``).
+        """
+        if not isinstance(data, Mapping):
+            raise TypeError(f"ProbeSpec.from_json expects a mapping, got {data!r}")
+        declared = {"n_points", "averaging", "max_wait_s"}
+        return cls(**{k: v for k, v in data.items() if k in declared})
+
+
+@dataclass(frozen=True)
+class StepCost:
+    """What one run costs per point, apart from the ramps.
+
+    The currency of the **duration-estimate standard**: the one thing a run
+    contributes to its own estimate, returned by
+    ``BaseProcedure.estimate_step_seconds()``. The estimator
+    (``core/estimates.py``) supplies the other half — the ramp time, which it
+    derives from the run's declared targets and the setup's nominal ramp
+    rates — so a procedure never has to know how fast its magnet moves.
+
+    Every number is seconds and every unknown is an assumption string rather
+    than a silent zero.
+
+    Attributes:
+        points: How many measurement points the run will take.
+        setup_s: One-off settle time before the first point (the initiate
+            wait).
+        settle_s: Settle time paid before every point after the first.
+        measure_s: Time one measurement at one point takes, averaging
+            included.
+        assumptions: Human-readable statements about what this cost model
+            could not derive and assumed instead.
+    """
+
+    points: int = 0
+    setup_s: float = 0.0
+    settle_s: float = 0.0
+    measure_s: float = 0.0
+    assumptions: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Validate the counts and freeze ``assumptions``.
+
+        Raises:
+            TypeError: If a numeric field is not a real number, or an
+                assumption is not a string.
+            ValueError: If any value is negative or non-finite.
+        """
+        if isinstance(self.points, bool) or not isinstance(self.points, int):
+            raise TypeError(f"StepCost.points must be an int, got {self.points!r}")
+        if self.points < 0:
+            raise ValueError(f"StepCost.points must be >= 0, got {self.points!r}")
+        for name in ("setup_s", "settle_s", "measure_s"):
+            value = getattr(self, name)
+            if not _is_real_number(value):
+                raise TypeError(f"StepCost.{name} must be a real number, got {value!r}")
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(
+                    f"StepCost.{name} must be finite and >= 0, got {value!r}"
+                )
+            object.__setattr__(self, name, float(value))
+        assumptions = tuple(self.assumptions)
+        for assumption in assumptions:
+            if not isinstance(assumption, str):
+                raise TypeError(
+                    f"StepCost.assumptions must hold strings, got {assumption!r}"
+                )
+        object.__setattr__(self, "assumptions", assumptions)
+
+
+@dataclass(frozen=True)
+class DurationEstimate:
+    """How long a run is expected to take, and what that answer assumed.
+
+    Frozen and JSON-safe, so the same value serves ``RunValidation``, the
+    verdict a client renders, and a stored session record. Deliberately
+    carries its own assumptions: an estimate a client cannot qualify is worse
+    than no estimate at all, so anything the model could not derive — a VI
+    with no declared ramp rate, a measurement whose duration nothing declares
+    — is named here instead of being silently counted as zero.
+
+    Attributes:
+        total_s: Expected wall-clock duration, in seconds. The sum of
+            ``phases``.
+        phases: Seconds per phase, e.g. ``{"setup": .., "ramp": ..,
+            "settle": .., "measure": ..}``. Phase keys are whatever the
+            estimator produced; a client renders them, never switches on them.
+        assumptions: One statement per thing the estimate assumed, in
+            discovery order. Never empty for a real estimate: at minimum it
+            names the rate model used.
+    """
+
+    total_s: float = 0.0
+    phases: dict[str, float] = field(default_factory=dict)
+    assumptions: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Validate and freeze copies of the phase map and assumptions.
+
+        Raises:
+            TypeError: If ``total_s`` or a phase value is not a real number,
+                ``phases`` is not a mapping, or an assumption is not a string.
+            ValueError: If a duration is negative or non-finite.
+        """
+        if not _is_real_number(self.total_s):
+            raise TypeError(
+                f"DurationEstimate.total_s must be a real number, got {self.total_s!r}"
+            )
+        if not math.isfinite(self.total_s) or self.total_s < 0:
+            raise ValueError(
+                f"DurationEstimate.total_s must be finite and >= 0, "
+                f"got {self.total_s!r}"
+            )
+        object.__setattr__(self, "total_s", float(self.total_s))
+        if not isinstance(self.phases, Mapping):
+            raise TypeError("DurationEstimate.phases must be a mapping")
+        phases: dict[str, float] = {}
+        for name, value in self.phases.items():
+            if not _is_real_number(value):
+                raise TypeError(
+                    f"DurationEstimate.phases[{name!r}] must be a real number, "
+                    f"got {value!r}"
+                )
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(
+                    f"DurationEstimate.phases[{name!r}] must be finite and >= 0, "
+                    f"got {value!r}"
+                )
+            phases[str(name)] = float(value)
+        object.__setattr__(self, "phases", phases)
+        assumptions = tuple(self.assumptions)
+        for assumption in assumptions:
+            if not isinstance(assumption, str):
+                raise TypeError(
+                    f"DurationEstimate.assumptions must hold strings, "
+                    f"got {assumption!r}"
+                )
+        object.__setattr__(self, "assumptions", assumptions)
+
+    def to_json(self) -> dict[str, Any]:
+        """Render this estimate as a JSON-safe dict.
+
+        Returns:
+            ``{"total_s": float, "phases": {str: float},
+            "assumptions": [str, ...]}``.
+        """
+        return {
+            "total_s": self.total_s,
+            "phases": dict(self.phases),
+            "assumptions": list(self.assumptions),
+        }
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> DurationEstimate:
+        """Rebuild an estimate from its ``to_json()`` dict.
+
+        Args:
+            data: A mapping as produced by ``to_json()``; unknown keys are
+                ignored.
+
+        Returns:
+            The typed estimate.
+
+        Raises:
+            TypeError: If *data* is not a mapping or a field has the wrong
+                type.
+            ValueError: If a duration is negative or non-finite.
+        """
+        if not isinstance(data, Mapping):
+            raise TypeError(
+                f"DurationEstimate.from_json expects a mapping, got {data!r}"
+            )
+        return cls(
+            total_s=data.get("total_s", 0.0),
+            phases=dict(data.get("phases") or {}),
+            assumptions=tuple(data.get("assumptions") or ()),
+        )

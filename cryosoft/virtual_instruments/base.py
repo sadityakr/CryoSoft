@@ -17,13 +17,65 @@ import statistics
 from collections.abc import Mapping, Sequence
 from typing import Any, ClassVar
 
+from cryosoft.core.events import LifecycleState
 from cryosoft.core.exceptions import (
     CryoSoftCommunicationError,
     CryoSoftConfigError,
     CryoSoftSafetyError,
 )
-from cryosoft.core.plan import ParamSpec
+from cryosoft.core.plan import ParamSpec, UIGroup
 from cryosoft.virtual_instruments.rampable import RampableVI
+
+logger = logging.getLogger(__name__)
+
+#: Config key naming a setup's excitation-current ceiling, in amperes.
+#: Every VI that drives current through the sample reads it — directly (the
+#: DC and delta-mode VIs bound the sourced current by it) or derived (a
+#: voltage-sourced lock-in bounds its oscillator amplitude by
+#: ``max_source_current_A × series_resistance_ohm``). Limits are properties of
+#: the setup, so the VALUE always comes from the config; this module only
+#: names the key.
+MAX_SOURCE_CURRENT_KEY: str = "max_source_current_A"
+
+#: ``control_limits`` limit name for a directly sourced excitation current
+#: (the control-validation standard). Shared by every current-sourcing
+#: measurement VI so one config key populates one named bound.
+EXCITATION_CURRENT_LIMIT: str = "source_current_A"
+
+
+def _populate_excitation_current_limit(
+    vi: BaseVirtualInstrument, init_params: Mapping[str, Any]
+) -> None:
+    """Set ``vi._limits[EXCITATION_CURRENT_LIMIT]`` from the setup config.
+
+    The one place the excitation ceiling is turned into a bound, shared by
+    every VI that sources current directly, so the four DC/delta-mode VIs
+    cannot drift apart in how they read the same config key.
+
+    The bound is symmetric: reversing the current is routine in DC and
+    delta-mode resistance work (thermal-EMF cancellation), and the hazard is
+    the magnitude either way. A missing key leaves the limit populated but
+    unbounded on both sides — the same "absent means no bound" rule the
+    temperature, magnet and rotator VIs follow — so an older hand-written
+    config still builds; the conformance suite is what requires every SHIPPED
+    config to declare it.
+
+    Args:
+        vi: The VI being constructed (its ``_limits`` dict is written).
+        init_params: The VI's config ``init_params``.
+    """
+    raw = init_params.get(MAX_SOURCE_CURRENT_KEY)
+    if raw is None:
+        logger.warning(
+            "%s: config declares no '%s' — the excitation current is "
+            "UNBOUNDED for this setup.",
+            type(vi).__name__,
+            MAX_SOURCE_CURRENT_KEY,
+        )
+        vi._limits[EXCITATION_CURRENT_LIMIT] = (None, None)
+        return
+    ceiling = abs(float(raw))
+    vi._limits[EXCITATION_CURRENT_LIMIT] = (-ceiling, ceiling)
 
 
 class BaseVirtualInstrument:
@@ -78,6 +130,46 @@ class BaseVirtualInstrument:
     ``disconnect()`` (release VI-held state). Reconnecting is the Station's
     job (``Station.connect_instrument()``), because only it holds the build
     recipe needed to construct fresh drivers.
+
+    Lifecycle-state standard
+    ------------------------
+    The operating half of the connection lifecycle is also DATA, not just a
+    pair of verbs: every VI carries its lifecycle state — ``"idle"``,
+    ``"initiated"`` or ``"standby"``, the ``LifecycleState`` vocabulary the
+    contract declares (``core/events.py``) — and ``lifecycle_state()`` reads
+    it. The rule this exists to enforce: a client RENDERS the state, it never
+    reconstructs it from the actions it happened to witness. An instrument
+    stood down by a path that emits no per-VI action — an emergency's
+    blanket ``Station.standby_all()`` — reports the truth on the very next
+    ``StatusSnapshot`` all the same, because the fact travels with the VI
+    rather than with the action.
+
+    Three rules bind every VI, and a VI author writes nothing to obey them:
+
+    1. **The verbs own the fact.** ``initiate()`` sets ``"initiated"``,
+       ``standby()`` sets ``"standby"``, ``disconnect()`` resets to
+       ``"idle"``, and a measurement VI's ``initiate_measurement()`` — the
+       arming half of its own lifecycle — sets ``"initiated"`` like the
+       plain verb. Each is written only AFTER the call returns without
+       raising, so a refused or failed stand-down never claims to have
+       happened. Maintained by ``__init_subclass__``'s wrap of a directly
+       defined method (the same inherited-enforcement idiom the
+       control-validation standard uses for ``@control``) and by these base
+       methods' own bodies, for a VI that inherits them unchanged.
+    2. **The read is pure.** ``lifecycle_state()`` returns the cached value
+       and sends nothing on the bus — the same purity rule
+       ``control_param_specs()`` follows — so any client may ask at any
+       time, including inside the status-snapshot assembly.
+    3. **Hardware may correct it, the cache still answers.** A VI that can
+       genuinely observe what the instrument is doing (an output that reads
+       back on/off) overrides ``observe_lifecycle_state()``, which the
+       monitor cycle consults once per poll, off the values it already read.
+       That refreshes the cached value; it never becomes the read itself.
+
+    Distinct from ``standby_status()``, which answers a narrower question —
+    is this VI at, or converging on, the state its own ``standby()`` drives
+    it to — from command provenance, for hold enforcement. Lifecycle state
+    is the operator-facing fact the instrument card renders.
 
     Detach-when-idle declaration
     -----------------------------
@@ -159,6 +251,46 @@ class BaseVirtualInstrument:
 
         control_limits = {**ParentVI.control_limits, "set_x": {"x": "x_lim"}}
 
+    UI-group standard
+    -----------------
+    A VI may declare titled groups of its own capabilities in the
+    ``ui_groups`` class attribute, a tuple of ``core.plan.UIGroup``::
+
+        ui_groups: ClassVar[tuple[UIGroup, ...]] = (
+            UIGroup(
+                key="heater",
+                title="Heater",
+                description="Closed-loop and manual heater control.",
+                members=("heater_mode", "heater_output",
+                         "set_heater_mode", "set_heater_output"),
+            ),
+        )
+
+    Declared order is render order and manifest order; a group's ``members``
+    tuple is the order WITHIN the group, and every member names a
+    ``@monitored`` or ``@control`` method of this class. A method may also
+    carry the matching ``@monitored(group="heater")`` / ``@control(group=
+    "heater")`` tag, which is the declaration a reader of the method sees;
+    tag and membership must agree.
+
+    Groups are presentation and description only — they title what the
+    instrument front panel renders and what the capability manifest
+    describes. NOTHING about a group crosses the action queue: a control is
+    still submitted alone, by method name, with flat scalar kwargs, and a
+    group implies no atomicity and no ordering guarantee.
+
+    ``__init_subclass__`` validates the declaration at class creation, so a
+    renamed or moved method cannot leave a dangling tag: group keys must be
+    unique, every member must exist as a monitored or control method, every
+    ``group=`` tag must name a declared group, and a member's own tag (if
+    any) must name the group that lists it. Each failure raises at import
+    naming the VI class and the offending method or key.
+
+    Subclasses that ADD groups must merge, not replace, exactly like
+    ``control_limits``::
+
+        ui_groups = (*ParentVI.ui_groups, UIGroup(...))
+
     Safety-flag manifest standard
     ------------------------------
     Every flag a VI's ``evaluate_safety()`` can report MUST be declared in
@@ -217,6 +349,11 @@ class BaseVirtualInstrument:
     # merged_safety_flags() — a subclass declares only the flags it adds.
     safety_flags: ClassVar[dict[str, str]] = {}
 
+    # Declarative UI-group manifest: the titled groups this VI's own
+    # capabilities fall into, in render order. See "UI-group standard" in the
+    # class docstring; validated by __init_subclass__.
+    ui_groups: ClassVar[tuple[UIGroup, ...]] = ()
+
     # The standby-provenance standard's command-history bit (see
     # ``standby_status()``): a CLASS-level default of False, shadowed by an
     # instance attribute the first time a wrapped standby()/start_ramp()/
@@ -230,6 +367,17 @@ class BaseVirtualInstrument:
     # ClassVar means "never assigned on an instance", which is the opposite
     # of how this attribute works.
     _standby_commanded: bool = False
+
+    # The lifecycle-state standard's observed fact (see the class docstring
+    # and ``lifecycle_state()``): a CLASS-level default of ``"idle"``,
+    # shadowed by an instance attribute the first time a wrapped
+    # ``initiate()``/``initiate_measurement()``/``standby()``/``disconnect()``
+    # writes to it. Deliberately not set in ``__init__`` and deliberately NOT
+    # annotated ``ClassVar``, for exactly the reasons ``_standby_commanded``
+    # above gives: a freshly constructed VI — including a subclass that
+    # defines none of the wrapped methods — reads this class attribute and
+    # gets "idle" until the first lifecycle call gives it an instance value.
+    _lifecycle_state: str = LifecycleState.IDLE.value
 
     # ── Reading-loop participation (see GLOSSARY "Reading loop") ──────────
     # A VI in the reading path may declare parameters the generic sweep
@@ -289,6 +437,16 @@ class BaseVirtualInstrument:
                 if is_monitored:
                     wrapped._is_monitored = True
                     wrapped._display_name = getattr(attr_value, "_display_name", attr_name)
+                    # The monitored declaration (unit/description) and the
+                    # UI-group tag, carried through the wrap the same way the
+                    # control metadata below is.
+                    wrapped._monitored_unit = getattr(
+                        attr_value, "_monitored_unit", None
+                    )
+                    wrapped._monitored_description = getattr(
+                        attr_value, "_monitored_description", ""
+                    )
+                    wrapped._ui_group = getattr(attr_value, "_ui_group", "")
                 if is_control:
                     wrapped._is_control = True
                     wrapped._display_name = getattr(attr_value, "_display_name", attr_name)
@@ -311,6 +469,7 @@ class BaseVirtualInstrument:
                             )
                     wrapped._control_specs = specs
                     wrapped._control_panel = getattr(attr_value, "_control_panel", True)
+                    wrapped._ui_group = getattr(attr_value, "_ui_group", "")
                 setattr(cls, attr_name, wrapped)
 
         # The detach-when-idle declaration's enforcement (see the class
@@ -330,6 +489,30 @@ class BaseVirtualInstrument:
         if callable(standby_method):
             cls.standby = BaseVirtualInstrument._make_standby_wrapper(standby_method)
 
+        # The lifecycle-state standard's other three verbs (see the class
+        # docstring): a directly defined initiate() / initiate_measurement()
+        # / disconnect() is wrapped so the state is recorded after the VI's
+        # own commands ran, with no VI author writing anything. Same
+        # ``vars(cls)`` discipline as the standby wrap above — an inherited
+        # method is already wrapped and must not be wrapped twice — and the
+        # same after-the-call timing, so a raise leaves the state untouched.
+        # ``standby()`` is not listed: its own wrapper above records
+        # ``"standby"`` alongside the detach and the standby provenance.
+        for lifecycle_method, resulting_state in (
+            ("initiate", LifecycleState.INITIATED),
+            ("initiate_measurement", LifecycleState.INITIATED),
+            ("disconnect", LifecycleState.IDLE),
+        ):
+            method = vars(cls).get(lifecycle_method)
+            if callable(method):
+                setattr(
+                    cls,
+                    lifecycle_method,
+                    BaseVirtualInstrument._make_lifecycle_wrapper(
+                        method, resulting_state
+                    ),
+                )
+
         # The standby-provenance standard's invalidation half: any directly
         # defined start_ramp()/stop_ramp() clears _standby_commanded, since
         # either means the VI is no longer converging on (or resting at) the
@@ -345,6 +528,105 @@ class BaseVirtualInstrument:
                     BaseVirtualInstrument._make_standby_invalidation_wrapper(
                         ramp_method
                     ),
+                )
+
+        # The UI-group standard (see the class docstring): resolve every
+        # group= tag against the declared ui_groups now, at class creation,
+        # so a renamed or moved method can never leave a dangling tag for a
+        # renderer to trip over at runtime.
+        BaseVirtualInstrument._validate_ui_groups(cls)
+
+    # ------------------------------------------------------------------
+    # UI-group validation (see the class docstring's "UI-group standard")
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _validate_ui_groups(cls: type) -> None:
+        """Check *cls*'s ``ui_groups`` declaration and every ``group=`` tag.
+
+        Runs at class creation over the FULLY RESOLVED capability surface
+        (inherited monitored/control methods included), so a subclass that
+        inherits a tagged method also inherits the obligation to declare its
+        group.
+
+        Args:
+            cls: The Virtual Instrument class being created.
+
+        Raises:
+            TypeError: If ``ui_groups`` is not a tuple of ``UIGroup``.
+            ValueError: If two groups share a key, if a group names a member
+                that is not a ``@monitored`` or ``@control`` method of this
+                class, if a method's ``group=`` tag names no declared group,
+                or if a member's own tag names a different group.
+        """
+        groups = cls.ui_groups
+        if not isinstance(groups, tuple):
+            raise TypeError(
+                f"{cls.__name__}.ui_groups must be a tuple of UIGroup, got "
+                f"{groups!r}"
+            )
+        for group in groups:
+            if not isinstance(group, UIGroup):
+                raise TypeError(
+                    f"{cls.__name__}.ui_groups entries must be UIGroup, got "
+                    f"{type(group).__name__}"
+                )
+
+        keys: list[str] = []
+        for group in groups:
+            if group.key in keys:
+                raise ValueError(
+                    f"{cls.__name__}.ui_groups declares the group key "
+                    f"{group.key!r} twice — group keys must be unique"
+                )
+            keys.append(group.key)
+
+        # The capability surface: every monitored or control method reachable
+        # on this class, with its tag.
+        tags: dict[str, str] = {}
+        for attr_name in dir(cls):
+            try:
+                attr = getattr(cls, attr_name)
+            except AttributeError:
+                continue
+            if not callable(attr):
+                continue
+            if getattr(attr, "_is_monitored", False) or getattr(
+                attr, "_is_control", False
+            ):
+                tags[attr_name] = getattr(attr, "_ui_group", "")
+
+        owner: dict[str, str] = {}
+        for group in groups:
+            for member in group.members:
+                if member not in tags:
+                    raise ValueError(
+                        f"{cls.__name__}.ui_groups[{group.key!r}] names member "
+                        f"{member!r}, which is not a @monitored or @control "
+                        f"method of {cls.__name__}"
+                    )
+                if member in owner:
+                    raise ValueError(
+                        f"{cls.__name__}.ui_groups: method {member!r} is a "
+                        f"member of both {owner[member]!r} and {group.key!r} — "
+                        f"a capability belongs to at most one group"
+                    )
+                owner[member] = group.key
+
+        for method_name, tag in tags.items():
+            if not tag:
+                continue
+            if tag not in keys:
+                raise ValueError(
+                    f"{cls.__name__}.{method_name} is tagged group={tag!r}, "
+                    f"which names no group in {cls.__name__}.ui_groups "
+                    f"(declared: {keys})"
+                )
+            if owner.get(method_name, tag) != tag:
+                raise ValueError(
+                    f"{cls.__name__}.{method_name} is tagged group={tag!r} but "
+                    f"is listed in the members of {owner[method_name]!r} — the "
+                    f"tag and the group's members must agree"
                 )
 
     # ------------------------------------------------------------------
@@ -378,8 +660,40 @@ class BaseVirtualInstrument:
         def wrapper(self, *args: Any, **kwargs: Any):
             result = method(self, *args, **kwargs)
             self._standby_commanded = True
+            self._lifecycle_state = LifecycleState.STANDBY.value
             if self.detach_when_idle:
                 self._detach()
+            return result
+
+        return wrapper
+
+    # ------------------------------------------------------------------
+    # Lifecycle-state wrapper factory (the lifecycle-state standard; see
+    # the class docstring and ``lifecycle_state()``)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _make_lifecycle_wrapper(method, resulting_state: LifecycleState):
+        """Return *method* wrapped to record the lifecycle state it reaches.
+
+        Calls the ORIGINAL method first — a VI's own setup, arming or
+        release commands run exactly as written — and records the new state
+        only once it returns without raising, so a refused ``initiate()``
+        never leaves a card claiming the instrument is running.
+
+        Args:
+            method: The subclass's directly defined ``initiate``,
+                ``initiate_measurement`` or ``disconnect``.
+            resulting_state: The state the VI is in once *method* succeeds.
+
+        Returns:
+            The wrapped method, to be set back onto the class.
+        """
+
+        @functools.wraps(method)
+        def wrapper(self, *args: Any, **kwargs: Any):
+            result = method(self, *args, **kwargs)
+            self._lifecycle_state = resulting_state.value
             return result
 
         return wrapper
@@ -424,6 +738,11 @@ class BaseVirtualInstrument:
 
         Looks up ``type(self).control_limits`` at call time, so a subclass can
         declare limits for methods it inherits without re-wrapping them.
+
+        An out-of-range call raises ``CryoSoftSafetyError`` carrying both the
+        operator-facing message and its structured form (``param``, ``value``,
+        ``lo``, ``hi``, ``limit_name``), so the refusal reaches a verdict as
+        fields rather than as prose to be parsed.
         """
         sig = inspect.signature(method)
 
@@ -450,12 +769,22 @@ class BaseVirtualInstrument:
                     ):
                         lo_txt = "-inf" if lo is None else f"{lo:g}"
                         hi_txt = "+inf" if hi is None else f"{hi:g}"
+                        # The message is the operator's banner; the keyword
+                        # fields are the same refusal in structured form, so
+                        # a caller turning this into a verdict reads fields
+                        # instead of parsing prose. Never derive one from the
+                        # other — the message text is asserted on verbatim.
                         raise CryoSoftSafetyError(
                             f"{self.vi_name or type(self).__name__}."
                             f"{method_name}: {param_name}={value:g} is outside "
                             f"the allowed range [{lo_txt}, {hi_txt}] for this "
                             f"setup (limit '{limit_name}' from the station "
-                            f"config). Command refused."
+                            f"config). Command refused.",
+                            param=param_name,
+                            value=value,
+                            lo=lo,
+                            hi=hi,
+                            limit_name=limit_name,
                         )
             return method(self, *args, **kwargs)
 
@@ -523,6 +852,11 @@ class BaseVirtualInstrument:
         # docstring): True until a detach_when_idle VI's __init__ or
         # standby() calls self._detach(). Read by is_attached().
         self._attached: bool = True
+        # The monitor-cycle cache behind last_monitored(): the values of
+        # this VI's @monitored methods as of the most recent successful
+        # get_state() poll. Empty until the first one. See
+        # ``control_param_specs()``'s purity rule.
+        self._monitored_cache: dict[str, Any] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -539,7 +873,14 @@ class BaseVirtualInstrument:
         CryoSoft while an instrument is mid-experiment finds it untouched.
 
         Override in subclasses to send those setup commands.
+
+        Records ``lifecycle_state() == "initiated"`` (the lifecycle-state
+        standard, see the class docstring). A subclass that overrides this
+        gets the same record from ``__init_subclass__``'s wrap instead
+        (``_make_lifecycle_wrapper``), so this body is only ever reached
+        directly by a VI with no override of its own.
         """
+        self._lifecycle_state = LifecycleState.INITIATED.value
 
     def standby(self) -> None:
         """Put the instrument in a safe idle state.
@@ -549,12 +890,13 @@ class BaseVirtualInstrument:
         ``disconnect()``, which releases the bus session and changes nothing
         the instrument is doing.
 
-        Honours the detach-when-idle declaration (see the class docstring)
-        and the standby-provenance standard (see ``standby_status()``): a VI
-        that inherits this base implementation unchanged — never overriding
+        Honours the detach-when-idle declaration (see the class docstring),
+        the standby-provenance standard (see ``standby_status()``) and the
+        lifecycle-state standard (see ``lifecycle_state()``): a VI that
+        inherits this base implementation unchanged — never overriding
         ``standby()`` itself — still records ``self._standby_commanded =
-        True`` and releases its driver session here when ``detach_when_idle``
-        is true. A subclass that DOES override ``standby()`` gets both of
+        True``, records ``lifecycle_state() == "standby"``, and releases its
+        driver session here when ``detach_when_idle`` is true. A subclass that DOES override ``standby()`` gets both of
         those from ``__init_subclass__``'s wrap instead (``_make_standby_
         wrapper``), so this method body is only ever reached directly by a
         VI with no override of its own — the one call site
@@ -562,8 +904,31 @@ class BaseVirtualInstrument:
         only.
         """
         self._standby_commanded = True
+        self._lifecycle_state = LifecycleState.STANDBY.value
         if self.detach_when_idle:
             self._detach()
+
+    def limit_bounds(self, limit_name: str) -> tuple[float | None, float | None]:
+        """Return the ``(lo, hi)`` bounds of one populated control limit.
+
+        The public read side of the control-validation standard (see the class
+        docstring): ``_limits`` is written by each VI's ``__init__`` from its
+        config and read by the enforcement wrapper; this is how a caller
+        OUTSIDE the VI — the Station, assembling the setup bounds an
+        experiment's envelope narrows — asks what the setup already allows,
+        without reaching into that dict.
+
+        Args:
+            limit_name: The limit's name, as referenced from
+                ``control_limits``.
+
+        Returns:
+            ``(lo, hi)`` in the parameter's SI unit; ``None`` on a side means
+            unbounded there. An unknown *limit_name* returns ``(None, None)``
+            — "this setup bounds nothing by that name" — so a caller
+            surveying limits needs no per-VI knowledge of which exist.
+        """
+        return self._limits.get(limit_name, (None, None))
 
     # ------------------------------------------------------------------
     # Connection lifecycle (the connection-lifecycle standard)
@@ -677,6 +1042,82 @@ class BaseVirtualInstrument:
         self._attached = False
 
     # ------------------------------------------------------------------
+    # Lifecycle state (the lifecycle-state standard; see the class docstring)
+    # ------------------------------------------------------------------
+
+    def lifecycle_state(self) -> str:
+        """Return what this instrument is DOING, as a pure cached read.
+
+        The lifecycle-state standard's read side (see the class docstring):
+        the operating half of the connection lifecycle as a fact a client
+        renders, rather than one it has to infer from whichever actions it
+        happened to see. Sends NOTHING on the bus — the same purity rule
+        ``control_param_specs()`` follows — so the Station may call it while
+        assembling a status snapshot, on any tick, for every VI.
+
+        Returns:
+            One of ``LifecycleState``'s values (``core/events.py``):
+            ``"idle"`` (never initiated, or reset by ``disconnect()``),
+            ``"initiated"`` (``initiate()`` — or, for a measurement VI,
+            ``initiate_measurement()`` — succeeded and nothing has stood it
+            down since), or ``"standby"`` (``standby()`` succeeded).
+        """
+        return self._lifecycle_state
+
+    def observe_lifecycle_state(self) -> str | None:
+        """Return the lifecycle state this VI can PROVE from hardware, or None.
+
+        The lifecycle-state standard's optional third rule (see the class
+        docstring): a VI whose instrument reports what it is doing — a
+        source whose output reads back on or off, a controller whose heater
+        range is readable — overrides this so the monitor cycle can correct
+        a cached value that a front-panel fiddle or a power cycle has made
+        wrong. ``get_state()`` consults it once per poll, AFTER the
+        ``@monitored`` reads, so an override answers from
+        ``last_monitored()`` and sends nothing extra on the bus.
+
+        Overriding this never changes where a client reads from:
+        ``lifecycle_state()`` remains the read, and this only refreshes what
+        it returns. An override that raises, or that answers with a value
+        outside the vocabulary, is logged and ignored — reporting must never
+        be the thing that breaks a monitor cycle.
+
+        Returns:
+            One of ``LifecycleState``'s values, or ``None`` (the default:
+            "this instrument cannot tell me, keep the commanded value").
+        """
+        return None
+
+    def _refresh_lifecycle_state(self) -> None:
+        """Let ``observe_lifecycle_state()`` correct the cached lifecycle state.
+
+        Called by ``get_state()`` at the end of every successful poll.
+        Guarded on both failure modes an override can present, because the
+        monitor cycle is the one thing that must not stop.
+        """
+        try:
+            observed = self.observe_lifecycle_state()
+        except Exception:  # noqa: BLE001 — an observation must not fail a poll
+            logging.getLogger(f"cryosoft.vi.{self.vi_name}").warning(
+                "%s: observe_lifecycle_state() raised — keeping the "
+                "commanded lifecycle state",
+                self.vi_name or type(self).__name__,
+                exc_info=True,
+            )
+            return
+        if observed is None:
+            return
+        try:
+            self._lifecycle_state = LifecycleState(observed).value
+        except ValueError:
+            logging.getLogger(f"cryosoft.vi.{self.vi_name}").warning(
+                "%s: observe_lifecycle_state() returned %r, which is not a "
+                "LifecycleState — keeping the commanded lifecycle state",
+                self.vi_name or type(self).__name__,
+                observed,
+            )
+
+    # ------------------------------------------------------------------
     # Standby provenance (the command-provenance standard)
     # ------------------------------------------------------------------
 
@@ -777,20 +1218,69 @@ class BaseVirtualInstrument:
         must leave the instrument doing exactly what it was doing (rule 2 of
         the connection-lifecycle standard). That is ``standby()``'s job, and
         the operator chooses whether to press it first.
+
+        Resets ``lifecycle_state()`` to ``"idle"`` (the lifecycle-state
+        standard): CryoSoft has stopped tracking what this instrument does,
+        so it must not keep claiming the last thing it asked for — and the
+        VI a later ``Station.connect_instrument()`` builds is a fresh object
+        that starts at ``"idle"`` anyway. A subclass that overrides this
+        gets the same reset from ``__init_subclass__``'s wrap
+        (``_make_lifecycle_wrapper``).
         """
+        self._lifecycle_state = LifecycleState.IDLE.value
 
     # ------------------------------------------------------------------
     # State snapshot
     # ------------------------------------------------------------------
 
     def get_state(self) -> dict:
-        """Return {method_name: value} for all @monitored methods."""
+        """Poll every @monitored method and return ``{method_name: value}``.
+
+        The VI's half of the monitor cycle, and the ONE place this VI reads
+        its instrument on a tick. The result is also kept as the cache
+        ``last_monitored()`` serves, so a pure read — a
+        ``control_param_specs()`` override that wants the instrument's
+        current setting as a widget default — never has to poll the bus a
+        second time (see ``control_param_specs()``'s purity rule).
+
+        Returns:
+            ``{monitored_method_name: value}`` for every @monitored method.
+
+        Raises:
+            CryoSoftCommunicationError: Propagated from a failing driver
+                read; the cache then keeps the previous poll's values, which
+                is what makes them "last known" rather than "current".
+        """
         from cryosoft.core.decorators import get_monitored_methods
 
         state: dict = {}
         for method_name in get_monitored_methods(self):
             state[method_name] = getattr(self, method_name)()
+        self._monitored_cache = dict(state)
+        # The lifecycle-state standard's hardware-correction rule (see
+        # ``observe_lifecycle_state()``): last, so an override answers from
+        # the values this very poll just cached rather than reading again.
+        self._refresh_lifecycle_state()
         return state
+
+    def last_monitored(self, name: str, default: Any = None) -> Any:
+        """Return one @monitored value as of the last successful poll.
+
+        The pure-read counterpart of calling the monitored method itself:
+        it answers from the monitor cycle's cache and NEVER touches the
+        bus, which is what lets ``control_param_specs()`` honour its purity
+        rule while still defaulting a widget to the instrument's current
+        setting.
+
+        Args:
+            name: The @monitored method's name.
+            default: What to return when this VI has not been polled yet,
+                or never reported that field.
+
+        Returns:
+            The cached value, or ``default``.
+        """
+        return getattr(self, "_monitored_cache", {}).get(name, default)
 
     # ------------------------------------------------------------------
     # Safety
@@ -806,6 +1296,24 @@ class BaseVirtualInstrument:
         this hook instead of the raw decorator metadata. Presentation only:
         enforcement stays with ``control_limits`` and the method's own checks.
 
+        **Purity rule.** This method is a PURE READ of config and of cached
+        state: an override may read ``self._init_params``-derived attributes
+        and ``last_monitored()``, and must send NO command to any driver.
+        Two reasons, and either alone would be enough. It is called to
+        DESCRIBE the instrument — by the front panel every time it renders,
+        and by ``Station.station_info()`` to build the station declaration
+        snapshot — so a bus read here puts instrument traffic on paths that
+        are meant to describe, not operate, including one that must work
+        for an instrument that is offline. And the Orchestrator is the sole
+        writer to hardware (see ``core/orchestrator.py``): a read issued
+        from a describe path is outside the single tick loop that
+        serialises bus access. A VI that wants a widget defaulted to the
+        instrument's current setting reads it from the monitor cycle's
+        cache with ``last_monitored(name, fallback)`` — the value is at most
+        one tick old, and the fallback covers the not-yet-polled case.
+        ``tests/test_conformance.py`` builds the whole station declaration
+        against spied drivers and fails on any call this path makes.
+
         Args:
             method_name: The @control method name.
 
@@ -815,6 +1323,35 @@ class BaseVirtualInstrument:
         from cryosoft.core.decorators import get_control_specs
 
         return get_control_specs(getattr(self, method_name))
+
+    def control_limit_bounds(self) -> dict[str, dict[str, tuple[float | None, float | None]]]:
+        """Return the configured bounds of every declared control limit.
+
+        The read side of the control-validation standard (see the class
+        docstring), and the counterpart of ``merged_safety_flags()``: it
+        resolves this class's ``control_limits`` declaration — method name
+        -> parameter name -> limit name — against the ``self._limits``
+        bounds this VI's ``__init__`` populated from the config, so a caller
+        that has to REPORT the limits (the station declaration snapshot,
+        an operator-facing panel) never reaches into the private mapping
+        itself.
+
+        Returns:
+            ``{method_name: {param_name: (lo, hi)}}``, ``None`` on either
+            side meaning unbounded there. A declared limit whose value the
+            config never supplied reports ``(None, None)`` rather than
+            raising — enforcement is where that violation is caught (with
+            ``CryoSoftConfigError``, at call time), and it is checked in CI
+            by ``tests/test_conformance.py``.
+        """
+        bounds: dict[str, dict[str, tuple[float | None, float | None]]] = {}
+        limits = getattr(self, "_limits", {})
+        for method_name, param_map in type(self).control_limits.items():
+            bounds[method_name] = {
+                param_name: tuple(limits.get(limit_name, (None, None)))  # type: ignore[misc]
+                for param_name, limit_name in param_map.items()
+            }
+        return bounds
 
     @classmethod
     def merged_safety_flags(cls) -> dict[str, str]:
@@ -1262,6 +1799,91 @@ class MeasurementInstrumentBase(BaseVirtualInstrument):
     # a VI that does not support external configuration.
     externally_owned_parameters: ClassVar[frozenset[str]] = frozenset()
 
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        """Install ``measurement_parameters`` as the declared control specs.
+
+        The one-declaration rule of the measurement-method standard: a
+        measurement VI already owns rich ``ParamSpec``s for its knobs in
+        ``measurement_parameters`` (units, bounds, drop-down ``choices``), and
+        the procedure form renders them. This hook hands the SAME specs to the
+        GUI's control renderer and the capability manifest, so the arming
+        control and the reading-loop setters show the same widgets and the
+        same units instead of bare text boxes — no per-VI duplication, and no
+        second place to keep in step.
+
+        Two controls are covered, and only when the subclass defines them
+        itself and declares no ``params=`` of its own (an explicit
+        declaration always wins):
+
+        * ``initiate_measurement`` — the whole ``measurement_parameters``
+          mapping, which its signature must accept exactly.
+        * every ``reading_setters`` setter — the single spec of the parameter
+          it sets, when that is the setter's only parameter.
+
+        Args:
+            **kwargs: Forwarded to ``BaseVirtualInstrument.__init_subclass__``.
+
+        Raises:
+            ValueError: If ``initiate_measurement`` is a ``@control`` whose
+                parameters are not exactly the ``measurement_parameters``
+                keys, which the measurement-method standard requires.
+        """
+        cls._install_measurement_control_specs()
+        super().__init_subclass__(**kwargs)
+
+    @classmethod
+    def _install_measurement_control_specs(cls) -> None:
+        """Copy ``measurement_parameters`` onto the directly defined controls.
+
+        Runs BEFORE ``BaseVirtualInstrument.__init_subclass__`` wraps the
+        methods, so the specs it writes onto the decorator's function are
+        carried onto the wrapper (and type-checked there) exactly like a
+        hand-written ``params=``. Only ``vars(cls)`` is touched: an inherited
+        method is left alone, since its specs were installed when its own
+        class was created and mutating it would change the parent for
+        everyone.
+
+        Raises:
+            ValueError: If ``initiate_measurement``'s parameters are not
+                exactly the ``measurement_parameters`` keys.
+        """
+        params = cls.measurement_parameters
+        if not params:
+            return
+
+        arming = vars(cls).get("initiate_measurement")
+        if callable(arming) and getattr(arming, "_is_control", False):
+            sig_names = {
+                name
+                for name in inspect.signature(arming).parameters
+                if name != "self"
+            }
+            if sig_names != set(params):
+                raise ValueError(
+                    f"{cls.__name__}.initiate_measurement() takes "
+                    f"{sorted(sig_names)} but measurement_parameters declares "
+                    f"{sorted(params)} — the measurement-method standard "
+                    f"requires them to match exactly."
+                )
+            if not getattr(arming, "_control_specs", None):
+                arming._control_specs = dict(params)
+
+        for param_name, setter_name in cls.reading_setters.items():
+            setter = vars(cls).get(setter_name)
+            if not callable(setter) or not getattr(setter, "_is_control", False):
+                continue
+            if getattr(setter, "_control_specs", None):
+                continue
+            if param_name not in params:
+                continue
+            sig_names = {
+                name
+                for name in inspect.signature(setter).parameters
+                if name != "self"
+            }
+            if sig_names == {param_name}:
+                setter._control_specs = {param_name: params[param_name]}
+
     def __init__(self, drivers: dict[str, object], **init_params: Any) -> None:
         """Initialise the measurement VI.
 
@@ -1512,6 +2134,15 @@ class DCMeasurementBase(MeasurementInstrumentBase):
 
     display_label: str = "DC resistance"
 
+    # Control-validation standard (see BaseVirtualInstrument): the excitation
+    # current a DC measurement pushes through the sample is the one @control
+    # parameter here that can damage it, so it is bounded by the setup's own
+    # ceiling. Subclasses that add a per-reading current setter MERGE into
+    # this mapping rather than replacing it.
+    control_limits = {
+        "initiate_measurement": {"current_A": EXCITATION_CURRENT_LIMIT},
+    }
+
     _ARRAY_KEYS, _SCALAR_COLUMNS = MeasurementInstrumentBase.quantity_columns(
         "voltage_V", "current_A"
     )
@@ -1540,6 +2171,22 @@ class DCMeasurementBase(MeasurementInstrumentBase):
             description="DC voltage readings averaged per point",
         ),
     }
+
+    def __init__(self, drivers: dict[str, object], **init_params: Any) -> None:
+        """Populate the excitation-current limit from the setup config.
+
+        Args:
+            drivers: The VI's driver mapping (see the concrete subclass).
+            **init_params: Setup parameters; ``max_source_current_A`` bounds
+                the sourced current symmetrically (current reversal is
+                routine in DC resistance work, so the bound is
+                ``±max_source_current_A``). Absent means unbounded — the
+                same "missing key means no bound on that side" rule every
+                other VI's limits follow. Every shipped config declares it;
+                ``tests/test_conformance.py`` makes that binding.
+        """
+        super().__init__(drivers, **init_params)
+        _populate_excitation_current_limit(self, init_params)
 
     def data_arrays(self, params: Mapping[str, Any]) -> dict[str, int]:
         """Return ``{"voltage_V_array": n, "current_A_array": n}``.

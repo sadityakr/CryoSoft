@@ -28,14 +28,16 @@ from PyQt6.QtWidgets import (
 )
 
 from cryosoft.core.events import ErrorEvent
-from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
-from cryosoft.core.station import Station, read_instrument_metadata
+from cryosoft.core.orchestrator import OrchestratorState
+from cryosoft.core.orchestrator_proxy import OrchestratorProxy
+from cryosoft.core.station import read_instrument_metadata
 from cryosoft.gui import app_settings  # import the module (not the function) so tests can monkeypatch the factory
 from cryosoft.gui import form_autosave  # module import keeps save/load monkeypatchable
 from cryosoft.gui import window_geometry
 from cryosoft.gui.config_menu import ConfigMenuController
 from cryosoft.gui.diagnostics_window import DiagnosticsWindow
 from cryosoft.gui.experiment_info_panel import ExperimentInfoPanel
+from cryosoft.gui.agent_panel import AgentPanel
 from cryosoft.gui.instrument_panel import InstrumentPanel
 from cryosoft.gui.log_panel import LogPanel
 from cryosoft.gui.notification_banner import NotificationBanner
@@ -45,6 +47,7 @@ from cryosoft.gui.operations_panel import OperationsPanel
 from cryosoft.gui.ramp_tracker_panel import RampTrackerPanel
 from cryosoft.gui.servicing_log_page import ServicingLogPage
 from cryosoft.gui.session_dialogs import ResumeSessionDialog
+from cryosoft.core.status_mirror import StatusMirror
 from cryosoft.gui.setup_dialogs import InstrumentInfoDialog, LoginDialog
 from cryosoft.gui.theme import (
     BANNER_SEVERITY_ERROR,
@@ -54,7 +57,11 @@ from cryosoft.gui.theme import (
     TEXT_ON_ACCENT,
     TEXT_PRIMARY,
 )
+from cryosoft.gui.assistant_dock import AssistantDock
+from cryosoft.gui.takeover_strip import TakeoverStrip
 from cryosoft.gui.trends_quadrant import TrendsQuadrant
+from cryosoft.gui.widget_lifecycle import hold_window, release_window, retire_widget
+from cryosoft.session.gateway import Role
 from cryosoft.session.manager import ExperimentManager
 from cryosoft.session.models import GUEST_USER_ID
 from cryosoft.session.store import SessionStore
@@ -62,7 +69,10 @@ from cryosoft.session.store import SessionStore
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from cryosoft.core.station import Station
+
     from cryosoft.core.config_catalog import ConfigCatalog
+    from cryosoft.session.assistant import AssistantRuntime
     from cryosoft.session.servicing_log import (
         CryogenicsRecorder,
         HeliumRecordStore,
@@ -82,6 +92,7 @@ _MAIN_SPLITTER_KEY = "MonitorWindow/quadrant_main_splitter"
 _LEFT_SPLITTER_KEY = "MonitorWindow/quadrant_left_splitter"
 _RIGHT_SPLITTER_KEY = "MonitorWindow/quadrant_right_splitter"
 _BOTTOM_RIGHT_SPLITTER_KEY = "MonitorWindow/quadrant_bottom_right_splitter"
+_AGENTS_SPLITTER_KEY = "MonitorWindow/quadrant_agents_splitter"
 
 # Minimum widths for the bottom-right quadrant's two sub-panels, and the
 # default split between them. Asymmetric on purpose: a ramp row is one line of
@@ -103,6 +114,15 @@ _BOTTOM_RIGHT_DEFAULT_SIZES = [220, 440]
 # ramp tracker half the quadrant it does not need. 1:2 keeps the split
 # proportional at every window width.
 _BOTTOM_RIGHT_STRETCH = (1, 2)
+
+# The bottom-right quadrant's own vertical split: the Ramps/Operations row on
+# top, the Agents sub-panel underneath. Vertical rather than a third column
+# because an agent row is one wide line of text — time, actor, command,
+# verdict, reason — and a third column would wrap every one of them. The
+# minimum is what keeps two rows and the filter visible at the smallest drag.
+_AGENTS_MIN_HEIGHT = 90
+_BOTTOM_RIGHT_VERTICAL_SIZES = [220, 220]
+_BOTTOM_RIGHT_VERTICAL_STRETCH = (1, 1)
 
 # Orchestrator state names that colour the status bar (dynamic 'level' property).
 _ACTIVE_STATES = frozenset({
@@ -130,8 +150,11 @@ class MonitorWindow(QMainWindow):
     measurement and switch cards tagged by role (the switch card carries the
     station-wide Enable Scanner checkbox) — top-right is the
     :class:`TrendsQuadrant`, bottom-left is the :class:`ExperimentInfoPanel`,
-    and bottom-right splits horizontally into the :class:`RampTrackerPanel`
-    (left) and the optional :class:`OperationsPanel` (right). Every splitter
+    and bottom-right splits vertically into a horizontal row of the
+    :class:`RampTrackerPanel` (left) and the optional
+    :class:`OperationsPanel` (right), over the full-width
+    :class:`AgentPanel`. The header carries the :class:`TakeoverStrip`.
+    Every splitter
     boundary is draggable; nothing in the grid can be closed, detached, or
     floated. Page 2 (Logs) is a :class:`ServicingLogPage` hosting one table
     per configured servicing-log kind plus the relocated :class:`LogPanel`.
@@ -149,10 +172,10 @@ class MonitorWindow(QMainWindow):
         session_store: Optional SessionStore (the L6 Session tier above
             ``session_manager``), used by the User menu's "Resume Session…"
             action to list/create sessions and persist the active one.
-            Switching takes effect on the next launch (see
-            ``docs/plans/session-tier-and-terminology.md``, "Startup
-            wiring") — ``session_manager``'s own ``ExperimentStore`` is
-            never rebound live.
+            Switching is deferred-until-restart and takes effect on the
+            next launch (see ``GLOSSARY.md``'s **Session**) —
+            ``session_manager``'s own ``ExperimentStore`` is never rebound
+            live.
         cryogenics_config: The active config's resolved ``cryogenics:``
             block (``Station.read_cryogenics_config()``), or None/empty when
             the setup has no such block. Optional — every existing
@@ -172,12 +195,27 @@ class MonitorWindow(QMainWindow):
             (``Station.read_panels_config()``): per-VI allowlists of the
             controls shown on the compact instrument cards. None/empty means
             every VI keeps its declared ``panel=`` defaults.
+        assistant_enabled: Whether this setup declares ``monitor.yaml``'s
+            ``assistant: true``. False (the default) builds no chat dock at
+            all, so a setup that never asked for one carries no widget.
+        assistant_runtime: The **Embedded assistant**'s ``AssistantRuntime``,
+            or None when there is no API key to build a client with — in which
+            case the dock is still registered and shows its one-line
+            no-key state, because a missing key is a configuration fact rather
+            than a fault.
+        assistant_max_role: The most authority the dock's role selector may
+            offer (``assistant_max_role``, falling back to
+            ``gateway_max_role``). Never widened here.
+        assistant_role_factory: Called with a role value to build the
+            ``Gateway`` the assistant should reconnect under. None leaves the
+            selector disabled: the window does not own the engine, so it does
+            not build connections.
     """
 
     def __init__(
         self,
         station: Station,
-        orchestrator: Orchestrator,
+        orchestrator: OrchestratorProxy,
         parent: QWidget | None = None,
         catalog: ConfigCatalog | None = None,
         active_config_path: str | None = None,
@@ -192,10 +230,21 @@ class MonitorWindow(QMainWindow):
         servicing_log_kinds: list[str] | None = None,
         cryogenics_recorder: CryogenicsRecorder | None = None,
         panels_config: dict[str, list[str]] | None = None,
+        mirror: StatusMirror | None = None,
+        assistant_enabled: bool = False,
+        assistant_runtime: AssistantRuntime | None = None,
+        assistant_max_role: str = "",
+        assistant_role_factory: Callable[[str], Any] | None = None,
     ) -> None:
         super().__init__(parent)
         self._station = station
         self._orchestrator = orchestrator
+        # The status-mirror standard: every read below is a mirror read. One
+        # mirror is shared by this window and every panel it builds, so they
+        # all answer from the same event. Whoever builds the engine hands one
+        # in already primed; the fallback is the inline construction path
+        # (tests, and any caller with the engine on its own thread).
+        self._mirror = mirror if mirror is not None else StatusMirror.of(orchestrator)
         self._panels_config = dict(panels_config or {})
         self._procedure_window = None  # lazily created
         self._diagnostics_window = None  # lazily created
@@ -296,7 +345,23 @@ class MonitorWindow(QMainWindow):
         self.setWindowTitle("CryoSoft — Monitor")
         window_geometry.restore_or_center(self, _GEOMETRY_KEY, fraction=0.9)
 
+        # The Embedded assistant's chat dock: config-gated like every optional
+        # feature, so a setup that does not declare `assistant: true` builds no
+        # widget at all. The window renders the runtime and never drives it —
+        # it holds no gateway and calls no tool (see gui/README.md).
+        self._assistant_dock: AssistantDock | None = None
+
         self._build_ui()
+        if assistant_enabled:
+            self._assistant_dock = AssistantDock(
+                assistant_runtime,
+                max_role=assistant_max_role or Role.OBSERVER.value,
+                role_factory=assistant_role_factory,
+                parent=self,
+            )
+            self.addDockWidget(
+                Qt.DockWidgetArea.RightDockWidgetArea, self._assistant_dock
+            )
         self._session_info.apply_session(self._session)
         self._build_menu()
         self._connect_signals()
@@ -307,7 +372,7 @@ class MonitorWindow(QMainWindow):
         # (or a pre-existing hold — _refresh_ack_controls() checks
         # held_vi_names() live, independent of the state passed in) may
         # already be active by the time this window is constructed.
-        self._on_state_changed(self._orchestrator.state)
+        self._on_state_changed(self._mirror.state)
 
         # Attach the log handler after the UI exists (LogPanel guards against
         # a duplicate if the window is ever reconstructed in-process).
@@ -333,6 +398,12 @@ class MonitorWindow(QMainWindow):
             self._banner.show_message(
                 " | ".join(startup_notes), BANNER_SEVERITY_WARNING
             )
+
+        # The window-liveness standard (gui/widget_lifecycle.py): this window
+        # owns the reference that keeps it alive, so no garbage-collection
+        # pass can destroy it — and the pyqtgraph scenes in its Trends
+        # quadrant — while it is on screen. Released in closeEvent().
+        hold_window(self)
 
     # ------------------------------------------------------------------
     # Menu bar
@@ -436,6 +507,12 @@ class MonitorWindow(QMainWindow):
                 get_data_dir=self.get_data_dir_for_run,
                 initial_session=self._session,
                 get_experiment_info=self.get_experiment_info,
+                queue_host=(
+                    self._session_manager.run_queue_host
+                    if self._session_manager is not None
+                    else None
+                ),
+                mirror=self._mirror,
             )
         self._procedure_window.show()
         self._procedure_window.raise_()
@@ -444,7 +521,9 @@ class MonitorWindow(QMainWindow):
     def _open_diagnostics_window(self) -> None:
         """Lazily create and show the DiagnosticsWindow."""
         if self._diagnostics_window is None:
-            self._diagnostics_window = DiagnosticsWindow(self._orchestrator)
+            self._diagnostics_window = DiagnosticsWindow(
+                self._orchestrator, self._mirror
+            )
         self._diagnostics_window.show()
         self._diagnostics_window.raise_()
         self._diagnostics_window.activateWindow()
@@ -528,7 +607,10 @@ class MonitorWindow(QMainWindow):
         self._right_splitter.setChildrenCollapsible(False)
         self._right_splitter.addWidget(self._trends)
         self._right_splitter.addWidget(bottom_right)
-        self._right_splitter.setSizes([750, 250])
+        # The bottom-right quadrant carries three things now (ramps,
+        # operations, agents), so it starts with a little more of the column
+        # than it did when it carried two.
+        self._right_splitter.setSizes([700, 300])
 
         self._main_splitter = QSplitter(Qt.Orientation.Horizontal)
         self._main_splitter.setObjectName("main_splitter")
@@ -564,7 +646,11 @@ class MonitorWindow(QMainWindow):
         # ── Status bar ────────────────────────────────────────────────
         self._status_bar = QStatusBar()
         self.setStatusBar(self._status_bar)
-        self._state_label = QLabel("State: IDLE")
+        # The last state announced, kept because the label is re-rendered
+        # from it whenever a fresh status snapshot lands (a pause requested
+        # mid-datapoint changes no state — see _refresh_state_label()).
+        self._state_name = OrchestratorState.IDLE.value
+        self._state_label = QLabel(f"State: {self._state_name}")
         self._status_bar.addWidget(self._state_label)
         # Current status-bar 'level' ("", "active", "error"); tracked so the
         # dynamic-property restyle only fires when the level actually changes.
@@ -598,6 +684,18 @@ class MonitorWindow(QMainWindow):
         row.addWidget(self._page_tab_bar)
 
         row.addStretch()
+
+        # The takeover strip: the kill switch, the attendance toggle and the
+        # "agents active" indicator, in the header because taking the machine
+        # back must never be somewhere you have to go and find. Its own
+        # controls are never gated — see takeover_strip.py.
+        self._takeover_strip = TakeoverStrip(
+            self._orchestrator,
+            self._mirror,
+            self._session_manager,
+            parent=self,
+        )
+        row.addWidget(self._takeover_strip)
 
         # Monitoring toggle: the Orchestrator polls no instrument until
         # monitoring is started (typically after "Initiate All" has brought
@@ -657,7 +755,7 @@ class MonitorWindow(QMainWindow):
 
     def _sync_monitoring_btn(self) -> None:
         """Mirror the Orchestrator's confirmed monitoring state onto the toggle."""
-        monitoring = self._orchestrator.is_monitoring()
+        monitoring = self._mirror.is_monitoring()
         btn = self._monitoring_btn
         btn.setChecked(monitoring)
         btn.setText("Stop Monitoring" if monitoring else "Start Monitoring")
@@ -722,13 +820,12 @@ class MonitorWindow(QMainWindow):
         # a live panel in place (_on_instrument_reconnected).
         tag_by_type = {"measurement": "Measurement", "switch": "Scanner"}
         for offset, vi_name in enumerate(self._station.offline_vi_names()):
-            info = self._station.get_offline_info(vi_name)
             card = OfflineInstrumentPanel(
                 vi_name,
-                info,
                 self._orchestrator,
+                self._mirror,
                 parent=self,
-                type_tag=tag_by_type.get(info.vi_type),
+                type_tag=tag_by_type.get(self._role_of(vi_name)),
             )
             card.setSizePolicy(
                 QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
@@ -757,16 +854,15 @@ class MonitorWindow(QMainWindow):
         Returns:
             The wired InstrumentPanel, size policy applied.
         """
-        vi = self._station.get_vi(vi_name)
         extra = (
             self._build_scanner_enable_checkbox(vi_name)
-            if self._station.get_vi_type(vi_name) == "switch"
+            if self._role_of(vi_name) == "switch"
             else None
         )
         panel = InstrumentPanel(
             vi_name,
-            vi,
             self._orchestrator,
+            self._mirror,
             parent=self,
             panel_controls=self._panels_config.get(vi_name),
             type_tag=type_tag,
@@ -777,25 +873,44 @@ class MonitorWindow(QMainWindow):
         )
         return panel
 
+    def _role_of(self, vi_name: str) -> str:
+        """Return one configured VI's config-registry role, from the declaration.
+
+        Args:
+            vi_name: The VI's configured name.
+
+        Returns:
+            ``"system"``/``"measurement"``/``"switch"``/``"level"``, or ``""``
+            when the declaration names no such instrument.
+        """
+        info = self._mirror.instrument_info(vi_name)
+        return info.role if info is not None else ""
+
     def _on_instrument_reconnected(self, vi_name: str) -> None:
         """Swap an offline card for a live InstrumentPanel in place.
+
+        The card that leaves goes out through ``retire_widget()`` (the
+        card-retirement standard, gui/widget_lifecycle.py): hidden and out of
+        the grid before its deferred delete, so it cannot paint over its
+        replacement in the meantime.
 
         Args:
             vi_name: The VI just brought live by
                 Orchestrator.connect_instrument().
         """
+        # Popped before the replacement is built: the pop is what makes a
+        # re-entrant reconnect signal (a second emission while this one is
+        # still running) a no-op instead of a second swap.
         card = self._offline_cards.pop(vi_name, None)
         if card is None:
             return
         tag_by_type = {"measurement": "Measurement", "switch": "Scanner"}
-        panel = self._make_live_panel(
-            vi_name, tag_by_type.get(self._station.get_vi_type(vi_name))
-        )
+        panel = self._make_live_panel(vi_name, tag_by_type.get(self._role_of(vi_name)))
         self._panels.append(panel)
         self._instruments_grid.replaceWidget(card, panel)
         panel.show()
         card.close_details()
-        card.deleteLater()
+        retire_widget(card, self._instruments_grid)
         logger.info("Offline card for '%s' replaced by live panel", vi_name)
 
     def _on_instrument_disconnected(self, vi_name: str) -> None:
@@ -809,6 +924,11 @@ class MonitorWindow(QMainWindow):
         longer holds; showing them greyed out would invite clicks that can
         only be refused.
 
+        The panel that leaves goes out through ``retire_widget()`` (the
+        card-retirement standard, gui/widget_lifecycle.py) — deferred, because
+        this runs inside the click signal of the Disconnect button on the very
+        card being retired.
+
         Args:
             vi_name: The VI just released by
                 Orchestrator.disconnect_instrument().
@@ -816,22 +936,24 @@ class MonitorWindow(QMainWindow):
         panel = next((p for p in self._panels if p.vi_name == vi_name), None)
         if panel is None:
             return
+        # Dropped from the panel list before the replacement is built, the
+        # mirror of the pop in _on_instrument_reconnected(): a re-entrant
+        # disconnect signal then finds no panel and returns.
+        self._panels.remove(panel)
         tag_by_type = {"measurement": "Measurement", "switch": "Scanner"}
-        info = self._station.get_offline_info(vi_name)
         card = OfflineInstrumentPanel(
             vi_name,
-            info,
             self._orchestrator,
+            self._mirror,
             parent=self,
-            type_tag=tag_by_type.get(info.vi_type),
+            type_tag=tag_by_type.get(self._role_of(vi_name)),
         )
         card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._offline_cards[vi_name] = card
-        self._panels.remove(panel)
         self._instruments_grid.replaceWidget(panel, card)
         card.show()
         panel.close_front_panel()
-        panel.deleteLater()
+        retire_widget(panel, self._instruments_grid)
         logger.info("Live panel for '%s' replaced by offline card", vi_name)
 
     def _build_scanner_enable_checkbox(self, vi_name: str) -> QCheckBox:
@@ -853,7 +975,7 @@ class MonitorWindow(QMainWindow):
             "Off by default. Required before the Procedure window offers "
             "this scanner's routes as loopable measurement parameters."
         )
-        enable_chk.setChecked(self._orchestrator.scanner_enabled())
+        enable_chk.setChecked(self._mirror.scanner_enabled())
         enable_chk.toggled.connect(self._on_scanner_toggled)
         self._scanner_enable_checks.append(enable_chk)
         return enable_chk
@@ -872,18 +994,22 @@ class MonitorWindow(QMainWindow):
                 chk.blockSignals(False)
 
     def _build_operations_quadrant(self) -> QWidget:
-        """Build the bottom-right quadrant: the Ramps and Operations sub-panels.
+        """Build the bottom-right quadrant: Ramps, Operations, and Agents.
 
-        The quadrant is split horizontally into two titled sub-panels: the
-        always-present ``RampTrackerPanel`` on the left (every ramp running
-        right now, each with its own Abort) and the optional
-        ``OperationsPanel`` on the right. They are siblings rather than one
-        stacked column because they answer different questions and are read
-        at different moments — "what is moving right now, and stop it" vs
-        "what servicing action should I start".
+        Two levels. The top row is split horizontally into two titled
+        sub-panels: the always-present ``RampTrackerPanel`` on the left
+        (every ramp running right now, each with its own Abort) and the
+        optional ``OperationsPanel`` on the right. They are siblings rather
+        than one stacked column because they answer different questions and
+        are read at different moments — "what is moving right now, and stop
+        it" vs "what servicing action should I start". Underneath, across the
+        full width, sits the ``AgentPanel``: a third question again ("what
+        did the machines do"), and a full-width one, because each of its rows
+        is a single wide line that a third column would only wrap.
 
         Returns:
-            A QSplitter holding both sub-panels.
+            A vertical QSplitter holding the two-panel row and the Agents
+            sub-panel.
         """
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setObjectName("bottom_right_splitter")
@@ -894,7 +1020,43 @@ class MonitorWindow(QMainWindow):
         splitter.setStretchFactor(0, _BOTTOM_RIGHT_STRETCH[0])
         splitter.setStretchFactor(1, _BOTTOM_RIGHT_STRETCH[1])
         self._operations_splitter = splitter
-        return splitter
+
+        column = QSplitter(Qt.Orientation.Vertical)
+        column.setObjectName("agents_splitter")
+        column.setChildrenCollapsible(False)
+        column.addWidget(splitter)
+        column.addWidget(self._build_agents_subpanel())
+        column.setSizes(list(_BOTTOM_RIGHT_VERTICAL_SIZES))
+        column.setStretchFactor(0, _BOTTOM_RIGHT_VERTICAL_STRETCH[0])
+        column.setStretchFactor(1, _BOTTOM_RIGHT_VERTICAL_STRETCH[1])
+        self._agents_splitter = column
+        return column
+
+    def _build_agents_subpanel(self) -> QWidget:
+        """Build the bottom-right quadrant's bottom sub-panel: the Agent panel.
+
+        Always built, like the ramp tracker: a setup with no agent shows the
+        panel's own empty state, and "nothing has acted on my cryostat but
+        me" is an answer the physicist should be able to read off the window
+        rather than infer from an absent widget. The panel connects to no
+        engine signal itself — the window forwards the two it filters (see
+        ``_connect_signals``), which is the destruction-order rule.
+
+        Returns:
+            A QWidget containing the title and the panel.
+        """
+        container = QWidget()
+        container.setObjectName("agents_quadrant")
+        container.setMinimumHeight(_AGENTS_MIN_HEIGHT)
+        outer = QVBoxLayout(container)
+        outer.setContentsMargins(4, 4, 4, 4)
+        outer.setSpacing(4)
+        outer.addWidget(QLabel("<b>Agents</b>"))
+        self._agent_panel = AgentPanel(
+            session_manager=self._session_manager, parent=self
+        )
+        outer.addWidget(self._agent_panel)
+        return container
 
     def _build_ramps_subpanel(self) -> QWidget:
         """Build the bottom-right quadrant's left sub-panel: the ramp tracker.
@@ -1025,10 +1187,10 @@ class MonitorWindow(QMainWindow):
     def get_data_dir_for_run(self) -> str | None:
         """Return the data dir, enforcing hard containment before a run starts.
 
-        The commit-point enforcement the Enforcement rule requires (see
-        ``docs/plans/session-tier-and-terminology.md``): when an experiment
-        is open and the configured Data Dir resolves outside that
-        experiment's folder, the run is refused rather than merely noted.
+        Experiment-directory containment is hard, not a warning (see
+        ``GLOSSARY.md``'s **Session**): when an experiment is open and the
+        configured Data Dir resolves outside that experiment's folder, the
+        run is refused rather than merely noted.
         No experiment open is unaffected (session-less legacy state).
 
         Returns:
@@ -1179,7 +1341,7 @@ class MonitorWindow(QMainWindow):
         Deferred-until-restart, same precedent the old sessions-root relocate
         action used: ``session_manager``'s own ``ExperimentStore`` stays fixed
         for the rest of this run regardless of what is picked here (see
-        ``docs/plans/session-tier-and-terminology.md``, "Startup wiring").
+        ``GLOSSARY.md``'s **Session**).
         """
         if self._session_store is None:
             QMessageBox.information(
@@ -1289,6 +1451,32 @@ class MonitorWindow(QMainWindow):
         # run_finished fires only at run boundaries (not every tick), so
         # there is no teardown-race concern connecting it here directly.
         self._orchestrator.run_finished.connect(self._on_run_finished_for_logs)
+        # The held-VI set and the override window are mirror reads with no
+        # state transition to piggyback on — a hold-only condition never
+        # changes the engine's state — so the ack controls refresh when the
+        # mirror does, which is once per tick and on every state change.
+        self._mirror.status_updated.connect(self._on_status_snapshot)
+        # The Agent panel is a FILTER of these two streams, and this window is
+        # the receiver for both — a panel that connected itself would keep a
+        # live connection into a tree Qt is already tearing down (the
+        # destruction-order rule).
+        # Both channels under whichever name this client carries them: the
+        # engine's own ``verdict_emitted``/``event_emitted``, which the proxy
+        # renames to ``verdict``/``event`` because a client CONSUMES the
+        # contract rather than relaying it. The engine's names are tried
+        # first, because ``event`` is also QObject's own virtual handler and
+        # every QObject answers to it.
+        verdict_stream = getattr(self._orchestrator, "verdict_emitted", None)
+        if verdict_stream is None:
+            verdict_stream = self._orchestrator.verdict
+        verdict_stream.connect(self._on_verdict_for_agents)
+        event_stream = getattr(self._orchestrator, "event_emitted", None)
+        if event_stream is None:
+            event_stream = self._orchestrator.event
+        event_stream.connect(self._on_event_for_agents)
+        self._agent_panel.agents_active_changed.connect(
+            self._takeover_strip.set_agents_active
+        )
         if self._session_manager is not None:
             self._session_manager.experiment_changed.connect(
                 self._on_session_experiment_changed
@@ -1369,7 +1557,7 @@ class MonitorWindow(QMainWindow):
         # cleared — but only if THIS banner is the one showing
         # (never steal a dismiss from an unrelated message, e.g. the
         # save-health error).
-        if self._last_fault_message is not None and not self._orchestrator.vi_faults():
+        if self._last_fault_message is not None and not self._mirror.vi_faults():
             self._banner.dismiss()
             self._last_fault_message = None
 
@@ -1413,13 +1601,7 @@ class MonitorWindow(QMainWindow):
         ``_on_states_updated`` — ``ramps_updated`` fires every tick, and
         LAST (``_publish_ramps()`` is the final step of ``_tick_body()``),
         after that tick's ``update_conditions()``/``decide()`` and any state
-        transition it triggered. This is deliberately where
-        ``_refresh_ack_controls()`` is called rather than from
-        ``_on_states_updated`` (which fires FIRST, before conditions are
-        recomputed): the hold-visibility path has no state transition to
-        piggyback on — a hold-only condition never changes ``_state`` — so
-        it must be driven by a signal that fires after the tick's condition
-        computation, or it always shows the PREVIOUS tick's held-VI set.
+        transition it triggered.
 
         Args:
             records: ``list[cryosoft.core.ramps.RampRecord]`` from the
@@ -1428,7 +1610,64 @@ class MonitorWindow(QMainWindow):
         """
         if self._ramp_tracker is not None:
             self._ramp_tracker.on_ramps_updated(records)
+
+    def _on_status_snapshot(self, _snapshot: object) -> None:
+        """Refresh the state-dependent header controls from the fresh mirror.
+
+        Also re-renders every instrument card's lifecycle toggle.
+
+        Args:
+            _snapshot: The ``StatusSnapshot`` the mirror just absorbed; the
+                controls read the mirror rather than the payload, so that
+                one slot serves every read they make.
+        """
         self._refresh_ack_controls()
+        # A requested-but-not-yet-honoured pause changes no state, so the
+        # state label has to follow the snapshot as well as state_changed.
+        self._refresh_state_label()
+        # The kill switch and attendance are values ANY client can change, so
+        # the strip re-reads the mirror rather than trusting its own last
+        # click; the activity count decays with time, so it is recomputed
+        # here too rather than only when an agent acts.
+        self._takeover_strip.sync_from_mirror()
+        self._takeover_strip.set_agents_active(
+            self._agent_panel.active_agent_count()
+        )
+        # Whose run is in flight (GLOSSARY.md's **Run owner**) — forwarded to
+        # the panel from here rather than read there, for the same
+        # destruction-order reason every other per-tick payload is.
+        self._agent_panel.set_run_owner(self._mirror.run_owner())
+        # Each instrument card's Initiate/Standby toggle renders the
+        # lifecycle state this snapshot carries (GLOSSARY.md's **Lifecycle
+        # state**), so a stand-down nobody clicked — an emergency's blanket
+        # standby_all(), an agent through the gateway, the CLI — reaches the
+        # card. Routed through this window rather than connected per panel:
+        # the mirror emits at tick rate, and the destruction-order rule wants
+        # the window as the receiver.
+        for panel in self._panels:
+            panel.on_status_snapshot()
+
+    def _on_verdict_for_agents(self, verdict: object) -> None:
+        """Forward one verdict to the panels that render verdicts.
+
+        Two of them, for opposite halves of the same contract: the Agent
+        panel keeps the non-operator ones, and the experiment header keeps
+        the one answering its own Apply click.
+
+        Args:
+            verdict: Anything off the client's ``verdict`` stream.
+        """
+        self._agent_panel.on_verdict(verdict)
+        self._session_info.on_verdict(verdict)
+
+    def _on_event_for_agents(self, event: object) -> None:
+        """Forward one event to the Agent panel.
+
+        Args:
+            event: Anything off the client's ``event`` stream; the panel keeps
+                the non-operator ``StateChange``s and ignores the rest.
+        """
+        self._agent_panel.on_event(event)
 
     def _on_run_finished_for_logs(self, _manifest: dict) -> None:
         """Refresh the Logs page's tables after any run finishes.
@@ -1450,7 +1689,8 @@ class MonitorWindow(QMainWindow):
         Args:
             state_name: The new state name string (e.g. ``"IDLE"``).
         """
-        self._state_label.setText(f"State: {state_name}")
+        self._state_name = state_name
+        self._refresh_state_label()
         logger.debug("MonitorWindow: orchestrator state → %s", state_name)
 
         self._in_emergency = state_name == OrchestratorState.EMERGENCY.value
@@ -1472,6 +1712,24 @@ class MonitorWindow(QMainWindow):
             for widget in (self._status_bar, self._state_label):
                 widget.style().unpolish(widget)
                 widget.style().polish(widget)
+
+    def _refresh_state_label(self) -> None:
+        """Render the status bar's state label, including a requested pause.
+
+        A pause asked for while the run is MEASURING is *deferred* to the
+        pause boundary (GLOSSARY.md's **Pause boundary**), so for the length
+        of that datapoint the state is still MEASURING and the only thing
+        that has changed is a flag on the status snapshot. Rendering it as
+        ``MEASURING · Pausing`` is what tells the operator their click was
+        taken — otherwise the window looks identical before and after it, and
+        the pause reads as ignored until the state finally moves.
+
+        Text only: no dynamic property, no new colour. The status-bar level
+        still follows the STATE (a pending pause is not an error, and the run
+        is still active), so nothing here can drift from the palette.
+        """
+        pausing = " · Pausing" if self._mirror.pause_pending() else ""
+        self._state_label.setText(f"State: {self._state_name}{pausing}")
 
     def _on_ack_clicked(self) -> None:
         """Acknowledge, then refresh immediately rather than waiting for the
@@ -1498,13 +1756,13 @@ class MonitorWindow(QMainWindow):
         succeeds or is refused against (Orchestrator.acknowledge()), so a
         refusal after it reads 00:00 is never a silent surprise.
         """
-        held = self._orchestrator.held_vi_names()
+        held = self._mirror.held_vi_names()
         self._ack_btn.setVisible(self._in_emergency or bool(held))
         self._ack_btn.setText(
             "Acknowledge emergency" if self._in_emergency else "Acknowledge & unlock"
         )
         self._refresh_hold_banner(held)
-        expires_at = self._orchestrator.manual_override_expires_at()
+        expires_at = self._mirror.manual_override_expires_at()
         if expires_at is None:
             self._ack_countdown_label.setVisible(False)
             return
@@ -1539,7 +1797,7 @@ class MonitorWindow(QMainWindow):
                 self._last_hold_message = None
             return
 
-        conditions = self._orchestrator.get_operational_status().get("conditions", [])
+        conditions = self._mirror.get_operational_status().get("conditions", [])
         hold_conditions = [c for c in conditions if c.get("severity") == "hold"]
         if not hold_conditions:
             if self._last_hold_message is not None:
@@ -1628,6 +1886,9 @@ class MonitorWindow(QMainWindow):
 
         Detaching the log handler prevents it from writing to the destroyed
         ``QTextEdit`` after the window is gone (RuntimeError on a dead widget).
+        Accepting the close is also what releases this window's own strong
+        reference (the window-liveness standard, gui/widget_lifecycle.py): a
+        closed window paints nothing, so it is safe to collect from here on.
         Splitter proportions and trend selections are saved automatically
         here (no separate "Save layout" action, unlike the old dock-state
         save/restore) — there is nothing else for the user to arrange since
@@ -1636,11 +1897,11 @@ class MonitorWindow(QMainWindow):
         Args:
             event: The Qt close event.
         """
-        if self._orchestrator.state != OrchestratorState.IDLE.value:
+        if self._mirror.state != OrchestratorState.IDLE.value:
             logger.warning(
                 "MonitorWindow closing while orchestrator state=%s — aborting "
                 "the active run to leave hardware safed.",
-                self._orchestrator.state,
+                self._mirror.state,
             )
             self._orchestrator.abort_procedure()
         self._save_session()
@@ -1653,8 +1914,11 @@ class MonitorWindow(QMainWindow):
         settings.setValue(
             _BOTTOM_RIGHT_SPLITTER_KEY, self._operations_splitter.saveState()
         )
+        settings.setValue(_AGENTS_SPLITTER_KEY, self._agents_splitter.saveState())
         self._trends.save_settings()
         super().closeEvent(event)
+        if event.isAccepted():
+            release_window(self)
 
     def _restore_splitter_state(self) -> None:
         """Restore each quadrant splitter's saved proportions, defensively.
@@ -1674,6 +1938,7 @@ class MonitorWindow(QMainWindow):
             (self._left_splitter, _LEFT_SPLITTER_KEY),
             (self._right_splitter, _RIGHT_SPLITTER_KEY),
             (self._operations_splitter, _BOTTOM_RIGHT_SPLITTER_KEY),
+            (self._agents_splitter, _AGENTS_SPLITTER_KEY),
         ):
             state = settings.value(key)
             if state is None:

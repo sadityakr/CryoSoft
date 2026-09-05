@@ -26,12 +26,27 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# LLM drafting of ELN entries (cryosoft/session/eln/drafting.py). Deliberately
+# OPTIONAL: the whole feature is off by default, the package is imported lazily
+# when a real draft client is constructed, and every test runs against
+# FakeDraftClient - so a setup that never drafts installs nothing extra, and a
+# checkout without this extra imports, lints, and tests unchanged. Only
+# `messages.create` is used, which both the 0.x and 1.x SDK lines provide.
+assistant = ["anthropic>=0.40"]
 dev = [
     "pytest>=7.4",
     "pytest-qt>=4.2",
     "mypy>=1.5",
     "import-linter>=2.0",
     "ruff>=0.4",
+]
+# The MCP adapter's optional stdio framing. `python -m cryosoft.mcp` serves a
+# complete session without it — cryosoft/mcp/shim.py is the reference backend
+# and the one the tests exercise — so this extra buys the framing from the
+# package that owns the protocol and nothing else. Never make the test suite
+# need it: a transport the tests cannot run is a transport nobody checks.
+mcp = [
+    "mcp>=2.0",
 ]
 
 [tool.pytest.ini_options]
@@ -302,4 +317,193 @@ forbidden_modules = [
     "cryosoft.core.trend_check_runner",
     "cryosoft.core.plan",
     "cryosoft.core.data_manager",
+]
+
+[[tool.importlinter.contracts]]
+name = "C16: cryosoft.core.events is a pure contract — stdlib only, nothing else in cryosoft"
+type = "forbidden"
+source_modules = ["cryosoft.core.events"]
+forbidden_modules = [
+    "cryosoft.drivers",
+    "cryosoft.virtual_instruments",
+    "cryosoft.procedures",
+    "cryosoft.gui",
+    "cryosoft.main",
+    "cryosoft.core.station",
+    "cryosoft.core.orchestrator",
+    "cryosoft.core.plan",
+    "cryosoft.core.data_manager",
+]
+
+[[tool.importlinter.contracts]]
+name = "C17: the data reader is standalone — it imports only events/exceptions from cryosoft (plus h5py/numpy/stdlib), so an analysis process can import it alone"
+type = "forbidden"
+# The allowlist is exactly `cryosoft.core.events` and `cryosoft.core.exceptions`;
+# everything else in the package is enumerated below, because import-linter only
+# matches a forbidden module that is not an ancestor of the source (naming
+# `cryosoft` or `cryosoft.core` here would silently match nothing). A core module
+# added later is caught by test_l5_data_reader.py's import-allowlist test, which
+# reads the module's own imports rather than a list that has to be maintained.
+source_modules = ["cryosoft.core.data_reader"]
+forbidden_modules = [
+    "cryosoft.drivers",
+    "cryosoft.virtual_instruments",
+    "cryosoft.procedures",
+    "cryosoft.gui",
+    "cryosoft.main",
+    "cryosoft.session",
+    "cryosoft.troubleshoot",
+    "cryosoft.core.availability",
+    "cryosoft.core.conditions",
+    "cryosoft.core.config_catalog",
+    "cryosoft.core.data_manager",
+    "cryosoft.core.decorators",
+    "cryosoft.core.estimates",
+    "cryosoft.core.gates",
+    "cryosoft.core.logging_config",
+    "cryosoft.core.operation",
+    "cryosoft.core.operational_status",
+    "cryosoft.core.orchestrator",
+    "cryosoft.core.paths",
+    "cryosoft.core.plan",
+    "cryosoft.core.procedure",
+    "cryosoft.core.ramps",
+    "cryosoft.core.run_buffer",
+    "cryosoft.core.run_builder",
+    "cryosoft.core.stall_detection",
+    "cryosoft.core.station",
+    "cryosoft.core.sweep_builder",
+    "cryosoft.core.tiered_trend_logger",
+    "cryosoft.core.trend_check_runner",
+    "cryosoft.core.trend_checks",
+    "cryosoft.core.trend_history",
+]
+
+[[tool.importlinter.contracts]]
+name = "C18: cryosoft.core.estimates is pure policy — the typed vocabulary and stdlib only"
+type = "forbidden"
+source_modules = ["cryosoft.core.estimates"]
+forbidden_modules = [
+    "cryosoft.drivers",
+    "cryosoft.virtual_instruments",
+    "cryosoft.procedures",
+    "cryosoft.gui",
+    "cryosoft.main",
+    "cryosoft.session",
+    "cryosoft.core.station",
+    "cryosoft.core.orchestrator",
+    "cryosoft.core.procedure",
+    "cryosoft.core.operation",
+    "cryosoft.core.data_manager",
+]
+
+[[tool.importlinter.contracts]]
+name = "C19: the GUI holds neither the Station nor the Orchestrator — it builds from the StationInfo declaration and acts through the OrchestratorProxy"
+type = "forbidden"
+source_modules = ["cryosoft.gui"]
+# Direct imports only: the GUI legitimately imports the Orchestrator, which
+# sits directly on top of the Station, so every indirect chain runs through a
+# layer that is SUPPOSED to hold one. What this contract forbids is a widget
+# naming the Station module itself.
+allow_indirect_imports = "True"
+# import-linter counts an import inside `if TYPE_CHECKING:` like any other, so
+# a contract alone cannot say "as a type, yes; at runtime, no". Every entry
+# below is therefore paired with the conformance test
+# `test_gui_imports_the_station_only_for_typing_or_config_helpers`, which is
+# what actually enforces the distinction: each ignored import must be inside a
+# type-checking guard, or be one of the two pure config-FILE helpers named
+# there (`validate_config_dir`, `read_instrument_metadata` — neither takes a
+# Station nor touches an instrument; they live in that module for historical
+# reasons and moving them is a separate change). A gui module NOT listed here
+# cannot import the Station at all, which is the property this contract keeps.
+ignore_imports = [
+    "cryosoft.gui.config_editor -> cryosoft.core.station",
+    "cryosoft.gui.monitor_window -> cryosoft.core.station",
+    "cryosoft.gui.operations_panel -> cryosoft.core.station",
+    "cryosoft.gui.procedure_params_panel -> cryosoft.core.station",
+    "cryosoft.gui.procedure_window -> cryosoft.core.station",
+    "cryosoft.gui.queue_panel -> cryosoft.core.station",
+    "cryosoft.gui.trends_quadrant -> cryosoft.core.station",
+    # The state-machine ENUM, not the engine: MonitorWindow names
+    # OrchestratorState's members to colour its status bar. Every other GUI
+    # module now imports cryosoft.core.orchestrator_proxy instead, and this
+    # last one goes when the state vocabulary moves into the contract.
+    "cryosoft.gui.monitor_window -> cryosoft.core.orchestrator",
+]
+forbidden_modules = [
+    "cryosoft.core.station",
+    "cryosoft.core.orchestrator",
+]
+
+[[tool.importlinter.contracts]]
+name = "C20: the reference client is a leaf entry point — cryosoft.ctl imports core, the session layer and the troubleshoot toolbox, plus cryosoft.procedures for the run catalog it discovers; never the GUI, drivers or VIs"
+type = "forbidden"
+# cryosoft.ctl is an ENTRY POINT, like cryosoft.main: it owns discovery. A run
+# travels as a class NAME, and neither the engine (C5) nor the session layer
+# (C11) may import cryosoft.procedures, so whoever owns discovery resolves the
+# name and hands the catalog down — which is why that one package above
+# core/session is reachable here and nothing else above them is. Procedures are
+# hardware-blind by C6, so importing them brings no instrument I/O with them.
+source_modules = ["cryosoft.ctl"]
+# Same pass-through exemption as C5/C6/C11: the client reaches the Station and
+# the Orchestrator, whose own VI imports do not make it hardware-aware.
+ignore_imports = ["cryosoft.core.station -> cryosoft.virtual_instruments.*"]
+forbidden_modules = [
+    "cryosoft.gui",
+    "cryosoft.main",
+    "cryosoft.drivers",
+    "cryosoft.virtual_instruments",
+]
+
+[[tool.importlinter.contracts]]
+name = "C21: the MCP adapter is a separate process that cannot reach an instrument — it imports only stdlib and cryosoft.core.events"
+type = "forbidden"
+# The whole argument for putting the transport out of process is that the
+# module speaking to the outside world CANNOT touch the Station, the
+# Orchestrator or the session layer — mechanically, not by convention. The
+# allowlist is exactly `cryosoft.core.events`, the pure contract; everything
+# else in the package is enumerated below, because import-linter only matches a
+# forbidden module that is not an ancestor of the source (naming `cryosoft` or
+# `cryosoft.core` here would silently match nothing). A module added to the
+# package later is caught by test_mcp_adapter.py's import-allowlist test, which
+# reads the adapter's own imports rather than a list that has to be maintained.
+source_modules = ["cryosoft.mcp"]
+forbidden_modules = [
+    "cryosoft.drivers",
+    "cryosoft.virtual_instruments",
+    "cryosoft.procedures",
+    "cryosoft.gui",
+    "cryosoft.main",
+    "cryosoft.session",
+    "cryosoft.troubleshoot",
+    "cryosoft.core.availability",
+    "cryosoft.core.capability_manifest",
+    "cryosoft.core.conditions",
+    "cryosoft.core.config_catalog",
+    "cryosoft.core.data_manager",
+    "cryosoft.core.data_reader",
+    "cryosoft.core.decorators",
+    "cryosoft.core.estimates",
+    "cryosoft.core.exceptions",
+    "cryosoft.core.gates",
+    "cryosoft.core.instrument_host",
+    "cryosoft.core.logging_config",
+    "cryosoft.core.operation",
+    "cryosoft.core.operational_status",
+    "cryosoft.core.orchestrator",
+    "cryosoft.core.orchestrator_proxy",
+    "cryosoft.core.paths",
+    "cryosoft.core.plan",
+    "cryosoft.core.procedure",
+    "cryosoft.core.ramps",
+    "cryosoft.core.run_buffer",
+    "cryosoft.core.run_builder",
+    "cryosoft.core.stall_detection",
+    "cryosoft.core.station",
+    "cryosoft.core.status_mirror",
+    "cryosoft.core.sweep_builder",
+    "cryosoft.core.tiered_trend_logger",
+    "cryosoft.core.trend_check_runner",
+    "cryosoft.core.trend_checks",
+    "cryosoft.core.trend_history",
 ]

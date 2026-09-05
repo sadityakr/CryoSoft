@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, final
 
+from cryosoft.core.events import OPERATOR, Actor
 from cryosoft.core.gates import Gate
-from cryosoft.core.plan import Command, PhasePlan, StepPlan
+from cryosoft.core.plan import Command, PhasePlan, StepPlan, params_digest
 
 logger = logging.getLogger(__name__)
 
@@ -145,12 +146,25 @@ class StepRecord:
         conditions: Flat ``{"<vi>.<field>": value}`` snapshot of the
             station's cached state at that instant, values kept as-is
             (floats and strings both). JSON-plain.
+        actor: Who attested it. A physical step the software can neither
+            perform nor verify is a claim about the world, so the record has
+            to say WHOSE claim it is: an autonomous actor confirming its own
+            step must be distinguishable from the physicist doing it, or the
+            attestation is worth nothing. Defaults to the ``OPERATOR``
+            sentinel, so a caller that does not name an actor is recorded as
+            the human at the window — which is what a direct GUI click is.
+        params_digest: The **Params digest** of the operation's parameters as
+            they stood at that instant (``core.plan.params_digest``), so a
+            later dispute can prove what was confirmed rather than what the
+            parameters happen to say now.
     """
 
     key: str
     status: str
     unix_time: float
     conditions: dict[str, Any]
+    actor: Actor = OPERATOR
+    params_digest: str = ""
 
 
 @dataclass(frozen=True)
@@ -231,11 +245,15 @@ class OperationBase:
       Confirm/Skip action for that step only, and it advances the moment an
       outcome is recorded.
     * ``confirm_step(key)`` / ``skip_step(key)`` stamp a ``StepRecord``
-      (status, unix time, and a snapshot of the station conditions via
-      ``step_conditions_snapshot()``). They reach here from the GUI through
-      ``Orchestrator.confirm_operation()`` and
-      ``Orchestrator.skip_operation_step()`` — an operation is never called
-      into directly from the GUI.
+      (status, unix time, a snapshot of the station conditions via
+      ``step_conditions_snapshot()``, the ``Actor`` who attested it, and the
+      **Params digest** of the parameters in force at that instant). They
+      reach here from the GUI through ``Orchestrator.confirm_operation()``
+      and ``Orchestrator.skip_operation_step()`` — an operation is never
+      called into directly from the GUI. The actor is what makes an
+      autonomous client's self-confirmation of a physical step
+      distinguishable from the physicist's; the digest is what lets a later
+      dispute say which parameters were confirmed.
     * ``steps_summary()`` returns the whole timeline, pending steps
       included, for ``run_summary()`` and thence the servicing log.
     * ``_reset_steps()`` clears the timeline; call it from ``initiate()``
@@ -662,12 +680,13 @@ class OperationBase:
         """
         return {}
 
-    def confirm_step(self, key: str) -> None:
-        """Record that a declared step was completed by the operator.
+    def confirm_step(self, key: str, *, actor: Actor = OPERATOR) -> None:
+        """Record that a declared step was completed and attested.
 
         Reached from the GUI through ``Orchestrator.confirm_operation(key)``.
-        Never touches hardware: this is a human attestation about a physical
-        action the software cannot perform or verify.
+        Never touches hardware: this is an attestation about a physical
+        action the software cannot perform or verify — which is exactly why
+        the record names who made it.
 
         Recording an already-recorded step is a no-op rather than an error,
         so a double-click cannot rewrite the timestamp of something that
@@ -675,13 +694,15 @@ class OperationBase:
 
         Args:
             key: One of ``steps()``' keys.
+            actor: Who attests the step was done. Defaults to the
+                ``OPERATOR`` sentinel — a direct GUI click is the human.
 
         Raises:
             ValueError: If ``key`` is not a declared step.
         """
-        self._record_step(key, STEP_STATUS_DONE)
+        self._record_step(key, STEP_STATUS_DONE, actor)
 
-    def skip_step(self, key: str) -> None:
+    def skip_step(self, key: str, *, actor: Actor = OPERATOR) -> None:
         """Record that a declared step was deliberately skipped.
 
         Reached from the GUI through
@@ -693,6 +714,8 @@ class OperationBase:
 
         Args:
             key: One of ``steps()``' keys.
+            actor: Who decided to skip it. An override is a decision, and the
+                record names who took it.
 
         Raises:
             ValueError: If ``key`` is not a declared step, or the step
@@ -704,7 +727,7 @@ class OperationBase:
                 f"{type(self).__name__}.skip_step: step {key!r} is not "
                 f"skippable."
             )
-        self._record_step(key, STEP_STATUS_SKIPPED)
+        self._record_step(key, STEP_STATUS_SKIPPED, actor)
 
     def _step_by_key(self, key: str) -> OperationStep:
         """Return the declared step named ``key``.
@@ -726,12 +749,15 @@ class OperationBase:
             f"steps are {[s.key for s in self.steps()]}"
         )
 
-    def _record_step(self, key: str, status: str) -> None:
-        """Stamp a step outcome with the current time and station conditions.
+    def _record_step(
+        self, key: str, status: str, actor: Actor = OPERATOR
+    ) -> None:
+        """Stamp a step outcome: time, conditions, actor, and params digest.
 
         Args:
             key: A declared step key.
             status: ``STEP_STATUS_DONE`` or ``STEP_STATUS_SKIPPED``.
+            actor: Who confirmed or skipped it.
 
         Raises:
             ValueError: If ``key`` is not a declared step.
@@ -750,14 +776,39 @@ class OperationBase:
             status=status,
             unix_time=time.time(),
             conditions=self.step_conditions_snapshot(),
+            actor=actor,
+            params_digest=params_digest(self._step_params()),
         )
         logger.info(
-            "%s: step %r (%s) recorded as %s",
+            "%s: step %r (%s) recorded as %s by %s %r",
             type(self).__name__,
             key,
             step.label,
             status,
+            actor.kind.value,
+            actor.id,
         )
+
+    def _step_params(self) -> dict[str, Any]:
+        """Return the parameters to digest onto a step outcome.
+
+        Guarded, because a digest is accountability and not control flow: a
+        subclass whose ``get_params()`` override raises, or returns something
+        that is not a mapping, records the digest of an empty parameter set
+        rather than failing the attestation it was asked to write down.
+
+        Returns:
+            The operation's current parameter values, or ``{}``.
+        """
+        try:
+            params = self.get_params()
+        except Exception:  # noqa: BLE001 — a digest must never block an attestation
+            logger.exception(
+                "%s: get_params() failed; step recorded with an empty digest",
+                type(self).__name__,
+            )
+            return {}
+        return dict(params) if isinstance(params, Mapping) else {}
 
     def steps_summary(self) -> list[dict[str, Any]]:
         """Return the step timeline in the JSON-plain shape for ``run_summary()``.
@@ -769,8 +820,10 @@ class OperationBase:
 
         Returns:
             A list of ``{"key", "label", "kind", "status", "unix_time",
-            "conditions"}`` dicts. ``unix_time`` is ``None`` and
-            ``conditions`` ``{}`` for a pending step.
+            "conditions", "actor", "params_digest"}`` dicts. ``unix_time`` is
+            ``None``, ``conditions`` ``{}``, ``actor`` ``None`` and
+            ``params_digest`` ``""`` for a pending step — nobody has attested
+            anything about it yet.
         """
         summary: list[dict[str, Any]] = []
         for step in self.steps():
@@ -783,6 +836,8 @@ class OperationBase:
                     "status": record.status if record else "pending",
                     "unix_time": record.unix_time if record else None,
                     "conditions": dict(record.conditions) if record else {},
+                    "actor": record.actor.to_json() if record else None,
+                    "params_digest": record.params_digest if record else "",
                 }
             )
         return summary

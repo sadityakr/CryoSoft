@@ -58,10 +58,10 @@ two agents acting at once.
 
 **M5. Authority model.** Roles and action classes, per-experiment limits
 narrower than the instrument's own, an attendance flag distinguishing
-"human is watching" from "3 a.m., keep it alive", and a kill switch. The
-critical design property: enforcement lives at the single-writer choke
-point, not in the agent's prompt. An agent that is *asked* not to exceed
-2 T is not limited to 2 T.
+"human is watching" from "3 a.m., keep it alive", a kill switch, and — once
+there is more than one agent — run ownership. The critical design property:
+enforcement lives at the single-writer choke point, not in the agent's
+prompt. An agent that is *asked* not to exceed 2 T is not limited to 2 T.
 
 **M6. Safe state and reversibility.** A guaranteed idempotent "leave it
 safe" per instrument, snapshot/restore around exploratory sequences, and
@@ -502,17 +502,45 @@ conformance test asserting it imports no hardware symbols.
    reports instead.
 3. **Kill switch**: tri-state `active` / `read-only` / `revoked` gating the
    whole gateway, never able to block the human path.
-4. **Action feed**: `AgentAction` records appended to
+4. **Run ownership** *(added 2026-09-04, after the end-to-end scenario tests
+   showed a second agent aborting another agent's run with no record)*. The
+   owner of a run is the `Actor` that started it — already stamped on
+   `RunStarted` and `RunRecord.actor`, and a queued run is owned by whoever
+   queued it. Ownership is a **fact, never a lease**: nothing is reserved,
+   nothing expires, nothing can be left locked, and there is no handover
+   protocol. Three rules. *The human is never gated*: `operator` and
+   `system` actors ignore ownership entirely, exactly as they ignore the
+   kill switch. *Safety is never gated*: emergency standby, stopping a ramp,
+   pause, resume, the gate and attendance all ignore it, because holding the
+   cryostat where it stands destroys nobody's result. *Destructive
+   run-scoped actions are owner-scoped for agents*: `abort_procedure`,
+   `confirm_operation`, `skip_operation_step` and `finish_operation` — the
+   ones that end somebody's result or attest to a physical step of it — are
+   refused to an agent that is not the owner, `BLOCKED_ROLE` with
+   `detail.rule == "run_owner"` naming the owner and how to proceed.
+   **Refuse, then override**: the same command carrying `override_owner` and
+   a non-empty `reason` is accepted and recorded as a *takeover* — the
+   verdict's `detail.takeover`, `RunFinished`'s acting `actor` and
+   `overridden_owner`, the agent feed's record, and a visually distinct row
+   in the agent panel reading "took over &lt;owner&gt;'s run: &lt;reason&gt;".
+   An override with no reason is itself refused
+   (`detail.rule == "override_reason_required"`): a takeover whose record
+   cannot say why is the unaccountable act the rule exists to prevent.
+   Enforced where every other authority rule is, at the single writer, so
+   the spool, the socket and a direct caller all pass it; the gateway
+   mirrors it locally off `StatusSnapshot.run.owner` so a tool call is
+   refused at the front door in the same words.
+5. **Action feed**: `AgentAction` records appended to
    `<experiments>/<id>/agent_actions.jsonl`, following the established
    pattern of `status.jsonl` and `troubleshoot.jsonl`, and re-emitted as a
    Qt signal for a future GUI panel.
-5. **Tool surface**, thin wrappers over existing public API: `get_status`,
+6. **Tool surface**, thin wrappers over existing public API: `get_status`,
    `get_live_state`, `describe_station` (Phase 1's manifest),
    `describe_procedure`, `list_experiments` / `get_experiment` / `get_run`,
    `read_run_data` (Phase 2's reader), `validate_run`, `probe_run`,
    run control, `submit_vi_action` (Phase 2's verdicts),
    `read_operational_log`, `read_agent_feed`.
-6. **`python -m cryosoft.ctl`**: an argparse CLI over the in-process
+7. **`python -m cryosoft.ctl`**: an argparse CLI over the in-process
    gateway, JSON in and JSON out, matching the troubleshoot CLI's
    conventions. This is the reference client and the integration-test
    harness, promoted from the old plan's "A5 optional" to a first-class
@@ -528,14 +556,18 @@ argument for this ordering.
 
 ### Phase 5 — MCP transport
 
-*The one sanctioned thread, landing alone.*
+*A second front door, landing alone.*
+
+The "one sanctioned thread" this phase was named for is retired: the single
+hardware thread standard (`instrument-thread-and-responsive-gui.md` §3) has
+since made the instrument thread the one thread, and every transport is an
+ordinary client of it on the main thread.
 
 Streamable HTTP MCP on `127.0.0.1` with a bearer token minted at startup
-into a runtime file. A transport thread owns only the socket and MCP
-framing and never touches Station, Orchestrator, or any VI; every decoded
-call crosses to the main thread by Qt queued connection, executes on the
-tick thread through the normal single-writer path, and the result crosses
-back. Written into the gateway README as a standard with a conformance test
+into a runtime file. The transport owns only the socket and MCP framing and
+never touches Station, Orchestrator, or any VI; every decoded call is
+submitted through the gateway on the main thread, executes on the instrument
+thread through the normal single-writer path, and the result crosses back. Written into the gateway README as a standard with a conformance test
 asserting no hardware imports in transport modules.
 
 Because Phase 4 already validated the whole tool surface in-process, this

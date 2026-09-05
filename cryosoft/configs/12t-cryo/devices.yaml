@@ -132,13 +132,19 @@ virtual_instruments:
     class: cryosoft.virtual_instruments.measurement.measurement_delta_mode.DeltaModeMeasurementVI
     drivers: {source: keithley_6220, meter: keithley_6220}  # serial relay to K2182A
     vi_type: measurement
-    init_params: {}
+    init_params:
+      # setup.md, "Physical Wiring & Safety Notes": the sample wiring on this
+      # rack (1-10 kOhm test resistor, K6220 -> HP 34420A) must never exceed
+      # +/-10 mA. That documented figure is the bound, not the K6220's own
+      # 105 mA ceiling. Revisit when a different sample is wired.
+      max_source_current_A: 0.01
 
   keithley_dc_mode:
     class: cryosoft.virtual_instruments.measurement.measurement_dc_mode.DCModeMeasurementVI
     drivers: {source: keithley_6220, meter: keithley_2182a}  # 2182A on its own GPIB address
     vi_type: measurement
-    init_params: {}
+    init_params:
+      max_source_current_A: 0.01   # setup.md: never exceed +/-10 mA on this wiring
 
   # Generic pass-through routes (ch1..ch20, one per raw 705 channel) rather
   # than fixed per-sample names: no sample-to-channel mapping is documented
@@ -199,8 +205,8 @@ virtual_instruments:
       configured_externally: true
 
 # Cryogenics: the helium-fill operation, the consumption display, and the
-# automatic level recorder are all built around level_vi (docs/plans/
-# cryogenics-logbook.md §9).
+# automatic level recorder are all built around level_vi (see GLOSSARY.md's
+# Cryogenics log).
 cryogenics:
   level_vi: level_meter
   # Advisory "a fill is coming due" level. Must sit ABOVE the level VI's
@@ -219,7 +225,7 @@ cryogenics:
 servicing_logs:                  # which declared log kinds this setup keeps
   - servicing
 
-# Cryostat-servicing operations (docs/plans/archive/cryogenics-logbook.md §9). Each
+# Cryostat-servicing operations (see GLOSSARY.md's Operation). Each
 # named sub-block configures one OperationBase subclass; a setup that omits
 # an operation's block still gets that operation's class-level defaults.
 operations:

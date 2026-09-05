@@ -4,11 +4,12 @@ Command grammar is API: the setup-supervisor skills and permission allowlists
 hard-code it, so subcommand names and their meanings must stay stable.
 
 Read/write split for permission gating: ``scan``, ``probe``, ``check``,
-``bench-l0``, ``methods``, ``idn``, ``read``, and ``status`` never change
-instrument state and are safe to allowlist (``status`` only reads a log
-file). ``write`` calls state-changing driver methods and ``query`` /
-``send`` transmit arbitrary raw bytes (a raw query can mutate state too), so
-those three should stay behind a permission prompt.
+``bench-l0``, ``methods``, ``idn``, ``read``, ``status``, and ``session``
+never change instrument state and are safe to allowlist (``status`` only
+reads a log file, ``session`` only an experiment folder). ``write`` calls
+state-changing driver methods and ``query`` / ``send`` transmit arbitrary raw
+bytes (a raw query can mutate state too), so those three should stay behind a
+permission prompt.
 
 There are deliberately no interactive prompts: authorization is the
 harness's job, and a hung prompt is the worst failure mode for an agent.
@@ -29,10 +30,10 @@ from typing import Any
 
 import cryosoft
 from cryosoft.core.logging_config import setup_logging
-from cryosoft.core.paths import log_directory
+from cryosoft.core.paths import log_directory, measurement_root
 from cryosoft.core.station import read_tick_interval_ms, read_trends_config
 from cryosoft.core.trend_checks import CheckResult, declared_checks, run_checks
-from cryosoft.troubleshoot import engine, status_reader
+from cryosoft.troubleshoot import engine, session_report, status_reader
 from cryosoft.troubleshoot.engine import (
     DriverBench,
     L0BenchResult,
@@ -427,6 +428,43 @@ def _add_target_args(parser: argparse.ArgumentParser) -> None:
     _add_config_arg(parser)
 
 
+def _judge_freshness(
+    digest: dict[str, Any], max_age_s: float
+) -> tuple[float | None, str | None]:
+    """Judge a status digest against a ``--max-age`` freshness limit.
+
+    Freshness is judged from the newest record's own ``ts``, never from the
+    file's mtime: a log rotation or a file copy moves the mtime without a
+    single new record being written, and the question here is whether the app
+    is still *ticking*. Mirrors `engine.check_trend_store_live`, which asks
+    the same question of the trend-history store.
+
+    Args:
+        digest: The `status_reader.summarize()` digest to judge.
+        max_age_s: Maximum tolerated age, in seconds, of the newest record.
+
+    Returns:
+        ``(age_s, reason)`` — the newest record's age in seconds where that
+        can be computed, and a one-line operator-readable reason the log
+        fails the gate, or None when it is fresh.
+    """
+    if not digest.get("available"):
+        return None, "no operational-status record: the app has not written one here."
+    ts = digest.get("ts")
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)):
+        return None, (
+            "the newest record carries no timestamp (schema 1 log), so its age "
+            "cannot be checked — treat it as stale."
+        )
+    age_s = time.time() - float(ts)
+    if age_s > max_age_s:
+        return age_s, (
+            f"the newest record is {age_s:.0f}s old (limit {max_age_s:.0f}s) — "
+            "the app is not ticking, so this state is history, not live."
+        )
+    return age_s, None
+
+
 def _cmd_status(args: argparse.Namespace) -> tuple[bool, dict[str, Any]]:
     """Summarize the running app's operational-status log (works while it runs).
 
@@ -437,16 +475,31 @@ def _cmd_status(args: argparse.Namespace) -> tuple[bool, dict[str, Any]]:
     exists and its verdict is OK, so an agent can gate on the exit code.
     This is the one troubleshoot command that reads the LIVE app rather than
     opening instruments with the app closed.
+
+    With ``--max-age`` the exit code also gates on freshness. Without it, a
+    log left behind by a process that died days ago still reads as a
+    confident "RAMPING, ~1400 s to target" and exits 0, so anything gating on
+    the exit code should pass ``--max-age``.
     """
     log_path = args.log or (_transcript_dir() / "status.jsonl")
     records = status_reader.read_records(log_path, last=args.last)
     digest = status_reader.summarize(records)
+    stale_reason: str | None = None
+    if args.max_age is not None:
+        age_s, stale_reason = _judge_freshness(digest, args.max_age)
+        digest["max_age_s"] = args.max_age
+        digest["age_s"] = None if age_s is None else round(age_s, 1)
+        digest["stale"] = stale_reason is not None
+        if stale_reason:
+            digest["stale_reason"] = stale_reason
     if args.json:
         _print_json(digest)
     else:
         print(status_reader.render_text(digest))
+        if stale_reason:
+            print(f"stale: {stale_reason}", file=sys.stderr)
     ok = bool(digest.get("available")) and digest.get("verdict") == "OK"
-    return ok, digest
+    return ok and stale_reason is None, digest
 
 
 _WINDOW_UNITS = {"s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0, "": 1.0}
@@ -570,6 +623,62 @@ def _cmd_trends(args: argparse.Namespace) -> tuple[bool, dict[str, Any]]:
     return ok, payload
 
 
+def _resolve_experiment_dir(explicit: str | None) -> tuple[Path | None, str | None]:
+    """Resolve which experiment folder to report on.
+
+    Args:
+        explicit: The EXPERIMENT_DIR positional argument, or None.
+
+    Returns:
+        ``(directory, reason)`` — the folder to report on, or None together
+        with one operator-readable sentence saying what was looked for and
+        where. An explicitly named folder is taken as given (its record is
+        parsed, and complains for itself if absent); with no argument, the
+        newest experiment under the measurement root wins.
+    """
+    if explicit:
+        return Path(explicit), None
+    try:
+        root = measurement_root()
+    except RuntimeError as exc:
+        return None, str(exc)
+    directory = session_report.latest_experiment_dir(root)
+    if directory is None:
+        return None, (
+            f"No experiment found under {root} (looked for "
+            f"sessions/<user_id>/<session_id>/<experiment_id>/experiment.json)."
+        )
+    return directory, None
+
+
+def _cmd_session(args: argparse.Namespace) -> tuple[bool, dict[str, Any]]:
+    """Report on one finished or in-progress experiment folder (read-only).
+
+    The after-the-fact sibling of ``status``: where that one explains what the
+    running app is doing right now, this reads an experiment's own record off
+    disk and lists its runs in order — kind, procedure, outcome, timestamps,
+    duration, data file — plus the session envelope it ran under and any
+    incident report filed in the folder. It opens no instruments and writes
+    nothing.
+
+    Exit 0 means a report was produced; exit 1 means there was nothing to
+    report on (no experiment resolved, or its ``experiment.json`` missing or
+    unparseable). A failed run is *content* of a successful report, not a
+    failure of the command — an agent gating on the exit code is asking "did
+    I get the record?", and reads the outcomes out of the payload.
+    """
+    directory, reason = _resolve_experiment_dir(args.experiment_dir)
+    if directory is None:
+        report = session_report.unavailable(reason or "No experiment found.")
+    else:
+        report = session_report.build_report(directory)
+    if args.json:
+        _print_json(report)
+    else:
+        print(session_report.render_text(report))
+    return bool(report.get("available")), report
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the argparse command tree (kept separate for --help testing)."""
     parser = argparse.ArgumentParser(
@@ -625,7 +734,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--last", type=int, default=5,
                    help="recent records to fold in for the gap trend (default 5)")
+    p.add_argument(
+        "--max-age", type=float, default=None, metavar="SECONDS",
+        help="fail (exit 1) unless the newest record is younger than this. "
+        "A few tick intervals is the useful value — 30 at the default 3 s "
+        "tick. Off by default; pass it whenever you gate on the exit code, "
+        "or a log from a process that died days ago reads as a live run",
+    )
     p.set_defaults(func=_cmd_status)
+
+    p = sub.add_parser("session", parents=[common],
+                       help="report on one experiment folder: its runs, their "
+                            "outcomes and data files, its envelope, and any "
+                            "incident reports filed beside it")
+    p.add_argument(
+        "experiment_dir",
+        nargs="?",
+        metavar="EXPERIMENT_DIR",
+        help="experiment folder to report on (default: the most recently "
+        "modified experiment under the measurement root — see "
+        "cryosoft.core.paths.measurement_root(), overridable via "
+        "CRYOSOFT_MEASUREMENT_ROOT)",
+    )
+    p.set_defaults(func=_cmd_session)
 
     p = sub.add_parser("trends", parents=[common],
                        help="evaluate the declared trend checks (temperature stability, "

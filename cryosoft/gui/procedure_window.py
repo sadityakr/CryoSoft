@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import qtawesome as qta
 from PyQt6.QtCore import Qt
@@ -23,16 +24,23 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from cryosoft.core.orchestrator import Orchestrator
+from cryosoft.core.orchestrator_proxy import OrchestratorProxy
 from cryosoft.core.procedure import BaseProcedure
-from cryosoft.core.station import Station
+from cryosoft.core.run_builder import PROCEDURE_BUILD_ERRORS, build_procedure
 from cryosoft.gui import window_geometry
 from cryosoft.gui.live_plot_panel import LivePlotPanel
 from cryosoft.gui.notification_banner import NotificationBanner
-from cryosoft.gui.form_autosave import STATUS_PENDING, FormAutosaveState
+from cryosoft.gui.form_autosave import FormAutosaveState
 from cryosoft.gui.procedure_discovery import discover_procedures
 from cryosoft.gui.procedure_params_panel import ProcedureParamsPanel
-from cryosoft.gui.queue_panel import QueueEntry, QueuePanel
+from cryosoft.gui.queue_panel import QueuePanel
+from cryosoft.gui.widget_lifecycle import hold_window, release_window
+from cryosoft.core.status_mirror import StatusMirror
+from cryosoft.session.run_queue import RunQueueHost
+
+if TYPE_CHECKING:  # the GUI holds a Station only as a type (contract C19)
+    from cryosoft.core.station import Station
+
 from cryosoft.gui.theme import (
     BANNER_SEVERITY_ERROR,
     BANNER_SEVERITY_WARNING,
@@ -49,6 +57,11 @@ _GEOMETRY_KEY = "ProcedureWindow/geometry"  # QSettings key for saved window geo
 # Max lines kept in the concise Status log before old lines are trimmed
 # (matches the Monitor detailed log's cap; bounds a long run's memory use).
 _STATUS_MAX_LINES = 500
+# The Pause button's two captions: its resting one, and the one it wears
+# while a pause has been requested but not yet honoured (GLOSSARY.md's
+# **Pause boundary**).
+_PAUSE_CAPTION = "Pause"
+_PAUSING_CAPTION = "Pausing…"
 
 
 class ProcedureWindow(QMainWindow):
@@ -71,8 +84,9 @@ class ProcedureWindow(QMainWindow):
         get_sample_info: Callable returning ``{sample_name, sample_id, comments}``.
         get_data_dir: Callable returning the data directory path string, or
             ``None`` when the caller rejected it (e.g. MonitorWindow's hard
-            containment check against the open experiment's folder — see
-            ``docs/plans/session-tier-and-terminology.md``, "Enforcement");
+            containment check against the open experiment's folder, which
+            refuses outright rather than merely warning — see
+            ``GLOSSARY.md``'s **Session**);
             a warning is expected to already have been shown to the operator
             in that case, so ``_collect_params`` just aborts quietly.
         parent: Optional Qt parent widget.
@@ -81,27 +95,43 @@ class ProcedureWindow(QMainWindow):
             context (``ExperimentManager.experiment_context()``), stamped into
             every built procedure as ``experiment_info``. ``None`` means no
             session layer is wired (unit tests) — procedures get ``{}``.
+        queue_host: The session layer's run queue
+            (``ExperimentManager.run_queue_host``), which the queue panel
+            renders and mutates. ``None`` means no session layer is wired and
+            the panel builds a standalone queue of its own.
+        mirror: The status mirror every read in this window is answered from
+            (the status-mirror standard, ``gui/README.md``). Built from the
+            proxy when none is given (the inline construction path).
     """
 
     def __init__(
         self,
         station: Station,
-        orchestrator: Orchestrator,
+        orchestrator: OrchestratorProxy,
         get_sample_info: Callable[[], dict[str, str]],
         get_data_dir: Callable[[], str | None],
         parent: QWidget | None = None,
         initial_session: FormAutosaveState | None = None,
         get_experiment_info: Callable[[], dict[str, str]] | None = None,
+        queue_host: RunQueueHost | None = None,
+        mirror: StatusMirror | None = None,
     ) -> None:
         super().__init__(parent)
         self._station = station
         self._orchestrator = orchestrator
+        # Every read this window makes is a mirror read (the status-mirror
+        # standard, gui/README.md); the run-kind guards below are advisory,
+        # and the engine remains the authority on what actually happens.
+        self._mirror = (
+            mirror if mirror is not None else StatusMirror.of(orchestrator)
+        )
         self._get_sample_info = get_sample_info
         self._get_data_dir = get_data_dir
         # Session-layer experiment context, stamped into every built
         # procedure's HDF5 metadata. None (unit tests, no session layer)
         # means "no experiment": procedures get an empty context.
         self._get_experiment_info = get_experiment_info
+        self._queue_host = queue_host
 
         # Active procedure reference (set on run)
         self._active_procedure: BaseProcedure | None = None
@@ -122,6 +152,12 @@ class ProcedureWindow(QMainWindow):
         if initial_session is not None:
             self._restore_session(initial_session)
 
+        # The window-liveness standard (gui/widget_lifecycle.py): this window
+        # owns the reference that keeps it alive, so no garbage-collection
+        # pass can destroy it — and the pyqtgraph scenes in its two live-plot
+        # panels — while it is on screen. Released in closeEvent().
+        hold_window(self)
+
     # ------------------------------------------------------------------
     # UI construction
     # ------------------------------------------------------------------
@@ -138,7 +174,10 @@ class ProcedureWindow(QMainWindow):
         root.addWidget(self._banner)
 
         # ── Fixed 2x2 quadrant grid ────────────────────────────────────
-        self._params_panel = ProcedureParamsPanel(self._station, discover_procedures())
+        self._procedure_classes = discover_procedures()
+        self._params_panel = ProcedureParamsPanel(
+            self._station, self._procedure_classes
+        )
         top_right = self._build_queue_quadrant()
         bottom_left, bottom_right = self._build_plot_quadrants()
 
@@ -199,7 +238,11 @@ class ProcedureWindow(QMainWindow):
         split.setObjectName("queue_status_splitter")
         split.setChildrenCollapsible(False)
         self._queue_panel = QueuePanel(
-            self._station, self._orchestrator, get_experiment_info=self._experiment_info
+            self._station,
+            self._orchestrator,
+            get_experiment_info=self._experiment_info,
+            queue_host=self._queue_host,
+            procedure_classes=self._procedure_classes,
         )
         self._queue_panel.setMinimumHeight(120)
         split.addWidget(self._queue_panel)
@@ -282,12 +325,15 @@ class ProcedureWindow(QMainWindow):
         """
         row = QHBoxLayout()
 
-        pause_btn = QPushButton("Pause")
+        pause_btn = QPushButton(_PAUSE_CAPTION)
         pause_btn.setObjectName("pause_btn")
         pause_btn.setProperty("class", BTN_CLASS_SECONDARY)
         pause_btn.setIcon(qta.icon("fa5s.pause", color=TEXT_PRIMARY))
         pause_btn.setToolTip("Pause the running procedure at the next safe point")
         pause_btn.clicked.connect(self._on_pause_clicked)
+        # Kept on the window because its caption reports a requested-but-
+        # deferred pause (see _refresh_pause_caption()).
+        self._pause_btn = pause_btn
 
         resume_btn = QPushButton("Resume")
         resume_btn.setObjectName("resume_btn")
@@ -324,6 +370,11 @@ class ProcedureWindow(QMainWindow):
             lambda msg: self._banner.show_message(msg, BANNER_SEVERITY_WARNING)
         )
         self._orchestrator.status_message.connect(self._on_status_message)
+        # A pause requested mid-datapoint is deferred to the pause boundary
+        # and changes no state, so the only thing that reports it is a fresh
+        # status snapshot. Connected to a WINDOW slot (the destruction-order
+        # rule, gui/README.md), like every other per-tick stream here.
+        self._mirror.status_updated.connect(self._on_status_snapshot)
 
         self._params_panel.add_to_queue_requested.connect(self._on_add_to_queue)
         self._params_panel.run_now_requested.connect(self._on_run_now)
@@ -332,6 +383,33 @@ class ProcedureWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Slot handlers
     # ------------------------------------------------------------------
+
+    def _on_status_snapshot(self, _snapshot: object) -> None:
+        """Refresh the snapshot-driven controls from the fresh mirror.
+
+        Args:
+            _snapshot: The ``StatusSnapshot`` the mirror just absorbed; the
+                controls read the mirror rather than the payload, so one slot
+                serves every read they make.
+        """
+        self._refresh_pause_caption()
+
+    def _refresh_pause_caption(self) -> None:
+        """Caption the Pause button "Pausing…" while a pause is deferred.
+
+        A pause asked for during ``MEASURING`` is honoured only at the pause
+        boundary (GLOSSARY.md's **Pause boundary**) — the datapoint being
+        read is finished and saved first. For that interval the engine's
+        state is unchanged and the run keeps producing points, so without
+        this the button looks exactly as it did before the click and the
+        request reads as ignored. The caption is the acknowledgement: the
+        engine took it, and it lands when the point does.
+
+        Text only — the button keeps its class, icon and palette, so no new
+        colour is introduced and the control cannot shift as it changes.
+        """
+        pausing = self._mirror.pause_pending()
+        self._pause_btn.setText(_PAUSING_CAPTION if pausing else _PAUSE_CAPTION)
 
     def _on_status_message(self, text: str) -> None:
         """Append one timestamped milestone line to the concise Status log.
@@ -396,15 +474,16 @@ class ProcedureWindow(QMainWindow):
             return None
 
         try:
-            return cls(
+            return build_procedure(
+                cls,
                 station=self._station,
+                params=param_values,
                 sample_info=sample_info,
                 data_directory=data_dir,
                 file_prefix=file_prefix,
                 experiment_info=self._experiment_info(),
-                **param_values,
             )
-        except Exception as exc:
+        except PROCEDURE_BUILD_ERRORS as exc:
             # A procedure may refuse construction (e.g. a nonzero field
             # requested on a magnet this station does not have). Surface it
             # as a form error — an uncaught raise in a Qt slot kills the app.
@@ -413,7 +492,12 @@ class ProcedureWindow(QMainWindow):
             return None
 
     def _on_add_to_queue(self) -> None:
-        """Freeze current form values and add a procedure entry to the queue."""
+        """Freeze current form values and queue them as a run spec.
+
+        Nothing is constructed here: what goes into the queue is the values,
+        validated at this moment (see ``QueuePanel.add_run``), and the engine
+        builds the one live object when it pulls the run.
+        """
         result = self._collect_params()
         if result is None:
             return
@@ -421,20 +505,8 @@ class ProcedureWindow(QMainWindow):
         cls = self._params_panel.current_class()
         if cls is None:
             return
-
-        # Construct through the shared _build_procedure_instance path (reusing the
-        # params we already collected) instead of re-implementing cls(...) here.
-        proc = self._build_procedure_instance(result)
-        self._queue_panel.add_entry(
-            QueueEntry(
-                cls=cls,
-                params=param_values,
-                sample_info=sample_info,
-                data_dir=data_dir,
-                file_prefix=file_prefix,
-                status=STATUS_PENDING,
-                proc=proc,
-            )
+        self._queue_panel.add_run(
+            cls, param_values, sample_info, data_dir, file_prefix
         )
 
     def _on_run_now(self) -> None:
@@ -449,13 +521,19 @@ class ProcedureWindow(QMainWindow):
     def _on_pause_clicked(self) -> None:
         """Pause the running procedure — a no-op while an operation is active.
 
-        This window is operation-blind (design doc operation-concurrency-
-        and-error-scoping.md §2's hard status separation): its Pause button
-        must never arm because an operation (e.g. a helium fill) happens to
-        be RAMPING. Operation control lives on the Operations panel's
-        OperationCard exclusively.
+        This window is operation-blind (the hard status separation — see
+        ``GLOSSARY.md``): its Pause button must never arm because an
+        operation (e.g. a helium fill) happens to be RAMPING. Operation
+        control lives on the Operations panel's OperationCard exclusively.
+
+        The run-kind check is an ADVISORY guard read off the status mirror,
+        never an authoritative one: which run is in flight is the engine's
+        fact, and the engine refuses anything it should refuse. The guard
+        exists because operation-blindness is a property of THIS window
+        rather than of the command — the Operations panel drives the very
+        same engine actions for the operation it owns.
         """
-        if self._orchestrator.active_run_kind() == "operation":
+        if self._mirror.active_run_kind() == "operation":
             return
         self._orchestrator.pause_procedure()
 
@@ -464,7 +542,7 @@ class ProcedureWindow(QMainWindow):
 
         Mirrors ``_on_pause_clicked``'s run-kind gate; see its docstring.
         """
-        if self._orchestrator.active_run_kind() == "operation":
+        if self._mirror.active_run_kind() == "operation":
             return
         self._orchestrator.resume_procedure()
 
@@ -472,12 +550,12 @@ class ProcedureWindow(QMainWindow):
         """Ask for confirmation, then abort the running procedure.
 
         A no-op while an operation is active — this window is operation-
-        blind (design doc operation-concurrency-and-error-scoping.md §2):
-        its Abort button must never act on a running operation (e.g. a
+        blind (the hard status separation — see ``GLOSSARY.md``): its Abort
+        button must never act on a running operation (e.g. a
         helium fill mid-RAMPING). An operation ends via its own OperationCard
         "Finish" control, never from here.
         """
-        if self._orchestrator.active_run_kind() == "operation":
+        if self._mirror.active_run_kind() == "operation":
             return
         answer = QMessageBox.question(
             self,
@@ -626,3 +704,5 @@ class ProcedureWindow(QMainWindow):
         """
         window_geometry.save_geometry(self, _GEOMETRY_KEY)
         super().closeEvent(event)
+        if event.isAccepted():
+            release_window(self)

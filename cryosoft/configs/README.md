@@ -42,10 +42,56 @@ every `configs/<name>/` directory:
   (`system` / `measurement` / `level` / `switch`). `init_params` carries the
   control-validation limits (`min/max_temperature_K`, `max_ramp_rate_K_per_min`,
   `max_current`, field bounds), magnet `ramp_segments`, and switch `routes`.
+- `max_source_current_A` — REQUIRED on every VI that drives current through the
+  sample (the DC, delta-mode and lock-in measurement VIs), in amperes.
+  Conformance-checked per shipped config, real setups included, because a
+  missing ceiling lets an action source whatever the instrument can deliver.
+  It bounds the sourced current symmetrically (±, current reversal is routine)
+  and, on the voltage-sourced lock-in, is converted to an oscillator-amplitude
+  bound by `max_source_current_A × series_resistance_ohm`. Choose it from the
+  SAMPLE WIRING where that figure is documented (`12t-cryo` records ±10 mA in
+  its `setup.md`) and from the source's own maximum output otherwise
+  (105 mA for a Keithley 6220/6221); narrow it when a sample's safe current is
+  measured. It is a property of the setup, so it lives here, never in the VI.
 
 `monitor.yaml` structure: a `monitor:` block with `tick_interval_ms` (the single
-QTimer tick period) and `max_vi_errors` (consecutive VI-error tolerance before
-escalation). Optionally a `panels:` block — see next section.
+QTimer tick period), `max_vi_errors` (consecutive VI-error tolerance before
+escalation) and the optional `instrument_thread` (see below). Optionally a
+`panels:` block — see the section after that.
+
+### `instrument_thread:` — the way back to one thread
+
+**The default is `true`, and a config that says nothing gets it.** The
+Station, the Orchestrator, every driver and the data manager live on the
+instrument thread (GLOSSARY.md's **Instrument thread**), which is the single
+hardware thread standard `CLAUDE.md` states: a slow instrument read cannot
+freeze the window, and there is still exactly one writer on the bus.
+
+`instrument_thread: false` asks for the temporary `inline` mode instead —
+the same design with the engine on the GUI's own thread (GLOSSARY.md's
+**Inline mode**). It lives here because it is a property of the setup, not of
+the code: whether this machine's VISA layer has been exercised under a second
+thread. Nothing a window shows or does changes with it — the same client
+adapter, the same events — so the only reason to write it is a rack whose
+drivers misbehave when the thread that opened their sessions is not the GUI's,
+and the line is expected to go once that rack has had a day of hardware soak
+with the thread on. `inline` itself is kept for one release after the flip and
+is then removed.
+
+`CRYOSOFT_INSTRUMENT_THREAD=0` (or `=1`) overrides this file for one launch,
+which is how CI runs the same GUI suite both ways.
+
+```yaml
+monitor:
+  tick_interval_ms: 1000
+  max_vi_errors: 3
+  # Omit the line to inherit the instrument thread; write it only to refuse.
+  instrument_thread: false
+```
+
+The shipped configs stand as: both sims inherit the thread, and the two real
+setups (`12t-cryo`, `a-sample-real-cryostat`) carry an explicit `false` with
+the reason, until their rack has been soaked on hardware with it on.
 
 ### `panels:` — which controls a VI's monitor card shows
 
