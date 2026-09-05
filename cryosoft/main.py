@@ -571,6 +571,27 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
     session_manager.attach_eln_publisher(app.eln_publisher)
     app.eln_publisher.start()
 
+    # Analysis before the notebook: with analysis on, a finished run is
+    # analysed by a recipe in its OWN process first, and the entry that
+    # analysis produced waits on the run for a human's approval in the eLab
+    # tab. The runner lives here beside the publisher for the same reason the
+    # drain timer does — a recipe is user code that may take seconds, so it
+    # belongs on the client side of the control contract, never on the tick.
+    app.analysis_runner = None
+    try:
+        from cryosoft.session.analysis_runner import AnalysisRunner
+    except ImportError:
+        logger.warning("This build has no analysis runner — analysis stays off")
+    else:
+        app.analysis_runner = AnalysisRunner(
+            session_manager,
+            app.eln_publisher,
+            lambda: app.eln_publisher.settings,
+        )
+        requested = getattr(app.eln_publisher, "analysis_requested", None)
+        if requested is not None:
+            requested.connect(app.analysis_runner.start)
+
     # Cryogenics management:
     # config-gated like every optional feature — a setup without a
     # cryogenics: block (or without the level VI it names) carries zero
@@ -627,6 +648,8 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
         restart_callback=_restart_application,
         startup_warning="; ".join(warnings) if warnings else None,
         session_manager=session_manager,
+        eln_publisher=app.eln_publisher,
+        analysis_runner=app.analysis_runner,
         session_store=session_store,
         cryogenics_config=cryogenics_config or None,
         operations_config=operations_config or None,
