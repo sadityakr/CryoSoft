@@ -775,11 +775,12 @@ def test_the_two_eln_tools_declare_their_class_and_their_recording(tools):
     assert publish.action_class is ActionClass.RUN_CONTROL
     assert draft.recorded is True and publish.recorded is True
     assert draft.session_function == "draft_eln_entry"
-    assert all(
-        tool.recorded is False
-        for tool in tools.values()
-        if tool.name not in {"draft_eln_entry", "publish_eln_entry"}
-    ), "a tool an agent polls must not drown the accountability trail"
+    assert {tool.name for tool in tools.values() if tool.recorded} == {
+        "draft_eln_entry",
+        "publish_eln_entry",
+        "write_analysis_recipe",
+        "run_analysis",
+    }, "a tool an agent polls must not drown the accountability trail"
 
 
 def test_drafting_a_finished_run_returns_the_entry_as_data(eln_gateway):
