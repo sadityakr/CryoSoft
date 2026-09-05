@@ -24,7 +24,6 @@ from cryosoft.core.station import (
     read_assistant_config,
     read_gateway_config,
     read_instrument_thread,
-    read_operations_config,
     read_panels_config,
     read_request_spool_config,
     read_safety_config,
@@ -35,7 +34,7 @@ from cryosoft.core.trend_check_runner import TrendCheckRunner
 from cryosoft.core.trend_checks import declared_checks
 from cryosoft.gui import app_settings
 from cryosoft.gui.monitor_window import MonitorWindow
-from cryosoft.gui.procedure_discovery import discover_operations, discover_procedures
+from cryosoft.gui.procedure_discovery import discover_procedures
 from cryosoft.gui.theme import PLOT_AXIS, PLOT_BG, build_stylesheet
 from cryosoft.session.agent_feed import AgentFeed
 from cryosoft.session.assistant import (
@@ -295,15 +294,13 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
         app_settings.shipped_config_dir(), app_settings.user_config_dir()
     )
 
-    # The run catalog: {class __name__: class} for every discovered procedure
-    # and operation. Discovery lives up here because neither the engine
+    # The run catalog: {class __name__: class} for every discovered
+    # procedure. Discovery lives up here because neither the engine
     # (contract C5) nor the session layer (C11) may import
     # cryosoft.procedures — whoever owns discovery hands the catalog down, so
     # a client that speaks the control contract can name a run by class and
     # the run queue can resolve a stored spec back to its class.
-    run_catalog: dict[str, type] = {
-        cls.__name__: cls for cls in (*discover_procedures(), *discover_operations())
-    }
+    run_catalog: dict[str, type] = {cls.__name__: cls for cls in discover_procedures()}
 
     # The instrument stack is built by the InstrumentHost, not here: which
     # THREAD owns the Station and the Orchestrator is the host's decision, and
@@ -604,10 +601,6 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
     # same store instances feed both the automatic recorder and the Monitor
     # window's Cryogenics panel / Logs page, so both always see the same data.
     cryogenics_config = read_cryogenics_config(used_path)
-    # Operations panel: declared operations.<key>: config blocks,
-    # GUI-safe to read unconditionally (empty {} when the setup declares
-    # none) — the panel decides which discovered class each key maps to.
-    operations_config = read_operations_config(used_path)
     cryogenics_recorder: CryogenicsRecorder | None = None
     helium_store: HeliumRecordStore | None = None
     servicing_store: ServicingLogStore | None = None
@@ -652,7 +645,6 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
         analysis_runner=app.analysis_runner,
         session_store=session_store,
         cryogenics_config=cryogenics_config or None,
-        operations_config=operations_config or None,
         helium_store=helium_store,
         servicing_store=servicing_store,
         servicing_log_kinds=servicing_log_kinds,

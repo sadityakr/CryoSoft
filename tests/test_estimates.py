@@ -18,11 +18,10 @@ from cryosoft.core.estimates import (
 )
 from cryosoft.core.plan import DurationEstimate, ProbeSpec, StepCost
 from cryosoft.core.procedure import BaseProcedure
-from cryosoft.core.run_builder import build_operation, build_procedure
+from cryosoft.core.run_builder import build_procedure
 from cryosoft.core.station import build_station
 from cryosoft.procedures.field_sweep import FieldSweep
-from cryosoft.procedures.operations.helium_fill import HeliumFillOperation
-from cryosoft.session.run_queue import KIND_OPERATION, validate_run
+from cryosoft.session.run_queue import validate_run
 
 CONFIG_PATH = "cryosoft/configs/sim_cryostat"
 
@@ -282,30 +281,5 @@ def test_validate_run_estimates_the_probe_when_one_is_asked_for(station, tmp_pat
     assert probe.duration_estimate_s < full.duration_estimate_s
 
 
-def test_an_operation_validates_and_is_estimated_too(station):
-    """Both run kinds get an estimate; an operation's simply says what it cannot know."""
-    result = validate_run(
-        HeliumFillOperation,
-        {"person": "AK"},
-        station=station,
-        kind=KIND_OPERATION,
-    )
-
-    assert result.ok
-    assert result.estimate is not None
-    assert result.estimate.assumptions
-    assert result.estimate.total_s == 0.0
 
 
-def test_an_operation_built_headlessly_can_be_estimated_directly(station):
-    """The estimator is duck-typed, so it works on an operation instance too."""
-    operation = build_operation(
-        HeliumFillOperation, station=station, params={"person": "AK"}
-    )
-
-    estimate = estimate_duration(operation, station.nominal_ramp_rates())
-
-    assert estimate.total_s == 0.0
-    assert any(
-        "HeliumFillOperation" in assumption for assumption in estimate.assumptions
-    )

@@ -84,11 +84,11 @@ def estimate_duration(
     reads the run's own declarations and touches no instrument.
 
     Duck-typed on purpose: this module sits below L4 and must not import
-    ``BaseProcedure``/``OperationBase`` (contract C5/C6 keep the layers apart),
-    so a run that declares neither hook simply gets an estimate that says so.
+    ``BaseProcedure`` (contracts C5/C6 keep the layers apart), so a run that
+    declares neither hook simply gets an estimate that says so.
 
     Args:
-        run: A built procedure or operation. Read through two optional
+        run: A built procedure. Read through two optional
             declarations — ``estimate_step_seconds()`` for its per-point cost
             and ``planned_targets()`` for the setpoints it will command.
         ramp_rates: ``{vi_name: units_per_minute}`` for the setup the run will

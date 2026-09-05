@@ -26,11 +26,10 @@ client can offer an action the other cannot see.
 so the normal queueing path does not pass through this proxy at all: a client
 adds a ``RunSpec`` through ``RunQueueHost``/``ExperimentManager``, which
 validates it, and asks for one ``QueueChanged`` broadcast afterwards through
-``publish_queue()``. ``queue_procedure``/``queue_operation`` remain here
-because ``CommandName`` enumerates them — they are the direct-handover path
-for a caller that already holds a BUILT run — and, like ``run_procedure``/
-``run_operation``, they forward (see ``_forward()``) because ``Command.args``
-is JSON and cannot carry an object. ``publish_queue`` and the two pull-seam
+``publish_queue()``. ``queue_procedure`` remains here because ``CommandName``
+enumerates it — it is the direct-handover path for a caller that already
+holds a BUILT run — and, like ``run_procedure``, it forwards (see
+``_forward()``) because ``Command.args`` is JSON and cannot carry an object. ``publish_queue`` and the two pull-seam
 attributes are the queue's other half of this surface: not commands, and
 documented as such where they are defined.
 
@@ -97,8 +96,6 @@ _PASSTHROUGH_SIGNALS: tuple[str, ...] = (
     "operational_status",
     "ramps_updated",
     "status_message",
-    "operation_status",
-    "operation_progress",
 )
 
 
@@ -196,8 +193,6 @@ class OrchestratorProxy(QObject):
     operational_status = pyqtSignal(dict)
     ramps_updated = pyqtSignal(list)
     status_message = pyqtSignal(str)
-    operation_status = pyqtSignal(str)
-    operation_progress = pyqtSignal(float)
 
     #: Which typed signal each event type is re-emitted on. Built from the
     #: contract's own classes so a new event type is registered by adding it
@@ -330,7 +325,7 @@ class OrchestratorProxy(QObject):
         return self._mirror.pause_pending()
 
     def active_run_kind(self) -> str | None:
-        """Return ``"procedure"``/``"operation"``, or ``None`` when idle."""
+        """Return ``"procedure"``, or ``None`` when idle."""
         return self._mirror.active_run_kind()
 
     def scanner_enabled(self) -> bool:
@@ -476,19 +471,18 @@ class OrchestratorProxy(QObject):
     def _forward(self, name: ev.CommandName, **kwargs: Any) -> str:
         """Call an engine command whose arguments the contract cannot carry.
 
-        Four commands take a built run OBJECT — ``run_procedure``,
-        ``run_operation`` and their queueing twins — and ``Command.args`` is
-        JSON by contract, so those cannot be submitted as a payload while the
-        client is the one constructing the object. The engine's own
-        ``submit()`` already accepts the JSON form (a class name plus params,
-        resolved through its run catalog), which is the path an agent takes.
+        Two commands take a built run OBJECT — ``run_procedure`` and
+        ``queue_procedure`` — and ``Command.args`` is JSON by contract, so
+        those cannot be submitted as a payload while the client is the one
+        constructing the object. The engine's own ``submit()`` already
+        accepts the JSON form (a class name plus params, resolved through its
+        run catalog), which is the path an agent takes.
 
-        The waiting queue already holds specs, so ``queue_procedure`` and
-        ``queue_operation`` are no longer how a run is queued — a client adds
-        a ``RunSpec`` through the session layer's ``RunQueueHost`` and the
-        engine pulls it. What is left here is the direct-handover path, for a
-        caller holding a run it built itself, and the two ``run_*`` twins that
-        start one immediately.
+        The waiting queue already holds specs, so ``queue_procedure`` is no
+        longer how a run is queued — a client adds a ``RunSpec`` through the
+        session layer's ``RunQueueHost`` and the engine pulls it. What is
+        left here is the direct-handover path, for a caller holding a run it
+        built itself, and ``run_procedure``, which starts one immediately.
 
         The actor is the same operator sentinel a submitted command carries,
         so accountability is identical — what is missing is the correlated
@@ -524,16 +518,6 @@ class OrchestratorProxy(QObject):
         """
         return self._forward(ev.CommandName.RUN_PROCEDURE, procedure=procedure)
 
-    def run_operation(self, operation: Any) -> str:
-        """Start a built operation immediately.
-
-        Args:
-            operation: The ready operation instance.
-
-        Returns:
-            The command's request id (see ``_forward()``).
-        """
-        return self._forward(ev.CommandName.RUN_OPERATION, operation=operation)
 
     def queue_procedure(self, procedure: Any) -> str:
         """Add a built procedure to the run queue.
@@ -546,16 +530,6 @@ class OrchestratorProxy(QObject):
         """
         return self._forward(ev.CommandName.QUEUE_PROCEDURE, procedure=procedure)
 
-    def queue_operation(self, operation: Any) -> str:
-        """Add a built operation to the run queue.
-
-        Args:
-            operation: The ready operation instance.
-
-        Returns:
-            The command's request id (see ``_forward()``).
-        """
-        return self._forward(ev.CommandName.QUEUE_OPERATION, operation=operation)
 
     def run_queue(self) -> str:
         """Start the next queued run if the engine is free to.
@@ -724,37 +698,8 @@ class OrchestratorProxy(QObject):
         """
         return self._submit(ev.CommandName.ABORT_PROCEDURE)
 
-    # ── Operation steps ────────────────────────────────────────────────
 
-    def confirm_operation(self, key: str) -> str:
-        """Confirm one of the active operation's operator confirmations.
 
-        Args:
-            key: The confirmation's declared key.
-
-        Returns:
-            The command's request id.
-        """
-        return self._submit(ev.CommandName.CONFIRM_OPERATION, key=key)
-
-    def skip_operation_step(self, key: str) -> str:
-        """Skip the active operation's current, skippable step.
-
-        Args:
-            key: The step's declared key.
-
-        Returns:
-            The command's request id.
-        """
-        return self._submit(ev.CommandName.SKIP_OPERATION_STEP, key=key)
-
-    def finish_operation(self) -> str:
-        """Ask the active operation to finish gracefully.
-
-        Returns:
-            The command's request id.
-        """
-        return self._submit(ev.CommandName.FINISH_OPERATION)
 
     # ── Instrument actions ─────────────────────────────────────────────
 

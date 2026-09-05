@@ -178,26 +178,11 @@ drift. It is a floor, not a guarantee: one datapoint costs three Orchestrator
 ticks (measure, advance, settle), so the fastest achievable cadence is three
 times the setup's `tick_interval_ms`.
 
-## Operations
-
-`procedures/operations/` (its own `README.md`) holds a DIFFERENT kind of
-request: cryostat-**servicing** actions (helium fill, sample change), each a
-subclass of `cryosoft.core.operation.OperationBase` rather than
-`BaseProcedure`. An operation is declarative like a procedure — it returns
-the same `PhasePlan`/`StepPlan`/`Target`/`Command`/`Gate` currency and is
-driven by the same Orchestrator tick loop — but carries operation-scope
-command access, tolerated safety flags, a verified `postcondition_gates()`
-phase, and higher submission priority; it is never returned among the
-measurement procedures discovered from this folder. See
-`procedures/operations/README.md` for its own entry/exit/interface contract,
-and GLOSSARY.md's **Operation**.
-
 ## How to add a new module
 
 Add a procedure only for a new **sweep axis**. To add a new *measurement*
 instead, add a measurement VI and register it with `vi_type: measurement`; both
-shipped sweeps pick it up with zero procedure change. To add a new
-cryostat-servicing action, see `procedures/operations/README.md` instead —
+shipped sweeps pick it up with zero procedure change.
 that is a different contract, not a sweep axis.
 
 1. Create `procedures/your_sweep.py` with the PEP 257 header docstring
@@ -229,9 +214,8 @@ editing them — which is what forced the 2026-07-20 global `magnet_x` ->
 `magnet_z` rename across every config and test.
 
 This violates the "config files are the single source of truth" principle: the
-VI a procedure drives is a *setup* property and belongs in the config, exactly
-as `sample_load`/`sample_unload` already do it (`operations.sample_load.vti_vi`,
-defaulted in `station.py`). The intended fix is to derive the names from the Station
+VI a procedure drives is a *setup* property and belongs in the config. The
+intended fix is to derive the names from the Station
 (a `magnet_vi_names()` / `temperature_vi_names()` discovery pair, mirroring the
 existing `measurement_vi_names()` / `switch_vi_names()`) and expose them as
 procedure parameters, so adding an axis or renaming a magnet needs no procedure

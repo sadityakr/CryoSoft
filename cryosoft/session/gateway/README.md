@@ -170,10 +170,9 @@ is.
 - **Run ownership is checked last, and it is about the run, not the role.**
   The **run-ownership standard** (GLOSSARY.md's **Run owner**): the `Actor`
   that started the run in flight owns it, and an `agent` that is not the
-  owner may not `abort_procedure`, `confirm_operation`,
-  `skip_operation_step` or `finish_operation` on it —
-  `roles.OWNER_SCOPED_COMMANDS`, the four that end somebody's result or
-  attest to a physical step of it. Refused with `detail.rule == "run_owner"`
+  owner may not `abort_procedure` on it —
+  `roles.OWNER_SCOPED_COMMANDS`, the one that ends somebody's result.
+  Refused with `detail.rule == "run_owner"`
   naming the owner; the same command re-sent with `override_owner` and a
   non-empty `reason` is admitted as a **Takeover** (an override with no
   reason is refused, `detail.rule == "override_reason_required"`). Last in

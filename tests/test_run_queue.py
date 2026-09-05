@@ -1,9 +1,8 @@
 # ---
 # description: |
 #   Tests for cryosoft.session.run_queue — the run queue as data. Covers the
-#   RunSpec contract (frozen, JSON round trip, actor), RunQueue ordering
-#   (operations first, queue-jumping never preemption), build_run's two
-#   construction shapes, and validate_run's three checks (declared ParamSpec
+#   RunSpec contract (frozen, JSON round trip, actor), RunQueue ordering,
+#   build_run's construction shape, and validate_run's three checks (declared ParamSpec
 #   bounds, the headless build, control_limits + the session envelope).
 # last_updated: 2026-09-03
 # ---
@@ -16,14 +15,12 @@ from cryosoft.core.events import OPERATOR, Actor, ActorKind
 from cryosoft.core.plan import EnvelopeBound, ExperimentEnvelope
 from cryosoft.core.station import build_station
 from cryosoft.procedures.field_sweep import FieldSweep
-from cryosoft.procedures.operations.helium_fill import HeliumFillOperation
 from cryosoft.session.run_queue import (
     FINDING_BUILD_REFUSED,
     FINDING_CONTROL_LIMIT,
     FINDING_ENVELOPE,
     FINDING_PARAM_BOUNDS,
     FINDING_UNKNOWN_PARAM,
-    KIND_OPERATION,
     KIND_PROCEDURE,
     RunFinding,
     RunQueue,
@@ -104,7 +101,7 @@ def test_run_spec_copies_its_params_defensively():
 
 
 def test_run_spec_refuses_an_unknown_kind():
-    """Only 'procedure' and 'operation' exist — a third kind fails loudly."""
+    """Only 'procedure' exists — a third kind fails loudly."""
     with pytest.raises(ValueError, match="kind"):
         RunSpec(kind="calibration", run_class="FieldSweep")
 
@@ -115,21 +112,8 @@ def test_run_spec_refuses_a_non_json_parameter():
         RunSpec(kind=KIND_PROCEDURE, run_class="FieldSweep", params={"vi": object()})
 
 
-# ── RunQueue: ordering, the queue-jumping rule ───────────────────────────────
+# ── RunQueue: ordering ───────────────────────────────
 
-def test_operations_drain_before_procedures():
-    """The queue-jumping rule: an operation queued later still runs first."""
-    queue = RunQueue()
-    procedure = queue.add(_spec(run_class="FieldSweep"))
-    operation = queue.add(_spec(kind=KIND_OPERATION, run_class="HeliumFillOperation"))
-
-    assert [s.spec_id for s in queue.snapshot()] == [
-        operation.spec_id,
-        procedure.spec_id,
-    ]
-    assert queue.pop_next().spec_id == operation.spec_id
-    assert queue.pop_next().spec_id == procedure.spec_id
-    assert queue.pop_next() is None
 
 
 def test_queue_preserves_add_order_within_a_kind():
@@ -162,15 +146,6 @@ def test_move_reorders_within_the_bucket_and_clamps_at_the_ends():
     assert queue.move("nope", -1) is False
 
 
-def test_move_cannot_push_a_procedure_ahead_of_an_operation():
-    """Queue-jumping is an ordering property, not a per-entry priority."""
-    queue = RunQueue()
-    operation = queue.add(_spec(kind=KIND_OPERATION, run_class="HeliumFillOperation"))
-    procedure = queue.add(_spec())
-
-    queue.move(procedure.spec_id, -5)
-
-    assert queue.snapshot()[0].spec_id == operation.spec_id
 
 
 def test_clear_empties_the_queue_and_reports_whether_it_did():
@@ -196,14 +171,14 @@ def test_entries_are_json_safe_dicts_in_run_order():
     """The snapshot a QueueChanged event carries is plain JSON."""
     queue = RunQueue()
     queue.add(_spec(run_class="FieldSweep"))
-    queue.add(_spec(kind=KIND_OPERATION, run_class="HeliumFillOperation"))
+    queue.add(_spec(run_class="TemperatureSweep"))
 
     entries = queue.entries()
 
     assert json.loads(json.dumps(entries))
     assert [entry["run_class"] for entry in entries] == [
-        "HeliumFillOperation",
         "FieldSweep",
+        "TemperatureSweep",
     ]
 
 
@@ -465,14 +440,6 @@ def test_a_spec_refuses_a_malformed_probe_reduction():
         )
 
 
-def test_an_operation_may_not_carry_a_probe_reduction():
-    """"A few points" means nothing for a servicing operation."""
-    with pytest.raises(ValueError, match="probe_spec"):
-        RunSpec(
-            kind=KIND_OPERATION,
-            run_class="HeliumFillOperation",
-            probe_spec={"n_points": 2},
-        )
 
 
 def test_build_run_reduces_a_probe_spec_to_the_cheap_variant(station, tmp_path):
@@ -530,46 +497,7 @@ def test_queueing_a_probe_stores_its_reduction_on_the_spec(station, tmp_path):
     assert host.next_run().run_kind == "probe"
 
 
-# ── Operations build headlessly too ──────────────────────────────────────────
-
-def test_an_operation_builds_headlessly_and_validates(station):
-    """Validation covers both run kinds: an operation is built and thrown away."""
-    result = validate_run(
-        HeliumFillOperation,
-        {"person": "AK"},
-        station=station,
-        kind=KIND_OPERATION,
-    )
-
-    assert result.ok
 
 
-def test_an_operation_this_station_cannot_honour_is_refused(station):
-    """The build itself is the check — an operation refuses what it cannot do."""
-    result = validate_run(
-        HeliumFillOperation,
-        {"level_vi": "no_such_vi"},
-        station=station,
-        kind=KIND_OPERATION,
-    )
-
-    assert not result.ok
-    assert [f.code for f in result.findings] == [FINDING_BUILD_REFUSED]
-    assert "no_such_vi" in result.findings[0].message
 
 
-def test_build_run_constructs_the_operation_the_spec_names(station):
-    """The operation half of the pull seam: one live operation, from data."""
-    spec = RunSpec(
-        kind=KIND_OPERATION,
-        run_class="HeliumFillOperation",
-        params={"person": "AK"},
-    )
-
-    run = build_run(
-        spec, station=station, run_catalog={"HeliumFillOperation": HeliumFillOperation}
-    )
-
-    assert isinstance(run, HeliumFillOperation)
-    assert run.run_kind == "operation"
-    assert run.get_params()["person"] == "AK"

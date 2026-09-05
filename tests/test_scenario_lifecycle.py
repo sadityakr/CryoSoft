@@ -5,7 +5,7 @@
 #   threaded and inline instrument modes), driven to completion, and checked
 #   at every layer it touches — the control contract's event stream, the
 #   HDF5 file core/data_reader.py reads back, the session layer's RunRecord,
-#   the run queue's operations-first rule, and the instrument thread's
+#   the run queue's chaining rule, and the instrument thread's
 #   responsiveness and shutdown guarantees.
 # last_updated: 2026-09-03
 # ---
@@ -129,18 +129,11 @@ class _QueueRun:
         return 1.0 if self._done else 0.0
 
 
-class _QueueOperation(_QueueRun):
-    """The same instant run, but scoped as an operation for the queue rule."""
-
-    command_scope = "operation"
-
-
 RUN_CATALOG: dict[str, type] = {
     "FieldSweep": FieldSweep,
     "TemperatureSweep": TemperatureSweep,
     "TimeSeries": TimeSeries,
     "_QueueRun": _QueueRun,
-    "_QueueOperation": _QueueOperation,
 }
 
 #: A queued hop costs one event-loop turn; this bounds every wait generously
@@ -411,20 +404,17 @@ def test_other_procedures_run_to_completion_the_same_way(
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 3. The queue: operations-first, chained via next_procedure, then empty
+# 3. The queue: chained via next_procedure, then empty
 # ══════════════════════════════════════════════════════════════════════════
 
 
-def test_a_queued_operation_starts_ahead_of_two_queued_procedures_and_chains(
-    host, proxy, qtbot
-):
-    """Operations-first and chaining, both survive the client boundary.
+def test_three_queued_procedures_run_in_order_and_chain(host, proxy, qtbot):
+    """Queue order and chaining both survive the client boundary.
 
-    Two procedures are queued first, then one operation; the operation
-    starts FIRST regardless, and each finish pulls the next run via the
-    engine's own ``run_queue()`` chain (``_finish_run()`` -> IDLE ->
-    ``run_queue()``) with no client re-queueing anything. A final
-    ``run_queue()`` on the now-empty queue starts nothing.
+    Three runs are queued; each finish pulls the next via the engine's own
+    ``run_queue()`` chain (``_finish_run()`` -> IDLE -> ``run_queue()``) with
+    no client re-queueing anything. A final ``run_queue()`` on the now-empty
+    queue starts nothing.
     """
     changes: list[ev.QueueChanged] = []
     started: list[str] = []
@@ -433,15 +423,15 @@ def test_a_queued_operation_starts_ahead_of_two_queued_procedures_and_chains(
     proxy.run_started.connect(lambda m: started.append(m["procedure"]))
     proxy.run_finished.connect(lambda m: finished.append(m["procedure"]))
 
+    proxy.queue_procedure(_QueueRun(host.station, name="Op A"))
     proxy.queue_procedure(_QueueRun(host.station, name="Proc B"))
     proxy.queue_procedure(_QueueRun(host.station, name="Proc C"))
-    proxy.queue_operation(_QueueOperation(host.station, name="Op A"))
     qtbot.waitUntil(lambda: len(changes) >= 3, timeout=WAIT_MS)
     assert [e["run_class"] for e in changes[-1].entries] == [
-        "_QueueOperation",
         "_QueueRun",
         "_QueueRun",
-    ], "the queue must list operations ahead of procedures"
+        "_QueueRun",
+    ], "the queue must list every waiting run, in order"
 
     proxy.run_queue()
     qtbot.waitUntil(lambda: len(finished) == 3, timeout=WAIT_MS)

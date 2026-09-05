@@ -310,9 +310,6 @@ _COMMANDS: tuple[tuple[str, tuple[Any, ...], dict[str, Any]], ...] = (
     ("pause_procedure", (), {}),
     ("resume_procedure", (), {}),
     ("abort_procedure", (), {}),
-    ("confirm_operation", ("step",), {}),
-    ("skip_operation_step", ("step",), {}),
-    ("finish_operation", (), {}),
     ("recover_from_error", (), {}),
     ("stop_monitoring", (), {}),
     ("emergency_standby", ("thread suite",), {}),
@@ -334,9 +331,7 @@ def test_every_command_crosses_the_thread_and_comes_back_as_one_verdict(
     covered = {name for name, _, _ in _COMMANDS}
     forwarded = {
         ev.CommandName.RUN_PROCEDURE.value,
-        ev.CommandName.RUN_OPERATION.value,
         ev.CommandName.QUEUE_PROCEDURE.value,
-        ev.CommandName.QUEUE_OPERATION.value,
     }
     assert covered | forwarded == {name.value for name in ev.CommandName}
 

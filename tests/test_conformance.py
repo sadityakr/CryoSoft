@@ -125,12 +125,6 @@ from cryosoft.core.exceptions import (
     CryoSoftSafetyError,
     CryoSoftUndeclaredActionError,
 )
-from cryosoft.core.operation import (
-    STEP_KINDS,
-    OperationBase,
-    OperationStep,
-    ReadinessCondition,
-)
 from cryosoft.core.plan import SETPOINT_PARAM_PREFIX, ParamSpec, UIGroup
 from cryosoft.core.procedure import BaseProcedure
 from cryosoft.core.capability_manifest import (
@@ -224,24 +218,6 @@ def _all_procedure_classes() -> list[type]:
     return classes
 
 
-def _all_operation_classes() -> list[type]:
-    """Every concrete OperationBase subclass anywhere under cryosoft.procedures.
-
-    Walks the package tree (not just its top level), so
-    ``cryosoft.procedures.operations`` and any future operations subpackage
-    are picked up automatically — the discovery scaffold (and every test
-    parametrized on it) tolerates an empty result too, for a hypothetical
-    setup with no operations module at all.
-    """
-    classes: list[type] = []
-    for mod_info in pkgutil.walk_packages(
-        cryosoft.procedures.__path__, prefix="cryosoft.procedures."
-    ):
-        module = importlib.import_module(mod_info.name)
-        for cls in _public_classes(module):
-            if issubclass(cls, OperationBase) and cls is not OperationBase:
-                classes.append(cls)
-    return classes
 
 
 def _load_yaml(path: Path) -> dict:
@@ -1254,74 +1230,6 @@ def test_cryogenics_config_block(config_dir: Path) -> None:
         )
 
 
-# ── Operations config block ───────────────────────────────────────────────────
-# An optional operations: block, one named sub-block per OperationBase
-# subclass (sample_load and sample_unload ship so far, sharing the same
-# block shape via _SampleAccessOperationBase). A config that declares none
-# carries zero footprint; a declared operations.sample_load:/
-# operations.sample_unload: must reference a real vi_type: system VI with
-# sane, ordered timing/tolerance values, and needle_valve must be "manual"
-# (a VI-capability reference is future work).
-
-_SAMPLE_ACCESS_CONFIG_KEYS = ("sample_load", "sample_unload")
-
-
-def _check_sample_access_block(config_dir: Path, devices: dict, operations: dict, key: str) -> None:
-    """Validate one operations.<key>: block against the sample-access shape."""
-    block = operations.get(key)
-    if block is None:
-        pytest.skip(f"{config_dir.name} declares no operations.{key}: block")
-    assert isinstance(block, dict), (
-        f"{config_dir.name}: operations.{key}: must be a mapping"
-    )
-
-    vti_vi_name = block.get("vti_vi", "temperature_vti")
-    virtual_instruments = devices.get("virtual_instruments", {})
-    vi_cfg = virtual_instruments.get(vti_vi_name)
-    assert vi_cfg is not None, (
-        f"{config_dir.name}: operations.{key}.vti_vi={vti_vi_name!r} "
-        f"does not name a registered VI"
-    )
-    assert vi_cfg.get("vi_type") == "system", (
-        f"{config_dir.name}: operations.{key}.vti_vi={vti_vi_name!r} "
-        f"must be a vi_type: system VI, got {vi_cfg.get('vi_type')!r}"
-    )
-
-    positive_keys = (
-        "temperature_tolerance_K",
-        "temperature_window_s",
-    )
-    for pos_key in positive_keys:
-        if pos_key not in block:
-            continue
-        assert float(block[pos_key]) > 0, (
-            f"{config_dir.name}: operations.{key}.{pos_key} must be "
-            f"positive, got {block[pos_key]!r}"
-        )
-
-    needle_valve = block.get("needle_valve", "manual")
-    assert needle_valve == "manual", (
-        f"{config_dir.name}: operations.{key}.needle_valve="
-        f"{needle_valve!r} is not supported; only 'manual' is implemented "
-        f"today (a VI-capability reference is future work)"
-    )
-
-
-@pytest.mark.parametrize("config_dir", _config_dirs(), ids=lambda p: p.name)
-@pytest.mark.parametrize("config_key", _SAMPLE_ACCESS_CONFIG_KEYS)
-def test_operations_config_block(config_dir: Path, config_key: str) -> None:
-    """A declared operations.sample_load:/operations.sample_unload: block is well-formed."""
-    devices = _load_yaml(config_dir / "devices.yaml")
-    operations = devices.get("operations")
-    if operations is None:
-        pytest.skip(f"{config_dir.name} declares no operations: block")
-    assert isinstance(operations, dict), (
-        f"{config_dir.name}: operations: must be a mapping"
-    )
-
-    _check_sample_access_block(config_dir, devices, operations, config_key)
-
-
 # ── Control-validation standard ───────────────────────────────────────────────
 # See BaseVirtualInstrument's "Control-validation standard" docstring: VIs
 # declare control_limits (method -> {param: limit_name}); __init__ populates
@@ -2250,162 +2158,6 @@ def test_execute_vi_action_refuses_non_control_names(config_dir: Path) -> None:
         f"{config_dir.name}: discovery found nothing to check "
         f"({checked_private} private, {checked_undeclared} undeclared)"
     )
-
-
-# ── Operation contract (L4, cryosoft.core.operation.OperationBase) ───────────
-# See OperationBase's docstring, including readiness/next-due. The
-# discovery scaffold above tolerates an empty parametrize set too, which
-# pytest handles by simply collecting zero test cases.
-
-
-@pytest.mark.parametrize("op_cls", _all_operation_classes(), ids=lambda c: c.__name__)
-def test_operation_declaration(op_cls: type) -> None:
-    """Every OperationBase subclass names itself and declares valid tolerated flags."""
-    assert op_cls.name, f"{op_cls.__name__} must set the 'name' class attribute"
-    tolerated = op_cls.tolerated_safety_flags
-    assert isinstance(tolerated, frozenset), (
-        f"{op_cls.__name__}.tolerated_safety_flags must be a frozenset, "
-        f"got {tolerated!r}"
-    )
-    assert all(isinstance(flag, str) for flag in tolerated), (
-        f"{op_cls.__name__}.tolerated_safety_flags must contain only str "
-        f"flags, got {tolerated!r}"
-    )
-
-
-@pytest.mark.parametrize("op_cls", _all_operation_classes(), ids=lambda c: c.__name__)
-def test_operation_constructs_from_defaults(op_cls: type) -> None:
-    """Every OperationBase subclass must construct from a sim station alone.
-
-    Unlike a plain procedure (some of which build from an empty ``Station``),
-    every operation resolves VIs from the station at construction (e.g. the
-    helium fill's ``Station.magnet_vi_names()`` and its configured level VI),
-    so it needs a populated one — mirrors
-    ``test_procedure_constructs_from_defaults``'s station-dependent branch.
-    Every other constructor argument (``person``, the plan-§9 ``**config``
-    keys) must have a working default.
-    """
-    station = build_station("cryosoft/configs/sim_cryostat")
-    op_cls(station)
-
-
-@pytest.mark.parametrize("op_cls", _all_operation_classes(), ids=lambda c: c.__name__)
-def test_operation_readiness_conditions_returns_tuple_of_readiness_condition(op_cls: type) -> None:
-    """readiness_conditions() must return a tuple of ReadinessCondition.
-
-    The Operations panel (``gui/operations_panel.py``) builds one checklist
-    row per element with zero per-operation code — a wrong return type would
-    silently break every card, not just this one, so it is checked here for
-    every discovered operation automatically.
-    """
-    station = build_station("cryosoft/configs/sim_cryostat")
-    op = op_cls(station)
-    conditions = op.readiness_conditions()
-    assert isinstance(conditions, tuple), (
-        f"{op_cls.__name__}.readiness_conditions() must return a tuple, got {type(conditions)!r}"
-    )
-    for condition in conditions:
-        assert isinstance(condition, ReadinessCondition), (
-            f"{op_cls.__name__}.readiness_conditions() must contain only "
-            f"ReadinessCondition instances, got {condition!r}"
-        )
-
-
-@pytest.mark.parametrize("op_cls", _all_operation_classes(), ids=lambda c: c.__name__)
-def test_operation_steps_contract(op_cls: type) -> None:
-    """A stepped operation's declared sequence must be well-formed.
-
-    This is what makes the step standard (see ``OperationBase``'s class
-    docstring) binding rather than a convention the next operation might
-    follow differently. An operation that declares no steps is unaffected —
-    the empty default is valid and skips every assertion below.
-
-    The GUI renders steps and routes their keys back through
-    ``Orchestrator.confirm_operation()`` / ``skip_operation_step()`` with
-    zero per-operation code, so a duplicate key or an unknown kind would
-    silently break the card rather than fail loudly here.
-    """
-    station = build_station("cryosoft/configs/sim_cryostat")
-    op = op_cls(station)
-    steps = op.steps()
-    assert isinstance(steps, tuple), (
-        f"{op_cls.__name__}.steps() must return a tuple, got {type(steps)!r}"
-    )
-    if not steps:
-        return
-
-    keys = [step.key for step in steps]
-    for step in steps:
-        assert isinstance(step, OperationStep), (
-            f"{op_cls.__name__}.steps() must contain only OperationStep "
-            f"instances, got {step!r}"
-        )
-        assert step.key, f"{op_cls.__name__}: every step needs a non-empty key"
-        assert step.label, (
-            f"{op_cls.__name__}: step {step.key!r} needs a human-readable label"
-        )
-        assert step.kind in STEP_KINDS, (
-            f"{op_cls.__name__}: step {step.key!r} declares kind "
-            f"{step.kind!r}; valid kinds are {sorted(STEP_KINDS)}"
-        )
-    assert len(keys) == len(set(keys)), (
-        f"{op_cls.__name__}.steps() has duplicate keys: {keys} — keys are "
-        f"how the GUI addresses a step, so they must be unique"
-    )
-
-    # current_step() starts at the first declared step and advances only as
-    # outcomes are recorded; every step must be reachable this way.
-    assert op.current_step() is not None
-    assert op.current_step().key == keys[0]
-    for key in keys:
-        assert op.current_step().key == key
-        op.confirm_step(key)
-    assert op.current_step() is None, (
-        f"{op_cls.__name__}: every declared step must be reachable in order"
-    )
-
-    # The timeline round-trips through the run manifest into a JSON sidecar.
-    json.dumps(op.steps_summary())
-
-
-@pytest.mark.parametrize("op_cls", _all_operation_classes(), ids=lambda c: c.__name__)
-def test_operation_claimed_vi_names_contract(op_cls: type) -> None:
-    """claimed_vi_names() returns None or a set of VI names known to the station.
-
-    Mirrors ``test_procedure_claimed_vi_names_contract``: ``None`` (claim
-    everything) is always valid; a non-``None`` return must be a
-    ``set[str]`` naming real station VIs, so a typo in a narrowed claim
-    (e.g. ``HeliumFillOperation``'s level meter, ``SampleLoadOperation``'s/
-    ``SampleUnloadOperation``'s magnets/VTI/measurement VIs) can never
-    silently under-claim.
-    """
-    station = build_station("cryosoft/configs/sim_cryostat")
-    op = op_cls(station)
-    claimed = op.claimed_vi_names()
-    if claimed is None:
-        return
-    assert isinstance(claimed, set) and all(isinstance(name, str) for name in claimed), (
-        f"{op_cls.__name__}.claimed_vi_names() must return None or a set[str], "
-        f"got {claimed!r}"
-    )
-    known = set(station.get_vi_names())
-    unknown = claimed - known
-    assert not unknown, (
-        f"{op_cls.__name__}.claimed_vi_names() names VI(s) not on the station: "
-        f"{sorted(unknown)}"
-    )
-
-
-def test_operation_config_key_unique_across_operations() -> None:
-    """A non-empty config_key must be unique across every discovered operation.
-
-    The Operations panel maps ``operations: {config_key: block}`` config
-    entries to a class by ``config_key`` — a collision would make
-    that mapping ambiguous.
-    """
-    keys = [op_cls.config_key for op_cls in _all_operation_classes() if op_cls.config_key]
-    duplicates = {key for key in keys if keys.count(key) > 1}
-    assert not duplicates, f"config_key collision(s) across operations: {duplicates}"
 
 
 # ── Measurement-method standard ───────────────────────────────────────────────
@@ -4221,16 +3973,16 @@ def test_no_blocking_sleep_in_gui_sources() -> None:
 
 # ── The run queue lives outside the engine ────────────────────────────────────
 
-_ENGINE_QUEUE_ATTRS = ("_procedure_queue", "_operation_queue")
+_ENGINE_QUEUE_ATTRS = ("_procedure_queue",)
 
 
 def test_no_source_reaches_into_the_engines_queue() -> None:
     """Only ``orchestrator.py`` touches the engine's own run queues.
 
     The run queue is data in the session layer (GLOSSARY.md's **Run queue**);
-    the engine keeps two small lists for runs handed to it directly, and it
+    the engine keeps one small list for runs handed to it directly, and it
     PULLS the rest through ``next_procedure()``. A widget or a session module
-    reaching into one of those private lists would be pushing runs into the
+    reaching into that private list would be pushing runs into the
     engine behind its back — exactly the shared mutable queue this design
     removed, and the seam through which a client could start a run the engine
     did not decide to start.
@@ -4249,7 +4001,7 @@ def test_no_source_reaches_into_the_engines_queue() -> None:
     assert not offenders, (
         "The engine's private run queues are referenced outside "
         "core/orchestrator.py. Queue through the session layer's RunQueue (or "
-        "Orchestrator.queue_procedure/queue_operation) instead:\n"
+        "Orchestrator.queue_procedure) instead:\n"
         + "\n".join(offenders)
     )
 
@@ -4290,8 +4042,6 @@ _ENGINE_SIGNALS = frozenset({
     "operational_status",
     "ramps_updated",
     "status_message",
-    "operation_status",
-    "operation_progress",
 })
 
 #: Non-command engine attributes a named GUI module may still touch, each with

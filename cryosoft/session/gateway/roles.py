@@ -41,11 +41,10 @@ Four properties of that table are the design, not incidental:
   to make the station safe.
 
 One rule sits AFTER the matrix, and it is about the run rather than the
-role: the **run-ownership standard** (GLOSSARY.md's *Run owner*). Four
-run-scoped commands — ``abort_procedure``, ``confirm_operation``,
-``skip_operation_step`` and ``finish_operation`` — end somebody's result or
-attest to a physical step of it, and an ``agent`` that did not start the run
-may not take them on it. Refused, not forbidden: the same command carrying
+role: the **run-ownership standard** (GLOSSARY.md's *Run owner*). The one
+run-scoped command — ``abort_procedure`` — ends somebody's result, and an
+``agent`` that did not start the run may not take it on it. Refused, not
+forbidden: the same command carrying
 ``override_owner`` and a non-empty ``reason`` is admitted as a **takeover**
 and recorded as one. It is checked last because it is the narrowest question
 of the lot — a role that may not run the experiment at all is refused by the
@@ -165,9 +164,6 @@ PERMISSION_MATRIX: dict[ActionClass, dict[Role, Permission]] = {
 OWNER_SCOPED_COMMANDS: frozenset[CommandName] = frozenset(
     {
         CommandName.ABORT_PROCEDURE,
-        CommandName.CONFIRM_OPERATION,
-        CommandName.SKIP_OPERATION_STEP,
-        CommandName.FINISH_OPERATION,
     }
 )
 

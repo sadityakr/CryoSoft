@@ -377,7 +377,7 @@ class Station:
         subclasses — distinct from the registry's own "system" role string,
         see GLOSSARY.md's "vi_type (class)" / "vi_type (config/registry)"
         entries). The order is config order, so a caller that defaults to
-        "every magnet" (e.g. the helium-fill operation forcing all magnets to
+        "every magnet" (e.g. a run forcing all magnets to
         zero field) gets a stable, config-controlled list —
         mirrors ``switch_vi_names()``.
 
@@ -1885,16 +1885,14 @@ class Station:
                 the Orchestrator calls ``check_safety()`` exactly once per
                 tick regardless of how many places consult the result.
             tolerated_flags: Hold-severity flags to treat as untripped —
-                the active run's own ``tolerated_safety_flags`` (only an
-                operation declares any; empty when a plain procedure or no
-                run is active). Resolved by the Orchestrator and passed
-                in: the Station never imports the procedure/operation
-                layer (contract C8) and has no notion of "the active run"
-                itself. This is what lets an operation like the helium
-                fill — tolerating ``helium_low`` while it claims and ramps
-                every magnet to zero — run to completion instead of being
-                held on (and having its own run failed for) the very
-                condition it exists to fix. Never applied to a flag's own
+                the active run's own ``tolerated_safety_flags`` (empty when
+                the run declares none, or when no run is active). Resolved
+                by the Orchestrator and passed in: the Station never imports
+                the procedure layer (contract C8) and has no notion of "the
+                active run" itself. This is what lets a run that exists to
+                clear a hold-severity condition run to completion instead of
+                being held on (and having its own run failed for) the very
+                condition it addresses. Never applied to a flag's own
                 critical/advisory condition (see above) — a critical or
                 advisory flag never becomes a hold in the first place.
         """
@@ -3353,68 +3351,3 @@ def read_servicing_logs_config(config_path: str) -> list[str]:
     if not isinstance(block, list):
         return []
     return [str(kind) for kind in block]
-
-
-# Per-operation-kind defaults for read_operations_config()'s merge.
-# "sample_load" and "sample_unload" (SampleLoadOperation/SampleUnloadOperation,
-# sharing _SampleAccessOperationBase) exist today, with identical defaults —
-# a future operation kind adds its own entry here. An operation name declared
-# in devices.yaml but absent from this dict is passed through unmerged —
-# forward-compatible with an operation this function does not yet know
-# defaults for.
-_SAMPLE_ACCESS_DEFAULTS: dict[str, float | str] = {
-    "vti_vi": "temperature_vti",
-    "target_temperature_K": 290.0,
-    "temperature_tolerance_K": 2.0,
-    "temperature_window_s": 60.0,
-    "needle_valve": "manual",
-    "postcondition_timeout_s": 7200.0,
-    # How often the hold phase records station state into the shared
-    # recording, in seconds. Matches HeliumFillOperation's own
-    # sample_period_s default.
-    "sample_period_s": 10.0,
-}
-_OPERATIONS_DEFAULTS: dict[str, dict[str, float | str]] = {
-    "sample_load": dict(_SAMPLE_ACCESS_DEFAULTS),
-    "sample_unload": dict(_SAMPLE_ACCESS_DEFAULTS),
-}
-
-
-def read_operations_config(config_path: str) -> dict[str, dict[str, Any]]:
-    """Read the optional ``operations:`` block, GUI-safe, with defaults applied.
-
-    Unlike ``cryogenics:`` (one flat mapping), ``operations:`` is a mapping
-    of *named* operation configs (``sample_load:``/``sample_unload:``, and
-    future kinds). Parses YAML only, mirroring ``read_cryogenics_config`` —
-    never imports the operations layer or instantiates anything, so it is
-    safe to call from the GUI thread on a config that may describe
-    unreachable hardware.
-
-    Args:
-        config_path: Path to the config directory containing ``devices.yaml``.
-
-    Returns:
-        ``{operation_name: {key: value, ...}}`` for every declared operation
-        sub-block, with every omitted key defaulted from
-        ``_OPERATIONS_DEFAULTS[operation_name]`` (an operation name with no
-        known defaults is passed through unmerged). ``{}`` when the
-        ``operations:`` block is absent, malformed, or the config
-        directory/file/YAML is unreadable — never raises. A caller
-        constructs the concrete operation with
-        ``SampleLoadOperation(station, **read_operations_config(path)
-        ["sample_load"])`` (or ``SampleUnloadOperation``/``"sample_unload"``).
-    """
-    devices_config = _load_devices_yaml(config_path)
-    if devices_config is None:
-        return {}
-    block = devices_config.get("operations")
-    if not isinstance(block, dict) or not block:
-        return {}
-    result: dict[str, dict[str, Any]] = {}
-    for op_name, op_cfg in block.items():
-        if not isinstance(op_cfg, dict):
-            continue
-        merged = dict(_OPERATIONS_DEFAULTS.get(op_name, {}))
-        merged.update(op_cfg)
-        result[str(op_name)] = merged
-    return result

@@ -253,7 +253,7 @@ def test_a_row_that_becomes_owned_updates_its_button(panel):
     assert row._abort_btn.isEnabled()
 
     panel.on_ramps_updated(
-        [_record(owner="operation 'Helium Fill'", stoppable=False, stop_blocked_reason="no")]
+        [_record(owner="procedure 'Field Sweep'", stoppable=False, stop_blocked_reason="no")]
     )
     assert panel._rows["magnet_z"] is row
     assert not row._abort_btn.isEnabled()
@@ -262,20 +262,20 @@ def test_a_row_that_becomes_owned_updates_its_button(panel):
 # ── MonitorWindow integration ─────────────────────────────────────────────────
 
 
-def test_monitor_window_hosts_the_ramps_subpanel_beside_operations(
+def test_monitor_window_hosts_the_ramps_subpanel_over_the_agents_one(
     station, orchestrator, qtbot
 ):
-    """The bottom-right quadrant is a two-sub-panel splitter: Ramps | Operations."""
+    """The bottom-right quadrant is a vertical splitter: Ramps over Agents."""
     win = MonitorWindow(station, orchestrator)
     qtbot.addWidget(win)
     win.resize(1280, 900)
     win.show()
     qtbot.waitExposed(win)
 
-    splitter = win._operations_splitter
+    splitter = win._agents_splitter
     assert splitter.count() == 2
     assert splitter.widget(0).objectName() == "ramps_quadrant"
-    assert splitter.widget(1).objectName() == "operations_quadrant"
+    assert splitter.widget(1).objectName() == "agents_quadrant"
     assert win._ramp_tracker is not None
 
 

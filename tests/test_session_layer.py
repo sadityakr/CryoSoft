@@ -10,7 +10,6 @@ from cryosoft.core.plan import EnvelopeBound, ExperimentEnvelope, params_digest
 from cryosoft.core.station import build_station
 from cryosoft.procedures.field_sweep import FieldSweep
 from cryosoft.session.manager import ExperimentManager
-from cryosoft.session.run_queue import KIND_OPERATION, RunSpec
 from cryosoft.session.models import (
     EXPERIMENT_STATUS_CLOSED,
     EXPERIMENT_STATUS_OPEN,
@@ -1379,19 +1378,3 @@ def test_next_run_on_an_empty_queue_is_none(queue_manager):
     assert queue_manager.next_run() is None
 
 
-def test_an_operation_spec_jumps_the_whole_queue(queue_manager, tmp_path):
-    """Queue-jumping, never preemption — and it survives the move out of the engine."""
-    queue_manager.queue_run(
-        FieldSweep,
-        FAST_PARAMS,
-        sample_info=SAMPLE_INFO,
-        data_directory=str(tmp_path),
-    )
-    queue_manager.run_queue.add(
-        RunSpec(kind=KIND_OPERATION, run_class="SomeOperation")
-    )
-
-    assert [spec.run_class for spec in queue_manager.queue_snapshot()] == [
-        "SomeOperation",
-        "FieldSweep",
-    ]

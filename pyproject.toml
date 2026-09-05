@@ -178,7 +178,7 @@ forbidden_modules = [
 [[tool.importlinter.contracts]]
 name = "C6: procedures are hardware-blind — no drivers, no VIs, no Orchestrator, no GUI"
 type = "forbidden"
-source_modules = ["cryosoft.procedures", "cryosoft.core.procedure", "cryosoft.core.operation"]
+source_modules = ["cryosoft.procedures", "cryosoft.core.procedure"]
 # Same pass-through exemption as C5: procedures may import the Station, and the
 # Station's own VI imports do not make procedures hardware-aware.
 ignore_imports = ["cryosoft.core.station -> cryosoft.virtual_instruments.*"]
@@ -367,7 +367,6 @@ forbidden_modules = [
     "cryosoft.core.estimates",
     "cryosoft.core.gates",
     "cryosoft.core.logging_config",
-    "cryosoft.core.operation",
     "cryosoft.core.operational_status",
     "cryosoft.core.orchestrator",
     "cryosoft.core.paths",
@@ -399,7 +398,6 @@ forbidden_modules = [
     "cryosoft.core.station",
     "cryosoft.core.orchestrator",
     "cryosoft.core.procedure",
-    "cryosoft.core.operation",
     "cryosoft.core.data_manager",
 ]
 
@@ -425,7 +423,6 @@ allow_indirect_imports = "True"
 ignore_imports = [
     "cryosoft.gui.config_editor -> cryosoft.core.station",
     "cryosoft.gui.monitor_window -> cryosoft.core.station",
-    "cryosoft.gui.operations_panel -> cryosoft.core.station",
     "cryosoft.gui.procedure_params_panel -> cryosoft.core.station",
     "cryosoft.gui.procedure_window -> cryosoft.core.station",
     "cryosoft.gui.queue_panel -> cryosoft.core.station",
@@ -494,7 +491,6 @@ forbidden_modules = [
     "cryosoft.core.gates",
     "cryosoft.core.instrument_host",
     "cryosoft.core.logging_config",
-    "cryosoft.core.operation",
     "cryosoft.core.operational_status",
     "cryosoft.core.orchestrator",
     "cryosoft.core.orchestrator_proxy",

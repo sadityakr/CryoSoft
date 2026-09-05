@@ -164,12 +164,12 @@ def test_claim_everything_run_owns_every_ramp():
 
 
 def test_narrow_claims_leave_unclaimed_ramps_unowned():
-    """An operation claiming only some VIs does not own the others' ramps."""
+    """A run claiming only some VIs does not own the others' ramps."""
     record = build_ramp_records(
         _snapshot(),
         setpoint_meta=_meta,
         stop_policy=_always_stoppable,
-        run_label="operation 'Helium Fill'",
+        run_label="procedure 'Field Sweep'",
         run_claims={"level_meter"},
     )[0]
     assert record.owner is None

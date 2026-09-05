@@ -624,44 +624,15 @@ class ProcedureWindow(QMainWindow):
         self._orchestrator.run_procedure(proc)
 
     def _on_pause_clicked(self) -> None:
-        """Pause the running procedure — a no-op while an operation is active.
-
-        This window is operation-blind (the hard status separation — see
-        ``GLOSSARY.md``): its Pause button must never arm because an
-        operation (e.g. a helium fill) happens to be RAMPING. Operation
-        control lives on the Operations panel's OperationCard exclusively.
-
-        The run-kind check is an ADVISORY guard read off the status mirror,
-        never an authoritative one: which run is in flight is the engine's
-        fact, and the engine refuses anything it should refuse. The guard
-        exists because operation-blindness is a property of THIS window
-        rather than of the command — the Operations panel drives the very
-        same engine actions for the operation it owns.
-        """
-        if self._mirror.active_run_kind() == "operation":
-            return
+        """Pause the running procedure."""
         self._orchestrator.pause_procedure()
 
     def _on_resume_clicked(self) -> None:
-        """Resume the paused procedure — a no-op while an operation is active.
-
-        Mirrors ``_on_pause_clicked``'s run-kind gate; see its docstring.
-        """
-        if self._mirror.active_run_kind() == "operation":
-            return
+        """Resume the paused procedure."""
         self._orchestrator.resume_procedure()
 
     def _on_abort(self) -> None:
-        """Ask for confirmation, then abort the running procedure.
-
-        A no-op while an operation is active — this window is operation-
-        blind (the hard status separation — see ``GLOSSARY.md``): its Abort
-        button must never act on a running operation (e.g. a
-        helium fill mid-RAMPING). An operation ends via its own OperationCard
-        "Finish" control, never from here.
-        """
-        if self._mirror.active_run_kind() == "operation":
-            return
+        """Ask for confirmation, then abort the running procedure."""
         answer = QMessageBox.question(
             self,
             "Abort Procedure",

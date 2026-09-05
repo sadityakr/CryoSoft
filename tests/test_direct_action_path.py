@@ -187,7 +187,7 @@ def test_envelope_refusal_is_re_checked_at_drain(orchestrator, station):
 
 
 def test_manual_path_grants_operation_scope(orchestrator, station, qtbot):
-    """A human at the front panel may still use an operation-scope capability.
+    """A human at the front panel may still use a wider-scope capability.
 
     ``execute_vi_action()``'s default scope is the restrictive
     ``"measurement"``; the Orchestrator opts into ``MANUAL_ACTION_SCOPE`` for

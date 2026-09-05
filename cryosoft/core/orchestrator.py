@@ -43,7 +43,7 @@ from cryosoft.core.plan import (
 )
 from cryosoft.core.ramps import RampRecord, build_ramp_records
 from cryosoft.core.request_spool import RequestSpool
-from cryosoft.core.run_builder import build_operation, build_procedure
+from cryosoft.core.run_builder import build_procedure
 from cryosoft.core.stall_detection import StallConfig, StallState, apply_stall_verdict
 from cryosoft.core.station import FaultRecord, Station
 from cryosoft.core.tiered_trend_logger import TieredTrendLogger
@@ -54,12 +54,12 @@ logger = logging.getLogger(__name__)
 
 #: The capability scope a MANUAL action is dispatched with (see the
 #: capability-scope standard in GLOSSARY.md and
-#: ``Station.execute_vi_action()``). A human at an instrument's front panel is
-#: the operation authority — the same authority that starts an operation — so
-#: the Orchestrator grants operation scope explicitly here, in one named
-#: place, rather than leaving ``execute_vi_action()``'s restrictive default to
-#: be the accident that decides it. Every other caller of the direct action
-#: path gets ``"measurement"`` unless it opts in the same way.
+#: ``Station.execute_vi_action()``). A human at an instrument's front panel
+#: holds the widest authority there is, so the Orchestrator grants that scope
+#: explicitly here, in one named place, rather than leaving
+#: ``execute_vi_action()``'s restrictive default to be the accident that
+#: decides it. Every other caller of the direct action path gets
+#: ``"measurement"`` unless it opts in the same way.
 MANUAL_ACTION_SCOPE: str = "operation"
 
 #: The actor every transition the engine makes on its own is attributed to —
@@ -104,27 +104,21 @@ class _PendingCommand:
 
 #: The run-scoped commands an agent may take only on a run it OWNS — the
 #: **run-ownership standard** (GLOSSARY.md's *Run owner*). Every one of them
-#: is destructive of somebody's work: it ends the run, ends a step of it, or
-#: attests that a physical step was carried out. Safety and recovery are
-#: deliberately absent — ``emergency_standby``, ``stop_ramp``,
-#: ``pause_procedure`` and ``resume_procedure`` hold the cryostat rather than
+#: is destructive of somebody's work: it ends the run. Safety and recovery
+#: are deliberately absent — ``emergency_standby``, ``stop_ramp``,
+#: ``pause_procedure`` and ``resume_procedure`` hold the station rather than
 #: destroying a result, and an actor that can see a problem must never be
 #: unable to make the station safe. ``run_queue`` is absent for the same
 #: reason read backwards: it starts a run, it destroys none.
 OWNER_SCOPED_COMMANDS: frozenset[str] = frozenset(
-    {
-        ev.CommandName.ABORT_PROCEDURE.value,
-        ev.CommandName.CONFIRM_OPERATION.value,
-        ev.CommandName.SKIP_OPERATION_STEP.value,
-        ev.CommandName.FINISH_OPERATION.value,
-    }
+    {ev.CommandName.ABORT_PROCEDURE.value}
 )
 
 #: The two arguments an owner-scoped command carries to take a run over
 #: (the refuse-then-override half of the run-ownership standard). The
-#: ``command`` decorator absorbs them exactly as it absorbs ``actor``, so the
-#: four methods keep the signatures they had and no caller of a method that
-#: is not owner-scoped can pass them by accident.
+#: ``command`` decorator absorbs them exactly as it absorbs ``actor``, so an
+#: owner-scoped method keeps the signature it had and no caller of a method
+#: that is not owner-scoped can pass them by accident.
 OWNERSHIP_ARGUMENTS: tuple[str, ...] = ("override_owner", "reason")
 
 
@@ -198,30 +192,6 @@ def command(method: Callable[..., Any]) -> Callable[..., Any]:
     return wrapper
 
 
-def _attest(method: Callable[..., Any], key: str, actor: ev.Actor) -> None:
-    """Call an operation's confirm/skip method, naming the actor when it can.
-
-    Both are duck-typed (contract C5 keeps this module from importing
-    ``OperationBase``), so the actor cannot simply be passed: an operation
-    written before attestations named one, or a test double implementing the
-    bare ``confirm(key)``, would raise ``TypeError``. The signature decides,
-    once per call, which is cheap next to the human decision it records — and
-    a callable whose signature cannot be read at all falls back to the bare
-    call rather than failing an attestation over introspection.
-
-    Args:
-        method: The operation's ``confirm``/``skip_step``.
-        key: The step key, passed positionally either way.
-        actor: Who is attesting, passed only when the method declares it.
-    """
-    try:
-        accepts_actor = "actor" in inspect.signature(method).parameters
-    except (TypeError, ValueError):
-        accepts_actor = False
-    if accepts_actor:
-        method(key, actor=actor)
-    else:
-        method(key)
 
 
 def _json_safe(value: Any) -> Any:
@@ -357,41 +327,23 @@ class Orchestrator(QObject):
         state_changed (str): Emitted when orchestrator state changes. Not
             run-scoped — fires regardless of run kind.
         procedure_progress (float): 0.0 to 1.0 progress of the current run.
-            PROCEDURE-EXCLUSIVE (the hard status separation, see
-            ``GLOSSARY.md``): never fires while an operation is the active
-            run — see ``operation_progress``.
-        procedure_finished (): Emitted when a PROCEDURE run ends cleanly.
-            PROCEDURE-EXCLUSIVE: never emitted for an operation run (the
-            Procedure window must stay blind to operation completions).
-        operation_status (str): Concise, human-readable milestone of the
-            running OPERATION — the same shape of message ``status_message``
-            carries for a procedure, but routed here instead whenever the
-            active run is an operation. Consumed by the Operations panel's
-            OperationCard, never the Procedure window. Also written to the
-            ``cryosoft.operation_status`` logger.
-        operation_progress (float): 0.0 to 1.0 progress of the current
-            OPERATION run — the operation-scoped counterpart of
-            ``procedure_progress``.
-        run_started (dict): Run manifest emitted once per run, after a
-            procedure's/operation's ``initiate()`` succeeded and its plan was
+        procedure_finished (): Emitted when a run ends cleanly.
+        run_started (dict): Run manifest emitted once per run, after the
+            procedure's ``initiate()`` succeeded and its plan was
             dispatched. Keys: ``run_id``, ``procedure`` (display name),
-            ``kind`` ("run" for a procedure, "probe" for a probe run, and
-            "operation" for an operation — the run's own ``run_kind``
-            attribute; ``apply_probe()`` is what sets it to "probe"),
-            ``params`` (merged parameter values), ``data_file`` (HDF5 path,
-            captured here because the procedure closes its file before the
-            run ends; empty for a dataset-less operation), and
-            ``started_utc`` (ISO 8601). The session layer records runs from
-            this signal; a run whose setup fails emits no manifest at all.
+            ``kind`` ("run" for a procedure and "probe" for a probe run —
+            the run's own ``run_kind`` attribute; ``apply_probe()`` is what
+            sets it to "probe"), ``params`` (merged parameter values),
+            ``data_file`` (HDF5 path, captured here because the procedure
+            closes its file before the run ends), and ``started_utc``
+            (ISO 8601). The session layer records runs from this signal; a
+            run whose setup fails emits no manifest at all.
         run_finished (dict): The same manifest re-emitted exactly once when the
             run ends, with ``finished_utc``, terminal ``status`` (``done`` /
             ``aborted`` / ``failed``), ``reason`` (error text, empty for
-            ``done``/``aborted``), ``postconditions_unmet`` (list of gate
-            names an operation's one-shot ``postcondition_gates()``
-            evaluation found unmet at finish — always ``[]`` for a procedure,
-            or for an operation with none declared/all held), and ``summary``
+            ``done``/``aborted``), and ``summary``
             (the dict ``procedure.run_summary()`` returned — duck-typed, ``{}``
-            for a procedure or an operation that does not override it, and
+            for a procedure that does not override it, and
             ``{}`` rather than propagating if the override raised) added.
         error_occurred (str): Emitted when ERROR or EMERGENCY state entered,
             or a run fails. Not run-scoped — fires regardless of run kind.
@@ -439,7 +391,6 @@ class Orchestrator(QObject):
             via the Station, so every procedure gets a status feed with no
             per-procedure code; consumed by the Procedure window's status log.
             Distinct from the per-tick detail stream on the Monitor log.
-            PROCEDURE-EXCLUSIVE — see ``operation_status``.
         verdict_emitted (events.Verdict): The single answer to one submitted
             ``Command`` — see the verdict standard above. Never emitted for a
             method called directly rather than through ``submit()``.
@@ -476,8 +427,6 @@ class Orchestrator(QObject):
     operational_status = pyqtSignal(dict)  # per-tick runtime status record (troubleshooting)
     ramps_updated = pyqtSignal(list)  # list[RampRecord] — every ramp running right now
     status_message = pyqtSignal(str)  # concise, human-readable PROCEDURE milestone line
-    operation_status = pyqtSignal(str)  # concise, human-readable OPERATION milestone line
-    operation_progress = pyqtSignal(float)  # 0.0-1.0 progress of the current OPERATION run
 
     def __init__(
         self,
@@ -505,17 +454,16 @@ class Orchestrator(QObject):
                 re-assertions on the same held VI.
             hold_enforcement_max_attempts: Consecutive failed re-assertions
                 before an unenforceable hold is escalated.
-            run_catalog: ``{class name: procedure/operation class}`` used to
+            run_catalog: ``{class name: procedure class}`` used to
                 build a run from a ``Command``'s dict payload (see
                 ``submit()``). Supplied by whoever owns discovery — the GUI,
                 a test, or an agent gateway — because the engine may not
                 import ``cryosoft.procedures`` (contract C5). Empty by
                 default, which refuses a dict-payload run with a ``FAILED``
                 verdict naming the missing class; passing a run object to
-                ``run_procedure()``/``run_operation()`` directly needs no
-                catalog at all.
+                ``run_procedure()`` directly needs no catalog at all.
             next_procedure: The **pull seam**: a callable returning the next
-                run to start (a built procedure or operation), or ``None``
+                run to start (a built procedure), or ``None``
                 when nothing is waiting. ``run_queue()`` calls it once the
                 engine's own handed-over runs are exhausted, so a client can
                 hold the queue as data while the engine keeps sole authority
@@ -578,15 +526,10 @@ class Orchestrator(QObject):
         # events; reset at every run start.
         self._datapoint_index = 0
         self._procedure_queue: list[Any] = []
-        # Operations (L4, duck-typed via command_scope == "operation") queue
-        # separately and always drain first — see run_operation()/
-        # queue_operation()/run_queue() and the "queue-jumping, not
-        # preemption".
-        self._operation_queue: list[Any] = []
         # Who queued each run handed over as a live object, keyed by id() —
-        # the two queues hold the objects themselves (callers index into
-        # them), so the actor rides alongside rather than inside. Entries are
-        # dropped the moment their run leaves the queue.
+        # the queue holds the objects themselves (callers index into it), so
+        # the actor rides alongside rather than inside. Entries are dropped
+        # the moment their run leaves the queue.
         self._queued_actors: dict[int, ev.Actor] = {}
         self._gui_action_queue: list[dict[str, Any]] = []
         # The Request spool, when this engine has one: the file-based write
@@ -612,12 +555,6 @@ class Orchestrator(QObject):
         self._pending_gates: list = []
         self._first_measurement = True
 
-        # Set by run_operation() when the EMERGENCY carve-out was
-        # used to start the active operation; read by _operation_end_state()
-        # so a finishing operation returns to EMERGENCY rather than IDLE when
-        # appropriate. Meaningless (and unread) for a plain procedure.
-        self._operation_started_from_emergency: bool = False
-
         # The single acknowledge()-driven override, time-boxed rather than a
         # standing bypass (GLOSSARY.md's **Hold acknowledge**). Both windows
         # are read by _manual_action_admissible() and reset by acknowledge();
@@ -629,8 +566,8 @@ class Orchestrator(QObject):
         # _emergency_override_until: set by acknowledge() while in EMERGENCY
         # and its condition is still active: unlocks submit_vi_action() for
         # manual front-panel recovery (e.g. cycling a switch heater by hand)
-        # without leaving EMERGENCY. Procedures and operations stay refused
-        # regardless — their gates check self._state, not this window.
+        # without leaving EMERGENCY. Procedures stay refused regardless —
+        # their gates check self._state, not this window.
         self._emergency_override_until: float | None = None
         # _hold_override_until: condition.key -> expiry unix timestamp, one
         # entry per currently-acknowledged hold-severity condition (e.g.
@@ -734,8 +671,7 @@ class Orchestrator(QObject):
         # captured once at _start_run() and cleared on EVERY teardown path
         # (finish, abort, fail, emergency — see _abort_active_procedure()/
         # _finish_run()). None while no run is active, or while the active
-        # run claims everything (the default for every procedure and for an
-        # operation that does not override claimed_vi_names()).
+        # run claims everything (the default for every procedure).
         self._active_claims: set[str] | None = None
 
         # Condition-registry onset tracking (the System-Condition standard,
@@ -827,10 +763,6 @@ class Orchestrator(QObject):
           down to a few points so it costs minutes instead of hours. The run
           it starts declares ``kind == "probe"`` in its manifest, its
           ``RunStarted`` event and its data file.
-        * ``RUN_OPERATION`` / ``QUEUE_OPERATION`` take ``operation`` (the
-          class name) plus ``params``; an operation is built by
-          ``run_builder.build_operation()``, the constructor shape every
-          operation declares.
         * ``SET_EXPERIMENT_ENVELOPE`` takes ``envelope``: the
           ``{vi_name: {min_value, max_value, state_key}}`` mapping
           ``ExperimentEnvelope.from_dict()`` reads, or ``null`` to clear it.
@@ -1039,16 +971,14 @@ class Orchestrator(QObject):
         Raises:
             KeyError: If a required argument is missing.
             TypeError: If an argument has the wrong shape.
-            ValueError: If a named procedure/operation class is not in the
-                run catalog, or an envelope is malformed.
+            ValueError: If a named procedure class is not in the run
+                catalog, or an envelope is malformed.
             CryoSoftError: If the procedure refuses to be built.
         """
         args = dict(command.args)
         name = command.name
         if name in (ev.CommandName.RUN_PROCEDURE, ev.CommandName.QUEUE_PROCEDURE):
-            return {"procedure": self._build_run("procedure", args)}
-        if name in (ev.CommandName.RUN_OPERATION, ev.CommandName.QUEUE_OPERATION):
-            return {"operation": self._build_run("operation", args)}
+            return {"procedure": self._build_run(args)}
         if name is ev.CommandName.SET_EXPERIMENT_ENVELOPE:
             envelope = args.get("envelope")
             return {
@@ -1062,25 +992,23 @@ class Orchestrator(QObject):
             return {"vi_name": vi_name, "method_name": method_name, **args}
         return args
 
-    def _build_run(self, kind: str, args: dict[str, Any]) -> Any:
-        """Build a procedure or an operation from a command's dict payload.
+    def _build_run(self, args: dict[str, Any]) -> Any:
+        """Build a procedure from a command's dict payload.
 
         The engine may not import ``cryosoft.procedures`` (contract C5), so a
         class name is resolved through the ``run_catalog`` whoever owns
-        discovery handed the constructor. Both kinds are assembled by
-        ``core.run_builder`` — ``build_procedure()`` and ``build_operation()``,
-        the two headless construction paths — so a run submitted as JSON is
-        the same object the GUI and the queue build.
+        discovery handed the constructor. The run is assembled by
+        ``core.run_builder.build_procedure()``, the headless construction
+        path — so a run submitted as JSON is the same object the GUI and the
+        queue build.
 
         Args:
-            kind: ``"procedure"`` or ``"operation"``; also the args key
-                carrying the class name.
-            args: The command's arguments. A procedure payload may carry
+            args: The command's arguments. The payload may carry
                 ``probe_spec``, which reduces the built run to a probe (see
                 ``ProbeSpec``).
 
         Returns:
-            The ready procedure or operation instance.
+            The ready procedure instance.
 
         Raises:
             ValueError: If no class of that name is in the run catalog, or a
@@ -1088,16 +1016,14 @@ class Orchestrator(QObject):
             CryoSoftError: If the run refuses to be built (see
                 ``run_builder.PROCEDURE_BUILD_ERRORS``).
         """
-        class_name = str(args.get(kind, ""))
+        class_name = str(args.get("procedure", ""))
         run_class = self._run_catalog.get(class_name)
         if run_class is None:
             raise ValueError(
-                f"unknown {kind} {class_name!r}: the run catalog holds "
+                f"unknown procedure {class_name!r}: the run catalog holds "
                 f"{sorted(self._run_catalog)}"
             )
         params = dict(args.get("params") or {})
-        if kind == "operation":
-            return build_operation(run_class, station=self._station, params=params)
         probe_spec = args.get("probe_spec")
         return build_procedure(
             run_class,
@@ -1376,103 +1302,20 @@ class Orchestrator(QObject):
             logger.info("run_procedure: monitoring was off — starting it (required during a run)")
             self.start_monitoring()
 
-        self._operation_started_from_emergency = False
-        self._start_run(procedure, kind="procedure")
+        self._start_run(procedure)
 
-    @command
-    def run_operation(self, operation: Any) -> None:
-        """Start an operation immediately if permitted; else refuse it.
 
-        Allowed from IDLE, from a manual ramp (cancelled first, exactly like
-        ``run_procedure()``), and — the narrow EMERGENCY carve-out — from
-        EMERGENCY iff every currently tripped safety flag (from
-        ``Station.check_safety()``) is in the operation's
-        ``tolerated_safety_flags``. This check alone decides whether the
-        operation is allowed to START; it does not exempt the operation
-        from the tick's own EMERGENCY-entry check afterwards, which reads
-        the unconditional System-Condition registry (``core/
-        conditions.py``: critical severity is never tolerated, station-wide
-        by construction) rather than this method's tolerance comparison. In
-        practice this means the carve-out only lets an operation keep
-        running past the start if the flag it tolerated is hold-severity
-        (e.g. ``helium_low``) or the EMERGENCY cause has actually cleared —
-        tolerating a still-tripped CRITICAL flag (e.g. ``quench``) here gets
-        the operation started, but the very next tick's EMERGENCY check
-        aborts it again, since that check answers "is anything critical
-        active", never "does the active run tolerate it".
-
-        Unlike ``run_procedure()``, a busy Orchestrator never auto-queues the
-        request: a running procedure (or operation) is NEVER auto-aborted, so
-        the refusal (``action_blocked``) tells the caller to abort it first.
-        Use ``queue_operation()`` to queue explicitly — queued operations
-        always run ahead of queued procedures (see ``run_queue()``).
-
-        Any exception during setup is contained exactly like
-        ``run_procedure()`` — degrades to ERROR rather than crashing.
-        """
-        manual_ramping = (
-            self._state == OrchestratorState.RAMPING and self._procedure is None
-        )
-        started_from_emergency = False
-
-        if self._state == OrchestratorState.EMERGENCY:
-            tolerated = frozenset(getattr(operation, "tolerated_safety_flags", frozenset()))
-            safety = self._station.check_safety()
-            active = {flag for flag, tripped in safety.items() if tripped}
-            untolerated = sorted(active - tolerated)
-            if untolerated:
-                msg = (
-                    "Cannot start operation from EMERGENCY: active safety "
-                    f"condition(s) not tolerated by this operation "
-                    f"({', '.join(untolerated)}). Resolve them first."
-                )
-                logger.info("Blocked run_operation: %s", msg)
-                self._action_blocked(msg)
-                return
-            started_from_emergency = True
-        elif not (self._state == OrchestratorState.IDLE or manual_ramping):
-            running_label = "procedure"
-            if self._procedure is not None and (
-                getattr(self._procedure, "command_scope", "measurement") == "operation"
-            ):
-                running_label = "operation"
-            msg = (
-                f"Cannot start operation: a {running_label} is running "
-                f"(state {self._state.name}). Abort it first, then start the "
-                "operation."
-            )
-            logger.info("Blocked run_operation: %s", msg)
-            self._action_blocked(msg)
-            return
-
-        if manual_ramping:
-            self._station.stop_ramps()
-            logger.info("Manual ramp cancelled — operation starting.")
-
-        # A run without the per-tick stall detector and stale detection would
-        # be blind to a quench or a dead controller, so monitoring is mandatory
-        # while an operation executes.
-        if not self._monitoring:
-            logger.info("run_operation: monitoring was off — starting it (required during a run)")
-            self.start_monitoring()
-
-        self._operation_started_from_emergency = started_from_emergency
-        self._start_run(operation, kind="operation")
-
-    def _start_run(self, procedure: Any, *, kind: str = "procedure") -> None:
-        """Shared setup path for ``run_procedure()``/``run_operation()``.
+    def _start_run(self, procedure: Any) -> None:
+        """Shared setup path for starting a run.
 
         Dispatches ``procedure.initiate()``'s plan (scope-checked via the
-        procedure's own ``command_scope``, defaulting to "measurement" for a
-        plain procedure), enters INITIATING, and emits the run-started
-        manifest. Any exception is contained to ERROR — the caller must have
-        already confirmed permission to start (queueing, EMERGENCY
-        carve-out, monitoring) before calling this.
+        procedure's own ``command_scope``, defaulting to "measurement"),
+        enters INITIATING, and emits the run-started manifest. Any exception
+        is contained to ERROR — the caller must have already confirmed
+        permission to start (queueing, monitoring) before calling this.
 
         Args:
-            procedure: The procedure or operation to start.
-            kind: ``"procedure"`` or ``"operation"``, used only for logging
-                and the error message on setup failure.
+            procedure: The procedure to start.
         """
         self._procedure = procedure
         # The **run owner** (GLOSSARY.md's *Run owner*): whoever started this
@@ -1483,7 +1326,7 @@ class Orchestrator(QObject):
         self._run_owner = self._next_run_owner or self._current_actor()
         self._next_run_owner = None
         # Claims + admission gate: captured here, duck-typed (never
-        # importing BaseProcedure/OperationBase — contract C5) so a test
+        # importing BaseProcedure — contract C5) so a test
         # double without claimed_vi_names() behaves exactly like the
         # claim-everything default.
         claimed_vi_names = getattr(procedure, "claimed_vi_names", None)
@@ -1497,7 +1340,7 @@ class Orchestrator(QObject):
             plan = procedure.initiate()
             # The frozen-dataclass repr is the permanent record of exactly what
             # was requested — logged once, at INFO, on receipt.
-            logger.info("%s plan (initiate): %r", kind.capitalize(), plan)
+            logger.info("Procedure plan (initiate): %r", plan)
 
             # Track active system VIs for stale monitoring, and as the run's
             # ramp scope (see _run_ramp_scope) — each step's targets are
@@ -1519,8 +1362,8 @@ class Orchestrator(QObject):
             self._emit_run_started()
             self._emit_initiation_status(plan.targets, plan.commands)
         except Exception as exc:
-            logger.exception("%s setup failed", kind)
-            self._fail_to_error(f"Could not start {kind}: {exc}")
+            logger.exception("Procedure setup failed")
+            self._fail_to_error(f"Could not start procedure: {exc}")
 
     def _current_gates(self) -> tuple:
         """Return the gates for the current RAMPING->MEASURING transition.
@@ -1595,26 +1438,12 @@ class Orchestrator(QObject):
         self._queued_actors[id(procedure)] = self._current_actor()
         self._emit_queue_changed()
 
-    @command
-    def queue_operation(self, operation: Any) -> None:
-        """Queue an operation to run once the Orchestrator returns to IDLE.
-
-        Operations queue separately from procedures and always drain first
-        (see ``run_queue()``) — the queueing half of "queue-jumping, not
-        preemption".
-
-        Args:
-            operation: The ready operation instance to queue.
-        """
-        self._operation_queue.append(operation)
-        self._queued_actors[id(operation)] = self._current_actor()
-        self._emit_queue_changed()
 
     def _take_queued(self, queue: list[Any]) -> Any:
         """Pop the front of *queue*, forgetting who queued it.
 
         Args:
-            queue: ``_operation_queue`` or ``_procedure_queue``.
+            queue: ``_procedure_queue``.
 
         Returns:
             The run that was waiting at the front.
@@ -1635,8 +1464,8 @@ class Orchestrator(QObject):
         never degrade it to ERROR.
 
         Returns:
-            A built procedure or operation, or ``None`` when nothing is
-            waiting or the callback failed.
+            A built procedure, or ``None`` when nothing is waiting or the
+            callback failed.
         """
         if self.next_procedure is None:
             return None
@@ -1655,16 +1484,15 @@ class Orchestrator(QObject):
 
     @command
     def run_queue(self) -> None:
-        """Run the next queued operation, else the next queued procedure, if IDLE.
+        """Run the next queued procedure, if IDLE.
 
-        **The engine pulls.** Runs handed over directly (``queue_procedure()``
-        / ``queue_operation()``) drain first, then the injected
+        **The engine pulls.** Runs handed over directly
+        (``queue_procedure()``) drain first, then the injected
         ``next_procedure()`` seam is asked for one; a queue held as data
-        outside the engine (``session/run_queue.py``) supplies it, already
-        ordered operations-first. Either way the engine, not the client,
-        decides *when* a run starts — a client that watched ``state_changed``
-        for the IDLE state and started the next run itself would advance
-        re-entrantly inside that emit, would starve queued operations, and,
+        outside the engine (``session/run_queue.py``) supplies it. Either way
+        the engine, not the client, decides *when* a run starts — a client
+        that watched ``state_changed`` for the IDLE state and started the
+        next run itself would advance re-entrantly inside that emit and,
         seeing only a state name, could not tell a clean finish from a hold
         acknowledge.
 
@@ -1674,9 +1502,8 @@ class Orchestrator(QObject):
 
         * ``abort_procedure()`` — chains. The operator ended THIS run, not
           the queue.
-        * ``_finish_run()`` when the run's end state is IDLE — chains. The
-          run completed, so the next one is due; this is also what drains a
-          queued operation ahead of a queued procedure.
+        * ``_finish_run()`` when the run ends — chains. The run completed,
+          so the next one is due.
         * ``recover_from_error()`` — no chain. After an error the queue's
           assumptions may no longer hold; the operator restarts explicitly.
         * ``_acknowledge_emergency()`` — no chain. Acknowledging a quench is
@@ -1698,11 +1525,6 @@ class Orchestrator(QObject):
             logger.info("Blocked run_queue: %s", message)
             self._action_blocked(message)
             return
-        if self._operation_queue:
-            operation = self._take_queued(self._operation_queue)
-            self._emit_queue_changed()
-            self.run_operation(operation)
-            return
         if self._procedure_queue:
             procedure = self._take_queued(self._procedure_queue)
             self._emit_queue_changed()
@@ -1713,10 +1535,7 @@ class Orchestrator(QObject):
             self._next_run_owner = None
             return
         self._emit_queue_changed()
-        if getattr(run, "command_scope", "measurement") == "operation":
-            self.run_operation(run)
-        else:
-            self.run_procedure(run)
+        self.run_procedure(run)
 
     def publish_queue(self, *, actor: ev.Actor = ev.OPERATOR) -> None:
         """Broadcast the run queue after a client changed it.
@@ -1742,8 +1561,8 @@ class Orchestrator(QObject):
         its ``spec_id`` is empty and the fields only a spec knows are blank.
 
         Args:
-            run: The queued procedure or operation.
-            kind: ``"procedure"`` or ``"operation"``.
+            run: The queued procedure.
+            kind: ``"procedure"``.
 
         Returns:
             A JSON-safe dict.
@@ -1764,15 +1583,13 @@ class Orchestrator(QObject):
     def _queue_entries(self) -> tuple[dict[str, Any], ...]:
         """Return every waiting run, in the order they will start.
 
-        Operations first (the queue-jumping rule), then procedures, then
-        whatever the injected ``queue_snapshot()`` reports — which is itself
-        already ordered operations-first.
+        The runs handed over directly first, then whatever the injected
+        ``queue_snapshot()`` reports.
 
         Returns:
             JSON-safe dicts, one per waiting run.
         """
-        entries = [self._queue_entry(run, "operation") for run in self._operation_queue]
-        entries += [self._queue_entry(run, "procedure") for run in self._procedure_queue]
+        entries = [self._queue_entry(run, "procedure") for run in self._procedure_queue]
         if self.queue_snapshot is not None:
             try:
                 entries += [dict(entry) for entry in self.queue_snapshot()]
@@ -2016,165 +1833,9 @@ class Orchestrator(QObject):
         self._active_ramps = [r for r in self._active_ramps if r.vi_name != vi_name]
         self.ramps_updated.emit(list(self._active_ramps))
 
-    @command
-    def finish_operation(self) -> None:
-        """Request a graceful stop of the active operation.
 
-        Calls ``request_finish()`` on the active operation so its next
-        ``change_sweep_step()`` (the ``OperationBase`` adapter) returns
-        ``None`` regardless of what ``step()`` would return, ending an
-        open-ended operation and running the normal
-        STANDBY -> postcondition path. Refused with ``action_blocked`` if no
-        operation is currently active (a duck-typed procedure without
-        ``command_scope == "operation"`` does not count).
 
-        Owner-scoped for agents, exactly as ``abort_procedure()`` is: ending
-        somebody else's operation is ending their result.
-        """
-        if not self._is_operation_active():
-            msg = "Cannot finish operation: no operation is currently running."
-            logger.info("Blocked finish_operation: %s", msg)
-            self._action_blocked(msg)
-            return
-        request_finish = getattr(self._procedure, "request_finish", None)
-        if callable(request_finish):
-            request_finish()
-        self._emit_status("Finish requested — completing operation")
 
-    @command
-    def confirm_operation(self, key: str) -> None:
-        """Record an operator confirmation on the active operation.
-
-        Mirrors ``finish_operation()``: calls ``confirm(key)`` on the active
-        operation (duck-typed — a plain procedure or an operation without a
-        ``confirm`` method is simply ignored) so a subsequent
-        ``postcondition_gates()`` check reading ``confirmed(key)`` sees the
-        flag. Refused with ``action_blocked`` if no operation is currently
-        active (a duck-typed procedure without ``command_scope ==
-        "operation"`` does not count).
-
-        The acting ``Actor`` is forwarded alongside the key when the
-        operation's ``confirm()`` declares one (see ``_attest()``), so the
-        ``StepRecord`` can tell an autonomous client's self-confirmation of a
-        physical step from the physicist's. An operation that predates the
-        actor — or a duck-typed test double — is called with the key alone.
-
-        Owner-scoped for agents (the run-ownership standard): attesting to a
-        physical step of somebody else's operation is the accountability case
-        the whole rule exists for.
-
-        Args:
-            key: The confirmation key (e.g. ``"needle_valve"``), forwarded
-                verbatim to the operation's ``confirm()``.
-        """
-        if not self._is_operation_active():
-            msg = "Cannot confirm operation step: no operation is currently running."
-            logger.info("Blocked confirm_operation: %s", msg)
-            self._action_blocked(msg)
-            return
-        confirm = getattr(self._procedure, "confirm", None)
-        if callable(confirm):
-            # Guarded: this is called directly from GUI code, where an
-            # unhandled exception in a Qt slot would abort the process. An
-            # undeclared key is refused with a verdict, never raised.
-            try:
-                _attest(confirm, key, self._current_actor())
-            except Exception as exc:  # noqa: BLE001 — verdict, not crash
-                logger.error("confirm_operation(%r) rejected: %s", key, exc)
-                self._action_blocked(
-                    f"Cannot confirm {key!r}: {exc}", ev.VerdictCode.FAILED
-                )
-                return
-        self._emit_status(f"Confirmed: {key}")
-
-    @command
-    def skip_operation_step(self, key: str) -> None:
-        """Record that the operator deliberately skipped a step of the active operation.
-
-        The counterpart to ``confirm_operation()``: calls ``skip_step(key)``
-        on the active operation (duck-typed, so an operation that declares
-        no steps is simply ignored), which records the skip as an override
-        rather than a failure. The GUI is responsible for warning the
-        operator first; by the time this is called the decision has been
-        made, and it always succeeds for a declared, skippable step.
-
-        Skipping a step the *system* was carrying out has a second half that
-        only the Orchestrator can do. An ``auto_ramp`` step is a ramp this
-        operation dispatched, and while that ramp runs the state is RAMPING,
-        where the operation's ``step()`` is never called — so the operation
-        cannot retarget or stop its own ramp, and ``stop_ramp()`` refuses a
-        VI claimed by an active run. The operation therefore raises a flag
-        (``skip_ramp_requested``) and ``_tick_body()``'s RAMPING branch
-        stops the ramp in place, leaving the instrument clamped where it had
-        reached. Doing it there rather than here keeps every hardware write
-        on the tick, which is the single-writer rule.
-
-        The acting ``Actor`` is forwarded exactly as ``confirm_operation()``
-        forwards it: a skip is an override, and the record names who took it.
-        Owner-scoped for agents for the same reason ``confirm_operation()``
-        is (the run-ownership standard).
-
-        Args:
-            key: The step key, forwarded verbatim to the operation's
-                ``skip_step()``.
-        """
-        if not self._is_operation_active():
-            msg = "Cannot skip operation step: no operation is currently running."
-            logger.info("Blocked skip_operation_step: %s", msg)
-            self._action_blocked(msg)
-            return
-        skip_step = getattr(self._procedure, "skip_step", None)
-        if callable(skip_step):
-            # Guarded exactly like confirm_operation(): called straight from
-            # a Qt slot, so an undeclared or unskippable key becomes a
-            # verdict, never an unhandled exception in the GUI thread.
-            try:
-                _attest(skip_step, key, self._current_actor())
-            except Exception as exc:  # noqa: BLE001 — verdict, not crash
-                logger.error("skip_operation_step(%r) rejected: %s", key, exc)
-                self._action_blocked(
-                    f"Cannot skip {key!r}: {exc}", ev.VerdictCode.FAILED
-                )
-                return
-        logger.warning(
-            "Operator skipped step %r of %s — recorded as an override.",
-            key,
-            getattr(self._procedure, "name", type(self._procedure).__name__),
-        )
-        self._emit_status(f"Skipped: {key}")
-
-    def _stop_ramps_for_skipped_step(self) -> bool:
-        """Stop the active run's ramps in place if a skipped step asked for it.
-
-        Reads and clears the active operation's ``skip_ramp_requested``
-        flag. ``Station.stop_ramps()`` is a hold-in-place — the same call
-        ``pause_procedure()`` makes — so the instrument stays wherever the
-        ramp had reached rather than returning anywhere, which is exactly
-        what "skip the warm-up" should mean: stop climbing, hold here.
-
-        Only VIs in ``_active_system_vis`` are stopped. That set is built
-        from the run's plan *targets* (see ``_start_procedure``), so for a
-        sample-access operation it is the VTI alone; magnets, dispatched as
-        commands, keep ramping down to zero field, which is both safe and
-        wanted — skipping the warm-up is not a reason to leave the magnet
-        energised while the cryostat is opened.
-
-        Returns:
-            True if a skip was pending and the ramps were stopped, False
-            otherwise (the overwhelmingly common case, one attribute read).
-        """
-        if not self._is_operation_active():
-            return False
-        if not getattr(self._procedure, "skip_ramp_requested", False):
-            return False
-        self._procedure.skip_ramp_requested = False
-        self._station.stop_ramps(self._run_ramp_scope())
-        logger.warning(
-            "Stopped the active run's ramps in place: the operator skipped "
-            "the step that started them."
-        )
-        self._emit_status("Ramp stopped — step skipped, holding here")
-        return True
 
     @command
     def recover_from_error(self) -> None:
@@ -2254,9 +1915,8 @@ class Orchestrator(QObject):
         does unlock manual control of held VIs (via
         ``_manual_action_admissible()``'s override bypass) for front-panel
         recovery — e.g. cycling a switch heater by hand — while remaining in
-        EMERGENCY. Starting a procedure or operation stays refused
-        throughout: those gates check the state itself, which is unchanged
-        here.
+        EMERGENCY. Starting a procedure stays refused throughout: those
+        gates check the state itself, which is unchanged here.
 
         A merely hold-only flag (e.g. ``helium_low``) never blocks this
         return: it was never why EMERGENCY was entered, and it keeps
@@ -2317,33 +1977,15 @@ class Orchestrator(QObject):
     def active_run_kind(self) -> str | None:
         """Return the active run's kind, or ``None`` if no run is active.
 
-        The public, duck-type-free accessor GUI code uses to tell a
-        procedure run from an operation run (the hard status separation, see
-        ``GLOSSARY.md``) without reaching into
-        ``self._procedure`` or importing ``OperationBase``/``BaseProcedure``
-        (contracts C5/C8).
+        The public, duck-type-free accessor GUI code uses to tell a run in
+        flight from an idle station without reaching into ``self._procedure``
+        or importing ``BaseProcedure`` (contracts C5/C8).
 
         Returns:
-            ``"operation"`` while an operation is the active run,
-            ``"procedure"`` while anything else (a plain procedure, or a
-            test double without ``command_scope``) is, or ``None`` while no
-            run is active.
+            ``"procedure"`` while a run is active, ``None`` otherwise.
         """
-        if self._procedure is None:
-            return None
-        return "operation" if self._is_operation_active() else "procedure"
+        return None if self._procedure is None else "procedure"
 
-    def _is_operation_active(self) -> bool:
-        """Return True while the active run is an operation (duck-typed).
-
-        Never imports ``OperationBase`` (contract C5) — reads
-        ``command_scope`` exactly like every other operation/procedure
-        branch in this module.
-        """
-        return (
-            self._procedure is not None
-            and getattr(self._procedure, "command_scope", "measurement") == "operation"
-        )
 
     def _active_run_label(self) -> str:
         """Return a human-readable ``"<kind> '<name>'"`` label for the active run.
@@ -2352,16 +1994,11 @@ class Orchestrator(QObject):
         called with no active run.
 
         Returns:
-            E.g. ``"operation 'Helium Fill'"`` or ``"procedure 'Field Sweep'"``.
+            E.g. ``"procedure 'Field Sweep'"``.
         """
         procedure = self._procedure
-        kind = (
-            "operation"
-            if getattr(procedure, "command_scope", "measurement") == "operation"
-            else "procedure"
-        )
         name = getattr(procedure, "name", "") or type(procedure).__name__
-        return f"{kind} {name!r}"
+        return f"procedure {name!r}"
 
     def _held_vis(self) -> dict[str, Condition]:
         """Return ``{vi_name: Condition}`` for every VI currently held.
@@ -3070,13 +2707,13 @@ class Orchestrator(QObject):
         """Return ``procedure.run_summary()``'s result, or ``{}`` on any problem.
 
         Duck-typed: looked up via ``getattr`` so this module never imports
-        ``OperationBase`` (contract C5) — a plain ``BaseProcedure`` or a test
-        double without ``run_summary()`` simply yields ``{}``. Guarded by a
+        ``BaseProcedure`` (contract C5) — a procedure or a test double without
+        ``run_summary()`` simply yields ``{}``. Guarded by a
         broad try/except plus a return-type check, so a broken or
         misbehaving override can never prevent the run from finishing.
 
         Args:
-            procedure: The procedure/operation to query (may be ``None``).
+            procedure: The procedure to query (may be ``None``).
 
         Returns:
             The dict ``run_summary()`` returned, or ``{}`` if the method is
@@ -3097,12 +2734,7 @@ class Orchestrator(QObject):
             return {}
         return summary
 
-    def _emit_run_finished(
-        self,
-        status: str,
-        reason: str = "",
-        postconditions_unmet: list[str] | None = None,
-    ) -> None:
+    def _emit_run_finished(self, status: str, reason: str = "") -> None:
         """Emit ``run_finished`` for the active run, exactly once.
 
         Idempotent: the captured manifest is cleared on emission, so the
@@ -3113,10 +2745,6 @@ class Orchestrator(QObject):
         Args:
             status: Terminal status — ``done``, ``aborted``, or ``failed``.
             reason: Error text for ``failed``; empty otherwise.
-            postconditions_unmet: Gate names an operation's one-shot
-                postcondition evaluation found unmet at finish, or
-                ``None`` — recorded as ``[]``, which is always the case for
-                a procedure/abort/failure path.
         """
         if self._active_run_manifest is None:
             return
@@ -3125,7 +2753,6 @@ class Orchestrator(QObject):
         manifest["finished_utc"] = datetime.now(timezone.utc).isoformat()
         manifest["status"] = status
         manifest["reason"] = reason
-        manifest["postconditions_unmet"] = list(postconditions_unmet or ())
         # run_summary() hand-off: self._procedure is still set on
         # the "done" path (_finish_run() clears it AFTER this call); the
         # abort/fail/emergency paths already cleared it via
@@ -3742,21 +3369,13 @@ class Orchestrator(QObject):
         runs inside an exception boundary that degrades to ERROR, and a
         cosmetic status line must not be able to trip it.
 
-        Routed by the active run's kind — the hard status separation (see
-        GLOSSARY.md): while an operation is
-        active this goes to ``operation_status``/``cryosoft.operation_status``
-        instead of ``status_message``/``cryosoft.procedure_status`` — the
-        Procedure window must never see operation chatter. Neither logger is
+        Goes to ``status_message``/``cryosoft.procedure_status``. Neither is
         the ``cryosoft.status`` logger, which carries the machine-only JSONL
         operational-status stream and must stay pure JSON.
         """
         try:
-            if self._is_operation_active():
-                logging.getLogger("cryosoft.operation_status").info(text)
-                self.operation_status.emit(text)
-            else:
-                logging.getLogger("cryosoft.procedure_status").info(text)
-                self.status_message.emit(text)
+            logging.getLogger("cryosoft.procedure_status").info(text)
+            self.status_message.emit(text)
         except Exception:  # noqa: BLE001 — status must never disrupt the run
             logger.exception("status emit failed")
 
@@ -3994,18 +3613,13 @@ class Orchestrator(QObject):
 
             # Safety check — reuses this tick's snapshot (no second hardware
             # poll), called exactly once regardless of how many decisions
-            # below consult it. An active operation's tolerated_safety_flags
-            # are resolved once here and applied uniformly by
-            # update_conditions() (a tolerated flag, e.g. helium_low during
-            # a helium-fill operation, must not hold the magnets that same
-            # operation claims and ramps to zero). Only the ACTIVE
-            # procedure's tolerance applies here — a plain procedure (or
-            # IDLE) tolerates nothing, unchanged.
+            # below consult it. The active run's tolerated_safety_flags are
+            # resolved once here and applied uniformly by
+            # update_conditions(); a plain procedure (or an idle station)
+            # tolerates nothing.
             safety = self._station.check_safety(state)
             tolerated: frozenset[str] = frozenset()
-            if self._procedure is not None and (
-                getattr(self._procedure, "command_scope", "measurement") == "operation"
-            ):
+            if self._procedure is not None:
                 tolerated = frozenset(
                     getattr(self._procedure, "tolerated_safety_flags", frozenset())
                 )
@@ -4184,13 +3798,6 @@ class Orchestrator(QObject):
         elif self._state == OrchestratorState.INITIATING:
             self._change_state(OrchestratorState.RAMPING)
         elif self._state == OrchestratorState.RAMPING:
-            # A skipped auto_ramp step ends this ramp early. The operation
-            # cannot do it itself — step() is not called in RAMPING — so the
-            # flag it raised is honoured here, on the tick, where every
-            # other hardware write happens. stop_ramps() holds in place, so
-            # check_ramps() reports complete on this same tick and the run
-            # proceeds exactly as if the ramp had landed.
-            self._stop_ramps_for_skipped_step()
             # Scoped to the run's OWN ramps (see _run_ramp_scope): a manual
             # front-panel ramp on a VI this run neither targets nor claims
             # must not hold its next measurement. Every ramp still advances
@@ -4231,23 +3838,10 @@ class Orchestrator(QObject):
             # tick spent here must still advance them or the gate can never
             # come true.
             self._station.advance_ramps()
-            if self._is_operation_active() and getattr(
-                self._procedure, "finish_requested", False
-            ):
-                # A gate (e.g. HeliumFillOperation's zero_field wait) can hold
-                # forever if its check() never turns true. finish_operation()
-                # only flips finish_requested — it is not itself wired into
-                # this branch — so without this check a Finish click here
-                # would appear to do nothing and the run would look stuck.
-                # Abandon the gate wait and go straight to STANDBY, exactly
-                # like a SWEEPING-state finish.
-                self._pending_gates = []
-                self._change_state(OrchestratorState.STANDBY)
-            else:
-                self._pending_gates = [g for g in self._pending_gates if not g.step()]
-                if not self._pending_gates:
-                    self._first_measurement = False
-                    self._change_state(OrchestratorState.MEASURING)
+            self._pending_gates = [g for g in self._pending_gates if not g.step()]
+            if not self._pending_gates:
+                self._first_measurement = False
+                self._change_state(OrchestratorState.MEASURING)
         elif self._state == OrchestratorState.MEASURING:
             # Ramps outside the run's scope keep moving while it measures —
             # a manual front-panel ramp must not advance at a third of its
@@ -4255,23 +3849,12 @@ class Orchestrator(QObject):
             # spent in states that historically never saw a live ramp.
             self._station.advance_ramps()
             if self._procedure:
-                is_operation = self._is_operation_active()
                 self._emit_status(self._measure_status_line())
                 self._procedure.measure()
                 if hasattr(self._procedure, "get_progress"):
-                    progress = self._procedure.get_progress()
-                    if is_operation:
-                        self.operation_progress.emit(progress)
-                    else:
-                        self.procedure_progress.emit(progress)
-                # measurement_ready is PROCEDURE-EXCLUSIVE (the hard
-                # status separation) — an operation's sample() has no
-                # equivalent GUI consumer today (the fill curve is an
-                # internal detail until phase 4 moves it to the cryogenics
-                # log), so it is withheld even if a future operation grows a
-                # last_datapoint attribute.
+                    self.procedure_progress.emit(self._procedure.get_progress())
                 last_datapoint = getattr(self._procedure, "last_datapoint", None)
-                if last_datapoint and not is_operation:
+                if last_datapoint:
                     self.measurement_ready.emit(dict(last_datapoint))
                     manifest = self._active_run_manifest or {}
                     self._emit_event(
@@ -4309,13 +3892,7 @@ class Orchestrator(QObject):
                     self._change_state(OrchestratorState.RAMPING)
                     self._emit_status(self._ramp_status_line(step_plan.targets))
         elif self._state == OrchestratorState.STANDBY:
-            if self._is_operation_active():
-                # Immediate finish — the operation contract has no blocking
-                # postcondition sub-phase and no postcondition timeout, so
-                # there is no waiting phase at all; see
-                # _standby_operation_immediate()'s docstring.
-                self._standby_operation_immediate()
-            elif not self._standby_dispatched:
+            if not self._standby_dispatched:
                 # Wait for whatever ramp THIS RUN had in flight when SWEEPING
                 # ended, then call standby() exactly once and dispatch
                 # whatever targets it returns (e.g. ramp magnet to 0 T). A
@@ -4340,10 +3917,7 @@ class Orchestrator(QObject):
                     self._standby_dispatched = True
             else:
                 # Wait for the ramp standby() itself just started (if any),
-                # then finish. A plain BaseProcedure declares no
-                # postcondition_gates() — that hook is operation-only, and an
-                # operation never reaches this branch (see the fork above) —
-                # so a procedure always finishes as soon as this ramp settles.
+                # then finish: a procedure finishes as soon as it settles.
                 if self._station.check_ramps(self._run_ramp_scope()):
                     self._finish_run()
         elif self._state == OrchestratorState.PAUSED:
@@ -4415,180 +3989,26 @@ class Orchestrator(QObject):
         self._first_measurement = True
         self._pending_gates = []
         self._pause_requested = False
-        self._operation_started_from_emergency = False
         self._last_system_targets = {}
 
-    def _operation_end_state(self, procedure: Any) -> OrchestratorState:
-        """Return the state a finishing run should return to.
 
-        A plain procedure always returns to IDLE. An operation returns to
-        EMERGENCY instead when it was started via the EMERGENCY carve-out
-        (``_operation_started_from_emergency`` — a sticky bit set at start,
-        independent of what is tripped right now), or when ``Station.
-        active_critical_conditions()`` — the System-Condition standard's own
-        live registry, see ``core/conditions.py`` — is non-empty at finish.
-        Critical severity is never tolerated (scope follows from severity
-        alone, unconditionally), so a critical condition still active here
-        would already have been caught by this same tick's own EMERGENCY
-        check in ``_tick_body()`` before ``_finish_run()`` could ever be
-        reached; this is the defensive backstop for that invariant, not a
-        path expected to fire in the ordinary case.
 
-        A merely hold-only flag (e.g. ``helium_low``) still tripped at
-        finish does NOT send the operation to EMERGENCY: it never causes
-        EMERGENCY in the first place (see the System-Condition standard),
-        and it keeps governing its concerned VIs identically whether the
-        machine lands in IDLE or EMERGENCY — the common case for
-        HeliumFillOperation finishing before the level has fully recovered.
 
-        Args:
-            procedure: The procedure/operation that just finished (captured
-                by the caller before clearing ``self._procedure``).
+    def _finish_run(self) -> None:
+        """Declare the active run done: emit finished signals and return to IDLE.
 
-        Returns:
-            ``OrchestratorState.EMERGENCY`` or ``OrchestratorState.IDLE``.
+        Called once the STANDBY wait settles.
         """
-        if getattr(procedure, "command_scope", "measurement") != "operation":
-            return OrchestratorState.IDLE
-        if self._operation_started_from_emergency:
-            return OrchestratorState.EMERGENCY
-        if self._station.active_critical_conditions():
-            return OrchestratorState.EMERGENCY
-        return OrchestratorState.IDLE
-
-    def _standby_operation_immediate(self) -> None:
-        """Immediate-finish STANDBY handling for an operation.
-
-        Runs exactly once, on the tick after SWEEPING enters STANDBY (the
-        ``elif`` state-machine dispatch in ``_tick_body()`` guarantees this —
-        by the time this method returns, ``_finish_run()`` has already moved
-        the state out of STANDBY). Unlike a procedure, this never waits for
-        any ramp — neither the one already in flight when SWEEPING ended, nor
-        one ``standby()`` itself starts — to complete: dispatching
-        ``standby()``'s plan, evaluating ``postcondition_gates()`` once, and
-        ending the run all happen in this single tick. Any ramp still moving
-        when the run ends continues under the ordinary manual-ramp handling
-        (the IDLE/EMERGENCY->RAMPING transition ``_tick_body()`` already
-        applies to any unfinished ramp with no active procedure) — exactly as
-        if the operator had started it by hand.
-        """
-        procedure = self._procedure
-        plan = None
-        if procedure is not None and hasattr(procedure, "standby"):
-            try:
-                plan = procedure.standby()
-            except Exception:
-                logger.exception("Operation standby() raised during immediate finish")
-        if plan is not None:
-            logger.info("Operation plan (standby): %r", plan)
-            self._dispatch_targets(plan.targets)
-            allowed_scope = getattr(procedure, "command_scope", "measurement")
-            self._station.send_measurement_commands(plan.commands, allowed_scope=allowed_scope)
-            if plan.targets or plan.commands:
-                self._emit_status("Parking hardware")
-                self._emit_setup_actions(plan.targets, plan.commands, verb="Ramping")
-
-        # Refresh the state snapshot before the one-shot evaluation: the
-        # standby commands went out within THIS tick, after the last
-        # monitoring poll, so a gate reading cached_state would otherwise
-        # verify against pre-standby values and report spuriously unmet
-        # (e.g. the fill's restore-SLOW-refresh gate). Ramps standby() just
-        # started are still honestly mid-flight — only command effects
-        # become visible, which is exactly what the gates verify.
-        try:
-            self._station.get_state()
-        except Exception:
-            logger.exception("State refresh before postcondition evaluation failed")
-
-        unmet = self._evaluate_postconditions_once(procedure)
-        if unmet:
-            message = f"Postcondition(s) not met at finish: {', '.join(unmet)}"
-            logger.warning(message)
-            self._emit_status(f"WARNING: {message}")
-
-        self._finish_run(postconditions_unmet=unmet)
-
-    def _evaluate_postconditions_once(self, procedure: Any) -> list[str]:
-        """Evaluate ``procedure.postcondition_gates()`` exactly once.
-
-        Each gate's one-shot ``action`` (if any) runs once and its ``check``
-        (if any) is read a single time via ``Gate.check_once()`` — no
-        holding, no timeout. A gate that raises, or a ``postcondition_gates()``
-        call that raises, is treated as unmet rather than propagating into
-        the tick boundary (a broken postcondition check must never prevent
-        the run from finishing).
-
-        Args:
-            procedure: The operation whose declared gates to evaluate
-                (duck-typed — a procedure or test double without
-                ``postcondition_gates()`` yields no gates at all).
-
-        Returns:
-            The names of every gate whose one-shot check did not hold; ``[]``
-            if every gate held (or none were declared).
-        """
-        gates_fn = getattr(procedure, "postcondition_gates", None)
-        if gates_fn is None:
-            return []
-        try:
-            gates = list(gates_fn())
-        except Exception:
-            logger.exception("postcondition_gates() raised during one-shot evaluation")
-            return []
-        unmet: list[str] = []
-        for gate in gates:
-            name = getattr(gate, "name", "unknown")
-            try:
-                if not gate.check_once():
-                    unmet.append(name)
-            except Exception:
-                logger.exception("postcondition gate %r raised during one-shot evaluation", name)
-                unmet.append(name)
-        return unmet
-
-    def _finish_run(self, postconditions_unmet: list[str] | None = None) -> None:
-        """Declare the active run done: emit finished signals and return home.
-
-        Called once the STANDBY wait settles for a procedure, or immediately
-        by ``_standby_operation_immediate()`` for an operation. Home is IDLE
-        for a plain procedure, or for an operation whose safety condition has
-        cleared; an operation returns to EMERGENCY instead when appropriate
-        (see ``_operation_end_state()``).
-
-        Args:
-            postconditions_unmet: Gate names an operation's one-shot
-                postcondition evaluation found unmet, or ``None``
-                (recorded as ``[]`` — always the case for a procedure, which
-                has no postcondition_gates() phase at all).
-        """
-        procedure = self._procedure
-        is_operation = self._is_operation_active()
-        label = "Operation" if is_operation else "Procedure"
-        self._emit_status(f"{label} finished")
-        self._emit_run_finished("done", postconditions_unmet=postconditions_unmet)
-        # procedure_finished is PROCEDURE-EXCLUSIVE (the hard status
-        # separation) — the Procedure window's queue-advance/progress-reset
-        # handler must never fire for an operation's completion.
-        if not is_operation:
-            self.procedure_finished.emit()
-        end_state = self._operation_end_state(procedure)
-        if end_state != OrchestratorState.IDLE:
-            # Emitted while self._procedure is still set (below), so this
-            # correctly routes through operation_status — only an operation
-            # can reach a non-IDLE end_state (see _operation_end_state()).
-            self._emit_status(
-                "Operation finished; a safety condition is still active — "
-                "remaining in EMERGENCY."
-            )
+        self._emit_status("Procedure finished")
+        self._emit_run_finished("done")
+        self.procedure_finished.emit()
         self._procedure = None
         self._active_claims = None
         self._active_system_vis.clear()
         self._standby_dispatched = False
         self._pause_requested = False
-        self._operation_started_from_emergency = False
-        self._change_state(end_state, cause="procedure_finished")
-        if end_state == OrchestratorState.IDLE:
-            self.run_queue()
+        self._change_state(OrchestratorState.IDLE, cause="procedure_finished")
+        self.run_queue()
 
     def _fail_to_error(self, message: str) -> None:
         """Contain a failure: clean up the run and degrade to ERROR.
@@ -4767,14 +4187,9 @@ class Orchestrator(QObject):
         # Also surface in the concise status log as a persistent history line.
         # logger.error above already wrote it to file, so emit the signal
         # directly (bypassing _emit_status's logger) to avoid double file
-        # logging — but keep _emit_status's run-kind ROUTING (the hard
-        # status separation): an operation's failure line belongs on its
-        # card, never in the Procedure window's status log.
+        # logging.
         try:
-            if self._is_operation_active():
-                self.operation_status.emit(message)
-            else:
-                self.status_message.emit(message)
+            self.status_message.emit(message)
         except Exception:  # noqa: BLE001 — status must never disrupt the run
             logger.exception("status emit failed in _error")
 

@@ -12,12 +12,10 @@ Two consequences follow, and they are the point of the design:
 * **The engine pulls.** ``Orchestrator.run_queue()`` asks its injected
   ``next_procedure()`` callback for the next run and starts it itself. A
   client that instead watched ``state_changed`` for the IDLE state and
-  started the next run would advance re-entrantly inside the engine's own emit,
-  would
-  starve queued operations (which jump ahead of procedures — queue-jumping,
-  never preemption), and could not tell a clean finish from a hold
-  acknowledge, so it would auto-start a run straight after an emergency
-  standby. Authority over *when* a run starts stays with the engine.
+  started the next run would advance re-entrantly inside the engine's own
+  emit, and could not tell a clean finish from a hold acknowledge, so it
+  would auto-start a run straight after an emergency standby. Authority over
+  *when* a run starts stays with the engine.
 * **Entries are validated when they are added, not when they start.**
   ``validate_run()`` builds the run headlessly and reports its findings, so a
   parameter outside a declared bound, a setup limit, or the session envelope
@@ -42,11 +40,7 @@ from typing import TYPE_CHECKING, Any
 from cryosoft.core.estimates import estimate_duration
 from cryosoft.core.events import OPERATOR, Actor
 from cryosoft.core.plan import DurationEstimate, ProbeSpec
-from cryosoft.core.run_builder import (
-    PROCEDURE_BUILD_ERRORS,
-    build_operation,
-    build_procedure,
-)
+from cryosoft.core.run_builder import PROCEDURE_BUILD_ERRORS, build_procedure
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -58,11 +52,8 @@ logger = logging.getLogger(__name__)
 
 #: A spec that names a measurement recipe (L4 ``BaseProcedure``).
 KIND_PROCEDURE = "procedure"
-#: A spec that names an operation (L4 ``OperationBase``). Operations jump the
-#: whole queue: every waiting operation drains before the first procedure.
-KIND_OPERATION = "operation"
-#: The two kinds a ``RunSpec`` may declare.
-RUN_KINDS: frozenset[str] = frozenset({KIND_PROCEDURE, KIND_OPERATION})
+#: The kinds a ``RunSpec`` may declare.
+RUN_KINDS: frozenset[str] = frozenset({KIND_PROCEDURE})
 
 #: The run refused to be built at all (see ``PROCEDURE_BUILD_ERRORS``).
 FINDING_BUILD_REFUSED = "build_refused"
@@ -131,7 +122,7 @@ class RunSpec:
     waiting.
 
     Attributes:
-        kind: ``"procedure"`` or ``"operation"`` (see ``RUN_KINDS``).
+        kind: ``"procedure"`` (see ``RUN_KINDS``).
         run_class: The class's ``__name__``, resolved against the run catalog
             when the engine pulls this spec.
         params: The run's own parameter values, already validated.
@@ -141,9 +132,7 @@ class RunSpec:
         probe_spec: A ``ProbeSpec``'s dict form when this entry is a **probe
             run** — the same run reduced to a few cheap points — and ``{}``
             for an ordinary run. Stored as its dict rather than as the typed
-            spec so a queue entry stays JSON-safe end to end. Only a
-            procedure may carry one: reducing a servicing operation to "a few
-            points" means nothing.
+            spec so a queue entry stays JSON-safe end to end.
         actor: Who queued it.
         spec_id: Stable identity of this queue entry, for remove/move.
         queued_at: Unix time it was queued.
@@ -165,8 +154,7 @@ class RunSpec:
 
         Raises:
             ValueError: If ``kind`` is not one of ``RUN_KINDS``, if
-                ``run_class`` is empty, or if ``probe_spec`` is malformed or
-                carried by an operation.
+                ``run_class`` is empty, or if ``probe_spec`` is malformed.
             TypeError: If ``params``/``sample_info``/``probe_spec`` are not
                 JSON-safe mappings, or ``actor`` is neither an ``Actor`` nor
                 its dict.
@@ -322,13 +310,7 @@ class RunValidation:
 
 
 class RunQueue:
-    """The ordered run queue: immutable specs, operations first.
-
-    Two ordered buckets rather than one list, because the queue-jumping rule
-    is an ordering property and not a per-entry priority field: every waiting
-    operation drains before the first waiting procedure, and adding a
-    procedure can never delay an operation. Within a bucket, order is exactly
-    the order entries were added (or moved to).
+    """The ordered run queue: immutable specs, in the order they were added.
 
     Nothing here touches hardware, Qt, or the engine. Mutating methods return
     whether they changed anything, so a caller knows when to broadcast.
@@ -340,21 +322,19 @@ class RunQueue:
         Args:
             specs: Initial specs, added in order.
         """
-        self._operations: list[RunSpec] = []
         self._procedures: list[RunSpec] = []
         for spec in specs:
             self.add(spec)
 
     def _bucket(self, kind: str) -> list[RunSpec]:
         """Return the list holding specs of *kind*."""
-        return self._operations if kind == KIND_OPERATION else self._procedures
+        return self._procedures
 
     def _locate(self, spec_id: str) -> tuple[list[RunSpec], int] | None:
         """Return the bucket and index holding *spec_id*, or ``None``."""
-        for bucket in (self._operations, self._procedures):
-            for index, spec in enumerate(bucket):
-                if spec.spec_id == spec_id:
-                    return bucket, index
+        for index, spec in enumerate(self._procedures):
+            if spec.spec_id == spec_id:
+                return self._procedures, index
         return None
 
     def add(self, spec: RunSpec) -> RunSpec:
@@ -402,11 +382,7 @@ class RunQueue:
         return True
 
     def move(self, spec_id: str, offset: int) -> bool:
-        """Move an entry *offset* places within its own bucket.
-
-        Operations and procedures never interleave, so a move is clamped to
-        the entry's own bucket: moving the first procedure up cannot push it
-        ahead of a waiting operation.
+        """Move an entry *offset* places, clamped to the ends of the queue.
 
         Args:
             spec_id: The entry's identity.
@@ -432,9 +408,8 @@ class RunQueue:
         Returns:
             True if anything was removed.
         """
-        if not self._operations and not self._procedures:
+        if not self._procedures:
             return False
-        self._operations.clear()
         self._procedures.clear()
         logger.info("Run queue: cleared")
         return True
@@ -443,9 +418,9 @@ class RunQueue:
         """Return every waiting spec in the order they will run.
 
         Returns:
-            Operations first (in their own order), then procedures.
+            The waiting specs, in queue order.
         """
-        return (*self._operations, *self._procedures)
+        return tuple(self._procedures)
 
     def entries(self) -> tuple[dict[str, Any], ...]:
         """Return ``snapshot()`` rendered as JSON-safe dicts."""
@@ -455,13 +430,9 @@ class RunQueue:
         """Remove and return the spec that should run next.
 
         Returns:
-            The first waiting operation if there is one, else the first
-            waiting procedure, else ``None`` for an empty queue.
+            The first waiting spec, else ``None`` for an empty queue.
         """
-        for bucket in (self._operations, self._procedures):
-            if bucket:
-                return bucket.pop(0)
-        return None
+        return self._procedures.pop(0) if self._procedures else None
 
     def find(self, spec_id: str) -> RunSpec | None:
         """Return the queued spec with this id, or ``None``."""
@@ -473,11 +444,11 @@ class RunQueue:
 
     def __len__(self) -> int:
         """Return how many specs are waiting."""
-        return len(self._operations) + len(self._procedures)
+        return len(self._procedures)
 
     def __bool__(self) -> bool:
         """True while anything is waiting."""
-        return bool(self._operations or self._procedures)
+        return bool(self._procedures)
 
 
 def build_run(
@@ -490,11 +461,10 @@ def build_run(
     """Construct the one live object a spec describes.
 
     The other half of the pull seam: the engine asks for the next run, and
-    exactly one procedure/operation instance comes into existence, for the run
-    that is about to start. A procedure is assembled by
-    ``run_builder.build_procedure()`` — the one headless construction path —
-    and an operation by its own ``cls(station, **params)`` constructor shape,
-    the same two shapes ``Orchestrator.submit()`` honours.
+    exactly one procedure instance comes into existence, for the run that is
+    about to start, assembled by ``run_builder.build_procedure()`` — the one
+    headless construction path, the same shape ``Orchestrator.submit()``
+    honours.
 
     Args:
         spec: The queued spec.
@@ -504,11 +474,10 @@ def build_run(
             (contract C11).
         experiment_info: Experiment context stamped onto the run, read at
             build time so a queued run belongs to the experiment that is open
-            when it actually starts. Ignored for an operation, which records
-            no experiment metadata of its own.
+            when it actually starts.
 
     Returns:
-        A ready procedure or operation instance, reduced to a **probe run**
+        A ready procedure instance, reduced to a **probe run**
         when the spec carries a ``probe_spec``, and carrying ``queued_by``:
         the spec's **Actor**, which becomes the **run owner** when the engine
         starts it (see ``Orchestrator._pull_next_run()``). It rides on the
@@ -529,19 +498,16 @@ def build_run(
             f"unknown {spec.kind} {spec.run_class!r}: the run catalog holds "
             f"{sorted(run_catalog)}"
         )
-    if spec.kind == KIND_OPERATION:
-        run = build_operation(run_class, station=station, params=spec.params)
-    else:
-        run = build_procedure(
-            run_class,
-            station=station,
-            params=dict(spec.params),
-            sample_info=dict(spec.sample_info),
-            data_directory=spec.data_directory,
-            file_prefix=spec.file_prefix,
-            experiment_info=dict(experiment_info) if experiment_info else None,
-            probe=ProbeSpec.from_json(spec.probe_spec) if spec.probe_spec else None,
-        )
+    run = build_procedure(
+        run_class,
+        station=station,
+        params=dict(spec.params),
+        sample_info=dict(spec.sample_info),
+        data_directory=spec.data_directory,
+        file_prefix=spec.file_prefix,
+        experiment_info=dict(experiment_info) if experiment_info else None,
+        probe=ProbeSpec.from_json(spec.probe_spec) if spec.probe_spec else None,
+    )
     run.queued_by = spec.actor
     return run
 
@@ -555,7 +521,7 @@ def _accepts_extra_params(run_class: type) -> bool:
     a closed signature can be told that a supplied name is undeclared.
 
     Args:
-        run_class: The procedure or operation class being queued.
+        run_class: The procedure class being queued.
 
     Returns:
         True when ``__init__`` declares a ``**kwargs`` catch-all.
@@ -578,7 +544,7 @@ def _declared_param_findings(
     layer happens to notice it first.
 
     Args:
-        run_class: The procedure or operation class being queued.
+        run_class: The procedure class being queued.
         params: The supplied parameter values.
 
     Returns:
@@ -652,7 +618,7 @@ def _target_findings(
     experiment's envelope, which narrows it.
 
     Args:
-        run: The freshly built procedure or operation.
+        run: The freshly built procedure.
         station: The Station it would drive.
         envelope: The open experiment's envelope, or ``None``.
 
@@ -731,10 +697,10 @@ def validate_run(
     calls, and what a caller with no session layer can call directly.
 
     Args:
-        run_class: The procedure or operation class being queued.
+        run_class: The procedure class being queued.
         params: The parameter values it would run with.
         station: The Station the run would drive.
-        kind: ``"procedure"`` or ``"operation"``.
+        kind: ``"procedure"``.
         sample_info: Sample metadata the run would record.
         data_directory: Directory the run would write into. Never created or
             written here.
@@ -871,9 +837,9 @@ class RunQueueHost:
         """Check a proposed run without dispatching anything.
 
         Args:
-            run_class: The procedure or operation class to check.
+            run_class: The procedure class to check.
             params: The parameter values it would run with.
-            kind: ``"procedure"`` or ``"operation"``.
+            kind: ``"procedure"``.
             sample_info: Sample metadata the run would record.
             data_directory: Directory the run would write into.
             file_prefix: Filename prefix the run would use.
@@ -920,9 +886,9 @@ class RunQueueHost:
         """Validate a proposed run and, if it passes, queue it.
 
         Args:
-            run_class: The procedure or operation class to queue.
+            run_class: The procedure class to queue.
             params: The parameter values it will run with.
-            kind: ``"procedure"`` or ``"operation"``.
+            kind: ``"procedure"``.
             sample_info: Sample metadata to record with the run.
             data_directory: Directory the run writes into.
             file_prefix: Optional filename prefix.
@@ -1055,7 +1021,7 @@ class RunQueueHost:
             spec: A spec this host has already popped.
 
         Returns:
-            A ready procedure or operation.
+            A ready procedure.
 
         Raises:
             KeyError: If the catalog holds no class of the spec's name.
@@ -1081,7 +1047,7 @@ class RunQueueHost:
         touches.
 
         Returns:
-            A ready procedure or operation, or ``None`` when the queue is
+            A ready procedure, or ``None`` when the queue is
             empty or this host has no Station/catalog to build with.
 
         Raises:

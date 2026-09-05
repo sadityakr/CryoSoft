@@ -39,8 +39,8 @@ see where judgement overrode it, and so a new row has somewhere to start):
 3. Anything that only reads is ``read``.
 
 Four rows deliberately DEVIATE from rule 1, and say so in their rationale:
-the magnet's persistent-mode and switch-heater capabilities are
-operation-scope but command the largest stored energy on the station, which
+the magnet's persistent-mode and switch-heater capabilities carry the wider
+capability scope but command the largest stored energy on the station, which
 is run control however the decorator is spelled.
 
 **No silent default.** An action with no row is not guessed at: it is
@@ -126,17 +126,9 @@ COMMAND_ACTION_CLASSES: dict[CommandName, ClassifiedAction] = {
     CommandName.RUN_PROCEDURE: ClassifiedAction(
         ActionClass.RUN_CONTROL, "Starts a measurement on the mounted sample."
     ),
-    CommandName.RUN_OPERATION: ClassifiedAction(
-        ActionClass.RUN_CONTROL,
-        "Starts an operation — cryogen handling and sample access, the "
-        "physical procedures with a person at the cryostat.",
-    ),
     CommandName.QUEUE_PROCEDURE: ClassifiedAction(
         ActionClass.RUN_CONTROL,
         "Commits the station to a measurement it will start unattended.",
-    ),
-    CommandName.QUEUE_OPERATION: ClassifiedAction(
-        ActionClass.RUN_CONTROL, "As queue_procedure, for an operation."
     ),
     CommandName.RUN_QUEUE: ClassifiedAction(
         ActionClass.RUN_CONTROL, "Pulls the next queued run and starts it."
@@ -153,19 +145,6 @@ COMMAND_ACTION_CLASSES: dict[CommandName, ClassifiedAction] = {
         ActionClass.RUN_CONTROL,
         "Ends the run and discards what it would still have measured; "
         "recovery keeps a run alive rather than ending it.",
-    ),
-    # ── Operation steps ──
-    CommandName.CONFIRM_OPERATION: ClassifiedAction(
-        ActionClass.RUN_CONTROL,
-        "Asserts that a physical step at the cryostat was done. An agent "
-        "self-confirming a step nobody performed is the accountability case "
-        "this whole layer exists for.",
-    ),
-    CommandName.SKIP_OPERATION_STEP: ClassifiedAction(
-        ActionClass.RUN_CONTROL, "Declares a physical step unnecessary."
-    ),
-    CommandName.FINISH_OPERATION: ClassifiedAction(
-        ActionClass.RUN_CONTROL, "Ends the operation and records its outcome."
     ),
     # ── Instrument actions ──
     CommandName.SUBMIT_GLOBAL_ACTION: ClassifiedAction(

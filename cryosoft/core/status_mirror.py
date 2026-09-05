@@ -275,7 +275,7 @@ class StatusMirror(QObject):
         return self._snapshot.pause_pending
 
     def active_run_kind(self) -> str | None:
-        """Return ``"procedure"``/``"operation"``, or ``None`` when idle."""
+        """Return ``"procedure"``, or ``None`` when idle."""
         return self._snapshot.active_run_kind
 
     def scanner_enabled(self) -> bool:

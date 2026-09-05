@@ -467,14 +467,6 @@ class QueuePanel(QGroupBox):
         if entry is None:
             return
         spec = entry.spec
-        if spec.kind != KIND_PROCEDURE:
-            QMessageBox.warning(
-                self,
-                "Cannot Probe This Item",
-                "Only a procedure can be probed — an operation is a servicing "
-                "action, not a measurement to reduce.",
-            )
-            return
         run_class = self._classes.get(spec.run_class)
         if run_class is None:
             QMessageBox.warning(

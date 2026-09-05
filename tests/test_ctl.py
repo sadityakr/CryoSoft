@@ -118,12 +118,11 @@ def test_the_default_actor_names_the_shell_and_the_machine():
     assert "@" in actor
 
 
-def test_discovery_finds_the_shipped_procedures_and_operations():
+def test_discovery_finds_the_shipped_procedures():
     """The run catalog an entry point owns, so a run can travel as a class name."""
     catalog = discover_run_catalog()
 
     assert "FieldSweep" in catalog
-    assert "HeliumFillOperation" in catalog
     assert all(isinstance(cls, type) for cls in catalog.values())
 
 

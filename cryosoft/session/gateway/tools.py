@@ -388,14 +388,12 @@ _PROBE_SPEC_SCHEMA: dict[str, Any] = {
 }
 
 
-def _run_properties(kind: str, *, probe: bool) -> dict[str, Any]:
-    """Build the shared ``properties`` block of a procedure/operation command.
+def _run_properties(kind: str = "procedure", *, probe: bool = True) -> dict[str, Any]:
+    """Build the shared ``properties`` block of a run command.
 
     Args:
-        kind: ``"procedure"`` or ``"operation"`` — also the argument name
-            carrying the class name.
-        probe: Whether the command accepts a ``probe_spec`` (procedures only;
-            reducing a servicing operation to "a few points" means nothing).
+        kind: The argument name carrying the class name.
+        probe: Whether the command accepts a ``probe_spec``.
 
     Returns:
         The JSON Schema properties for that command's arguments.
@@ -474,14 +472,6 @@ _OWNERSHIP_RATIONALE = (
     "them, so the wire arguments are the method's own plus those two."
 )
 
-#: The step key the two operation-step commands take, said once.
-_STEP_KEY_PROPERTY: dict[str, Any] = {
-    "key": {
-        "type": "string",
-        "description": "The operation step's key, as the operation declares it.",
-    }
-}
-
 #: Commands whose JSON ``args`` are translated by ``Orchestrator.submit()``
 #: rather than being the method's own parameters, plus the one command whose
 #: parameter carries an enum. Every entry says why it deviates; a command
@@ -500,19 +490,6 @@ COMMAND_ARG_SCHEMAS: dict[CommandName, WireArguments] = {
         properties=_run_properties("procedure", probe=True),
         required=("procedure",),
         rationale="As run_procedure — the same payload, queued instead of started.",
-    ),
-    CommandName.RUN_OPERATION: WireArguments(
-        properties=_run_properties("operation", probe=False),
-        required=("operation",),
-        rationale=(
-            "The method takes a built operation object; a client sends the "
-            "class name and its params."
-        ),
-    ),
-    CommandName.QUEUE_OPERATION: WireArguments(
-        properties=_run_properties("operation", probe=False),
-        required=("operation",),
-        rationale="As run_operation — the same payload, queued instead of started.",
     ),
     CommandName.SET_EXPERIMENT_ENVELOPE: WireArguments(
         properties={
@@ -534,21 +511,6 @@ COMMAND_ARG_SCHEMAS: dict[CommandName, WireArguments] = {
     CommandName.ABORT_PROCEDURE: WireArguments(
         properties=dict(_OWNERSHIP_PROPERTIES),
         required=(),
-        rationale=_OWNERSHIP_RATIONALE,
-    ),
-    CommandName.FINISH_OPERATION: WireArguments(
-        properties=dict(_OWNERSHIP_PROPERTIES),
-        required=(),
-        rationale=_OWNERSHIP_RATIONALE,
-    ),
-    CommandName.CONFIRM_OPERATION: WireArguments(
-        properties={**_STEP_KEY_PROPERTY, **_OWNERSHIP_PROPERTIES},
-        required=("key",),
-        rationale=_OWNERSHIP_RATIONALE,
-    ),
-    CommandName.SKIP_OPERATION_STEP: WireArguments(
-        properties={**_STEP_KEY_PROPERTY, **_OWNERSHIP_PROPERTIES},
-        required=("key",),
         rationale=_OWNERSHIP_RATIONALE,
     ),
     CommandName.SET_AGENT_GATE: WireArguments(
@@ -1100,15 +1062,9 @@ SESSION_TOOLS: tuple[ToolSpec, ...] = (
         {
             "procedure": {
                 "type": "string",
-                "description": "Class name of the procedure or operation.",
+                "description": "Class name of the procedure.",
             },
             "params": {"type": "object", "description": "The values it would run with."},
-            "kind": {
-                "type": "string",
-                "enum": ["procedure", "operation"],
-                "default": "procedure",
-                "description": "Which kind of run is proposed.",
-            },
             "sample_info": {"type": "object", "description": "Sample metadata."},
             "data_directory": {
                 "type": "string",
@@ -1485,7 +1441,7 @@ class ToolContext:
             ``current_experiment()``, ``validate_run()``), duck-typed so a
             test can pass a stub. It is what supplies the Station to build
             against and the open experiment's envelope.
-        run_catalog: ``{class __name__: procedure/operation class}`` — the
+        run_catalog: ``{class __name__: procedure class}`` — the
             catalog a proposed run's class name is resolved through, supplied
             by whoever owns discovery because this package may not import
             ``cryosoft.procedures``.
@@ -2062,7 +2018,6 @@ def _tool_validate_run(args: Mapping[str, Any], context: ToolContext) -> Any:
         validation = experiments.validate_run(
             run_class,
             dict(args.get("params") or {}),
-            kind=str(args.get("kind", "procedure")),
             sample_info=dict(args.get("sample_info") or {}),
             data_directory=str(args.get("data_directory", "")),
             file_prefix=str(args.get("file_prefix", "")),

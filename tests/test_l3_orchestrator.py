@@ -12,7 +12,6 @@ from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
 from cryosoft.core.plan import Command, ExperimentEnvelope, PhasePlan, StepPlan, Target
 from cryosoft.core.station import Station, build_station
 from cryosoft.procedures.field_sweep import FieldSweep
-from cryosoft.procedures.operations.helium_fill import HeliumFillOperation
 from cryosoft.session.run_queue import RunQueue, RunSpec, build_run
 from cryosoft.virtual_instruments.base import BaseVirtualInstrument
 from cryosoft.virtual_instruments.rampable import RampableVI
@@ -3062,39 +3061,6 @@ def test_dict_payload_starts_a_run_and_is_answered_ok(port):
     orch.abort_procedure()
 
 
-def test_an_operation_dict_payload_starts_an_operation_run(station, qtbot, tmp_path):
-    """The other headless construction path: an operation, submitted as JSON.
-
-    ``build_operation()`` is what turns the payload into the live operation,
-    so the engine port covers both run kinds with no inline constructor call
-    of its own.
-    """
-    orch = Orchestrator(
-        station,
-        tick_interval_ms=10,
-        run_catalog={"HeliumFillOperation": HeliumFillOperation},
-    )
-    orch.start_monitoring()
-    verdicts: list[ev.Verdict] = []
-    orch.verdict_emitted.connect(verdicts.append)
-    try:
-        request_id = orch.submit(
-            ev.Command(
-                name=ev.CommandName.RUN_OPERATION,
-                actor=AGENT,
-                args={
-                    "operation": "HeliumFillOperation",
-                    "params": {"person": "AK"},
-                },
-            )
-        )
-
-        assert [v.request_id for v in verdicts] == [request_id]
-        assert verdicts[0].code is ev.VerdictCode.OK
-        assert orch.active_run_kind() == "operation"
-        orch.abort_procedure()
-    finally:
-        orch.shutdown()
 
 
 def test_a_run_payload_naming_no_known_class_fails_without_raising(port):
@@ -3652,19 +3618,9 @@ class QueueableProcedure(MockProcedure):
         super().__init__(station)
 
 
-class QueueableOperation(MockProcedure):
-    """A duck-typed operation: same plan interface, operation command scope."""
-
-    name = "Queueable Operation"
-    command_scope = "operation"
-
-
 def _pull_seam(orchestrator, station, queue):
     """Wire *queue* to the engine as its pull seam, and return the catalog."""
-    catalog = {
-        "QueueableProcedure": QueueableProcedure,
-        "QueueableOperation": QueueableOperation,
-    }
+    catalog = {"QueueableProcedure": QueueableProcedure}
 
     def next_run():
         spec = queue.pop_next()
@@ -3677,27 +3633,10 @@ def _pull_seam(orchestrator, station, queue):
     return catalog
 
 
-def test_a_queued_operation_starts_ahead_of_a_queued_procedure(orchestrator, station):
-    """Killer #1: queue-jumping survives the queue moving out of the engine.
-
-    The procedure is queued first and the operation second; the operation
-    still starts first, because the queue orders operations ahead of
-    procedures and the engine pulls from it in that order.
-    """
-    queue = RunQueue()
-    _pull_seam(orchestrator, station, queue)
-    queue.add(RunSpec(kind="procedure", run_class="QueueableProcedure"))
-    queue.add(RunSpec(kind="operation", run_class="QueueableOperation"))
-
-    orchestrator.run_queue()
-
-    assert isinstance(orchestrator._procedure, QueueableOperation)
-    assert [spec.run_class for spec in queue.snapshot()] == ["QueueableProcedure"]
-    orchestrator.abort_procedure()
 
 
 def test_the_pull_seam_starts_a_plain_procedure_as_a_procedure(orchestrator, station):
-    """A pulled run with no operation scope goes down the procedure path."""
+    """A run pulled off the queue goes down the procedure path."""
     queue = RunQueue()
     _pull_seam(orchestrator, station, queue)
     queue.add(RunSpec(kind="procedure", run_class="QueueableProcedure"))
@@ -3834,15 +3773,15 @@ def test_queueing_a_run_broadcasts_the_whole_queue(port, station):
     """One event describes the queue as it now stands, in run order."""
     orch, recorder, _tmp_path = port
     orch.queue_procedure(MockProcedure(station))
-    orch.queue_operation(QueueableOperation(station))
+    orch.queue_procedure(QueueableProcedure(station))
 
     events = recorder.of_type(ev.QueueChanged)
     assert len(events) == 2
     assert [entry["run_class"] for entry in events[-1].entries] == [
-        "QueueableOperation",
         "MockProcedure",
+        "QueueableProcedure",
     ]
-    assert events[-1].entries[0]["kind"] == "operation"
+    assert events[-1].entries[0]["kind"] == "procedure"
 
 
 def test_a_queue_changed_event_names_the_actor_who_queued(port, tmp_path):
@@ -4213,25 +4152,6 @@ def test_safety_and_recovery_commands_are_not_owner_scoped(port):
     assert orch.state == OrchestratorState.EMERGENCY.value
 
 
-def test_an_operations_steps_are_owner_scoped(station, qtbot, tmp_path):
-    """confirm / skip / finish are the owner's, exactly as abort is."""
-    orch = Orchestrator(station, tick_interval_ms=10)
-    recorder = _Recorder(orch)
-    try:
-        orch.run_operation(QueueableOperation(station), actor=AGENT_A)
-        assert orch.status_snapshot().run["owner"] == AGENT_A.ref()
-
-        for name in (
-            ev.CommandName.CONFIRM_OPERATION,
-            ev.CommandName.SKIP_OPERATION_STEP,
-        ):
-            verdict = _submit(orch, recorder, name, AGENT_B, key="needle_valve")
-            assert verdict.detail["rule"] == "run_owner", name
-
-        verdict = _submit(orch, recorder, ev.CommandName.FINISH_OPERATION, AGENT_B)
-        assert verdict.detail["rule"] == "run_owner"
-    finally:
-        orch.shutdown()
 
 
 def test_a_run_handed_to_the_queue_is_owned_by_whoever_queued_it(

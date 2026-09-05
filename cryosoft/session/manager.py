@@ -113,7 +113,7 @@ class ExperimentManager(QObject):
                 live object the engine pulls. ``None`` (a unit test that only
                 exercises the experiment tier) leaves every other feature
                 working; the two that need it say so.
-            run_catalog: ``{class __name__: procedure/operation class}``, the
+            run_catalog: ``{class __name__: procedure class}``, the
                 catalog a queued **run spec**'s class name is resolved
                 through. Supplied by whoever owns discovery, because this
                 package may not import ``cryosoft.procedures`` (contract C11).
@@ -584,9 +584,9 @@ class ExperimentManager(QObject):
         bounds, instead of an hour later when the run would have started.
 
         Args:
-            procedure_cls: The procedure or operation class to check.
+            procedure_cls: The procedure class to check.
             params: The parameter values it would run with.
-            kind: ``"procedure"`` or ``"operation"``.
+            kind: ``"procedure"``.
             sample_info: Sample metadata the run would record.
             data_directory: Directory the run would write into. Never created
                 or written here.
@@ -629,10 +629,9 @@ class ExperimentManager(QObject):
         the queue, so nothing waiting in it is known to be unrunnable.
 
         Args:
-            procedure_cls: The procedure or operation class to queue.
+            procedure_cls: The procedure class to queue.
             params: The parameter values it will run with.
-            kind: ``"procedure"`` or ``"operation"``. Operations jump ahead of
-                every queued procedure.
+            kind: ``"procedure"``.
             sample_info: Sample metadata to record with the run.
             data_directory: Directory the run writes into.
             file_prefix: Optional filename prefix.
@@ -704,7 +703,7 @@ class ExperimentManager(QObject):
         an experiment was opened still belongs to the one open when it runs.
 
         Returns:
-            A ready procedure or operation, or ``None`` when the queue is
+            A ready procedure, or ``None`` when the queue is
             empty or this manager has no Station/catalog to build with.
 
         Raises:
@@ -739,7 +738,7 @@ class ExperimentManager(QObject):
             spec: A spec ``take_next_spec()`` returned.
 
         Returns:
-            A ready procedure or operation.
+            A ready procedure.
 
         Raises:
             KeyError: If the run catalog holds no class of the spec's name.

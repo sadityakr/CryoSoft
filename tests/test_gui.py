@@ -2849,27 +2849,6 @@ def test_probe_first_does_nothing_without_a_selected_waiting_row(procedure_win):
     assert not panel._probe_label.isVisible()
 
 
-def test_probe_first_refuses_an_operation_row(procedure_win, monkeypatch):
-    """An operation is a servicing action, not a measurement to reduce."""
-    from cryosoft.session.run_queue import KIND_OPERATION, RunSpec
-
-    panel = procedure_win._queue_panel
-    spec = panel._host.add_spec(
-        RunSpec(kind=KIND_OPERATION, run_class="HeliumFillOperation", params={})
-    )
-    settled(procedure_win._orchestrator)
-    panel._sync_from_queue()
-    panel._select_spec(spec.spec_id)
-    warnings: list[str] = []
-    monkeypatch.setattr(
-        QMessageBox, "warning", lambda *args, **kwargs: warnings.append(args[2])
-    )
-
-    procedure_win.findChild(QPushButton, "queue_probe_btn").click()
-    settled(procedure_win._orchestrator)
-
-    assert warnings and "operation" in warnings[0]
-    assert len(panel._host.snapshot()) == 1, "nothing was queued"
 
 
 def test_run_now_passes_file_prefix_to_procedure_instance(procedure_win, qtbot):
@@ -2917,20 +2896,18 @@ def test_monitor_instrument_panels_exist_for_every_vi(monitor_win, station):
 
 
 def test_monitor_fixed_quadrants_exist_with_expected_content(monitor_win):
-    """Sample Info and the Operations quadrant contain the expected widgets.
+    """Sample Info and the Ramps/Agents quadrant contain the expected widgets.
 
-    The Log view moved to page 2 (ServicingLogPage) in Phase 5; the Other
-    Devices section is retired (measurement/switch VIs are instrument cards
-    now), so the bottom-right quadrant is Operations — a placeholder label
-    when the setup declares no operations/cryogenics config.
+    The Log view moved to page 2 (the Logs page); the Other Devices section
+    is retired (measurement/switch VIs are instrument cards now), so the
+    bottom-right quadrant is the ramp tracker over the agent panel.
     """
     sample_quadrant = monitor_win.findChild(QScrollArea, "session_info_scroll")
     assert sample_quadrant is not None
     assert sample_quadrant.widget().findChild(QLineEdit, "sample_name_input") is not None
 
-    operations_quadrant = monitor_win.findChild(QWidget, "operations_quadrant")
-    assert operations_quadrant is not None
-    assert monitor_win._operations_panel is None  # no operations config wired here
+    assert monitor_win.findChild(QWidget, "ramps_quadrant") is not None
+    assert monitor_win.findChild(QWidget, "agents_quadrant") is not None
     assert monitor_win._log_panel is monitor_win._servicing_log_page.findChild(QTextEdit, "log_panel")
 
 
@@ -3195,64 +3172,6 @@ def test_status_log_appends_status_messages(procedure_win, orchestrator):
     status_log = procedure_win.findChild(QTextEdit, "status_log")
     orchestrator.status_message.emit("Measuring point 3/11")
     assert "Measuring point 3/11" in status_log.toPlainText()
-
-
-# ── ProcedureWindow is operation-blind (hard status separation) ──────────
-
-
-class _StubOperation:
-    """A minimal duck-typed active-run stand-in with command_scope='operation'."""
-
-    name = "Helium Fill"
-    command_scope = "operation"
-
-
-def test_status_log_stays_empty_while_operation_runs(procedure_win, orchestrator):
-    """_emit_status() routes to operation_status, never status_message, for an operation run."""
-    status_log = procedure_win.findChild(QTextEdit, "status_log")
-    engine = engine_of(orchestrator)
-    set_on_engine(orchestrator, "_procedure", _StubOperation())
-    try:
-        on_engine(orchestrator, lambda: engine._emit_status("Ramping magnet_z to 0 T"))
-    finally:
-        set_on_engine(orchestrator, "_procedure", None)
-    assert status_log.toPlainText() == ""
-
-
-def test_abort_button_does_not_act_while_operation_runs(procedure_win, orchestrator, monkeypatch):
-    """The Abort button no-ops (no confirmation dialog, no abort_procedure()) for an operation."""
-    called = []
-    monkeypatch.setattr(orchestrator, "abort_procedure", lambda: called.append(True))
-    engine = engine_of(orchestrator)
-    set_on_engine(orchestrator, "_procedure", _StubOperation())
-    # The window reads the run kind off its mirror, so the snapshot has to
-    # have crossed back before the click.
-    on_engine(orchestrator, engine._emit_status_snapshot)
-    try:
-        procedure_win._on_abort()
-    finally:
-        set_on_engine(orchestrator, "_procedure", None)
-        on_engine(orchestrator, engine._emit_status_snapshot)
-    assert called == []
-
-
-def test_pause_resume_do_not_act_while_operation_runs(procedure_win, orchestrator, monkeypatch):
-    """Pause/Resume no-op while a helium fill (an operation) is the active run."""
-    pause_calls = []
-    resume_calls = []
-    monkeypatch.setattr(orchestrator, "pause_procedure", lambda: pause_calls.append(True))
-    monkeypatch.setattr(orchestrator, "resume_procedure", lambda: resume_calls.append(True))
-    engine = engine_of(orchestrator)
-    set_on_engine(orchestrator, "_procedure", _StubOperation())
-    on_engine(orchestrator, engine._emit_status_snapshot)
-    try:
-        procedure_win._on_pause_clicked()
-        procedure_win._on_resume_clicked()
-    finally:
-        set_on_engine(orchestrator, "_procedure", None)
-        on_engine(orchestrator, engine._emit_status_snapshot)
-    assert pause_calls == []
-    assert resume_calls == []
 
 
 def test_pause_resume_abort_still_act_on_a_procedure(procedure_win, orchestrator, monkeypatch):

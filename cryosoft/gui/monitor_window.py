@@ -44,7 +44,6 @@ from cryosoft.gui.log_panel import LogPanel
 from cryosoft.gui.notification_banner import NotificationBanner
 from cryosoft.gui.offline_panel import OfflineInstrumentPanel
 from cryosoft.gui.open_experiment_dialog import OpenExperimentDialog
-from cryosoft.gui.operations_panel import OperationsPanel
 from cryosoft.gui.ramp_tracker_panel import RampTrackerPanel
 from cryosoft.gui.servicing_log_page import ServicingLogPage
 from cryosoft.gui.session_dialogs import ResumeSessionDialog
@@ -92,35 +91,22 @@ _GEOMETRY_KEY = "MonitorWindow/geometry"
 _MAIN_SPLITTER_KEY = "MonitorWindow/quadrant_main_splitter"
 _LEFT_SPLITTER_KEY = "MonitorWindow/quadrant_left_splitter"
 _RIGHT_SPLITTER_KEY = "MonitorWindow/quadrant_right_splitter"
-_BOTTOM_RIGHT_SPLITTER_KEY = "MonitorWindow/quadrant_bottom_right_splitter"
 _AGENTS_SPLITTER_KEY = "MonitorWindow/quadrant_agents_splitter"
 
-# Minimum widths for the bottom-right quadrant's two sub-panels, and the
-# default split between them. Asymmetric on purpose: a ramp row is one line of
-# numbers plus a button, while an OperationCard column carries checklists and
-# wrapped detail text and the OperationsPanel stacks two of those columns side
-# by side (its own minimumSizeHint is ~375 px). The MINIMUMS are deliberately
-# well under that: they exist only so a drag cannot crush either pane to
-# nothing, and their sum must stay small enough that the right quadrant column
+# The ramp tracker's minimum width: a pane that displays data gets a real
+# minimum so a splitter drag cannot crush a ramp row's numbers out of
+# readability, and it must stay small enough that the right quadrant column
 # never outgrows half the window — otherwise the main 50/50 quadrant split is
-# forced open on a small screen. Reaching the Operations panel's comfortable
-# width is the DEFAULT SIZES' job instead, which Qt honours whenever the
-# quadrant has the room (and scales down proportionally when it does not,
-# leaving the Operations scroll area to scroll as scroll areas do).
+# forced open on a small screen.
 _RAMPS_MIN_WIDTH = 140
-_OPERATIONS_MIN_WIDTH = 200
-_BOTTOM_RIGHT_DEFAULT_SIZES = [220, 440]
-# Stretch factors, not just initial sizes: setSizes() alone is a one-shot
-# hint that Qt re-divides EVENLY on the next resize, which would hand the
-# ramp tracker half the quadrant it does not need. 1:2 keeps the split
-# proportional at every window width.
-_BOTTOM_RIGHT_STRETCH = (1, 2)
 
-# The bottom-right quadrant's own vertical split: the Ramps/Operations row on
-# top, the Agents sub-panel underneath. Vertical rather than a third column
-# because an agent row is one wide line of text — time, actor, command,
-# verdict, reason — and a third column would wrap every one of them. The
-# minimum is what keeps two rows and the filter visible at the smallest drag.
+# The bottom-right quadrant's vertical split: the Ramps sub-panel on top, the
+# Agents sub-panel underneath. Vertical rather than two columns because an
+# agent row is one wide line of text — time, actor, command, verdict,
+# reason — and a column would wrap every one of them. The minimum is what
+# keeps two rows and the filter visible at the smallest drag. Stretch factors
+# as well as initial sizes: setSizes() alone is a one-shot hint that Qt
+# re-divides evenly on the next resize.
 _AGENTS_MIN_HEIGHT = 90
 _BOTTOM_RIGHT_VERTICAL_SIZES = [220, 220]
 _BOTTOM_RIGHT_VERTICAL_STRETCH = (1, 1)
@@ -151,10 +137,9 @@ class MonitorWindow(QMainWindow):
     measurement and switch cards tagged by role (the switch card carries the
     station-wide Enable Scanner checkbox) — top-right is the
     :class:`TrendsQuadrant`, bottom-left is the :class:`ExperimentInfoPanel`,
-    and bottom-right splits vertically into a horizontal row of the
-    :class:`RampTrackerPanel` (left) and the optional
-    :class:`OperationsPanel` (right), over the full-width
-    :class:`AgentPanel`. The header carries the :class:`TakeoverStrip`.
+    and bottom-right splits vertically into the :class:`RampTrackerPanel`
+    over the :class:`AgentPanel`. The header carries the
+    :class:`TakeoverStrip`.
     Every splitter
     boundary is draggable; nothing in the grid can be closed, detached, or
     floated. Page 2 (Logs) is a :class:`ServicingLogPage` hosting one table
@@ -187,12 +172,6 @@ class MonitorWindow(QMainWindow):
             block (``Station.read_cryogenics_config()``), or None/empty when
             the setup has no such block. Optional — every existing
             construction site keeps working unchanged.
-        operations_config: The active config's resolved ``operations:``
-            block (``Station.read_operations_config()``), or None/empty when
-            the setup declares none. The Operations panel is available when
-            cryogenics is enabled OR this is non-empty — a setup with only
-            ``sample_load``/``sample_unload`` still gets the panel, minus
-            the cryo section.
         helium_store: The active setup's HeliumRecordStore, or None.
         servicing_store: The active setup's ServicingLogStore, or None.
         servicing_log_kinds: The declared, editable log-kind keys this setup
@@ -233,7 +212,6 @@ class MonitorWindow(QMainWindow):
         analysis_runner: Any | None = None,
         session_store: SessionStore | None = None,
         cryogenics_config: dict[str, Any] | None = None,
-        operations_config: dict[str, dict[str, Any]] | None = None,
         helium_store: HeliumRecordStore | None = None,
         servicing_store: ServicingLogStore | None = None,
         servicing_log_kinds: list[str] | None = None,
@@ -264,29 +242,20 @@ class MonitorWindow(QMainWindow):
         # Cryogenics management,
         # all optional — every existing construction site (and every prior
         # test) keeps working with these left at their None defaults, which
-        # simply builds the Logs page with no tables/no Operations panel.
+        # simply builds the Logs page with no tables.
         self._cryogenics_config = cryogenics_config
-        self._operations_config = dict(operations_config or {})
         self._helium_store = helium_store
         self._servicing_store = servicing_store
         self._servicing_log_kinds = list(servicing_log_kinds or [])
         self._cryogenics_recorder = cryogenics_recorder
-        self._operations_panel: OperationsPanel | None = None
-        #: Always built (unlike the Operations panel): every setup can ramp
-        #: something, and the tracker shows its own empty state otherwise.
+        #: Always built: every setup can ramp something, and the tracker
+        #: shows its own empty state otherwise.
         self._ramp_tracker: RampTrackerPanel | None = None
         self._cryogenics_enabled = bool(
             self._cryogenics_config
             and self._helium_store is not None
             and self._servicing_store is not None
             and self._station.has_vi(str(self._cryogenics_config.get("level_vi", "")))
-        )
-        # The Operations panel is available when cryogenics is
-        # enabled OR an operations: config block is declared — a setup with
-        # only sample_load/sample_unload still gets the panel, minus the
-        # cryo section.
-        self._operations_panel_enabled = self._cryogenics_enabled or bool(
-            self._operations_config
         )
 
         # Session layer (L6, optional — absent in unit tests). experiment_context()
@@ -622,7 +591,7 @@ class MonitorWindow(QMainWindow):
         top_left = self._build_instruments_quadrant(measurement_vis, switch_vis)
         self._trends = TrendsQuadrant(self._station, parent=self)
         self._session_info = ExperimentInfoPanel(session_manager=self._session_manager)
-        bottom_right = self._build_operations_quadrant()
+        bottom_right = self._build_bottom_right_quadrant()
 
         self._left_splitter = QSplitter(Qt.Orientation.Vertical)
         self._left_splitter.setObjectName("left_splitter")
@@ -636,9 +605,6 @@ class MonitorWindow(QMainWindow):
         self._right_splitter.setChildrenCollapsible(False)
         self._right_splitter.addWidget(self._trends)
         self._right_splitter.addWidget(bottom_right)
-        # The bottom-right quadrant carries three things now (ramps,
-        # operations, agents), so it starts with a little more of the column
-        # than it did when it carried two.
         self._right_splitter.setSizes([700, 300])
 
         self._main_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -1022,38 +988,22 @@ class MonitorWindow(QMainWindow):
                 chk.setChecked(checked)
                 chk.blockSignals(False)
 
-    def _build_operations_quadrant(self) -> QWidget:
-        """Build the bottom-right quadrant: Ramps, Operations, and Agents.
+    def _build_bottom_right_quadrant(self) -> QWidget:
+        """Build the bottom-right quadrant: Ramps over Agents.
 
-        Two levels. The top row is split horizontally into two titled
-        sub-panels: the always-present ``RampTrackerPanel`` on the left
-        (every ramp running right now, each with its own Abort) and the
-        optional ``OperationsPanel`` on the right. They are siblings rather
-        than one stacked column because they answer different questions and
-        are read at different moments — "what is moving right now, and stop
-        it" vs "what servicing action should I start". Underneath, across the
-        full width, sits the ``AgentPanel``: a third question again ("what
-        did the machines do"), and a full-width one, because each of its rows
-        is a single wide line that a third column would only wrap.
+        The always-present ``RampTrackerPanel`` on top (every ramp running
+        right now, each with its own Abort), the ``AgentPanel`` underneath
+        ("what did the machines do"). Stacked rather than side by side
+        because each agent row is a single wide line that a column would only
+        wrap.
 
         Returns:
-            A vertical QSplitter holding the two-panel row and the Agents
-            sub-panel.
+            A vertical QSplitter holding the Ramps and Agents sub-panels.
         """
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setObjectName("bottom_right_splitter")
-        splitter.setChildrenCollapsible(False)
-        splitter.addWidget(self._build_ramps_subpanel())
-        splitter.addWidget(self._build_operations_subpanel())
-        splitter.setSizes(list(_BOTTOM_RIGHT_DEFAULT_SIZES))
-        splitter.setStretchFactor(0, _BOTTOM_RIGHT_STRETCH[0])
-        splitter.setStretchFactor(1, _BOTTOM_RIGHT_STRETCH[1])
-        self._operations_splitter = splitter
-
         column = QSplitter(Qt.Orientation.Vertical)
         column.setObjectName("agents_splitter")
         column.setChildrenCollapsible(False)
-        column.addWidget(splitter)
+        column.addWidget(self._build_ramps_subpanel())
         column.addWidget(self._build_agents_subpanel())
         column.setSizes(list(_BOTTOM_RIGHT_VERTICAL_SIZES))
         column.setStretchFactor(0, _BOTTOM_RIGHT_VERTICAL_STRETCH[0])
@@ -1088,7 +1038,7 @@ class MonitorWindow(QMainWindow):
         return container
 
     def _build_ramps_subpanel(self) -> QWidget:
-        """Build the bottom-right quadrant's left sub-panel: the ramp tracker.
+        """Build the bottom-right quadrant's top sub-panel: the ramp tracker.
 
         Always built — a setup with no rampable VI simply shows the panel's
         own "No ramps running." empty state, and every setup has at least
@@ -1102,8 +1052,6 @@ class MonitorWindow(QMainWindow):
         container.setObjectName("ramps_quadrant")
         # Layout rule: a pane that displays data gets a real minimum so the
         # splitter can never crush a ramp row's numbers out of readability.
-        # Kept modest — a row is one short line plus a button, and every
-        # pixel here is one the (much hungrier) Operations sub-panel loses.
         container.setMinimumWidth(_RAMPS_MIN_WIDTH)
         outer = QVBoxLayout(container)
         outer.setContentsMargins(4, 4, 4, 4)
@@ -1118,52 +1066,6 @@ class MonitorWindow(QMainWindow):
         outer.addWidget(ramps_scroll)
         return container
 
-    def _build_operations_subpanel(self) -> QWidget:
-        """Build the bottom-right quadrant's right sub-panel: the Operations panel.
-
-        The Other Devices section that used to share this quadrant is
-        retired — measurement and switch VIs are full cards in the
-        instrument grid now — so the sub-panel holds the OperationsPanel when
-        ``self._operations_panel_enabled``, else a placeholder label.
-
-        Returns:
-            A QWidget containing the title and the panel (or placeholder).
-        """
-        container = QWidget()
-        container.setObjectName("operations_quadrant")
-        # The OperationsPanel lays its cards out in two columns, so it needs
-        # materially more width than the ramp tracker to render without a
-        # horizontal scrollbar — hence the asymmetric minimums and the
-        # Operations-favouring default split above.
-        container.setMinimumWidth(_OPERATIONS_MIN_WIDTH)
-        outer = QVBoxLayout(container)
-        outer.setContentsMargins(4, 4, 4, 4)
-        outer.setSpacing(4)
-        outer.addWidget(QLabel("<b>Operations</b>"))
-
-        if self._operations_panel_enabled:
-            self._operations_panel = OperationsPanel(
-                self._station,
-                self._orchestrator,
-                dict(self._cryogenics_config or {}) if self._cryogenics_enabled else None,
-                self._operations_config,
-                self._helium_store,
-                self._servicing_store,
-                get_data_dir=self.get_data_dir,
-                get_current_person=self._current_person_for_logs,
-                parent=self,
-            )
-            operations_scroll = QScrollArea()
-            operations_scroll.setObjectName("operations_scroll")
-            operations_scroll.setWidgetResizable(True)
-            operations_scroll.setWidget(self._operations_panel)
-            outer.addWidget(operations_scroll)
-        else:
-            placeholder = QLabel("No operations configured for this setup.")
-            placeholder.setProperty("class", "secondary_label")
-            outer.addWidget(placeholder)
-            outer.addStretch()
-        return container
 
     def _on_page_changed(self, index: int) -> None:
         """Switch the central QStackedWidget's page and refresh Logs on show.
@@ -1496,13 +1398,8 @@ class MonitorWindow(QMainWindow):
         self._orchestrator.action_succeeded.connect(self._on_action_confirmed)
         # Separate from InstrumentPanel's own states_updated connections
         # (each panel connects itself in its constructor) — this slot only
-        # feeds the Trends quadrant and the optional Operations panel.
+        # feeds the Trends quadrant.
         self._orchestrator.states_updated.connect(self._on_states_updated)
-        # operation_status fires every tick while an operation runs (like
-        # states_updated), so it routes through this window too rather than
-        # connecting the panel directly (gui-edit skill's destruction-order
-        # rule).
-        self._orchestrator.operation_status.connect(self._on_operation_status)
         # ramps_updated likewise fires every tick, so it routes through this
         # window rather than connecting the tracker directly (gui-edit
         # skill's destruction-order rule).
@@ -1595,7 +1492,7 @@ class MonitorWindow(QMainWindow):
         )
 
     def _on_states_updated(self, state: dict) -> None:
-        """Forward the per-tick state snapshot to the Trends and Operations panels.
+        """Forward the per-tick state snapshot to the Trends quadrant.
 
         The WINDOW (not the child panels) is the connection receiver on
         purpose: Qt severs a receiver's connections at the start of its own
@@ -1609,8 +1506,6 @@ class MonitorWindow(QMainWindow):
             state: ``{vi_name: {field: value, ...}}`` from the Orchestrator.
         """
         self._trends.on_states_updated(state)
-        if self._operations_panel is not None:
-            self._operations_panel.on_states_updated(state)
 
         # Calm a shown fault-warning banner once every runtime fault has
         # cleared — but only if THIS banner is the one showing
@@ -1640,18 +1535,6 @@ class MonitorWindow(QMainWindow):
         self._last_fault_message = message
         self._banner.show_message(message, BANNER_SEVERITY_WARNING)
 
-    def _on_operation_status(self, text: str) -> None:
-        """Forward one operation_status milestone line to the Operations panel.
-
-        Routed through the window for the same teardown-race reason as
-        ``_on_states_updated`` — ``operation_status`` fires every tick while
-        an operation runs, never at a safe run-boundary-only cadence.
-
-        Args:
-            text: The milestone line (``Orchestrator.operation_status``).
-        """
-        if self._operations_panel is not None:
-            self._operations_panel.on_operation_status(text)
 
     def _on_ramps_updated(self, records: list) -> None:
         """Forward this tick's running-ramp records to the Ramps sub-panel.
@@ -1731,8 +1614,7 @@ class MonitorWindow(QMainWindow):
     def _on_run_finished_for_logs(self, _manifest: dict) -> None:
         """Refresh the Logs page's tables after any run finishes.
 
-        A run's manifest (procedure or operation) may have just produced a
-        new servicing-log entry via the CryogenicsRecorder (connected ahead
+        A run's manifest may have just produced a new servicing-log entry via the CryogenicsRecorder (connected ahead
         of this in main.py, so its write always lands before this refresh
         reads); cheap to call even when nothing changed.
         """
@@ -1970,9 +1852,6 @@ class MonitorWindow(QMainWindow):
         settings.setValue(_MAIN_SPLITTER_KEY, self._main_splitter.saveState())
         settings.setValue(_LEFT_SPLITTER_KEY, self._left_splitter.saveState())
         settings.setValue(_RIGHT_SPLITTER_KEY, self._right_splitter.saveState())
-        settings.setValue(
-            _BOTTOM_RIGHT_SPLITTER_KEY, self._operations_splitter.saveState()
-        )
         settings.setValue(_AGENTS_SPLITTER_KEY, self._agents_splitter.saveState())
         self._trends.save_settings()
         super().closeEvent(event)
@@ -1996,7 +1875,6 @@ class MonitorWindow(QMainWindow):
             (self._main_splitter, _MAIN_SPLITTER_KEY),
             (self._left_splitter, _LEFT_SPLITTER_KEY),
             (self._right_splitter, _RIGHT_SPLITTER_KEY),
-            (self._operations_splitter, _BOTTOM_RIGHT_SPLITTER_KEY),
             (self._agents_splitter, _AGENTS_SPLITTER_KEY),
         ):
             state = settings.value(key)

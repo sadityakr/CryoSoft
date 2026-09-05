@@ -367,18 +367,11 @@ class CommandName(str, Enum):
 
     # Runs and the queue
     RUN_PROCEDURE = "run_procedure"
-    RUN_OPERATION = "run_operation"
     QUEUE_PROCEDURE = "queue_procedure"
-    QUEUE_OPERATION = "queue_operation"
     RUN_QUEUE = "run_queue"
     PAUSE_PROCEDURE = "pause_procedure"
     RESUME_PROCEDURE = "resume_procedure"
     ABORT_PROCEDURE = "abort_procedure"
-
-    # Operation steps
-    CONFIRM_OPERATION = "confirm_operation"
-    SKIP_OPERATION_STEP = "skip_operation_step"
-    FINISH_OPERATION = "finish_operation"
 
     # Instrument actions
     SUBMIT_VI_ACTION = "submit_vi_action"
@@ -626,7 +619,7 @@ class StatusSnapshot(_ContractMessage):
             value; see above).
         is_monitoring: Whether the per-tick monitoring cycle is polling.
         pause_pending: Whether a pause is waiting for the current datapoint.
-        active_run_kind: ``"procedure"``/``"operation"``, or ``None``.
+        active_run_kind: ``"procedure"``, or ``None`` while idle.
         scanner_enabled: Whether scanner-sensitive procedures may use it.
         override_active: Whether the EMERGENCY manual override is unlocked
             (the ``override_active(None)`` answer; the per-VI answers live in

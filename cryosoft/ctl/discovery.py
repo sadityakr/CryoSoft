@@ -21,7 +21,6 @@ import logging
 import pkgutil
 from pathlib import Path
 
-from cryosoft.core.operation import OperationBase
 from cryosoft.core.procedure import BaseProcedure
 
 logger = logging.getLogger(__name__)
@@ -31,7 +30,6 @@ __all__ = ["discover_run_catalog"]
 #: The packages walked, and the base each one's classes must derive from.
 _PACKAGES: tuple[tuple[str, type], ...] = (
     ("cryosoft.procedures", BaseProcedure),
-    ("cryosoft.procedures.operations", OperationBase),
 )
 
 
@@ -65,16 +63,16 @@ def _named_subclasses(base: type) -> list[type]:
 
 
 def discover_run_catalog() -> dict[str, type]:
-    """Import the shipped procedures and operations and catalog them by class name.
+    """Import the shipped procedures and catalog them by class name.
 
     A module that fails to import is logged and skipped: one broken procedure
     must not leave a client with no catalog at all.
 
     Returns:
-        ``{class __name__: class}`` for every concrete procedure and
-        operation this installation ships — the mapping the Orchestrator, the
-        run queue and the gateway's ``validate_run`` all resolve a run's class
-        name through.
+        ``{class __name__: class}`` for every concrete procedure this
+        installation ships — the mapping the Orchestrator, the run queue and
+        the gateway's ``validate_run`` all resolve a run's class name
+        through.
     """
     for package_name, _base in _PACKAGES:
         try:

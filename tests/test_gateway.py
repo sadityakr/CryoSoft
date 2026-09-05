@@ -665,9 +665,9 @@ def test_the_gateway_mirrors_ownership_from_the_status_snapshot(qtbot, engine, t
         orch, Role.SESSION, "agent-B", station_info=station.station_info, feed=feed
     )
 
-    from tests.test_l3_orchestrator import QueueableOperation
+    from tests.test_l3_orchestrator import QueueableProcedure
 
-    orch.run_operation(QueueableOperation(station), actor=agent_a.actor)
+    orch.run_procedure(QueueableProcedure(station), actor=agent_a.actor)
     orch._emit_status_snapshot()
     assert agent_b.run_owner() == {"kind": "agent", "id": "agent-A"}
 
