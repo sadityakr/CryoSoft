@@ -114,41 +114,31 @@ class RunFaultCode(str, Enum):
     * ``OK``              — ramping/settling normally, or idle.
     * ``VI_STALE``        — the instrument stopped updating (cached values).
     * ``VI_DISCONNECTED`` — repeated comms failures; assumed off the bus.
-    * ``QUENCH``          — a magnet reported a quench.
+    * ``CRITICAL_FLAG``   — this instrument reported a safety flag its class
+                            declares ``"critical"`` (the Safety-flag manifest
+                            standard), which is what forces EMERGENCY. Never
+                            names a particular flag: a magnet's ``quench``, a
+                            pressure switch and an interlock all reach this
+                            code by declaring the same severity.
     * ``RAMP_STALLED``    — a ramp made no progress for several ticks
                             (``cryosoft.core.stall_detection``).
-    * ``STALLED_RUN``     — RESERVED, no longer emitted. Previously a fixed
-                            30 s timeout on any state assumed to last a single
-                            tick, which was an assumption about how
-                            procedures are written rather than a physical
-                            fact (a long lock-in time constant or a heavily
-                            averaged point can legitimately keep MEASURING
-                            active past 30 s). The producer was removed;
-                            the member is kept because ``core/README.md``
-                            documents ``RunFaultCode`` values as a stable
-                            API that is never renamed, and existing consumers
-                            (``troubleshoot.status_reader``,
-                            ``gui.diagnostics_window``) still map the string
-                            for display so an old ``status.jsonl`` renders
-                            correctly.
     """
 
     OK = "OK"
     VI_STALE = "VI_STALE"
     VI_DISCONNECTED = "VI_DISCONNECTED"
-    QUENCH = "QUENCH"
+    CRITICAL_FLAG = "CRITICAL_FLAG"
     RAMP_STALLED = "RAMP_STALLED"
-    STALLED_RUN = "STALLED_RUN"
 
 
 # Higher = more severe; the record's overall verdict is the worst VI's code.
-# Physical instrument faults (quench, lost comms) outrank a progress stall.
+# Physical instrument faults (a critical flag, lost comms) outrank a
+# progress stall.
 _SEVERITY: dict[RunFaultCode, int] = {
     RunFaultCode.OK: 0,
     RunFaultCode.VI_STALE: 2,
     RunFaultCode.RAMP_STALLED: 3,
-    RunFaultCode.STALLED_RUN: 3,
-    RunFaultCode.QUENCH: 4,
+    RunFaultCode.CRITICAL_FLAG: 4,
     RunFaultCode.VI_DISCONNECTED: 4,
 }
 
@@ -259,7 +249,7 @@ def build_operational_status(
         orch_state: Orchestrator state name (e.g. ``"RAMPING"``).
         elapsed_in_state_s: Seconds since that state was entered.
         state: The station state snapshot ``{vi_name: {field: value, ...}}``,
-            used for the ``_stale`` / ``_disconnected`` flags and magnet quench.
+            used for the ``_stale`` / ``_disconnected`` flags.
         ramp_info: ``{vi_name: {"value","target","rate","ramp_status","phase"}}``.
         prev_gaps: Per-VI gap from the previous tick, for the closing fact.
         wait_target_s / wait_elapsed_s: Settle-wait clock, if in a wait.
@@ -309,6 +299,19 @@ def build_operational_status(
     new_gaps: dict[str, float] = {}
     verdict = RunFaultCode.OK
 
+    # Which VI reported a flag its class declares "critical" — read off this
+    # tick's condition registry rather than off any one instrument's status
+    # word, so a magnet's quench, an interlock and a pressure switch all
+    # reach RunFaultCode.CRITICAL_FLAG by declaring the same severity (the
+    # Safety-flag manifest standard). Critical conditions are station-wide
+    # (affected_vis is None by construction), so the attribution here is to
+    # the VI that REPORTED the flag, which is what source_vis names.
+    critical_by_vi: dict[str, str] = {}
+    for condition in conditions:
+        if condition.origin == "safety" and condition.severity == "critical":
+            for source in condition.source_vis:
+                critical_by_vi.setdefault(source, condition.kind)
+
     for vi_name, ramp in ramp_info.items():
         vi_state = state.get(vi_name, {})
         value = ramp.get("value")
@@ -335,8 +338,11 @@ def build_operational_status(
             code, detail = RunFaultCode.VI_DISCONNECTED, "no response from instrument"
         elif vi_state.get("_stale") or ramp.get("_stale"):
             code, detail = RunFaultCode.VI_STALE, "instrument stopped updating"
-        elif vi_state.get("magnet_status") == "QUENCH":
-            code, detail = RunFaultCode.QUENCH, "magnet quench detected"
+        elif vi_name in critical_by_vi:
+            code, detail = (
+                RunFaultCode.CRITICAL_FLAG,
+                f"critical safety flag '{critical_by_vi[vi_name]}' reported",
+            )
 
         vis.append(
             VIHealth(

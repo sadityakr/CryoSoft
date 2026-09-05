@@ -47,21 +47,15 @@ _CODE_EXPLANATIONS: dict[str, str] = {
         "power, cabling, and address. Close the app and run "
         "`python -m cryosoft.troubleshoot check` for a full preflight."
     ),
-    RunFaultCode.QUENCH.value: (
-        "A magnet reported a quench. Verify the magnet state and helium "
-        "level immediately."
+    RunFaultCode.CRITICAL_FLAG.value: (
+        "This instrument reported a safety flag its class declares critical. "
+        "Find what tripped — the conditions list names the flag — before "
+        "doing anything else."
     ),
     RunFaultCode.RAMP_STALLED.value: (
         "The setpoint is being sent but the value is not following — "
         "suspect a controller/PID limit, a saturated heater, a thermal "
         "load, or the instrument not accepting setpoints."
-    ),
-    RunFaultCode.STALLED_RUN.value: (
-        "Reserved, no longer produced by a running app — kept only so an "
-        "older status.jsonl still renders. If you see this on a live run, "
-        "the log predates the fixed 30 s single-tick-state timeout being "
-        "removed as unreliable (a long lock-in time constant or heavily "
-        "averaged point could legitimately exceed it)."
     ),
 }
 
@@ -71,8 +65,7 @@ _CODE_SEVERITY: dict[str, str] = {
     RunFaultCode.OK.value: "ok",
     RunFaultCode.VI_STALE.value: "warning",
     RunFaultCode.RAMP_STALLED.value: "warning",
-    RunFaultCode.STALLED_RUN.value: "warning",
-    RunFaultCode.QUENCH.value: "error",
+    RunFaultCode.CRITICAL_FLAG.value: "error",
     RunFaultCode.VI_DISCONNECTED.value: "error",
 }
 _SEVERITY_COLOR = {"ok": STATUS_OK, "warning": STATUS_WARN, "error": STATUS_ERROR}
@@ -137,7 +130,7 @@ class DiagnosticsWindow(QMainWindow):
         self._verdict_badge = QLabel("—")
         self._verdict_badge.setObjectName("verdict_badge")
         self._verdict_badge.setProperty("class", "verdict_badge")
-        # The longest code (STALLED_RUN/VI_DISCONNECTED) must fit without
+        # The longest code (CRITICAL_FLAG/VI_DISCONNECTED) must fit without
         # wrapping; a floating sizeHint is not reliably honoured by the
         # QHBoxLayout against the header's stretch.
         self._verdict_badge.setMinimumWidth(140)

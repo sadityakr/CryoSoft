@@ -67,8 +67,10 @@ typed currency shared by all of them.
   retyped, or given a new meaning, and an unknown value is `null` rather than
   a missing key. `RunFaultCode`'s values carry the same guarantee: they are a
   stable API that consumers map for display, so a member is added but never
-  renamed or repurposed (`STALLED_RUN` is kept, and no longer produced, for
-  exactly that reason).
+  repurposed. (`CRITICAL_FLAG` is the one deliberate rename in the framework
+  extraction: the code that used to be `QUENCH` now names the DECLARED
+  severity rather than one magnet's status word, so any setup's critical
+  flag reaches it.)
   One record is written on **every** tick, whether monitoring is on or off,
   so that silence in `status.jsonl` unambiguously means the process stopped
   ticking — the property `troubleshoot status --max-age` gates on. A tick

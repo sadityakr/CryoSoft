@@ -74,14 +74,51 @@ def test_disconnected_outranks_stale():
     assert record["verdict"] == "VI_DISCONNECTED"
 
 
-def test_quench_sets_verdict():
-    state = {"magnet_z": {"magnet_status": "QUENCH"}}
+def test_a_critical_flag_sets_the_verdict_on_the_vi_that_reported_it():
+    """An active critical-severity condition IS the CRITICAL_FLAG verdict.
+
+    Read off this tick's condition registry, never off an instrument's own
+    status word: the code names the declared severity, so any setup's
+    critical flag reaches it (see the Safety-flag manifest standard).
+    """
     ramp_info = {"magnet_z": {"value": 1.0, "target": 2.0, "rate": 0.5, "ramp_status": "RAMPING"}}
-    record, _ = build_operational_status(
-        orch_state="RAMPING", elapsed_in_state_s=1.0, state=state,
-        ramp_info=ramp_info, prev_gaps={},
+    quench = Condition(
+        key="safety:quench",
+        origin="safety",
+        severity="critical",
+        kind="quench",
+        source_vis=("magnet_z",),
+        affected_vis=None,
+        message="Safety flag 'quench' is tripped",
+        since=1.0,
     )
-    assert record["verdict"] == "QUENCH"
+    record, _ = build_operational_status(
+        orch_state="RAMPING", elapsed_in_state_s=1.0, state={},
+        ramp_info=ramp_info, prev_gaps={}, conditions=[quench],
+    )
+    assert record["verdict"] == "CRITICAL_FLAG"
+    assert record["vis"][0]["code"] == "CRITICAL_FLAG"
+    assert "quench" in record["vis"][0]["detail"]
+
+
+def test_a_hold_flag_is_not_a_critical_verdict():
+    """Only critical severity produces the code — a hold is enforced elsewhere."""
+    ramp_info = {"magnet_z": {"value": 1.0, "target": 2.0, "rate": 0.5, "ramp_status": "RAMPING"}}
+    hold = Condition(
+        key="safety:coolant_low",
+        origin="safety",
+        severity="hold",
+        kind="coolant_low",
+        source_vis=("magnet_z",),
+        affected_vis=frozenset({"magnet_z"}),
+        message="Safety flag 'coolant_low' is tripped",
+        since=1.0,
+    )
+    record, _ = build_operational_status(
+        orch_state="RAMPING", elapsed_in_state_s=1.0, state={},
+        ramp_info=ramp_info, prev_gaps={}, conditions=[hold],
+    )
+    assert record["verdict"] == "OK"
 
 
 def test_wait_block_present_only_during_wait():

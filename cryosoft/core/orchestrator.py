@@ -1487,8 +1487,8 @@ class Orchestrator(QObject):
           so the next one is due.
         * ``recover_from_error()`` — no chain. After an error the queue's
           assumptions may no longer hold; the operator restarts explicitly.
-        * ``_acknowledge_emergency()`` — no chain. Acknowledging a quench is
-          not a request to carry on measuring.
+        * ``_acknowledge_emergency()`` — no chain. Acknowledging a critical
+          flag is not a request to carry on measuring.
         * ``_fail_run_for_fault()`` — no chain. A run that failed for an
           instrument fault or a safety hold must not silently auto-continue.
         * ``_tick_body()``'s RAMPING branch when a MANUAL ramp completes — no
@@ -4033,7 +4033,7 @@ class Orchestrator(QObject):
         entry into EMERGENCY is one however it was observed; writing it here
         rather than at each caller is what keeps the two routes from
         diverging (they did: the manual call logged CRITICAL, the tick's
-        quench only ERROR). Callers pass their reason and add no log line of
+        critical-flag entry only ERROR). Callers pass their reason and add no log line of
         their own, so the file log carries exactly one record per entry.
 
         Args:
