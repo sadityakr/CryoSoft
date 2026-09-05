@@ -10,7 +10,7 @@ folder copies the evidence with it — the same rule the **Outbox** follows.
 The record standard
 -------------------
 
-One JSON object per line, appended, never rewritten. Unlike the servicing
+One JSON object per line, appended, never rewritten. Unlike the maintenance
 log and the Outbox — journals of *entities*, where the last line naming an
 id wins — this is a journal of *facts*: every line is a distinct thing that
 happened, ordered by its ``seq``, and nothing here ever supersedes an
@@ -68,7 +68,7 @@ What is recorded, and by whom
   arguments were never seen here.
 * **Operator traffic is not recorded at all.** This file is the answer to
   "what did the machines do"; the physicist's own actions are the rest of
-  the session record (``experiment.json``, the servicing log, the
+  the session record (``experiment.json``, the maintenance log, the
   operational-status log), and mixing the two would make the trail useless
   for the question it exists to answer.
 
@@ -172,7 +172,7 @@ def read_feed(
     The read side of the record standard. A line that is not readable JSON,
     or does not hold an object, is skipped with a WARNING rather than
     failing the read — one mangled line must never strand the rest of the
-    trail, exactly as in ``store.py`` and ``servicing_log.py``.
+    trail, exactly as in ``store.py`` and ``maintenance_log.py``.
 
     Args:
         path: The feed file, normally from

@@ -13,44 +13,11 @@ own README) reaches, over the socket the **Gateway server** publishes: an
 external agent session therefore sees this layer's tool surface and is bound
 by its permission model without holding any of it.
 
-Also hosts the **Servicing Log** framework (`servicing_log.py`): per-setup,
-typed, human-editable logs of servicing events (**log kind**, e.g. the
-legacy **cryogenics log**, now unifying into the flat **servicing** kind —
-see below), the machine-recorded **helium record**, the `CryogenicsRecorder`
-automatic writer, and (Phase 1 of the unification) a pure legacy-migration
-routine — independent of experiments, what technical staff consult and
-maintain. See the **Servicing log** / **Log kind** / **Cryogenics log** /
-**Entry revision** / **Helium record** / **Recording** entries in
+Also hosts the **maintenance log** framework (`maintenance_log.py`):
+per-setup, typed, human-editable logs of maintenance events (**log kind**),
+independent of experiments — what technical staff consult and maintain. See
+the **Maintenance log** / **Log kind** / **Entry revision** entries in
 `GLOSSARY.md`.
-
-**Unification:** the legacy `cryogenics` (editable, one entry per fill) and `operations`
-(machine-only audit trail) kinds are superseded by ONE flat `servicing`
-kind — every entry, regardless of what happened (`entry_kind`:
-`"helium_fill"` / `"sample_load"` / `"sample_unload"` / a future
-operation's key / `"manual"`), shares exactly the same field table (`person`,
-`start_utc`/`end_utc`, `helium_start_pct`/`helium_end_pct`,
-`ln2_start_pct`/`ln2_end_pct`, `notes`, `recording`, `origin`) — no
-kind-specific columns, no `status` field. Phase 1 added the declaration,
-store support (`add_entry`/`revise_entry`/`delete_entry` work for both
-`origin="manual"` and `origin="machine"` entries — origin is a data field,
-not a per-kind editability flag), and `migrate_legacy_servicing_log()` (a
-pure function, plus `ServicingLogStore.migrate_legacy()`) that merges
-existing `cryogenics.jsonl`/`operations.jsonl` into `servicing.jsonl`,
-converts an embedded `level_curve` into a `recordings/<run_id>.json`
-sidecar, and renames the originals to `.bak`. **Phase 2** rewires
-`CryogenicsRecorder` to write ONLY `servicing` — one merged entry per
-finished operation run (any kind, not just fills), with He/LN2
-start/end levels stamped for every run kind (cached at `on_run_started`,
-re-read at finish from the last `states_updated` sample), abort/failure
-reason plus `postconditions_unmet` folded into `notes`, and a recording
-sidecar written whenever the operation's `run_summary()` hands off a
-well-formed generic `"recording"` series and/or a `"steps"` timeline (a
-stepped operation's per-step outcomes, times, and conditions — either
-alone is enough to write the sidecar) — and calls
-`ServicingLogStore.migrate_legacy()` once from `cryosoft.main` at startup.
-The legacy kinds stay declared (readable, `cryogenics` still manually
-editable) so a not-yet-migrated setup's history keeps working, but the
-recorder never writes them again. A later phase unifies the viewer.
 
 Also hosts the **run queue** (`run_queue.py`): the ordered list of runs
 waiting to start, held as immutable **run specs** rather than as live
@@ -116,7 +83,7 @@ GUI imports session).
 
 - Orchestrator signals: `run_started` / `run_finished` manifests (run id,
   procedure, kind, params, data file path, timestamps, terminal status), and
-  `states_updated` (full station state, polled into `CryogenicsRecorder`).
+  `states_updated` (the full station state each monitored tick).
 - The Orchestrator's `event_emitted` stream, for the one fact the manifests
   do not carry: `RunStarted.actor`, stamped onto the `RunRecord` the
   manifest just opened (the manifest signal is emitted first, so the record
@@ -148,12 +115,8 @@ GUI imports session).
 - Questions for the **Embedded assistant** (`AssistantRuntime.ask()`), and
   the `ChatClient` its answers come from — injected, never built here, so a
   deployment with no API key simply constructs no runtime.
-- Servicing-log writes: `ServicingLogStore.add_entry`/`revise_entry`/
-  `delete_entry` (manual, from the GUI's add/edit dialogs, and
-  `CryogenicsRecorder`'s machine-attributed `"servicing"` entries — see
-  `add_entry(..., source="operation")`) and `append_machine_entry`
-  (machine-only kinds; still available for the legacy `"operations"` kind,
-  no longer written by the recorder).
+- Maintenance-log writes: `MaintenanceLogStore.add_entry`/`revise_entry`/
+  `delete_entry`, from the GUI's add/edit dialogs.
 
 ## Exit (what goes out)
 
@@ -230,8 +193,8 @@ GUI imports session).
 - Signals for the GUI: `experiment_changed(dict)`, `run_recorded(dict)`,
   `store_health_changed(dict)` (`{"ok": bool, "detail": str}` — a save
   failure/recovery, emitted once per transition).
-- Servicing-log storage: `<store root>/<config_name>/<kind>.jsonl` (one file
-  per declared log kind) and `<store root>/<config_name>/helium_record.jsonl`.
+- Maintenance-log storage: `<store root>/<config_name>/<kind>.jsonl`, one
+  file per declared log kind.
 - The **Agent feed**, `<experiment_id>/agent_actions.jsonl`
   (`ExperimentStore.agent_feed_path()`) — one line per command a
   non-operator actor submitted, per verdict answering one, per `StateChange`
@@ -291,9 +254,7 @@ file-format change, not a routine edit.
   is the **Params digest** (`core.plan.params_digest()`) of the run's params,
   stamped from the manifest when the run opens and stored rather than
   recomputed on read — so it says what the run actually started with even if
-  the record is later amended, and an operation's step confirmation carrying
-  the same digest proves the two agree without either holding a copy of the
-  other's parameters. A record written before digests were stamped carries an
+  the record is later amended. A record written before digests were stamped carries an
   empty string, never a digest invented on read.
 - **Bundle-relative data paths.** `RunRecord.data_file` is stored relative to
   the experiment's session folder whenever the file lives under it (normally
@@ -313,7 +274,7 @@ file-format change, not a routine edit.
   `agent_actions.jsonl` is a distinct thing that happened, ordered by a
   per-file `seq` that continues where an earlier process left off; nothing
   supersedes an earlier line, so the last-line-wins rule the **Outbox** and
-  the servicing log follow does NOT apply here. Every record carries every
+  the maintenance log follow does NOT apply here. Every record carries every
   key of the standard, `null` where one does not apply — a reader must never
   have to guess whether an absent key means "no" or "old file". A corrupt
   line is skipped with a WARNING, as everywhere else in this layer.
@@ -328,10 +289,9 @@ file-format change, not a routine edit.
 - **The queue is data, and it is validated on the way in.** Nothing waiting
   in the run queue holds a live procedure object, and nothing enters it
   without passing `validate_run()` — so a queued run is never known-unrunnable
-  and never holds a data file or a claim on instruments. Validation covers
-  both run kinds: a procedure through `run_builder.build_procedure()` and an
-  operation through `run_builder.build_operation()`, each built headlessly and
-  thrown away. A `probe_spec` is applied before those checks, so a probe is
+  and never holds a data file or a claim on instruments. Validation builds
+  the run through `run_builder.build_procedure()` headlessly and throws it
+  away. A `probe_spec` is applied before those checks, so a probe is
   validated as what would actually run — its reduced targets, its estimate. The engine PULLS: it
   asks `next_run()` when it is ready, and keeps sole authority over *when* a
   run starts. See `run_queue.py`'s module docstring for why the opposite
@@ -348,36 +308,23 @@ file-format change, not a routine edit.
 - **Disk discipline** (`store.py`): atomic writes (`.tmp` + `os.replace`),
   tolerant loads, and lazy directory creation — nothing is created on disk
   until something is saved.
-- **Qt-widget-free.** `ExperimentManager`/`CryogenicsRecorder` are `QObject`s
-  (signals only); the package never imports Qt widgets or `cryosoft.gui`
-  (contract C11).
-- **Entry-revision model** (`servicing_log.py`): `ServicingLogStore` is
+- **Qt-widget-free.** `ExperimentManager` is a `QObject` (signals only); the
+  package never imports Qt widgets or `cryosoft.gui` (contract C11).
+- **Entry-revision model** (`maintenance_log.py`): `MaintenanceLogStore` is
   append-only — `add_entry`/`revise_entry`/`delete_entry` always append a new
-  `ServiceLogEntry` sharing the earlier one's `entry_id`, never rewrite an
+  `MaintenanceLogEntry` sharing the earlier one's `entry_id`, never rewrite an
   existing line. `entries()` returns only the latest, non-deleted revision
   per `entry_id`; `revisions()` returns the full history. Writes are
   validated/coerced against the log kind's `ParamSpec` fields (unknown field
   or wrong type → `ValueError`); reads tolerate a corrupt line (skipped with
-  a WARNING, never raised) — same discipline as `store.py`. A kind with
-  `editable=False` (e.g. `"operations"`) refuses `add_entry`/`revise_entry`/
-  `delete_entry`; only `append_machine_entry` may write it.
-- **Log kinds are declarations.** Adding a servicing log for a new setup is
+  a WARNING, never raised) — same discipline as `store.py`. A kind declared
+  `editable=False` refuses every write.
+- **Log kinds are declarations.** Adding a log for a new setup is
   one `LogKindSpec` in `DECLARED_LOG_KINDS`, never new store or GUI code —
-  see `LogKindSpec`'s docstring.
-- **Operation data hand-off without a file.** An operation's run-manifest
-  `data_file` may stay empty — the data file is optional on `OperationBase`,
-  so the series travels through the manifest instead:
-  `CryogenicsRecorder.on_run_finished` reads the duck-typed `run_summary()`
-  result off the Orchestrator's `run_finished` manifest
-  (`manifest["summary"]`) and, when it carries a well-formed generic
-  `"recording"` key (GLOSSARY.md's **Recording** — `{"unix_time": [...],
-  "channels": {"<vi>.<value>": [...], ...}}`), writes it as `recordings/<run_id>.json` and
-  stamps that filename into the `servicing` entry's `recording` field — e.g.
-  `HeliumFillOperation`'s bounded in-memory level curve, with no HDF5 file
-  involved. Adding a new field to an existing kind is backward-compatible by
-  construction: `ServicingLogStore` never rewrites an existing line, so an
-  old entry simply lacks the new key — readers must use `.get(field,
-  default)`, never index it directly.
+  see `LogKindSpec`'s docstring. Adding a field to an existing kind is
+  backward-compatible by construction: the store never rewrites an existing
+  line, so an old entry simply lacks the new key — readers must use
+  `.get(field, default)`, never index it directly.
 
 ## How to add a new module
 
@@ -394,24 +341,23 @@ file-format change, not a routine edit.
    `session/eln/README.md`, which owns its own rules) and `session/gateway/`
    (the **Agent gateway**: **Role**s, **Action class**es and the permission
    matrix — see `session/gateway/README.md`, which owns its own rules).
-5. **New servicing-log kind:** add one `LogKindSpec` to `DECLARED_LOG_KINDS`
-   in `servicing_log.py` (fields as `ParamSpec`s, every one with a usable
-   default) — storage, revision handling, and (once Phase 5 lands) the GUI
-   table/add/edit dialogs all follow automatically. Covered immediately by
-   the `test_log_kind_spec_is_valid` conformance test in
-   `tests/test_conformance.py`; add behavior tests to
-   `tests/test_servicing_log.py`.
+5. **New maintenance-log kind:** add one `LogKindSpec` to
+   `DECLARED_LOG_KINDS` in `maintenance_log.py` (fields as `ParamSpec`s,
+   every one with a usable default) — storage and revision handling follow
+   automatically. Covered immediately by the `test_log_kind_spec_is_valid`
+   conformance test in `tests/test_conformance.py`; add behavior tests to
+   `tests/test_maintenance_log.py`.
 
 ## Files
 
 | File | Responsibility | Key public API | Owning test |
 |------|----------------|----------------|-------------|
-| `models.py` | Tolerant-parse records: users, sessions (the L6 tier above an experiment, incl. its `experiments` index), runs (incl. the per-run `eln_link` the publisher stamps, the `pending_eln_draft` an unapproved **draft entry** waits in, the `actor`/`actor_legacy` pair naming who started it, and the `params_digest` fixing what it started with), experiments (incl. `queue` and `schema_version`), ELN links, servicing-log entries; envelope (de)serialisation. | `SCHEMA_VERSION`, `GUEST_USER_ID`, `GUEST_USER_NAME`, `User`, `Session`, `ExperimentIndexEntry`, `RunRecord`, `ExperimentRecord`, `ElnLink`, `ServiceLogEntry`, `envelope_to_dict`, `envelope_from_dict` | `tests/test_session_layer.py` / `tests/test_servicing_log.py` + conformance |
+| `models.py` | Tolerant-parse records: users, sessions (the L6 tier above an experiment, incl. its `experiments` index), runs (incl. the per-run `eln_link` the publisher stamps, the `pending_eln_draft` an unapproved **draft entry** waits in, the `actor`/`actor_legacy` pair naming who started it, and the `params_digest` fixing what it started with), experiments (incl. `queue` and `schema_version`), ELN links, maintenance-log entries; envelope (de)serialisation. | `SCHEMA_VERSION`, `GUEST_USER_ID`, `GUEST_USER_NAME`, `User`, `Session`, `ExperimentIndexEntry`, `RunRecord`, `ExperimentRecord`, `ElnLink`, `MaintenanceLogEntry`, `envelope_to_dict`, `envelope_from_dict` | `tests/test_session_layer.py` / `tests/test_servicing_log.py` + conformance |
 | `store.py` | Disk persistence: per-user, per-session folders (`session.json` + machine-wide active pointer) via `SessionStore`, one level above per-experiment folders (`experiment.json`, `gui_state.json`, `data/`, `analysis/` — recipes and one report folder per run) + their own active pointer via `ExperimentStore`; user roster; bundle-relative data-path (de)resolution. | `SessionStore` (`list_sessions(user_id)`, `create_session`, `load(user_id, session_id)`, `save`, `get_active` → `tuple[str, str] \| None`, `set_active(user_id, session_id)`, `make_session_id`), `ExperimentStore` (`list_experiments`, `load`, `save`, `get_active`, `set_active`, `make_experiment_id`, `data_dir`, `gui_state_path`, `outbox_path`, `agent_feed_path`, `analysis_dir`, `recipes_dir`, `report_dir`, `relativize_data_file`, `resolve_data_file`), `UserRoster` (`list_users`, `get`, `add`) | `tests/test_session_layer.py` |
 | `manager.py` | The L6 façade: experiment lifecycle (incl. switching between open experiments, the run queue, and a chosen experiment folder name), automatic run recording from manifests, envelope and attendance installation (both session-owned policy values, pushed down into the engine wherever a record becomes live and on every later change), HDF5 context, save-health surfacing, session experiment-index reconciliation, the single write path for published ELN links, the drafting approval gate, and the run queue (validated adds, ordered mutations, and the engine's pull seam). | `ExperimentManager` (`start_experiment(..., envelope=None, experiment_dirname=None)`, `close_experiment`, `set_findings`, `set_attended`, `set_queue`, `switch_experiment`, `current_data_dir`, `current_gui_state_path`, `experiment_context`, `envelope_variables`, `set_experiment_envelope`, `current_experiment`, `set_run_eln_link`, `attach_eln_publisher`, `set_pending_eln_draft`, `pending_eln_draft`, `approve_eln_draft`, `discard_pending_eln_draft`, `run_queue`, `queue_snapshot`, `queue_entries`, `validate_run`, `queue_run`, `dequeue_run`, `move_queued_run`, `clear_run_queue`, `next_run`; optional `session_store`/`station`/`run_catalog` constructor args; signals `experiment_changed`, `run_recorded`, `store_health_changed`) | `tests/test_session_layer.py` |
-| `run_queue.py` | The run queue as data: immutable **run specs**, their ordering (operations drain before procedures — queue-jumping, never preemption), the one construction path from a spec to the live object the engine starts (both kinds, through `core.run_builder`'s `build_procedure()` / `build_operation()`, with a spec's optional `probe_spec` reducing the built run to a **probe run**), and the add-time **run validation** (declared `ParamSpec` bounds, the headless build, `control_limits` + the **session envelope**, plus the **duration estimate**). Imports no Qt, no Orchestrator, and no `cryosoft.procedures` — the classes a spec names are resolved through an injected run catalog. | `RunSpec`, `RunQueue` (`add`, `remove`, `move`, `clear`, `snapshot`, `entries`, `pop_next`, `find`), `RunFinding`, `RunValidation`, `build_run`, `validate_run`, `KIND_PROCEDURE`, `KIND_OPERATION`, the `FINDING_*` codes | `tests/test_run_queue.py` |
+| `run_queue.py` | The run queue as data: immutable **run specs**, their ordering, the one construction path from a spec to the live object the engine starts (`core.run_builder`'s `build_procedure()`, with a spec's optional `probe_spec` reducing the built run to a **probe run**), and the add-time **run validation** (declared `ParamSpec` bounds, the headless build, `control_limits` + the **session envelope**, plus the **duration estimate**). Imports no Qt, no Orchestrator, and no `cryosoft.procedures` — the classes a spec names are resolved through an injected run catalog. | `RunSpec`, `RunQueue` (`add`, `remove`, `move`, `clear`, `snapshot`, `entries`, `pop_next`, `find`), `RunFinding`, `RunValidation`, `build_run`, `validate_run`, `KIND_PROCEDURE`, the `FINDING_*` codes | `tests/test_run_queue.py` |
 | `analysis_runner.py` | The analysis stage's client half: builds an `AnalysisSpec` from one run record plus the experiment context and the settings, writes it into `<experiment>/analysis/<run_id>/`, runs `python -m cryosoft.analysis run --spec …` as a bounded `QProcess` (one at a time, FIFO queue, QTimer timeout, no blocking wait), and hands the report back to the ELN publisher — an **analysed entry** when it ran, the facts fallback when it did not. | `AnalysisRunner` (`start`, `cancel`, `is_running`, `recipe_dirs`; signals `analysis_started`, `analysis_finished`, `analysis_failed`) | `tests/test_analysis_runner.py` |
 | `agent_feed.py` | The **Agent feed**: one experiment's append-only trail of every command a non-operator actor submitted, every verdict answering one, every agent-caused `StateChange`, and every call of a tool declaring `ToolSpec.recorded` (with its cost line) — joined by `request_id`, tolerant on read, and never able to raise into the engine's emit path. | `AgentFeed` (`attach`, `record_command`, `record_verdict`, `record_event`, `record_tool_call`, `set_run_id`, `path`, `run_id`, `experiment_id`), `read_feed`, `SCHEMA_VERSION`, `RECORD_COMMAND`, `RECORD_VERDICT`, `RECORD_EVENT`, `RECORD_TOOL` | `tests/test_agent_feed.py` |
 | `gateway/` | The **Agent gateway** (sub-package, own README): the permission model in front of the control contract — `Role` × `ActionClass` as one `PERMISSION_MATRIX`, the PROVISIONAL per-command and per-capability classification tables, `authorize()`, and the in-process `Gateway` client that stamps an agent identity onto every command and answers a refusal on the engine's own verdict stream. Also renders the **Tool surface** from `CommandName` and the station declaration, answers `call_tool()` for every call, and — through the **Gateway server** — carries that same client to another PROCESS over a local socket, one `Gateway` per connection, without a thread. | `Gateway`, `EngineClient`, `GatewayServer`, `Role`, `Permission`, `PERMISSION_MATRIX`, `authorize`, `role_within_ceiling`, `ActionClass`, `ClassifiedAction`, `UnclassifiedActionError`, `COMMAND_ACTION_CLASSES`, `CONTROL_ACTION_CLASSES`, `LIFECYCLE_ACTION_CLASSES`, `classify_command`, `classify_control`, `ToolSpec`, `ToolContext`, `ToolError`, `SESSION_TOOLS`, `render_tools`, `capability_tool_name`, `validate_tool_args` | `tests/test_gateway.py`, `tests/test_gateway_tools.py`, `tests/test_gateway_server.py` + conformance |
 | `assistant/` | The **Embedded assistant** (sub-package, own README): the tool-use loop whose tools are the gateway's and whose execution is the gateway's, the system-prompt standard it runs under, the **Assistant transcript** it writes as evidence, the two **cost line**s it reports, and the thread rule that keeps every model call off the thread that drives the tick. | `AssistantRuntime`, `ASSISTANT_SYSTEM_PROMPT`, `ChatClient`, `ChatResult`, `ToolCall`, `AssistantError`, `FakeChatClient`, `AnthropicChatClient`, `AssistantTranscript`, `read_transcript`, `STATUS_*`, `empty_cost_line` | `tests/test_assistant.py` |
-| `servicing_log.py` | The Servicing Log framework: declared log kinds (incl. the unifying flat `servicing` kind, the only one the recorder writes as of Phase 2), revisioned per-kind storage, the hourly helium record, consumption fit, the automatic recorder, and legacy-log migration. | `LogKindSpec`, `DECLARED_LOG_KINDS`, `ServicingLogStore` (`add_entry`, `revise_entry`, `delete_entry`, `append_machine_entry`, `entries`, `revisions`, `recordings_path`, `migrate_legacy`), `HeliumRecordStore` (`append`, `samples`), `consumption_rate_pct_per_h`, `CryogenicsRecorder` (`on_states_updated`, `on_run_started`, `on_run_finished`; signal `cryo_warning`), `migrate_legacy_servicing_log` | `tests/test_servicing_log.py` + conformance |
+| `maintenance_log.py` | The maintenance-log framework: declared log kinds (`maintenance` ships) and revisioned per-kind storage. | `LogKindSpec`, `DECLARED_LOG_KINDS`, `MaintenanceLogStore` (`add_entry`, `revise_entry`, `delete_entry`, `entries`, `revisions`) | `tests/test_maintenance_log.py` + conformance |

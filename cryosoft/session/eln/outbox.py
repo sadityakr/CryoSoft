@@ -9,11 +9,11 @@ the credentials are wrong, if the machine is rebooted mid-day, the job is
 still sitting in the file afterwards.
 
 **The journal shape** is the entry-revision model this layer already uses for
-the servicing log: append-only, one JSON object per line, **the last line
+the maintenance log: append-only, one JSON object per line, **the last line
 naming a ``job_id`` wins**. A job is never rewritten in place and never
 deleted, so a crash between two writes can lose at most the newest revision,
 never the job. Reads tolerate a corrupt line (skipped with a WARNING) exactly
-as ``store.py`` and ``servicing_log.py`` do.
+as ``store.py`` and ``maintenance_log.py`` do.
 
 **Idempotency is by ``job_id``.** The publisher derives a job's id from what
 it publishes (``"publish_run:<run_id>"``), so a duplicate ``RunFinished`` —

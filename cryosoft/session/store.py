@@ -37,7 +37,7 @@ _ANALYSIS_DIRNAME = "analysis"
 def _utc_now_iso() -> str:
     """Return the current UTC time as an ISO 8601 string.
 
-    Mirrors ``session.manager._utc_now_iso()``/``session.servicing_log.
+    Mirrors ``session.manager._utc_now_iso()``/``session.maintenance_log.
     _utc_now_iso()`` exactly; duplicated rather than imported to avoid a
     circular import (``manager.py`` imports this module).
     """

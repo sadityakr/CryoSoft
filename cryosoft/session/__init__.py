@@ -1,19 +1,22 @@
 """cryosoft.session — the L6 Session Management layer.
 
 See ``cryosoft/session/README.md`` for the layer standard, and ``GLOSSARY.md``
-for the Servicing Log vocabulary.
+for the session-layer vocabulary.
 """
 
 from cryosoft.session.agent_feed import AgentFeed, read_feed
 from cryosoft.session.manager import ExperimentManager
-from cryosoft.session.models import ElnLink, ExperimentRecord, RunRecord, ServiceLogEntry, User
-from cryosoft.session.servicing_log import (
+from cryosoft.session.maintenance_log import (
     DECLARED_LOG_KINDS,
-    CryogenicsRecorder,
-    HeliumRecordStore,
     LogKindSpec,
-    ServicingLogStore,
-    consumption_rate_pct_per_h,
+    MaintenanceLogStore,
+)
+from cryosoft.session.models import (
+    ElnLink,
+    ExperimentRecord,
+    MaintenanceLogEntry,
+    RunRecord,
+    User,
 )
 from cryosoft.session.store import ExperimentStore, UserRoster
 
@@ -27,11 +30,8 @@ __all__ = [
     "RunRecord",
     "User",
     "ElnLink",
-    "ServiceLogEntry",
+    "MaintenanceLogEntry",
     "LogKindSpec",
     "DECLARED_LOG_KINDS",
-    "ServicingLogStore",
-    "HeliumRecordStore",
-    "consumption_rate_pct_per_h",
-    "CryogenicsRecorder",
+    "MaintenanceLogStore",
 ]

@@ -31,8 +31,7 @@ def _raw_record(t: float, values: dict[str, float]) -> dict:
 
 # One trivial throwaway predicate/check, exercising the run_check()/
 # run_checks() machinery generically — the real declared checks
-# (sample_temperature_stable, helium_consumption_normal) get their own
-# dedicated predicate tests below.
+# (sample_temperature_stable) gets its own dedicated predicate tests below.
 def _stability_predicate(key: str, std_limit: float):
     def predicate(summaries, series, window_s):
         del series, window_s  # unused: this fixture predicate only needs the summary
@@ -206,15 +205,13 @@ _FULL_TRENDS_CONFIG: dict[str, float] = {
     "sample_temperature_window_s": 3600.0,
     "sample_temperature_std_limit_K": 0.1,
     "sample_temperature_range_limit_K": 0.5,
-    "helium_consumption_window_s": 7200.0,
-    "helium_consumption_rate_limit_pct_per_hour": 5.0,
     "store_live_stale_ticks": 10.0,
 }
 
 
-def test_declared_checks_ships_two_advisory_checks():
+def test_declared_checks_ships_one_advisory_check():
     checks = declared_checks(_FULL_TRENDS_CONFIG)
-    assert [c.name for c in checks] == ["sample_temperature_stable", "helium_consumption_normal"]
+    assert [c.name for c in checks] == ["sample_temperature_stable"]
     assert all(c.severity == "advisory" for c in checks)
 
 
@@ -222,21 +219,18 @@ def test_declared_checks_falls_back_on_missing_config_keys():
     # declared_checks() is called with {} by this test only — real callers
     # always pass Station.read_trends_config()'s fully-merged dict.
     checks = declared_checks({})
-    assert [c.name for c in checks] == ["sample_temperature_stable", "helium_consumption_normal"]
+    assert [c.name for c in checks] == ["sample_temperature_stable"]
 
 
 def test_declared_checks_never_hardcodes_window_reading_config():
     checks = declared_checks(_FULL_TRENDS_CONFIG)
     by_name = {c.name: c for c in checks}
     assert by_name["sample_temperature_stable"].window_s == 3600.0
-    assert by_name["helium_consumption_normal"].window_s == 7200.0
 
     overridden = dict(_FULL_TRENDS_CONFIG)
     overridden["sample_temperature_window_s"] = 1800.0
-    overridden["helium_consumption_window_s"] = 3600.0
     checks2 = {c.name: c for c in declared_checks(overridden)}
     assert checks2["sample_temperature_stable"].window_s == 1800.0
-    assert checks2["helium_consumption_normal"].window_s == 3600.0
 
 
 # ── sample_temperature_stable ────────────────────────────────────────────────
@@ -291,76 +285,3 @@ def test_sample_temperature_stable_defined_verdict_on_single_sample(tmp_path: Pa
     assert result.evidence["count"] == 1
     assert result.evidence["std_K"] == 0.0
     assert result.evidence["range_K"] == 0.0
-
-
-# ── helium_consumption_normal ───────────────────────────────────────────────
-
-
-def _helium_check(config: dict[str, float] | None = None) -> TrendCheck:
-    checks = {c.name: c for c in declared_checks(config or _FULL_TRENDS_CONFIG)}
-    return checks["helium_consumption_normal"]
-
-
-def test_helium_consumption_normal_passes_for_normal_boiloff(tmp_path: Path):
-    now = 2_000_000.0
-    # 80% -> 79% over 2 h = 0.5 %/h, well under the 5.0 %/h default limit.
-    records = [
-        _raw_record(now - 7200.0, {"level_meter_helium_level": 80.0}),
-        _raw_record(now - 3600.0, {"level_meter_helium_level": 79.5}),
-        _raw_record(now, {"level_meter_helium_level": 79.0}),
-    ]
-    _write_jsonl(tmp_path / "trend_history_raw.jsonl", records)
-    result = run_check(_helium_check(), tmp_path, now=now)
-    assert result.passed is True
-    assert result.evidence["rate_pct_per_hour"] == pytest.approx(0.5)
-    assert result.evidence["level_start_pct"] == 80.0
-    assert result.evidence["level_end_pct"] == 79.0
-    assert result.evidence["elapsed_h"] == pytest.approx(2.0)
-
-
-def test_helium_consumption_normal_fails_for_fast_boiloff(tmp_path: Path):
-    now = 2_000_000.0
-    # 80% -> 60% over 2 h = 10 %/h, over the 5.0 %/h default limit.
-    records = [
-        _raw_record(now - 7200.0, {"level_meter_helium_level": 80.0}),
-        _raw_record(now, {"level_meter_helium_level": 60.0}),
-    ]
-    _write_jsonl(tmp_path / "trend_history_raw.jsonl", records)
-    result = run_check(_helium_check(), tmp_path, now=now)
-    assert result.passed is False
-    assert result.evidence["rate_pct_per_hour"] == pytest.approx(10.0)
-    assert "high" in result.message
-
-
-def test_helium_consumption_normal_indeterminate_on_empty_window(tmp_path: Path):
-    result = run_check(_helium_check(), tmp_path, now=2_000_000.0)
-    assert result.passed is None
-
-
-def test_helium_consumption_normal_indeterminate_on_single_sample(tmp_path: Path):
-    now = 2_000_000.0
-    _write_jsonl(
-        tmp_path / "trend_history_raw.jsonl", [_raw_record(now, {"level_meter_helium_level": 80.0})]
-    )
-    result = run_check(_helium_check(), tmp_path, now=now)
-    assert result.passed is None
-    assert "at least two" in result.message
-
-
-def test_helium_consumption_normal_notes_bucket_means_off_the_raw_tier(tmp_path: Path):
-    """A window long enough to leave the raw tier must say its endpoints are
-    bucket means, never present them as instantaneous readings."""
-    now = 2_000_000.0
-    day = 86400.0
-    # 3-min tier records: two aggregate buckets a week apart forces pick_tier
-    # onto "3min" (window_s > 24 h, <= 7 d).
-    records = [
-        {"t": now - 6 * day, "v": {"level_meter_helium_level": {"min": 79.0, "max": 81.0, "mean": 80.0, "std": 0.5, "count": 20}}},
-        {"t": now, "v": {"level_meter_helium_level": {"min": 59.0, "max": 61.0, "mean": 60.0, "std": 0.5, "count": 20}}},
-    ]
-    _write_jsonl(tmp_path / "trend_history_3min.jsonl", records)
-    config = dict(_FULL_TRENDS_CONFIG)
-    config["helium_consumption_window_s"] = 6.0 * day
-    result = run_check(_helium_check(config), tmp_path, now=now)
-    assert result.evidence["tier"] == "3min"
-    assert "bucket means" in result.message

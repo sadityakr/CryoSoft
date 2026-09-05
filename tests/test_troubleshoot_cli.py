@@ -244,7 +244,7 @@ def test_trends_indeterminate_with_no_store_on_disk(
     payload = _json_out(capsys)
     assert payload["ok"] is True
     names = {r["name"] for r in payload["results"]}
-    assert names == {"sample_temperature_stable", "helium_consumption_normal", "trend_store_live"}
+    assert names == {"sample_temperature_stable", "trend_store_live"}
     assert all(r["passed"] is None for r in payload["results"])
 
 
@@ -315,7 +315,6 @@ def test_trends_human_output_lists_every_check(
     assert exit_code == 0
     out = capsys.readouterr().out
     assert "sample_temperature_stable" in out
-    assert "helium_consumption_normal" in out
     assert "trend_store_live" in out
 
 

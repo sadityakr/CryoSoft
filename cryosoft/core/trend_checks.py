@@ -392,100 +392,6 @@ def _sample_temperature_stable_predicate(std_limit_K: float, range_limit_K: floa
     return predicate
 
 
-# ── helium_consumption_normal ───────────────────────────────────────────────
-# The flat state key: the "level_meter" VI's @monitored helium_level()
-# method, in percent (0-100), verified the same way as the temperature key.
-_HELIUM_LEVEL_KEY = "level_meter_helium_level"
-
-_HELIUM_CONSUMPTION_WINDOW_S = 7200.0
-_HELIUM_CONSUMPTION_RATE_LIMIT_PCT_PER_HOUR = 5.0
-
-
-def _helium_consumption_normal_predicate(rate_limit_pct_per_hour: float) -> Predicate:
-    """Build the `helium_consumption_normal` predicate for one setup's threshold.
-
-    Units are percent-per-hour, matching `helium_level()`'s own percent
-    reading directly — a litres-per-hour variant would need
-    `cryogenics.helium_volume_l` (see `Station.read_cryogenics_config()`),
-    which is optional and setup-specific, whereas percent is always
-    available.
-
-    The rate comes from the windowed series' two endpoints
-    (`series[0]`/`series[-1]`), never from `KeySummary` (which has no
-    endpoint *values*, only endpoint *timestamps* — see the module
-    docstring) and never by re-deriving anything `summarize()` already
-    gives exactly. On a window short enough to stay on the raw tier
-    (`trend_history.pick_tier`, up to 24 h — this check's default 2 h
-    window always qualifies) the endpoints are true instantaneous samples;
-    if this check is ever evaluated with a longer window (e.g. the
-    troubleshoot CLI's `--window` override), the endpoints become bucket
-    *means* instead, which the message says explicitly rather than
-    presenting a mean as if it were a reading.
-    """
-
-    def predicate(
-        summaries: Mapping[str, KeySummary], series: WindowedSeries, window_s: float
-    ) -> CheckOutcome:
-        no_data = no_data_outcome(summaries, [_HELIUM_LEVEL_KEY])
-        if no_data is not None:
-            return no_data
-        points = series[_HELIUM_LEVEL_KEY]
-        summary = summaries[_HELIUM_LEVEL_KEY]
-        if len(points) < 2:
-            evidence: dict[str, object] = {
-                "count": summary.count,
-                "window_s": window_s,
-            }
-            return CheckOutcome(
-                passed=None,
-                message=(
-                    f"Cannot tell — only {len(points)} helium-level sample(s) in the "
-                    f"{window_s / 3600.0:.2g} h window; need at least two to compute a rate."
-                ),
-                evidence=evidence,
-            )
-        t0, v0 = points[0]
-        t1, v1 = points[-1]
-        elapsed_h = (t1 - t0) / 3600.0
-        if elapsed_h <= 0.0:
-            evidence = {"t0": t0, "t1": t1, "window_s": window_s}
-            return CheckOutcome(
-                passed=None,
-                message=(
-                    f"Cannot tell — the first and last helium-level samples in the "
-                    f"window share a timestamp ({t0}); cannot compute a rate."
-                ),
-                evidence=evidence,
-            )
-        # Positive rate = falling level = consumption.
-        rate_pct_per_hour = (v0 - v1) / elapsed_h
-        endpoint_note = (
-            f" (endpoints are {summary.tier!r}-tier bucket means, not instantaneous "
-            "samples, on this longer window)"
-            if summary.tier != "raw"
-            else ""
-        )
-        evidence = {
-            "level_start_pct": v0,
-            "level_end_pct": v1,
-            "elapsed_h": elapsed_h,
-            "rate_pct_per_hour": rate_pct_per_hour,
-            "rate_limit_pct_per_hour": rate_limit_pct_per_hour,
-            "tier": summary.tier,
-            "window_s": window_s,
-        }
-        too_fast = rate_pct_per_hour > rate_limit_pct_per_hour
-        verdict = "high" if too_fast else "normal"
-        message = (
-            f"Helium consumption {verdict}: level {v0:.3g}% -> {v1:.3g}% over "
-            f"{elapsed_h:.2g} h ({rate_pct_per_hour:.3g} %/h, limit "
-            f"{rate_limit_pct_per_hour} %/h){endpoint_note}."
-        )
-        return CheckOutcome(passed=not too_fast, message=message, evidence=evidence)
-
-    return predicate
-
-
 def declared_checks(config: Mapping[str, float]) -> tuple[TrendCheck, ...]:
     """Return every trend check this setup should run.
 
@@ -514,10 +420,9 @@ def declared_checks(config: Mapping[str, float]) -> tuple[TrendCheck, ...]:
 
     Returns:
         Every trend check this setup should run, in declaration order:
-        `sample_temperature_stable`, `helium_consumption_normal`.
+        `sample_temperature_stable`.
     """
     temperature_window_s = config.get("sample_temperature_window_s", _SAMPLE_TEMPERATURE_WINDOW_S)
-    helium_window_s = config.get("helium_consumption_window_s", _HELIUM_CONSUMPTION_WINDOW_S)
     return (
         TrendCheck(
             name="sample_temperature_stable",
@@ -528,18 +433,6 @@ def declared_checks(config: Mapping[str, float]) -> tuple[TrendCheck, ...]:
                 std_limit_K=config.get("sample_temperature_std_limit_K", _SAMPLE_TEMPERATURE_STD_LIMIT_K),
                 range_limit_K=config.get(
                     "sample_temperature_range_limit_K", _SAMPLE_TEMPERATURE_RANGE_LIMIT_K
-                ),
-            ),
-        ),
-        TrendCheck(
-            name="helium_consumption_normal",
-            keys=(_HELIUM_LEVEL_KEY,),
-            window_s=helium_window_s,
-            severity="advisory",
-            predicate=_helium_consumption_normal_predicate(
-                rate_limit_pct_per_hour=config.get(
-                    "helium_consumption_rate_limit_pct_per_hour",
-                    _HELIUM_CONSUMPTION_RATE_LIMIT_PCT_PER_HOUR,
                 ),
             ),
         ),

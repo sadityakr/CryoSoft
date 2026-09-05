@@ -2829,25 +2829,11 @@ def read_instrument_metadata(config_path: str) -> dict[str, dict[str, str]]:
     return result
 
 
-# Defaults applied by read_cryogenics_config() for every key the config
-# omits. ``helium_volume_l`` deliberately has no default: its absence means
-# "no L/h display", not "0 L".
-_CRYOGENICS_DEFAULTS: dict[str, float | str] = {
-    "level_vi": "level_meter",
-    "helium_warning_pct": 35.0,
-    "fill_target_pct": 90.0,
-    "fill_zero_field_window_s": 10.0,
-    "fill_complete_window_s": 120.0,
-    "max_fill_duration_s": 3600.0,
-    "sample_period_s": 10.0,
-    "history_sample_s": 3600.0,
-}
-
 # Defaults applied by read_safety_config() for every key the config omits —
-# unlike _CRYOGENICS_DEFAULTS, these apply even when the whole ``safety:``
-# block is absent (Orchestrator.acknowledge()'s override window, the
-# safety-hold enforcement invariant, and stall detection are not opt-in
-# features the way cryogenics is; every setup gets them).
+# these apply even when the whole ``safety:`` block is absent
+# (Orchestrator.acknowledge()'s override window, the safety-hold enforcement
+# invariant, and stall detection are not opt-in features; every setup gets
+# them).
 #
 # stall_seconds mirrors 18.0 s (the previous hardcoded 6-tick threshold at
 # this module's 3000 ms reference tick interval — see
@@ -2882,8 +2868,8 @@ _SAFETY_DEFAULTS: dict[str, float] = {
 # that distinction legible in devices.yaml, at the cost of one more block
 # name to remember.
 #
-# The per-check keys below (sample_temperature_*, helium_consumption_*,
-# store_live_stale_ticks) are mirrored, not imported, in
+# The per-check keys below (sample_temperature_*, store_live_stale_ticks)
+# are mirrored, not imported, in
 # cryosoft.core.trend_checks's own `.get()` fallbacks (import-linter
 # contract C15 keeps that module Station-free) — a real setup's config
 # always arrives there already merged through read_trends_config(), so the
@@ -2894,20 +2880,14 @@ _SAFETY_DEFAULTS: dict[str, float] = {
 # noise floor: sample_temperature_std_limit_K/range_limit_K are set well
 # above what a controller with zero sensor noise reports (the sim drivers
 # model no temperature noise at all, so a stable simulated run reports
-# std ~ 0), and helium_consumption_rate_limit_pct_per_hour (5.0 %/h) sits
-# comfortably above the sim level meter's own steady drift (0.01 %/min =
-# 0.6 %/h, cryosoft.drivers.sim_oxford_ilm200.SimOxfordILM200) while still
-# catching a genuinely fast boil-off. An unvalidated threshold that fires
-# constantly is worse than no check at all, so every default here is
-# expected to be re-tuned per real setup once real noise/consumption data
-# exists.
+# std ~ 0). An unvalidated threshold that fires constantly is worse than no
+# check at all, so every default here is expected to be re-tuned per real
+# setup once real noise data exists.
 _TREND_DEFAULTS: dict[str, float] = {
     "refresh_interval_s": 60.0,
     "sample_temperature_window_s": 3600.0,
     "sample_temperature_std_limit_K": 0.1,
     "sample_temperature_range_limit_K": 0.5,
-    "helium_consumption_window_s": 7200.0,
-    "helium_consumption_rate_limit_pct_per_hour": 5.0,
     "store_live_stale_ticks": 10.0,
 }
 
@@ -2915,9 +2895,8 @@ _TREND_DEFAULTS: dict[str, float] = {
 def _load_devices_yaml(config_path: str) -> dict[str, Any] | None:
     """Parse ``devices.yaml`` under *config_path*, GUI-safe.
 
-    Shared by ``read_cryogenics_config`` / ``read_servicing_logs_config``:
-    YAML-parse only, never imports a driver/VI class or instantiates
-    anything, so it is safe to call from the GUI thread on a config that may
+    Shared by every ``read_*_config`` reader below: YAML-parse only, never
+    imports a driver/VI class or instantiates anything, so it is safe to call from the GUI thread on a config that may
     describe unreachable hardware.
 
     Args:
@@ -3223,42 +3202,13 @@ def read_assistant_config(config_path: str) -> dict[str, Any]:
     return merged
 
 
-def read_cryogenics_config(config_path: str) -> dict[str, Any]:
-    """Read the optional ``cryogenics:`` block, GUI-safe, with defaults applied.
-
-    A setup property like everything else in ``devices.yaml``: the
-    fill target, zero-field tolerance, timing, and the level VI the
-    cryogenics feature (the helium-fill operation, the consumption display,
-    the automatic recorder) is built around. Parses YAML only — never
-    imports a driver/VI class or instantiates anything, so it is safe to
-    call from the GUI thread on a config that may describe unreachable
-    hardware, mirroring ``read_instrument_metadata``'s GUI-safe pattern.
-
-    Args:
-        config_path: Path to the config directory containing ``devices.yaml``.
-
-    Returns:
-        The ``cryogenics:`` mapping with every omitted key defaulted from
-        ``_CRYOGENICS_DEFAULTS``. ``{}`` when the block is absent, malformed,
-        or the config directory/file/YAML is unreadable — never raises.
-    """
-    devices_config = _load_devices_yaml(config_path)
-    if devices_config is None:
-        return {}
-    block = devices_config.get("cryogenics")
-    if not isinstance(block, dict) or not block:
-        return {}
-    merged = dict(_CRYOGENICS_DEFAULTS)
-    merged.update(block)
-    return merged
 
 
 def read_safety_config(config_path: str) -> dict[str, float]:
     """Read the optional ``safety:`` block, GUI-safe, always defaulted.
 
-    Unlike ``read_cryogenics_config()``, an absent ``safety:`` block does
-    NOT mean "feature disabled" — ``Orchestrator.acknowledge()``'s override
-    window applies to every setup, so this always returns
+    An absent ``safety:`` block does NOT mean "feature disabled" —
+    ``Orchestrator.acknowledge()``'s override window applies to every setup, so this always returns
     ``_SAFETY_DEFAULTS`` merged with whatever the config overrides, never
     ``{}``.
 
@@ -3298,8 +3248,7 @@ def read_trends_config(config_path: str) -> dict[str, float]:
     Mirrors ``read_safety_config()``'s pattern exactly: the trend-check
     scheduler (`cryosoft.core.trend_check_runner.TrendCheckRunner`) always
     needs a refresh cadence, so an absent block means "use the defaults",
-    never "feature disabled" (unlike ``read_cryogenics_config()``). See
-    ``_TREND_DEFAULTS``'s comment for why this is its own block rather than
+    never "feature disabled". See ``_TREND_DEFAULTS``'s comment for why this is its own block rather than
     an extension of ``safety:``. No shipped ``devices.yaml`` declares a
     ``trends:`` block today — this is the code-default pattern, the same
     precedent ``stall_seconds`` established for ``safety:``.
@@ -3326,28 +3275,3 @@ def read_trends_config(config_path: str) -> dict[str, float]:
         return merged
     merged.update(block)
     return merged
-
-
-def read_servicing_logs_config(config_path: str) -> list[str]:
-    """Read the optional ``servicing_logs:`` list, GUI-safe.
-
-    Names which declared servicing-log kinds (``cryosoft.session.
-    servicing_log.DECLARED_LOG_KINDS``) this setup keeps. Parses
-    YAML only, mirroring ``read_cryogenics_config`` — never imports the
-    session layer or instantiates anything.
-
-    Args:
-        config_path: Path to the config directory containing ``devices.yaml``.
-
-    Returns:
-        The declared log-kind keys, string-coerced, in config order. ``[]``
-        when the block is absent, malformed, or the config is unreadable —
-        never raises.
-    """
-    devices_config = _load_devices_yaml(config_path)
-    if devices_config is None:
-        return []
-    block = devices_config.get("servicing_logs")
-    if not isinstance(block, list):
-        return []
-    return [str(kind) for kind in block]

@@ -45,7 +45,6 @@ from cryosoft.gui.notification_banner import NotificationBanner
 from cryosoft.gui.offline_panel import OfflineInstrumentPanel
 from cryosoft.gui.open_experiment_dialog import OpenExperimentDialog
 from cryosoft.gui.ramp_tracker_panel import RampTrackerPanel
-from cryosoft.gui.servicing_log_page import ServicingLogPage
 from cryosoft.gui.session_dialogs import ResumeSessionDialog
 from cryosoft.core.status_mirror import StatusMirror
 from cryosoft.gui.setup_dialogs import InstrumentInfoDialog, LoginDialog
@@ -73,11 +72,6 @@ if TYPE_CHECKING:
 
     from cryosoft.core.config_catalog import ConfigCatalog
     from cryosoft.session.assistant import AssistantRuntime
-    from cryosoft.session.servicing_log import (
-        CryogenicsRecorder,
-        HeliumRecordStore,
-        ServicingLogStore,
-    )
 
 logger = logging.getLogger(__name__)
 
@@ -142,8 +136,7 @@ class MonitorWindow(QMainWindow):
     :class:`TakeoverStrip`.
     Every splitter
     boundary is draggable; nothing in the grid can be closed, detached, or
-    floated. Page 2 (Logs) is a :class:`ServicingLogPage` hosting one table
-    per configured servicing-log kind plus the relocated :class:`LogPanel`.
+    floated. Page 2 (Logs) hosts the relocated :class:`LogPanel`.
 
     Args:
         station: The active Station instance.
@@ -168,15 +161,6 @@ class MonitorWindow(QMainWindow):
             next launch (see ``GLOSSARY.md``'s **Session**) —
             ``session_manager``'s own ``ExperimentStore`` is never rebound
             live.
-        cryogenics_config: The active config's resolved ``cryogenics:``
-            block (``Station.read_cryogenics_config()``), or None/empty when
-            the setup has no such block. Optional — every existing
-            construction site keeps working unchanged.
-        helium_store: The active setup's HeliumRecordStore, or None.
-        servicing_store: The active setup's ServicingLogStore, or None.
-        servicing_log_kinds: The declared, editable log-kind keys this setup
-            keeps (``Station.read_servicing_logs_config()``), or None/empty.
-        cryogenics_recorder: The active CryogenicsRecorder, or None.
         panels_config: The active config's ``panels:`` block
             (``Station.read_panels_config()``): per-VI allowlists of the
             controls shown on the compact instrument cards. None/empty means
@@ -211,11 +195,6 @@ class MonitorWindow(QMainWindow):
         eln_publisher: Any | None = None,
         analysis_runner: Any | None = None,
         session_store: SessionStore | None = None,
-        cryogenics_config: dict[str, Any] | None = None,
-        helium_store: HeliumRecordStore | None = None,
-        servicing_store: ServicingLogStore | None = None,
-        servicing_log_kinds: list[str] | None = None,
-        cryogenics_recorder: CryogenicsRecorder | None = None,
         panels_config: dict[str, list[str]] | None = None,
         mirror: StatusMirror | None = None,
         assistant_enabled: bool = False,
@@ -239,24 +218,9 @@ class MonitorWindow(QMainWindow):
         # scanner_enabled is a single Station-wide bit.
         self._scanner_enable_checks: list[QCheckBox] = []
 
-        # Cryogenics management,
-        # all optional — every existing construction site (and every prior
-        # test) keeps working with these left at their None defaults, which
-        # simply builds the Logs page with no tables.
-        self._cryogenics_config = cryogenics_config
-        self._helium_store = helium_store
-        self._servicing_store = servicing_store
-        self._servicing_log_kinds = list(servicing_log_kinds or [])
-        self._cryogenics_recorder = cryogenics_recorder
         #: Always built: every setup can ramp something, and the tracker
         #: shows its own empty state otherwise.
         self._ramp_tracker: RampTrackerPanel | None = None
-        self._cryogenics_enabled = bool(
-            self._cryogenics_config
-            and self._helium_store is not None
-            and self._servicing_store is not None
-            and self._station.has_vi(str(self._cryogenics_config.get("level_vi", "")))
-        )
 
         # Session layer (L6, optional — absent in unit tests). experiment_context()
         # stamps built procedures; the experiment start/close/attendance/findings
@@ -619,19 +583,19 @@ class MonitorWindow(QMainWindow):
         # Logs page (moved off the bottom-right quadrant); MonitorWindow
         # still owns its attach()/detach() lifecycle (see __init__/closeEvent).
         self._log_panel = LogPanel()
-        self._servicing_log_page = ServicingLogPage(
-            self._servicing_store,
-            self._servicing_log_kinds,
-            self._log_panel,
-            get_current_person=self._current_person_for_logs,
-            parent=self,
-        )
+        self._logs_page = QWidget()
+        self._logs_page.setObjectName("logs_page")
+        logs_layout = QVBoxLayout(self._logs_page)
+        logs_layout.setContentsMargins(4, 4, 4, 4)
+        logs_layout.setSpacing(4)
+        logs_layout.addWidget(QLabel("<b>Logs</b>"))
+        logs_layout.addWidget(self._log_panel)
 
         # ── Page switcher: a QStackedWidget driven by the header tab bar ──
         self._page_stack = QStackedWidget()
         self._page_stack.setObjectName("page_stack")
         self._page_stack.addWidget(self._main_splitter)  # page 0: Monitor
-        self._page_stack.addWidget(self._servicing_log_page)  # page 1: Logs
+        self._page_stack.addWidget(self._logs_page)  # page 1: Logs
         root.addWidget(self._page_stack)
         self._page_tab_bar.currentChanged.connect(self._on_page_changed)
 
@@ -668,7 +632,7 @@ class MonitorWindow(QMainWindow):
         row.addWidget(self._current_user_label)
 
         # Slim page switcher: Page 1 (Monitor, the quadrant grid, unchanged)
-        # / Page 2 (Logs, ServicingLogPage). Not connected here — the pages
+        # / Page 2 (Logs). Not connected here — the pages
         # it switches between are built later in _build_ui(); the connection
         # is made once both exist, at the end of _build_ui().
         self._page_tab_bar = QTabBar()
@@ -1068,27 +1032,13 @@ class MonitorWindow(QMainWindow):
 
 
     def _on_page_changed(self, index: int) -> None:
-        """Switch the central QStackedWidget's page and refresh Logs on show.
+        """Switch the central QStackedWidget's page.
 
         Args:
             index: The tab bar's new current index (0 = Monitor, 1 = Logs).
         """
         self._page_stack.setCurrentIndex(index)
-        if index == 1:
-            self._servicing_log_page.refresh()
 
-    def _current_person_for_logs(self) -> str:
-        """Return the active experiment's user name, for attribution prefill.
-
-        Used to prefill the "Edited by" / "Deleted by" fields on the Logs
-        page and the operator-name field on the Fill helium dialog.
-
-        Returns:
-            The active experiment's user name, or ``""`` when no session
-            layer is wired or no experiment is currently open.
-        """
-        info = self.get_experiment_info()
-        return str(info.get("experiment", {}).get("user_name", ""))
 
     # ------------------------------------------------------------------
     # Public sample-info accessors (used by ProcedureWindow)
@@ -1404,9 +1354,6 @@ class MonitorWindow(QMainWindow):
         # window rather than connecting the tracker directly (gui-edit
         # skill's destruction-order rule).
         self._orchestrator.ramps_updated.connect(self._on_ramps_updated)
-        # run_finished fires only at run boundaries (not every tick), so
-        # there is no teardown-race concern connecting it here directly.
-        self._orchestrator.run_finished.connect(self._on_run_finished_for_logs)
         # The held-VI set and the override window are mirror reads with no
         # state transition to piggyback on — a hold-only condition never
         # changes the engine's state — so the ack controls refresh when the
@@ -1611,14 +1558,6 @@ class MonitorWindow(QMainWindow):
         """
         self._agent_panel.on_event(event)
 
-    def _on_run_finished_for_logs(self, _manifest: dict) -> None:
-        """Refresh the Logs page's tables after any run finishes.
-
-        A run's manifest may have just produced a new servicing-log entry via the CryogenicsRecorder (connected ahead
-        of this in main.py, so its write always lands before this refresh
-        reads); cheap to call even when nothing changed.
-        """
-        self._servicing_log_page.refresh()
 
     def _on_state_changed(self, state_name: str) -> None:
         """Update the status bar label and colour level when state changes.

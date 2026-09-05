@@ -711,13 +711,13 @@ class Session:
 
 
 @dataclass
-class ServiceLogEntry:
-    """One revision of one servicing-log entry (see ``session/servicing_log.py``).
+class MaintenanceLogEntry:
+    """One revision of one maintenance-log entry (see ``session/maintenance_log.py``).
 
     Implements the **entry revision** model (GLOSSARY.md): every edit or
-    deletion of a logical entry appends a *new* ``ServiceLogEntry`` sharing the
-    same ``entry_id`` with an incremented ``revision`` rather than rewriting
-    anything on disk. ``ServicingLogStore.entries()`` presents only the latest,
+    deletion of a logical entry appends a *new* ``MaintenanceLogEntry`` sharing
+    the same ``entry_id`` with an incremented ``revision`` rather than rewriting
+    anything on disk. ``MaintenanceLogStore.entries()`` presents only the latest,
     non-deleted revision per ``entry_id``; ``revisions()`` returns the full
     history. ``created_utc`` is copied from the first revision and never
     changes, so entries keep a stable creation time across edits.
@@ -725,12 +725,12 @@ class ServiceLogEntry:
     Attributes:
         entry_id: Stable id shared by every revision of the same logical entry
             (a ``uuid4`` hex string, assigned on the first revision).
-        kind: The declared log kind's key (e.g. ``"cryogenics"``).
+        kind: The declared log kind's key (e.g. ``"maintenance"``).
         values: The entry's field values, keyed by the kind's field names.
-        source: Provenance of this entry — ``"manual"`` (a technician via the
-            GUI), ``"operation"`` (written by an operation's recorder), or
-            ``"machine"`` (a non-editable machine stream, e.g. ``"operations"``).
-        run_id: The linked run id when ``source == "operation"``; ``""`` otherwise.
+        source: Provenance of this entry — ``"manual"`` (a person via the
+            GUI) or the name of whatever wrote it.
+        run_id: The linked run id when the entry belongs to one; ``""``
+            otherwise.
         created_utc: ISO 8601 creation time of the entry's first revision.
         revised_utc: ISO 8601 time this revision was written; ``""`` on the
             first revision.
@@ -738,7 +738,7 @@ class ServiceLogEntry:
         revision: 1-based revision number, incrementing with every edit or
             deletion.
         deleted: ``True`` for a tombstone revision — the entry is hidden from
-            ``ServicingLogStore.entries()`` but remains in its history.
+            ``MaintenanceLogStore.entries()`` but remains in its history.
     """
 
     entry_id: str = ""
@@ -768,8 +768,8 @@ class ServiceLogEntry:
         }
 
     @classmethod
-    def from_dict(cls, data: object) -> ServiceLogEntry:
-        """Build a ``ServiceLogEntry`` from a parsed dict, tolerating bad input."""
+    def from_dict(cls, data: object) -> MaintenanceLogEntry:
+        """Build a ``MaintenanceLogEntry`` from a parsed dict, tolerating bad input."""
         if not isinstance(data, dict):
             return cls()
         return cls(

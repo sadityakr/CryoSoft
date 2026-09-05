@@ -140,7 +140,7 @@ from cryosoft.core.station import (
     _monitored_infos,
     build_station,
 )
-from cryosoft.session.servicing_log import DECLARED_LOG_KINDS
+from cryosoft.session.maintenance_log import DECLARED_LOG_KINDS
 from tests.mocks.bus_spy import spy_on_station
 from cryosoft.virtual_instruments.base import (
     EXCITATION_CURRENT_LIMIT,
@@ -1162,72 +1162,6 @@ def test_panels_config_names_real_vis_and_controls(config_dir: Path) -> None:
                 f"'{control_name}', which is not a @control method on "
                 f"{vi_cls.__name__}"
             )
-
-
-# ── Cryogenics config block ───────────────────────────────────────────────────
-# An optional cryogenics: block plus
-# a servicing_logs: list. A config that declares neither carries zero
-# footprint (the feature stays off); a config that declares cryogenics: must
-# reference a real vi_type: level VI with sane, ordered bounds.
-
-
-@pytest.mark.parametrize("config_dir", _config_dirs(), ids=lambda p: p.name)
-def test_cryogenics_config_block(config_dir: Path) -> None:
-    """A declared cryogenics: block names a real level VI with sane bounds."""
-    devices = _load_yaml(config_dir / "devices.yaml")
-    cryo = devices.get("cryogenics")
-    if cryo is None:
-        pytest.skip(f"{config_dir.name} declares no cryogenics: block")
-    assert isinstance(cryo, dict), f"{config_dir.name}: cryogenics: must be a mapping"
-
-    level_vi_name = cryo.get("level_vi")
-    virtual_instruments = devices.get("virtual_instruments", {})
-    vi_cfg = virtual_instruments.get(level_vi_name)
-    assert vi_cfg is not None, (
-        f"{config_dir.name}: cryogenics.level_vi={level_vi_name!r} does not "
-        f"name a registered VI"
-    )
-    assert vi_cfg.get("vi_type") == "level", (
-        f"{config_dir.name}: cryogenics.level_vi={level_vi_name!r} must be a "
-        f"vi_type: level VI, got {vi_cfg.get('vi_type')!r}"
-    )
-
-    helium_low_threshold = float(
-        (vi_cfg.get("init_params") or {}).get("helium_low_threshold", 0.0)
-    )
-    warning_pct = float(cryo.get("helium_warning_pct", 0.0))
-    assert warning_pct > helium_low_threshold, (
-        f"{config_dir.name}: cryogenics.helium_warning_pct ({warning_pct}) "
-        f"must exceed the level VI's helium_low_threshold "
-        f"({helium_low_threshold})"
-    )
-
-    positive_keys = (
-        "helium_warning_pct",
-        "fill_target_pct",
-        "fill_zero_field_window_s",
-        "fill_complete_window_s",
-        "max_fill_duration_s",
-        "sample_period_s",
-        "history_sample_s",
-    )
-    for key in positive_keys:
-        if key not in cryo:
-            continue
-        assert float(cryo[key]) > 0, (
-            f"{config_dir.name}: cryogenics.{key} must be positive, "
-            f"got {cryo[key]!r}"
-        )
-
-    servicing_logs = devices.get("servicing_logs") or []
-    assert isinstance(servicing_logs, list), (
-        f"{config_dir.name}: servicing_logs must be a list"
-    )
-    for kind in servicing_logs:
-        assert kind in DECLARED_LOG_KINDS, (
-            f"{config_dir.name}: servicing_logs entry {kind!r} is not a "
-            f"declared log kind ({sorted(DECLARED_LOG_KINDS)})"
-        )
 
 
 # ── Control-validation standard ───────────────────────────────────────────────
@@ -2746,8 +2680,8 @@ def test_eln_rendered_body_is_self_contained_html() -> None:
     assert "<b>escape me</b>" not in body, "rendered ELN body must escape every value"
 
 
-# ── Servicing-log kind standard (L6) ──────────────────────────────────────────
-# Every declared LogKindSpec (cryosoft.session.servicing_log.DECLARED_LOG_KINDS)
+# ── Maintenance-log kind standard (L6) ────────────────────────────────────────
+# Every declared LogKindSpec (cryosoft.session.maintenance_log.DECLARED_LOG_KINDS)
 # must have a valid key, a title, and a non-empty ordered field schema of
 # ParamSpecs — see LogKindSpec's docstring. A new log kind is covered the
 # moment it's added to the registry, no

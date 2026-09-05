@@ -20,14 +20,12 @@ from cryosoft.core.request_spool import RequestSpool
 from cryosoft.core.station import (
     Station,
     build_station_with_fallback,
-    read_cryogenics_config,
     read_assistant_config,
     read_gateway_config,
     read_instrument_thread,
     read_panels_config,
     read_request_spool_config,
     read_safety_config,
-    read_servicing_logs_config,
     read_trends_config,
 )
 from cryosoft.core.trend_check_runner import TrendCheckRunner
@@ -49,11 +47,6 @@ from cryosoft.session.eln.settings import load_eln_settings
 from cryosoft.session.gateway import Gateway, GatewayServer, ToolContext
 from cryosoft.session.manager import ExperimentManager
 from cryosoft.session.models import GUEST_USER_ID, GUEST_USER_NAME, User
-from cryosoft.session.servicing_log import (
-    CryogenicsRecorder,
-    HeliumRecordStore,
-    ServicingLogStore,
-)
 from cryosoft.session.store import ExperimentStore, SessionStore, UserRoster
 
 logger = logging.getLogger(__name__)
@@ -431,8 +424,7 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
     # it is always constructed with one real, already-resolved
     # ExperimentStore and grows no live rebind machinery (GLOSSARY.md's
     # Session). The user roster relocates to
-    # measurement_root()/"users.json", alongside "sessions/" and
-    # "servicing/".
+    # measurement_root()/"users.json", alongside "sessions/".
     roster = UserRoster(measurement_root() / "users.json")
     _ensure_guest_user_registered(roster)
     session_store = SessionStore(measurement_root() / "sessions")
@@ -589,50 +581,6 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
         if requested is not None:
             requested.connect(app.analysis_runner.start)
 
-    # Cryogenics management:
-    # config-gated like every optional feature — a setup without a
-    # cryogenics: block (or without the level VI it names) carries zero
-    # footprint and this whole block is a no-op. Stores are rooted at
-    # measurement_root()/"servicing" — a Setup-tier location sibling to
-    # "sessions/" (flat, never inside a session or experiment folder), since
-    # these records describe the rig across all sessions and must not keep
-    # depending on the Data Directory form field now that it is derived from
-    # whichever experiment is open. The
-    # same store instances feed both the automatic recorder and the Monitor
-    # window's Cryogenics panel / Logs page, so both always see the same data.
-    cryogenics_config = read_cryogenics_config(used_path)
-    cryogenics_recorder: CryogenicsRecorder | None = None
-    helium_store: HeliumRecordStore | None = None
-    servicing_store: ServicingLogStore | None = None
-    servicing_log_kinds: list[str] = []
-    if cryogenics_config and station.has_vi(cryogenics_config["level_vi"]):
-        servicing_root = measurement_root() / "servicing"
-        config_identity = (
-            used_entry.name if used_entry is not None else Path(used_path).name
-        )
-        helium_store = HeliumRecordStore(servicing_root, config_identity)
-        servicing_store = ServicingLogStore(servicing_root, config_identity)
-        # One-time migration of any pre-unification cryogenics.jsonl/
-        # operations.jsonl into servicing.jsonl. Idempotent no-op once
-        # servicing.jsonl exists or neither legacy file is present, so it is
-        # always safe to call unconditionally on every startup.
-        servicing_store.migrate_legacy(level_vi_name=cryogenics_config["level_vi"])
-        servicing_log_kinds = read_servicing_logs_config(used_path)
-        cryogenics_recorder = CryogenicsRecorder(
-            helium_store,
-            servicing_store,
-            level_vi_name=cryogenics_config["level_vi"],
-            history_sample_s=float(cryogenics_config["history_sample_s"]),
-        )
-        orchestrator.states_updated.connect(cryogenics_recorder.on_states_updated)
-        orchestrator.run_started.connect(cryogenics_recorder.on_run_started)
-        orchestrator.run_finished.connect(cryogenics_recorder.on_run_finished)
-        logger.info(
-            "Cryogenics recorder active (level_vi=%s, config=%s)",
-            cryogenics_config["level_vi"],
-            config_identity,
-        )
-
     monitor = MonitorWindow(
         station,
         orchestrator,
@@ -644,11 +592,6 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
         eln_publisher=app.eln_publisher,
         analysis_runner=app.analysis_runner,
         session_store=session_store,
-        cryogenics_config=cryogenics_config or None,
-        helium_store=helium_store,
-        servicing_store=servicing_store,
-        servicing_log_kinds=servicing_log_kinds,
-        cryogenics_recorder=cryogenics_recorder,
         panels_config=read_panels_config(used_path),
         mirror=mirror,
         assistant_enabled=bool(assistant_config["assistant"]),

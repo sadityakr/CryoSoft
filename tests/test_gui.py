@@ -2908,7 +2908,7 @@ def test_monitor_fixed_quadrants_exist_with_expected_content(monitor_win):
 
     assert monitor_win.findChild(QWidget, "ramps_quadrant") is not None
     assert monitor_win.findChild(QWidget, "agents_quadrant") is not None
-    assert monitor_win._log_panel is monitor_win._servicing_log_page.findChild(QTextEdit, "log_panel")
+    assert monitor_win._log_panel is monitor_win._logs_page.findChild(QTextEdit, "log_panel")
 
 
 def test_monitor_default_trend_panels_exist_and_gridded(monitor_win):
@@ -2980,7 +2980,7 @@ def test_monitor_page_switcher_swaps_pages(monitor_win):
 
     monitor_win._page_tab_bar.setCurrentIndex(1)
     assert monitor_win._page_stack.currentIndex() == 1
-    assert monitor_win._page_stack.currentWidget() is monitor_win._servicing_log_page
+    assert monitor_win._page_stack.currentWidget() is monitor_win._logs_page
 
     monitor_win._page_tab_bar.setCurrentIndex(0)
     assert monitor_win._page_stack.currentIndex() == 0
@@ -3237,6 +3237,18 @@ def test_monitor_central_widget_not_scroll_area(monitor_win):
     """The central widget is the content widget directly, holding the main quadrant splitter."""
     assert not isinstance(monitor_win.centralWidget(), QScrollArea)
     assert monitor_win.centralWidget().findChild(QSplitter, "main_splitter") is monitor_win._main_splitter
+
+
+def test_logs_page_holds_the_log_panel(monitor_win):
+    """Page 2 is the bare Logs page: the relocated LogPanel and nothing else.
+
+    Ported from the deleted servicing-log-page suite — the LogPanel's home
+    is the property that outlived the tables it used to sit beside.
+    """
+    from cryosoft.gui.log_panel import LogPanel
+
+    assert monitor_win._logs_page.findChild(LogPanel, "log_panel") is monitor_win._log_panel
+    assert monitor_win._page_stack.indexOf(monitor_win._logs_page) == 1
 
 
 def test_log_handler_removed_on_close(station, orchestrator, qtbot):
