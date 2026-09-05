@@ -1,11 +1,14 @@
 # I2AS — Instrument to Agentic Station: extracting the framework from CryoSoft
 
-**Status:** Plan, awaiting approval. Nothing cut yet. Branch `feature/i2as-framework`
-(from the integration branch head `c5392da`, which carries the analysis stage).
+**Status:** Approved 2026-09-05 (two rounds of decisions, §2 and §12). Execution
+starts with phase 1. Branch `feature/i2as-framework` (from the integration branch
+head `c5392da`, which carries the analysis stage).
 **Scope:** turn this repository into a self-standing, publishable framework in which a
 user writes only virtual instruments, procedures, analysis recipes and one YAML
 config, and gets an agent-operable measurement station in return. Everything
-cryostat-specific leaves; one trimmed sim cryostat stays as the worked example.
+cryostat-specific leaves; two worked examples stay: a trimmed sim cryostat
+(transport under field and temperature) and a new sim imaging setup (a camera
+under field), so the repository shows two classes of procedure, not one.
 **Date:** 2026-09-05
 **Survey basis:** four parallel full-read surveys of `core/ctl/troubleshoot/mcp`,
 `drivers/virtual_instruments/procedures/configs`, `gui/` + `main.py`, and
@@ -37,11 +40,9 @@ The repository that ships with the paper has to look like that claim.
 | GUI | Minimal operator GUI: monitor window, procedure/queue window with the eLab tab, eLab setup dialog, agent feed and takeover strip. Servicing log, operations panel, config editor, diagnostics window, debug menus go. |
 | Worked example | Trimmed sim cryostat: sim magnet, sim temperature controller, one sim source+meter measurement pair; one real/sim driver twin as the driver-contract exemplar; Field Sweep as the primary procedure. |
 | Delivery | This plan first; then execution in phases on the branch, `make check` green after each. The branch head is what becomes the public repo. |
-
-Assumptions made here, flagged for the user in §12: the embedded assistant
-chat leaves the core; Temperature Sweep and Time Series stay as cheap second
-and third procedures; `docs/plans/` becomes the design record that ships with
-the paper.
+| Second example | **Imaging with field, widefield camera** (MOKE/Kerr-microscope style): a sim camera returns a frame per exposure, a sim XY stage positions the sample, the magnet sweeps. One frame per field step; the recipe renders a montage and an ROI hysteresis loop. §5.8, §6.8. |
+| Design documents | **Not shipped.** `docs/plans/` leaves the repository entirely in phase 6; the README carries the architecture story on its own. This plan stays in CryoSoft's history and on the branch until then. |
+| Second-round confirmations | Embedded assistant leaves the core; Field Sweep, Temperature Sweep and Time Series all stay; the Lakeshore VI variant is the temperature example; MIT unchanged; `sim_cryostat`/`magnet_z` keep their names, `temperature_vti` → `temperature`; import-linter contracts lose only the lines naming deleted modules, never a rule. |
 
 ## 3. What the user writes, what the framework gives
 
@@ -55,6 +56,12 @@ README. Line counts are today's shipped examples.
 | A procedure | ~170 lines | Six axis hooks on `SweepMeasureProcedure` | Parameter form, queue validation, probe run, duration estimate, HDF5 run file, run manifest, agent `run_procedure`/`probe_run` |
 | An analysis recipe | ~55–380 lines | `AnalysisRecipe.analyse(run, context)` | Out-of-process analysis, figures, the analysed notebook entry, preview-and-approve, agent `run_analysis` |
 | One config folder | ~65 lines YAML | Config schema | The station, its limits, its ceilings, the manifest, the setup name in every record |
+
+Two shipped setups make the point that the framework is not about one kind
+of physics: `sim_cryostat` (a transport measurement swept in field and
+temperature) and `sim_imaging` (a camera frame per field step over a
+positioned sample). They share the magnet VI and the whole framework; they
+differ only in the files the table above says a user writes.
 
 And what the framework guarantees for the agent, in the vocabulary of the
 nine-module framework (`agentic-instrumentation-framework.md`): a generated
@@ -71,18 +78,18 @@ client (M9).
 i2as/
   core/                 contract + engine (events, plan, decorators, station, orchestrator, procedure, data)
   drivers/              4 sim + 2 real: the driver contract and its exemplar twin
-  virtual_instruments/  base, rampable, magnet/, temperature/, measurement/
-  procedures/           field_sweep, temperature_sweep, time_series
-  configs/sim_cryostat/ the one shipped setup (+ setup.md template)
+  virtual_instruments/  base, rampable, magnet/, temperature/, stage/, measurement/ (transport + camera)
+  procedures/           field_sweep, temperature_sweep, time_series, field_imaging
+  configs/sim_cryostat/ transport example (+ setup.md template)
+  configs/sim_imaging/  imaging example
   session/              experiments, runs, run queue, agent feed, maintenance log, analysis runner
   session/eln/          adapter contract, eLabFTW, sim, outbox, publisher, templates, settings
   session/gateway/      roles, action classes, tools, gateway, local server
-  analysis/             recipe contract, discovery, worker, two recipes
+  analysis/             recipe contract, discovery, worker, three recipes
   gui/                  33 modules: monitor, procedure/queue, eLab tab, agent feed, dialogs
   mcp/  ctl/  troubleshoot/   MCP server, CLI client, doctor CLI
   main.py
-tests/                  ~66 files, conformance suite derived from the package name
-docs/design/            the design record (today's docs/plans, pruned)
+tests/                  ~70 files, conformance suite derived from the package name
 docs/user-docs/
 .claude/skills/         write-measurement-vi, setup-commission, setup-supervisor, measure-session, troubleshoot-runtime, gui-edit
 ```
@@ -92,14 +99,14 @@ Estimated size after the cut (source lines, excluding tests):
 | Package | Today | After | Note |
 |---|---|---|---|
 | core | 24 500 | ~13 000 | operations, switch, magnet specifics, cryogenics out; config readers split out |
-| drivers | 8 200 | ~2 100 | 6 files |
-| virtual_instruments | 7 500 | ~3 700 | base + rampable + 4 VIs |
-| procedures | 2 100 | ~700 | 3 axis procedures, no operations |
+| drivers | 8 200 | ~2 600 | 6 kept files + sim camera + sim stage |
+| virtual_instruments | 7 500 | ~4 400 | base + rampable + 4 kept VIs + camera + stage |
+| procedures | 2 100 | ~900 | 3 kept axis procedures + field imaging, no operations |
 | session | 18 300 | ~15 600 | maintenance log generalised, assistant out |
-| analysis | 2 500 | 2 500 | unchanged |
+| analysis | 2 500 | ~2 800 | + the image-stack recipe |
 | gui | 17 300 | ~13 700 | 6 modules dropped, monitor window trimmed |
 | mcp + ctl + troubleshoot | 6 100 | 6 100 | 12 string edits |
-| **total** | **~86 000** | **~57 000** | about half of what remains is docstring: the standards live there |
+| **total** | **~86 000** | **~58 500** | about half of what remains is docstring: the standards live there; the imaging example adds ~1 500 |
 
 Conciseness for the reader comes from §3, not from the total: the surface a
 student touches is a few hundred lines per file kind, and every file kind has
@@ -226,7 +233,27 @@ Trim inside kept files:
 `pyproject.toml` contract C8's exception list loses `config_editor` and
 `operations_panel`.
 
-### 5.8 mcp/, ctl/, troubleshoot/
+### 5.8 New: the imaging example
+
+All new code, written to the existing standards so conformance covers it the
+moment the files exist. (§5.9 below lists the packages shipped as-is.)
+
+| File | Lines (est.) | What it is |
+|---|---|---|
+| `drivers/sim_camera.py` | ~250 | Sim widefield camera: exposure, binning, ROI, `get_frame()` → 2D `uint16` array. Frame physics: a domain pattern that switches with the applied field with hysteresis (coercive field, nucleation noise), so a field sweep produces a recognisable loop. The field is fed in by the sim station the same way the sim magnet's sim meter pair shares state today. |
+| `drivers/sim_xy_stage.py` | ~200 | Sim XY sample stage: `move_to(x, y)`, `position()`, finite speed, travel limits, `stop()`. |
+| `virtual_instruments/stage/xy_stage.py` (+ `StageBase` in `base.py`) | ~300 | `XYStageVI`: rampable in two axes, `@control(move_to, params=x_m, y_m)` with `control_limits` from the config travel range, `@monitored` position, `stop` as a recovery action. The second rampable class beside magnet and temperature, and the second subject of `vi_names_by_base()`. |
+| `virtual_instruments/measurement/camera.py` | ~350 | `CameraMeasurementVI`: `measurement_parameters` exposure_s, binning, frames_per_step; one image block `frame` (§6.8); scalar columns `roi_mean` / `roi_std` from a config-declared ROI so the live plot and the generic sweep recipe still have a scalar to show. |
+| `procedures/field_imaging.py` | ~200 | `FieldImaging(SweepMeasureProcedure)`: the field axis as in Field Sweep, plus stage position as system parameters (`stage_x_m`, `stage_y_m`), a saturation pre-step so the first frame is the reference, and `frames_per_step` averaging. Same six hooks; the reference frame is what makes it a distinct procedure class rather than Field Sweep with a camera. |
+| `analysis/recipes/field_image_stack.py` | ~300 | Serves `FieldImaging`: montage of frames against field (subsampled to ≤ 12 panels), difference images against the reference frame, and the ROI-mean hysteresis loop with coercive-field estimate as `ResultValue`s. |
+| `configs/sim_imaging/` | ~60 | `magnet_z` (SuperconductingMagnetVI on SimOxfordIPS120), `stage` (XYStageVI on SimXYStage), `camera` (CameraMeasurementVI on SimCamera), `roi` and travel limits in `init_params`. |
+| Tests | ~900 | `test_l0_sim_camera_stage.py`, `test_l1_camera_stage_vis.py`, `test_field_imaging_procedure.py`, recipe cases in `test_analysis.py`, an end-to-end run in `test_analysis_end_to_end.py`; conformance discovers the rest. |
+
+The camera is the shipped example of a 2D block, so the raw-block section of
+the measurement README is rewritten around frames instead of being cut with
+the tensormeter.
+
+### 5.9 mcp/, ctl/, troubleshoot/
 
 Ship as-is. Edits: `translate.INSTRUCTIONS`, `SERVER_NAME`, the three
 `i2as://` URIs, `status_reader.CODE_HELP` (QUENCH row → CRITICAL_FLAG),
@@ -312,24 +339,49 @@ re-implement the AppData/XDG resolution (flagged in
 `config-directory-migration.md`). Consolidate into `paths.py` before the
 rename, so the eight literal sites become two.
 
+### 6.8 Image blocks: a frame is a 2D block, not a row of channels
+
+Today a measurement VI may declare `measurement_raw_blocks = {name: [channel
+labels]}` and the run file stores `(N, [n_loop1, n_loop2,] rows, cols)` with
+`channel_names` on the dataset. A camera frame has the same shape but no
+channel per column. Add one declaration form beside it:
+
+```python
+measurement_image_blocks: ClassVar[dict[str, ImageBlock]] = {
+    "frame": ImageBlock(height_px=256, width_px=256, unit="counts", description="…"),
+}
+```
+
+`DataManager` writes it through the same dataset path with
+`attrs["block_kind"] = "image"` and `unit`, no `channel_names`;
+`data_reader` gains `ROLE_IMAGE` beside `ROLE_RAW_BLOCK` and a
+`read_image(name, index)` helper; `RunSource` reports it as a column with
+role `image`. Nothing else changes: the live plot ignores image columns, the
+generic sweep recipe plots the scalar columns, the image-stack recipe reads
+frames. Conformance requires each declared block's `height_px`/`width_px`
+to match what `take_reading()` actually returns from the sim.
+
 ## 7. Phases
 
 Each phase ends with `make check` green in both thread modes and one commit
-on `feature/i2as-framework`. Phases 1–3 are independent of each other and
-can run in parallel worktrees; 4 depends on 1–3; 5–7 are sequential.
+on `feature/i2as-framework`. Phases 1, 2 and 4 are independent of each other
+and can run in parallel worktrees; 3 depends on 1 and 2 (it uses
+`vi_names_by_base()` and the `StageBase`); 5 depends on 1–4; 6–8 are
+sequential.
 
 | # | Phase | Contents | Exit |
 |---|---|---|---|
 | 0 | Plan | This document; `docs/plans/README.md` row. | Approved by the user. |
 | 1 | Cut the cryostat verticals | Operations (core, orchestrator, commands, tools, GUI panel, procedures, tests). Servicing/cryogenics (`servicing_log` split, recorder, GUI page, `main.py` block, config blocks, three conformance sections). Switch matrix and `scanner_enabled` across eight files. Level meter, rotator, lock-in, tensormeter, persistent magnet, VTI VI, dc-mode/delta VIs, their drivers, three configs, 28 test files. `rtm2`/`pymeasure` out of `pyproject.toml`. | Suite green with the reduced sim config; contracts pass with dead module lines removed (never a weakened rule). |
-| 2 | Generalise | §6.1–6.7. New conformance tests: explicit `action_class` on every shipped control; procedure `description` non-empty; `no_motion_phases` is a frozenset. | Field Sweep runs end to end with `field_vi`/`temperature_vi` chosen by discovery; `test_scenario_emergency` passes on `CRITICAL_FLAG`. |
-| 3 | Trim the GUI | §5.7. Re-home `LogPanel` and "Instrument Info…". Screenshot verification per `gui-edit`. | `test_gui.py` minus the listed cases green in both modes; screenshots of both windows inspected. |
-| 4 | Tests and fixtures | `tests/scenarios.py` and `tests/instrument_modes.py` on the minimal station; swap `helium_fill` out of `test_estimates`, `test_l3_orchestrator`, `test_run_queue`; retarget `test_connection_lifecycle` to the kept sims; `test_conformance.py` derives every module prefix from `PACKAGE = i2as.__name__`; `CONTROL_LIMIT_EXEMPTIONS` and `_SIM_MEASUREMENT_DRIVER_CLASSES` shrink. | Conformance discovers exactly the shipped 6 drivers, 4 VIs, 3 procedures, 1 config, 2 recipes. |
-| 5 | Docs and skills | New `README.md` (§3 table, layer story, install, run the sim, "add a VI / procedure / recipe / config", agent API table from `gateway/README.md`, roles matrix). `GLOSSARY.md` minus ~17 cryogen/magnet/switch terms. Folder READMEs to the surviving files. `CLAUDE.md` for I2AS. `docs/plans/` → `docs/design/` keeping the five design-record documents; `archive/`, `deferred/`, `Issues/` dropped. Skills: keep `write-measurement-vi`, `gui-edit`; genericise `setup-commission`, `setup-supervisor`, `measure-session`, `troubleshoot-runtime`; drop `diagnose-connections`. Add `setup.md` template. | Folder-README conformance green; no `docs/plans` citation in code. |
-| 6 | Rename | `cryosoft` → `i2as` everywhere (~4 100 occurrences) with deliberate handling of the ~60 runtime literals in §8; console scripts `i2as`, `i2as-ctl`, `i2as-doctor`, `i2as-mcp`; CI workflows; `.mcp.json`. | `pip install -e .[dev]` from a clean venv, `make check` green, `python -m i2as.main` opens on the sim, `i2as-mcp` serves the tool list, `i2as-ctl status` answers. |
-| 7 | Cut the repo | Fresh clone of the branch, `make check`, tag `v0.1.0`, push `feature/i2as-framework:main` to the new `i2as` remote. History stays (the CryoSoft lineage is the provenance the paper cites). | The new repo passes CI from its own default branch. |
+| 2 | Generalise | §6.1–6.8 (6.8 adds the image-block declaration, writer and reader with tests, before any camera exists). New conformance tests: explicit `action_class` on every shipped control; procedure `description` non-empty; `no_motion_phases` is a frozenset; image blocks match the sim's frame shape. | Field Sweep runs end to end with `field_vi`/`temperature_vi` chosen by discovery; `test_scenario_emergency` passes on `CRITICAL_FLAG`. |
+| 3 | Imaging example | §5.8: sim camera, sim stage, `StageBase`, `XYStageVI`, `CameraMeasurementVI`, `FieldImaging`, `field_image_stack`, `configs/sim_imaging/`, their tests and folder READMEs; the measurement README's raw-block section rewritten around frames. | `FieldImaging` runs on `sim_imaging` through the GUI and through the gateway as an agent; the recipe produces the montage and the loop; conformance discovers 2 configs, 6 VIs, 4 procedures, 3 recipes. |
+| 4 | Trim the GUI | §5.7. Re-home `LogPanel` and "Instrument Info…". Screenshot verification per `gui-edit`. | `test_gui.py` minus the listed cases green in both modes; screenshots of both windows inspected. |
+| 5 | Tests and fixtures | `tests/scenarios.py` and `tests/instrument_modes.py` on the minimal station; swap `helium_fill` out of `test_estimates`, `test_l3_orchestrator`, `test_run_queue`; retarget `test_connection_lifecycle` to the kept sims; `test_conformance.py` derives every module prefix from `PACKAGE = i2as.__name__`; `CONTROL_LIMIT_EXEMPTIONS` and `_SIM_MEASUREMENT_DRIVER_CLASSES` shrink. | Conformance discovers exactly the shipped 8 drivers, 6 VIs, 4 procedures, 2 configs, 3 recipes. |
+| 6 | Docs and skills | New `README.md` (§3 table, layer story, both examples, install, run a sim, "add a VI / procedure / recipe / config", agent API table from `gateway/README.md`, roles matrix). `GLOSSARY.md` minus ~17 cryogen/magnet/switch terms, plus the imaging terms. Folder READMEs to the surviving files. `CLAUDE.md` for I2AS. `docs/plans/` (this document included), `docs/Issues/` removed. Skills: keep `write-measurement-vi`, `gui-edit`; genericise `setup-commission`, `setup-supervisor`, `measure-session`, `troubleshoot-runtime`; drop `diagnose-connections`. Add `setup.md` template. | Folder-README conformance green; no `docs/plans` citation in code. |
+| 7 | Rename | `cryosoft` → `i2as` everywhere (~4 100 occurrences) with deliberate handling of the ~60 runtime literals in §8; console scripts `i2as`, `i2as-ctl`, `i2as-doctor`, `i2as-mcp`; CI workflows; `.mcp.json`. | `pip install -e .[dev]` from a clean venv, `make check` green, `python -m i2as.main` opens on the sim, `i2as-mcp` serves the tool list, `i2as-ctl status` answers. |
+| 8 | Cut the repo | Fresh clone of the branch, `make check`, tag `v0.1.0`, push `feature/i2as-framework:main` to the new `i2as` remote. History stays (the CryoSoft lineage is the provenance the paper cites). | The new repo passes CI from its own default branch. |
 
-Rename is last on purpose: every phase 1–5 diff remains readable against
+Rename is second to last on purpose: every phase 1–6 diff remains readable against
 CryoSoft history and can be cherry-picked back into `develop` if a fix
 belongs to both.
 
@@ -357,11 +409,13 @@ lines naming deleted modules are removed.
 VIs 6, servicing and operations 6, setup-specific procedures and scenarios 5,
 GUI servicing/operations/config-editor/assistant 4), 2 support fixtures
 rewritten (`scenarios.py`, `instrument_modes.py`), the rest kept with the
-edits in phase 4. New tests: the three conformance rules in phase 2, a
+edits in phase 5. New tests: the four conformance rules in phase 2, a
 `CRITICAL_FLAG` emergency scenario, role discovery in `test_l4_procedure.py`,
-and one end-to-end test that runs the sim Field Sweep through the gateway as
-an agent, analyses it and parks the notebook entry (most of it exists in
-`test_analysis_end_to_end.py`; it gains the agent leg).
+image-block write/read in `test_l5_data_manager.py`/`test_l5_data_reader.py`,
+the imaging example's five files (§5.8), and one end-to-end test per example
+that runs the sim procedure through the gateway as an agent, analyses it and
+parks the notebook entry (the transport half exists in
+`test_analysis_end_to_end.py`; it gains the agent leg and an imaging twin).
 
 `test_conformance.py` stays the crown jewel: auto-discovery means a user's
 new VI or recipe is checked the moment the file exists. It loses the
@@ -370,54 +424,42 @@ gains the three rules above.
 
 ## 10. Docs that ship
 
-- `README.md`: rewritten around §3 and the layer story; the agent tool table
-  and roles matrix from `gateway/README.md`; install; run the sim; the four
-  "add a …" walkthroughs; how to connect a real rack (config + sim twin).
-- `GLOSSARY.md`: ~190 of 208 terms survive.
-- `docs/design/`: `agentic-instrumentation-framework.md`,
-  `agent-operative-architecture-audit.md`,
-  `development-plan-contracts-to-agents.md`,
-  `instrument-thread-and-responsive-gui.md`, `analysis-before-eln.md`, this
-  document. These are the paper's design record. Fix the two index
-  inconsistencies the survey found (`session-tier-and-terminology.md`
-  status, the `synchronized-*` link).
+- `README.md`: rewritten around §3 and the layer story; both examples; the
+  agent tool table and roles matrix from `gateway/README.md`; install; run a
+  sim; the four "add a …" walkthroughs; how to connect a real rack (config +
+  sim twin).
+- `GLOSSARY.md`: ~190 of 208 terms survive, plus image block, stage, frame,
+  reference frame.
+- Folder READMEs: every functional folder, per the folder-README standard.
+  Together with the docstrings they are the complete design record that
+  ships; `docs/plans/` does not (§2).
 - `docs/user-docs/`: keep, add the state-path migration note.
-- `LICENSE`: MIT, unchanged (§12, decision 5).
+- `LICENSE`: MIT, unchanged.
 
 ## 11. Verification plan
 
 After every phase: `ruff check .`, `lint-imports`, `pytest -m "not hardware"`
-threaded and inline, from `.venv`. After phase 3: offscreen screenshots of
-the monitor window and the procedure window per the `gui-edit` skill. After
-phase 6: fresh-venv install and the four console scripts. After phase 7:
-CI on the new repo.
+threaded and inline, from `.venv`. After phase 3: the imaging run's report
+figures inspected. After phase 4: offscreen screenshots of the monitor window
+and the procedure window on both configs per the `gui-edit` skill. After
+phase 7: fresh-venv install and the four console scripts. After phase 8: CI
+on the new repo.
 
-## 12. Decisions for the user
+## 12. Decisions taken in the second round (2026-09-05)
 
-1. **Embedded assistant.** `session/assistant/` (1 747 lines) and
-   `gui/assistant_dock.py` (490) are generic and cryostat-free, but they are
-   a second agent client with no capability of their own; everything they do
-   an external agent does over MCP. Recommendation: leave them out of I2AS
-   core (they stay in CryoSoft). Alternative: keep them behind the existing
-   `assistant` extra, at +2 200 lines and two test files.
-2. **Third procedure.** Time Series (355 lines) is the simplest procedure and
-   shows `sweep_axis = None` and end-condition channels. Recommendation: keep
-   it and Temperature Sweep; three procedures show the pattern better than
-   one. Alternative: Field Sweep alone.
-3. **Lakeshore VI variant.** Keep `lakeshore_335_sample_temperature_controller.py`
-   (206 lines) as the example temperature VI, because it is the only shipped
-   use of dynamic `control_param_specs()` choices. Alternative: the plain
-   `SampleTemperatureControllerVI` and lose that example.
-4. **Design record.** Ship `docs/design/` with the six documents named in §10
-   (about 3 000 lines of prose). Alternative: ship only the framework
-   document and this plan.
-5. **Licence and attribution.** MIT stays as is. The `CryoSoft` name survives
-   only in the README's provenance line and the git history.
-6. **The example name.** `configs/sim_cryostat` keeps its name (it is a
-   cryostat). The VI `temperature_vti` is renamed `temperature`; `magnet_z`
-   and `dc_measurement` stay.
-
-Absent an answer, execution proceeds with the recommendations.
+1. **Embedded assistant**: out of I2AS core; stays in CryoSoft.
+2. **Procedures**: Field Sweep, Temperature Sweep, Time Series stay; Field
+   Imaging is added.
+3. **Temperature VI**: the Lakeshore variant, for its dynamic choices example.
+4. **Design record**: not shipped. `docs/plans/` is removed in phase 6.
+5. **Licence**: MIT unchanged; CryoSoft named only in the README's provenance
+   line and the git history.
+6. **Example naming**: `sim_cryostat`, `magnet_z`, `dc_measurement` keep their
+   names; `temperature_vti` → `temperature`. The imaging setup is
+   `sim_imaging` with `magnet_z`, `stage`, `camera`.
+7. **Contracts**: lines naming deleted modules are removed from the
+   import-linter contracts; no rule is weakened.
+8. **Imaging kind**: widefield camera (not scanning probe).
 
 ## 13. Out of scope (later, separately)
 
@@ -429,7 +471,13 @@ Absent an answer, execution proceeds with the recommendations.
   analysis recipe already has one; the others are natural follow-ups).
 - Rewriting `sim_oxford_ips120` as a generic "sim rampable source" (the sim
   magnet's physics is the example, and it is tested).
-- The per-procedure recipe-preference editor noted in `analysis-before-eln.md`.
+- The per-procedure recipe-preference editor noted in the analysis stage's
+  design.
+- A live frame view in the procedure window (today the two live plots show
+  scalar columns; the imaging example shows `roi_mean` live and the frames in
+  the analysed entry). Natural follow-up once the image block exists.
+- A scanning-probe imaging example (stage raster over a point detector
+  through the reading loop); the widefield camera was chosen first.
 
 ## 14. Cutting the repository
 
