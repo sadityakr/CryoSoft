@@ -62,7 +62,7 @@ class _HousekeepingVI(BaseVirtualInstrument):
         super().__init__(drivers, **init_params)
         self.mode = 0
 
-    @control(scope="operation")
+    @control(scope="operation", action_class="recovery")
     def set_housekeeping_mode(self, mode: int) -> None:
         """Select an instrument-housekeeping mode.
 

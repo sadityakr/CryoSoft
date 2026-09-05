@@ -24,9 +24,18 @@ a `drivers` dict of role → driver instance (e.g. `{"main": ...}`,
   numeric state snapshot each tick.
 - `@control` action methods, validated against `control_limits` before any
   hardware call (out-of-range raises `CryoSoftSafetyError`), carrying a
-  capability scope (see below) and optional GUI metadata: `params={name:
-  ParamSpec}` (widget shape, unit, bounds, choices) and `panel=` (default
-  monitor-card placement — see "GUI presentation" below).
+  capability scope (see below), an **action class** and optional GUI
+  metadata: `params={name: ParamSpec}` (widget shape, unit, bounds, choices)
+  and `panel=` (default monitor-card placement — see "GUI presentation"
+  below).
+- The **action-class declaration**: `action_class=` on every `@control`,
+  one of `read` / `recovery` / `run_control` / `envelope` (GLOSSARY.md's
+  **Action class**). How much authority an action needs is a judgement about
+  the instrument, so it is declared here rather than in a table in the agent
+  gateway, which reads it off the station's declaration snapshot. Every
+  shipped control declares it explicitly — conformance requires it — even
+  though the decorator's own default (`run_control`, the most restrictive)
+  would be safe.
 - `evaluate_safety()` interlock verdicts reported to `Station.check_safety()`
   every tick — a per-VI, per-tick JUDGMENT of that VI's own polled state,
   never a declaration. The two declarative halves that classify what a

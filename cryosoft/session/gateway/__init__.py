@@ -15,7 +15,6 @@ vocabulary.
 
 from cryosoft.session.gateway.action_classes import (
     COMMAND_ACTION_CLASSES,
-    CONTROL_ACTION_CLASSES,
     LIFECYCLE_ACTION_CLASSES,
     ActionClass,
     ClassifiedAction,
@@ -58,7 +57,6 @@ __all__ = [
     "ClassifiedAction",
     "UnclassifiedActionError",
     "COMMAND_ACTION_CLASSES",
-    "CONTROL_ACTION_CLASSES",
     "LIFECYCLE_ACTION_CLASSES",
     "classify_command",
     "classify_control",

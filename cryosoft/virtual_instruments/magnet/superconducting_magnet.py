@@ -393,6 +393,7 @@ class SuperconductingMagnetVI(MagnetBase, RampableVI):
     # control-validation standard). The spec's default is the form seed —
     # zero field, the same target standby() drives to.
     @control(
+        action_class="run_control",
         params={
             "target_T": ParamSpec(
                 type=float,

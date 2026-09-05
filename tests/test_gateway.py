@@ -64,7 +64,11 @@ def test_a_command_is_classified_from_the_table(station_info):
 
 
 def test_a_vi_action_is_classified_from_its_target(station_info):
-    """The one command whose class depends on what it points at."""
+    """The one command whose class depends on what it points at.
+
+    And the class comes from the target's own declaration (the action-class
+    declaration on the ``@control``), not from a table in the gateway.
+    """
     ramp = _command(
         ev.CommandName.SUBMIT_VI_ACTION,
         vi_name="magnet_z",
@@ -72,6 +76,13 @@ def test_a_vi_action_is_classified_from_its_target(station_info):
         target_T=0.1,
     )
     assert classify_command(ramp, station_info).action_class is ActionClass.RUN_CONTROL
+
+    read = _command(
+        ev.CommandName.SUBMIT_VI_ACTION,
+        vi_name="dc_measurement",
+        method_name="read_now",
+    )
+    assert classify_command(read, station_info).action_class is ActionClass.READ
 
     lifecycle = _command(
         ev.CommandName.SUBMIT_VI_ACTION, vi_name="magnet_z", method_name="standby"
@@ -123,6 +134,18 @@ def test_observer_is_refused_run_control_with_a_structured_reason(station_info):
     assert verdict.detail["action_class"] == "run_control"
     assert verdict.detail["rationale"]
     assert not verdict.ok
+
+
+def test_observer_may_read(station_info):
+    """A read-class capability is permitted to every role."""
+    command = _command(
+        ev.CommandName.SUBMIT_VI_ACTION,
+        actor=OBSERVER,
+        vi_name="dc_measurement",
+        method_name="read_now",
+    )
+
+    assert _authorize(command, station_info) is None
 
 
 def test_debug_takes_recovery_only_while_unattended(station_info):
@@ -193,14 +216,15 @@ def test_a_revoked_gate_refuses_even_the_session_role(station_info):
     assert verdict.detail["gate"] == "revoked"
 
 
-def test_a_read_only_gate_refuses_every_write(station_info):
-    """read_only is the middle rung: observe, but write nothing.
+def test_a_read_only_gate_leaves_reads_alone(station_info):
+    """read_only is the middle rung: observe, but write nothing."""
+    read = _command(
+        ev.CommandName.SUBMIT_VI_ACTION,
+        vi_name="dc_measurement",
+        method_name="read_now",
+    )
+    assert _authorize(read, station_info, gate=ev.AgentGate.READ_ONLY) is None
 
-    No shipped VI declares a read-class capability today, so the READ rung
-    itself has no subject to dispatch here; what this pins is the half that
-    does have one — every non-read class is refused while the gate is closed
-    to writes.
-    """
     write = _command(ev.CommandName.PAUSE_PROCEDURE)
 
     refused = _authorize(write, station_info, gate=ev.AgentGate.READ_ONLY)

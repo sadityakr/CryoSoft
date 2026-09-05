@@ -217,6 +217,7 @@ class Lakeshore335SampleTemperatureControllerVI(SampleTemperatureControllerVI):
     # DEFAULT is per-instrument, which is why control_param_specs() above
     # overrides this declaration with the currently-assigned curve.
     @control(
+        action_class="recovery",
         panel=False,
         params={
             "curve": ParamSpec(
@@ -237,6 +238,7 @@ class Lakeshore335SampleTemperatureControllerVI(SampleTemperatureControllerVI):
 
     # Static choices, per-instrument default — see set_curve above.
     @control(
+        action_class="run_control",
         panel=False,
         params={
             "range_setting": ParamSpec(

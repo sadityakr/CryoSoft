@@ -818,6 +818,11 @@ class ControlInfo(_ContractMessage):
         name: The method name, which is what a ``Command`` names to invoke
             it.
         scope: Capability scope — ``"measurement"`` or ``"operation"``.
+        action_class: How much authority this action needs, as the VI
+            declared it (the action-class declaration, see GLOSSARY.md's
+            **Action class**): ``"read"``, ``"recovery"``, ``"run_control"``
+            or ``"envelope"``. This is what the agent gateway classifies a
+            ``submit_vi_action`` by; the GUI ignores it.
         panel: Declared default placement: ``True`` on the compact monitor
             card, ``False`` in the instrument front panel only. Display
             only, never a safety mechanism.
@@ -836,6 +841,7 @@ class ControlInfo(_ContractMessage):
 
     name: str
     scope: str = "measurement"
+    action_class: str = "run_control"
     panel: bool = True
     group: str = ""
     params: tuple[dict[str, Any], ...] = ()
@@ -850,10 +856,16 @@ class ControlInfo(_ContractMessage):
             ValueError: If ``name`` is empty.
         """
         _checked_strings(
-            "ControlInfo", name=self.name, scope=self.scope, group=self.group
+            "ControlInfo",
+            name=self.name,
+            scope=self.scope,
+            action_class=self.action_class,
+            group=self.group,
         )
         if not self.name:
             raise ValueError("ControlInfo.name must be a non-empty str")
+        if not self.action_class:
+            raise ValueError("ControlInfo.action_class must be a non-empty str")
         if not isinstance(self.panel, bool):
             raise TypeError("ControlInfo.panel must be a bool")
         if isinstance(self.params, (Mapping, str)) or not isinstance(

@@ -303,6 +303,7 @@ class SampleTemperatureControllerVI(TemperatureControllerBase, RampableVI):
     # repeated on the spec; the default mirrors this VI's own
     # default_ramp_rate fallback.
     @control(
+        action_class="recovery",
         group="temperature_control",
         params={
             "rate_K_per_min": ParamSpec(
@@ -334,6 +335,7 @@ class SampleTemperatureControllerVI(TemperatureControllerBase, RampableVI):
     # is only the form seed: zero commands the coldest the setup allows,
     # i.e. heater off, the same direction standby() drives in.
     @control(
+        action_class="run_control",
         group="temperature_control",
         params={
             "target_K": ParamSpec(
@@ -356,6 +358,7 @@ class SampleTemperatureControllerVI(TemperatureControllerBase, RampableVI):
     # setting rather than a routine sweep control, so it lives in the
     # instrument front panel, not the compact monitor card.
     @control(
+        action_class="run_control",
         panel=False,
         group="heater",
         params={
@@ -386,6 +389,7 @@ class SampleTemperatureControllerVI(TemperatureControllerBase, RampableVI):
     # Lakeshore 335 MOUT command and the ITC503 heater property clamp to it),
     # not a setup limit, so it does not go through control_limits/config.
     @control(
+        action_class="run_control",
         panel=False,
         group="heater",
         params={
@@ -422,6 +426,7 @@ class SampleTemperatureControllerVI(TemperatureControllerBase, RampableVI):
     # the same ranges); they are instrument constants, not setup limits, so
     # they do not go through control_limits/config.
     @control(
+        action_class="recovery",
         panel=False,
         group="heater",
         params={

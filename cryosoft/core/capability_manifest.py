@@ -10,7 +10,7 @@ validator that checks one against the other.
 must be able to answer "what can this system do?" without a human writing a
 word of glue. That answer is *generated* from the same declarations that
 drive everything else (``@monitored(unit=, description=, group=)``,
-``@control(params=, scope=, panel=, group=)``, ``control_limits``,
+``@control(params=, scope=, action_class=, panel=, group=)``, ``control_limits``,
 ``ui_groups``, ``safety_flags``), never hand-maintained, because a
 hand-maintained description drifts from the instrument in the first week.
 This module writes no description of its own; every string in its output
@@ -59,6 +59,7 @@ import sys
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
+from cryosoft.core.decorators import VALID_ACTION_CLASSES
 from cryosoft.core.events import StationInfo
 
 if TYPE_CHECKING:  # pragma: no cover — typing only, never imported at runtime
@@ -275,11 +276,17 @@ MANIFEST_SCHEMA: dict[str, Any] = {
         "control": {
             "type": "object",
             "description": "One @control action.",
-            "required": ["name", "scope", "panel", "group", "params"],
+            "required": ["name", "scope", "action_class", "panel", "group", "params"],
             "additionalProperties": False,
             "properties": {
                 "name": {"type": "string"},
                 "scope": {"type": "string", "enum": ["measurement", "operation"]},
+                "action_class": {
+                    "type": "string",
+                    "enum": list(VALID_ACTION_CLASSES),
+                    "description": "How much authority this action needs, as "
+                    "the instrument declares it.",
+                },
                 "panel": {"type": "boolean"},
                 "group": {"type": "string"},
                 "params": {"type": "array", "items": {"$ref": "#/$defs/param"}},

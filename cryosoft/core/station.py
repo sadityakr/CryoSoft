@@ -21,6 +21,7 @@ from typing import Any
 from cryosoft.core.availability import Availability, state_for
 from cryosoft.core.conditions import Condition
 from cryosoft.core.decorators import (
+    get_control_action_class,
     get_control_methods,
     get_control_panel,
     get_control_scope,
@@ -2377,6 +2378,7 @@ def _control_infos(
             ControlInfo(
                 name=name,
                 scope=get_control_scope(method),
+                action_class=get_control_action_class(method),
                 panel=get_control_panel(method),
                 group=get_ui_group(method),
                 params=tuple(

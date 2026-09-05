@@ -58,6 +58,13 @@ Uniform lifecycle (methods)
   HDF5 layout mismatches mid-run.
 - `standby() → None` — safe-off idle state.
 - `ping() → bool` — IDN check on all drivers.
+- `read_now() → None` (optional) — the bench hook: one `take_reading()` at
+  the excitation already armed, cached into `@monitored` fields so an
+  operator can confirm the settings produce sane readings before committing
+  to a run. It is the natural home of a `read`-class capability
+  (`@control(panel=False, action_class="read")` — GLOSSARY.md's **Action
+  class**), since it commands nothing new; `dc_separate_measurement.py` is
+  the shipped example.
 - `reading_setters: dict[str, str]` — OPTIONAL reading-loop declaration
   (default `{}`): maps a `measurement_parameters` name to the cheap setter
   method that reprograms just that quantity between readings without
@@ -282,7 +289,9 @@ shared-6221 handoff test for the pattern.
   entry `{"current_A": "set_source_current"}`, so the reading loop can measure
   a user-entered current list (e.g. `1e-6, -1e-6`) at every sweep point
   (per-slot index-label columns); the setter reprograms the source in place
-  with no re-arm cost. tests: `tests/test_measurement_dc_vi.py`,
+  with no re-arm cost. Also the shipped example of a `read`-class capability:
+  `read_now()` plus the `last_voltage_V` / `last_n_valid` fields it fills.
+  tests: `tests/test_measurement_dc_vi.py`,
   `tests/test_l1_new_vis.py` (`TestDCSeparateMeasurementVI`),
   `tests/test_new_procedures.py` (reading loop).
 - `__init__.py` — package marker. tests: none.

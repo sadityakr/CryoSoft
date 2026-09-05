@@ -4243,80 +4243,67 @@ def test_run_source_conformance(source_cls: type) -> None:
 # unclassified, and no row names something that no longer exists.
 
 
-def _configured_control_actions() -> set[tuple[str, str]]:
-    """(VI kind, @control name) for every control every shipped config declares.
+def test_action_class_names_agree_between_the_declaration_and_the_gateway() -> None:
+    """`VALID_ACTION_CLASSES` and `ActionClass` carry the same four values.
 
-    Read from the configs' `virtual_instruments` blocks by importing each
-    named class — a pure import, no Station and no driver — so the real
-    (hardware-only) configs are covered exactly like the sim ones.
-
-    Returns:
-        The set of `(InstrumentInfo.kind, method_name)` keys the gateway's
-        classification table must cover.
+    The action-class declaration lives in `core/decorators.py`, which imports
+    nothing (contract C1), so the names it validates against are plain
+    strings; the gateway's permission matrix is keyed by the `ActionClass`
+    enum. One is what a VI declares, the other is what decides who may take
+    it — if they ever disagree, a control could declare a class no role can
+    be granted. This is the check that keeps the two in step.
     """
-    actions: set[tuple[str, str]] = set()
-    for config_dir in _config_dirs():
-        devices = _load_yaml(config_dir / "devices.yaml")
-        for vi_cfg in (devices.get("virtual_instruments") or {}).values():
-            vi_cls = _import_class(vi_cfg["class"])
-            kind = str(getattr(vi_cls, "vi_type", ""))
-            for method_name in _control_methods(vi_cls):
-                actions.add((kind, method_name))
-    return actions
+    from cryosoft.core.decorators import VALID_ACTION_CLASSES
+    from cryosoft.session.gateway import ActionClass
+
+    assert set(VALID_ACTION_CLASSES) == {member.value for member in ActionClass}
 
 
-@pytest.mark.parametrize("config_dir", _config_dirs(), ids=lambda p: p.name)
-def test_every_configured_control_has_an_action_class(config_dir: Path) -> None:
-    """Every control this config's manifest declares is classified.
+@pytest.mark.parametrize("vi_cls", _all_vi_classes(), ids=lambda c: c.__name__)
+def test_every_control_declares_its_action_class(vi_cls: type) -> None:
+    """Every shipped `@control` declares `action_class=` explicitly.
 
-    A control with no row is refused at runtime rather than defaulted, so an
-    unclassified capability is an instrument an agent simply cannot reach.
-    Adding a VI or a `@control` therefore means adding a row to
-    `CONTROL_ACTION_CLASSES` with its one-line rationale, in the same commit.
+    The action-class declaration (see `core/decorators.py`): how much
+    authority an instrument's action needs is a judgement about that
+    instrument, so it is declared beside the action rather than in a table
+    above it. The decorator DOES have a default — the most restrictive class
+    — so a missing declaration can never widen what an agent may do; what it
+    would do is hide the judgement, which is why every shipped control makes
+    it in the open. The undeclared marker is `None`, distinct from an
+    explicit `action_class="run_control"`.
     """
-    from cryosoft.session.gateway import CONTROL_ACTION_CLASSES
+    from cryosoft.core.decorators import VALID_ACTION_CLASSES
 
-    devices = _load_yaml(config_dir / "devices.yaml")
-    missing: list[str] = []
-    for vi_name, vi_cfg in (devices.get("virtual_instruments") or {}).items():
-        vi_cls = _import_class(vi_cfg["class"])
-        kind = str(getattr(vi_cls, "vi_type", ""))
-        for method_name in _control_methods(vi_cls):
-            if (kind, method_name) not in CONTROL_ACTION_CLASSES:
-                missing.append(f"({kind!r}, {method_name!r})  # {vi_name}")
-    assert not missing, (
-        f"{config_dir.name} declares controls with no row in the gateway's "
-        f"CONTROL_ACTION_CLASSES table:\n  " + "\n  ".join(sorted(missing))
+    undeclared: list[str] = []
+    for method_name, method in _control_methods(vi_cls).items():
+        declared = getattr(method, "_control_action_class", None)
+        if declared is None:
+            undeclared.append(method_name)
+        else:
+            assert declared in VALID_ACTION_CLASSES, (
+                f"{vi_cls.__name__}.{method_name} declares action class "
+                f"{declared!r}, not one of {list(VALID_ACTION_CLASSES)}"
+            )
+    assert not undeclared, (
+        f"{vi_cls.__name__} declares controls with no action_class=: "
+        f"{sorted(undeclared)} — every @control says how much authority it "
+        f"needs (the action-class declaration)"
     )
 
 
-def test_no_stale_control_action_classes() -> None:
-    """No classification row names a capability no shipped config declares.
+def test_every_action_class_row_carries_a_rationale() -> None:
+    """Each row of the two remaining tables says WHY.
 
-    A stale row is a rationale nobody can check against a real instrument;
-    the physicist reviewing the table must be reviewing what the station
-    actually offers.
+    A `@control`'s class comes from its own declaration, so the only tables
+    left are the engine's command surface and the two lifecycle actions.
     """
-    from cryosoft.session.gateway import CONTROL_ACTION_CLASSES
-
-    stale = set(CONTROL_ACTION_CLASSES) - _configured_control_actions()
-    assert not stale, (
-        f"CONTROL_ACTION_CLASSES rows that no shipped config declares: "
-        f"{sorted(stale)}"
-    )
-
-
-def test_every_control_action_class_carries_a_rationale() -> None:
-    """Each row says WHY, because that is what the physicist reviews."""
     from cryosoft.session.gateway import (
         COMMAND_ACTION_CLASSES,
-        CONTROL_ACTION_CLASSES,
         LIFECYCLE_ACTION_CLASSES,
     )
 
     rows: dict[str, object] = {}
     rows.update({f"command {k.value}": v for k, v in COMMAND_ACTION_CLASSES.items()})
-    rows.update({f"control {k}": v for k, v in CONTROL_ACTION_CLASSES.items()})
     rows.update({f"lifecycle {k}": v for k, v in LIFECYCLE_ACTION_CLASSES.items()})
     for label, classified in rows.items():
         rationale = classified.rationale  # type: ignore[attr-defined]

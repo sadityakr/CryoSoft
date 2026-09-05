@@ -130,7 +130,8 @@ def test_a_capability_tool_carries_its_units_bounds_and_rationale(tools):
     assert tool.fixed_args == {"vi_name": "magnet_z", "method_name": "set_field"}
     assert tool.instrument == "magnet_z"
     assert tool.capability == "set_field"
-    assert "largest stored energy" in tool.description  # the classification's rationale
+    # The declared action class, which is what the classification now reads.
+    assert "Declared run_control" in tool.description
 
     target = tool.input_schema["properties"]["target_T"]
     assert target["type"] == "number"

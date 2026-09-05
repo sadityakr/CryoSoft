@@ -1,53 +1,36 @@
-"""What each action a client can take actually DOES, as one declarative table.
+"""What each action a client can take actually DOES, as one classification.
 
 The permission matrix in ``roles.py`` decides who may take an action of a
-given class. This module decides which class an action IS — and it does so
-in tables, not in code, because the classification is a physics judgement
-about a particular instrument rack rather than a rule that can be derived
-from a method signature.
+given class. This module decides which class an action IS.
 
-**PROVISIONAL — to be confirmed by the physicist.** Every rationale below is
-a first pass written from the VI docstrings. The recovery-versus-run-control
-line in particular is a decision that belongs to whoever owns the cryostat,
-not to whoever wrote the gateway, and it is expected to move. Nothing here
-is load-bearing for safety on its own — the Orchestrator's own admission
-rules, the control-validation standard's limits and the session envelope all
-still bind every writer regardless of what this table says. What this table
-decides is how much autonomy an agent is granted BEFORE those checks run.
-
-**Three tables, one rule each.**
+**Where each answer comes from.** How dangerous one instrument's action is
+is a judgement about that instrument, so a ``@control``'s class is not
+decided here at all: it is DECLARED on the VI
+(``@control(action_class=...)``, the action-class declaration — see
+``core/decorators.py``) and travels to this module on
+``StationInfo``'s ``ControlInfo.action_class``. What stays here is what
+belongs to the engine rather than to any instrument rack:
 
 * ``COMMAND_ACTION_CLASSES`` — one row per ``CommandName``, the engine's own
-  command surface.
-* ``CONTROL_ACTION_CLASSES`` — one row per ``(VI kind, @control name)``, for
-  the one command whose class depends on its target, ``submit_vi_action``.
-  The key's first half is ``InstrumentInfo.kind``, the VI CLASS's ``vi_type``
-  (``magnet``, ``temperature``, ``measurement`` …), so a row is
-  written once per capability rather than once per
-  configured instrument.
+  command surface. ``SUBMIT_VI_ACTION`` is the one command whose class is
+  not fixed here, because it depends on the capability it targets:
+  ``classify_control()`` reads the declaration.
 * ``LIFECYCLE_ACTION_CLASSES`` — ``initiate`` / ``standby``, the two
-  non-``@control`` methods the direct action path admits, for every VI kind.
+  non-``@control`` methods the direct action path admits. They carry no
+  decorator to declare anything on, and they mean the same thing on every
+  VI, so they are classified once here.
 
-**The default rule the rows were derived from** (stated so a reviewer can
-see where judgement overrode it, and so a new row has somewhere to start):
+Nothing in this module is load-bearing for safety on its own — the
+Orchestrator's own admission rules, the control-validation standard's limits
+and the session envelope all still bind every writer. What the
+classification decides is how much autonomy an agent is granted BEFORE those
+checks run.
 
-1. A ``@control`` whose **capability scope** is ``operation``, and each
-   lifecycle action, is ``recovery`` — instrument housekeeping a debug agent
-   may do alone to keep a run alive.
-2. Anything that sets a setpoint, ramps, arms a measurement or sources
-   current is ``run_control``.
-3. Anything that only reads is ``read``.
-
-Four rows deliberately DEVIATE from rule 1, and say so in their rationale:
-the magnet's persistent-mode and switch-heater capabilities carry the wider
-capability scope but command the largest stored energy on the station, which
-is run control however the decorator is spelled.
-
-**No silent default.** An action with no row is not guessed at: it is
-refused, by name, with a reason saying the classification is missing.
-A conformance test asserts every control every shipped config declares has a
-row, so the refusal is a bug report about a table that was not updated, never
-the normal path.
+**No silent default.** A command with no row, or a capability no instrument
+declares, is not guessed at: it is refused, by name, with a reason saying
+the classification is missing. Conformance asserts every shipped
+``@control`` declares its class explicitly, so a refusal is a bug report,
+never the normal path.
 """
 
 from __future__ import annotations
@@ -57,7 +40,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 
-from cryosoft.core.events import Command, CommandName, StationInfo
+from cryosoft.core.events import Command, CommandName, ControlInfo, StationInfo
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +50,10 @@ class ActionClass(str, Enum):
 
     The four classes of the gateway's permission matrix (``roles.py``). A
     ``str`` enum so the value is JSON-safe as it stands and travels in a
-    refusal's ``detail`` unchanged.
+    refusal's ``detail`` unchanged. The same four values are
+    ``core.decorators.VALID_ACTION_CLASSES``, which is what a VI declares
+    against; ``tests/test_conformance.py`` asserts the two agree, so the
+    declaration side and the permission side can never drift apart.
 
     Members:
         READ: Observes the system and changes nothing.
@@ -119,7 +105,7 @@ class UnclassifiedActionError(ValueError):
 # One row per CommandName; conformance diffs the two, so a command added to
 # the contract cannot reach an agent unclassified. SUBMIT_VI_ACTION is the
 # one command whose class is not fixed here — it depends on the capability it
-# targets, so it is resolved through CONTROL_ACTION_CLASSES below.
+# targets, so classify_control() reads that capability's own declaration.
 
 COMMAND_ACTION_CLASSES: dict[CommandName, ClassifiedAction] = {
     # ── Runs and the queue ──
@@ -225,67 +211,6 @@ COMMAND_ACTION_CLASSES: dict[CommandName, ClassifiedAction] = {
 }
 
 
-# ── Per-VI-kind capabilities: the physicist's pass ────────────────────
-#
-# Keyed by (InstrumentInfo.kind, @control name). Every control every shipped
-# config's manifest declares has a row, asserted by conformance.
-
-CONTROL_ACTION_CLASSES: dict[tuple[str, str], ClassifiedAction] = {
-    # ── magnet: superconducting magnets ──
-    ("magnet", "set_field"): ClassifiedAction(
-        ActionClass.RUN_CONTROL,
-        "Ramps the magnet to a new field — the archetypal setpoint, and the "
-        "largest stored energy on the station.",
-    ),
-    # ── measurement: source/measure electronics ──
-    ("measurement", "initiate_measurement"): ClassifiedAction(
-        ActionClass.RUN_CONTROL,
-        "Arms the instrument and, on a current-sourcing method, begins "
-        "sourcing current into the sample.",
-    ),
-    ("measurement", "set_source_current"): ClassifiedAction(
-        ActionClass.RUN_CONTROL,
-        "Sets the current sourced through the sample by a separate "
-        "source/voltmeter pair.",
-    ),
-    # ── temperature: sample temperature controllers ──
-    ("temperature", "set_temperature"): ClassifiedAction(
-        ActionClass.RUN_CONTROL,
-        "Ramps the sample space to a new temperature — a setpoint.",
-    ),
-    ("temperature", "set_ramp_rate"): ClassifiedAction(
-        ActionClass.RECOVERY,
-        "How fast a later ramp approaches its setpoint, never the setpoint "
-        "itself — the framework's 'adjust waits' recovery action.",
-    ),
-    ("temperature", "set_pid"): ClassifiedAction(
-        ActionClass.RECOVERY,
-        "Retunes the closed loop to settle an oscillation; commands no new "
-        "setpoint. The framework's 're-send config'.",
-    ),
-    ("temperature", "set_heater_mode"): ClassifiedAction(
-        ActionClass.RUN_CONTROL,
-        "AUTO to MANUAL removes the closed loop from the sample's "
-        "temperature and leaves it under open-loop power.",
-    ),
-    ("temperature", "set_heater_output"): ClassifiedAction(
-        ActionClass.RUN_CONTROL,
-        "Open-loop heater power straight into the sample space.",
-    ),
-    ("temperature", "set_heater_range"): ClassifiedAction(
-        ActionClass.RUN_CONTROL,
-        "Selects the decade of heater power, OFF included — it switches the "
-        "heater on and off.",
-    ),
-    ("temperature", "set_curve"): ClassifiedAction(
-        ActionClass.RECOVERY,
-        "PROVISIONAL: assigning a calibration curve changes how the sensor "
-        "is READ, which is 're-send config' — but the closed loop then "
-        "interprets its setpoint through it, so the physicist may move this.",
-    ),
-}
-
-
 # ── Lifecycle actions: the same two on every VI ───────────────────────
 
 LIFECYCLE_ACTION_CLASSES: dict[str, ClassifiedAction] = {
@@ -302,22 +227,33 @@ LIFECYCLE_ACTION_CLASSES: dict[str, ClassifiedAction] = {
 }
 
 
-def _instrument_kind(station_info: StationInfo, vi_name: str) -> str:
-    """Return the VI CLASS kind of one configured instrument.
+def _declared_control(
+    station_info: StationInfo, vi_name: str, method_name: str
+) -> ControlInfo:
+    """Return one configured instrument's declaration of one ``@control``.
 
     Args:
         station_info: The station's declaration snapshot.
         vi_name: The instrument the action targets.
+        method_name: The ``@control`` being called.
 
     Returns:
-        ``InstrumentInfo.kind`` — the VI class's ``vi_type``.
+        The instrument's ``ControlInfo`` for that capability.
 
     Raises:
-        UnclassifiedActionError: If no configured instrument has that name.
+        UnclassifiedActionError: If no configured instrument has that name,
+            or it declares no such capability.
     """
     for instrument in station_info.instruments:
-        if instrument.name == vi_name:
-            return instrument.kind
+        if instrument.name != vi_name:
+            continue
+        for declared in instrument.controls:
+            if declared.name == method_name:
+                return declared
+        raise UnclassifiedActionError(
+            f"{vi_name} declares no capability named {method_name!r}, so the "
+            f"action cannot be classified"
+        )
     raise UnclassifiedActionError(
         f"no instrument named {vi_name!r} is configured on this station, so "
         f"the action cannot be classified"
@@ -327,29 +263,40 @@ def _instrument_kind(station_info: StationInfo, vi_name: str) -> str:
 def classify_control(station_info: StationInfo, vi_name: str, method_name: str) -> ClassifiedAction:
     """Classify one capability of one configured instrument.
 
+    Reads the class the VI itself declared (the action-class declaration, see
+    ``core/decorators.py``) off the station's snapshot. The two lifecycle
+    actions carry no decorator, so they come from
+    ``LIFECYCLE_ACTION_CLASSES`` instead.
+
     Args:
         station_info: The station's declaration snapshot, which is where the
-            instrument's ``kind`` comes from.
+            declared class comes from.
         vi_name: The instrument the action targets.
         method_name: The ``@control`` or lifecycle action being called.
 
     Returns:
-        The table's row for it, class and rationale.
+        The action's class and the rationale a refusal quotes back.
 
     Raises:
-        UnclassifiedActionError: If the instrument is not configured, or the
-            capability has no row — never a guessed default.
+        UnclassifiedActionError: If the instrument is not configured, if it
+            declares no such capability, or if the declared class is not one
+            this gateway knows — never a guessed default.
     """
     if method_name in LIFECYCLE_ACTION_CLASSES:
         return LIFECYCLE_ACTION_CLASSES[method_name]
-    kind = _instrument_kind(station_info, vi_name)
-    classified = CONTROL_ACTION_CLASSES.get((kind, method_name))
-    if classified is None:
+    declared = _declared_control(station_info, vi_name, method_name)
+    try:
+        action_class = ActionClass(declared.action_class)
+    except ValueError as exc:
         raise UnclassifiedActionError(
-            f"{vi_name}.{method_name}() (VI kind {kind!r}) has no row in the "
-            f"gateway's action-class table, so no role can be granted it"
-        )
-    return classified
+            f"{vi_name}.{method_name}() declares action class "
+            f"{declared.action_class!r}, which this gateway does not know, "
+            f"so no role can be granted it"
+        ) from exc
+    return ClassifiedAction(
+        action_class,
+        f"Declared {action_class.value} by {vi_name}'s own @control.",
+    )
 
 
 def classify_command(command: Command, station_info: StationInfo) -> ClassifiedAction:
