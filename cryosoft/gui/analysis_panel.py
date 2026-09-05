@@ -89,6 +89,14 @@ EXPERIMENT_SUFFIX = " (experiment)"
 #: ``ANY_PROCEDURE``), repeated here so the filter needs no analysis import.
 _ANY_PROCEDURE = "*"
 
+#: Room left beside a preview figure for the browser's own frame and
+#: scrollbar, so clamping a figure to the viewport does not itself push one.
+_PREVIEW_MARGIN_PX = 28
+
+#: Below this the preview has no meaningful width yet (it is not on screen),
+#: and a recipe's declared figure width is used unclamped.
+_MIN_CLAMP_WIDTH_PX = 200
+
 #: Publish states the chip renders, from ``publish_state_changed``.
 _CHIP_TEXT = {
     "synced": "eLab · synced",
@@ -162,6 +170,11 @@ class AnalysisPanel(QWidget):
         #: Guard against the settings write the checkbox itself triggers
         #: being re-applied while the panel is refreshing the checkbox.
         self._loading = False
+        #: The pending entry currently on screen, with the report and figure
+        #: directory it was rendered from — re-used by the resize path.
+        self._entry: dict[str, Any] = {}
+        self._report_shown: AnalysisReport | None = None
+        self._report_dir: Path | None = None
 
         self._build_ui()
         self._connect_collaborators()
@@ -194,7 +207,8 @@ class AnalysisPanel(QWidget):
         self._warnings = QTextEdit()
         self._warnings.setObjectName("analysis_warnings")
         self._warnings.setReadOnly(True)
-        self._warnings.setMaximumHeight(90)
+        self._warnings.setMaximumHeight(64)
+        self._warnings.setToolTip("What the recipe could not do, in its own words")
         self._warnings.hide()
         root.addWidget(self._warnings)
 
@@ -591,7 +605,32 @@ class AnalysisPanel(QWidget):
             return None
         return AnalysisReport.from_dict(payload)
 
-    def _preview_html(self, entry: Mapping[str, Any]) -> str:
+    def _figure_width(self, declared: int) -> int:
+        """Return the width one preview figure is rendered at, in pixels.
+
+        Clamped to the preview's own viewport whenever that viewport has a
+        real width, so a wide figure fits the pane instead of pushing a
+        horizontal scrollbar under it. Before the panel is on screen there is
+        no meaningful width to clamp to, and the recipe's declared one is
+        used as it stands.
+
+        Args:
+            declared: The figure's ``width_px``, or ``0`` for "unspecified".
+
+        Returns:
+            The width to render at, or ``0`` to leave it to the image itself.
+        """
+        available = self._preview.viewport().width() - _PREVIEW_MARGIN_PX
+        if available < _MIN_CLAMP_WIDTH_PX:
+            return declared
+        return min(declared, available) if declared else available
+
+    def _preview_html(
+        self,
+        entry: Mapping[str, Any],
+        report: AnalysisReport | None,
+        report_dir: Path | None,
+    ) -> str:
         """Render the entry as the operator sees it: figures, then the body.
 
         The figures are prepended here and ONLY here. The published body
@@ -600,6 +639,8 @@ class AnalysisPanel(QWidget):
 
         Args:
             entry: The pending entry's dict (``title``/``body_html``).
+            report: The run's analysis report, when one was written.
+            report_dir: The directory that report's figures live in.
 
         Returns:
             The HTML for the preview browser.
@@ -607,13 +648,12 @@ class AnalysisPanel(QWidget):
         title = html.escape(str(entry.get("title", "")))
         parts = [f"<h3>{title}</h3>"] if title else []
 
-        report = self._report()
-        report_dir = self._store_dir("report_dir")
         if report is not None and report_dir is not None:
             for figure in report.figures:
                 url = QUrl.fromLocalFile(str(report_dir / figure.file)).toString()
-                width = f' width="{figure.width_px}"' if figure.width_px else ""
-                parts.append(f'<p><img src="{html.escape(url)}"{width}></p>')
+                width = self._figure_width(figure.width_px)
+                attribute = f' width="{width}"' if width else ""
+                parts.append(f'<p><img src="{html.escape(url)}"{attribute}></p>')
                 if figure.caption:
                     parts.append(
                         f"<p><i>{html.escape(figure.caption)}</i></p>"
@@ -621,13 +661,33 @@ class AnalysisPanel(QWidget):
         parts.append(str(entry.get("body_html", "")))
         return "\n".join(parts)
 
+    def resizeEvent(self, event: Any) -> None:
+        """Re-render the preview so a figure keeps fitting the new width.
+
+        Args:
+            event: The Qt resize event.
+        """
+        super().resizeEvent(event)
+        if self._entry:
+            self._preview.setHtml(
+                self._preview_html(self._entry, self._report_shown, self._report_dir)
+            )
+
     def _refresh_pending(self) -> None:
         """Repaint the preview, the warnings box, the buttons and the status."""
         run_id = self.current_run_id()
         entry = self.pending_entry(run_id)
-        self._preview.setHtml(self._preview_html(entry) if entry else "")
-
         report = self._report() if entry else None
+        report_dir = self._store_dir("report_dir") if entry else None
+        # Held for the resize path, which re-renders the preview without
+        # going back to disk for a report it already read.
+        self._entry = dict(entry)
+        self._report_shown = report
+        self._report_dir = report_dir
+        self._preview.setHtml(
+            self._preview_html(entry, report, report_dir) if entry else ""
+        )
+
         notes: list[str] = []
         if report is not None and str(entry.get("source", "")) != "model":
             notes.extend(report.warnings)
