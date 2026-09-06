@@ -1,7 +1,7 @@
 """Behavior tests for tests/scenarios.py, doubling as its usage examples.
 
 Each test asks one question a facility operator would ask about a hazardous
-or degraded state ("what happens if helium is low while a run is in
+or degraded state ("what happens if a safety hold trips while a run is in
 flight?", "does a quench really lock out everything?") using the scenario
 helpers instead of hand-rolling driver flags + qtbot.waitUntil per test.
 """
@@ -29,9 +29,12 @@ def orchestrator(station, qtbot):
     orch.shutdown()
 
 
-def test_helium_low_holds_magnets_and_fails_running_procedure(station, orchestrator, qtbot):
-    """A procedure ramping a magnet, started while helium is already low, fails."""
-    scenarios.helium_low(station, orchestrator, qtbot, pct=10.0)
+def test_hold_flag_holds_concerned_vis_and_fails_running_procedure(
+    station, orchestrator, qtbot, monkeypatch
+):
+    """A procedure ramping a magnet, started under a standing safety hold, fails."""
+    hold_flag = scenarios.declare_hold_flag(monkeypatch, station)
+    scenarios.hold_flag_tripped(hold_flag, orchestrator, qtbot)
 
     run_finished = []
     orchestrator.run_finished.connect(lambda manifest: run_finished.append(manifest))
@@ -45,7 +48,7 @@ def test_helium_low_holds_magnets_and_fails_running_procedure(station, orchestra
     snap = scenarios.snapshot(station, orchestrator)
     assert "magnet_z" in snap["held_vis"]
     assert run_finished and run_finished[0]["status"] == "failed"
-    assert "helium_low" in run_finished[0]["reason"]
+    assert hold_flag.flag in run_finished[0]["reason"]
 
 
 def test_quench_blocks_manual_control_of_every_vi(station, orchestrator, qtbot):
@@ -55,7 +58,7 @@ def test_quench_blocks_manual_control_of_every_vi(station, orchestrator, qtbot):
     snap = scenarios.snapshot(station, orchestrator)
     assert snap["orchestrator_state"] == "EMERGENCY"
 
-    admitted, _reason = orchestrator._manual_action_admissible("temperature_vti")
+    admitted, _reason = orchestrator._manual_action_admissible("temperature")
     assert admitted is False, "EMERGENCY must refuse an unrelated VI too"
 
     station.get_vi("magnet_z")._driver._simulate_quench = False
@@ -64,19 +67,19 @@ def test_quench_blocks_manual_control_of_every_vi(station, orchestrator, qtbot):
 def test_disconnect_faults_the_named_vi(station, orchestrator, qtbot):
     """A disconnected instrument shows up as a comm fault, not a safety hold."""
     orchestrator._tick()  # one successful poll first, so the fault is a transition
-    scenarios.disconnect(station, orchestrator, qtbot, "temperature_vti")
+    scenarios.disconnect(station, orchestrator, qtbot, "temperature")
 
     snap = scenarios.snapshot(station, orchestrator)
-    assert "temperature_vti" in snap["faulted_vis"]
-    assert "not_responding" in orchestrator._station.availability("temperature_vti").tags
+    assert "temperature" in snap["faulted_vis"]
+    assert "not_responding" in orchestrator._station.availability("temperature").tags
 
-    station.get_vi("temperature_vti")._driver._simulate_error = False
+    station.get_vi("temperature")._driver._simulate_error = False
 
 
 def test_measurement_instrument_returns_error_instead_of_data(station, orchestrator, qtbot):
     """A measurement VI raises at the call site, with no station-wide fault at idle.
 
-    Unlike a system/level VI (test_disconnect_faults_the_named_vi), a
+    Unlike a system VI (test_disconnect_faults_the_named_vi), a
     measurement VI is not polled every tick — the fault only exists once
     something actually tries to use it, mirroring how a running procedure's
     sample() would see it.

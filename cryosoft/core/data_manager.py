@@ -82,6 +82,9 @@ class DataManager:
                                                                 # (N, n_loop1, n_loop2, 5, 44)
                     "measurement_block_labels": {"raw_channels_block": ["ch0", ...]},
                                                                 # ordered channel names, len == cols
+                    "measurement_image_blocks": {"frame": {"unit": "counts",
+                                                           "description": "..."}},
+                                                                # which blocks are frames
                     "loop_shape": [n_loop1, n_loop2],                   # each >= 1
                 }
 
@@ -92,6 +95,12 @@ class DataManager:
             HDF5 attribute directly on that block's dataset (see
             :meth:`_allocate_datasets`), so the file is self-describing
             without parsing this ``data_config`` JSON blob.
+            ``measurement_image_blocks`` is optional too: a block named
+            there is an IMAGE (the image-block standard, ``core.plan.
+            ImageBlock``) — the same ``(rows, cols)`` dataset, written with
+            ``block_kind = "image"`` and its ``unit``/``description``
+            attributes and no ``channel_names``. Every other block is
+            written with ``block_kind = "raw"``.
 
         n_sweep_points:
             Total number of sweep points expected (used for pre-allocation).
@@ -136,6 +145,13 @@ class DataManager:
         self._measurement_block_labels: dict[str, list[str]] = {
             name: list(labels)
             for name, labels in data_config.get("measurement_block_labels", {}).items()
+        }
+        self._measurement_image_blocks: dict[str, dict[str, str]] = {
+            name: {
+                "unit": str(info.get("unit", "")),
+                "description": str(info.get("description", "")),
+            }
+            for name, info in data_config.get("measurement_image_blocks", {}).items()
         }
         loop_shape = data_config.get("loop_shape", [1, 1])
         self._loop_shape: tuple[int, int] = (int(loop_shape[0]), int(loop_shape[1]))
@@ -249,18 +265,27 @@ class DataManager:
                 dtype=np.float64,
                 fillvalue=np.nan,
             )
-            # Self-description: which column index is which physical
-            # channel, and what each axis means, written directly on the
-            # dataset so a reader never needs to parse the JSON
-            # data_config metadata blob (see the __init__ docstring's
-            # measurement_block_labels entry).
+            # Self-description: what kind of block this is, what each axis
+            # means and — for a raw block — which column index is which
+            # physical channel, or — for an image — the pixel unit; all
+            # written directly on the dataset so a reader never needs to
+            # parse the JSON data_config metadata blob (see the __init__
+            # docstring's measurement_block_labels / measurement_image_blocks
+            # entries).
+            image = self._measurement_image_blocks.get(block_name)
             axis_names = (
                 "sweep_point",
                 *(("loop1", "loop2") if block_loop_prefix else ()),
                 "row",
-                "channel",
+                "col" if image is not None else "channel",
             )
             block_ds.attrs["axes"] = ", ".join(axis_names)
+            if image is not None:
+                block_ds.attrs["block_kind"] = "image"
+                block_ds.attrs["unit"] = image["unit"]
+                block_ds.attrs["description"] = image["description"]
+                continue
+            block_ds.attrs["block_kind"] = "raw"
             labels = self._measurement_block_labels.get(block_name)
             if labels is not None:
                 block_ds.attrs["channel_names"] = np.array(labels, dtype=h5py.string_dtype())

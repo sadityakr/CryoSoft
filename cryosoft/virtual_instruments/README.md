@@ -24,9 +24,18 @@ a `drivers` dict of role → driver instance (e.g. `{"main": ...}`,
   numeric state snapshot each tick.
 - `@control` action methods, validated against `control_limits` before any
   hardware call (out-of-range raises `CryoSoftSafetyError`), carrying a
-  capability scope (see below) and optional GUI metadata: `params={name:
-  ParamSpec}` (widget shape, unit, bounds, choices) and `panel=` (default
-  monitor-card placement — see "GUI presentation" below).
+  capability scope (see below), an **action class** and optional GUI
+  metadata: `params={name: ParamSpec}` (widget shape, unit, bounds, choices)
+  and `panel=` (default monitor-card placement — see "GUI presentation"
+  below).
+- The **action-class declaration**: `action_class=` on every `@control`,
+  one of `read` / `recovery` / `run_control` / `envelope` (GLOSSARY.md's
+  **Action class**). How much authority an action needs is a judgement about
+  the instrument, so it is declared here rather than in a table in the agent
+  gateway, which reads it off the station's declaration snapshot. Every
+  shipped control declares it explicitly — conformance requires it — even
+  though the decorator's own default (`run_control`, the most restrictive)
+  would be safe.
 - `evaluate_safety()` interlock verdicts reported to `Station.check_safety()`
   every tick — a per-VI, per-tick JUDGMENT of that VI's own polled state,
   never a declaration. The two declarative halves that classify what a
@@ -35,16 +44,16 @@ a `drivers` dict of role → driver instance (e.g. `{"main": ...}`,
   condition** / **Safety-flag manifest** / **Safety concern**): the
   PRODUCER side is the `safety_flags` class attribute, mapping every flag
   this VI's `evaluate_safety()` can report to its severity — `"advisory"`
-  (reserved), `"hold"` (scoped to concerned VIs, e.g. `LevelMeterBase`'s
-  `"helium_low"`), or `"critical"` (station-wide EMERGENCY by construction,
+  (reserved), `"hold"` (scoped to the VIs that name it in
+  `safety_concerns()`), or `"critical"` (station-wide EMERGENCY by construction,
   e.g. `MagnetBase`'s `"quench"` — no VI may name a critical flag as a
   concern, since a per-VI hold would be meaningless once EMERGENCY has
   already stopped everything) — merged across the MRO by
   `merged_safety_flags()`, exactly like `control_limits`. The CONSUMER side
   is `safety_concerns()`: which HOLD-severity flags — by name, anyone's —
-  this VI depends on to operate safely (only `MagnetBase` overrides the
-  empty-set default, declaring `{"helium_low"}`; quench-concerned VIs
-  declare nothing, `quench` being critical). Both are static, declarative —
+  this VI depends on to operate safely (no shipped VI overrides the
+  empty-set default; quench-concerned VIs declare nothing, `quench` being
+  critical). Both are static, declarative —
   never a live reading — read by `Station.update_conditions()` once per
   tick, with no extra poll, to build that tick's safety-origin `Condition`s
   (GLOSSARY.md's **Safety hold** / **Critical safety flag**).
@@ -244,7 +253,7 @@ The written standards all live in this root and are enforced by
 ## How to add a new module
 1. Pick the `vi_type` and open that subfolder's README for the local recipe.
 2. Subclass the right base (`MagnetBase`, `TemperatureControllerBase`,
-   `LevelMeterBase`, `MeasurementInstrumentBase` / `DCMeasurementBase`, or
+   `MeasurementInstrumentBase` / `DCMeasurementBase`, or
    `BaseVirtualInstrument` directly for a category with no base yet),
    adding `RampableVI` if it ramps.
 3. Tag reads `@monitored(unit=..., description=...)` and actions `@control`;
@@ -265,7 +274,7 @@ The written standards all live in this root and are enforced by
 Shared contracts at the root; concrete classes live in the subfolders.
 
 - `base.py` — `BaseVirtualInstrument` plus the typed sub-bases `MagnetBase`,
-  `TemperatureControllerBase`, `LevelMeterBase`,
+  `TemperatureControllerBase`,
   `MeasurementInstrumentBase`, `DCMeasurementBase`. Provides `__init_subclass__` auto-wrapping of
   `@monitored`/`@control` (structured logging + declarative limit enforcement),
   `get_state()` (which also fills the monitor-cycle cache `last_monitored()`
@@ -297,7 +306,9 @@ Shared contracts at the root; concrete classes live in the subfolders.
   that `Station.get_ramp_status()` aggregates once per tick for the ramp
   tracker and the operational-status record — `ramp_setpoint()` is the NEXT
   setpoint (the intermediate value the hardware is driving to), distinct
-  from `ramp_target()`'s END setpoint. Mixed into the magnet and temperature
+  from `ramp_target()`'s END setpoint — and the `no_motion_phases` class
+  declaration (the `ramp_phase()` values in which the value is meant to hold
+  still), carried in the same snapshot for the stall detector. Mixed into the magnet and temperature
   VIs. tests: `tests/test_l1_virtual_instruments.py`,
   `tests/test_l1_new_vis.py` (via the concrete rampable VIs).
 - `__init__.py` — package marker (docstring only). tests: none.

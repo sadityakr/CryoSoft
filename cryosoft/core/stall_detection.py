@@ -4,19 +4,22 @@ The record from ``build_operational_status`` carries the *facts* (gap, closing,
 elapsed). This layer makes the *judgement*: has a ramp stopped making progress?
 It is pure arithmetic over the record plus a small carried counter, so it is
 fully unit-testable — a scripted sequence of ticks can assert the alert fires
-at exactly the right tick and stays quiet through a normal switch-heater
-warmup.
+at exactly the right tick and stays quiet through a phase the VI declares as
+a deliberate pause.
+
+Which phases are deliberate pauses is the VI's own physics, not this
+module's: each rampable VI declares them in ``RampableVI.no_motion_phases``
+(the no-motion phase declaration), ``Station.get_ramp_status()`` carries the
+declaration beside the live phase, and the caller hands them in per VI. This
+module knows no instrument.
 """
 
 from __future__ import annotations
 
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 
 from cryosoft.core.operational_status import RunFaultCode, worst_code
-
-# Persistent-magnet sub-phases where the field deliberately holds still — the
-# stall detector must not read these expected pauses as a stall.
-_NO_MOTION_PHASES = frozenset({"matching", "warmup", "cooldown", "parking"})
 
 
 @dataclass
@@ -56,10 +59,28 @@ class StallState:
     stuck_ticks: dict[str, int] = field(default_factory=dict)
 
 
+def no_motion_phases_from(ramp_info: Mapping[str, Mapping]) -> dict[str, frozenset[str]]:
+    """Pull each VI's no-motion phase declaration out of a ramp-status snapshot.
+
+    Args:
+        ramp_info: ``Station.get_ramp_status()``'s ``{vi_name: {...}}``, whose
+            per-VI entries carry ``"no_motion_phases"``.
+
+    Returns:
+        ``{vi_name: frozenset_of_phases}``; a VI whose entry lacks the key
+        declares none.
+    """
+    return {
+        name: frozenset(info.get("no_motion_phases") or ())
+        for name, info in ramp_info.items()
+    }
+
+
 def apply_stall_verdict(
     record: dict,
     state: StallState,
     config: StallConfig | None = None,
+    no_motion_phases: Mapping[str, Collection[str]] | None = None,
 ) -> tuple[dict, StallState]:
     """Layer heuristic stall verdicts onto an operational-status record.
 
@@ -70,6 +91,11 @@ def apply_stall_verdict(
         record: The dict from ``build_operational_status``.
         state: Per-VI non-closing tick counts from the previous tick.
         config: Thresholds; defaults if omitted.
+        no_motion_phases: Per-VI ``{vi_name: phases}`` — each VI's
+            ``RampableVI.no_motion_phases`` declaration, as carried in the
+            ramp-status snapshot (see ``no_motion_phases_from()``). A VI
+            absent from the mapping declares none, so every RAMPING tick of
+            it is judged.
 
     Returns:
         ``(record, new_state)`` — the record with per-VI codes upgraded to
@@ -77,6 +103,7 @@ def apply_stall_verdict(
         ``"verdict"`` recomputed; and the StallState for the next tick.
     """
     config = config or StallConfig()
+    no_motion_phases = no_motion_phases or {}
     new_stuck = dict(state.stuck_ticks)
     alerts: list[str] = list(record.get("alerts", []))
 
@@ -84,7 +111,7 @@ def apply_stall_verdict(
         name = vi["vi_name"]
         ramping = vi.get("ramp_status") == "RAMPING"
         phase = vi.get("phase")
-        if not ramping or phase in _NO_MOTION_PHASES:
+        if not ramping or phase in no_motion_phases.get(name, ()):
             # Not ramping, or in an expected no-motion phase: reset, don't judge.
             new_stuck[name] = 0
             continue

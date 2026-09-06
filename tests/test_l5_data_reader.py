@@ -587,3 +587,107 @@ def test_data_reader_imports_only_events_and_exceptions():
         "cryosoft.core.events",
         "cryosoft.core.exceptions",
     }
+
+
+# ── Image blocks (the image-block standard) ───────────────────────────────────
+
+IMAGE_H, IMAGE_W = 3, 4
+
+
+def _image_run(tmp_path: Path, loop_shape: list[int], n_points: int = 2) -> Path:
+    """Write a closed run holding one image block beside a scalar, return its path."""
+    config = {
+        "sweep_columns": {"field_T": "float"},
+        "measurement_scalars": {"intensity_counts": "float"},
+        "measurement_arrays": {},
+        "measurement_blocks": {"frame": (IMAGE_H, IMAGE_W)},
+        "measurement_image_blocks": {"frame": {"unit": "counts", "description": "sim frame"}},
+        "loop_shape": loop_shape,
+    }
+    n1, n2 = loop_shape
+    writer = DataManager(
+        data_directory=str(tmp_path),
+        procedure_name="FieldImaging",
+        procedure_params={"field_start": 0.0, "loop1_values": [1e-6, -1e-6] if n1 == 2 else []},
+        sample_info=SAMPLE_INFO,
+        instrument_state={},
+        system_targets={},
+        measurement_commands=[],
+        data_config=config,
+        n_sweep_points=n_points,
+    )
+    for index in range(n_points):
+        frames = np.array(
+            [[np.full((IMAGE_H, IMAGE_W), 10.0 * index + i1 + 0.1 * i2) for i2 in range(n2)] for i1 in range(n1)]
+        )
+        value = frames if (n1, n2) != (1, 1) else frames[0, 0]
+        writer.save_datapoint(
+            index,
+            {
+                "field_T": float(index),
+                "intensity_counts": [[float(index)] * n2 for _ in range(n1)],
+                "frame": value,
+            },
+            {},
+        )
+    writer.close()
+    return writer.filepath
+
+
+def test_image_block_is_listed_with_the_image_role(tmp_path):
+    with dr.open_run(_image_run(tmp_path, [1, 1])) as handle:
+        info = _by_name(handle)["frame"]
+    assert info.role == dr.ROLE_IMAGE
+    assert info.shape == (2, IMAGE_H, IMAGE_W)
+    assert dr.ROLE_IMAGE in dr.COLUMN_ROLES
+
+
+def test_image_role_falls_back_to_the_block_kind_attribute(tmp_path):
+    """Strip the declaration: the dataset's own block_kind still names it an image."""
+    path = _image_run(tmp_path, [1, 1])
+    import json
+
+    import h5py
+
+    with h5py.File(path, "r+") as f:
+        config = json.loads(f["metadata"].attrs["data_config"])
+        config.pop("measurement_image_blocks")
+        config.pop("measurement_blocks")
+        f["metadata"].attrs["data_config"] = json.dumps(config)
+    with dr.open_run(path) as handle:
+        assert _by_name(handle)["frame"].role == dr.ROLE_IMAGE
+
+
+def test_read_image_without_a_loop(tmp_path):
+    with dr.open_run(_image_run(tmp_path, [1, 1])) as handle:
+        frame = handle.read_image("frame", 1)
+        assert frame.shape == (IMAGE_H, IMAGE_W)
+        np.testing.assert_allclose(frame, 10.0)
+        with pytest.raises(IndexError):
+            handle.read_image("frame", 1, loop1=1)
+
+
+def test_read_image_with_a_loop_selects_the_slot(tmp_path):
+    with dr.open_run(_image_run(tmp_path, [2, 1])) as handle:
+        np.testing.assert_allclose(handle.read_image("frame", 1, loop1=0), 10.0)
+        np.testing.assert_allclose(handle.read_image("frame", 1, loop1=1), 11.0)
+        assert handle.read_image("frame", 0).shape == (IMAGE_H, IMAGE_W)
+
+
+def test_read_image_refuses_a_non_image_column_and_an_unwritten_point(tmp_path):
+    with dr.open_run(_image_run(tmp_path, [1, 1])) as handle:
+        with pytest.raises(ValueError, match="not an image block"):
+            handle.read_image("intensity_counts", 0)
+        with pytest.raises(IndexError):
+            handle.read_image("frame", 2)
+        with pytest.raises(KeyError):
+            handle.read_image("no_such_frame", 0)
+
+
+def test_select_frame_shapes():
+    frame = np.zeros((IMAGE_H, IMAGE_W))
+    assert dr.select_frame(frame).shape == (IMAGE_H, IMAGE_W)
+    looped = np.zeros((2, 1, IMAGE_H, IMAGE_W))
+    assert dr.select_frame(looped, 1, 0).shape == (IMAGE_H, IMAGE_W)
+    with pytest.raises(ValueError):
+        dr.select_frame(np.zeros((IMAGE_H,)))

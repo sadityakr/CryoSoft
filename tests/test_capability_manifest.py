@@ -28,7 +28,8 @@ from cryosoft.core.capability_manifest import (
     validate_manifest,
 )
 from cryosoft.core.events import StationInfo
-from cryosoft.core.station import Station, build_station, read_tick_interval_ms
+from cryosoft.core.config import read_tick_interval_ms
+from cryosoft.core.station import Station, build_station
 
 SIM_CONFIG = str(Path(cryosoft.__file__).parent / "configs" / "sim_cryostat")
 
@@ -100,10 +101,10 @@ def test_station_info_captures_instance_aware_control_choices(
     decorator metadata.
     """
     station.get_state()  # populate the cache control_param_specs() reads
-    controller = _instrument(station.station_info(), "temperature_vti")
+    controller = _instrument(station.station_info(), "temperature")
     curve = _control(controller, "set_curve").params[0]
     assert curve["name"] == "curve"
-    assert curve["default"] == station.temperature_vti.curve()
+    assert curve["default"] == station.temperature.curve()
 
 
 def test_station_info_lists_capabilities_in_declared_order(station: Station) -> None:
@@ -141,19 +142,19 @@ def test_station_info_rebuilds_on_disconnect_and_connect(station: Station) -> No
     exactly why the snapshot has to be rebuilt on these two events.
     """
     before = station.station_info()
-    assert _instrument(before, "level_meter").availability == ()
+    assert _instrument(before, "temperature").availability == ()
 
-    ok, _ = station.disconnect_instrument("level_meter")
+    ok, _ = station.disconnect_instrument("temperature")
     assert ok
     disconnected = station.station_info()
     assert disconnected.seq > before.seq
-    assert _instrument(disconnected, "level_meter").availability == ("operator",)
+    assert _instrument(disconnected, "temperature").availability == ("operator",)
 
-    ok, _ = station.connect_instrument("level_meter")
+    ok, _ = station.connect_instrument("temperature")
     assert ok
     reconnected = station.station_info()
     assert reconnected.seq > disconnected.seq
-    assert _instrument(reconnected, "level_meter").availability == ()
+    assert _instrument(reconnected, "temperature").availability == ()
 
 
 def test_offline_instrument_still_declares_its_capabilities(station: Station) -> None:
@@ -186,8 +187,8 @@ def test_manifest_groups_equal_the_vis_declared_ui_groups(station: Station) -> N
     Key, title, description and member order all come from the one
     declaration on the VI; the manifest adds nothing and reorders nothing.
     """
-    vi = station.temperature_vti
-    entry = _manifest_instrument(build_manifest(station), "temperature_vti")
+    vi = station.temperature
+    entry = _manifest_instrument(build_manifest(station), "temperature")
 
     assert [group["key"] for group in entry["groups"]] == [
         group.key for group in vi.ui_groups
@@ -200,13 +201,13 @@ def test_manifest_groups_equal_the_vis_declared_ui_groups(station: Station) -> N
 
 def test_manifest_puts_grouped_capabilities_first(station: Station) -> None:
     """Grouped items lead, in declared group order; ungrouped ones follow."""
-    entry = _manifest_instrument(build_manifest(station), "temperature_vti")
+    entry = _manifest_instrument(build_manifest(station), "temperature")
     grouped = [
         name
         for group in entry["groups"]
         for name in group["monitored"] + group["controls"]
     ]
-    assert grouped, "temperature_vti declares groups"
+    assert grouped, "temperature declares groups"
     assert entry["ungrouped"]["monitored"] or entry["ungrouped"]["controls"]
 
     order = [item["name"] for item in entry["monitored"]]
@@ -270,7 +271,7 @@ def test_measurement_arming_controls_carry_params_units_and_choices(
 
 def test_enumerated_control_renders_its_choice_map(station: Station) -> None:
     """A concrete enumerated knob reaches the manifest as a label -> value map."""
-    entry = _manifest_instrument(build_manifest(station), "temperature_vti")
+    entry = _manifest_instrument(build_manifest(station), "temperature")
     params = {
         item["name"]: item
         for item in _manifest_control(entry, "set_heater_range")["params"]

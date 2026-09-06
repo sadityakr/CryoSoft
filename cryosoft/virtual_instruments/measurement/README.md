@@ -58,6 +58,13 @@ Uniform lifecycle (methods)
   HDF5 layout mismatches mid-run.
 - `standby() → None` — safe-off idle state.
 - `ping() → bool` — IDN check on all drivers.
+- `read_now() → None` (optional) — the bench hook: one `take_reading()` at
+  the excitation already armed, cached into `@monitored` fields so an
+  operator can confirm the settings produce sane readings before committing
+  to a run. It is the natural home of a `read`-class capability
+  (`@control(panel=False, action_class="read")` — GLOSSARY.md's **Action
+  class**), since it commands nothing new; `dc_separate_measurement.py` is
+  the shipped example.
 - `reading_setters: dict[str, str]` — OPTIONAL reading-loop declaration
   (default `{}`): maps a `measurement_parameters` name to the cheap setter
   method that reprograms just that quantity between readings without
@@ -137,6 +144,48 @@ contract — `DataManager` writes it to disk as the block dataset's own
 `axes` attribute naming every dimension in order. A reader opening the file
 directly (h5py, HDFView) sees both attached to `/data/<block_name>` itself,
 with no need to parse the `/metadata` group's JSON `data_config` blob.
+
+## Image blocks: a frame is a 2D block, not a row of channels
+
+The **image-block standard** is the raw block's sibling for a camera or any
+instrument whose reading is a frame. A frame has a raw block's `(rows, cols)`
+storage shape, but no channel per column: every element is one pixel in one
+unit, and no per-column scalar makes sense. A VI declares it with its pixel
+dimensions and unit instead of a channel-label list:
+
+```python
+from cryosoft.core.plan import ImageBlock
+
+measurement_image_blocks: ClassVar[dict[str, ImageBlock]] = {
+    "frame": ImageBlock(height_px=256, width_px=256, unit="counts",
+                        description="Widefield frame at the sample"),
+}
+```
+
+- `measurement_image_blocks: ClassVar[dict[str, ImageBlock]]` — block name →
+  declaration. The declared `height_px`/`width_px` fix the frame's shape for
+  every reading (`raw_block_row_counts()` plays no part). Empty (the default)
+  means the VI takes no frames.
+- `take_reading()` returns the frame under the block name as a
+  `(height_px, width_px)` numpy array (or an equivalently nested list),
+  alongside the scalars and arrays it already returns.
+
+Storage and reading reuse the raw block's path with one difference in what
+the dataset says about itself: `SweepMeasureProcedure` puts the block into
+`DataSchema.measurement_blocks` with its declared shape (same loop-axis rule
+— bare `(rows, cols)` with no reading loop, `(n_loop1, n_loop2, rows, cols)`
+with one), and `DataManager` writes `block_kind = "image"`, `unit` and
+`description` attributes with `axes` ending in `row, col` and NO
+`channel_names`. `data_reader` reports the column with role `image` (from the
+`data_config`'s `measurement_image_blocks` section, or from the dataset's own
+`block_kind` when the declaration is missing) and serves one frame through
+`read_image(name, index, loop1=0, loop2=0)`, on a file and on the live
+`RunBuffer` alike. No scalar column is ever derived from a frame: the live
+plot and the generic sweep recipe use the VI's scalar columns
+(`measurement_scalar_columns` — a mean intensity, say), the image-stack recipe
+reads the frames. Conformance requires each declared block's
+`height_px`/`width_px` to match what the sim's `take_reading()` actually
+returns, and that no image block name collides with another column.
 
 ## Under-delivery: the n_valid standard
 A VI whose `take_reading()` can deliver fewer raw samples than `data_arrays()`
@@ -282,7 +331,9 @@ shared-6221 handoff test for the pattern.
   entry `{"current_A": "set_source_current"}`, so the reading loop can measure
   a user-entered current list (e.g. `1e-6, -1e-6`) at every sweep point
   (per-slot index-label columns); the setter reprograms the source in place
-  with no re-arm cost. tests: `tests/test_measurement_dc_vi.py`,
+  with no re-arm cost. Also the shipped example of a `read`-class capability:
+  `read_now()` plus the `last_voltage_V` / `last_n_valid` fields it fills.
+  tests: `tests/test_measurement_dc_vi.py`,
   `tests/test_l1_new_vis.py` (`TestDCSeparateMeasurementVI`),
   `tests/test_new_procedures.py` (reading loop).
 - `__init__.py` — package marker. tests: none.

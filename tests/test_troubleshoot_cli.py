@@ -43,10 +43,38 @@ def fake_bus(monkeypatch: pytest.MonkeyPatch) -> FakeResourceManager:
     return rm
 
 
+_TRENDS_BLOCK = """
+trends:
+  checks:
+    - key: temperature_temperature
+      low: 1.0
+      high: 320.0
+      window_s: 3600.0
+"""
+
+
 @pytest.fixture()
 def sim_config(tmp_path: Path) -> str:
-    return make_config(
+    """A minimal config declaring one trend check, as the shipped example does."""
+    path = make_config(
         tmp_path / "cfg",
+        {
+            "meter": {
+                "class": "cryosoft.drivers.sim_keithley_2182a.SimKeithley2182A",
+                "address": "SIM::CLI",
+            }
+        },
+    )
+    with (Path(path) / "devices.yaml").open("a", encoding="utf-8") as handle:
+        handle.write(_TRENDS_BLOCK)
+    return path
+
+
+@pytest.fixture()
+def sim_config_without_trends(tmp_path: Path) -> str:
+    """The same minimal config with no ``trends:`` block at all."""
+    return make_config(
+        tmp_path / "cfg_plain",
         {
             "meter": {
                 "class": "cryosoft.drivers.sim_keithley_2182a.SimKeithley2182A",
@@ -244,17 +272,27 @@ def test_trends_indeterminate_with_no_store_on_disk(
     payload = _json_out(capsys)
     assert payload["ok"] is True
     names = {r["name"] for r in payload["results"]}
-    assert names == {"sample_temperature_stable", "trend_store_live"}
+    assert names == {"temperature_temperature_within_band", "trend_store_live"}
     assert all(r["passed"] is None for r in payload["results"])
 
 
-def test_trends_fails_on_unstable_temperature(
+def test_trends_with_no_declared_checks_runs_only_the_store_liveness_check(
+    sim_config_without_trends, isolated_trend_log_dir: Path, capsys
+) -> None:
+    """A setup that declares no ``trends.checks`` runs none; the CLI-only check remains."""
+    exit_code = cli.main(["trends", "--config", sim_config_without_trends, "--json"])
+    assert exit_code == 0
+    payload = _json_out(capsys)
+    assert [r["name"] for r in payload["results"]] == ["trend_store_live"]
+
+
+def test_trends_fails_when_the_temperature_leaves_its_band(
     sim_config, isolated_trend_log_dir: Path, capsys
 ) -> None:
     now = time.time()
     records = [
-        {"t": now - i * 60, "v": {"temperature_vti_temperature": v}}
-        for i, v in enumerate([4.0, 4.6, 4.0, 4.6])
+        {"t": now - i * 60, "v": {"temperature_temperature": v}}
+        for i, v in enumerate([4.0, 4.6, 400.0, 4.6])
     ]
     _write_trend_jsonl(isolated_trend_log_dir / "trend_history_raw.jsonl", records)
 
@@ -264,8 +302,8 @@ def test_trends_fails_on_unstable_temperature(
     payload = _json_out(capsys)
     assert payload["ok"] is False
     by_name = {r["name"]: r for r in payload["results"]}
-    assert by_name["sample_temperature_stable"]["passed"] is False
-    assert "range_K" in by_name["sample_temperature_stable"]["evidence"]
+    assert by_name["temperature_temperature_within_band"]["passed"] is False
+    assert by_name["temperature_temperature_within_band"]["evidence"]["max"] == 400.0
 
 
 def test_trends_store_live_fails_when_stale(
@@ -275,7 +313,7 @@ def test_trends_store_live_fails_when_stale(
     stale_t = now - 10_000.0
     path = isolated_trend_log_dir / "trend_history_raw.jsonl"
     path.write_text(
-        json.dumps({"t": stale_t, "v": {"temperature_vti_temperature": 4.2}}) + "\n",
+        json.dumps({"t": stale_t, "v": {"temperature_temperature": 4.2}}) + "\n",
         encoding="utf-8",
     )
     os.utime(path, (stale_t, stale_t))
@@ -292,7 +330,7 @@ def test_trends_window_override_applies_to_every_declared_check(
     sim_config, isolated_trend_log_dir: Path, capsys
 ) -> None:
     now = time.time()
-    records = [{"t": now - i, "v": {"temperature_vti_temperature": 4.2}} for i in range(5)]
+    records = [{"t": now - i, "v": {"temperature_temperature": 4.2}} for i in range(5)]
     _write_trend_jsonl(isolated_trend_log_dir / "trend_history_raw.jsonl", records)
 
     exit_code = cli.main(["trends", "--config", sim_config, "--window", "600", "--json"])
@@ -300,7 +338,7 @@ def test_trends_window_override_applies_to_every_declared_check(
     assert exit_code == 0
     payload = _json_out(capsys)
     by_name = {r["name"]: r for r in payload["results"]}
-    assert by_name["sample_temperature_stable"]["evidence"]["window_s"] == 600.0
+    assert by_name["temperature_temperature_within_band"]["evidence"]["window_s"] == 600.0
 
 
 def test_trends_invalid_window_is_a_clean_error(sim_config) -> None:
@@ -314,7 +352,7 @@ def test_trends_human_output_lists_every_check(
     exit_code = cli.main(["trends", "--config", sim_config])
     assert exit_code == 0
     out = capsys.readouterr().out
-    assert "sample_temperature_stable" in out
+    assert "temperature_temperature_within_band" in out
     assert "trend_store_live" in out
 
 

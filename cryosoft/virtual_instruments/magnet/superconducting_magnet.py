@@ -83,18 +83,12 @@ class SuperconductingMagnetVI(MagnetBase, RampableVI):
     # RampableVI implementation
     # ------------------------------------------------------------------
 
-    def start_ramp(self, target: float, persistent: bool = True) -> None:
+    def start_ramp(self, target: float) -> None:
         """Begin ramping to *target* tesla.
 
         Args:
             target: Target field in tesla.
-            persistent: Ignored — this VI has no persistent-mode switch
-                heater. Accepted so callers (e.g. Station.process_system_targets,
-                or a Procedure written against any magnet VI) can pass
-                ``persistent=`` uniformly, whatever magnet class the config
-                names.
         """
-        _ = persistent
         target_A = self._clamp_target_A(target * self._amperes_per_tesla)
         self._ramp_target_T = target_A / self._amperes_per_tesla
         # Cleared here, not in the generator: the first next() below sends the
@@ -310,7 +304,7 @@ class SuperconductingMagnetVI(MagnetBase, RampableVI):
     def magnet_current(self) -> float:
         """Return the field-holding current in amperes.
 
-        In this VI (non-persistent), equals PSU output (switch heater always on).
+        Equals the PSU output: this VI keeps the switch heater on throughout.
         """
         return self._driver.get_current()  # type: ignore[attr-defined]
 
@@ -393,6 +387,7 @@ class SuperconductingMagnetVI(MagnetBase, RampableVI):
     # control-validation standard). The spec's default is the form seed —
     # zero field, the same target standby() drives to.
     @control(
+        action_class="run_control",
         params={
             "target_T": ParamSpec(
                 type=float,

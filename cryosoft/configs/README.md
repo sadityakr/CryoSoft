@@ -54,6 +54,9 @@ every `configs/<name>/` directory:
   sample's safe current is measured. It is a property of the setup, so it
   lives here, never in the VI.
 
+- `trends:` — optional; the trend checks this setup runs (see the section
+  below).
+
 `monitor.yaml` structure: a `monitor:` block with `tick_interval_ms` (the single
 QTimer tick period), `max_vi_errors` (consecutive VI-error tolerance before
 escalation) and the optional `instrument_thread` (see below). Optionally a
@@ -108,7 +111,7 @@ edit; nobody edits a Virtual Instrument to customize their monitor:
 
 ```yaml
 panels:
-  temperature_vti:
+  temperature:
     controls: [set_temperature, set_pid]  # card shows exactly these two
   dc_measurement:
     controls: []                          # card shows no controls at all
@@ -123,6 +126,36 @@ Conformance checks every listed VI and control name against `devices.yaml`,
 so a typo fails CI instead of silently rendering a bare card. The companion
 write-up from the VI side is `cryosoft/virtual_instruments/README.md`
 ("GUI presentation").
+
+### `trends:` — which channels a trend check watches
+
+The **Trend check** standard (`core/trend_checks.py`, GLOSSARY.md) evaluates
+advisory judgements over the trend-history store on its own slow timer. The
+checks themselves are declared here, per setup, because which channel to watch
+and where its safe band lies are setup facts (a controller's range, a sample's
+tolerance), not framework constants. The block is optional; absent, no check
+runs and the scheduler still gets its default cadence.
+
+```yaml
+trends:
+  refresh_interval_s: 60.0      # how often the in-app scheduler re-evaluates
+  store_live_stale_ticks: 10    # CLI-only store-liveness check: ticks of silence
+  checks:
+    - key: temperature_temperature   # a flat state key: <vi_name>_<monitored method>
+      low: 1.0                       # band, inclusive, in the key's own unit
+      high: 320.0
+      window_s: 3600.0               # trailing window the check judges
+      # kind: channel_within_band    # default and the only shipped kind
+      # name: sample_in_band         # default "<key>_within_band"
+      # severity: advisory           # default; a trend check reports, never enforces
+```
+
+Each entry becomes one `TrendCheck` (`trend_checks.declared_checks()`), keyed
+`trend:<name>` in the condition registry when it fails. Conformance checks that
+every declared `key` is one this config's VIs can actually produce, so a typo
+fails CI instead of a check silently reporting "no data" forever; a malformed
+entry (unknown field, `low >= high`) is refused at startup and by
+`python -m cryosoft.troubleshoot trends`.
 
 ## How to add a new module
 1. Create `configs/<name>/` with a `devices.yaml` and a `monitor.yaml`.
@@ -139,9 +172,8 @@ the same two files.
 
 - `sim_cryostat/` — fully simulated reference station, and the station every
   procedure/orchestrator test builds against: `magnet_z`
-  (`SuperconductingMagnetVI` on `SimOxfordIPS120`), `temperature_vti`
-  (`Lakeshore335SampleTemperatureControllerVI` on `SimLakeshore335`),
-  `level_meter` (`CryogenLevelMeterVI` on `SimOxfordILM200`) and
+  (`SuperconductingMagnetVI` on `SimOxfordIPS120`), `temperature`
+  (`Lakeshore335SampleTemperatureControllerVI` on `SimLakeshore335`) and
   `dc_measurement` (`DCSeparateMeasurementVI` on a `SimKeithley6221` +
   `SimKeithley2182A` pair).
   - `devices.yaml` — all `Sim*` drivers at `SIM::*` addresses; the canonical VI

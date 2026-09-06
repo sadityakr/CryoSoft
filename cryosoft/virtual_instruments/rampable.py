@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import abstractmethod
+from typing import ClassVar
 
 
 class RampableVI:
@@ -13,7 +14,20 @@ class RampableVI:
     ``"TARGET_REACHED"``.
 
     Subclasses *must* implement all four abstract methods.
+
+    Attributes:
+        no_motion_phases: The **no-motion phase declaration**: the
+            ``ramp_phase()`` values during which this VI's value is MEANT to
+            hold still while ``ramp_status()`` still reports ``"RAMPING"`` —
+            a switch-heater warm-up, a settle before the next segment. The
+            stall detector (``core/stall_detection.py``) never judges a VI
+            in one of these phases, so an expected pause is not read as a
+            stall. It is the VI's own physics, so it is declared here, on
+            the class, and read off the ramp-status snapshot; the default is
+            empty (every ``RAMPING`` tick is expected to make progress).
     """
+
+    no_motion_phases: ClassVar[frozenset[str]] = frozenset()
 
     @abstractmethod
     def start_ramp(self, target: float) -> None:
@@ -146,10 +160,9 @@ class RampableVI:
         """Return the active ramp sub-phase, or ``None`` if the VI has none.
 
         Most VIs ramp in a single phase and return ``None`` (the stall detector
-        then treats them as always making progress toward target). VIs with
-        distinct no-motion phases — a persistent magnet's switch-heater
-        warmup/cooldown, where the field deliberately holds still — override
-        this so the stall detector does not read those expected pauses as a
-        stall.
+        then treats them as always making progress toward target). A VI with
+        distinct phases overrides this, and names the ones where its value
+        deliberately holds still in ``no_motion_phases`` so the stall
+        detector does not read those expected pauses as a stall.
         """
         return None

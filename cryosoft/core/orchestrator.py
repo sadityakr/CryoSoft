@@ -44,7 +44,12 @@ from cryosoft.core.plan import (
 from cryosoft.core.ramps import RampRecord, build_ramp_records
 from cryosoft.core.request_spool import RequestSpool
 from cryosoft.core.run_builder import build_procedure
-from cryosoft.core.stall_detection import StallConfig, StallState, apply_stall_verdict
+from cryosoft.core.stall_detection import (
+    StallConfig,
+    StallState,
+    apply_stall_verdict,
+    no_motion_phases_from,
+)
 from cryosoft.core.station import FaultRecord, Station
 from cryosoft.core.tiered_trend_logger import TieredTrendLogger
 # Procedures will be imported/type-checked but for now we expect a BaseProcedure mock.
@@ -571,7 +576,7 @@ class Orchestrator(QObject):
         self._emergency_override_until: float | None = None
         # _hold_override_until: condition.key -> expiry unix timestamp, one
         # entry per currently-acknowledged hold-severity condition (e.g.
-        # "safety:helium_low"). Pruned by expiry only (never merely because
+        # "safety:coolant_low"). Pruned by expiry only (never merely because
         # the condition cleared) — see _tick_body()'s pruning step — so a
         # flapping flag doesn't force a fresh acknowledge on every re-trip
         # within the same window.
@@ -1487,8 +1492,8 @@ class Orchestrator(QObject):
           so the next one is due.
         * ``recover_from_error()`` — no chain. After an error the queue's
           assumptions may no longer hold; the operator restarts explicitly.
-        * ``_acknowledge_emergency()`` — no chain. Acknowledging a quench is
-          not a request to carry on measuring.
+        * ``_acknowledge_emergency()`` — no chain. Acknowledging a critical
+          flag is not a request to carry on measuring.
         * ``_fail_run_for_fault()`` — no chain. A run that failed for an
           instrument fault or a safety hold must not silently auto-continue.
         * ``_tick_body()``'s RAMPING branch when a MANUAL ramp completes — no
@@ -1899,7 +1904,7 @@ class Orchestrator(QObject):
         EMERGENCY. Starting a procedure stays refused throughout: those
         gates check the state itself, which is unchanged here.
 
-        A merely hold-only flag (e.g. ``helium_low``) never blocks this
+        A merely hold-only flag never blocks this
         return: it was never why EMERGENCY was entered, and it keeps
         governing its concerned VIs identically in IDLE (the System-
         Condition standard applies in every state, not only EMERGENCY).
@@ -3247,7 +3252,10 @@ class Orchestrator(QObject):
                 ),
             )
             record, self._stall_state = apply_stall_verdict(
-                record, self._stall_state, self._stall_config
+                record,
+                self._stall_state,
+                self._stall_config,
+                no_motion_phases=no_motion_phases_from(ramp_info),
             )
             self._operational_status = record
             self.operational_status.emit(dict(record))  # the signal payload rule
@@ -3550,8 +3558,8 @@ class Orchestrator(QObject):
                 OrchestratorState.EMERGENCY,
             )
             # The run's watched VIs: its system (target-receiving) VIs plus
-            # its EXPLICIT claims — a claimed non-system VI (e.g. the helium
-            # fill's level meter) faulting must fail the run too, not merely
+            # its EXPLICIT claims — a claimed non-system VI (a monitor a
+            # run depends on) faulting must fail the run too, not merely
             # warn while the run keeps trusting a dead instrument. Claims of
             # None (claim-everything, every plain procedure) deliberately do
             # NOT widen this beyond the system VIs: a procedure's unrelated
@@ -3780,9 +3788,9 @@ class Orchestrator(QObject):
                             self._change_state(OrchestratorState.MEASURING)
         elif self._state in (OrchestratorState.INITIATION_GATE, OrchestratorState.READING_GATE):
             # A gate can be waiting ON a ramp that is outside the run's ramp
-            # scope — the helium fill's magnets are commanded into standby
-            # rather than targeted, so its zero_field gate holds while they
-            # ramp down. Nothing but this call moves a ramp generator, so a
+            # scope — a VI commanded into standby rather than targeted still
+            # ramps down, and a gate on its readback holds until it gets
+            # there. Nothing but this call moves a ramp generator, so a
             # tick spent here must still advance them or the gate can never
             # come true.
             self._station.advance_ramps()
@@ -4021,8 +4029,8 @@ class Orchestrator(QObject):
         """One-shot emergency entry: clean up the run, then safe shutdown.
 
         The shutdown runs exactly once here (not every tick): repeating it
-        each tick would, for a persistent magnet, restart the full
-        switch-heater warmup/cooldown cycle every few seconds.
+        each tick would, for a VI whose shutdown is itself a multi-tick
+        sequence, restart that sequence every few seconds.
 
         **The single EMERGENCY-entry record.** This is the one path into
         EMERGENCY — a tripped critical condition observed by the tick and an
@@ -4033,7 +4041,7 @@ class Orchestrator(QObject):
         entry into EMERGENCY is one however it was observed; writing it here
         rather than at each caller is what keeps the two routes from
         diverging (they did: the manual call logged CRITICAL, the tick's
-        quench only ERROR). Callers pass their reason and add no log line of
+        critical-flag entry only ERROR). Callers pass their reason and add no log line of
         their own, so the file log carries exactly one record per entry.
 
         Args:
@@ -4061,7 +4069,7 @@ class Orchestrator(QObject):
         # Defense in depth alongside _manual_action_admissible()'s own
         # EMERGENCY/ERROR guard on the hold override: a fresh EMERGENCY
         # starts with a clean slate for BOTH override kinds, so a hold
-        # acknowledged moments earlier (e.g. a helium_low ack still live on
+        # acknowledged moments earlier (a hold ack still live on
         # magnet_z) cannot be mistaken for an EMERGENCY acknowledge once a
         # quench trips this same tick.
         self._emergency_override_until = None
@@ -4199,11 +4207,10 @@ class Orchestrator(QObject):
         Generality (CLAUDE.md's "standards over one-off code"): this reads
         only ``Condition.severity == "hold"`` and its ``affected_vis`` —
         both already resolved into ``verdict.held_vis`` by
-        ``core.conditions.decide()`` — and never names a flag. ``helium_low``
-        is simply the only hold-severity flag any VI declares today; a
-        future one is a declaration on a category base plus a config
-        threshold, inheriting this enforcement with zero Orchestrator
-        change. The one thing that is NOT general: ``standby()`` is the
+        ``core.conditions.decide()`` — and never names a flag. No shipped
+        VI declares a hold-severity flag today; one is a declaration on a
+        category base plus a config threshold, inheriting this enforcement
+        with zero Orchestrator change. The one thing that is NOT general: ``standby()`` is the
         only safe response this contract models. A future hold-severity
         flag that needs a different safe action belongs as a declaration
         on the VI itself (a new hook alongside ``standby_status()``), never

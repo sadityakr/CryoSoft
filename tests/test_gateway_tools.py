@@ -130,7 +130,8 @@ def test_a_capability_tool_carries_its_units_bounds_and_rationale(tools):
     assert tool.fixed_args == {"vi_name": "magnet_z", "method_name": "set_field"}
     assert tool.instrument == "magnet_z"
     assert tool.capability == "set_field"
-    assert "largest stored energy" in tool.description  # the classification's rationale
+    # The declared action class, which is what the classification now reads.
+    assert "Declared run_control" in tool.description
 
     target = tool.input_schema["properties"]["target_T"]
     assert target["type"] == "number"
@@ -144,18 +145,18 @@ def test_a_capability_tool_carries_its_units_bounds_and_rationale(tools):
 
 def test_a_choice_parameter_renders_its_values_and_labels(tools):
     """An enumerated ParamSpec becomes an enum an agent can pick from."""
-    mode = tools[capability_tool_name("level_meter", "set_refresh_rate")].input_schema[
-        "properties"
-    ]["mode"]
+    heater_range = tools[
+        capability_tool_name("temperature", "set_heater_range")
+    ].input_schema["properties"]["range_setting"]
 
-    assert mode["type"] == "integer"
-    assert mode["enum"] == [0, 1, 2]
-    assert mode["choice_labels"]["Fast (helium fill)"] == 2
+    assert heater_range["type"] == "string"
+    assert heater_range["enum"] == ["OFF", "LOW", "MEDIUM", "HIGH"]
+    assert heater_range["choice_labels"]["Off"] == "OFF"
 
 
 def test_a_default_the_configured_bound_refuses_is_not_published(tools):
     """A schema never offers a default its own bound would reject."""
-    tool = tools[capability_tool_name("temperature_vti", "set_temperature")]
+    tool = tools[capability_tool_name("temperature", "set_temperature")]
     target = tool.input_schema["properties"]["target_K"]
 
     assert target["minimum"] == 1.4

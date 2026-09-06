@@ -42,14 +42,42 @@ from cryosoft.core.orchestrator import (
     Orchestrator,
     OrchestratorState,
 )
+from cryosoft.core.decorators import control
 from cryosoft.core.plan import EnvelopeBound, ExperimentEnvelope
 from cryosoft.core.station import build_station
+from cryosoft.virtual_instruments.base import BaseVirtualInstrument
+
+
+class _HousekeepingVI(BaseVirtualInstrument):
+    """Test-local double declaring one operation-scope capability.
+
+    No shipped VI declares ``scope="operation"``, so the capability-scope
+    fence (refusal 3 below) gets its subject here, exactly as a setup with
+    an instrument-housekeeping action would declare it.
+    """
+
+    vi_type = "system"
+
+    def __init__(self, drivers: dict, **init_params: object) -> None:
+        super().__init__(drivers, **init_params)
+        self.mode = 0
+
+    @control(scope="operation", action_class="recovery")
+    def set_housekeeping_mode(self, mode: int) -> None:
+        """Select an instrument-housekeeping mode.
+
+        Args:
+            mode: The mode index to select.
+        """
+        self.mode = int(mode)
 
 
 @pytest.fixture
 def station():
-    """A real simulated station (sim_cryostat)."""
-    return build_station("cryosoft/configs/sim_cryostat")
+    """A real simulated station (sim_cryostat), plus one operation-scope VI."""
+    built = build_station("cryosoft/configs/sim_cryostat")
+    built.register_vi("housekeeping", _HousekeepingVI({}), "system")
+    return built
 
 
 @pytest.fixture
@@ -87,7 +115,7 @@ def test_refuses_non_control_method(station):
 def test_refuses_out_of_scope_capability(station):
     """An operation-scope capability is refused for a measurement-scope caller."""
     with pytest.raises(CryoSoftActionScopeError) as exc:
-        station.execute_vi_action("level_meter", "set_refresh_rate", mode=1)
+        station.execute_vi_action("housekeeping", "set_housekeeping_mode", mode=1)
     assert "requires operation-scope access" in str(exc.value)
 
 
@@ -126,7 +154,7 @@ def test_the_five_refusal_reasons_are_pairwise_distinct(station, orchestrator):
     for call in (
         lambda: station.execute_vi_action("magnet_z", "_ramp_generator"),
         lambda: station.execute_vi_action("magnet_z", "start_ramp", target=99.0),
-        lambda: station.execute_vi_action("level_meter", "set_refresh_rate", mode=1),
+        lambda: station.execute_vi_action("housekeeping", "set_housekeeping_mode", mode=1),
         lambda: station.execute_vi_action("magnet_z", "set_field", target_T=99.0),
     ):
         with pytest.raises(CryoSoftSafetyError) as exc:
@@ -197,10 +225,10 @@ def test_manual_path_grants_operation_scope(orchestrator, station, qtbot):
     succeeded: list[tuple[str, str]] = []
     orchestrator.action_succeeded.connect(lambda vi, m: succeeded.append((vi, m)))
 
-    orchestrator.submit_vi_action("level_meter", "set_refresh_rate", mode=1)
+    orchestrator.submit_vi_action("housekeeping", "set_housekeeping_mode", mode=1)
     orchestrator._tick()
 
-    assert succeeded == [("level_meter", "set_refresh_rate")]
+    assert succeeded == [("housekeeping", "set_housekeeping_mode")]
 
 
 def test_lifecycle_actions_still_dispatch(station):
@@ -251,18 +279,18 @@ def test_envelope_ignores_non_setpoint_parameters(orchestrator, station):
     """
     orchestrator.set_experiment_envelope(
         ExperimentEnvelope(
-            bounds={"temperature_vti": EnvelopeBound(min_value=-1.0, max_value=1.0)}
+            bounds={"temperature": EnvelopeBound(min_value=-1.0, max_value=1.0)}
         )
     )
     succeeded: list[tuple[str, str]] = []
     orchestrator.action_succeeded.connect(lambda vi, m: succeeded.append((vi, m)))
 
     orchestrator.submit_vi_action(
-        "temperature_vti", "set_ramp_rate", rate_K_per_min=2.0
+        "temperature", "set_ramp_rate", rate_K_per_min=2.0
     )
     orchestrator._tick()
 
-    assert succeeded == [("temperature_vti", "set_ramp_rate")]
+    assert succeeded == [("temperature", "set_ramp_rate")]
 
 
 # ── The excitation-current fence ──────────────────────────────────────────────
@@ -360,11 +388,11 @@ def test_emergency_standby_is_permitted_in_every_state(
 def test_emergency_standby_logs_critical_with_the_reason(orchestrator, caplog):
     """The reason lands in a CRITICAL log record, per the logging levels."""
     with caplog.at_level(logging.CRITICAL, logger="cryosoft.core.orchestrator"):
-        orchestrator.emergency_standby("helium level below the fill line")
+        orchestrator.emergency_standby("coolant level below the safe line")
 
     critical = [r for r in caplog.records if r.levelno == logging.CRITICAL]
     assert critical, "an emergency standby must be logged at CRITICAL"
-    assert any("helium level below the fill line" in r.getMessage() for r in critical)
+    assert any("coolant level below the safe line" in r.getMessage() for r in critical)
 
 
 def test_emergency_standby_reason_reaches_the_error_signal(orchestrator, qtbot):

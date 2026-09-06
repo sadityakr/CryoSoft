@@ -332,6 +332,42 @@ class RunBuffer:
             f"available: {[info.name for info in self.list_columns()]}"
         )
 
+    def read_image(
+        self, column: str, index: int, loop1: int = 0, loop2: int = 0
+    ) -> np.ndarray:
+        """Return one frame of an image block (the image-block standard).
+
+        Args:
+            column: The image column's name (role ``image`` — which a buffer
+                knows only from the manifest's ``data_config``).
+            index: The sweep point, among the points received so far.
+            loop1: Reading-loop slot-1 index, when the run loops.
+            loop2: Reading-loop slot-2 index, when the run loops.
+
+        Returns:
+            The ``(height_px, width_px)`` frame as a float64 array.
+
+        Raises:
+            KeyError: If the buffer holds no such column.
+            ValueError: If the column is not an image block.
+            IndexError: If ``index`` is not a received point, or a loop index
+                does not fit the column.
+        """
+        buffered = self._columns.get(column)
+        if buffered is None:
+            raise KeyError(
+                f"run {self._run_id or '(unnamed)'} has no column {column!r}; "
+                f"available: {[info.name for info in self.list_columns()]}"
+            )
+        if buffered.role != reader.ROLE_IMAGE:
+            raise ValueError(f"{column!r} is not an image block")
+        if not 0 <= index < self._n_points:
+            raise IndexError(
+                f"sweep point {index} has not been received for {column!r} "
+                f"({self._n_points} point(s) so far)"
+            )
+        return reader.select_frame(buffered.values[index], loop1, loop2)
+
     def summary_stats(self, column: str) -> Stats:
         """Return the NaN-aware summary of one numeric column.
 

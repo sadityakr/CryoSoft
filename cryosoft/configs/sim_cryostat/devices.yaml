@@ -8,9 +8,6 @@ real_drivers:
   lakeshore_vti:
     class: cryosoft.drivers.sim_lakeshore_335.SimLakeshore335
     address: "SIM::LS335"
-  ilm:
-    class: cryosoft.drivers.sim_oxford_ilm200.SimOxfordILM200
-    address: "SIM::ILM"
   keithley_6221:
     class: cryosoft.drivers.sim_keithley_6221.SimKeithley6221
     address: "SIM::K6221"
@@ -36,7 +33,7 @@ virtual_instruments:
       role: Z-axis magnet
       manufacturer: Oxford Instruments
       model: IPS120-10
-  temperature_vti:
+  temperature:
     class: cryosoft.virtual_instruments.temperature.lakeshore_335_sample_temperature_controller.Lakeshore335SampleTemperatureControllerVI
     drivers: {main: lakeshore_vti}
     vi_type: system
@@ -51,17 +48,6 @@ virtual_instruments:
       role: Sample-space temperature controller
       manufacturer: Lakeshore
       model: 335
-  level_meter:
-    class: cryosoft.virtual_instruments.level.cryogen_level_meter.CryogenLevelMeterVI
-    drivers: {main: ilm}
-    vi_type: level
-    init_params:
-      helium_low_threshold: 20.0
-      buffer_size: 5
-    metadata:
-      role: Helium/nitrogen level meter
-      manufacturer: Oxford Instruments
-      model: ILM200
   dc_measurement:
     class: cryosoft.virtual_instruments.measurement.dc_separate_measurement.DCSeparateMeasurementVI
     drivers: {source: keithley_6221, meter: keithley_2182a}
@@ -77,3 +63,18 @@ virtual_instruments:
       role: DC source-and-measure (source + nanovoltmeter pair)
       manufacturer: Keithley
       model: 6221 + 2182A
+
+# Trend checks (the Trend check standard, core/trend_checks.py): advisory
+# judgements over the trend-history store, evaluated on their own slow timer
+# and published as advisory conditions — they report, never enforce. Each
+# entry watches one flat state key ("<vi_name>_<monitored_method>") and
+# fails when the window's min/max leave the band. The band here is this
+# setup's controller range; a real setup narrows it to the sample's own.
+trends:
+  refresh_interval_s: 60.0
+  store_live_stale_ticks: 10
+  checks:
+    - key: temperature_temperature
+      low: 1.0
+      high: 320.0
+      window_s: 3600.0

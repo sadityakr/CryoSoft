@@ -85,7 +85,7 @@ says why, not when. `test_instrument_modes.py` is the helper family's own
 test file.
 
 `scenarios.py` (not itself a test file) names the sim-driver state-injection
-recipes every hazard/fault test needs — helium low, quench, a disconnected
+recipes every hazard/fault test needs — a declared safety hold, quench, a disconnected
 instrument, a measurement instrument erroring instead of returning data, a
 procedure running — as composable functions instead of each test hand-rolling
 driver flags plus a `qtbot.waitUntil`. Each has a plain `apply_*` form (sets

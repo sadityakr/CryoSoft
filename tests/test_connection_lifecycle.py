@@ -83,7 +83,7 @@ def test_ping_is_false_once_the_session_is_released(station: Station):
 
 def test_disconnect_hook_sends_no_commands(station: Station):
     """The VI-level disconnect() hook must not command the instrument."""
-    vi = station.get_vi("temperature_vti")
+    vi = station.get_vi("temperature")
     vi.set_temperature(10.0)
     setpoint_before = vi._driver.get_setpoint()
     vi.disconnect()
@@ -310,18 +310,18 @@ def test_disconnect_closes_an_exclusively_owned_driver(station: Station):
 
 def test_disconnect_then_connect_restores_the_vi(station: Station):
     """connect_instrument() is the one way back, for either offline origin."""
-    station.disconnect_instrument("temperature_vti")
-    assert "temperature_vti" not in station.get_vi_names()
+    station.disconnect_instrument("temperature")
+    assert "temperature" not in station.get_vi_names()
 
-    ok, message = station.connect_instrument("temperature_vti")
+    ok, message = station.connect_instrument("temperature")
 
     assert ok is True
-    assert "temperature_vti" in message
-    assert "temperature_vti" in station.get_vi_names()
+    assert "temperature" in message
+    assert "temperature" in station.get_vi_names()
     assert station.offline_vi_names() == []
     # A freshly built driver, so the instrument answers again.
-    assert station.get_vi("temperature_vti").ping() is True
-    assert "temperature_vti" in station.get_state()
+    assert station.get_vi("temperature").ping() is True
+    assert "temperature" in station.get_state()
 
 
 def test_disconnect_rejects_unknown_and_already_offline_names(station: Station):
@@ -330,20 +330,20 @@ def test_disconnect_rejects_unknown_and_already_offline_names(station: Station):
     assert ok is False
     assert "not a registered VI" in message
 
-    station.disconnect_instrument("temperature_vti")
-    ok, message = station.disconnect_instrument("temperature_vti")
+    station.disconnect_instrument("temperature")
+    ok, message = station.disconnect_instrument("temperature")
     assert ok is False
     assert "already disconnected" in message
 
 
 def test_disconnect_clears_a_standing_comm_fault(station: Station):
     """A VI nobody polls cannot be in a fault — the banner must not name it."""
-    station._record_comm_condition("temperature_vti", "disconnected", "boom")
-    assert "temperature_vti" in station.vi_faults()
+    station._record_comm_condition("temperature", "disconnected", "boom")
+    assert "temperature" in station.vi_faults()
 
-    station.disconnect_instrument("temperature_vti")
+    station.disconnect_instrument("temperature")
 
-    assert "temperature_vti" not in station.vi_faults()
+    assert "temperature" not in station.vi_faults()
 
 
 def test_build_sends_only_the_identity_check(tmp_path):
@@ -431,8 +431,8 @@ def test_orchestrator_disconnect_allowed_mid_run_for_a_vi_it_does_not_claim(
         with qtbot.waitSignals(
             [orch.instrument_disconnected, orch.action_succeeded], timeout=500
         ):
-            orch.disconnect_instrument("temperature_vti")
-        assert station.has_vi("temperature_vti") is False
+            orch.disconnect_instrument("temperature")
+        assert station.has_vi("temperature") is False
         assert station.has_vi("magnet_z") is True
     finally:
         orch._state = OrchestratorState.IDLE
@@ -454,7 +454,7 @@ def test_orchestrator_disconnect_blocked_for_a_vi_the_run_is_ramping(
     try:
         orch._state = OrchestratorState.RAMPING
         orch._procedure = object()
-        orch._active_claims = {"temperature_vti"}  # deliberately NOT magnet_z
+        orch._active_claims = {"temperature"}  # deliberately NOT magnet_z
         orch._active_system_vis = {"magnet_z"}
         with qtbot.waitSignal(orch.action_blocked, timeout=500) as blocker:
             orch.disconnect_instrument("magnet_z")

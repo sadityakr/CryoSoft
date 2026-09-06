@@ -6,6 +6,7 @@ import pytest
 
 from cryosoft.core.exceptions import DataSchemaError
 from cryosoft.core.plan import (
+    ImageBlock,
     Command,
     DataSchema,
     EnvelopeBound,
@@ -27,11 +28,9 @@ def test_target_happy_and_defaults():
     t = Target(1.5)
     assert t.target == 1.5
     assert t.rate is None
-    assert t.persistent is None
-    t2 = Target(2, rate=0.1, persistent=True)
+    t2 = Target(2, rate=0.1)
     assert t2.target == 2.0 and isinstance(t2.target, float)
     assert t2.rate == 0.1
-    assert t2.persistent is True
 
 
 def test_target_bool_rejected():
@@ -56,11 +55,6 @@ def test_target_rate_must_be_positive():
 def test_target_rate_nonfinite_rejected():
     with pytest.raises(ValueError, match="Target.rate"):
         Target(1.0, rate=float("inf"))
-
-
-def test_target_persistent_type():
-    with pytest.raises(TypeError, match="Target.persistent"):
-        Target(1.0, persistent=1)
 
 
 def test_target_frozen():
@@ -132,7 +126,7 @@ def test_phaseplan_commands_normalized_to_tuple_order_preserved():
 
 def test_phaseplan_claim_commands_normalized_to_tuple_order_preserved():
     c1 = Command("magnet_z", "initiate")
-    c2 = Command("temperature_vti", "initiate")
+    c2 = Command("temperature", "initiate")
     p = PhasePlan(targets={}, claim_commands=[c1, c2])
     assert isinstance(p.claim_commands, tuple)
     assert p.claim_commands == (c1, c2)
@@ -903,3 +897,38 @@ def test_params_digest_survives_a_round_trip_through_json():
     """The digest a record stores must still match after the record is reread."""
     params = {"field_T": 1.5, "points": 21, "note": "µ-metal shield"}
     assert params_digest(json.loads(json.dumps(params))) == params_digest(params)
+
+
+# ── ImageBlock (the image-block standard) ─────────────────────────────────────
+
+
+def test_image_block_happy_and_shape():
+    block = ImageBlock(height_px=4, width_px=6, unit="counts", description="a frame")
+    assert block.shape == (4, 6)
+    assert block.unit == "counts"
+    assert block.description == "a frame"
+    assert ImageBlock(1, 1, "V").description == ""
+
+
+@pytest.mark.parametrize(
+    "kwargs, exc, match",
+    [
+        ({"height_px": 0, "width_px": 6, "unit": "counts"}, ValueError, "height_px"),
+        ({"height_px": 4, "width_px": -1, "unit": "counts"}, ValueError, "width_px"),
+        ({"height_px": 4.0, "width_px": 6, "unit": "counts"}, TypeError, "height_px"),
+        ({"height_px": True, "width_px": 6, "unit": "counts"}, TypeError, "height_px"),
+        ({"height_px": 4, "width_px": 6, "unit": ""}, ValueError, "unit"),
+        ({"height_px": 4, "width_px": 6, "unit": 3}, TypeError, "unit"),
+        ({"height_px": 4, "width_px": 6, "unit": "counts", "description": 1}, TypeError, "description"),
+    ],
+    ids=["zero-height", "negative-width", "float-height", "bool-height", "empty-unit", "non-str-unit", "non-str-description"],
+)
+def test_image_block_rejects_bad_declarations(kwargs, exc, match):
+    with pytest.raises(exc, match=f"ImageBlock.{match}"):
+        ImageBlock(**kwargs)
+
+
+def test_image_block_is_frozen():
+    block = ImageBlock(4, 6, "counts")
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        block.height_px = 8  # type: ignore[misc]

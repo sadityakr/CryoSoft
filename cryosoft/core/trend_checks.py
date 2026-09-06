@@ -14,10 +14,12 @@ is the one runner that evaluates any number of declarations uniformly — it
 never special-cases a check by name — and `to_condition`/`conditions_for` are
 the one adapter that turns a failing check into the `Condition` currency the
 rest of CryoSoft's System-Condition standard (`core/conditions.py`) already
-understands. Adding a fourth check means adding a `TrendCheck` literal (with
-its predicate) to `declared_checks()`'s returned tuple, reading any threshold
-it needs out of the `config` mapping passed in — never hardcoded, see
-`Station.read_trends_config()` — and nothing else in this module changes.
+understands. The checks a setup runs are DECLARED IN ITS CONFIG: `declared_checks()`
+builds one `TrendCheck` per entry of the `trends.checks:` list that
+`cryosoft.core.config.read_trends_config()` hands it, each through a builder such as
+`channel_within_band()` — so which channel is watched and where its band
+lies are setup facts in `devices.yaml`, never constants in this module. A
+new kind of judgement is one builder function plus one `CHECK_KINDS` row.
 
 No data in a requested window is not a failure of the thing being measured,
 and it is not a pass either: it is "cannot tell", which this module
@@ -43,7 +45,7 @@ re-decided by the predicate itself:
   ramp-completion ETA) cannot answer it from `summaries` alone, and adding
   those values to `KeySummary` itself would leak a rate-specific need into
   an aggregate-statistics type. A predicate that only needs aggregates
-  (e.g. `sample_temperature_stable`) simply does not read this argument. On
+  (e.g. `channel_within_band`) simply does not read this argument. On
   the `3min`/`hourly` tiers a series' values are bucket *means*, not true
   instantaneous samples (see `KeySummary.tier`); a predicate presenting one
   as if it were a raw reading on a window long enough to leave the raw tier
@@ -104,11 +106,11 @@ class TrendCheck:
     """One declared temporal judgement over the trend-history store.
 
     Attributes:
-        name: Stable identity, e.g. ``"sample_temperature_stable"``. Used to
+        name: Stable identity, e.g. ``"temperature_temperature_within_band"``. Used to
             key its published `Condition` (``f"trend:{name}"``) and to match
             a `CheckResult` back to its declaration.
         keys: Flat state keys to summarize, as in `Station.last_state_flat()`
-            (e.g. ``"temperature_sample_temperature_K"``).
+            (e.g. ``"temperature_temperature"``).
         window_s: Trailing window length in seconds, passed to
             `trend_history.summarize()`. Tier selection is not this check's
             decision — `trend_history.pick_tier()` is the single home for
@@ -326,84 +328,131 @@ def conditions_for(
     return conditions
 
 
-# ── sample_temperature_stable ────────────────────────────────────────────────
-# The flat state key from Station.last_state_flat(): the sample-sensor
-# temperature-controller VI's @monitored temperature() method, verified
-# against every sim-buildable shipped config by
-# test_declared_trend_checks_name_real_state_keys.
-_SAMPLE_TEMPERATURE_KEY = "temperature_vti_temperature"
-
-# Mirrors cryosoft.core.station._TREND_DEFAULTS's values for these keys —
-# see that dict's comment for why this is a mirror, not an import (contract
-# C15). Used only as `.get()` fallbacks; a real setup's config always arrives
-# here already merged by Station.read_trends_config().
-_SAMPLE_TEMPERATURE_WINDOW_S = 3600.0
-_SAMPLE_TEMPERATURE_STD_LIMIT_K = 0.1
-_SAMPLE_TEMPERATURE_RANGE_LIMIT_K = 0.5
+# ── channel_within_band ──────────────────────────────────────────────────────
+# The one shipped check KIND. Its instances are not written here: a setup
+# declares them in its devices.yaml `trends.checks:` list, which
+# read_trends_config() hands to declared_checks() below, so which channel is
+# watched and what "within band" means are setup facts in the config, never
+# constants in this module.
 
 
-def _sample_temperature_stable_predicate(std_limit_K: float, range_limit_K: float) -> Predicate:
-    """Build the `sample_temperature_stable` predicate for one setup's thresholds.
+def channel_within_band(
+    key: str,
+    low: float,
+    high: float,
+    window_s: float,
+    *,
+    name: str | None = None,
+    severity: str = "advisory",
+) -> TrendCheck:
+    """Declare a check that one flat state key stayed inside ``[low, high]``.
 
-    Fails when either the trailing window's standard deviation exceeds
-    ``std_limit_K`` or its full min-max spread exceeds ``range_limit_K`` —
-    two different failure shapes (persistent slow drift raises std without
-    necessarily widening the range much; a single spike widens the range
-    without moving std much), both worth catching. Uses only `summarize()`'s
-    exact recombined `std`/`min`/`max` — never re-derives them from raw
-    rows, which would disagree with `summarize()` at tier boundaries (see
-    the module docstring). Thresholds are fixed per-check declaration; the
-    window is read off the predicate's own `window_s` argument (the window
-    THIS evaluation actually queried — see the module docstring), never
-    closed over, so a caller overriding `TrendCheck.window_s` never gets
-    evidence citing a stale window.
+    Passes when every sample in the trailing window lies within the band —
+    judged from `summarize()`'s exact ``min``/``max`` over the window, never
+    re-derived from raw rows (which would disagree with `summarize()` at
+    tier boundaries; see the module docstring). Fails when the window's
+    minimum dipped below ``low`` or its maximum rose above ``high``, and
+    reports both bounds and both extremes as evidence so the reader can see
+    by how much. The window is read off the predicate's own ``window_s``
+    argument (the window THIS evaluation actually queried), never closed
+    over, so a caller overriding `TrendCheck.window_s` never gets evidence
+    citing a stale window.
+
+    Args:
+        key: The flat state key to watch, as in `Station.last_state_flat()`
+            (``"<vi_name>_<monitored_method>"``, e.g.
+            ``"temperature_temperature"``).
+        low: Lower bound of the band, inclusive, in the key's own unit.
+        high: Upper bound of the band, inclusive, same unit.
+        window_s: Trailing window in seconds the check defaults to.
+        name: Stable identity for the check; defaults to
+            ``f"{key}_within_band"``.
+        severity: A `cryosoft.core.conditions.SEVERITIES` rung; defaults to
+            ``"advisory"`` — a trend check reports and never enforces.
+
+    Returns:
+        The `TrendCheck` declaration, ready for `run_check()`.
+
+    Raises:
+        ValueError: If ``low >= high``, or via `TrendCheck.__post_init__`
+            for an empty key, a non-positive window or an unknown severity.
     """
+    if not low < high:
+        raise ValueError(
+            f"channel_within_band({key!r}): low must be below high, got low={low!r} high={high!r}"
+        )
 
     def predicate(
         summaries: Mapping[str, KeySummary], series: WindowedSeries, window_s: float
     ) -> CheckOutcome:
         # `series` is unused: this check needs only the aggregate summary.
-        no_data = no_data_outcome(summaries, [_SAMPLE_TEMPERATURE_KEY])
+        no_data = no_data_outcome(summaries, [key])
         if no_data is not None:
             return no_data
-        summary = summaries[_SAMPLE_TEMPERATURE_KEY]
-        # min/max/std are non-None here: no_data_outcome already ruled out
+        summary = summaries[key]
+        # min/max are non-None here: no_data_outcome already ruled out
         # count == 0, and summarize() always populates them together.
-        spread = summary.max - summary.min  # type: ignore[operator]
+        below = summary.min < low  # type: ignore[operator]
+        above = summary.max > high  # type: ignore[operator]
         evidence: dict[str, object] = {
-            "std_K": summary.std,
-            "min_K": summary.min,
-            "max_K": summary.max,
-            "range_K": spread,
+            "min": summary.min,
+            "max": summary.max,
+            "low": low,
+            "high": high,
             "count": summary.count,
             "window_s": window_s,
-            "std_limit_K": std_limit_K,
-            "range_limit_K": range_limit_K,
         }
-        unstable = summary.std > std_limit_K or spread > range_limit_K  # type: ignore[operator]
-        verdict = "unstable" if unstable else "stable"
+        verdict = "left" if (below or above) else "stayed within"
         message = (
-            f"Sample temperature {verdict} over {window_s / 3600.0:.2g} h: "
-            f"std={summary.std:.3g} K (limit {std_limit_K} K), "
-            f"range={spread:.3g} K (limit {range_limit_K} K), n={summary.count}."
+            f"{key} {verdict} the band [{low:g}, {high:g}] over "
+            f"{window_s / 3600.0:.2g} h: min={summary.min:.4g}, max={summary.max:.4g}, "
+            f"n={summary.count}."
         )
-        return CheckOutcome(passed=not unstable, message=message, evidence=evidence)
+        return CheckOutcome(passed=not (below or above), message=message, evidence=evidence)
 
-    return predicate
+    return TrendCheck(
+        name=name or f"{key}_within_band",
+        keys=(key,),
+        window_s=float(window_s),
+        severity=severity,
+        predicate=predicate,
+    )
 
 
-def declared_checks(config: Mapping[str, float]) -> tuple[TrendCheck, ...]:
-    """Return every trend check this setup should run.
+#: The builder behind each ``kind:`` a ``trends.checks:`` entry may name.
+#: ``kind`` is optional in the config and defaults to the one shipped kind;
+#: a new kind of check is one builder function plus one row here.
+CHECK_KINDS: Mapping[str, Callable[..., TrendCheck]] = {
+    "channel_within_band": channel_within_band,
+}
+
+_ENTRY_FIELDS = frozenset({"kind", "key", "low", "high", "window_s", "name", "severity"})
+
+
+def declared_checks(config: Mapping[str, object]) -> tuple[TrendCheck, ...]:
+    """Build every trend check this setup declares in its config.
 
     The standard's single registration point: the trend-check scheduler
     (`cryosoft.core.trend_check_runner`), the troubleshoot CLI's `trends`
     subcommand, and the conformance test all call this once and iterate
-    whatever it returns — none of them special-case a check by name. Adding
-    a check means adding a `TrendCheck` literal to the returned tuple here,
-    reading its threshold(s) out of `config` (as returned by
-    `cryosoft.core.station.read_trends_config()`) rather than hardcoding a
-    number (`CLAUDE.md`: constants and limits in config, not code) — no
-    other module in this standard needs to change.
+    whatever it returns — none of them special-case a check by name. The
+    checks themselves are declared in the setup's `devices.yaml`::
+
+        trends:
+          checks:
+            - key: temperature_temperature   # a Station.last_state_flat() key
+              low: 1.0                       # band, in the key's own unit
+              high: 320.0
+              window_s: 3600.0
+              # kind: channel_within_band    # the default, and the only shipped kind
+              # name: sample_temperature_in_band  # default "<key>_within_band"
+              # severity: advisory           # default; a trend check never enforces
+
+    so watching a different channel, or adding a second band, is a config
+    edit (`CLAUDE.md`: constants and limits in config, not code). Adding a
+    new KIND of judgement means one builder function beside
+    `channel_within_band()` and one row in `CHECK_KINDS` — no other module
+    in this standard changes.
 
     `trend_store_live` is deliberately NOT declared here: it is pull-only by
     design (see its own module, `cryosoft.troubleshoot.engine`) — it exists
@@ -415,25 +464,38 @@ def declared_checks(config: Mapping[str, float]) -> tuple[TrendCheck, ...]:
     state from outside.
 
     Args:
-        config: This setup's trend-check config, e.g.
-            ``read_trends_config(config_path)``.
+        config: This setup's ``trends:`` block as merged by
+            `cryosoft.core.config.read_trends_config()`; its ``"checks"``
+            entry is the list above (``[]`` when the setup declares none).
 
     Returns:
-        Every trend check this setup should run, in declaration order:
-        `sample_temperature_stable`.
+        One `TrendCheck` per ``checks:`` entry, in declaration order.
+
+    Raises:
+        ValueError: If an entry is not a mapping, names an unknown ``kind``
+            or an unknown field, or fails its builder's own validation —
+            a malformed check is a config error worth stopping on, not a
+            check that silently never runs.
     """
-    temperature_window_s = config.get("sample_temperature_window_s", _SAMPLE_TEMPERATURE_WINDOW_S)
-    return (
-        TrendCheck(
-            name="sample_temperature_stable",
-            keys=(_SAMPLE_TEMPERATURE_KEY,),
-            window_s=temperature_window_s,
-            severity="advisory",
-            predicate=_sample_temperature_stable_predicate(
-                std_limit_K=config.get("sample_temperature_std_limit_K", _SAMPLE_TEMPERATURE_STD_LIMIT_K),
-                range_limit_K=config.get(
-                    "sample_temperature_range_limit_K", _SAMPLE_TEMPERATURE_RANGE_LIMIT_K
-                ),
-            ),
-        ),
-    )
+    entries = config.get("checks") or ()
+    checks: list[TrendCheck] = []
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, Mapping):
+            raise ValueError(f"trends.checks[{index}] must be a mapping, got {entry!r}")
+        unknown = set(entry) - _ENTRY_FIELDS
+        if unknown:
+            raise ValueError(
+                f"trends.checks[{index}] has unknown field(s) {sorted(unknown)}; "
+                f"allowed: {sorted(_ENTRY_FIELDS)}"
+            )
+        kind = str(entry.get("kind", "channel_within_band"))
+        builder = CHECK_KINDS.get(kind)
+        if builder is None:
+            raise ValueError(
+                f"trends.checks[{index}]: unknown kind {kind!r}; known: {sorted(CHECK_KINDS)}"
+            )
+        try:
+            checks.append(builder(**{k: v for k, v in entry.items() if k != "kind"}))
+        except TypeError as exc:  # a missing or misnamed required field
+            raise ValueError(f"trends.checks[{index}] ({kind}): {exc}") from exc
+    return tuple(checks)

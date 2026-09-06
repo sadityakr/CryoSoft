@@ -34,12 +34,13 @@ critical (GLOSSARY.md's **Safety-flag manifest**), so a tripped quench
 escalates the whole station to EMERGENCY (see GLOSSARY.md's **Critical
 safety flag**) rather than holding any concerned VI — no VI, including this
 one, names `quench` in `safety_concerns()`, since a per-VI hold would be
-meaningless once EMERGENCY has already stopped everything. `MagnetBase.
-safety_concerns()` declares every magnet dependent only on `{"helium_low"}`
-— a low-helium condition (reported by the level meter, not this VI) places
-a safety hold on every magnet, refusing manual control and failing any run
-that claims one, without touching an unconcerned instrument (see
-GLOSSARY.md's **Safety hold**).
+meaningless once EMERGENCY has already stopped everything. `MagnetBase`
+keeps the empty-set `safety_concerns()` default: this setup declares no
+hold-severity flag a magnet depends on. A setup that has one (a coolant
+level, a pressure switch) declares it on the VI that reports it and names
+it here, and every magnet is then stood down by a scoped safety hold
+without touching an unconcerned instrument (see GLOSSARY.md's
+**Safety hold**).
 
 ## Interface contract
 All classes here extend `SuperconductingMagnetVI` (itself inheriting from

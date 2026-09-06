@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
-
-from cryosoft.core.exceptions import CryoSoftConfigError
 from cryosoft.core.plan import Command, ParamSpec, PhasePlan, Target
-from cryosoft.core.procedure import SweepMeasureProcedure
+from cryosoft.core.procedure import RoleParam, SweepMeasureProcedure
 from cryosoft.core.sweep_builder import SweepAxis
 
 
@@ -20,20 +17,21 @@ class FieldSweep(SweepMeasureProcedure):
     supplies the ramp targets and the axis read-back.
 
     Procedure flow:
-    1. ``initiate()``: ramp ``magnet_z`` to the first field, ``temperature_vti``
-       to the target temperature, arm the selected measurement VI.
+    1. ``initiate()``: ramp the magnet to the first field, the temperature
+       controller to the target temperature, arm the selected measurement VI.
     2. ``measure()``: read the VI, tag on the field read-back, save.
-    3. ``change_sweep_step()``: step ``magnet_z`` to the next field.
-    4. ``standby()``: disarm the VI and put ``magnet_z`` into its own standby
+    3. ``change_sweep_step()``: step the magnet to the next field.
+    4. ``standby()``: disarm the VI and put the magnet into its own standby
        (that VI's standard command owns what "standby" means physically —
        ramp to zero, switch heater off where applicable — this procedure
        does not set the field itself).
 
-    Required VIs in Station:
-        ``magnet_z`` (system), ``temperature_vti`` (system), and at least one
-        measurement VI. In normal (non-persistent) mode the magnet keeps its
-        switch heater energised across the whole sweep, so the per-point ramps
-        are plain field targets.
+    Instruments (the role-discovery standard, see ``RoleParam``):
+        ``field_vi`` — the magnet this sweeps, required; ``temperature_vi`` —
+        the controller whose setpoint it sets, optional. Both default to the
+        setup's only instrument of that role, and both are chosen in the form
+        when a setup has several. At least one measurement VI is required by
+        ``SweepMeasureProcedure``.
     """
 
     name = "Field Sweep"
@@ -50,31 +48,29 @@ class FieldSweep(SweepMeasureProcedure):
     sweep_data_keys = [sweep_axis.data_key]
     default_x_key = sweep_axis.data_key
 
+    role_parameters = {
+        "field_vi": RoleParam(
+            candidates=lambda station: station.magnet_vi_names(),
+            description="Magnet this run sweeps",
+        ),
+        "temperature_vi": RoleParam(
+            candidates=lambda station: station.temperature_vi_names(),
+            description="Temperature controller this run sets (see 'set_temperature')",
+            required=False,
+        ),
+    }
+
     system_parameters = {
-        "set_vti_temperature": ParamSpec(
+        "set_temperature": ParamSpec(
             type=bool,
             default=True,
-            description="Set the VTI temperature during this run (off = leave it alone)",
+            description="Set the temperature during this run (off = leave it alone)",
         ),
         "temperature": ParamSpec(
             type=float,
             default=10.0,
             unit="K",
-            description="VTI temperature setpoint (ignored when 'set_vti_temperature' is off)",
-        ),
-        "set_sample_temperature": ParamSpec(
-            type=bool,
-            default=False,
-            description="Set the sample-stage temperature during this run",
-        ),
-        "sample_temperature": ParamSpec(
-            type=float,
-            default=10.0,
-            unit="K",
-            description=(
-                "Sample-stage temperature setpoint "
-                "(ignored when 'set_sample_temperature' is off)"
-            ),
+            description="Temperature setpoint (ignored when 'set_temperature' is off)",
         ),
         "init_wait": ParamSpec(
             type=float,
@@ -94,72 +90,49 @@ class FieldSweep(SweepMeasureProcedure):
     # Axis-specific hooks (SweepMeasureProcedure owns the four-method loop)
     # ------------------------------------------------------------------
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        """Build the procedure, then check the switched-on temperature channels exist.
-
-        A channel the user switched ON must actually be present on the station.
-        Failing here, at construction, beats discovering it mid-run: silently
-        measuring while a requested setpoint was never applied would corrupt a
-        dataset whose metadata claims that temperature. A switched-OFF channel
-        is not required to exist, so a station with no sample loop runs fine.
-
-        Raises:
-            CryoSoftConfigError: If an enabled temperature channel has no VI.
-        """
-        super().__init__(*args, **kwargs)
-        for toggle, vi_name in (
-            ("set_vti_temperature", "temperature_vti"),
-            ("set_sample_temperature", "temperature_sample"),
-        ):
-            if self._params[toggle] and not self._station.has_vi(vi_name):
-                raise CryoSoftConfigError(
-                    f"'{toggle}' is on, but this station has no '{vi_name}' VI. "
-                    f"Switch {toggle} off, or configure that controller."
-                )
-
     def _initial_system_targets(self) -> dict[str, Target]:
-        """Ramp ``magnet_z`` to the first field and any enabled temperature channels.
+        """Ramp the magnet to the first field, and the temperature if enabled.
 
-        A channel whose toggle is off is simply absent from the returned dict, so
-        the Orchestrator never ramps it and the controller holds wherever the
-        operator left it. Monitoring is unaffected — readings come from the tick
-        loop's monitor pass, not from targets.
+        The temperature target is absent when its toggle is off, or when this
+        station configures no temperature controller at all, so the
+        Orchestrator never ramps it and the controller holds wherever the
+        operator left it. Monitoring is unaffected — readings come from the
+        tick loop's monitor pass, not from targets.
         """
-        targets = {"magnet_z": Target(self._sweep[0])}
-        if self._params["set_vti_temperature"]:
-            targets["temperature_vti"] = Target(self._params["temperature"])
-        if self._params["set_sample_temperature"]:
-            targets["temperature_sample"] = Target(self._params["sample_temperature"])
+        targets = {self.role_vi("field_vi"): Target(self._sweep[0])}
+        temperature_vi = self.role_vi("temperature_vi")
+        if temperature_vi and self._params["set_temperature"]:
+            targets[temperature_vi] = Target(self._params["temperature"])
         return targets
 
     def _step_targets(self, index: int) -> dict[str, Target]:
-        """Ramp ``magnet_z`` to the field at *index*."""
-        return {"magnet_z": Target(self._sweep[index])}
+        """Ramp the magnet to the field at *index*."""
+        return {self.role_vi("field_vi"): Target(self._sweep[index])}
 
     def _standby_targets(self) -> dict[str, Target]:
         """No system targets — ``standby()`` below commands the magnet directly."""
         return {}
 
     def standby(self) -> PhasePlan:
-        """Disarm the measurement VI and put ``magnet_z`` into its own standby.
+        """Disarm the measurement VI and put the magnet into its own standby.
 
         Returns:
             The base ``SweepMeasureProcedure.standby()`` plan plus a
-            ``Command`` invoking ``magnet_z.standby()`` — the magnet VI's own
-            standard standby action, which owns what that means physically
-            (ramp to zero, switch heater off where applicable). This
-            procedure does not set the field itself.
+            ``Command`` invoking the magnet's own ``standby()`` — that VI's
+            standard standby action, which owns what standby means
+            physically (ramp to zero, switch heater off where applicable).
+            This procedure does not set the field itself.
         """
         plan = super().standby()
         return PhasePlan(
             targets=plan.targets,
-            commands=(*plan.commands, Command("magnet_z", "standby", {})),
+            commands=(*plan.commands, Command(self.role_vi("field_vi"), "standby", {})),
             wait_s=plan.wait_s,
         )
 
     def _axis_readback(self) -> float:
-        """Read the current field from ``magnet_z``."""
-        return self._station.magnet_z.magnet_field_T()
+        """Read the current field from the magnet this run sweeps."""
+        return self._station.get_vi(self.role_vi("field_vi")).magnet_field_T()
 
     def _initiate_wait_s(self) -> float:
         """Settle time after the initial ramp (``init_wait``)."""

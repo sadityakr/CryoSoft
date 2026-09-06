@@ -75,6 +75,7 @@ from typing import Any
 
 from cryosoft.analysis.report import AnalysisReport, FigureRef, TableSpec
 from cryosoft.core.data_reader import (
+    ROLE_IMAGE,
     ROLE_LOOP_AXIS,
     ROLE_RAW_BLOCK,
     TIMESTAMP_COLUMN,
@@ -406,7 +407,7 @@ def measured_columns(run: RunSource, exclude: Sequence[str] = ()) -> tuple[Colum
         for info in run.list_columns()
         if is_numeric(info)
         and info.name not in skipped
-        and info.role not in (ROLE_LOOP_AXIS, ROLE_RAW_BLOCK)
+        and info.role not in (ROLE_LOOP_AXIS, ROLE_RAW_BLOCK, ROLE_IMAGE)
     )
 
 

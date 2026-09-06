@@ -453,16 +453,18 @@ def test_quench_mid_measurement_enters_emergency_and_closes_the_run(
     assert orchestrator.override_active() is False
 
 
-def test_helium_low_mid_measurement_fails_only_the_run_not_the_station(
-    orchestrator, station, tmp_path, qtbot
+def test_safety_hold_mid_measurement_fails_only_the_run_not_the_station(
+    orchestrator, station, tmp_path, qtbot, monkeypatch
 ):
-    """A hold-severity flag (helium_low) fails the watched run, no EMERGENCY.
+    """A hold-severity flag fails the watched run, no EMERGENCY.
 
-    ``magnet_z`` is a system (watched) VI for FieldSweep and declares
-    ``helium_low`` as a safety concern (``MagnetBase.safety_concerns()``), so
-    the run fails via ``_fail_run_for_fault()`` and the machine returns to
-    IDLE rather than EMERGENCY — every other instrument stays usable.
+    ``magnet_z`` is a system (watched) VI for FieldSweep and is the VI
+    concerned with the declared hold flag (see
+    ``tests/scenarios.declare_hold_flag``), so the run fails via
+    ``_fail_run_for_fault()`` and the machine returns to IDLE rather than
+    EMERGENCY — every other instrument stays usable.
     """
+    hold_flag = scenarios.declare_hold_flag(monkeypatch, station)
     recorder = _Recorder(orchestrator)
     _start_field_sweep(orchestrator, station, tmp_path)
     _tick_until(orchestrator, lambda: len(recorder.of_type(ev.Datapoint)) >= 1)
@@ -477,7 +479,7 @@ def test_helium_low_mid_measurement_fails_only_the_run_not_the_station(
 
     station.magnet_z.standby = _spy
 
-    scenarios.apply_helium_low(station)
+    hold_flag.trip()
     _tick_until(orchestrator, lambda: orchestrator._state == OrchestratorState.IDLE)
 
     assert orchestrator._state == OrchestratorState.IDLE  # not EMERGENCY
@@ -486,14 +488,14 @@ def test_helium_low_mid_measurement_fails_only_the_run_not_the_station(
 
     finished = recorder.of_type(ev.RunFinished)
     assert finished and finished[-1].status == "failed"
-    assert "helium_low" in finished[-1].reason
+    assert hold_flag.flag in finished[-1].reason
     assert len(recorder.of_type(ev.Datapoint)) == saved_before
 
     # The hold is still active and reported.
     held = orchestrator.held_vi_names()
     assert "magnet_z" in held
     conditions = station.conditions()
-    assert "safety:helium_low" in conditions
+    assert hold_flag.key in conditions
 
     # acknowledge() unlocks manual control for a time-boxed window.
     admitted_before, _reason, _code = orchestrator._manual_action_admission("magnet_z")
@@ -693,14 +695,14 @@ def test_shutdown_is_bounded_over_a_wedged_read_and_names_the_vi(caplog):
 
     def _factory():
         station = build_station(CONFIG_PATH)
-        original = station.get_vi("level_meter").get_state
+        original = station.get_vi("temperature").get_state
 
         def _never_returns():
             wedged.set()
             time.sleep(3.0)
             return original()
 
-        station.get_vi("level_meter").get_state = _never_returns
+        station.get_vi("temperature").get_state = _never_returns
         return station
 
     host = InstrumentHost(
@@ -723,7 +725,7 @@ def test_shutdown_is_bounded_over_a_wedged_read_and_names_the_vi(caplog):
     critical = [r for r in caplog.records if r.levelno >= logging.CRITICAL]
     assert critical, "a wedged shutdown must say so at CRITICAL"
     message = critical[-1].getMessage()
-    assert "level_meter" in message, message
+    assert "temperature" in message, message
 
     assert host.thread_object.wait(60000)
 

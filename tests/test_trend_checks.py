@@ -12,6 +12,7 @@ from cryosoft.core.trend_checks import (
     CheckOutcome,
     CheckResult,
     TrendCheck,
+    channel_within_band,
     conditions_for,
     declared_checks,
     no_data_outcome,
@@ -30,8 +31,8 @@ def _raw_record(t: float, values: dict[str, float]) -> dict:
 
 
 # One trivial throwaway predicate/check, exercising the run_check()/
-# run_checks() machinery generically — the real declared checks
-# (sample_temperature_stable) gets its own dedicated predicate tests below.
+# run_checks() machinery generically — the shipped check kind
+# (channel_within_band) gets its own dedicated predicate tests below.
 def _stability_predicate(key: str, std_limit: float):
     def predicate(summaries, series, window_s):
         del series, window_s  # unused: this fixture predicate only needs the summary
@@ -195,93 +196,135 @@ def test_conditions_for_only_includes_failures(tmp_path: Path):
     assert [c.key for c in conditions] == ["trend:unstable_check"]
 
 
-# ── declared_checks ───────────────────────────────────────────────────────────
+# ── declared_checks: built from the config's trends.checks list ──────────────
 
-# A fully-merged trends: config, mirroring what Station.read_trends_config()
-# actually hands declared_checks() at runtime — real usage never calls it
-# with a partial dict.
-_FULL_TRENDS_CONFIG: dict[str, float] = {
+# A fully-merged trends: config, mirroring what config.read_trends_config()
+# actually hands declared_checks() at runtime.
+_BAND_ENTRY = {"key": "temperature_temperature", "low": 1.0, "high": 320.0, "window_s": 3600.0}
+_FULL_TRENDS_CONFIG: dict[str, object] = {
     "refresh_interval_s": 60.0,
-    "sample_temperature_window_s": 3600.0,
-    "sample_temperature_std_limit_K": 0.1,
-    "sample_temperature_range_limit_K": 0.5,
     "store_live_stale_ticks": 10.0,
+    "checks": [_BAND_ENTRY],
 }
 
 
-def test_declared_checks_ships_one_advisory_check():
+def test_declared_checks_builds_one_check_per_config_entry():
     checks = declared_checks(_FULL_TRENDS_CONFIG)
-    assert [c.name for c in checks] == ["sample_temperature_stable"]
+    assert [c.name for c in checks] == ["temperature_temperature_within_band"]
+    assert checks[0].keys == ("temperature_temperature",)
+    assert checks[0].window_s == 3600.0
     assert all(c.severity == "advisory" for c in checks)
 
 
-def test_declared_checks_falls_back_on_missing_config_keys():
-    # declared_checks() is called with {} by this test only — real callers
-    # always pass Station.read_trends_config()'s fully-merged dict.
-    checks = declared_checks({})
-    assert [c.name for c in checks] == ["sample_temperature_stable"]
+def test_declared_checks_is_empty_when_the_config_declares_none():
+    assert declared_checks({}) == ()
+    assert declared_checks({"checks": []}) == ()
 
 
-def test_declared_checks_never_hardcodes_window_reading_config():
-    checks = declared_checks(_FULL_TRENDS_CONFIG)
-    by_name = {c.name: c for c in checks}
-    assert by_name["sample_temperature_stable"].window_s == 3600.0
-
-    overridden = dict(_FULL_TRENDS_CONFIG)
-    overridden["sample_temperature_window_s"] = 1800.0
-    checks2 = {c.name: c for c in declared_checks(overridden)}
-    assert checks2["sample_temperature_stable"].window_s == 1800.0
+def test_declared_checks_honours_name_kind_and_severity_overrides():
+    entry = {**_BAND_ENTRY, "kind": "channel_within_band", "name": "sample_ok", "severity": "hold"}
+    (check,) = declared_checks({"checks": [entry]})
+    assert check.name == "sample_ok"
+    assert check.severity == "hold"
 
 
-# ── sample_temperature_stable ────────────────────────────────────────────────
+def test_declared_checks_preserves_declaration_order():
+    second = {**_BAND_ENTRY, "key": "magnet_z_magnet_field_T", "low": -9.0, "high": 9.0}
+    checks = declared_checks({"checks": [_BAND_ENTRY, second]})
+    assert [c.keys[0] for c in checks] == ["temperature_temperature", "magnet_z_magnet_field_T"]
 
 
-def _temperature_check(config: dict[str, float] | None = None) -> TrendCheck:
-    checks = {c.name: c for c in declared_checks(config or _FULL_TRENDS_CONFIG)}
-    return checks["sample_temperature_stable"]
+@pytest.mark.parametrize(
+    "entry, match",
+    [
+        ("not-a-mapping", "must be a mapping"),
+        ({**_BAND_ENTRY, "kind": "no_such_kind"}, "unknown kind"),
+        ({**_BAND_ENTRY, "typo": 1.0}, "unknown field"),
+        ({"key": "temperature_temperature", "low": 1.0, "window_s": 60.0}, "high"),
+        ({**_BAND_ENTRY, "low": 5.0, "high": 5.0}, "low must be below high"),
+        ({**_BAND_ENTRY, "window_s": 0.0}, "window_s must be positive"),
+    ],
+    ids=["not-mapping", "unknown-kind", "unknown-field", "missing-high", "inverted-band", "zero-window"],
+)
+def test_declared_checks_refuses_a_malformed_entry(entry, match):
+    """A malformed check is a config error worth stopping on, not a check that never runs."""
+    with pytest.raises(ValueError, match=match):
+        declared_checks({"checks": [entry]})
 
 
-def test_sample_temperature_stable_passes_for_flat_readings(tmp_path: Path):
+# ── channel_within_band ──────────────────────────────────────────────────────
+
+
+def _band_check(**overrides) -> TrendCheck:
+    return channel_within_band(**{**_BAND_ENTRY, **overrides})
+
+
+def test_channel_within_band_passes_for_readings_inside_the_band(tmp_path: Path):
     now = 2_000_000.0
     records = [
-        _raw_record(now - i, {"temperature_vti_temperature": 4.2}) for i in range(0, 3600, 100)
+        _raw_record(now - i, {"temperature_temperature": 4.2}) for i in range(0, 3600, 100)
     ]
     _write_jsonl(tmp_path / "trend_history_raw.jsonl", records)
-    result = run_check(_temperature_check(), tmp_path, now=now)
+    result = run_check(_band_check(), tmp_path, now=now)
     assert result.passed is True
-    assert result.evidence["std_K"] == pytest.approx(0.0, abs=1e-9)
+    assert result.evidence["min"] == pytest.approx(4.2)
+    assert result.evidence["max"] == pytest.approx(4.2)
     assert result.evidence["count"] == len(records)
     assert result.evidence["window_s"] == 3600.0
+    assert "stayed within" in result.message
 
 
-def test_sample_temperature_stable_fails_for_oscillating_readings(tmp_path: Path):
+def test_channel_within_band_fails_when_the_maximum_leaves_the_band(tmp_path: Path):
     now = 2_000_000.0
-    values = [4.0, 4.6, 4.0, 4.6, 4.0, 4.6]
+    values = [4.0, 4.6, 400.0, 4.6, 4.0]
     records = [
-        _raw_record(now - i * 60, {"temperature_vti_temperature": v})
-        for i, v in enumerate(values)
+        _raw_record(now - i * 60, {"temperature_temperature": v}) for i, v in enumerate(values)
     ]
     _write_jsonl(tmp_path / "trend_history_raw.jsonl", records)
-    result = run_check(_temperature_check(), tmp_path, now=now)
+    result = run_check(_band_check(), tmp_path, now=now)
     assert result.passed is False
-    assert result.evidence["std_K"] > 0.1
-    assert result.evidence["range_K"] == pytest.approx(0.6)
-    assert "std=" in result.message and "range=" in result.message
+    assert result.evidence["max"] == pytest.approx(400.0)
+    assert result.evidence["high"] == 320.0
+    assert "left the band" in result.message
 
 
-def test_sample_temperature_stable_indeterminate_on_empty_window(tmp_path: Path):
-    result = run_check(_temperature_check(), tmp_path, now=2_000_000.0)
+def test_channel_within_band_fails_when_the_minimum_leaves_the_band(tmp_path: Path):
+    now = 2_000_000.0
+    records = [_raw_record(now - i * 60, {"temperature_temperature": v}) for i, v in enumerate([4.0, 0.5])]
+    _write_jsonl(tmp_path / "trend_history_raw.jsonl", records)
+    result = run_check(_band_check(), tmp_path, now=now)
+    assert result.passed is False
+    assert result.evidence["min"] == pytest.approx(0.5)
+
+
+def test_channel_within_band_bounds_are_inclusive(tmp_path: Path):
+    now = 2_000_000.0
+    records = [_raw_record(now - i * 60, {"temperature_temperature": v}) for i, v in enumerate([1.0, 320.0])]
+    _write_jsonl(tmp_path / "trend_history_raw.jsonl", records)
+    assert run_check(_band_check(), tmp_path, now=now).passed is True
+
+
+def test_channel_within_band_indeterminate_on_empty_window(tmp_path: Path):
+    result = run_check(_band_check(), tmp_path, now=2_000_000.0)
     assert result.passed is None
 
 
-def test_sample_temperature_stable_defined_verdict_on_single_sample(tmp_path: Path):
+def test_channel_within_band_reports_the_window_actually_queried(tmp_path: Path):
+    """A caller overriding window_s gets evidence citing that window, not the declared one."""
+    import dataclasses
+
     now = 2_000_000.0
     _write_jsonl(
-        tmp_path / "trend_history_raw.jsonl", [_raw_record(now, {"temperature_vti_temperature": 4.2})]
+        tmp_path / "trend_history_raw.jsonl", [_raw_record(now, {"temperature_temperature": 4.2})]
     )
-    result = run_check(_temperature_check(), tmp_path, now=now)
-    # One sample: std/range are both exactly zero, a defined (passing) verdict.
+    check = dataclasses.replace(_band_check(), window_s=600.0)
+    result = run_check(check, tmp_path, now=now)
     assert result.passed is True
-    assert result.evidence["count"] == 1
-    assert result.evidence["std_K"] == 0.0
-    assert result.evidence["range_K"] == 0.0
+    assert result.evidence["window_s"] == 600.0
+
+
+def test_channel_within_band_default_name_and_overrides():
+    assert _band_check().name == "temperature_temperature_within_band"
+    assert _band_check(name="sample_ok", severity="advisory").name == "sample_ok"
+    with pytest.raises(ValueError, match="low must be below high"):
+        channel_within_band("k", 2.0, 1.0, 60.0)

@@ -30,22 +30,16 @@ CODE_HELP: dict[str, str] = {
         "Repeated communication failures — treated as off the bus. Check power, "
         "cabling, and address; run `troubleshoot check` with the app closed."
     ),
-    "QUENCH": (
-        "A magnet reported a quench. The run should be in EMERGENCY; verify the "
-        "magnet state and helium level."
+    "CRITICAL_FLAG": (
+        "This instrument reported a safety flag its class declares critical. "
+        "The run should be in EMERGENCY; find what tripped (the record's "
+        "conditions list names the flag) before doing anything else."
     ),
     "RAMP_STALLED": (
         "A ramp has not moved toward its target for several ticks. The setpoint "
         "is being sent but the value is not following, so suspect a "
         "controller/PID limit, a saturated heater, a thermal load, or the "
         "instrument not accepting setpoints."
-    ),
-    "STALLED_RUN": (
-        "Reserved, no longer produced by a running app — kept only so an "
-        "older status.jsonl still renders. If you see this on a live run, "
-        "the log predates the fixed 30 s single-tick-state timeout being "
-        "removed as unreliable (a long lock-in time constant or heavily "
-        "averaged point could legitimately exceed it)."
     ),
 }
 

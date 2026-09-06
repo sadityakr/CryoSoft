@@ -11,7 +11,7 @@ def test_flattening_matches_last_state_flat_convention():
             "ramp_status": "ramping",  # string -> excluded
             "_stale": True,  # leading underscore -> excluded
         },
-        "temperature_vti": {
+        "temperature": {
             "temperature_K": 4.2,
             "heater_on": True,  # bool -> excluded even though bool is an int subclass
             "_disconnected": False,  # leading underscore -> excluded
@@ -20,7 +20,7 @@ def test_flattening_matches_last_state_flat_convention():
     history.record(state, timestamp=100.0)
 
     assert history.keys() == sorted(
-        ["magnet_z_get_field", "magnet_z_magnet_current", "temperature_vti_temperature_K"]
+        ["magnet_z_get_field", "magnet_z_magnet_current", "temperature_temperature_K"]
     )
 
     # Hand-computed expectation matching Station.last_state_flat()'s output shape
@@ -29,7 +29,7 @@ def test_flattening_matches_last_state_flat_convention():
     expected_flat = {
         "magnet_z_get_field": 0.5,
         "magnet_z_magnet_current": 12.3,
-        "temperature_vti_temperature_K": 4.2,
+        "temperature_temperature_K": 4.2,
     }
     for key, value in expected_flat.items():
         times, values = history.series(key)
@@ -105,13 +105,13 @@ def test_key_appearing_only_in_later_records_still_works():
 def test_record_flat_appends_and_is_retrievable():
     """record_flat() appends already-flat readings, retrievable via series()/keys()."""
     history = MonitorHistory()
-    history.record_flat({"magnet_z_get_field": 0.5, "temperature_vti_temperature_K": 4.2}, timestamp=100.0)
+    history.record_flat({"magnet_z_get_field": 0.5, "temperature_temperature_K": 4.2}, timestamp=100.0)
 
-    assert history.keys() == sorted(["magnet_z_get_field", "temperature_vti_temperature_K"])
+    assert history.keys() == sorted(["magnet_z_get_field", "temperature_temperature_K"])
     times, values = history.series("magnet_z_get_field")
     assert times == [100.0]
     assert values == [0.5]
-    times, values = history.series("temperature_vti_temperature_K")
+    times, values = history.series("temperature_temperature_K")
     assert times == [100.0]
     assert values == [4.2]
 

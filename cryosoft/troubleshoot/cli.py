@@ -30,8 +30,8 @@ from typing import Any
 
 import cryosoft
 from cryosoft.core.logging_config import setup_logging
-from cryosoft.core.paths import log_directory, measurement_root
-from cryosoft.core.station import read_tick_interval_ms, read_trends_config
+from cryosoft.core.paths import log_directory, measurement_root, user_config_dir
+from cryosoft.core.config import read_tick_interval_ms, read_trends_config
 from cryosoft.core.trend_checks import CheckResult, declared_checks, run_checks
 from cryosoft.troubleshoot import engine, session_report, status_reader
 from cryosoft.troubleshoot.engine import (
@@ -78,10 +78,13 @@ def _shipped_config_dir() -> Path:
 
 
 def _user_config_dir() -> Path:
-    import os
+    """The user's editable config copies: ``configs/`` under the per-user config root.
 
-    appdata = os.environ.get("APPDATA", str(Path.home()))
-    return Path(appdata) / "CryoSoft" / "configs"
+    Delegates to ``cryosoft.core.paths.user_config_dir()`` (the per-user
+    path standard) so this CLI and the application resolve the same
+    directory.
+    """
+    return user_config_dir() / "configs"
 
 
 def _read_active_config() -> str | None:
@@ -759,8 +762,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=_cmd_session)
 
     p = sub.add_parser("trends", parents=[common],
-                       help="evaluate the declared trend checks (temperature stability) "
-                            "plus the pull-only store-liveness check")
+                       help="evaluate the trend checks this setup's devices.yaml "
+                            "declares under trends.checks (each a channel kept within "
+                            "a band over a window) plus the pull-only store-liveness "
+                            "check")
     _add_config_arg(p)
     p.add_argument(
         "--window",

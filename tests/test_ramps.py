@@ -170,7 +170,7 @@ def test_narrow_claims_leave_unclaimed_ramps_unowned():
         setpoint_meta=_meta,
         stop_policy=_always_stoppable,
         run_label="procedure 'Field Sweep'",
-        run_claims={"level_meter"},
+        run_claims={"dc_measurement"},
     )[0]
     assert record.owner is None
 

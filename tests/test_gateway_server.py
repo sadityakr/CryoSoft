@@ -674,7 +674,7 @@ def app_wired_server(qtbot, tmp_path):
     the instrument thread while the server is on this one.
     """
     from cryosoft.core.instrument_host import InstrumentHost
-    from cryosoft.core.station import read_gateway_config
+    from cryosoft.core.config import read_gateway_config
     from cryosoft.main import _build_gateway_server
 
     host = InstrumentHost(
@@ -758,7 +758,7 @@ def test_the_app_wiring_serves_a_client_with_the_engine_on_its_own_thread(
 
 def test_a_setup_that_does_not_ask_for_a_server_gets_none(tmp_path):
     """The config gate, in the wiring function: silence opens no socket."""
-    from cryosoft.core.station import read_gateway_config
+    from cryosoft.core.config import read_gateway_config
     from cryosoft.main import _build_gateway_server
 
     (tmp_path / "monitor.yaml").write_text("monitor:\n  tick_interval_ms: 1000\n")

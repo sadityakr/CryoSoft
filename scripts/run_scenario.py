@@ -14,7 +14,7 @@ Input: a scenario name plus its parameters on the command line (see
 ``cryosoft.main`` already resolves at startup.
 Process: builds and applies the requested scenario's driver flags the
 moment the Station is built, before the window is shown; scenarios that
-need several ticks to converge (helium_low's debounce buffer, quench's
+need several ticks to converge (quench's
 safety-flag propagation) simply appear once the operator starts monitoring
 in the running app, exactly as they would on real hardware.
 Output: the CryoSoft window, running live in the requested state, until the
@@ -33,21 +33,18 @@ from cryosoft.core.station import Station  # noqa: E402
 from cryosoft.main import main  # noqa: E402
 from tests import scenarios as scn  # noqa: E402
 
-_SCENARIOS = ("helium-low", "quench", "disconnect", "measurement-error")
+_SCENARIOS = ("quench", "disconnect", "measurement-error")
 
 
 def _build_apply(args: argparse.Namespace):
     """Return a Station -> None closure applying the requested scenario."""
 
     def _apply(station: Station) -> None:
-        if args.scenario == "helium-low":
-            scn.apply_helium_low(station, pct=args.pct, level_vi=args.vi or "level_meter")
-            print(f"[scenario] helium-low: forced {args.vi or 'level_meter'} to {args.pct}%")
-        elif args.scenario == "quench":
+        if args.scenario == "quench":
             scn.apply_quench(station, magnet_vi=args.vi or "magnet_z")
             print(f"[scenario] quench: {args.vi or 'magnet_z'} will report QUENCH")
         elif args.scenario == "disconnect":
-            vi_name = args.vi or "temperature_sample"
+            vi_name = args.vi or "temperature"
             scn.apply_disconnect(station, vi_name, driver_attr=args.driver_attr or "_driver")
             print(f"[scenario] disconnect: {vi_name} will fail every call")
         elif args.scenario == "measurement-error":
@@ -74,10 +71,7 @@ def _parse_args() -> argparse.Namespace:
         "--vi",
         default=None,
         help="VI name the scenario targets (defaults per scenario, e.g. "
-        "level_meter / magnet_z / temperature_sample / dc_measurement).",
-    )
-    parser.add_argument(
-        "--pct", type=float, default=10.0, help="helium-low: forced level, in percent."
+        "magnet_z / temperature / dc_measurement).",
     )
     parser.add_argument(
         "--driver-attr",

@@ -29,7 +29,7 @@ from PyQt6.QtWidgets import (
 from cryosoft.core.events import ErrorEvent
 from cryosoft.core.orchestrator import OrchestratorState
 from cryosoft.core.orchestrator_proxy import OrchestratorProxy
-from cryosoft.core.station import read_instrument_metadata
+from cryosoft.core.config import read_instrument_metadata
 from cryosoft.gui import app_settings  # import the module (not the function) so tests can monkeypatch the factory
 from cryosoft.gui import form_autosave  # module import keeps save/load monkeypatchable
 from cryosoft.gui import window_geometry
@@ -150,7 +150,7 @@ class MonitorWindow(QMainWindow):
             ``session_manager``'s own ``ExperimentStore`` is never rebound
             live.
         panels_config: The active config's ``panels:`` block
-            (``Station.read_panels_config()``): per-VI allowlists of the
+            (``cryosoft.core.config.read_panels_config()``): per-VI allowlists of the
             controls shown on the compact instrument cards. None/empty means
             every VI keeps its declared ``panel=`` defaults.
     """
@@ -417,7 +417,7 @@ class MonitorWindow(QMainWindow):
 
         self._system_vi_names = [
             n for n in self._station.get_vi_names()
-            if self._station.get_vi_type(n) in {"system", "level"}
+            if self._station.get_vi_type(n) in {"system"}
         ]
         measurement_vis = [
             n for n in self._station.get_vi_names()

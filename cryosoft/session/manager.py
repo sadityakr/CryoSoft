@@ -12,7 +12,8 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from cryosoft.core.events import OPERATOR, Actor, RunStarted
 from cryosoft.core.orchestrator_proxy import OrchestratorProxy
 from cryosoft.core.plan import ExperimentEnvelope, params_digest
-from cryosoft.core.station import Station, read_instrument_metadata
+from cryosoft.core.config import read_instrument_metadata
+from cryosoft.core.station import Station
 from cryosoft.session.models import (
     EXPERIMENT_STATUS_CLOSED,
     EXPERIMENT_STATUS_OPEN,

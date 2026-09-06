@@ -82,13 +82,13 @@ def _arm(station, meas, proc):
 # ── set_ramp_rate @control on temperature VI ─────────────────────────────────
 
 def test_set_ramp_rate_changes_default(station):
-    vi = station.temperature_vti
+    vi = station.temperature
     vi.set_ramp_rate(10.0)
     assert vi._default_ramp_rate == pytest.approx(10.0)
 
 
 def test_set_ramp_rate_is_control(station):
-    vi = station.temperature_vti
+    vi = station.temperature
     assert getattr(vi.set_ramp_rate, "_is_control", False) is True
 
 
@@ -96,9 +96,9 @@ def test_set_ramp_rate_is_control(station):
 
 def test_process_system_targets_forwards_rate(station):
     """Passing 'rate' in system_targets changes the ramp rate used."""
-    vi = station.temperature_vti
+    vi = station.temperature
     vi._default_ramp_rate = 1.0  # base rate
-    station.process_system_targets({"temperature_vti": Target(300.0, rate=500.0)})
+    station.process_system_targets({"temperature": Target(300.0, rate=500.0)})
     assert vi._default_ramp_rate == pytest.approx(1.0)  # not mutated
     assert vi._ramp_target == pytest.approx(300.0)
 
@@ -144,9 +144,9 @@ def test_field_sweep_initiate_full_phaseplan(station, tmp_path, meas):
     proc.standby()
 
     assert isinstance(plan, PhasePlan)
-    assert set(plan.targets) == {"magnet_z", "temperature_vti"}
+    assert set(plan.targets) == {"magnet_z", "temperature"}
     assert plan.targets["magnet_z"] == Target(-0.1)
-    assert plan.targets["temperature_vti"] == Target(300.0)
+    assert plan.targets["temperature"] == Target(300.0)
 
     # FieldSweep keeps the default claim (claimed_vi_names() -> None), so
     # claim_commands initiate every station VI, in station registration order.
@@ -274,8 +274,9 @@ def test_temp_sweep_initiate_full_phaseplan(station, tmp_path, meas):
     plan = proc.initiate()
     proc.standby()
 
-    assert plan.targets["temperature_vti"] == Target(300.0, rate=6000.0)
-    # sim_cryostat has magnet_z; field_z defaults to 0.0.
+    assert plan.targets["temperature"] == Target(300.0, rate=6000.0)
+    # sim_cryostat has magnet_z, discovered for the optional field role;
+    # field defaults to 0.0.
     assert plan.targets["magnet_z"] == Target(0.0)
 
     # TemperatureSweep keeps the default claim too — every station VI.
@@ -295,7 +296,7 @@ def test_temp_sweep_change_step_includes_rate(station, tmp_path, meas):
     proc.initiate()
     step = proc.change_sweep_step()
     assert isinstance(step, StepPlan)
-    assert step.targets["temperature_vti"].rate == pytest.approx(6000.0)
+    assert step.targets["temperature"].rate == pytest.approx(6000.0)
     proc.standby()
 
 
@@ -326,21 +327,21 @@ def test_temp_sweep_run_resets_a_stale_manual_heater_to_auto(station, tmp_path):
     """A run resets a heater the operator left in MANUAL back to AUTO.
 
     Regression test for the scenario claim_commands exists to solve: an
-    operator switches temperature_vti's heater to MANUAL by hand (e.g.
+    operator switches temperature's heater to MANUAL by hand (e.g.
     during a bench test) and leaves it that way. Without claim-initiating
     every claimed VI at run start, the closed loop would stay off for the
     whole run and the sweep's ramp target would never actually be reached.
     """
     from cryosoft.core.orchestrator import Orchestrator
 
-    station.temperature_vti.set_heater_mode("MANUAL")
-    assert station.temperature_vti.heater_mode() == "MANUAL"
+    station.temperature.set_heater_mode("MANUAL")
+    assert station.temperature.heater_mode() == "MANUAL"
 
     proc = _temp_proc(station, tmp_path, DC)
     orch = Orchestrator(station, tick_interval_ms=10)
     try:
         orch.run_procedure(proc)
-        assert station.temperature_vti.heater_mode() == "AUTO"
+        assert station.temperature.heater_mode() == "AUTO"
     finally:
         orch.shutdown()
 
@@ -373,29 +374,45 @@ def _partial_station(*keep: str):
     return partial
 
 
-def test_temp_sweep_missing_magnet_with_zero_field_is_skipped(tmp_path):
-    """A station without magnet_y still runs the sweep at field_y=0."""
-    station = _partial_station("magnet_z", "temperature_vti", "dc_measurement")
+def test_temp_sweep_without_a_magnet_runs_at_zero_field(tmp_path):
+    """A station configuring no magnet still runs the sweep at field=0.
+
+    The field role is optional (the role-discovery standard), so it simply
+    resolves to nothing and no field target is emitted.
+    """
+    station = _partial_station("temperature", "dc_measurement")
     proc = TemperatureSweep(
         station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
         **FAST_TEMP, **DC,
     )
     plan = proc.initiate()
-    assert "magnet_y" not in plan.targets
-    assert "magnet_z" in plan.targets
-    assert "temperature_vti" in plan.targets
+    assert proc.role_vi("field_vi") == ""
+    assert "temperature" in plan.targets
+    assert len(plan.targets) == 1
     proc.standby()
 
 
-def test_temp_sweep_missing_magnet_with_nonzero_field_is_refused(tmp_path):
-    """A NONZERO field on a missing magnet must fail at construction."""
+def test_temp_sweep_without_a_magnet_and_a_nonzero_field_is_refused(tmp_path):
+    """A NONZERO field with no magnet configured must fail at construction."""
     from cryosoft.core.exceptions import CryoSoftConfigError
 
-    station = _partial_station("magnet_z", "temperature_vti", "dc_measurement")
-    with pytest.raises(CryoSoftConfigError, match="magnet_y"):
+    station = _partial_station("temperature", "dc_measurement")
+    with pytest.raises(CryoSoftConfigError, match="configures no"):
         TemperatureSweep(
             station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
-            **{**FAST_TEMP, **DC, "field_y": 0.5},
+            **{**FAST_TEMP, **DC, "field": 0.5},
+        )
+
+
+def test_temp_sweep_without_a_temperature_controller_is_refused(tmp_path):
+    """The swept role is REQUIRED: no candidate means no run, said at construction."""
+    from cryosoft.core.exceptions import CryoSoftConfigError
+
+    station = _partial_station("magnet_z", "dc_measurement")
+    with pytest.raises(CryoSoftConfigError, match="temperature_vi"):
+        TemperatureSweep(
+            station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
+            **FAST_TEMP, **DC,
         )
 
 
@@ -634,65 +651,64 @@ def test_field_sweep_sets_vti_and_not_sample_by_default(station, tmp_path):
     """Default toggles preserve the pre-toggle behaviour exactly."""
     proc = _field_proc(station, tmp_path, DC)
     targets = proc.initiate().targets
-    assert targets["temperature_vti"].target == pytest.approx(FAST_FIELD["temperature"])
-    assert "temperature_sample" not in targets
+    assert targets["temperature"].target == pytest.approx(FAST_FIELD["temperature"])
     proc.standby()
 
 
-def test_field_sweep_vti_off_emits_no_vti_target(station, tmp_path):
-    """set_vti_temperature=False drops the VTI target but keeps the field ramp."""
+def test_field_sweep_temperature_off_emits_no_temperature_target(station, tmp_path):
+    """set_temperature=False drops the temperature target but keeps the field ramp."""
     proc = FieldSweep(
         station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
-        **{**FAST_FIELD, **DC, "set_vti_temperature": False},
+        **{**FAST_FIELD, **DC, "set_temperature": False},
     )
     targets = proc.initiate().targets
-    assert "temperature_vti" not in targets
+    assert "temperature" not in targets
     assert "magnet_z" in targets
     proc.standby()
 
 
-def test_field_sweep_both_channels_off_emits_no_temperature_targets(station, tmp_path):
-    """Both toggles off leaves the field sweep with no temperature targets at all."""
+def test_field_sweep_without_a_temperature_controller_runs(tmp_path):
+    """The temperature role is optional: no controller, no temperature target."""
+    station = _partial_station("magnet_z", "dc_measurement")
     proc = FieldSweep(
         station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
-        **{**FAST_FIELD, **DC, "set_vti_temperature": False,
-           "set_sample_temperature": False},
+        **FAST_FIELD, **DC,
     )
-    targets = proc.initiate().targets
-    assert not {"temperature_vti", "temperature_sample"} & set(targets)
+    assert proc.role_vi("temperature_vi") == ""
+    assert set(proc.initiate().targets) == {"magnet_z"}
     proc.standby()
 
 
-def test_field_sweep_enabled_channel_without_vi_is_refused(tmp_path):
-    """Switching a channel ON that the station lacks must fail at construction."""
+def test_field_sweep_without_a_magnet_is_refused(tmp_path):
+    """The swept role is REQUIRED: no magnet means no run, said at construction."""
     from cryosoft.core.exceptions import CryoSoftConfigError
 
-    station = _partial_station("magnet_z", "temperature_vti", "dc_measurement")
-    with pytest.raises(CryoSoftConfigError, match="temperature_sample"):
+    station = _partial_station("temperature", "dc_measurement")
+    with pytest.raises(CryoSoftConfigError, match="field_vi"):
         FieldSweep(
             station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
-            **{**FAST_FIELD, **DC, "set_sample_temperature": True},
+            **FAST_FIELD, **DC,
         )
 
 
-def test_field_sweep_disabled_channel_without_vi_is_allowed(tmp_path):
-    """A switched-OFF channel is not required to exist on the station."""
-    station = _partial_station("magnet_z", "temperature_vti", "dc_measurement")
-    proc = FieldSweep(
-        station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
-        **{**FAST_FIELD, **DC, "set_sample_temperature": False},
-    )
-    assert "temperature_sample" not in proc.initiate().targets
-    proc.standby()
+def test_field_sweep_rejects_a_role_the_station_does_not_have(station, tmp_path):
+    """A named instrument that is not of that role is refused, not guessed at."""
+    from cryosoft.core.exceptions import CryoSoftConfigError
+
+    with pytest.raises(CryoSoftConfigError, match="field_vi"):
+        FieldSweep(
+            station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
+            **{**FAST_FIELD, **DC, "field_vi": "temperature"},
+        )
 
 
-def test_temp_sweep_vti_off_emits_no_targets_on_initiate_or_step(station, tmp_path):
-    """With the swept channel off, the sweep measures without commanding the VTI."""
+def test_temp_sweep_temperature_off_emits_no_targets_on_initiate_or_step(station, tmp_path):
+    """With the swept channel off, the sweep measures without commanding it."""
     proc = TemperatureSweep(
         station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
-        **{**FAST_TEMP, **DC, "set_vti_temperature": False},
+        **{**FAST_TEMP, **DC, "set_temperature": False},
     )
-    assert "temperature_vti" not in proc.initiate().targets
+    assert "temperature" not in proc.initiate().targets
     step = proc.change_sweep_step()
-    assert step is not None and "temperature_vti" not in step.targets
+    assert step is not None and "temperature" not in step.targets
     proc.standby()

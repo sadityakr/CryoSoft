@@ -7,8 +7,8 @@ import logging
 import math
 import statistics
 import time
-from collections.abc import Iterable, Mapping
-from typing import Any
+from collections.abc import Callable, Iterable, Mapping
+from typing import Any, ClassVar
 
 from cryosoft.core.data_manager import DataManager
 from cryosoft.core.exceptions import CryoSoftConfigError
@@ -48,6 +48,39 @@ def _nanmean(values: Iterable[float]) -> float:
     """
     valid = [v for v in values if not math.isnan(v)]
     return statistics.fmean(valid) if valid else float("nan")
+
+
+@dataclasses.dataclass(frozen=True)
+class RoleParam:
+    """One instrument ROLE a procedure needs, discovered on the Station.
+
+    The **role-discovery standard**: a procedure names the role it needs
+    ("the magnet whose field this sweeps"), never a configured instrument
+    name, so the same recipe runs on any setup that has such an instrument.
+    Discovery happens at construction: the candidates come from the Station,
+    the value defaults to the only candidate when there is exactly one, and a
+    REQUIRED role with no candidate at all refuses the run at construction
+    rather than failing mid-sweep.
+
+    A procedure is hardware-blind (contract C6) and never imports a VI class,
+    so ``candidates`` is a callable over the Station's own role accessors
+    (``magnet_vi_names()``, ``temperature_vi_names()``,
+    ``measurement_vi_names()``), which are the thin, named front of
+    ``Station.vi_names_by_base()``.
+
+    Attributes:
+        candidates: ``station -> [vi_name, ...]``, in config order. The first
+            entry is the default.
+        description: One line describing what the procedure does with this
+            instrument; rendered as the parameter's help text.
+        required: Whether the procedure can run without one. A required role
+            with no candidate raises ``CryoSoftConfigError`` at construction;
+            an optional one resolves to ``""``.
+    """
+
+    candidates: Callable[[Any], list[str]]
+    description: str
+    required: bool = True
 
 
 class BaseProcedure:
@@ -134,6 +167,12 @@ class BaseProcedure:
     measurement_parameters: dict[str, ParamSpec] = {}
     parameters: dict[str, ParamSpec] = {}
 
+    # The instrument roles this procedure discovers on the Station (the
+    # role-discovery standard — see ``RoleParam``). Each becomes one
+    # parameter whose choices are the configured instruments of that role,
+    # resolved at construction by ``role_vi()``.
+    role_parameters: ClassVar[dict[str, RoleParam]] = {}
+
     sweep_data_keys: list[str] = []        # procedure's own scalar sweep columns (e.g. field_T)
     measurement_data_keys: list[str] = []  # measurement array columns (e.g. voltage_V, current_A)
     default_x_key: str = ""                # default X axis for live plots
@@ -155,8 +194,17 @@ class BaseProcedure:
     def __init_subclass__(cls, **kwargs: object) -> None:
         super().__init_subclass__(**kwargs)
         axis_params = sweep_axis_param_specs(cls.sweep_axis) if cls.sweep_axis else {}
+        # A role parameter's CHOICES need a Station, so the class-level spec
+        # carries only the empty default ("discover it"); the real one, with
+        # this setup's instruments as its choices, is built by
+        # get_param_groups().
+        role_params = {
+            name: ParamSpec(type=str, default="", description=role.description)
+            for name, role in cls.role_parameters.items()
+        }
         cls.parameters = {
             **axis_params,
+            **role_params,
             **cls.sweep_parameters,
             **cls.system_parameters,
             **cls.measurement_parameters,
@@ -191,6 +239,7 @@ class BaseProcedure:
             The non-empty parameter groups, in Sweep, System, Measurement order.
         """
         candidates = (
+            ("instruments", "Instruments", cls._role_param_specs(station, selections)),
             ("sweep", "Sweep", cls.sweep_parameters),
             ("system", "System", cls.system_parameters),
             ("measurement", "Measurement", cls.measurement_parameters),
@@ -200,6 +249,45 @@ class BaseProcedure:
             for key, title, params in candidates
             if params
         ]
+
+    @classmethod
+    def _role_param_specs(
+        cls, station: Station, selections: Mapping[str, Any] | None = None
+    ) -> dict[str, ParamSpec]:
+        """Build this procedure's role parameters against a live Station.
+
+        The rendering half of the role-discovery standard (see
+        ``RoleParam``): each declared role becomes a drop-down over the
+        instruments of that role this setup configured, defaulted to the
+        first — which IS the value when there is only one. A role with no
+        candidate contributes no widget; a REQUIRED one is refused at
+        construction instead, where the message can say what to configure.
+
+        Args:
+            station: The active Station, which supplies the candidates.
+            selections: Current structural-parameter values, so a role the
+                user already chose stays chosen across a re-render.
+
+        Returns:
+            ``{param_name: ParamSpec}``, empty when this procedure declares
+            no roles or the station has none of them.
+        """
+        selections = selections or {}
+        specs: dict[str, ParamSpec] = {}
+        for name, role in cls.role_parameters.items():
+            names = role.candidates(station)
+            if not names:
+                continue
+            selected = selections.get(name)
+            if selected not in names:
+                selected = names[0]
+            specs[name] = ParamSpec(
+                type=str,
+                default=selected,
+                choices={vi_name: vi_name for vi_name in names},
+                description=role.description,
+            )
+        return specs
 
     @classmethod
     def live_plot_measurement_keys(
@@ -292,6 +380,13 @@ class BaseProcedure:
         }
         merged_params.update(param_values)
         self._params: dict[str, Any] = merged_params
+        # Role discovery, before anything else reads a VI name: a subclass's
+        # own __init__ (and _build_sweep_array below) may ask for a resolved
+        # role straight after calling super().__init__().
+        self._role_vis: dict[str, str] = {
+            name: self._resolve_role(name, role)
+            for name, role in type(self).role_parameters.items()
+        }
         self._data_manager = None
         # Optional declared HDF5 layout. A procedure that assembles a DataSchema
         # in initiate() (the generic sweep procedures do) stores it here, and
@@ -300,6 +395,58 @@ class BaseProcedure:
         self._data_schema: DataSchema | None = None
         self._sweep: list = self._build_sweep_array()
         self._index: int = 0
+
+    def _resolve_role(self, param_name: str, role: RoleParam) -> str:
+        """Resolve one declared role to a configured instrument name.
+
+        Args:
+            param_name: The role parameter's name, e.g. ``"field_vi"``.
+            role: Its declaration.
+
+        Returns:
+            The chosen VI name, or ``""`` for an optional role this station
+            has no instrument for.
+
+        Raises:
+            CryoSoftConfigError: If the station has no instrument for a
+                REQUIRED role, or if the caller named one that is not a
+                candidate (a typo, or a config that changed under a queued
+                run).
+        """
+        names = role.candidates(self._station)
+        chosen = str(self._params.get(param_name) or "")
+        if chosen:
+            if chosen not in names:
+                raise CryoSoftConfigError(
+                    f"{type(self).name!r}: {param_name}={chosen!r} is not an "
+                    f"instrument of that role on this station "
+                    f"(candidates: {names or 'none'})."
+                )
+            return chosen
+        if names:
+            return names[0]
+        if role.required:
+            raise CryoSoftConfigError(
+                f"{type(self).name!r} needs an instrument for {param_name!r} "
+                f"({role.description}), but this station configures none. "
+                f"Add one to devices.yaml, or run a procedure that does not "
+                f"need it."
+            )
+        return ""
+
+    def role_vi(self, param_name: str) -> str:
+        """Return the instrument name this run resolved a declared role to.
+
+        Args:
+            param_name: The role parameter's name, e.g. ``"field_vi"``.
+
+        Returns:
+            The VI name, or ``""`` for an optional role with no instrument.
+
+        Raises:
+            KeyError: If this procedure declares no such role.
+        """
+        return self._role_vis[param_name]
 
     # ------------------------------------------------------------------
     # Override in subclass
@@ -1575,6 +1722,9 @@ class SweepMeasureProcedure(BaseProcedure):
         "Raw diagnostic blocks" standard): the VI's ``measurement_raw_blocks``
         label lists (channel-axis length) combined with
         ``raw_block_row_counts()`` (row-axis length) for the same params.
+        Image blocks (the image-block standard, ``measurement_image_blocks``)
+        take the same ``measurement_blocks`` slot with their declared
+        ``(height_px, width_px)``; no scalar column is derived from a frame.
 
         Args:
             vi: The selected measurement VI instance.
@@ -1591,6 +1741,13 @@ class SweepMeasureProcedure(BaseProcedure):
             name: (row_counts[name], len(labels))
             for name, labels in vi.measurement_raw_blocks.items()
         }
+        for name, image in vi.measurement_image_blocks.items():
+            if name in measurement_blocks or name in sweep_columns:
+                raise CryoSoftConfigError(
+                    f"{type(self).name!r}: image block {name!r} collides with a "
+                    f"raw block or sweep column of the same name."
+                )
+            measurement_blocks[name] = image.shape
         measurement_scalars = {
             **dict(vi.measurement_scalar_columns),
             **self._raw_block_channel_columns(vi, sweep_columns),
@@ -1815,6 +1972,10 @@ class SweepMeasureProcedure(BaseProcedure):
             "measurement_arrays": dict(self._data_schema.measurement_arrays),
             "measurement_blocks": dict(self._data_schema.measurement_blocks),
             "measurement_block_labels": dict(vi.measurement_raw_blocks),
+            "measurement_image_blocks": {
+                name: {"unit": image.unit, "description": image.description}
+                for name, image in vi.measurement_image_blocks.items()
+            },
             "loop_shape": list(self._data_schema.loop_shape),
         }
 
@@ -1891,6 +2052,9 @@ class SweepMeasureProcedure(BaseProcedure):
         reduced scalar per channel (see ``_raw_block_channel_columns``) —
         those are ordinary scalar columns and always keep their real
         ``(n_loop1, n_loop2)`` grid, never squeezed like the block itself.
+        An image block (``vi.measurement_image_blocks``, the image-block
+        standard) is stored exactly like a raw block — same grid, same
+        squeeze — but no scalar is ever derived from a frame.
 
         Raises:
             RuntimeError: If called before ``initiate()``.
@@ -1915,10 +2079,11 @@ class SweepMeasureProcedure(BaseProcedure):
 
         n_loop1, n_loop2 = self._loop_shape
         channel_labels = self._raw_block_channel_labels(vi)
+        block_keys = list(vi.measurement_raw_blocks) + list(vi.measurement_image_blocks)
         keys = (
             list(vi.measurement_data_keys)
             + list(vi.measurement_scalar_columns)
-            + list(vi.measurement_raw_blocks)
+            + block_keys
             + channel_labels
         )
         grids: dict[str, list[list[Any]]] = {
@@ -1951,10 +2116,10 @@ class SweepMeasureProcedure(BaseProcedure):
 
         measured_data: dict[str, Any] = dict(grids)
         if (n_loop1, n_loop2) == (1, 1):
-            # No reading loop configured: a raw block skips the trivial
-            # (1, 1) axis entirely rather than carrying it like a scalar/
-            # array column does (see DataSchema.measurement_blocks).
-            for block_key in vi.measurement_raw_blocks:
+            # No reading loop configured: a raw or image block skips the
+            # trivial (1, 1) axis entirely rather than carrying it like a
+            # scalar/array column does (see DataSchema.measurement_blocks).
+            for block_key in block_keys:
                 measured_data[block_key] = grids[block_key][0][0]
         measured_data[type(self).axis_data_key()] = self._axis_readback()
         self._save_datapoint(measured_data)

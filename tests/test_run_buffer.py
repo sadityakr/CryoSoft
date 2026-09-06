@@ -461,3 +461,51 @@ def test_the_module_level_vocabulary_reads_either_source(sim_run):
             assert len(dr.list_columns(source)) == len(handle.list_columns())
             assert dr.read_slice(source, "field_T").shape == (3,)
             assert set(dr.read_metadata(source)) == set(dr.RUN_METADATA_KEYS)
+
+
+# ── Image blocks (the image-block standard) ───────────────────────────────────
+
+
+def _image_buffer(loop_shape):
+    config = {
+        "sweep_columns": {"field_T": "float"},
+        "measurement_scalars": {},
+        "measurement_arrays": {},
+        "measurement_blocks": {"frame": [2, 3]},
+        "measurement_image_blocks": {"frame": {"unit": "counts", "description": "f"}},
+        "loop_shape": loop_shape,
+    }
+    manifest = {**MANIFEST, "data_config": config, "params": {"field_start": 0.0}}
+    buffer = RunBuffer()
+    buffer.start(RunStarted(run_id=RUN_ID, manifest=manifest))
+    n1, n2 = loop_shape
+    for index in range(2):
+        frames = [[[[10.0 * index + i1] * 3] * 2 for i2 in range(n2)] for i1 in range(n1)]
+        value = frames if (n1, n2) != (1, 1) else frames[0][0]
+        buffer.append(
+            Datapoint(run_id=RUN_ID, index=index, values={"field_T": float(index), "frame": value}, ts=1.0 + index)
+        )
+    return buffer
+
+
+def test_buffer_reports_an_image_block_from_the_declaration():
+    buffer = _image_buffer([1, 1])
+    assert _by_name(buffer)["frame"].role == dr.ROLE_IMAGE
+    assert _by_name(buffer)["frame"].shape == (2, 2, 3)
+
+
+def test_buffer_read_image_matches_the_file_vocabulary():
+    plain = _image_buffer([1, 1])
+    np.testing.assert_allclose(plain.read_image("frame", 1), 10.0)
+    with pytest.raises(IndexError):
+        plain.read_image("frame", 1, loop1=1)
+    with pytest.raises(IndexError):
+        plain.read_image("frame", 2)
+    with pytest.raises(ValueError, match="not an image block"):
+        plain.read_image("field_T", 0)
+    with pytest.raises(KeyError):
+        plain.read_image("nope", 0)
+
+    looped = _image_buffer([2, 1])
+    np.testing.assert_allclose(looped.read_image("frame", 1, loop1=1), 11.0)
+    assert looped.read_image("frame", 0).shape == (2, 3)

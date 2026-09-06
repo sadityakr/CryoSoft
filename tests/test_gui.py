@@ -297,7 +297,7 @@ def test_instrument_panel_creates_control_buttons(station, orchestrator, qtbot):
 
 def test_instrument_panel_lifecycle_buttons_exist(station, orchestrator, qtbot):
     """InstrumentPanel has a single lifecycle toggle button (Initiate/Standby)."""
-    vi_name = "temperature_vti"
+    vi_name = "temperature"
     panel = InstrumentPanel(vi_name, orchestrator)
     qtbot.addWidget(panel)
 
@@ -879,7 +879,7 @@ def test_monitor_window_threads_panels_config(station, orchestrator, qtbot):
     win.show()
     assert win.findChild(QPushButton, "magnet_z_set_field_btn") is None
     # An unlisted VI keeps its declared defaults.
-    assert win.findChild(QPushButton, "temperature_vti_set_temperature_btn") is not None
+    assert win.findChild(QPushButton, "temperature_set_temperature_btn") is not None
 
 
 def _control_grid(panel, vi_name, method_name):
@@ -1085,8 +1085,8 @@ def _select_procedure(procedure_win, name):
 def test_procedure_bool_widgets_render(procedure_win):
     """A bool param renders as a checkbox carrying its declared default.
 
-    Covers the temperature-channel toggles FieldSweep declares — the generic
-    form must map them with no per-procedure code. (The full ParamSpec ->
+    Covers the temperature toggle FieldSweep declares — the generic form
+    must map it with no per-procedure code. (The full ParamSpec ->
     widget mapping, enumerated choices included, is pinned against
     ``param_form`` directly further down this file.)
     """
@@ -1094,11 +1094,9 @@ def test_procedure_bool_widgets_render(procedure_win):
 
     _select_procedure(procedure_win, FieldSweep.name)
 
-    vti_box = procedure_win.findChild(QCheckBox, "param_set_vti_temperature_input")
-    sample_box = procedure_win.findChild(QCheckBox, "param_set_sample_temperature_input")
-    assert vti_box is not None and sample_box is not None
-    assert vti_box.isChecked() is True    # default True
-    assert sample_box.isChecked() is False  # default False
+    box = procedure_win.findChild(QCheckBox, "param_set_temperature_input")
+    assert box is not None
+    assert box.isChecked() is True    # default True
 
 
 def test_procedure_bool_values_collected(procedure_win):
@@ -1107,14 +1105,12 @@ def test_procedure_bool_values_collected(procedure_win):
 
     _select_procedure(procedure_win, FieldSweep.name)
 
-    procedure_win.findChild(QCheckBox, "param_set_vti_temperature_input").setChecked(False)
-    procedure_win.findChild(QCheckBox, "param_set_sample_temperature_input").setChecked(True)
+    procedure_win.findChild(QCheckBox, "param_set_temperature_input").setChecked(False)
 
     collected = procedure_win._collect_params()
     assert collected is not None
     param_values = collected[0]
-    assert param_values["set_vti_temperature"] is False
-    assert param_values["set_sample_temperature"] is True
+    assert param_values["set_temperature"] is False
 
 
 # ── Generic sweep procedure: structural measurement-VI re-render ──────────────
@@ -2472,7 +2468,7 @@ def test_ack_button_absent_from_procedure_window(procedure_win):
 
 
 def test_hold_banner_shows_message_and_dismisses_on_clear(monitor_win, orchestrator, monkeypatch):
-    """A plain hold condition (e.g. helium_low, NOT emergency) populates the banner.
+    """A plain hold condition (NOT emergency) populates the banner.
 
     Regression test: previously the ACK button appeared alone with no
     explanation on the banner above it (see _refresh_hold_banner()). Stubs
@@ -2489,11 +2485,11 @@ def test_hold_banner_shows_message_and_dismisses_on_clear(monitor_win, orchestra
         lambda: {
             "conditions": [
                 {
-                    "key": "safety:helium_low",
+                    "key": "safety:coolant_low",
                     "origin": "safety",
                     "severity": "hold",
-                    "kind": "helium_low",
-                    "message": "Safety flag 'helium_low' is tripped",
+                    "kind": "coolant_low",
+                    "message": "Safety flag 'coolant_low' is tripped",
                     "affected": sorted(held),
                     "since": 0.0,
                     "acknowledged": False,
@@ -2507,7 +2503,7 @@ def test_hold_banner_shows_message_and_dismisses_on_clear(monitor_win, orchestra
 
     assert monitor_win._ack_btn.isVisible()
     assert monitor_win._banner.isVisible()
-    assert "helium_low" in monitor_win._banner._label.text()
+    assert "coolant_low" in monitor_win._banner._label.text()
     assert "magnet_z" in monitor_win._banner._label.text()
 
     # Clearing the hold condition dismisses the banner it owns.
@@ -2809,26 +2805,38 @@ def test_monitor_states_updated_feeds_history_and_trend_combos(monitor_win, orch
         assert combo.count() > 0
 
 
-def test_monitor_default_trend_key_hint_prefers_reading_over_setting(monitor_win, orchestrator):
-    """The hinted default trend dock picks a temperature READING, not a setting/rate field.
+def test_monitor_default_trend_key_hints_prefer_readings_over_settings(monitor_win, orchestrator):
+    """The two default trend docks pick a temperature READING, not a setting/rate field.
 
     Regression pin: a plain substring search for "temperature" matches the
-    VI-name prefix on fields like temperature_vti_heater_output before it
+    VI-name prefix on fields like temperature_heater_output before it
     reaches the actual reading. Which specific VI wins alphabetically is not
-    asserted here (real orchestrator ticks may have already populated history
-    for other VIs too) — only that the FIELD chosen is the reading, not a
-    setting/rate. The second dock has no hint of its own and simply takes the
-    first available key, which is the documented degradation.
+    asserted here (real orchestrator ticks may have already populated
+    history for other VIs too) — only that the FIELD chosen is the reading,
+    not a setting/rate.
     """
     fake_state = {
-        "temperature_vti": {"heater_output": 0.0, "temperature": 4.2, "setpoint": 4.2},
+        "temperature": {"heater_output": 0.0, "temperature": 4.2, "setpoint": 4.2},
     }
     orchestrator.states_updated.emit(fake_state)
 
     trend_0 = monitor_win._trends._trend_panels["trend_0"]
-    trend_1 = monitor_win._trends._trend_panels["trend_1"]
     assert trend_0.selected_key().endswith("_temperature")
-    assert trend_1.selected_key()
+
+    # The picker itself, over a key list this test owns: the VI-name prefix
+    # must never win over the field name.
+    picked = monitor_win._trends._pick_default_trend_key(
+        "temperature",
+        sorted(
+            [
+                "temperature_heater_output",
+                "temperature_setpoint",
+                "temperature_temperature",
+                "magnet_z_magnet_field_T",
+            ]
+        ),
+    )
+    assert picked == "temperature_temperature"
 
 
 def test_monitor_persistence_roundtrip_splitters_and_trends(
@@ -3924,12 +3932,12 @@ def test_disconnect_mid_run_swaps_the_card_for_a_vi_the_run_does_not_claim(qtbot
         orch._state = OrchestratorState.MEASURING
         orch._procedure = object()
         orch._active_claims = {"magnet_z"}
-        win.findChild(QGroupBox, "level_meter_panel").findChild(
-            QPushButton, "level_meter_disconnect_btn"
+        win.findChild(QGroupBox, "temperature_panel").findChild(
+            QPushButton, "temperature_disconnect_btn"
         ).click()
 
-        assert station.has_vi("level_meter") is False
-        assert win.findChild(QGroupBox, "level_meter_offline_card") is not None
+        assert station.has_vi("temperature") is False
+        assert win.findChild(QGroupBox, "temperature_offline_card") is not None
         assert station.has_vi("magnet_z") is True
     finally:
         orch._state = OrchestratorState.IDLE

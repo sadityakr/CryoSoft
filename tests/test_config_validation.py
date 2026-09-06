@@ -11,11 +11,8 @@ from pathlib import Path
 import pytest
 
 from cryosoft.core.exceptions import CryoSoftConfigError
-from cryosoft.core.station import (
-    build_station_with_fallback,
-    read_instrument_metadata,
-    validate_config_dir,
-)
+from cryosoft.core.config import read_instrument_metadata
+from cryosoft.core.station import build_station_with_fallback, validate_config_dir
 
 _SIM_CONFIG = "cryosoft/configs/sim_cryostat"
 

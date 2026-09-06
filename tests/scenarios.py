@@ -1,10 +1,10 @@
 """Composable scenario helpers for driving a simulated station into a target state.
 
-The sim drivers already expose test-control knobs (``_force_helium_level``,
-``_simulate_error``, ``_simulate_quench``, ...); every existing test sets
+The sim drivers already expose test-control knobs (``_simulate_error``,
+``_simulate_quench``, ...); every existing test sets
 these by hand and hand-writes its own ``qtbot.waitUntil`` convergence check.
 This module names those recipes once so a test — or a throwaway exploration
-script — can ask for "helium low" or "magnet_z disconnected" and get back a
+script — can ask for "a safety hold" or "magnet_z disconnected" and get back a
 station already in that state, then compose several in one test to ask "what
 happens when X and Y are both true".
 
@@ -59,51 +59,99 @@ def snapshot(station: Station, orchestrator: Orchestrator) -> dict[str, Any]:
     }
 
 
-def apply_helium_low(
-    station: Station, *, pct: float = 10.0, level_vi: str = "level_meter"
-) -> None:
-    """Force the level meter's helium reading low (no wait — see ``helium_low()``).
+HOLD_FLAG = "coolant_low"
+
+
+class HoldFlag:
+    """Handle over one declared hold-severity safety flag — see ``declare_hold_flag()``."""
+
+    def __init__(self, source_vi: Any, flag: str) -> None:
+        self._source_vi = source_vi
+        self.flag = flag
+        self.key = f"safety:{flag}"
+
+    def trip(self) -> None:
+        """Make the source VI report the flag from its next ``evaluate_safety()``."""
+        self._source_vi._hold_flag_tripped = True
+
+    def clear(self) -> None:
+        """Stop reporting it; the hold lifts on the next tick, no acknowledge needed."""
+        self._source_vi._hold_flag_tripped = False
+
+
+def declare_hold_flag(
+    monkeypatch: Any,
+    station: Station,
+    *,
+    source_vi: str = "temperature",
+    concerned_vis: tuple[str, ...] = ("magnet_z",),
+    flag: str = HOLD_FLAG,
+) -> HoldFlag:
+    """Declare one hold-severity safety flag on a live station, for tests.
+
+    No shipped VI declares a hold-severity flag (the only shipped flag is
+    the magnet's critical ``quench``), so a test of the safety-hold half of
+    the System-Condition standard declares one exactly the way a real setup
+    does: the producer VI names it in ``safety_flags`` and reports it from
+    ``evaluate_safety()``, and every concerned VI names it in
+    ``safety_concerns()``. Both halves are class declarations, so they are
+    installed on the classes and undone by ``monkeypatch``.
 
     Args:
-        station: The station; must have ``level_vi`` registered.
-        pct: Forced helium level, in percent. Below the config's
-            ``helium_low_threshold`` (20.0 in ``sim_cryostat``) to actually
-            trip the flag once enough ticks have passed.
-        level_vi: Name of the registered level-meter VI.
+        monkeypatch: pytest's fixture; owns undoing the declaration.
+        station: The live station whose VIs carry the declaration.
+        source_vi: Name of the VI that reports the flag.
+        concerned_vis: Names of the VIs held while the flag is tripped.
+        flag: The flag name.
+
+    Returns:
+        A ``HoldFlag`` handle whose ``trip()``/``clear()`` drive it.
     """
-    station.get_vi(level_vi)._driver._force_helium_level = float(pct)
+    source = station.get_vi(source_vi)
+    source_cls = type(source)
+    monkeypatch.setattr(
+        source_cls,
+        "safety_flags",
+        {**source_cls.merged_safety_flags(), flag: "hold"},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        source_cls,
+        "evaluate_safety",
+        lambda self, state, _f=flag: {_f: bool(getattr(self, "_hold_flag_tripped", False))},
+    )
+    for name in concerned_vis:
+        monkeypatch.setattr(
+            type(station.get_vi(name)), "safety_concerns", lambda self, _f=flag: {_f}
+        )
+    source._hold_flag_tripped = False
+    return HoldFlag(source, flag)
 
 
-def helium_low(
-    station: Station,
+def hold_flag_tripped(
+    hold_flag: HoldFlag,
     orchestrator: Orchestrator,
     qtbot: Any,
     *,
-    pct: float = 10.0,
-    level_vi: str = "level_meter",
     timeout_ms: int = _DEFAULT_TIMEOUT_MS,
 ) -> None:
-    """``apply_helium_low()`` then wait for the resulting hold to actually trip.
+    """Trip a declared hold flag and wait for the resulting hold to land.
 
     Args:
-        station: The station; must have ``level_vi`` registered.
-        orchestrator: Its Orchestrator, monitoring already started.
-        qtbot: pytest-qt's fixture, used to wait for the debounce buffer
-            (``CryogenLevelMeterVI``'s majority vote) to converge.
-        pct: See ``apply_helium_low()``.
-        level_vi: See ``apply_helium_low()``.
+        hold_flag: The handle ``declare_hold_flag()`` returned.
+        orchestrator: The station's Orchestrator, monitoring already started.
+        qtbot: pytest-qt's fixture, used to wait for a real tick.
         timeout_ms: ``qtbot.waitUntil`` timeout.
 
     Raises:
-        TimeoutError: If no magnet becomes held within ``timeout_ms`` — most
-            likely because the station has no magnet (``helium_low`` only
-            holds VIs that declare it in ``safety_concerns()``).
+        TimeoutError: If no VI becomes held within ``timeout_ms`` — most
+            likely because no VI names the flag in ``safety_concerns()``.
     """
-    apply_helium_low(station, pct=pct, level_vi=level_vi)
+    hold_flag.trip()
 
     def _tripped() -> bool:
         return any(
-            cond.key == "safety:helium_low" for cond in orchestrator._held_vis().values()
+            cond.key == hold_flag.key for cond in orchestrator._held_vis().values()
         )
 
     qtbot.waitUntil(_tripped, timeout=timeout_ms)
@@ -158,10 +206,10 @@ def apply_disconnect(
     off the bus" and "a measurement instrument returned an error instead of
     data": every sim driver raises ``CryoSoftCommunicationError`` from
     every public method while it is set, regardless of the VI's role
-    (system/level/measurement) — there is only one comm-fault primitive at
+    (system/measurement) — there is only one comm-fault primitive at
     the driver layer; what differs is which VI it's applied to.
 
-    Only meaningful for a system/level VI: those are polled every tick
+    Only meaningful for a system VI: those are polled every tick
     (``Station.get_state()``) regardless of whether a run is active, so a
     comm error surfaces as a station-wide fault condition on its own. A
     measurement VI is *not* polled at idle — see ``measurement_error()``
@@ -171,8 +219,7 @@ def apply_disconnect(
         station: The station; must have ``vi_name`` registered.
         vi_name: Name of the registered VI to fault.
         driver_attr: Name of the driver attribute on the VI — ``"_driver"``
-            for a single-driver VI (the standard, e.g. every system/level
-            VI).
+            for a single-driver VI (the standard, e.g. every system VI).
     """
     getattr(station.get_vi(vi_name), driver_attr)._simulate_error = True
 
@@ -267,7 +314,7 @@ def running_procedure(
     """Start a minimal procedure ramping ``vi_name`` toward ``target``.
 
     Use this to compose "a procedure is running" with another scenario
-    (``helium_low``, ``quench``, ``disconnect``): call this first, tick a
+    (a safety hold, ``quench``, ``disconnect``): call this first, tick a
     few times so the run is genuinely in flight, then layer the second
     scenario on top and observe (``snapshot()``) whether the run survives,
     fails, or is refused outright.

@@ -69,6 +69,7 @@ import typing
 from enum import Enum
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 import cryosoft.core
@@ -125,7 +126,7 @@ from cryosoft.core.exceptions import (
     CryoSoftSafetyError,
     CryoSoftUndeclaredActionError,
 )
-from cryosoft.core.plan import SETPOINT_PARAM_PREFIX, ParamSpec, UIGroup
+from cryosoft.core.plan import SETPOINT_PARAM_PREFIX, ImageBlock, ParamSpec, UIGroup
 from cryosoft.core.procedure import BaseProcedure
 from cryosoft.core.capability_manifest import (
     _instrument_json,
@@ -160,7 +161,7 @@ VI_BASE_MODULES = {
 
 # Registry types accepted by Station.register_vi via config (distinct from a VI
 # class's own vi_type like "magnet" — see GLOSSARY.md).
-CONFIG_VI_TYPES = {"system", "measurement", "level"}
+CONFIG_VI_TYPES = {"system", "measurement"}
 
 
 # ── Discovery helpers ─────────────────────────────────────────────────────────
@@ -368,7 +369,7 @@ def test_sim_driver_safe_shutdown_reaches_a_declared_safe_state(module_name: str
     safe means for its instrument in ``_is_in_safe_state()`` — private, so
     the real/sim public-API parity contract stays intact, and documented in
     the sim's own docstring (a magnet's safe state is HOLD, not zero field; a
-    level meter's is pulsed refresh, not off). This test asserts the three
+    meter's is its idle input mode, not off). This test asserts the three
     properties the standard promises: the call works from the sim's
     as-constructed state, it leaves the instrument in that declared state,
     and calling it a second time changes nothing at all.
@@ -910,9 +911,9 @@ def test_safety_concerns_are_consumer_side_and_hold_only(vi_cls: type) -> None:
     tripped critical flag already forces station-wide EMERGENCY (the
     System-Condition standard, ``core/conditions.py``: critical scope is
     station-wide by construction), which stops this VI (and every other)
-    regardless of any per-VI concern declaration. MagnetBase is the one
-    concrete example today: it names "helium_low" (hold) but not "quench"
-    (critical), even though it is the VI that reports "quench".
+    regardless of any per-VI concern declaration. No shipped VI declares a
+    concern today; MagnetBase reports "quench" (critical) and deliberately
+    does NOT name it as a concern.
 
     A bare (``__init__``-less) instance is enough: every existing
     ``safety_concerns()`` override is a pure function of the class, never
@@ -975,6 +976,51 @@ def test_procedure_declaration(proc_cls: type) -> None:
         f"{proc_cls.__name__}.default_x_key={proc_cls.default_x_key!r} is not one "
         f"of its data keys {valid_x_keys}"
     )
+
+
+@pytest.mark.parametrize("proc_cls", _all_procedure_classes(), ids=lambda c: c.__name__)
+def test_procedure_has_description(proc_cls: type) -> None:
+    """Every procedure declares a non-empty ``description`` class attribute.
+
+    The one-line description is what the procedure selector, the run record
+    and the agent's procedure listing show beside the name; a procedure
+    without one renders as a bare title that says nothing about what the
+    run does. ``name`` is checked in ``test_procedure_declaration``.
+    """
+    description = getattr(proc_cls, "description", "")
+    assert isinstance(description, str) and description.strip(), (
+        f"{proc_cls.__name__} must set a non-empty 'description' class attribute"
+    )
+
+
+@pytest.mark.parametrize("proc_cls", _all_procedure_classes(), ids=lambda c: c.__name__)
+def test_procedure_roles_resolve_on_the_sim_station(proc_cls: type) -> None:
+    """Every declared role is a ``RoleParam`` whose candidates come from the station.
+
+    The role-discovery standard: a procedure names roles, never configured
+    instrument names, so each role's ``candidates`` must be answerable by a
+    Station and each becomes a parameter carrying a description. On the
+    shipped sim station every candidate list is a subset of the registered
+    VIs.
+    """
+    from cryosoft.core.procedure import RoleParam
+
+    station = build_station("cryosoft/configs/sim_cryostat")
+    for param_name, role in proc_cls.role_parameters.items():
+        assert isinstance(role, RoleParam), (
+            f"{proc_cls.__name__}.role_parameters[{param_name!r}] must be a RoleParam"
+        )
+        assert role.description.strip(), (
+            f"{proc_cls.__name__}.role_parameters[{param_name!r}] lacks a description"
+        )
+        names = role.candidates(station)
+        assert set(names) <= set(station.get_vi_names()), (
+            f"{proc_cls.__name__}.{param_name} candidates {names} are not all "
+            f"registered VIs"
+        )
+        assert param_name in proc_cls.parameters, (
+            f"{proc_cls.__name__}.{param_name} is a role but not a parameter"
+        )
 
 
 @pytest.mark.parametrize("proc_cls", _all_procedure_classes(), ids=lambda c: c.__name__)
@@ -1141,7 +1187,7 @@ def test_panels_config_names_real_vis_and_controls(config_dir: Path) -> None:
     A typo'd VI or control name would otherwise fail silently — the card
     would just render without the control the operator expected.
     """
-    from cryosoft.core.station import read_panels_config
+    from cryosoft.core.config import read_panels_config
 
     panels = read_panels_config(str(config_dir))
     if not panels:
@@ -1619,19 +1665,6 @@ def test_control_scope_is_a_valid_value(vi_cls: type) -> None:
         )
 
 
-def test_known_operation_scope_controls() -> None:
-    """``CryogenLevelMeterVI.set_refresh_rate`` is operation-scope.
-
-    Meter housekeeping an operation drives (the fill switches the meter to
-    FAST refresh for the duration), never a sample-facing setpoint.
-    """
-    from cryosoft.virtual_instruments.level.cryogen_level_meter import (
-        CryogenLevelMeterVI,
-    )
-
-    assert get_control_scope(CryogenLevelMeterVI.set_refresh_rate) == "operation"
-
-
 def test_reading_setters_are_measurement_scope() -> None:
     """Every reading_setters target method is measurement-scope.
 
@@ -1693,10 +1726,6 @@ def test_measurement_lifecycle_is_measurement_scope(vi_cls: type) -> None:
 CONTROL_LIMIT_EXEMPTIONS: dict[tuple[str, str, str], str] = {
     # -- Enumerated instrument settings: the value selects a mode, it is not a
     #    physical quantity a range could bound.
-    ("CryogenLevelMeterVI", "set_refresh_rate", "mode"): (
-        "ILM refresh-rate code (1=slow/2=fast/3=off), not a physical quantity; "
-        "the VI rejects any other value outright."
-    ),
     ("Lakeshore335SampleTemperatureControllerVI", "set_curve", "curve"): (
         "Calibration-curve slot index in the controller's own curve table; an "
         "index selects a stored curve and drives no output."
@@ -1815,6 +1844,28 @@ def test_no_stale_control_limit_exemptions() -> None:
 
 
 # ── The setpoint-parameter convention ────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "vi_cls",
+    [cls for cls in _all_vi_classes() if issubclass(cls, RampableVI)],
+    ids=lambda c: c.__name__,
+)
+def test_rampable_vi_declares_no_motion_phases_as_a_frozenset(vi_cls: type) -> None:
+    """Every rampable VI's ``no_motion_phases`` is a frozenset of phase names.
+
+    The no-motion phase declaration is read off the ramp-status snapshot by
+    the stall detector every tick, so it must be an immutable set of strings
+    on the class — a list or a bare string would be iterated as characters
+    or mutated from a shared default.
+    """
+    phases = vi_cls.no_motion_phases
+    assert isinstance(phases, frozenset), (
+        f"{vi_cls.__name__}.no_motion_phases must be a frozenset, got {type(phases).__name__}"
+    )
+    assert all(isinstance(phase, str) and phase for phase in phases), (
+        f"{vi_cls.__name__}.no_motion_phases must contain non-empty strings: {phases!r}"
+    )
 
 
 @pytest.mark.parametrize(
@@ -2202,11 +2253,21 @@ def test_measurement_vi_round_trip(vi_cls: type) -> None:
         set(vi_cls.measurement_data_keys)
         | set(vi_cls.measurement_scalar_columns)
         | set(vi_cls.measurement_raw_blocks)
+        | set(vi_cls.measurement_image_blocks)
     )
     assert set(data) == expected_keys, (
         f"{vi_cls.__name__}.take_reading() returned keys {sorted(data)}, "
         f"expected {sorted(expected_keys)}"
     )
+
+    # The image-block standard: a declared frame comes back at exactly the
+    # declared (height_px, width_px) — passes vacuously for a VI with none.
+    for name, image in vi_cls.measurement_image_blocks.items():
+        frame = np.asarray(data[name], dtype=np.float64)
+        assert frame.shape == image.shape, (
+            f"{vi_cls.__name__}.take_reading()[{name!r}] has shape {frame.shape}, "
+            f"but measurement_image_blocks declared {image.shape}"
+        )
 
     arrays = vi.data_arrays(defaults)
     assert set(arrays) == set(vi_cls.measurement_data_keys), (
@@ -2386,6 +2447,15 @@ def test_measurement_vi_raw_block_names_dont_collide(vi_cls: type) -> None:
         assert labels, (
             f"{vi_cls.__name__}.measurement_raw_blocks[{block_name!r}] must "
             f"be a non-empty channel-label list"
+        )
+    for block_name, image in vi_cls.measurement_image_blocks.items():
+        assert isinstance(image, ImageBlock), (
+            f"{vi_cls.__name__}.measurement_image_blocks[{block_name!r}] must be "
+            f"an ImageBlock, got {image!r}"
+        )
+        assert block_name not in other_names and block_name not in vi_cls.measurement_raw_blocks, (
+            f"{vi_cls.__name__}.measurement_image_blocks name {block_name!r} "
+            f"collides with another declared column or block"
         )
 
 
@@ -2787,7 +2857,7 @@ def test_declared_trend_checks_name_real_state_keys(config_dir: Path) -> None:
     below covers every shipped config, including any real-hardware setup,
     via the static derivation this test's own key set is verified against.
     """
-    from cryosoft.core.station import read_trends_config
+    from cryosoft.core.config import read_trends_config
     from cryosoft.core.trend_checks import declared_checks
 
     station = build_station(str(config_dir))
@@ -2865,7 +2935,7 @@ def test_declared_trend_checks_name_derivable_state_keys(config_dir: Path) -> No
     Covers every shipped config, including a real-hardware setup that
     `test_declared_trend_checks_name_real_state_keys` cannot reach, because
     it needs `get_state()`, a hardware poll. If a site renames the VI a
-    trend check names (`temperature_vti`, `level_meter`), the check's key
+    trend check names, the check's key
     stops resolving and `summarize()` reports `persisted=False` forever —
     an indeterminate result that publishes nothing, silently and
     permanently, with no signal that coverage was lost. This test moves
@@ -2875,7 +2945,7 @@ def test_declared_trend_checks_name_derivable_state_keys(config_dir: Path) -> No
     `test_panels_config_names_real_vis_and_controls` already use to cover
     all four configs.
     """
-    from cryosoft.core.station import read_trends_config
+    from cryosoft.core.config import read_trends_config
     from cryosoft.core.trend_checks import declared_checks
 
     derivable_keys = _static_flat_keys(config_dir)
@@ -2968,7 +3038,7 @@ def _contract_specimens() -> dict[str, object]:
             held_vi_names=("magnet_z",),
             active_ramps=({"vi_name": "magnet_z", "label": "field", "unit": "T"},),
             availabilities={"magnet_z": {"state": "live", "tags": []}},
-            vi_faults={"temperature_vti": {"kind": "stale", "acknowledged": False}},
+            vi_faults={"temperature": {"kind": "stale", "acknowledged": False}},
             offline_reason={"dc_measurement": "no response at GPIB0::12::INSTR"},
             envelope_variables={
                 "magnet_z": {"param_name": "target_T", "config_max": 9.0}
@@ -3129,7 +3199,7 @@ def _contract_specimens() -> dict[str, object]:
             ts=1_700_000_004.0,
         ),
         "Readings": Readings(
-            values={"magnet_z": {"field_T": 0.5}, "temperature_vti": {"temperature": 4.2}},
+            values={"magnet_z": {"field_T": 0.5}, "temperature": {"temperature": 4.2}},
             seq=11,
             ts=1_700_000_005.0,
         ),
@@ -4129,20 +4199,20 @@ def test_the_proxy_re_exposes_every_engine_signal() -> None:
 #: reasons and moving it is a separate change. Import contract C19 carries
 #: the matching ``ignore_imports`` entry.
 _RUNTIME_STATION_IMPORTS: dict[str, set[str]] = {
-    "cryosoft/gui/monitor_window.py": {"read_instrument_metadata"},
 }
 
 
 def test_gui_imports_the_station_only_for_typing_or_config_helpers() -> None:
     """C19's other half: a ``cryosoft.core.station`` import under ``gui/`` is
-    type-only, or one of the two named config-file helpers.
+    type-only, or the one named config-validation helper.
 
     Import contract C19 forbids the dependency outright and lists the
     existing modules in ``ignore_imports`` — import-linter counts an import
     inside ``if TYPE_CHECKING:`` like any other, so the contract alone cannot
     express "types are fine". This is the half that can: every ignored import
     must be inside a type-checking guard, unless it is the config helper
-    named above.
+    named above (the YAML-only readers live in ``cryosoft.core.config``,
+    which the GUI may import freely).
     """
     offenders: list[str] = []
     for path in sorted((PACKAGE_DIR / "gui").rglob("*.py")):
@@ -4259,80 +4329,67 @@ def test_run_source_conformance(source_cls: type) -> None:
 # unclassified, and no row names something that no longer exists.
 
 
-def _configured_control_actions() -> set[tuple[str, str]]:
-    """(VI kind, @control name) for every control every shipped config declares.
+def test_action_class_names_agree_between_the_declaration_and_the_gateway() -> None:
+    """`VALID_ACTION_CLASSES` and `ActionClass` carry the same four values.
 
-    Read from the configs' `virtual_instruments` blocks by importing each
-    named class — a pure import, no Station and no driver — so the real
-    (hardware-only) configs are covered exactly like the sim ones.
-
-    Returns:
-        The set of `(InstrumentInfo.kind, method_name)` keys the gateway's
-        classification table must cover.
+    The action-class declaration lives in `core/decorators.py`, which imports
+    nothing (contract C1), so the names it validates against are plain
+    strings; the gateway's permission matrix is keyed by the `ActionClass`
+    enum. One is what a VI declares, the other is what decides who may take
+    it — if they ever disagree, a control could declare a class no role can
+    be granted. This is the check that keeps the two in step.
     """
-    actions: set[tuple[str, str]] = set()
-    for config_dir in _config_dirs():
-        devices = _load_yaml(config_dir / "devices.yaml")
-        for vi_cfg in (devices.get("virtual_instruments") or {}).values():
-            vi_cls = _import_class(vi_cfg["class"])
-            kind = str(getattr(vi_cls, "vi_type", ""))
-            for method_name in _control_methods(vi_cls):
-                actions.add((kind, method_name))
-    return actions
+    from cryosoft.core.decorators import VALID_ACTION_CLASSES
+    from cryosoft.session.gateway import ActionClass
+
+    assert set(VALID_ACTION_CLASSES) == {member.value for member in ActionClass}
 
 
-@pytest.mark.parametrize("config_dir", _config_dirs(), ids=lambda p: p.name)
-def test_every_configured_control_has_an_action_class(config_dir: Path) -> None:
-    """Every control this config's manifest declares is classified.
+@pytest.mark.parametrize("vi_cls", _all_vi_classes(), ids=lambda c: c.__name__)
+def test_every_control_declares_its_action_class(vi_cls: type) -> None:
+    """Every shipped `@control` declares `action_class=` explicitly.
 
-    A control with no row is refused at runtime rather than defaulted, so an
-    unclassified capability is an instrument an agent simply cannot reach.
-    Adding a VI or a `@control` therefore means adding a row to
-    `CONTROL_ACTION_CLASSES` with its one-line rationale, in the same commit.
+    The action-class declaration (see `core/decorators.py`): how much
+    authority an instrument's action needs is a judgement about that
+    instrument, so it is declared beside the action rather than in a table
+    above it. The decorator DOES have a default — the most restrictive class
+    — so a missing declaration can never widen what an agent may do; what it
+    would do is hide the judgement, which is why every shipped control makes
+    it in the open. The undeclared marker is `None`, distinct from an
+    explicit `action_class="run_control"`.
     """
-    from cryosoft.session.gateway import CONTROL_ACTION_CLASSES
+    from cryosoft.core.decorators import VALID_ACTION_CLASSES
 
-    devices = _load_yaml(config_dir / "devices.yaml")
-    missing: list[str] = []
-    for vi_name, vi_cfg in (devices.get("virtual_instruments") or {}).items():
-        vi_cls = _import_class(vi_cfg["class"])
-        kind = str(getattr(vi_cls, "vi_type", ""))
-        for method_name in _control_methods(vi_cls):
-            if (kind, method_name) not in CONTROL_ACTION_CLASSES:
-                missing.append(f"({kind!r}, {method_name!r})  # {vi_name}")
-    assert not missing, (
-        f"{config_dir.name} declares controls with no row in the gateway's "
-        f"CONTROL_ACTION_CLASSES table:\n  " + "\n  ".join(sorted(missing))
+    undeclared: list[str] = []
+    for method_name, method in _control_methods(vi_cls).items():
+        declared = getattr(method, "_control_action_class", None)
+        if declared is None:
+            undeclared.append(method_name)
+        else:
+            assert declared in VALID_ACTION_CLASSES, (
+                f"{vi_cls.__name__}.{method_name} declares action class "
+                f"{declared!r}, not one of {list(VALID_ACTION_CLASSES)}"
+            )
+    assert not undeclared, (
+        f"{vi_cls.__name__} declares controls with no action_class=: "
+        f"{sorted(undeclared)} — every @control says how much authority it "
+        f"needs (the action-class declaration)"
     )
 
 
-def test_no_stale_control_action_classes() -> None:
-    """No classification row names a capability no shipped config declares.
+def test_every_action_class_row_carries_a_rationale() -> None:
+    """Each row of the two remaining tables says WHY.
 
-    A stale row is a rationale nobody can check against a real instrument;
-    the physicist reviewing the table must be reviewing what the station
-    actually offers.
+    A `@control`'s class comes from its own declaration, so the only tables
+    left are the engine's command surface and the two lifecycle actions.
     """
-    from cryosoft.session.gateway import CONTROL_ACTION_CLASSES
-
-    stale = set(CONTROL_ACTION_CLASSES) - _configured_control_actions()
-    assert not stale, (
-        f"CONTROL_ACTION_CLASSES rows that no shipped config declares: "
-        f"{sorted(stale)}"
-    )
-
-
-def test_every_control_action_class_carries_a_rationale() -> None:
-    """Each row says WHY, because that is what the physicist reviews."""
     from cryosoft.session.gateway import (
         COMMAND_ACTION_CLASSES,
-        CONTROL_ACTION_CLASSES,
         LIFECYCLE_ACTION_CLASSES,
     )
 
     rows: dict[str, object] = {}
     rows.update({f"command {k.value}": v for k, v in COMMAND_ACTION_CLASSES.items()})
-    rows.update({f"control {k}": v for k, v in CONTROL_ACTION_CLASSES.items()})
     rows.update({f"lifecycle {k}": v for k, v in LIFECYCLE_ACTION_CLASSES.items()})
     for label, classified in rows.items():
         rationale = classified.rationale  # type: ignore[attr-defined]

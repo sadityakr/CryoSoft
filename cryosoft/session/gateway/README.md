@@ -77,9 +77,9 @@ is.
 - **The two policy values**, read off the latest `StatusSnapshot` the engine
   published: `attended` and `agent_gate`.
 - **The station's declaration snapshot** (`StationInfo`), which is where a
-  `submit_vi_action`'s target capability gets its VI kind, and therefore its
-  action class — and where every capability tool gets its parameters, units,
-  choices and bounds.
+  `submit_vi_action`'s target capability gets its declared action class —
+  and where every capability tool gets its parameters, units, choices and
+  bounds.
 - **A `ToolContext`** (optional): the collaborators the session tools read
   through — the experiment façade, the run catalog a proposed run's class
   name is resolved through, the operational log to tail, for the ELN
@@ -339,24 +339,32 @@ start.
   in both directions — the third leg alongside the contract-to-engine and
   contract-to-classification diffs.
 
-### The action-class table is PROVISIONAL
+### A capability's class is declared on the capability
 
-`action_classes.py`'s classification — in particular every
-recovery-versus-run-control call — is **PROVISIONAL, to be confirmed by the
-physicist**. It was written from the VI docstrings, and the line between "an
-agent may do this alone overnight to keep a run alive" and "this commands
-the cryostat" is a judgement about a specific instrument rack, not something
-derivable from a method signature. Every row carries a one-line rationale
-for exactly that review, and a row that deliberately deviates from the
-default rule below says so in its own rationale.
+The line between "an agent may do this alone overnight to keep a run alive"
+and "this commands the cryostat" is a judgement about a specific instrument,
+not something derivable from a method signature — so it is not made here.
+It is **declared on the `@control` itself**
+(`@control(action_class="run_control")`, the action-class declaration, see
+`core/decorators.py`), travels on `StationInfo`'s
+`ControlInfo.action_class`, and `classify_control()` reads it. Whoever
+writes the VI is the person who knows what its action does, and the class
+they wrote is what the permission matrix judges.
 
-The default rule the rows were derived from:
+What is still classified here is what belongs to the engine rather than to
+any instrument: `COMMAND_ACTION_CLASSES` (one row per `CommandName`) and
+`LIFECYCLE_ACTION_CLASSES` (`initiate` / `standby` — no decorator to declare
+anything on, and the same meaning on every VI). Those rows carry a one-line
+rationale, which is what a refusal quotes back.
 
-1. A `@control` whose **capability scope** is `operation`, and each lifecycle
-   action (`initiate` / `standby`), is `recovery`.
+The rule a new declaration starts from:
+
+1. Instrument housekeeping that keeps a run alive — and each lifecycle
+   action (`initiate` / `standby`) — is `recovery`.
 2. Anything that sets a setpoint, ramps, arms a measurement or sources
    current is `run_control`.
-3. Anything that only reads is `read`.
+3. Anything that only reads is `read` (`dc_measurement.read_now` is the
+   shipped example).
 
 ## How to add a new module
 
@@ -368,12 +376,13 @@ The default rule the rows were derived from:
    `roles.py` (who may ask) imports it; `gateway.py` (a client asking)
    imports both. A rule that needed those arrows to point both ways would
    mean the split is in the wrong place.
-3. **A new command or capability is a new table row, in the same commit.**
+3. **A new command is a new table row; a new capability is a declaration.**
    A `CommandName` added to the contract needs a row in
-   `COMMAND_ACTION_CLASSES`; a new `@control` or a new VI kind needs one in
-   `CONTROL_ACTION_CLASSES` — each with its one-line rationale. Conformance
-   diffs both tables against the contract and the shipped configs in both
-   directions, so a missing row and a stale row both fail the harness.
+   `COMMAND_ACTION_CLASSES` with its one-line rationale — conformance diffs
+   the table against the contract both ways, so a missing row and a stale
+   row both fail the harness. A new `@control` needs nothing here at all: it
+   declares its own `action_class=`, and conformance fails any shipped
+   control that leaves it out.
 4. **A new tool is a new declaration, not a new tool.** A command gets its
    tool from `CommandName`; a capability gets its tool from the station's
    snapshot. Write nothing in `tools.py` for either — if a command will not
@@ -400,7 +409,7 @@ The default rule the rows were derived from:
 
 | File | Responsibility | Key public API | Owning test |
 |------|----------------|----------------|-------------|
-| `action_classes.py` | What an action IS, as declarative tables: one row per `CommandName`, one per `(VI kind, @control name)`, and the two lifecycle actions — each with the rationale a physicist reviews. **PROVISIONAL.** Resolves a `submit_vi_action` to its target's class through the station's declaration snapshot; refuses by name rather than defaulting. | `ActionClass`, `ClassifiedAction`, `UnclassifiedActionError`, `COMMAND_ACTION_CLASSES`, `CONTROL_ACTION_CLASSES`, `LIFECYCLE_ACTION_CLASSES`, `classify_command()`, `classify_control()` | `tests/test_gateway.py` + conformance |
+| `action_classes.py` | What an action IS: one table row per `CommandName` and one per lifecycle action, each with the rationale a refusal quotes. A `@control`'s class is not tabulated here — `classify_control()` reads the class the VI declared, off `ControlInfo.action_class` in the station's declaration snapshot, and refuses by name rather than defaulting. | `ActionClass`, `ClassifiedAction`, `UnclassifiedActionError`, `COMMAND_ACTION_CLASSES`, `LIFECYCLE_ACTION_CLASSES`, `classify_command()`, `classify_control()` | `tests/test_gateway.py` + conformance |
 | `gateway.py` | The in-process client an agent holds: one connection, one `Role`, one actor id. Stamps `Actor(kind="agent", ...)` on every command, runs `authorize()`, and either forwards to the engine or answers the request itself with a `BLOCKED_ROLE` verdict on the engine's OWN `verdict_emitted` stream. Mirrors the latest `StatusSnapshot`/`StationInfo` so every read — attendance, the gate and the **run owner** included — is answered locally. Duck-typed on `EngineClient` and reaching the two streams through `verdict_stream()`/`event_stream()`, so it holds the **Orchestrator proxy** on the GUI thread, the Orchestrator on the instrument thread, and a transport proxy later, without noticing. No Qt import, no network, no thread. Also publishes the rendered surface: `tools()` / `tool_schemas()` re-render whenever the mirrored declaration is replaced, and `call_tool()` validates a call against its schema before routing it — a command tool through `submit()`, a session tool to its function after the same kill-switch and matrix checks. It answers every call and raises at none. | `Gateway` (`submit(name, args)`, `permits(name, args)`, optional `feed=` (the **Agent feed** every submitted command is written to before it is forwarded or refused), `call_tool(name, args)`, `tools()`, `tool_schemas()`, `tool(name)`, `status()`, `station()`, `state()`, `attended()`, `agent_gate()`, `run_owner()`, `role`, `actor`), `EngineClient`, `verdict_stream`, `event_stream` | `tests/test_gateway.py`, `tests/test_gateway_tools.py` |
 | `local_server.py` | The **Gateway server**: a `QLocalServer` on the GUI thread's event loop that accepts local-socket connections and gives each one its own `Gateway`, built with the role and actor id its `hello` declared. Speaks newline-delimited JSON-RPC 2.0 (`hello`, `tools/list`, `tools/call`, `status`, `station`, `events/subscribe`, plus `event`/`verdict` notifications), publishes `gateway.json` with the socket name, pid, schema version and per-launch token at 0600, and refuses a bad token, an unknown role or a role above the deployment's ceiling at the handshake. Buffers partial reads, caps a frame, and answers every malformed thing as a JSON-RPC error rather than raising into the loop. No thread. | `GatewayServer` (`start()`, `stop()`, `socket_name`, `descriptor`, `token`, `max_role`), `SCHEMA_VERSION`, `MAX_FRAME_BYTES`, `descriptor_path()`, `default_socket_name()` | `tests/test_gateway_server.py` |
 | `roles.py` | Who may take an action of a given class: the `Role` enum, the `Permission` cell values, the one `PERMISSION_MATRIX` table that is the standard, and `authorize()` — the ordered checks (emergency standby, actor kind, role validity, classification, kill switch, matrix, and last the **run-ownership standard** against the mirrored owner) that answer with `None` or one `BLOCKED_ROLE` verdict. `authorize_spooled()` is the same model with the **Request spool**'s role cap in front of it, injected into `core.request_spool` as its permission hook. | `Role`, `Permission`, `PERMISSION_MATRIX`, `ROLE_LADDER`, `OWNER_SCOPED_COMMANDS`, `authorize()`, `authorize_spooled()` | `tests/test_gateway.py`, `tests/test_request_spool.py` + conformance |

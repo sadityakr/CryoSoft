@@ -35,7 +35,7 @@ from __future__ import annotations
 
 from typing import Any, ClassVar
 
-from cryosoft.core.decorators import control
+from cryosoft.core.decorators import control, monitored
 from cryosoft.virtual_instruments.base import (
     EXCITATION_CURRENT_LIMIT,
     DCMeasurementBase,
@@ -59,6 +59,13 @@ class DCSeparateMeasurementVI(DCMeasurementBase):
         # data = {"voltage_V": float, "voltage_V_error": float,
         #         "voltage_V_array": list[float](50,), "current_A": float,
         #         "current_A_error": float, "current_A_array": list[float](50,)}
+
+    Bench-testing from the GUI front panel uses ``read_now()`` instead:
+    after ``initiate_measurement()`` has armed the instruments, one manual
+    read collects the same ``readings_per_point`` samples and surfaces them
+    through the ``last_voltage_V`` / ``last_n_valid`` monitored fields, so an
+    operator (or an agent holding nothing but read authority) can confirm a
+    configured current yields sane readings before committing to a run.
 
     To swap to a single-instrument SMU, name that SMU's VI in the YAML
     config instead of this one. The procedure is unchanged.
@@ -104,13 +111,17 @@ class DCSeparateMeasurementVI(DCMeasurementBase):
         self._voltmeter_range_V: float = 0.1
         self._readings_per_point: int = 10
 
+        # Cache of the last read_now() datapoint, read by the two monitored
+        # fields below. None until the first manual read.
+        self._last_reading: dict[str, Any] | None = None
+
     # ------------------------------------------------------------------
     # DCMeasurementBase implementation
     # ------------------------------------------------------------------
 
     # panel=False: arming is a deliberate act — reachable from the front
     # panel and from procedures, never from the compact monitor card.
-    @control(panel=False)
+    @control(panel=False, action_class="run_control")
     def initiate_measurement(
         self,
         current_A: float = 1e-6,
@@ -178,7 +189,62 @@ class DCSeparateMeasurementVI(DCMeasurementBase):
             "current_A_error": c_error,
         }
 
-    @control
+    # ------------------------------------------------------------------
+    # Manual bench read — the one read-class capability of this VI
+    # ------------------------------------------------------------------
+
+    @monitored(
+        unit="V",
+        description="Most recent voltage sample from the last manual read",
+    )
+    def last_voltage_V(self) -> float | None:
+        """Return the last sample of the last ``read_now()``, or None.
+
+        Returns:
+            The final voltage sample in Volts, or ``None`` before the first
+            manual read.
+        """
+        if self._last_reading is None:
+            return None
+        samples = self._last_reading["voltage_V_array"]
+        return float(samples[-1]) if samples else None
+
+    # Dimensionless: a sample count, not a measured quantity.
+    @monitored(
+        unit="",
+        description="Number of samples returned by the last manual read",
+    )
+    def last_n_valid(self) -> int | None:
+        """Return how many samples the last ``read_now()`` collected, or None.
+
+        Returns:
+            The sample count, or ``None`` before the first manual read.
+        """
+        if self._last_reading is None:
+            return None
+        return len(self._last_reading["voltage_V_array"])
+
+    # panel=False: a bench check belongs in the instrument front panel, not
+    # on the compact monitor card. action_class="read": it observes the
+    # sample at the excitation already armed and commands nothing new, which
+    # is what makes it the read-class capability an observer may take.
+    @control(panel=False, action_class="read")
+    def read_now(self) -> None:
+        """Take one manual reading and cache it for the monitored fields.
+
+        The human- (and observer-) facing counterpart of ``take_reading()``,
+        which stays procedure-only per the measurement-method standard:
+        this collects one datapoint at the current already armed and stores
+        it, so ``last_voltage_V`` / ``last_n_valid`` report it on the next
+        monitor tick.
+
+        Raises:
+            RuntimeError: If ``initiate_measurement()`` has not been called
+                first.
+        """
+        self._last_reading = self.take_reading()
+
+    @control(action_class="run_control")
     def set_source_current(self, current_A: float) -> None:
         """Reprogram the source current without re-arming the measurement.
 
@@ -206,3 +272,4 @@ class DCSeparateMeasurementVI(DCMeasurementBase):
         """Zero the current source and reset the initiated state."""
         self._source.set_current(0.0)  # type: ignore[attr-defined]
         self._current_A = _NOT_INITIATED
+        self._last_reading = None

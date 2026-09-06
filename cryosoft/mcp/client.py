@@ -83,12 +83,14 @@ class GatewayError(RuntimeError):
 def default_descriptor_path() -> Path:
     """Resolve where the running app's descriptor is expected to be.
 
-    Precedence, mirroring the app's own log-directory rule:
+    Precedence, mirroring the app's own log-directory rule
+    (``cryosoft.core.paths.log_directory()``):
 
     1. ``CRYOSOFT_GATEWAY_DESCRIPTOR``, the file itself.
     2. ``CRYOSOFT_LOG_DIR/gateway.json``.
-    3. ``%LOCALAPPDATA%\\CryoSoft\\logs\\gateway.json`` on Windows, or
-       ``~/.local/state/cryosoft/logs/gateway.json`` elsewhere.
+    3. ``gateway.json`` under the per-user state root's ``logs/`` —
+       ``%LOCALAPPDATA%\\CryoSoft\\logs`` on Windows, ``~/.local/state/cryosoft/logs``
+       (or its ``XDG_STATE_HOME`` form) elsewhere and as the Windows fallback.
 
     Returns:
         The path (not guaranteed to exist).
@@ -99,11 +101,18 @@ def default_descriptor_path() -> Path:
     log_dir = os.environ.get("CRYOSOFT_LOG_DIR")
     if log_dir:
         return Path(log_dir) / DESCRIPTOR_FILENAME
+    # A deliberate copy of cryosoft.core.paths.user_state_dir(): this module
+    # may import only the stdlib and cryosoft.core.events (import contract
+    # C21 — the adapter must not be able to reach an instrument), so it
+    # cannot import paths.py. Keep the two in step; test_mcp_adapter pins
+    # them against each other.
     if os.name == "nt":
-        local_appdata = os.environ.get("LOCALAPPDATA", "")
+        local_appdata = os.environ.get("LOCALAPPDATA")
         if local_appdata:
             return Path(local_appdata) / "CryoSoft" / "logs" / DESCRIPTOR_FILENAME
-    return Path.home() / ".local" / "state" / "cryosoft" / "logs" / DESCRIPTOR_FILENAME
+    xdg_state = os.environ.get("XDG_STATE_HOME")
+    state_root = Path(xdg_state) if xdg_state else Path.home() / ".local" / "state"
+    return state_root / "cryosoft" / "logs" / DESCRIPTOR_FILENAME
 
 
 def read_descriptor(path: Path | str) -> dict[str, Any]:

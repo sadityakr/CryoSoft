@@ -5,7 +5,6 @@ from cryosoft.core.exceptions import CryoSoftCommunicationError, CryoSoftSafetyE
 # Assuming we have valid sim drivers from L0 test phase
 from cryosoft.drivers.sim_oxford_ips120 import SimOxfordIPS120
 from cryosoft.drivers.sim_lakeshore_335 import SimLakeshore335
-from cryosoft.drivers.sim_oxford_ilm200 import SimOxfordILM200
 from cryosoft.drivers.sim_keithley_6221 import SimKeithley6221
 from cryosoft.drivers.sim_keithley_2182a import SimKeithley2182A
 
@@ -293,28 +292,6 @@ def test_temperature_vi_set_pid_forwards_to_driver_and_hides_from_card():
 
     # panel=False: shown in the instrument front panel, never on the card.
     assert get_control_panel(vi.set_pid) is False
-
-
-# 13. Level meter tests
-def test_level_vi_buffer():
-    from cryosoft.virtual_instruments.level.cryogen_level_meter import CryogenLevelMeterVI
-    driver = SimOxfordILM200("SIM")
-    vi = CryogenLevelMeterVI({"main": driver}, helium_low_threshold=20.0, buffer_size=3)
-
-    assert vi.helium_low() is False
-
-    driver._force_helium_level = 15.0
-    vi.helium_level()
-    assert vi.helium_low() is False
-
-    vi.helium_level()
-    vi.helium_level()
-    assert vi.helium_low() is True
-
-    driver._force_helium_level = 50.0
-    vi.helium_level()
-    vi.helium_level()
-    assert vi.helium_low() is False
 
 
 # 16. Shared-instrument mode discipline (see GLOSSARY.md and

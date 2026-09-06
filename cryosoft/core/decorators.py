@@ -10,7 +10,7 @@ Usage:
         def set_temperature(self, target_K: float):
             self._driver.set_setpoint(target_K)
 
-        @control(scope="operation")
+        @control(scope="operation", action_class="recovery")
         def switch_heater_on(self):
             self._driver.set_switch_heater(True)
 
@@ -36,6 +36,16 @@ The @control decorator marks a method that:
   way; a human in IDLE can still click any @control as before. The scope is
   enforced only at plan-dispatch time, by
   ``Station.send_measurement_commands()``.
+- Carries an **action class** (``action_class=``): how much authority the
+  action needs, independent of who is asking — one of
+  ``VALID_ACTION_CLASSES``. This is the action-class declaration: how
+  dangerous an instrument's action is is a judgement about that instrument,
+  so it is declared here, on the VI, and not in a table somewhere above it.
+  It reaches the agent gateway's permission matrix through
+  ``StationInfo``'s ``ControlInfo.action_class``. Every shipped ``@control``
+  declares it explicitly (enforced by ``tests/test_conformance.py``); the
+  value defaults to ``DEFAULT_ACTION_CLASS`` — the most restrictive class an
+  agent can ever hold — for a control that does not.
 
 Both decorators accept ``group=``, the UI-group tag: the key of one of the
 ``UIGroup``s the VI declares in its ``ui_groups`` class attribute (see the
@@ -56,6 +66,19 @@ from typing import Any, Callable
 # ValueError at decoration time — a typo in scope="opration" fails loudly at
 # import time, not silently at dispatch.
 VALID_CONTROL_SCOPES: frozenset[str] = frozenset({"measurement", "operation"})
+
+# The only valid @control action classes, in ascending authority. Declared
+# here, as plain strings, because this module imports nothing (layer
+# contract C1); the agent gateway's ``ActionClass`` enum carries the same
+# four values and ``tests/test_conformance.py`` asserts the two agree, so
+# neither can drift from the other.
+VALID_ACTION_CLASSES: tuple[str, ...] = ("read", "recovery", "run_control", "envelope")
+
+# The class a @control that declares none is treated as: the most
+# restrictive an agent can ever hold, so forgetting the declaration never
+# widens what an agent may do. Conformance still requires every shipped
+# control to declare it explicitly.
+DEFAULT_ACTION_CLASS: str = "run_control"
 
 
 def monitored(
@@ -151,6 +174,7 @@ def control(
     func: Callable | None = None,
     *,
     scope: str = "measurement",
+    action_class: str | None = None,
     params: dict[str, Any] | None = None,
     panel: bool = True,
     group: str | None = None,
@@ -167,11 +191,18 @@ def control(
     3. Be wrapped with logging by __init_subclass__.
     4. Carry a capability scope enforced at plan-dispatch time (see the module
        docstring and GLOSSARY.md's "Capability scope" entry).
+    5. Carry an action class — the action-class declaration (see the module
+       docstring and GLOSSARY.md's "Action class" entry), read by the agent
+       gateway off ``ControlInfo.action_class``.
 
     Args:
         func: The method being decorated (bare-decorator form only; ``None``
             when called parametrized, e.g. ``@control(scope=...)``).
         scope: ``"measurement"`` (default) or ``"operation"``.
+        action_class: One of ``VALID_ACTION_CLASSES`` — how much authority
+            this action needs. ``None`` (the default) means undeclared,
+            which ``get_control_action_class()`` reports as
+            ``DEFAULT_ACTION_CLASS``; every shipped control declares it.
         params: Optional ``{param_name: ParamSpec}`` describing each signature
             parameter (unit, min/max, choices, description) for GUI
             rendering. Keys must exactly match the method's parameters
@@ -191,6 +222,7 @@ def control(
     Raises:
         TypeError: If ``group`` is not a string.
         ValueError: If ``scope`` is not one of ``VALID_CONTROL_SCOPES``, if
+            ``action_class`` is not one of ``VALID_ACTION_CLASSES``, if
             ``group`` is an empty string, or if ``params`` keys do not
             exactly match the method's parameters.
     """
@@ -199,6 +231,11 @@ def control(
         raise ValueError(
             f"@control scope must be one of {sorted(VALID_CONTROL_SCOPES)}, "
             f"got {scope!r}"
+        )
+    if action_class is not None and action_class not in VALID_ACTION_CLASSES:
+        raise ValueError(
+            f"@control action_class must be one of {list(VALID_ACTION_CLASSES)}, "
+            f"got {action_class!r}"
         )
 
     def _decorate(inner_func: Callable) -> Callable:
@@ -209,6 +246,9 @@ def control(
         wrapper._is_control = True
         wrapper._display_name = inner_func.__name__
         wrapper._control_scope = scope
+        # None marks "undeclared" — the sentinel the conformance test reads
+        # to require an explicit declaration on every shipped control.
+        wrapper._control_action_class = action_class
         wrapper._control_panel = panel
         wrapper._ui_group = group or ""
 
@@ -362,3 +402,23 @@ def get_control_scope(method: Callable) -> str:
         ``"measurement"`` or ``"operation"``.
     """
     return getattr(method, "_control_scope", "measurement")
+
+
+def get_control_action_class(method: Callable) -> str:
+    """Return a @control method's declared action class.
+
+    The read side of the action-class declaration (see the module
+    docstring). A control that declared none — and any method that is not a
+    ``@control`` at all — reports ``DEFAULT_ACTION_CLASS``, the most
+    restrictive class, so a missing declaration never widens authority. The
+    raw ``_control_action_class`` marker stays ``None`` in that case, which
+    is what ``tests/test_conformance.py`` reads to require an explicit
+    declaration on every shipped control.
+
+    Args:
+        method: A callable, typically a bound or unbound VI method.
+
+    Returns:
+        One of ``VALID_ACTION_CLASSES``.
+    """
+    return getattr(method, "_control_action_class", None) or DEFAULT_ACTION_CLASS

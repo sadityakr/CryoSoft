@@ -56,8 +56,7 @@ standard operating state (see **Claim** below) when this plan's own
 targets/commands reach it; a `StepPlan` carries the next point's `targets` and
 its `wait_s` (no `claim_commands` — only `initiate()`'s plan claim-initiates).
 A `Target` carries an optional `rate` (forwarded to the VI's `start_ramp()`
-only when set) and a `persistent` flag; `Command` order is meaningful and
-never reordered. Every plan object validates at construction, so a malformed
+only when set); `Command` order is meaningful and never reordered. Every plan object validates at construction, so a malformed
 plan fails at the procedure boundary, not in the tick loop.
 
 ## Interface contract
@@ -202,28 +201,50 @@ A procedure with a non sweep-and-measure shape can subclass `BaseProcedure`
 directly and implement the five lifecycle methods and its own `DataManager`;
 `SweepMeasureProcedure` is the recommended default.
 
-## Known issues
+## Instrument roles (role discovery)
 
-**Magnet and temperature VI names are hardcoded in the procedures.**
-`FieldSweep` and `TemperatureSweep` address `magnet_z`, `magnet_y`,
-`temperature_vti` and `temperature_sample` as literal strings, and
-`TimeSeries` does the same for the channels its end condition can
-watch (`_END_CHANNELS`). A setup that
-names its instruments differently cannot run the shipped procedures without
-editing them — which is what forced the 2026-07-20 global `magnet_x` ->
-`magnet_z` rename across every config and test.
+A procedure never names a configured instrument. It declares the **roles** it
+needs in `role_parameters` — one `RoleParam` per role, each carrying a
+`candidates` callable over the Station's role accessors (`magnet_vi_names()`,
+`temperature_vi_names()`, the thin fronts of `Station.vi_names_by_base()`), a
+one-line description, and a `required` flag:
 
-This violates the "config files are the single source of truth" principle: the
-VI a procedure drives is a *setup* property and belongs in the config. The
-intended fix is to derive the names from the Station
-(a `magnet_vi_names()` / `temperature_vi_names()` discovery pair, mirroring the
-existing `measurement_vi_names()`) and expose them as
-procedure parameters, so adding an axis or renaming a magnet needs no procedure
-change.
+```python
+role_parameters = {
+    "field_vi": RoleParam(
+        candidates=lambda station: station.magnet_vi_names(),
+        description="Magnet this run sweeps",
+    ),
+    "temperature_vi": RoleParam(
+        candidates=lambda station: station.temperature_vi_names(),
+        description="Temperature controller this run sets",
+        required=False,
+    ),
+}
+```
 
-The same applies to the temperature on/off toggles below: both procedures
-declare them independently, so a third procedure wanting them must repeat the
-declaration. Both are the same underlying gap and should be fixed together.
+Each role becomes one ordinary parameter (`field_vi`, `temperature_vi`) in an
+"Instruments" `ParamGroup` that `get_param_groups(station)` fills against the
+live Station: the choices are the configured instruments of that role, the
+default is the first (which IS the value when a setup has exactly one), and a
+role with no candidate contributes no widget. The GUI form and the agent tool
+schema pick the choices up automatically because both render `ParamSpec`.
+
+At construction every role is resolved once (`BaseProcedure._resolve_role`)
+and read back through `self.role_vi("field_vi")`, which the axis hooks use
+in place of a literal name. Resolution is strict: a **required** role with no
+candidate refuses the run with `CryoSoftConfigError` (the message names the
+role and what to configure), a name the caller passed that is not a candidate
+is refused the same way (a typo, or a config that changed under a queued
+run), and an **optional** role with no candidate resolves to `""`, which the
+procedure treats as "emit no target for it". `TimeSeries` uses the same
+discovery for the channels its end condition can watch: every magnet and
+temperature controller the setup configures, labelled with the VI's own
+setpoint label and unit.
+
+Renaming a magnet or adding a second temperature controller therefore needs
+no procedure change — the config stays the single source of truth for what
+the setup has, and the run form asks only when there is a choice to make.
 
 ## Files
 
@@ -232,27 +253,26 @@ Each row: responsibility, key public class, and the test file(s) in `tests/`.
 | File | Responsibility | Key public API | Tests |
 |------|----------------|----------------|-------|
 | `__init__.py` | Package marker | (none) | none |
-| `field_sweep.py` | Sweeps magnetic field (`magnet_z`), optionally holding `temperature_vti` and/or `temperature_sample` (see Temperature channels below), running any selected measurement VI at each point; parks `magnet_z` at 0 T on standby. Requires `magnet_z`, at least one measurement VI, and a VI for each switched-on temperature channel. | `FieldSweep` (axis hooks over `SweepMeasureProcedure`) | `test_new_procedures.py`, `test_l4_procedure.py` |
-| `time_series.py` | Measures repeatedly against elapsed time, commanding no system hardware and claiming only the reading path, so the operator keeps manual control of the whole cryostat during the run. Ends on `max_duration_s`, or when a watched channel (`temperature_vti`, `magnet_z`) reaches `end_value`. Requires at least one measurement VI; a watched channel's VI must exist. | `TimeSeries` (axis hooks + `axis_data_key`/`claimed_vi_names` over `SweepMeasureProcedure`) | `test_time_series_procedure.py`, `test_l3_orchestrator.py` (ramp scope) |
-| `temperature_sweep.py` | Sweeps temperature (`temperature_vti`) at a per-sweep ramp rate, optionally holding `temperature_sample` and optional `magnet_z` / `magnet_y` fields, running any selected measurement VI at each stable point. Requires at least one measurement VI; magnets optional (skipped at 0, refused at nonzero when absent). | `TemperatureSweep` (axis hooks over `SweepMeasureProcedure`) | `test_new_procedures.py` |
+| `field_sweep.py` | Sweeps magnetic field on the discovered magnet (`field_vi`, required), optionally setting the discovered temperature controller (`temperature_vi`, optional; gated by `set_temperature`), running any selected measurement VI at each point; hands the magnet to its own `standby()` on standby. Requires a magnet and at least one measurement VI. | `FieldSweep` (axis hooks over `SweepMeasureProcedure`) | `test_new_procedures.py`, `test_l4_procedure.py` |
+| `time_series.py` | Measures repeatedly against elapsed time, commanding no system hardware and claiming only the reading path, so the operator keeps manual control of the whole cryostat during the run. Ends on `max_duration_s`, or when a watched channel (any magnet or temperature controller the setup configures, discovered at construction) reaches `end_value`. Requires at least one measurement VI; a watched channel's VI must exist. | `TimeSeries` (axis hooks + `axis_data_key`/`claimed_vi_names`/`get_param_groups` over `SweepMeasureProcedure`) | `test_time_series_procedure.py`, `test_l3_orchestrator.py` (ramp scope) |
+| `temperature_sweep.py` | Sweeps temperature on the discovered controller (`temperature_vi`, required) at a per-sweep ramp rate, optionally holding the discovered magnet (`field_vi`, optional) at `field`, running any selected measurement VI at each stable point. Requires a temperature controller and at least one measurement VI; a magnet is optional (a nonzero `field` with no magnet is refused at construction). | `TemperatureSweep` (axis hooks over `SweepMeasureProcedure`) | `test_new_procedures.py` |
 
-### Temperature channels (on/off)
+### The temperature toggle (on/off)
 
-Both sweep procedures control the VTI and the sample stage **independently**, each
-gated by a bool parameter:
+Both sweep procedures gate their temperature target on one bool parameter:
 
 | Parameter | Default | Effect when on |
 |---|---|---|
-| `set_vti_temperature` | `True` | Emits a `temperature_vti` target — the fixed `temperature` in `FieldSweep`, the swept value in `TemperatureSweep` |
-| `set_sample_temperature` | `False` | Emits a `temperature_sample` target at `sample_temperature`, set once in `initiate()` and held |
+| `set_temperature` | `True` | Emits a target for the discovered `temperature_vi` — the fixed `temperature` in `FieldSweep`, the swept value in `TemperatureSweep` |
 
 "Off" means the procedure emits **no `Target`** for that VI, so the Orchestrator
 never calls `start_ramp` on it and the controller holds exactly where the operator
 left it. Reading is unaffected: monitoring, logging and trends come from the tick
-loop's monitor pass, not from targets. A channel that is switched on but has no VI
-on the station is refused at construction (`CryoSoftConfigError`); a switched-off
-channel is not required to exist.
+loop's monitor pass, not from targets. In `FieldSweep` the role is optional, so a
+station with no temperature controller also emits no target, toggle or not; in
+`TemperatureSweep` the controller is the swept axis and its absence is refused at
+construction.
 
-Both procedures declare these parameters and build the conditional target dicts
-themselves — there is deliberately no shared framework mechanism yet, so a new
-procedure that wants the same toggles must declare them too.
+Both procedures declare the toggle and build the conditional target dict
+themselves — there is deliberately no shared framework mechanism, so a new
+procedure that wants the same toggle must declare it too.

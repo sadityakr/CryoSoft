@@ -327,7 +327,7 @@ class TrendsQuadrant(QWidget):
         """Pick the best default trend key for a hint substring (e.g. "temperature").
 
         Flat keys are ``{vi_name}_{field_name}``, and several VI names
-        themselves contain hint words (e.g. ``temperature_vti``,
+        themselves contain hint words (e.g. ``temperature``,
         ``temperature_sample``), which would make a plain substring search
         match a boring setting field (``temperature_sample_heater_output``)
         before the actual reading. This strips the known vi_name prefix first

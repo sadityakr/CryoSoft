@@ -29,11 +29,11 @@ def _vi(name, value, target, gap, code, ramp_status="RAMPING"):
 
 
 def _condition(
-    key="safety:helium_low", severity="hold", message="helium low",
+    key="safety:coolant_low", severity="hold", message="coolant low",
     affected="magnet_z", acknowledged=False,
 ):
     return {
-        "key": key, "origin": "safety", "severity": severity, "kind": "helium_low",
+        "key": key, "origin": "safety", "severity": severity, "kind": "coolant_low",
         "message": message, "affected": [affected] if affected != "all" else "all",
         "since": 1.0, "acknowledged": acknowledged,
     }
@@ -116,10 +116,10 @@ def test_summarize_defaults_conditions_to_empty_for_old_log():
 
 def test_render_text_shows_active_conditions_section():
     rec = _rec("RAMPING", "OK", [_vi("m", 1.0, 2.0, 1.0, "OK")])
-    rec["conditions"] = [_condition(severity="hold", message="helium low", affected="magnet_z")]
+    rec["conditions"] = [_condition(severity="hold", message="coolant low", affected="magnet_z")]
     text = status_reader.render_text(status_reader.summarize([rec]))
     assert "Active conditions:" in text
-    assert "HOLD: helium low (affects: magnet_z)" in text
+    assert "HOLD: coolant low (affects: magnet_z)" in text
 
 
 def test_render_text_marks_station_wide_and_acknowledged_conditions():

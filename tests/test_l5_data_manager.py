@@ -756,3 +756,83 @@ def test_close_trims_block_dataset_on_abort(block_dm):
     block_dm.close()
     with h5py.File(block_dm.filepath, "r") as f:
         assert f["data"]["raw_channels_block"].shape == (2, 5, 3)
+
+
+# ── Image blocks (the image-block standard) ───────────────────────────────────
+# A frame rides the raw block's dataset path (same shape rule, same NaN fill,
+# same loop-axis rule) but describes itself differently on disk: block_kind
+# "image", a unit and a description, and NO channel_names.
+
+IMAGE_CONFIG = {
+    "sweep_columns": {"field_T": "float"},
+    "measurement_arrays": {},
+    "measurement_blocks": {"frame": (4, 6)},
+    "measurement_image_blocks": {"frame": {"unit": "counts", "description": "sim frame"}},
+}
+
+
+def _image_dm(tmp_path, config=IMAGE_CONFIG, n_points=3):
+    return DataManager(
+        data_directory=str(tmp_path),
+        procedure_name="Image_Sweep",
+        procedure_params=PROCEDURE_PARAMS,
+        sample_info=SAMPLE_INFO,
+        instrument_state={},
+        system_targets={},
+        measurement_commands={},
+        data_config=config,
+        n_sweep_points=n_points,
+    )
+
+
+def test_image_block_dataset_is_marked_as_an_image(tmp_path):
+    manager = _image_dm(tmp_path)
+    manager.close()
+    with h5py.File(manager.filepath, "r") as f:
+        ds = f["data"]["frame"]
+        assert ds.shape[1:] == (4, 6)
+        assert ds.attrs["block_kind"] == "image"
+        assert ds.attrs["unit"] == "counts"
+        assert ds.attrs["description"] == "sim frame"
+        assert ds.attrs["axes"] == "sweep_point, row, col"
+        assert "channel_names" not in ds.attrs
+
+
+def test_raw_block_dataset_is_marked_as_raw(block_dm):
+    """The sibling declaration says what it is too, so a reader never guesses."""
+    with h5py.File(block_dm.filepath, "r") as f:
+        ds = f["data"]["raw_channels_block"]
+        assert ds.attrs["block_kind"] == "raw"
+        assert "unit" not in ds.attrs
+
+
+def test_image_block_round_trip_without_loop(tmp_path):
+    manager = _image_dm(tmp_path)
+    frame = np.arange(24, dtype=float).reshape(4, 6)
+    manager.save_datapoint(1, {"field_T": 0.5, "frame": frame}, {})
+    manager.close()
+    with h5py.File(manager.filepath, "r") as f:
+        stored = f["data"]["frame"][:]
+    assert stored.shape == (2, 4, 6)  # trimmed to the written prefix on close
+    np.testing.assert_array_equal(stored[1], frame)
+    assert np.all(np.isnan(stored[0]))
+
+
+def test_image_block_round_trip_with_loop(tmp_path):
+    config = {**IMAGE_CONFIG, "loop_shape": [2, 1]}
+    manager = _image_dm(tmp_path, config=config)
+    frames = np.stack([np.full((4, 6), 1.0), np.full((4, 6), 2.0)])[:, None, :, :]  # (2, 1, 4, 6)
+    manager.save_datapoint(0, {"field_T": 0.0, "frame": frames}, {})
+    manager.close()
+    with h5py.File(manager.filepath, "r") as f:
+        ds = f["data"]["frame"]
+        assert ds.attrs["axes"] == "sweep_point, loop1, loop2, row, col"
+        assert ds.attrs["block_kind"] == "image"
+        np.testing.assert_array_equal(ds[0, 1, 0], np.full((4, 6), 2.0))
+
+
+def test_image_block_wrong_width_raises(tmp_path):
+    manager = _image_dm(tmp_path)
+    with pytest.raises(ValueError, match="frame"):
+        manager.save_datapoint(0, {"field_T": 0.0, "frame": np.zeros((4, 5))}, {})
+    manager.close()

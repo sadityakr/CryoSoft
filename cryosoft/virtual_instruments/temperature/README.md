@@ -58,8 +58,8 @@ circuit at zero output.
 
 `TemperatureControllerBase` does not override `safety_concerns()` — it
 keeps the empty-set default, so a temperature controller is never subject
-to a safety hold: not for `helium_low` (only magnets, via `MagnetBase`,
-depend on it — see GLOSSARY.md's **Safety concern**) and not for `quench`
+to a safety hold: no shipped VI declares a hold-severity flag (see
+GLOSSARY.md's **Safety concern**), and not for `quench`
 either, since `quench` is critical severity and therefore station-wide by
 construction (GLOSSARY.md's **Critical safety flag**) — a quench stops
 every instrument, including the temperature controller, via EMERGENCY

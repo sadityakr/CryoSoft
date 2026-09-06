@@ -66,25 +66,25 @@ def test_build_station_passes_address_to_driver(tmp_path):
 
 def test_read_panels_config_well_formed(tmp_path):
     """read_panels_config returns per-VI control allowlists from monitor.yaml."""
-    from cryosoft.core.station import read_panels_config
+    from cryosoft.core.config import read_panels_config
 
     (tmp_path / "monitor.yaml").write_text(
         "monitor:\n  tick_interval_ms: 1000\n"
         "panels:\n"
-        "  temperature_vti:\n"
+        "  temperature:\n"
         "    controls: [set_temperature]\n"
         "  magnet_z:\n"
         "    controls: [set_field, set_ramp_rate]\n"
     )
     assert read_panels_config(str(tmp_path)) == {
-        "temperature_vti": ["set_temperature"],
+        "temperature": ["set_temperature"],
         "magnet_z": ["set_field", "set_ramp_rate"],
     }
 
 
 def test_read_panels_config_tolerates_absent_or_malformed(tmp_path):
     """Absent block, malformed entries, or a missing file yield {} / skip, never raise."""
-    from cryosoft.core.station import read_panels_config
+    from cryosoft.core.config import read_panels_config
 
     # No monitor.yaml at all.
     assert read_panels_config(str(tmp_path / "nowhere")) == {}
@@ -105,14 +105,14 @@ def test_read_panels_config_tolerates_absent_or_malformed(tmp_path):
 
 
 def test_read_tick_interval_ms_reads_the_configured_value(tmp_path):
-    from cryosoft.core.station import read_tick_interval_ms
+    from cryosoft.core.config import read_tick_interval_ms
 
     (tmp_path / "monitor.yaml").write_text("monitor:\n  tick_interval_ms: 1000\n")
     assert read_tick_interval_ms(str(tmp_path)) == 1000
 
 
 def test_read_tick_interval_ms_defaults_when_absent_or_missing(tmp_path):
-    from cryosoft.core.station import read_tick_interval_ms
+    from cryosoft.core.config import read_tick_interval_ms
 
     # No monitor.yaml at all.
     assert read_tick_interval_ms(str(tmp_path / "nowhere")) == 3000
@@ -126,7 +126,7 @@ def test_build_station_success(sim_station: Station):
     assert sim_station is not None
     # Check that expected VIs are registered
     vi_names = sim_station.get_vi_names()
-    expected = ["magnet_z", "temperature_vti", "level_meter", "dc_measurement"]
+    expected = ["magnet_z", "temperature", "dc_measurement"]
     for name in expected:
         assert name in vi_names
 
@@ -138,8 +138,8 @@ def test_station_getattr(sim_station: Station):
     assert magnet_z.__class__.__name__ == "SuperconductingMagnetVI"
 
     # Check another one to be sure
-    temp_vti = sim_station.temperature_vti
-    assert temp_vti.vi_name == "temperature_vti"
+    temp_vti = sim_station.temperature
+    assert temp_vti.vi_name == "temperature"
     assert temp_vti.__class__.__name__ == (
         "Lakeshore335SampleTemperatureControllerVI"
     )
@@ -187,7 +187,7 @@ def test_get_ramp_status_covers_system_rampables(sim_station: Station):
     ramps = sim_station.get_ramp_status()
 
     assert "magnet_z" in ramps
-    assert "temperature_vti" in ramps
+    assert "temperature" in ramps
     for entry in ramps.values():
         assert {"target", "rate", "ramp_status"} <= set(entry)
 
@@ -278,34 +278,22 @@ def test_last_state_flat_coerces_bool_to_float_unlike_monitor_history(sim_statio
     assert isinstance(flat[key], float)
 
 
-def test_process_system_targets_forwards_persistent_key(sim_station: Station):
-    """An optional 'persistent' key in a target dict is forwarded to start_ramp().
-
-    sim_cryostat's magnet_z is a plain SuperconductingMagnetVI, which accepts
-    persistent= as a no-op — this must not raise, so any procedure can include
-    'persistent' in a magnet target regardless of which magnet VI flavor a
-    config wires up.
-    """
-    sim_station.process_system_targets({"magnet_z": Target(1.0, persistent=False)})
-    assert sim_station.magnet_z.ramp_status() == "RAMPING"
-
-
 def test_process_system_targets_dispatch(sim_station: Station):
     """process_system_targets dispatches to correct VIs only."""
     targets = {
         "magnet_z": Target(1.0),
-        "temperature_vti": Target(150.0)
+        "temperature": Target(150.0)
     }
 
     sim_station.process_system_targets(targets)
 
     # Verify that the ramps have started
     assert sim_station.magnet_z.ramp_status() == "RAMPING"
-    assert sim_station.temperature_vti.ramp_status() == "RAMPING"
+    assert sim_station.temperature.ramp_status() == "RAMPING"
 
     # process_system_targets should raise if we pass a non-system VI
     with pytest.raises(ValueError):
-        sim_station.process_system_targets({"level_meter": Target(10.0)})
+        sim_station.process_system_targets({"dc_measurement": Target(10.0)})
 
 
 def test_check_ramps(sim_station: Station):
@@ -347,7 +335,7 @@ def test_check_ramps_reports_only_the_named_vis(sim_station: Station):
 
     assert sim_station.check_ramps() is False                      # whole station
     assert sim_station.check_ramps({"magnet_z"}) is False           # in scope
-    assert sim_station.check_ramps({"temperature_vti"}) is True     # out of scope
+    assert sim_station.check_ramps({"temperature"}) is True     # out of scope
     assert sim_station.check_ramps(set()) is True                   # owns nothing
 
 
@@ -376,7 +364,7 @@ def test_get_ramp_status_carries_the_full_introspection_snapshot(sim_station: St
     """
     status = sim_station.get_ramp_status()
     assert status, "expected at least one rampable system VI"
-    keys = {"value", "setpoint", "target", "rate", "ramp_status", "phase"}
+    keys = {"value", "setpoint", "target", "rate", "ramp_status", "phase", "no_motion_phases"}
     for vi_name, entry in status.items():
         assert keys <= set(entry), f"{vi_name} missing {keys - set(entry)}"
         assert entry["ramp_status"] == "IDLE"
@@ -401,96 +389,6 @@ def test_get_ramp_status_reports_next_and_end_setpoint_during_a_ramp(
     assert sim_station.get_ramp_status()["magnet_z"]["setpoint"] is None
 
 
-def test_check_safety(sim_station: Station):
-    """check_safety() aggregates the level meter's DEBOUNCED helium verdict.
-
-    The helium flag comes from the level-meter VI's majority-vote buffer
-    (filled during get_state() polls) — a single glitched low reading must
-    NOT trip it, and check_safety() itself never polls hardware.
-    """
-    # Warm up get_state cache
-    sim_station.get_state()
-    safety = sim_station.check_safety()
-    assert safety["helium_low"] is False
-
-    # Simulate a low helium condition
-    level_driver = sim_station.level_meter._driver
-    level_driver._force_helium_level = 5.0
-
-    # One low poll is a glitch — debounce must suppress it.
-    sim_station.get_state()
-    safety = sim_station.check_safety()
-    assert safety["helium_low"] is False
-
-    # A sustained low level (buffer majority) must trip the flag.
-    for _ in range(3):
-        sim_station.get_state()
-    safety = sim_station.check_safety()
-    assert safety["helium_low"] is True
-
-
-def test_check_safety_debounces_transient_disconnect(sim_station: Station):
-    """A single disconnected tick must not force-trip helium_low.
-
-    Regression test: check_safety() used to unconditionally force helium_low
-    True the instant the level meter went _disconnected, bypassing the
-    debounce buffer entirely — a momentary ISOBUS round-trip failure (right
-    as a fill's standby() switches refresh mode, say) could false-trip
-    EMERGENCY on a helium-fill operation even with the reservoir full. A
-    disconnected tick must instead feed the SAME majority-vote buffer real
-    low readings use.
-    """
-    sim_station.get_state()
-    assert sim_station.check_safety()["helium_low"] is False
-
-    level_driver = sim_station.level_meter._driver
-    level_driver._simulate_error = True
-
-    # Two ticks below Station's own max_vi_errors=3 streak: _stale, not yet
-    # _disconnected, so no buffer entry should be added at all.
-    state = sim_station.get_state()
-    assert state["level_meter"].get("_disconnected") is not True
-    assert sim_station.check_safety(state)["helium_low"] is False
-
-    state = sim_station.get_state()
-    assert state["level_meter"].get("_disconnected") is not True
-    assert sim_station.check_safety(state)["helium_low"] is False
-
-    # 3rd consecutive error -> _disconnected, but that is only the buffer's
-    # 1st "low" entry (out of 5) — still not a majority.
-    state = sim_station.get_state()
-    assert state["level_meter"]["_disconnected"] is True
-    assert sim_station.check_safety(state)["helium_low"] is False
-
-    # Recovers before disconnection ever won the majority vote.
-    level_driver._simulate_error = False
-    state = sim_station.get_state()
-    assert sim_station.check_safety(state)["helium_low"] is False
-
-
-def test_check_safety_sustained_disconnect_still_trips(sim_station: Station):
-    """A genuinely dead level meter still trips helium_low, just debounced.
-
-    Preserves the "can't monitor the level -> assume unsafe" guarantee: it
-    just takes a real, sustained outage (several consecutive ticks, matching
-    how a genuine low-level reading is debounced too) rather than the single
-    _disconnected tick the old force-override reacted to.
-    """
-    sim_station.get_state()
-    assert sim_station.check_safety()["helium_low"] is False
-
-    level_driver = sim_station.level_meter._driver
-    level_driver._simulate_error = True
-
-    tripped = False
-    for _ in range(10):
-        state = sim_station.get_state()
-        if sim_station.check_safety(state)["helium_low"]:
-            tripped = True
-            break
-    assert tripped, "a sustained disconnection must still trip helium_low"
-
-
 def test_check_safety_uses_snapshot_without_polling(sim_station: Station):
     """check_safety(state) must not poll hardware (review finding H1).
 
@@ -498,24 +396,22 @@ def test_check_safety_uses_snapshot_without_polling(sim_station: Station):
     traffic every tick and double-counting the error counters.
     """
     state = sim_station.get_state()
-    level_driver = sim_station.level_meter._driver
-    calls_before = getattr(level_driver, "_get_helium_calls", None)
+    magnet_driver = sim_station.magnet_z._driver
 
     # Count driver polls around check_safety via a wrapper.
     call_count = {"n": 0}
-    original = level_driver.get_helium_level
+    original = magnet_driver.get_status
 
     def counting(*args, **kwargs):
         call_count["n"] += 1
         return original(*args, **kwargs)
 
-    level_driver.get_helium_level = counting
+    magnet_driver.get_status = counting
     try:
         sim_station.check_safety(state)
         sim_station.check_safety()  # cached-state variant
     finally:
-        level_driver.get_helium_level = original
-    _ = calls_before
+        magnet_driver.get_status = original
     assert call_count["n"] == 0
 
 
@@ -632,39 +528,6 @@ def test_retry_fault_disconnected_rebuilds_the_driver_session(sim_station: Stati
     assert sim_station.magnet_z._driver._simulate_error is False
 
 
-def test_level_meter_disconnect_records_fault_independent_of_debounce(sim_station: Station):
-    """A disconnected level meter records a fault whether or not helium_low has
-    won the debounce majority vote yet.
-
-    Guards the interplay between the two: the runtime fault registry
-    (vi_faults(), always reflecting the *current* comm state) is independent
-    of check_safety()'s debounced safety verdict (which may lag a few ticks
-    behind — see test_check_safety_sustained_disconnect_still_trips).
-    """
-    level_driver = sim_station.level_meter._driver
-    level_driver._simulate_error = True
-    state = sim_station.get_state()
-    state = sim_station.get_state()
-    state = sim_station.get_state()
-
-    assert sim_station.vi_faults()["level_meter"].kind == "disconnected"
-    # Only the buffer's 1st "low" entry so far — not yet a majority.
-    safety = sim_station.check_safety(state)
-    assert safety["helium_low"] is False
-
-    # Sustained disconnection (one check_safety() call per tick, matching
-    # production's per-tick safety check) eventually wins the majority vote
-    # too, and safety_flag_sources() attributes it to level_meter via the
-    # normal per-VI evaluate_safety() loop (no separate disconnected
-    # special-case).
-    for _ in range(3):
-        state = sim_station.get_state()
-        safety = sim_station.check_safety(state)
-    assert safety["helium_low"] is True
-    sources = sim_station.safety_flag_sources(state)
-    assert "level_meter" in sources.get("helium_low", [])
-
-
 # ---------------------------------------------------------------------------
 # Unified condition registry (the System-Condition standard, see
 # cryosoft/core/conditions.py and GLOSSARY.md) — Station.conditions() and
@@ -688,6 +551,38 @@ class _CriticalFlagZVI(BaseVirtualInstrument):
 
     def evaluate_safety(self, state: dict) -> dict[str, bool]:
         return {"flag_zzz": True}
+
+
+class _HoldFlagVI(BaseVirtualInstrument):
+    """Test double: reports a hold-severity flag whenever ``tripped`` is set.
+
+    No shipped VI declares a hold-severity flag, so the hold half of the
+    System-Condition standard is exercised the way a real setup declares
+    one: a producer naming the flag in ``safety_flags`` and reporting it
+    from ``evaluate_safety()``, plus a consumer naming it in
+    ``safety_concerns()``.
+    """
+
+    safety_flags: ClassVar[dict[str, str]] = {"coolant_low": "hold"}
+    tripped: bool = True
+
+    def evaluate_safety(self, state: dict) -> dict[str, bool]:
+        return {"coolant_low": bool(self.tripped)}
+
+
+class _CoolantConcernedVI(BaseVirtualInstrument):
+    """Test double: cannot operate while the hold-severity flag is tripped."""
+
+    def safety_concerns(self) -> set[str]:
+        return {"coolant_low"}
+
+
+def _hold_flag_station() -> Station:
+    """A minimal station with one hold-flag producer and one concerned VI."""
+    station = Station()
+    station.register_vi("monitor", _HoldFlagVI({}), "system")
+    station.register_vi("consumer", _CoolantConcernedVI({}), "system")
+    return station
 
 
 class _UnconsumedHoldFlagVI(BaseVirtualInstrument):
@@ -755,56 +650,44 @@ def test_vi_faults_adapter_agrees_with_conditions_registry(sim_station: Station)
     assert fault.acknowledged == condition.acknowledged
 
 
-def test_update_conditions_tolerated_hold_flag_constructs_nothing(sim_station: Station):
+def test_update_conditions_tolerated_hold_flag_constructs_nothing():
     """A tolerated hold-severity flag builds no condition and holds no VI."""
-    level_driver = sim_station.level_meter._driver
-    level_driver._simulate_error = True
-    safety: dict[str, bool] = {}
-    for _ in range(10):
-        state = sim_station.get_state()
-        safety = sim_station.check_safety(state)
-        if safety.get("helium_low"):
-            break
-    assert safety.get("helium_low") is True
+    station = _hold_flag_station()
+    safety = station.check_safety()
+    assert safety["coolant_low"] is True
 
-    sim_station.update_conditions(safety, tolerated_flags=frozenset({"helium_low"}))
-    assert "safety:helium_low" not in sim_station.conditions()
+    station.update_conditions(safety, tolerated_flags=frozenset({"coolant_low"}))
+    assert "safety:coolant_low" not in station.conditions()
     assert not any(
         c.origin == "safety" and c.severity == "hold"
-        for c in sim_station.conditions().values()
+        for c in station.conditions().values()
     )
 
 
 def test_update_conditions_clearing_tolerance_recreates_with_fresh_since(
-    sim_station: Station, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch
 ):
     """Un-tolerating a flag rebuilds its condition with a FRESH `since` —
     the tolerated interval removed the condition entirely, so there is no
     prior entry for _upsert_condition() to preserve `since` from.
     """
-    level_driver = sim_station.level_meter._driver
-    level_driver._simulate_error = True
-    safety: dict[str, bool] = {}
-    for _ in range(10):
-        state = sim_station.get_state()
-        safety = sim_station.check_safety(state)
-        if safety.get("helium_low"):
-            break
-    assert safety.get("helium_low") is True
+    station = _hold_flag_station()
+    safety = station.check_safety()
+    assert safety["coolant_low"] is True
 
     import cryosoft.core.station as station_module
 
     clock = iter([100.0, 200.0, 300.0])
     monkeypatch.setattr(station_module.time, "time", lambda: next(clock))
 
-    sim_station.update_conditions(safety, tolerated_flags=frozenset())
-    assert sim_station.conditions()["safety:helium_low"].since == 100.0
+    station.update_conditions(safety, tolerated_flags=frozenset())
+    assert station.conditions()["safety:coolant_low"].since == 100.0
 
-    sim_station.update_conditions(safety, tolerated_flags=frozenset({"helium_low"}))
-    assert "safety:helium_low" not in sim_station.conditions()
+    station.update_conditions(safety, tolerated_flags=frozenset({"coolant_low"}))
+    assert "safety:coolant_low" not in station.conditions()
 
-    sim_station.update_conditions(safety, tolerated_flags=frozenset())
-    assert sim_station.conditions()["safety:helium_low"].since == 300.0
+    station.update_conditions(safety, tolerated_flags=frozenset())
+    assert station.conditions()["safety:coolant_low"].since == 300.0
 
 
 def test_update_conditions_critical_flag_ignores_tolerance(sim_station: Station):
@@ -848,43 +731,29 @@ def test_update_conditions_critical_flag_produces_only_its_own_condition(
     assert set(sim_station.conditions()) == {"safety:quench"}
 
 
-def test_update_conditions_hold_flag_scopes_to_concerned_vis(sim_station: Station):
+def test_update_conditions_hold_flag_scopes_to_concerned_vis():
     """A hold-severity flag holds exactly the VIs whose safety_concerns()
-    name it — every magnet (via MagnetBase), not temperature_vti or
-    level_meter.
+    name it — never the VI that reported it.
     """
-    level_driver = sim_station.level_meter._driver
-    level_driver._simulate_error = True
+    station = _hold_flag_station()
+    safety = station.check_safety()
+    assert safety["coolant_low"] is True
 
-    safety: dict[str, bool] = {}
-    for _ in range(10):
-        state = sim_station.get_state()
-        safety = sim_station.check_safety(state)
-        if safety.get("helium_low"):
-            break
-    assert safety.get("helium_low") is True
-
-    sim_station.update_conditions(safety, tolerated_flags=frozenset())
-    condition = sim_station.conditions()["safety:helium_low"]
+    station.update_conditions(safety, tolerated_flags=frozenset())
+    condition = station.conditions()["safety:coolant_low"]
     assert condition.severity == "hold"
-    assert condition.affected_vis == frozenset({"magnet_z"})
+    assert condition.affected_vis == frozenset({"consumer"})
 
 
-def test_acknowledge_condition_acknowledges_a_safety_hold(sim_station: Station):
+def test_acknowledge_condition_acknowledges_a_safety_hold():
     """acknowledge_condition() marks a hold-severity safety condition as seen."""
-    level_driver = sim_station.level_meter._driver
-    level_driver._simulate_error = True
-    safety: dict[str, bool] = {}
-    for _ in range(10):
-        state = sim_station.get_state()
-        safety = sim_station.check_safety(state)
-        if safety.get("helium_low"):
-            break
+    station = _hold_flag_station()
+    safety = station.check_safety()
 
-    sim_station.update_conditions(safety, tolerated_flags=frozenset())
-    assert sim_station.acknowledge_condition("safety:helium_low") is True
-    assert sim_station.conditions()["safety:helium_low"].acknowledged is True
-    assert sim_station.acknowledge_condition("safety:no_such_flag") is False
+    station.update_conditions(safety, tolerated_flags=frozenset())
+    assert station.acknowledge_condition("safety:coolant_low") is True
+    assert station.conditions()["safety:coolant_low"].acknowledged is True
+    assert station.acknowledge_condition("safety:no_such_flag") is False
 
 
 def test_active_critical_conditions_sorted_by_key():
@@ -968,27 +837,21 @@ def test_publish_conditions_rejects_origin_mismatch(sim_station: Station):
         sim_station.publish_conditions("trend", [mismatched])
 
 
-def test_publish_conditions_does_not_disturb_other_origins(sim_station: Station):
+def test_publish_conditions_does_not_disturb_other_origins():
     """The trend origin's refresh never wipes a safety-origin condition, and vice versa."""
-    level_driver = sim_station.level_meter._driver
-    level_driver._simulate_error = True
-    safety: dict[str, bool] = {}
-    for _ in range(10):
-        state = sim_station.get_state()
-        safety = sim_station.check_safety(state)
-        if safety.get("helium_low"):
-            break
-    sim_station.update_conditions(safety, tolerated_flags=frozenset())
-    assert "safety:helium_low" in sim_station.conditions()
+    station = _hold_flag_station()
+    safety = station.check_safety()
+    station.update_conditions(safety, tolerated_flags=frozenset())
+    assert "safety:coolant_low" in station.conditions()
 
     # The trend refresh (its own cadence) must not touch the safety condition.
-    sim_station.publish_conditions("trend", [_trend_condition("a")])
-    assert "safety:helium_low" in sim_station.conditions()
-    assert "trend:a" in sim_station.conditions()
+    station.publish_conditions("trend", [_trend_condition("a")])
+    assert "safety:coolant_low" in station.conditions()
+    assert "trend:a" in station.conditions()
 
     # The per-tick safety refresh must not touch the trend condition either.
-    sim_station.update_conditions(safety, tolerated_flags=frozenset())
-    assert "trend:a" in sim_station.conditions()
+    station.update_conditions(safety, tolerated_flags=frozenset())
+    assert "trend:a" in station.conditions()
 
 
 def test_acknowledge_condition_unknown_key_returns_false(sim_station: Station):
@@ -1344,9 +1207,9 @@ def test_availability_faulted_with_not_responding_tag_under_standing_comm_condit
     sim_station: Station,
 ):
     """A live VI under a standing comm fault reports faulted/not_responding."""
-    sim_station._record_comm_condition("level_meter", "disconnected", "boom")
+    sim_station._record_comm_condition("temperature", "disconnected", "boom")
 
-    avail = sim_station.availability("level_meter")
+    avail = sim_station.availability("temperature")
 
     assert avail.state == "faulted"
     assert avail.tags == frozenset({"not_responding"})
@@ -1391,7 +1254,7 @@ def test_availability_failed_reconnect_of_operator_disconnected_vi_adds_connect_
 
 def test_read_gateway_config_reads_the_declared_values(tmp_path):
     """A setup that opens itself to agents says so in its own monitor.yaml."""
-    from cryosoft.core.station import read_gateway_config
+    from cryosoft.core.config import read_gateway_config
 
     (tmp_path / "monitor.yaml").write_text(
         "monitor:\n"
@@ -1411,7 +1274,7 @@ def test_read_gateway_config_reads_the_declared_values(tmp_path):
 
 def test_read_gateway_config_defaults_to_the_closed_door(tmp_path):
     """Absent, malformed or unreadable all mean off — never raises."""
-    from cryosoft.core.station import read_gateway_config
+    from cryosoft.core.config import read_gateway_config
 
     closed = {"gateway_server": False, "gateway_max_role": "observer"}
     assert read_gateway_config(str(tmp_path / "nowhere")) == closed
@@ -1427,7 +1290,7 @@ def test_read_instrument_thread_defaults_to_the_thread(tmp_path):
     Absent, malformed or unreadable all inherit it too — the fallback of a
     file nobody can read must be the shape every other setup runs in.
     """
-    from cryosoft.core.station import read_instrument_thread
+    from cryosoft.core.config import read_instrument_thread
 
     assert read_instrument_thread(str(tmp_path / "nowhere")) is True
     (tmp_path / "monitor.yaml").write_text("monitor:\n  tick_interval_ms: 1000\n")
@@ -1438,7 +1301,7 @@ def test_read_instrument_thread_defaults_to_the_thread(tmp_path):
 
 def test_read_instrument_thread_honours_a_deliberate_refusal(tmp_path):
     """A setup that wants the temporary inline mode back says so explicitly."""
-    from cryosoft.core.station import read_instrument_thread
+    from cryosoft.core.config import read_instrument_thread
 
     (tmp_path / "monitor.yaml").write_text(
         "monitor:\n  tick_interval_ms: 1000\n  instrument_thread: false\n"
@@ -1474,7 +1337,7 @@ def test_lifecycle_state_of_one_vi_matches_the_vi_itself(sim_station):
     assert sim_station.lifecycle_state("magnet_z") == (
         sim_station.get_vi("magnet_z").lifecycle_state()
     )
-    assert sim_station.lifecycle_state("temperature_vti") == "idle"
+    assert sim_station.lifecycle_state("temperature") == "idle"
 
     with pytest.raises(KeyError):
         sim_station.lifecycle_state("no_such_instrument")
