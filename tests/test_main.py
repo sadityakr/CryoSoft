@@ -119,3 +119,88 @@ def test_ensure_guest_user_registered_does_not_clobber_existing_guest_customizat
     _ensure_guest_user_registered(roster)
 
     assert roster.get(GUEST_USER_ID).name == "Visiting Scientist"
+
+
+def _shipped() -> Path:
+    from i2as.gui import app_settings
+
+    return app_settings.shipped_config_dir()
+
+
+def test_command_line_config_is_optional(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bare ``i2as`` parses to no config; ``--config NAME`` parses to the name."""
+    from i2as.main import build_parser
+
+    assert build_parser().parse_args([]).config is None
+    assert build_parser().parse_args(["--config", "sim_imaging"]).config == "sim_imaging"
+
+
+def test_startup_candidates_put_the_command_line_config_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--config`` goes ahead of the saved active config; sim_cryostat stays last."""
+    from i2as import main as app_main
+    from i2as.gui import app_settings
+
+    monkeypatch.setattr(app_settings, "user_config_dir", lambda: tmp_path / "user")
+    monkeypatch.setattr(app_settings, "config_active", lambda: ("sim_cryostat", "shipped"))
+
+    candidates = app_main._startup_candidates("sim_imaging")
+
+    assert candidates == [
+        str(_shipped() / "sim_imaging"),
+        str(_shipped() / "sim_cryostat"),
+    ]
+    assert app_main._startup_candidates(None) == [str(_shipped() / "sim_cryostat")]
+
+
+def test_startup_candidates_chain_a_user_copy_then_the_active_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A user copy named on the command line comes first, then the saved active
+    config, then sim_cryostat; a copy that kept its shipped name is followed by
+    that shipped baseline, exactly as an active user config is."""
+    from i2as import main as app_main
+    from i2as.core.config_catalog import ConfigCatalog
+    from i2as.gui import app_settings
+
+    monkeypatch.setattr(app_settings, "user_config_dir", lambda: tmp_path / "user")
+    catalog = ConfigCatalog(_shipped(), tmp_path / "user")
+    mine = catalog.fork_shipped("sim_cryostat", "mine")
+    same_name = catalog.fork_shipped("sim_imaging", "sim_imaging")
+    monkeypatch.setattr(app_settings, "config_active", lambda: ("sim_imaging", "shipped"))
+
+    assert app_main.resolve_config_name("mine") == (mine.path, "user")
+    assert app_main._startup_candidates("mine") == [
+        str(mine.path),
+        str(_shipped() / "sim_imaging"),
+        str(_shipped() / "sim_cryostat"),
+    ]
+    # Shipped configs are searched first, as the doctor CLI's --config does, so
+    # a same-named user copy is reached through the active config's identity.
+    assert app_main.resolve_config_name("sim_imaging") == (
+        _shipped() / "sim_imaging",
+        "shipped",
+    )
+    monkeypatch.setattr(app_settings, "config_active", lambda: ("sim_imaging", "user"))
+    assert app_main._startup_candidates(None) == [
+        str(same_name.path),
+        str(_shipped() / "sim_imaging"),
+        str(_shipped() / "sim_cryostat"),
+    ]
+
+
+def test_unknown_command_line_config_is_a_usage_error_before_any_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A name that exists nowhere exits 2 with the places searched, and builds nothing."""
+    from i2as import main as app_main
+    from i2as.gui import app_settings
+
+    monkeypatch.setattr(app_settings, "user_config_dir", lambda: tmp_path / "user")
+    with pytest.raises(LookupError):
+        app_main._startup_candidates("no_such_config")
+    with pytest.raises(SystemExit) as exit_info:
+        app_main.main(["--config", "no_such_config"])
+    assert exit_info.value.code == 2
+    assert "no_such_config" in capsys.readouterr().err

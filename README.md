@@ -132,14 +132,16 @@ refuses to start rather than inventing a location.
 **The desktop application:**
 
 ```bash
-python -m i2as.main
+i2as --config sim_imaging          # equivalently: python -m i2as.main --config sim_imaging
 ```
 
-It opens the *active config* — the one saved on this machine from the last
-successful launch — and falls back to the always-loadable `sim_cryostat`.
-The startup chain is `active config → its shipped baseline → sim_cryostat`,
-so a broken config produces a warning instead of a crash. To start on the
-imaging example instead, mark it active once:
+`--config` names a shipped config or a user copy of one and opens it for
+this launch. Without it, the app opens the *active config* — the one saved
+on this machine from the last successful launch — and falls back to the
+always-loadable `sim_cryostat`. The startup chain is `--config → active
+config → its shipped baseline → sim_cryostat`, so a broken config produces
+a warning instead of a crash. To make a config the persistent default
+instead, mark it active once:
 
 ```bash
 python -c "from i2as.gui import app_settings; app_settings.set_config_active('sim_imaging', 'shipped')"

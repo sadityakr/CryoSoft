@@ -85,4 +85,6 @@ def _parse_args() -> argparse.Namespace:
 
 
 if __name__ == "__main__":
-    main(on_station_built=_build_apply(_parse_args()))
+    # The scenario owns this command line; the app gets none of it (and so
+    # opens the saved active config, falling back to sim_cryostat).
+    main([], on_station_built=_build_apply(_parse_args()))

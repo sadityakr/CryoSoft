@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import argparse
 import logging
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Callable
 
@@ -48,30 +49,100 @@ logger = logging.getLogger(__name__)
 APPLICATION_NAME = "I2AS"
 
 
-def _startup_candidates() -> list[str]:
+def build_parser() -> argparse.ArgumentParser:
+    """Build the application's command line.
+
+    Returns:
+        The parser. ``--config`` picks the config for this launch only; the
+        saved active config (``gui/app_settings.py``) stays the persistent
+        choice and is what a launch without the option opens.
+    """
+    parser = argparse.ArgumentParser(
+        prog="i2as", description="Start the I2AS desktop application."
+    )
+    parser.add_argument(
+        "--config",
+        metavar="NAME",
+        default=None,
+        help=(
+            "Config directory name to open for this launch — a shipped config "
+            "(e.g. sim_imaging) or a user copy of one. Overrides the saved "
+            "active config without replacing it; the startup fallback chain "
+            "still applies behind it."
+        ),
+    )
+    return parser
+
+
+def resolve_config_name(name: str) -> tuple[Path, str]:
+    """Resolve a config directory name to its directory and source.
+
+    Shipped configs are searched first, then the user's copies, mirroring the
+    identity ``app_settings.config_active()`` stores.
+
+    Args:
+        name: A config directory name such as ``"sim_imaging"``.
+
+    Returns:
+        ``(path, source)`` with ``source`` ``"shipped"`` or ``"user"``.
+
+    Raises:
+        LookupError: If no config of that name exists in either place.
+    """
+    searched = (
+        (app_settings.shipped_config_dir(), "shipped"),
+        (app_settings.user_config_dir(), "user"),
+    )
+    for base_dir, source in searched:
+        candidate = base_dir / name
+        if candidate.is_dir():
+            return candidate, source
+    raise LookupError(
+        f"no config named {name!r} (looked in "
+        + ", ".join(str(base_dir) for base_dir, _ in searched)
+        + ")"
+    )
+
+
+def _chain_for(name: str, source: str) -> list[str]:
+    """Return one config and, for a user copy, its never-edited shipped baseline."""
+    base_dir = (
+        app_settings.user_config_dir()
+        if source == "user"
+        else app_settings.shipped_config_dir()
+    )
+    chain = [str(base_dir / name)]
+    if source == "user":
+        shipped_baseline = app_settings.shipped_config_dir() / name
+        if shipped_baseline.is_dir():
+            chain.append(str(shipped_baseline))
+    return chain
+
+
+def _startup_candidates(config: str | None = None) -> list[str]:
     """Return the ordered config candidates for startup, safest last.
 
-    The saved active config is tried first; if it is a user copy, its shipped
-    namesake (the never-edited baseline) is tried next; the always-loadable
+    The config named on the command line, if any, is tried first; then the
+    saved active config; each followed by its shipped namesake (the
+    never-edited baseline) when it is a user copy; the always-loadable
     ``sim_cryostat`` is the final guarantee. Order-preserving de-dup.
+
+    Args:
+        config: The ``--config`` value, a config directory name, or ``None``.
 
     Returns:
         A list of config directory paths, most-preferred first.
+
+    Raises:
+        LookupError: If ``config`` names a config that exists nowhere.
     """
     candidates: list[str] = []
+    if config is not None:
+        requested, source = resolve_config_name(config)
+        candidates.extend(_chain_for(requested.name, source))
     active = app_settings.config_active()
     if active is not None:
-        name, source = active
-        base_dir = (
-            app_settings.user_config_dir()
-            if source == "user"
-            else app_settings.shipped_config_dir()
-        )
-        candidates.append(str(base_dir / name))
-        if source == "user":
-            shipped_baseline = app_settings.shipped_config_dir() / name
-            if shipped_baseline.is_dir():
-                candidates.append(str(shipped_baseline))
+        candidates.extend(_chain_for(*active))
     candidates.append(str(app_settings.shipped_config_dir() / "sim_cryostat"))
 
     seen: set[str] = set()
@@ -223,10 +294,17 @@ def _build_gateway_server(
     return server
 
 
-def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    on_station_built: Callable[[Station], None] | None = None,
+) -> None:
     """Start the I2AS application.
 
     Args:
+        argv: The command line (see ``build_parser``), or ``None`` to read
+            the process's own. Bare ``main()`` is what the ``i2as`` console
+            script calls.
         on_station_built: Optional hook run once, immediately after the
             Station is built and before the Monitor window is shown.
             Monitoring is off at that point (the production default), so a
@@ -235,6 +313,13 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
             functions) lands them before anything polls the hardware. Never
             used in normal `python -m i2as.main` startup.
     """
+    parser = build_parser()
+    args = parser.parse_args(sys.argv[1:] if argv is None else list(argv))
+    try:
+        candidates = _startup_candidates(args.config)
+    except LookupError as error:
+        parser.error(str(error))
+
     setup_logging()
 
     app = QApplication(sys.argv)
@@ -268,9 +353,7 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
 
     def _build_station() -> Station:
         """Build the Station from the first usable startup config."""
-        station, used_path, warnings = build_station_with_fallback(
-            _startup_candidates()
-        )
+        station, used_path, warnings = build_station_with_fallback(candidates)
         build["used_path"] = used_path
         build["warnings"] = warnings
         if on_station_built is not None:
@@ -312,7 +395,7 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
     # stack has to be decided before anything is built; a fallback to another
     # config does not change the mode. `I2AS_INSTRUMENT_THREAD` overrides
     # it for one launch, which is how CI runs the GUI suite in both modes.
-    mode = resolve_mode(read_instrument_thread(_startup_candidates()[0]))
+    mode = resolve_mode(read_instrument_thread(candidates[0]))
 
     # Trend-check standard (core/trend_checks.py, GLOSSARY.md's **Trend
     # check**): a small, single-purpose scheduler independent of the
@@ -347,9 +430,10 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
     warnings = build["warnings"]
 
     # Persist the config that actually loaded (by identity, not path) so the
-    # next launch starts there even from a different clone/worktree.
+    # next launch starts there even from a different clone/worktree — unless
+    # the command line chose it, which is a choice for this launch alone.
     used_entry = catalog.get_by_path(used_path)
-    if used_entry is not None:
+    if used_entry is not None and args.config is None:
         app_settings.set_config_active(used_entry.name, used_entry.source)
     if warnings:
         for warning in warnings:
