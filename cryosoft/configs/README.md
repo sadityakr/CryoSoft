@@ -167,8 +167,8 @@ entry (unknown field, `low >= high`) is refused at startup and by
    `setup-commission` skill (writes a per-setup `setup.md`).
 
 ## Files
-One shipped config today; a real setup is added as a sibling directory with
-the same two files.
+Two shipped configs — one per worked example; a real setup is added as a
+sibling directory with the same two files (plus its `setup.md`).
 
 - `sim_cryostat/` — fully simulated reference station, and the station every
   procedure/orchestrator test builds against: `magnet_z`
@@ -178,6 +178,17 @@ the same two files.
   `SimKeithley2182A` pair).
   - `devices.yaml` — all `Sim*` drivers at `SIM::*` addresses; the canonical VI
     graph and `init_params`.
+  - `monitor.yaml` — `tick_interval_ms: 3000`, `max_vi_errors: 3`.
+- `sim_imaging/` — fully simulated widefield-imaging station, the second
+  worked example: `magnet_z` (`SuperconductingMagnetVI` on `SimOxfordIPS120`),
+  `stage_x` and `stage_y` (one `StageAxisVI` per axis, both on one
+  `SimXYStage`, each with its own travel limit) and `camera`
+  (`CameraMeasurementVI` on `SimCamera`, with the `roi` its scalar columns
+  are taken over and the exposure range). The magnet's and the camera's
+  addresses carry the same `@imaging` suffix, which is what couples the
+  simulated sample to the simulated field (the **sim-coupling standard**,
+  `drivers/README.md`); the stage joins no environment.
+  - `devices.yaml` — the VI graph above and its `init_params`.
   - `monitor.yaml` — `tick_interval_ms: 3000`, `max_vi_errors: 3`.
 
 **A real setup and its sim twin.** The intended shape for a real cryostat is a

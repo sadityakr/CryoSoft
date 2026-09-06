@@ -1765,7 +1765,16 @@ CONTROL_LIMIT_EXEMPTIONS: dict[tuple[str, str, str], str] = {
         "Closed-loop derivative time: a tuning constant, clamped by the "
         "controller firmware, that commands no setpoint of its own."
     ),
-    # -- Lock-in oscillator frequency.
+    # -- Camera readout: an enumerated sensor mode and an exposure count.
+    ("CameraMeasurementVI", "initiate_measurement", "binning"): (
+        "On-sensor binning factor: an enumerated readout mode the camera "
+        "either supports or refuses; it selects how pixels are summed and "
+        "drives nothing at the sample."
+    ),
+    ("CameraMeasurementVI", "initiate_measurement", "frames_per_step"): (
+        "Dimensionless exposure count averaged per point; it costs time, "
+        "not light or energy at the sample."
+    ),
 }
 
 
@@ -2096,6 +2105,7 @@ def test_execute_vi_action_refuses_non_control_names(config_dir: Path) -> None:
 _SIM_MEASUREMENT_DRIVER_CLASSES = {
     "source": "cryosoft.drivers.sim_keithley_6221.SimKeithley6221",
     "meter": "cryosoft.drivers.sim_keithley_2182a.SimKeithley2182A",
+    "main": "cryosoft.drivers.sim_camera.SimCamera",
 }
 
 

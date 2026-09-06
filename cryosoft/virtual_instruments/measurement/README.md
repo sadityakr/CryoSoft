@@ -1,8 +1,8 @@
 ﻿# virtual_instruments/measurement/
 
 ## Purpose
-Virtual instruments for electrical transport measurements. Every class here is a
-**measurement method**: a self-describing measurement VI that declares its own
+Virtual instruments for measurements — electrical transport and widefield
+imaging. Every class here is a **measurement method**: a self-describing measurement VI that declares its own
 GUI knobs and output shape and implements one uniform lifecycle, so a generic
 procedure can run any of them without knowing which instrument or protocol is
 behind it. The standard is defined and documented on
@@ -15,6 +15,10 @@ L1 — Virtual Instruments.
 Driver dicts and `init_params` (the setup constants each class needs).
 - `DCSeparateMeasurementVI`: `{"source": <K6221>, "meter": <K2182A>}`,
   `init_params: {max_source_current_A}` (the setup's excitation ceiling).
+- `CameraMeasurementVI`: `{"main": <camera>}`, `init_params: {roi:
+  [x0, y0, width, height], min_exposure_s, max_exposure_s}` — the region
+  the scalar columns are computed over, and the exposure range this
+  setup's camera accepts (the control-validation standard's limit keys).
 
 ## Exit (what goes out)
 The measurement-method standard (all classes obey it):
@@ -148,7 +152,11 @@ with no need to parse the `/metadata` group's JSON `data_config` blob.
 ## Image blocks: a frame is a 2D block, not a row of channels
 
 The **image-block standard** is the raw block's sibling for a camera or any
-instrument whose reading is a frame. A frame has a raw block's `(rows, cols)`
+instrument whose reading is a frame. `camera.py` is the shipped example:
+one `frame` block on the fixed sensor grid, plus the `roi_mean` /
+`roi_std` scalars over a config-declared region of interest, so the live
+plot and the generic sweep recipe still have a scalar and the image-stack
+recipe reads the frames. A frame has a raw block's `(rows, cols)`
 storage shape, but no channel per column: every element is one pixel in one
 unit, and no per-column scalar makes sense. A VI declares it with its pixel
 dimensions and unit instead of a channel-label list:
@@ -157,10 +165,18 @@ dimensions and unit instead of a channel-label list:
 from cryosoft.core.plan import ImageBlock
 
 measurement_image_blocks: ClassVar[dict[str, ImageBlock]] = {
-    "frame": ImageBlock(height_px=256, width_px=256, unit="counts",
+    "frame": ImageBlock(height_px=128, width_px=128, unit="counts",
                         description="Widefield frame at the sample"),
 }
 ```
+
+The declaration is a class attribute, so the frame's shape is a property
+of the VI, not of a run's knobs: `CameraMeasurementVI` asserts the full
+sensor ROI when it arms and expands a binned readout back onto the sensor
+grid (each superpixel repeated), so `binning` changes what a pixel means
+("counts in the superpixel it lies in") and never what the dataset looks
+like — the same fixed-shape guarantee NaN-padding gives an under-delivered
+array.
 
 - `measurement_image_blocks: ClassVar[dict[str, ImageBlock]]` — block name →
   declaration. The declared `height_px`/`width_px` fix the frame's shape for
@@ -322,7 +338,10 @@ shared-6221 handoff test for the pattern.
    per point (see the Exit section above).
 4. If the VI needs a driver role not already in
    `tests/test_conformance.py::_SIM_MEASUREMENT_DRIVER_CLASSES`, add its sim
-   driver there so the round-trip conformance test can build it.
+   driver there so the round-trip conformance test can build it (`source`
+   and `meter` are the DC pair, `main` the camera). A VI that takes frames
+   declares them in `measurement_image_blocks` (the image-block standard
+   above) and returns each under its block name from `take_reading()`.
 5. Register in `devices.yaml`; add behaviour tests to `tests/test_l1_new_vis.py`.
 
 ## Files
@@ -336,4 +355,13 @@ shared-6221 handoff test for the pattern.
   tests: `tests/test_measurement_dc_vi.py`,
   `tests/test_l1_new_vis.py` (`TestDCSeparateMeasurementVI`),
   `tests/test_new_procedures.py` (reading loop).
+- `camera.py` — `CameraMeasurementVI`: widefield imaging as a measurement
+  method and the shipped example of the image-block standard. Parameters
+  `exposure_s` (seconds-valued, so the duration estimate counts it),
+  `binning` (enumerated) and `frames_per_step`; one `frame` image block on
+  the 128x128 sensor grid, averaged over the exposures; `roi_mean` (the
+  mean/error/array triple over the per-exposure ROI means) and `roi_std`
+  scalars over the config `roi`; `read_now()` plus `last_roi_mean` /
+  `last_roi_std` as the bench hook; `standby()` disarms. tests:
+  `tests/test_l1_camera_stage_vis.py`, `tests/test_conformance.py`.
 - `__init__.py` — package marker. tests: none.
