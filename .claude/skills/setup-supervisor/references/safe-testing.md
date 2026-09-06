@@ -30,13 +30,13 @@ when in doubt.
 
 | Category (example) | L2 test value | Rationale |
 |---|---|---|
-| Superconducting magnet PSU (Mercury iPS, IPS120) | ≤ 10 mA lead current | ~1.3 mT on this setup (7.954 A/T) — negligible field, proves the PSU sources and reads back |
+| Magnet PSU (e.g. IPS120) | ≤ 10 mA lead current | about 1 mT at a typical 10 A/T coil constant — negligible field, proves the PSU sources and reads back |
 | Precision current source (Keithley 6221) | ≤ 1 nA, smallest range | proves sourcing five orders below full scale; sample-safe for most devices |
 | Nanovoltmeter (Keithley 2182A) | none — passive | reading voltage is already zero-excitation |
-| Temperature controller (ITC503, Lakeshore 335) | setpoint change ≤ 1 K *from the current temperature*, then restore | proves the control loop path without a thermal excursion |
-| Needle valve / gas flow | ≤ 5 % step from current position, then restore | avoids pressure/flow transients |
-| Cryogen level meter (ILM200) | none — passive | |
-| Switch heater (persistent magnets) | **never in diagnostics** | heater cycling has quench implications; L3 only, human present |
+| Temperature controller (Lakeshore 335) | setpoint change ≤ 1 K *from the current temperature*, then restore | proves the control loop path without a thermal excursion |
+| Sample stage | ≤ 100 µm move from the current position, then restore | proves the axis drives and reads back without approaching a travel limit or whatever sits above the sample |
+| Camera / detector | none — passive | an exposure changes nothing at the sample; read one frame back |
+| Any output whose consequences the human has not described | **never in diagnostics** | L3 only, human present |
 
 ## Rules
 

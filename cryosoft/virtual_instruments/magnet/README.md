@@ -20,8 +20,8 @@ A driver dict `{"main": <PSU real driver>}` and optional `init_params`:
 HOLD/RAMPING/QUENCH/CLAMPED, read straight from the driver), `magnet_state() →
 str` (this VI's logical interpretation of PSU status plus the live current
 readings — "standby"/"ramping"/"holding"/"quenched"/"clamped"; see
-GLOSSARY.md's **Magnet state**). Operations gate readiness on `magnet_state()`, never on
-raw current thresholds — see GLOSSARY.md's **Magnet state**.
+GLOSSARY.md's **Magnet state**). A caller that needs "is this magnet idle"
+reads `magnet_state()`, never raw current thresholds.
 `@control` actions: `set_field(target_T)` — bounded by the setup's field limit
 via the control-validation standard (`control_limits`); an out-of-range value
 raises `CryoSoftSafetyError` before any hardware command.

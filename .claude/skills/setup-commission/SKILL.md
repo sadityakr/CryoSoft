@@ -1,9 +1,9 @@
 ---
 name: setup-commission
-description: Bring a new cryostat setup (or a changed instrument rack) into CryoSoft - interview the human, write the config folder's setup.md, build/extend devices.yaml with expect_idn identity checks, iterate the troubleshoot preflight until green, bench each instrument at safe excitation levels, and deliver a signed-off preflight report. Use when the user says "set up CryoSoft on this system", "commission the new setup", "we added/replaced an instrument", or a fresh install must be verified before first measurements.
+description: Bring a new instrument setup (or a changed rack) into I2AS - interview the human, write the config folder's setup.md, build/extend devices.yaml with expect_idn identity checks, iterate the troubleshoot preflight until green, bench each instrument at safe excitation levels, and deliver a signed-off preflight report. Use when the user says "set up I2AS on this system", "commission the new setup", "we added/replaced an instrument", or a fresh install must be verified before first measurements.
 ---
 
-# setup-commission — bringing a setup into CryoSoft
+# setup-commission — bringing a setup into I2AS
 
 Goal: after this workflow, the setup has a green preflight, a `setup.md` that
 future agents can trust, and an honest record of what was and was not
@@ -18,7 +18,8 @@ binds every step here. The main app must be closed while commissioning.
 
 ### 1. Interview
 Ask the human, in one batch: which instruments (make + model), what each one
-does physically (which magnet axis, which thermometer, sample vs VTI), how
+does physically (which axis a magnet drives, which thermometer reads the sample, what a
+detector images), how
 each is connected (GPIB address / COM port, as far as known), what is
 currently wired downstream of every source (sample? shorting plug? open
 leads?), and any known oddities. Missing answers become explicit TODOs, not
@@ -26,7 +27,9 @@ guesses.
 
 ### 2. Draft setup.md — the human signs it
 Copy `references/setup-md-template.md` into the config directory as
-`setup.md` and fill it from the interview. Present it to the human for
+`setup.md` and fill it from the interview; the shipped
+`cryosoft/configs/sim_cryostat/setup.md` and `sim_imaging/setup.md` are
+filled-in examples of the same template. Present it to the human for
 correction and explicit confirmation before proceeding: this file becomes
 ground truth for every future agent, so an error here propagates forever.
 Record the confirmation date in the file header.
@@ -40,12 +43,15 @@ is a supervised step: the human spot-checks it, because a wrong cheat sheet
 misleads every later diagnosis.
 
 ### 4. Config
-Create or extend `devices.yaml` (copy the nearest shipped config as the
-starting point; addresses and limits belong in YAML, never in code). For
+Create or extend `devices.yaml` (copy the nearer of the two shipped configs
+as the starting point — `cryosoft/configs/sim_cryostat/` for a transport
+rack, `sim_imaging/` for a detector over a positioned sample; addresses and
+limits belong in YAML, never in code). For
 every driver entry add `expect_idn` — but only after step 5 has shown the
 real identity string; never invent one. New instrument without a driver?
 That is the separate driver-development workflow (sim first, tests, then
-real; see project CLAUDE.md §8) — commission pauses until the driver exists.
+real; see CLAUDE.md, "Build bottom-up, test at every layer") — commission
+pauses until the driver exists.
 
 ### 5. Preflight loop
 `python -m cryosoft.troubleshoot check --config <name> --json`, then fix
@@ -68,16 +74,17 @@ answers it:
   flakiness early — better now than mid-cooldown.
 
 ### 7. Preflight report and handover
-Write the report to `cryosoft/logs/incidents/YYYY-MM-DD-commissioning-<name>.md`
-(same folder as incident reports, it is the positive counterpart):
+Write the report to `incidents/YYYY-MM-DD-commissioning-<name>.md` under the
+resolved log directory (`cryosoft.core.paths.log_directory()`; the same
+folder as incident reports, it is the positive counterpart):
 - table of instruments: address, IDN, FaultCode history during commissioning,
   bench rung reached;
 - **verified** vs **not verified** — be explicit: "responds with correct IDN"
   is necessary, not sufficient; sample wiring, field calibration, and
   thermometry accuracy are NOT proven by this workflow;
 - open TODOs (missing manuals, placeholder addresses, L2 tests skipped).
-Then: LOGBOOK.md entry, commit the config + setup.md (manuals stay
-gitignored), and tell the human the setup's honest status in two sentences.
+Then: commit the config + setup.md (manuals stay gitignored; add a
+LOGBOOK.md entry if you keep one), and tell the human the setup's honest status in two sentences.
 
 ## Failure discipline
 

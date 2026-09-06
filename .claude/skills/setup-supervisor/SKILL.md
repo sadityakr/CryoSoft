@@ -1,9 +1,9 @@
 ---
 name: setup-supervisor
-description: Diagnose CryoSoft setup problems from a plain-language symptom ("the field isn't ramping", "no reading from the sample thermometer", "values look frozen") using the troubleshoot CLI, the fault taxonomy, and a triage decision tree. The human handles only hardware actions; the agent diagnoses systematically, fixes software faults through the harness, and never monkey-patches. Use whenever the user reports instrument or setup misbehavior, asks to check what is connected, or a measurement fails for unclear reasons.
+description: Diagnose I2AS setup problems from a plain-language symptom ("the field isn't ramping", "no reading from the sample thermometer", "values look frozen") using the troubleshoot CLI, the fault taxonomy, and a triage decision tree. The human handles only hardware actions; the agent diagnoses systematically, fixes software faults through the harness, and never monkey-patches. Use whenever the user reports instrument or setup misbehavior, asks to check what is connected, or a measurement fails for unclear reasons.
 ---
 
-# setup-supervisor — systematic diagnosis of a CryoSoft setup
+# setup-supervisor — systematic diagnosis of a I2AS setup
 
 You are the debugger so the human does not have to be. The human describes the
 symptom in plain language and acts as hands and eyes at the rack; you do
@@ -19,7 +19,7 @@ a diagnosis is *derived*, not guessed.
 
 ## Preconditions
 
-- The main CryoSoft app must be CLOSED before running any troubleshoot
+- The main I2AS app must be CLOSED before running any troubleshoot
   command (serial instruments are exclusive-open). Ask the human to close it
   and confirm.
 - Identify the active config: `python -m cryosoft.troubleshoot check --json`
@@ -31,7 +31,7 @@ a diagnosis is *derived*, not guessed.
 
 1. **Capture the symptom.** Restate what the human reported as: what was
    expected, what happened instead, when it started, what changed recently
-   (check `LOGBOOK.md` and recent commits).
+   (check recent commits, and `LOGBOOK.md` if one is kept).
 2. **Gather passive evidence first** (no instrument I/O): find the log
    directory — `cryosoft.core.paths.log_directory()` resolves it
    (default `%LOCALAPPDATA%\CryoSoft\logs` on Windows, overridable via the
@@ -64,8 +64,7 @@ a diagnosis is *derived*, not guessed.
      step 2) and tell the human what a stronger model or a human expert
      should look at. A good report is a success; a guess or a workaround is
      a failure.
-6. **Write back.** Every episode ends with: a LOGBOOK.md entry (symptom,
-   diagnosis, evidence, resolution); a new dated entry under "Known quirks"
+6. **Write back.** Every episode ends with: a new dated entry under "Known quirks"
    in the config's `setup.md` if the cause was a property of this setup; and,
    if the triage tree was missing the branch you needed, propose the addition
    to the human (do not silently rewrite the tree).
@@ -74,7 +73,7 @@ a diagnosis is *derived*, not guessed.
 
 - `write`, `query`, and `send` are permission-prompted by the harness — that
   prompt is the human's veto, so never batch many writes into one approval.
-- Magnet current, switch heater, and any heater output additionally require
+- Magnet current and any heater output additionally require
   explicit conversational confirmation from the human, every time, even if
   the permission prompt would allow it.
 - Follow the excitation ladder in `references/safe-testing.md`: passive →

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Publish what CryoSoft measured into an **electronic lab notebook**, without
+Publish what I2AS measured into an **electronic lab notebook**, without
 ever letting the notebook's availability affect a measurement. Six
 separable pieces: a backend-neutral **ELN adapter** standard (`adapter.py`)
 with an eLabFTW backend and an in-memory sim twin, deterministic **body

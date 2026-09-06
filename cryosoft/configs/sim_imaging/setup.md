@@ -1,8 +1,8 @@
 # Setup: Simulated widefield-imaging station  <!-- confirmed by the shipped example, 2026-09-06 -->
 
 ## Identity
-- Cryostat: none — a fully simulated station, the second worked example
-- CryoSoft config: `sim_imaging`
+- Station: none — a fully simulated imaging station, the second worked example
+- Config: `sim_imaging`
 - Responsible humans: whoever runs the sim; nothing here can be damaged
 
 ## Instruments and their purposes
@@ -41,8 +41,7 @@ Dated, newest first.
 
 ## Safety notes
 None — simulated. A real imaging setup would record here what energising
-the magnet does to the objective and the stage, and where the cryogen
-handling contacts are.
+the magnet does to the objective and the stage, and whom to call.
 
 ## Not commissioned / open TODOs
 Nothing: the sim exists to be run without commissioning. A real setup

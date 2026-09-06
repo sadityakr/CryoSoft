@@ -1,4 +1,4 @@
-"""Offscreen visual smoke test for the CryoSoft GUI.
+"""Offscreen visual smoke test for the I2AS GUI.
 
 Builds the real application (sim_cryostat config, real stylesheet) without a
 display, drives it into its visually distinct states (idle, stale panel,

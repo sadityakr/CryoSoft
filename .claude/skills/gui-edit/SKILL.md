@@ -1,15 +1,15 @@
 ---
 name: gui-edit
-description: How to modify the CryoSoft GUI layer (cryosoft/gui/) correctly - theme tokens, Qt dynamic-property styling, layout rules, notification policy, and the mandatory offscreen screenshot verification. Use for any change to GUI widgets, styling, colors, layout, or GUI tests.
+description: How to modify the I2AS GUI layer (cryosoft/gui/) correctly - theme tokens, Qt dynamic-property styling, layout rules, notification policy, and the mandatory offscreen screenshot verification. Use for any change to GUI widgets, styling, colors, layout, or GUI tests.
 ---
 
-# gui-edit — editing the CryoSoft GUI layer
+# gui-edit — editing the I2AS GUI layer
 
 The GUI was rebuilt in July 2026 (light theme, layered on validated design
 tokens). These rules keep edits consistent with that system. Layer rules are
 machine-enforced: contract C8 in `pyproject.toml` (import-linter) forbids the
 GUI from importing drivers or concrete VIs (`virtual_instruments.base` is the
-one allowed exception). CI runs `make lint + make contracts + make test`.
+one allowed exception). CI runs `make check` (lint, contracts, and the suite in both thread modes).
 
 ## Files
 
@@ -35,7 +35,7 @@ one allowed exception). CI runs `make lint + make contracts + make test`.
 | `tests/test_gui.py` | pytest-qt suite; run with `-p no:randomly` when run alone |
 
 Destruction-order rule: Orchestrator signals that feed child panels (e.g.
-`states_updated` → Trends / Operations) must connect to a WINDOW slot that
+`states_updated` → Trends / RampTracker) must connect to a WINDOW slot that
 forwards to the panels, never to the panel directly — Qt severs a receiver's
 connections at the start of its own destruction, so the window-as-receiver
 topology is what stops a live tick from reaching a partially destroyed child
@@ -89,10 +89,13 @@ tree (RuntimeError/segfault on a deleted plot curve under pytest-qt).
 
 ## Verification (all three, every time)
 
-1. `& "<repo>\.venv\Scripts\python.exe" -m pytest tests/test_gui.py -q -p no:randomly`
-2. Full suite: `... -m pytest tests/ -q`
+1. `python -m pytest tests/test_gui.py -q -p no:randomly` from the activated
+   `.venv`, then again with `CRYOSOFT_INSTRUMENT_THREAD=0` (the inline leg
+   `make test-instrument-inline` runs) — a handler that only holds inline is
+   a bug the threaded default will expose.
+2. Full suite: `make check`.
 3. **Offscreen screenshot smoke — mandatory for any visible change:**
-   `& "<repo>\.venv\Scripts\python.exe" .claude\skills\gui-edit\scripts\gui_smoke.py`
+   `QT_QPA_PLATFORM=offscreen python .claude/skills/gui-edit/scripts/gui_smoke.py`
    writes PNGs of both windows (idle + error/stale/emergency states) to
    `tmp/gui-edit/<timestamp>/` and prints effective banner/status-bar colors.
    Open the PNGs and look at them. Tests assert properties; only pixels catch

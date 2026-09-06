@@ -1,7 +1,7 @@
 # Upgrading to Session folders
 
-CryoSoft now organizes experiments inside **Sessions** — named folders that
-each hold several experiments. If you used CryoSoft before this change,
+I2AS now organizes experiments inside **Sessions** — named folders that
+each hold several experiments. If you used I2AS before this change,
 your existing experiment folders sit directly under the measurement root
 (the fixed data folder your installation is configured to use), rather than
 inside a Session folder. This note explains what changed and how to see
@@ -17,7 +17,7 @@ dialog looks in.
 
 ## Nothing is lost, and nothing moves automatically
 
-Your old data is untouched, exactly where it always was. CryoSoft does not
+Your old data is untouched, exactly where it always was. I2AS does not
 move anything on your behalf: whether to bring old experiments into a
 Session is entirely your choice, and skipping this is fine if you don't
 need to reopen that data through the app.
@@ -35,7 +35,7 @@ its folder into a Session folder by hand:
    `<measurement_root>/sessions/<session_id>/<experiment_id>/`.
 
 Use Windows Explorer or any plain file move for this — there is no button
-in CryoSoft that does it for you. Once moved, the experiment appears in
+in I2AS that does it for you. Once moved, the experiment appears in
 Open Experiment… the next time that Session is active.
 
 ## Ask if you're not sure

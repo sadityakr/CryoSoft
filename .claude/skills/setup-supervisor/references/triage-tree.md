@@ -37,7 +37,7 @@ hardware. Terminal: hardware handoff (one instruction at a time), except the
 quirk entry.
 
 ### `OPEN_FAILED`
-The resource exists but will not open. Causes: the main CryoSoft app (or NI
+The resource exists but will not open. Causes: the main I2AS app (or NI
 MAX, or another session) still holds the port → wrong resource type in the
 address string. Discriminate: ask the human to confirm the app is closed;
 retry; check the address format against `scan` output. Terminal: usually
@@ -45,8 +45,8 @@ procedural (close the other program), else software fix (address string).
 
 ### `NO_RESPONSE`
 Opens but silent. Causes: (serial) wrong baud/termination settings → wrong
-protocol (SCPI `*IDN?` sent to a pre-SCPI Oxford instrument — retry `probe`
-with `--idn-command V`) → instrument hung (human power-cycles) → dead
+protocol (an instrument that does not answer `*IDN?` — retry `probe` with
+`--idn-command <its own identify command>`) → instrument hung (human power-cycles) → dead
 interface board. Discriminate: cheat sheet (`manuals/notes/`) for the correct
 serial parameters and identify command; try the protocol-correct probe before
 concluding hardware. Terminal: software fix if protocol/config, hardware

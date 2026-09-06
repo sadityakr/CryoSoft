@@ -182,7 +182,7 @@ is.
   (`Gateway.run_owner()`), and — exactly like the kill switch — the engine
   enforces it a second time at the single writer, which is the authority;
   conformance diffs the two command sets so they cannot drift. The two
-  arguments are published on the four tools' schemas
+  arguments are published on `abort_procedure`'s schema
   (`tools.COMMAND_ARG_SCHEMAS`), so every client offers the override with no
   code of its own.
 - **A request that arrived as a file is capped.** `authorize_spooled()` is the
@@ -243,9 +243,9 @@ is.
   reader of the code reads.
 - **A signature becomes a schema.** A scalar parameter renders straight from
   its annotation. Some commands' JSON `args` are not the method's parameters:
-  five are translated by `Orchestrator.submit()` (a procedure travels as a
+  four are translated by `Orchestrator.submit()` (a procedure travels as a
   class name plus its params, an envelope as a mapping, the kill switch as
-  its `AgentGate` value), and the four owner-scoped ones carry
+  its `AgentGate` value), and the one owner-scoped command carries
   `override_owner` and `reason` on the wire, which the `command` decorator
   absorbs before the method is called (the **run-ownership standard**). All
   of them are declared once in `COMMAND_ARG_SCHEMAS`, each with the
@@ -342,7 +342,7 @@ start.
 ### A capability's class is declared on the capability
 
 The line between "an agent may do this alone overnight to keep a run alive"
-and "this commands the cryostat" is a judgement about a specific instrument,
+and "this commands the station" is a judgement about a specific instrument,
 not something derivable from a method signature — so it is not made here.
 It is **declared on the `@control` itself**
 (`@control(action_class="run_control")`, the action-class declaration, see

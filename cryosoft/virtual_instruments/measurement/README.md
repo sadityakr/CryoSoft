@@ -80,8 +80,8 @@ Uniform lifecycle (methods)
   metadata as `procedure_params["loop1_values"]` / `["loop2_values"]`.
   Setters must accept the parameter under its own name and never change the
   reading's shape. The same standard lives on `BaseVirtualInstrument` (plus
-  `reading_parameters` / `reading_safe_off`), so non-measurement VIs like
-  the switch participate identically. Full contract in the base docstrings.
+  `reading_parameters` / `reading_safe_off`), so a non-measurement VI — a
+  routing instrument, say — participates identically. Full contract in the base docstrings.
 
 ## Interface contract
 DC measurement classes inherit `DCMeasurementBase` (which fixes the DC-resistance
@@ -213,7 +213,7 @@ rows verbatim (including any instrument-emitted NaN, e.g. a ratiometric
 divide-by-zero), padded with `float("nan")` out to the declared length. The
 mean, SEM, and `n_valid` are computed over the delivered samples BEFORE
 padding — never by filtering NaN out of the padded array, which would
-conflate CryoSoft's own padding with a NaN the instrument itself emitted. Row
+conflate I2AS's own padding with a NaN the instrument itself emitted. Row
 selection when more samples arrived than requested (first-*n* vs last-*n*) is
 per-instrument physics — documented on that VI's own `take_reading()`, not
 standardised here. A VI whose instrument always delivers exactly the
@@ -225,11 +225,11 @@ the `n_valid` standard".
 Some instruments expose far more configuration surface than a VI wraps
 (analysis modes, pulse trains, reference muxing, preamp modes, …). A VI may
 support an operator configuring the instrument with the vendor's own tool and
-letting CryoSoft run only the measurement — arm the data path, trigger,
+letting I2AS run only the measurement — arm the data path, trigger,
 read, and save a fixed-shape data block — without touching that
 configuration. This is the `configured_externally` standard on
 `MeasurementInstrumentBase`, motivated by single-client instrument firmware
-where the vendor tool and CryoSoft are mutually exclusive at the instrument.
+where the vendor tool and I2AS are mutually exclusive at the instrument.
 No shipped VI declares it today; the standard is stated here so the first VI
 that needs it inherits the whole mechanism rather than inventing one.
 
@@ -251,7 +251,7 @@ When `self._configured_externally` is true:
   accepted (procedures pass them regardless of mode); log one INFO listing
   the ignored parameters.
 - `standby()` MUST NOT overwrite externally-owned source state. It resets
-  only CryoSoft's own internal arming state; releasing the hardware resource
+  only I2AS's own internal arming state; releasing the hardware resource
   is no longer this method's own job — see "Detached-idle lifecycle" below.
 
 A VI supporting external configuration MUST declare
@@ -261,7 +261,7 @@ A VI supporting external configuration MUST declare
 (`active_measurement_parameters`) and the reading-loop registry
 (`reading_parameters`) both hide those names automatically once
 `configured_externally` is true, with no per-VI form code. Data-path
-parameters (e.g. a tensor-component selector, a readings-per-point count —
+parameters (e.g. a readings-per-point count, a frames-per-step count —
 anything that writes nothing to the instrument) stay off this set, so they
 remain operator-controlled, and rendered, in every mode. The empty default
 changes nothing for a VI that does not support external configuration;
@@ -281,7 +281,7 @@ case for `BaseVirtualInstrument`'s declared `detach_when_idle` standard
 restates the standard itself. A VI opts in with one line —
 `detach_when_idle` returning `self._configured_externally` — and the base
 does everything else: born detached (`__init__` calls `self._detach()`
-before returning, so starting CryoSoft while the vendor tool is open builds
+before returning, so starting I2AS while the vendor tool is open builds
 cleanly), a `ping()` verify-and-release path (reattach, a true round trip,
 then release — so `initiate()`, which calls `ping()`, returns a clean
 failure verdict rather than raising when the instrument is currently held

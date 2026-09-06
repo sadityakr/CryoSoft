@@ -1,11 +1,11 @@
 ---
 name: troubleshoot-runtime
-description: Explain what a RUNNING CryoSoft measurement is doing and whether it is stuck, slow, or normal. Reads the live operational-status log (status.jsonl, in the resolved log directory — see cryosoft.core.paths.log_directory(), overridable via CRYOSOFT_LOG_DIR — written by the Orchestrator each tick) via `python -m cryosoft.troubleshoot status` and interprets state, per-instrument ramp progress, ETA, and stall alerts in plain language for the operator. Use when the app is running and the user asks "why is this taking so long", "is it stuck", "what is it doing", "is this normal". NOT for setup-time instrument or config faults with the app closed — that is the setup-supervisor skill.
+description: Explain what a RUNNING I2AS measurement is doing and whether it is stuck, slow, or normal. Reads the live operational-status log (status.jsonl, in the resolved log directory — see cryosoft.core.paths.log_directory(), overridable via CRYOSOFT_LOG_DIR — written by the Orchestrator each tick) via `python -m cryosoft.troubleshoot status` and interprets state, per-instrument ramp progress, ETA, and stall alerts in plain language for the operator. Use when the app is running and the user asks "why is this taking so long", "is it stuck", "what is it doing", "is this normal". NOT for setup-time instrument or config faults with the app closed — that is the setup-supervisor skill.
 ---
 
 # troubleshoot-runtime — explain what a running measurement is doing
 
-The user (often a PhD student operating the cryostat) is watching a run and
+The user (often a student operating the station) is watching a run and
 cannot tell whether a long ramp is normal or wedged. Your job is to read the
 live status log and tell them, in plain language, what is happening and whether
 to worry.
@@ -53,8 +53,7 @@ app paused.
 
 - **"Is it stuck?"** Look at `verdict` and `alerts`. `RAMP_STALLED` is a
   high-confidence "yes, stuck" (the stall detector is deliberately lenient, so
-  an alert is meaningful). `STALLED_RUN` is reserved vocabulary that a current
-  build no longer produces — if you see it, the log is old. `OK` with a gap
+  an alert is meaningful). `OK` with a gap
   that is `closing` is normal progress.
 - **"Why is it taking so long?"** Look at the instrument's `gap`, `trend`, and
   ETA. If it is `closing` with a large ETA, it is simply a big/slow ramp, not a
@@ -83,9 +82,11 @@ final word. The open-ended reasoning is yours:
   responding. Diagnosing that needs to probe the instrument, which requires the
   app CLOSED. Explain the finding, then hand off to `setup-supervisor` (which
   the user runs after closing the app).
-- If the verdict is `QUENCH`, treat it as an emergency: the run should already
-  be in EMERGENCY. Confirm the magnet and helium state; do not attempt to clear
-  it from software.
+- If the verdict is `CRITICAL_FLAG`, a VI's critical safety flag has tripped
+  (the sim magnet's `quench`; a real setup's interlock, whatever it declared):
+  treat it as an emergency — the station should already be in EMERGENCY. Say
+  which instrument raised it from the `--json` instrument fields; do not
+  attempt to clear it from software.
 
 ## Do not act destructively without asking
 

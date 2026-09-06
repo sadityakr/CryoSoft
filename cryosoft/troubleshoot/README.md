@@ -74,8 +74,9 @@ satisfiable at all. Anything Qt belongs in `cryosoft/gui/`, not here.
 `python -m cryosoft.troubleshoot <subcommand>` — one-shot commands, each
 terminating on its own, with `--json` for machine-readable output and exit
 code 0 (all OK) / 1 (any fault). Every invocation appends a JSONL line to
-`cryosoft/logs/troubleshoot.jsonl` (the session transcript agents mine when
-hardening the triage skill).
+`troubleshoot.jsonl` in the resolved log directory
+(`cryosoft.core.paths.log_directory()`, overridable via `CRYOSOFT_LOG_DIR`)
+— the session transcript agents mine when hardening the triage skill.
 
 | Subcommand | What it does | Allowlist-safe? |
 |---|---|---|
@@ -85,7 +86,7 @@ hardening the triage skill).
 | `bench-l0 [--config X]` | L0 bench: idn + one passive getter per driver (zero excitation) | yes |
 | `status [--log P] [--last N] [--max-age S]` | summarize the RUNNING app's operational-status log (`status.jsonl`); the only command that reads the live app rather than the instruments | yes |
 | `session [EXPERIMENT_DIR]` | report on one experiment folder — its runs in order (kind, procedure, outcome, start/end, duration, data file), its session envelope, and any incident reports filed beside it; defaults to the most recently modified experiment under the measurement root | yes |
-| `trends [--config X] [--window 8h]` | evaluate the declared trend checks (temperature stability) plus the pull-only `trend_store_live` check, against the trend-history store on disk | yes |
+| `trends [--config X] [--window 8h]` | evaluate the trend checks the config's `trends:` block declares plus the pull-only `trend_store_live` check, against the trend-history store on disk | yes |
 | `methods <target>` | list a driver's public methods | yes |
 | `idn <target>` | identify one instrument via its driver | yes |
 | `read <target> <method> [args] [--repeat N] [--interval S]` | call a read-only driver method; repeats expose intermittent/timing faults | yes |

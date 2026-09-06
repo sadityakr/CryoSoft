@@ -74,6 +74,17 @@ class InstrumentNameMeasurementVI(MeasurementInstrumentBase):
     # reprograms just that value without re-running initiate_measurement().
     # reading_setters: ClassVar[dict[str, str]] = {"source_value": "set_source_value"}
 
+    # Declare ONLY if the reading is a frame (a camera, any 2-D datum in one
+    # unit): the image-block standard. take_reading() then returns the frame
+    # under the block name as a (height_px, width_px) numpy array, alongside
+    # the scalars; keep a scalar column derived from it so the live plot has
+    # something to show. See virtual_instruments/measurement/camera.py.
+    # from cryosoft.core.plan import ImageBlock
+    # measurement_image_blocks: ClassVar[dict[str, ImageBlock]] = {
+    #     "frame": ImageBlock(height_px=128, width_px=128, unit="counts",
+    #                         description="TODO what one pixel measures"),
+    # }
+
     def __init__(self, drivers: dict[str, object], **init_params: Any) -> None:
         """TODO: docstring — what init_params this VI reads.
 
@@ -98,8 +109,10 @@ class InstrumentNameMeasurementVI(MeasurementInstrumentBase):
         n = int(params["readings_per_point"])
         return {key: n for key in self.measurement_data_keys}
 
-    # panel=False: arming is a deliberate act, never on the compact monitor card.
-    @control(panel=False)
+    # panel=False: arming is a deliberate act, never on the compact monitor
+    # card. action_class: arming commands the instrument, so an agent needs
+    # run_control authority for it (every @control declares its class).
+    @control(panel=False, action_class="run_control")
     def initiate_measurement(
         self,
         source_value: float = 1e-6,
@@ -155,7 +168,7 @@ class InstrumentNameMeasurementVI(MeasurementInstrumentBase):
     # Optional: reading-loop setter (only if reading_setters is declared above)
     # ------------------------------------------------------------------
 
-    # @control
+    # @control(action_class="run_control")
     # def set_source_value(self, source_value: float) -> None:
     #     """Reprogram source_value without re-arming. Keep control_limits here too
     #     if it's the same bounded parameter (control_limits = {..., "set_source_value": {...}})."""
