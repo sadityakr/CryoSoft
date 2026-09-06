@@ -92,7 +92,7 @@ def hold_flag(station, monkeypatch):
 
     No shipped VI declares one (see ``tests/scenarios.declare_hold_flag``),
     so the tests of the safety-hold half of the System-Condition standard
-    declare it here: reported by ``temperature_vti``, concerned-with by
+    declare it here: reported by ``temperature``, concerned-with by
     ``magnet_z``. ``trip()``/``clear()`` drive it.
     """
     from tests import scenarios
@@ -525,7 +525,7 @@ def test_status_messages_emitted_during_run(orchestrator, station, qtbot):
 def test_station_setpoint_and_measurement_labels(station):
     """Station exposes each VI's declarative label/unit for status lines."""
     assert station.system_setpoint_meta("magnet_z") == ("field", "T")
-    assert station.system_setpoint_meta("temperature_vti") == ("temperature", "K")
+    assert station.system_setpoint_meta("temperature") == ("temperature", "K")
     assert station.measurement_label("dc_measurement") == "DC resistance"
     # Unknown VI degrades to (name, "") / name rather than raising.
     assert station.system_setpoint_meta("nope") == ("nope", "")
@@ -825,10 +825,10 @@ def test_stop_ramp_holds_that_vi_and_leaves_the_others_alone(
 ):
     """A manual ramp is stopped per instrument, unlike abort_procedure()."""
     station.get_vi("magnet_z").set_field(5.0)
-    station.get_vi("temperature_vti").set_temperature(200.0)
+    station.get_vi("temperature").set_temperature(200.0)
     orchestrator._tick()
     assert {r.vi_name for r in orchestrator.active_ramps()} == {
-        "magnet_z", "temperature_vti",
+        "magnet_z", "temperature",
     }
 
     with qtbot.waitSignal(orchestrator.action_succeeded, timeout=500) as blocker:
@@ -836,9 +836,9 @@ def test_stop_ramp_holds_that_vi_and_leaves_the_others_alone(
     assert blocker.args == ["magnet_z", "stop_ramp"]
 
     assert station.get_vi("magnet_z").ramp_status() == "IDLE"
-    assert station.get_vi("temperature_vti").ramp_status() == "RAMPING"
+    assert station.get_vi("temperature").ramp_status() == "RAMPING"
     # The stopped row leaves the tracker immediately, not a tick later.
-    assert [r.vi_name for r in orchestrator.active_ramps()] == ["temperature_vti"]
+    assert [r.vi_name for r in orchestrator.active_ramps()] == ["temperature"]
 
 
 def test_stop_ramp_returns_the_machine_to_idle_on_the_next_tick(
@@ -1001,7 +1001,7 @@ def test_stale_claimed_vi_during_procedure_fails_run_to_idle(orchestrator, stati
 
     # Every OTHER instrument stays usable: a manual action on an unfaulted
     # VI is admitted immediately (no run is active any more).
-    admitted, _ = orchestrator._manual_action_admissible("temperature_vti")
+    admitted, _ = orchestrator._manual_action_admissible("temperature")
     assert admitted is True
 
     # The faulted VI itself is refused until it recovers or is retried.
@@ -1025,10 +1025,10 @@ def test_stale_unclaimed_vi_while_monitoring_is_warning_only(orchestrator, stati
     orchestrator.error_event.connect(lambda ev: events.append(ev))
 
     assert orchestrator._state == OrchestratorState.IDLE
-    station.temperature_vti._driver._simulate_error = True
+    station.temperature._driver._simulate_error = True
 
     def has_fault():
-        return "temperature_vti" in station.vi_faults()
+        return "temperature" in station.vi_faults()
 
     qtbot.waitUntil(has_fault, timeout=1000)
 
@@ -1036,12 +1036,12 @@ def test_stale_unclaimed_vi_while_monitoring_is_warning_only(orchestrator, stati
     assert orchestrator._state == OrchestratorState.IDLE
 
     fault_events = [
-        e for e in events if e.kind == "fault" and e.vi_name == "temperature_vti"
+        e for e in events if e.kind == "fault" and e.vi_name == "temperature"
     ]
     assert fault_events
     assert fault_events[-1].severity == "warning"
 
-    station.temperature_vti._driver._simulate_error = False
+    station.temperature._driver._simulate_error = False
 
 
 def test_unhandled_tick_exception_still_enters_error(orchestrator, qtbot, monkeypatch):
@@ -1068,7 +1068,7 @@ def test_hold_flag_holds_concerned_vis_without_emergency(orchestrator, station, 
 
     The declared flag is hold-only and magnet_z is the only VI concerned
     with it (see the ``hold_flag`` fixture): magnet_z is refused manual
-    control the moment the hold is recorded, while temperature_vti — the VI
+    control the moment the hold is recorded, while temperature — the VI
     that REPORTS the flag, and is not concerned with it — keeps operating
     freely and the Orchestrator never leaves IDLE.
     """
@@ -1086,7 +1086,7 @@ def test_hold_flag_holds_concerned_vis_without_emergency(orchestrator, station, 
     assert orchestrator._state == OrchestratorState.IDLE
 
     with qtbot.waitSignal(orchestrator.action_succeeded, timeout=500):
-        orchestrator.submit_vi_action("temperature_vti", "initiate")
+        orchestrator.submit_vi_action("temperature", "initiate")
 
     # The flag clears; the hold lifts on the next tick, on its own — no
     # acknowledgment needed.
@@ -1462,7 +1462,7 @@ def test_quench_emergency_blocks_all_manual_control(orchestrator, station, qtbot
     regardless of which VI reported the quench or which VI's
     safety_concerns() name it. This is the inversion of the old
     "unconcerned VI stays usable" behavior — dc_measurement (a plain
-    measurement VI with no safety_concerns() at all) and temperature_vti
+    measurement VI with no safety_concerns() at all) and temperature
     (unaffected by quench under either the old or new safety_concerns())
     are refused exactly like magnet_z, until acknowledge()
     unlocks the manual override.
@@ -1475,7 +1475,7 @@ def test_quench_emergency_blocks_all_manual_control(orchestrator, station, qtbot
     with qtbot.waitSignal(orchestrator.action_blocked, timeout=500):
         orchestrator.submit_vi_action("magnet_z", "initiate")
     with qtbot.waitSignal(orchestrator.action_blocked, timeout=500):
-        orchestrator.submit_vi_action("temperature_vti", "initiate")
+        orchestrator.submit_vi_action("temperature", "initiate")
     with qtbot.waitSignal(orchestrator.action_blocked, timeout=500):
         orchestrator.submit_vi_action("dc_measurement", "initiate")
 
@@ -1503,7 +1503,7 @@ def test_safety_hold_fails_claimed_run_but_spares_others(orchestrator, station, 
     assert orchestrator._state == OrchestratorState.IDLE
 
     with qtbot.waitSignal(orchestrator.action_succeeded, timeout=500):
-        orchestrator.submit_vi_action("temperature_vti", "initiate")
+        orchestrator.submit_vi_action("temperature", "initiate")
 
 
 class RecordingProcedure(MockProcedure):
@@ -1914,7 +1914,7 @@ def test_envelope_state_violation_enters_emergency(orchestrator, station, qtbot)
     # immediate violation on the next tick.
     orchestrator.set_experiment_envelope(
         _envelope(
-            temperature_vti=EnvelopeBound(min_value=400.0, state_key="temperature")
+            temperature=EnvelopeBound(min_value=400.0, state_key="temperature")
         )
     )
     errors: list[str] = []
@@ -1922,7 +1922,7 @@ def test_envelope_state_violation_enters_emergency(orchestrator, station, qtbot)
 
     orchestrator._tick()
     assert orchestrator._state == OrchestratorState.EMERGENCY
-    assert any("session envelope" in e and "temperature_vti" in e for e in errors)
+    assert any("session envelope" in e and "temperature" in e for e in errors)
 
     # Acknowledgement is refused while the violation persists...
     orchestrator._acknowledge_emergency()
@@ -2102,13 +2102,13 @@ def test_not_responding_never_bypassed_by_emergency_override(orchestrator, stati
     unlike a safety hold (rule 0b), acknowledging an EMERGENCY can never
     unlock a ``not_responding`` VI — only recovery or ``retry_fault()`` can.
     A DIFFERENT VI's quench drives the EMERGENCY here so the fault under test
-    is purely a comm condition on ``temperature_vti``, isolating rule 0 from
+    is purely a comm condition on ``temperature``, isolating rule 0 from
     rule 0b.
     """
-    station.temperature_vti._driver._simulate_error = True
+    station.temperature._driver._simulate_error = True
 
     def has_fault():
-        return "temperature_vti" in station.vi_faults()
+        return "temperature" in station.vi_faults()
 
     qtbot.waitUntil(has_fault, timeout=1000)
 
@@ -2124,7 +2124,7 @@ def test_not_responding_never_bypassed_by_emergency_override(orchestrator, stati
         orchestrator.submit_vi_action("dc_measurement", "initiate")
 
     # ...but NOT the not_responding VI, override notwithstanding.
-    admitted, reason = orchestrator._manual_action_admissible("temperature_vti")
+    admitted, reason = orchestrator._manual_action_admissible("temperature")
     assert admitted is False
     assert "instrument fault" in reason
 
@@ -2135,7 +2135,7 @@ def test_not_responding_never_bypassed_by_emergency_override(orchestrator, stati
     orchestrator.acknowledge()
     assert orchestrator._state == OrchestratorState.IDLE
 
-    station.temperature_vti._driver._simulate_error = False
+    station.temperature._driver._simulate_error = False
 
 
 def test_detached_vi_admitted_by_tag_policy(orchestrator, station):
@@ -3914,7 +3914,7 @@ def test_snapshot_reports_a_disconnected_instrument_as_idle(orchestrator, statio
 
     snapshot = orchestrator.status_snapshot()
     assert snapshot.instruments["magnet_z"]["lifecycle"] == "idle"
-    assert snapshot.instruments["temperature_vti"]["lifecycle"] == "initiated"
+    assert snapshot.instruments["temperature"]["lifecycle"] == "initiated"
 
 
 # ══════════════════════════════════════════════════════════════════════

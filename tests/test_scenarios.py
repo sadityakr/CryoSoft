@@ -58,7 +58,7 @@ def test_quench_blocks_manual_control_of_every_vi(station, orchestrator, qtbot):
     snap = scenarios.snapshot(station, orchestrator)
     assert snap["orchestrator_state"] == "EMERGENCY"
 
-    admitted, _reason = orchestrator._manual_action_admissible("temperature_vti")
+    admitted, _reason = orchestrator._manual_action_admissible("temperature")
     assert admitted is False, "EMERGENCY must refuse an unrelated VI too"
 
     station.get_vi("magnet_z")._driver._simulate_quench = False
@@ -67,13 +67,13 @@ def test_quench_blocks_manual_control_of_every_vi(station, orchestrator, qtbot):
 def test_disconnect_faults_the_named_vi(station, orchestrator, qtbot):
     """A disconnected instrument shows up as a comm fault, not a safety hold."""
     orchestrator._tick()  # one successful poll first, so the fault is a transition
-    scenarios.disconnect(station, orchestrator, qtbot, "temperature_vti")
+    scenarios.disconnect(station, orchestrator, qtbot, "temperature")
 
     snap = scenarios.snapshot(station, orchestrator)
-    assert "temperature_vti" in snap["faulted_vis"]
-    assert "not_responding" in orchestrator._station.availability("temperature_vti").tags
+    assert "temperature" in snap["faulted_vis"]
+    assert "not_responding" in orchestrator._station.availability("temperature").tags
 
-    station.get_vi("temperature_vti")._driver._simulate_error = False
+    station.get_vi("temperature")._driver._simulate_error = False
 
 
 def test_measurement_instrument_returns_error_instead_of_data(station, orchestrator, qtbot):

@@ -54,7 +54,11 @@ from cryosoft.core.plan import (
     ParamSpec,
     Target,
 )
-from cryosoft.virtual_instruments.base import BaseVirtualInstrument
+from cryosoft.virtual_instruments.base import (
+    BaseVirtualInstrument,
+    MagnetBase,
+    TemperatureControllerBase,
+)
 from cryosoft.virtual_instruments.rampable import RampableVI
 
 logger = logging.getLogger(__name__)
@@ -351,27 +355,53 @@ class Station:
             if vi_type == "measurement"
         ]
 
-    def magnet_vi_names(self) -> list[str]:
-        """Return the names of all registered magnet VIs, in registration order.
+    def vi_names_by_base(self, base_cls: type) -> list[str]:
+        """Return every registered VI that is an instance of *base_cls*.
 
-        A magnet VI is a registry-``system`` VI whose class ``vi_type ==
-        "magnet"`` (the typed VI category from ``MagnetBase`` and its
-        subclasses — distinct from the registry's own "system" role string,
-        see GLOSSARY.md's "vi_type (class)" / "vi_type (config/registry)"
-        entries). The order is config order, so a caller that defaults to
-        "every magnet" (e.g. a run forcing all magnets to zero field)
-        gets a stable, config-controlled list — mirrors
-        ``measurement_vi_names()``.
+        The general read behind **role discovery** (GLOSSARY.md): a caller
+        that needs "the magnet" or "the temperature controller" asks for the
+        instrument CATEGORY and gets whatever this setup configured, instead
+        of naming an instrument the config may not have. The typed category
+        bases in ``virtual_instruments/base.py`` are the roles; the two thin
+        accessors below are the ones procedures use, since a procedure is
+        hardware-blind and never imports a VI class itself (contract C6).
+
+        Args:
+            base_cls: A VI base class, e.g. ``MagnetBase``.
 
         Returns:
-            List of magnet VI names, registration order preserved.
+            The matching VI names, registration (config) order preserved, so
+            "the only candidate" and "the first candidate" are both stable
+            and config-controlled.
         """
         return [
             name
-            for name, vi_type in self._vi_registry.items()
-            if vi_type == "system"
-            and getattr(self._virtual_instruments[name], "vi_type", "") == "magnet"
+            for name, vi in self._virtual_instruments.items()
+            if isinstance(vi, base_cls)
         ]
+
+    def magnet_vi_names(self) -> list[str]:
+        """Return the names of all registered magnet VIs, in config order.
+
+        Args:
+            None.
+
+        Returns:
+            List of magnet VI names — every VI built on ``MagnetBase``.
+        """
+        return self.vi_names_by_base(MagnetBase)
+
+    def temperature_vi_names(self) -> list[str]:
+        """Return the names of all registered temperature-controller VIs.
+
+        Args:
+            None.
+
+        Returns:
+            List of temperature VI names — every VI built on
+            ``TemperatureControllerBase`` — in config order.
+        """
+        return self.vi_names_by_base(TemperatureControllerBase)
 
     def has_vi(self, vi_name: str) -> bool:
         """Return True if a VI with this name is registered."""
@@ -3017,7 +3047,7 @@ def read_panels_config(config_path: str) -> dict[str, list[str]]:
     Expected shape::
 
         panels:
-          temperature_vti:
+          temperature:
             controls: [set_temperature]
 
     Args:

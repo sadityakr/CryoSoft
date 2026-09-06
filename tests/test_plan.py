@@ -132,7 +132,7 @@ def test_phaseplan_commands_normalized_to_tuple_order_preserved():
 
 def test_phaseplan_claim_commands_normalized_to_tuple_order_preserved():
     c1 = Command("magnet_z", "initiate")
-    c2 = Command("temperature_vti", "initiate")
+    c2 = Command("temperature", "initiate")
     p = PhasePlan(targets={}, claim_commands=[c1, c2])
     assert isinstance(p.claim_commands, tuple)
     assert p.claim_commands == (c1, c2)

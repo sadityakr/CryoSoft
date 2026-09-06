@@ -146,7 +146,7 @@ def test_a_capability_tool_carries_its_units_bounds_and_rationale(tools):
 def test_a_choice_parameter_renders_its_values_and_labels(tools):
     """An enumerated ParamSpec becomes an enum an agent can pick from."""
     heater_range = tools[
-        capability_tool_name("temperature_vti", "set_heater_range")
+        capability_tool_name("temperature", "set_heater_range")
     ].input_schema["properties"]["range_setting"]
 
     assert heater_range["type"] == "string"
@@ -156,7 +156,7 @@ def test_a_choice_parameter_renders_its_values_and_labels(tools):
 
 def test_a_default_the_configured_bound_refuses_is_not_published(tools):
     """A schema never offers a default its own bound would reject."""
-    tool = tools[capability_tool_name("temperature_vti", "set_temperature")]
+    tool = tools[capability_tool_name("temperature", "set_temperature")]
     target = tool.input_schema["properties"]["target_K"]
 
     assert target["minimum"] == 1.4

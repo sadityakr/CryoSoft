@@ -44,7 +44,7 @@ def _build_apply(args: argparse.Namespace):
             scn.apply_quench(station, magnet_vi=args.vi or "magnet_z")
             print(f"[scenario] quench: {args.vi or 'magnet_z'} will report QUENCH")
         elif args.scenario == "disconnect":
-            vi_name = args.vi or "temperature_vti"
+            vi_name = args.vi or "temperature"
             scn.apply_disconnect(station, vi_name, driver_attr=args.driver_attr or "_driver")
             print(f"[scenario] disconnect: {vi_name} will fail every call")
         elif args.scenario == "measurement-error":
@@ -71,7 +71,7 @@ def _parse_args() -> argparse.Namespace:
         "--vi",
         default=None,
         help="VI name the scenario targets (defaults per scenario, e.g. "
-        "magnet_z / temperature_vti / dc_measurement).",
+        "magnet_z / temperature / dc_measurement).",
     )
     parser.add_argument(
         "--driver-attr",

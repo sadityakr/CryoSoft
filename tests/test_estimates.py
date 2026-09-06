@@ -62,7 +62,7 @@ def test_the_station_declares_a_nominal_rate_per_ramping_vi(station):
 
     # The sim magnet's slowest segment is 1 A/min at 10 A/T.
     assert rates["magnet_z"] == pytest.approx(0.1)
-    assert rates["temperature_vti"] == pytest.approx(2.0)
+    assert rates["temperature"] == pytest.approx(2.0)
     assert "dc_measurement" not in rates  # not a ramping system VI
 
 

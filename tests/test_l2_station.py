@@ -71,13 +71,13 @@ def test_read_panels_config_well_formed(tmp_path):
     (tmp_path / "monitor.yaml").write_text(
         "monitor:\n  tick_interval_ms: 1000\n"
         "panels:\n"
-        "  temperature_vti:\n"
+        "  temperature:\n"
         "    controls: [set_temperature]\n"
         "  magnet_z:\n"
         "    controls: [set_field, set_ramp_rate]\n"
     )
     assert read_panels_config(str(tmp_path)) == {
-        "temperature_vti": ["set_temperature"],
+        "temperature": ["set_temperature"],
         "magnet_z": ["set_field", "set_ramp_rate"],
     }
 
@@ -126,7 +126,7 @@ def test_build_station_success(sim_station: Station):
     assert sim_station is not None
     # Check that expected VIs are registered
     vi_names = sim_station.get_vi_names()
-    expected = ["magnet_z", "temperature_vti", "dc_measurement"]
+    expected = ["magnet_z", "temperature", "dc_measurement"]
     for name in expected:
         assert name in vi_names
 
@@ -138,8 +138,8 @@ def test_station_getattr(sim_station: Station):
     assert magnet_z.__class__.__name__ == "SuperconductingMagnetVI"
 
     # Check another one to be sure
-    temp_vti = sim_station.temperature_vti
-    assert temp_vti.vi_name == "temperature_vti"
+    temp_vti = sim_station.temperature
+    assert temp_vti.vi_name == "temperature"
     assert temp_vti.__class__.__name__ == (
         "Lakeshore335SampleTemperatureControllerVI"
     )
@@ -187,7 +187,7 @@ def test_get_ramp_status_covers_system_rampables(sim_station: Station):
     ramps = sim_station.get_ramp_status()
 
     assert "magnet_z" in ramps
-    assert "temperature_vti" in ramps
+    assert "temperature" in ramps
     for entry in ramps.values():
         assert {"target", "rate", "ramp_status"} <= set(entry)
 
@@ -294,14 +294,14 @@ def test_process_system_targets_dispatch(sim_station: Station):
     """process_system_targets dispatches to correct VIs only."""
     targets = {
         "magnet_z": Target(1.0),
-        "temperature_vti": Target(150.0)
+        "temperature": Target(150.0)
     }
 
     sim_station.process_system_targets(targets)
 
     # Verify that the ramps have started
     assert sim_station.magnet_z.ramp_status() == "RAMPING"
-    assert sim_station.temperature_vti.ramp_status() == "RAMPING"
+    assert sim_station.temperature.ramp_status() == "RAMPING"
 
     # process_system_targets should raise if we pass a non-system VI
     with pytest.raises(ValueError):
@@ -347,7 +347,7 @@ def test_check_ramps_reports_only_the_named_vis(sim_station: Station):
 
     assert sim_station.check_ramps() is False                      # whole station
     assert sim_station.check_ramps({"magnet_z"}) is False           # in scope
-    assert sim_station.check_ramps({"temperature_vti"}) is True     # out of scope
+    assert sim_station.check_ramps({"temperature"}) is True     # out of scope
     assert sim_station.check_ramps(set()) is True                   # owns nothing
 
 
@@ -1219,9 +1219,9 @@ def test_availability_faulted_with_not_responding_tag_under_standing_comm_condit
     sim_station: Station,
 ):
     """A live VI under a standing comm fault reports faulted/not_responding."""
-    sim_station._record_comm_condition("temperature_vti", "disconnected", "boom")
+    sim_station._record_comm_condition("temperature", "disconnected", "boom")
 
-    avail = sim_station.availability("temperature_vti")
+    avail = sim_station.availability("temperature")
 
     assert avail.state == "faulted"
     assert avail.tags == frozenset({"not_responding"})
@@ -1349,7 +1349,7 @@ def test_lifecycle_state_of_one_vi_matches_the_vi_itself(sim_station):
     assert sim_station.lifecycle_state("magnet_z") == (
         sim_station.get_vi("magnet_z").lifecycle_state()
     )
-    assert sim_station.lifecycle_state("temperature_vti") == "idle"
+    assert sim_station.lifecycle_state("temperature") == "idle"
 
     with pytest.raises(KeyError):
         sim_station.lifecycle_state("no_such_instrument")

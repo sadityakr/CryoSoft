@@ -214,8 +214,8 @@ def test_pause_while_ramping_to_first_point_holds_and_resume_completes_the_sweep
     """
     # An independent ramp on a VI this run never targets, started manually —
     # exactly what an operator's own front-panel ramp looks like.
-    station.temperature_vti.set_temperature(target_K=250.0)
-    assert station.temperature_vti.ramp_status() == "RAMPING"
+    station.temperature.set_temperature(target_K=250.0)
+    assert station.temperature.ramp_status() == "RAMPING"
 
     procedure = PauseProbeProcedure(station, tmp_path)  # slow default magnet ramp
     orchestrator.run_procedure(procedure)
@@ -229,10 +229,10 @@ def test_pause_while_ramping_to_first_point_holds_and_resume_completes_the_sweep
     orchestrator._tick()  # let the ramp tracker re-poll with the hold in place
     active = {r.vi_name for r in orchestrator.active_ramps()}
     assert "magnet_z" not in active, "the run's own ramp must be held, not listed as active"
-    assert "temperature_vti" in active, (
+    assert "temperature" in active, (
         "an unrelated VI's ramp must not be stopped by the pause"
     )
-    assert station.temperature_vti.ramp_status() == "RAMPING"  # never held
+    assert station.temperature.ramp_status() == "RAMPING"  # never held
 
     # Speed the ramp up for the rest of the run — the point under test here is
     # that resume re-dispatches the SAME target, not how long a slow ramp

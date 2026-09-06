@@ -83,7 +83,7 @@ def declare_hold_flag(
     monkeypatch: Any,
     station: Station,
     *,
-    source_vi: str = "temperature_vti",
+    source_vi: str = "temperature",
     concerned_vis: tuple[str, ...] = ("magnet_z",),
     flag: str = HOLD_FLAG,
 ) -> HoldFlag:

@@ -31,7 +31,7 @@ def _fixed_verdict_check(name: str, passed: bool) -> TrendCheck:
     """
     return TrendCheck(
         name=name,
-        keys=("temperature_vti_sample_temperature",),
+        keys=("temperature_sample_temperature",),
         window_s=3600.0,
         severity="advisory",
         predicate=lambda summaries, series, window_s: CheckOutcome(
@@ -90,7 +90,7 @@ def test_advisory_trend_condition_leaves_decide_verdict_empty(
 
     verdict = decide(
         sim_station.conditions().values(),
-        watched_vis={"temperature_vti"},
+        watched_vis={"temperature"},
         run_active=True,
     )
     assert verdict.held_vis == {}

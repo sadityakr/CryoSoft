@@ -189,7 +189,7 @@ def test_decide_run_failure_picks_alphabetically_first_watched_held_vi():
 
 def test_decide_run_failure_none_when_watched_disjoint_from_held():
     c = _condition("comm:magnet_z", affected_vis=frozenset({"magnet_z"}))
-    verdict = decide([c], watched_vis={"temperature_vti"}, run_active=True)
+    verdict = decide([c], watched_vis={"temperature"}, run_active=True)
     assert verdict.held_vis == {"magnet_z": c}
     assert verdict.run_failure is None
 

@@ -279,18 +279,18 @@ def test_envelope_ignores_non_setpoint_parameters(orchestrator, station):
     """
     orchestrator.set_experiment_envelope(
         ExperimentEnvelope(
-            bounds={"temperature_vti": EnvelopeBound(min_value=-1.0, max_value=1.0)}
+            bounds={"temperature": EnvelopeBound(min_value=-1.0, max_value=1.0)}
         )
     )
     succeeded: list[tuple[str, str]] = []
     orchestrator.action_succeeded.connect(lambda vi, m: succeeded.append((vi, m)))
 
     orchestrator.submit_vi_action(
-        "temperature_vti", "set_ramp_rate", rate_K_per_min=2.0
+        "temperature", "set_ramp_rate", rate_K_per_min=2.0
     )
     orchestrator._tick()
 
-    assert succeeded == [("temperature_vti", "set_ramp_rate")]
+    assert succeeded == [("temperature", "set_ramp_rate")]
 
 
 # ── The excitation-current fence ──────────────────────────────────────────────

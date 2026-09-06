@@ -108,7 +108,7 @@ edit; nobody edits a Virtual Instrument to customize their monitor:
 
 ```yaml
 panels:
-  temperature_vti:
+  temperature:
     controls: [set_temperature, set_pid]  # card shows exactly these two
   dc_measurement:
     controls: []                          # card shows no controls at all
@@ -139,7 +139,7 @@ the same two files.
 
 - `sim_cryostat/` — fully simulated reference station, and the station every
   procedure/orchestrator test builds against: `magnet_z`
-  (`SuperconductingMagnetVI` on `SimOxfordIPS120`), `temperature_vti`
+  (`SuperconductingMagnetVI` on `SimOxfordIPS120`), `temperature`
   (`Lakeshore335SampleTemperatureControllerVI` on `SimLakeshore335`) and
   `dc_measurement` (`DCSeparateMeasurementVI` on a `SimKeithley6221` +
   `SimKeithley2182A` pair).

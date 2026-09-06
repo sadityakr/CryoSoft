@@ -33,7 +33,7 @@ virtual_instruments:
       role: Z-axis magnet
       manufacturer: Oxford Instruments
       model: IPS120-10
-  temperature_vti:
+  temperature:
     class: cryosoft.virtual_instruments.temperature.lakeshore_335_sample_temperature_controller.Lakeshore335SampleTemperatureControllerVI
     drivers: {main: lakeshore_vti}
     vi_type: system

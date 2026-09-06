@@ -456,35 +456,35 @@ def test_disconnect_swaps_the_card_reconnect_swaps_it_back_and_station_info_rede
     """
     from PyQt6.QtWidgets import QGroupBox
 
-    card = monitor_win.findChild(QGroupBox, "temperature_vti_panel")
+    card = monitor_win.findChild(QGroupBox, "temperature_panel")
     assert card is not None
-    card.findChild(QPushButton, "temperature_vti_disconnect_btn").click()
+    card.findChild(QPushButton, "temperature_disconnect_btn").click()
     settled(orchestrator)
 
-    assert station.has_vi("temperature_vti") is False
-    assert "temperature_vti" in monitor_win._offline_cards
-    offline_card = monitor_win.findChild(QGroupBox, "temperature_vti_offline_card")
+    assert station.has_vi("temperature") is False
+    assert "temperature" in monitor_win._offline_cards
+    offline_card = monitor_win.findChild(QGroupBox, "temperature_offline_card")
     assert offline_card is not None
 
     mirror = monitor_win._mirror
-    assert mirror.offline_reason("temperature_vti")
+    assert mirror.offline_reason("temperature")
 
     def _availability(name: str) -> tuple[str, ...]:
         info = next(i for i in station.station_info().instruments if i.name == name)
         return info.availability
 
-    assert "operator" in _availability("temperature_vti"), (
+    assert "operator" in _availability("temperature"), (
         "the station's own declaration snapshot re-declares the offline VI "
         "(the operator-disconnect availability tag)"
     )
 
     # Reconnect swaps the card back.
-    offline_card.findChild(QPushButton, "temperature_vti_connect_btn").click()
+    offline_card.findChild(QPushButton, "temperature_connect_btn").click()
     settled(orchestrator)
-    assert station.has_vi("temperature_vti") is True
+    assert station.has_vi("temperature") is True
     assert monitor_win._offline_cards == {}
-    assert monitor_win.findChild(QGroupBox, "temperature_vti_panel") is not None
-    assert "operator" not in _availability("temperature_vti")
+    assert monitor_win.findChild(QGroupBox, "temperature_panel") is not None
+    assert "operator" not in _availability("temperature")
 
 
 def test_disconnect_mid_run_is_refused_for_the_claimed_vi_and_allowed_for_the_free_one(
@@ -519,15 +519,15 @@ def test_disconnect_mid_run_is_refused_for_the_claimed_vi_and_allowed_for_the_fr
     assert "magnet_z" in monitor_win._banner._label.text()
 
     # The VI it does not claim: released mid-run, card swapped, run continues.
-    monitor_win.findChild(QGroupBox, "temperature_vti_panel").findChild(
-        QPushButton, "temperature_vti_disconnect_btn"
+    monitor_win.findChild(QGroupBox, "temperature_panel").findChild(
+        QPushButton, "temperature_disconnect_btn"
     ).click()
     settled(orchestrator)
-    assert station.has_vi("temperature_vti") is False
-    assert "temperature_vti" in monitor_win._offline_cards
-    assert monitor_win.findChild(QGroupBox, "temperature_vti_offline_card") is not None
+    assert station.has_vi("temperature") is False
+    assert "temperature" in monitor_win._offline_cards
+    assert monitor_win.findChild(QGroupBox, "temperature_offline_card") is not None
     info = next(
-        i for i in station.station_info().instruments if i.name == "temperature_vti"
+        i for i in station.station_info().instruments if i.name == "temperature"
     )
     assert "operator" in info.availability
     assert orchestrator.state != "IDLE", "the run carries on without it"

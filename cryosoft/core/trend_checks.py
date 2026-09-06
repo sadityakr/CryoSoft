@@ -331,7 +331,7 @@ def conditions_for(
 # temperature-controller VI's @monitored temperature() method, verified
 # against every sim-buildable shipped config by
 # test_declared_trend_checks_name_real_state_keys.
-_SAMPLE_TEMPERATURE_KEY = "temperature_vti_temperature"
+_SAMPLE_TEMPERATURE_KEY = "temperature_temperature"
 
 # Mirrors cryosoft.core.station._TREND_DEFAULTS's values for these keys —
 # see that dict's comment for why this is a mirror, not an import (contract

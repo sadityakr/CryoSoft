@@ -695,14 +695,14 @@ def test_shutdown_is_bounded_over_a_wedged_read_and_names_the_vi(caplog):
 
     def _factory():
         station = build_station(CONFIG_PATH)
-        original = station.get_vi("temperature_vti").get_state
+        original = station.get_vi("temperature").get_state
 
         def _never_returns():
             wedged.set()
             time.sleep(3.0)
             return original()
 
-        station.get_vi("temperature_vti").get_state = _never_returns
+        station.get_vi("temperature").get_state = _never_returns
         return station
 
     host = InstrumentHost(
@@ -725,7 +725,7 @@ def test_shutdown_is_bounded_over_a_wedged_read_and_names_the_vi(caplog):
     critical = [r for r in caplog.records if r.levelno >= logging.CRITICAL]
     assert critical, "a wedged shutdown must say so at CRITICAL"
     message = critical[-1].getMessage()
-    assert "temperature_vti" in message, message
+    assert "temperature" in message, message
 
     assert host.thread_object.wait(60000)
 

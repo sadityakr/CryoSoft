@@ -4,23 +4,36 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Mapping
 from typing import Any
 
 from cryosoft.core.exceptions import CryoSoftConfigError
-from cryosoft.core.plan import ParamSpec, PhasePlan, StepPlan, Target
+from cryosoft.core.plan import ParamGroup, ParamSpec, PhasePlan, StepPlan, Target
 from cryosoft.core.procedure import SweepMeasureProcedure
 
 logger = logging.getLogger(__name__)
 
-# The quantities an end condition can watch, and how to read each one.
-# ``{choice: (vi_name, reader_method, unit)}``. Reading through the VI's own
-# monitored method is the same route ``FieldSweep._axis_readback`` and
-# ``TemperatureSweep._axis_readback`` take, so the condition sees exactly the
-# value the operator sees on the monitor panel.
-_END_CHANNELS: dict[str, tuple[str, str, str]] = {
-    "temperature_vti": ("temperature_vti", "temperature", "K"),
-    "magnet_z": ("magnet_z", "magnet_field_T", "T"),
-}
+#: The ``end_condition`` value meaning "the schedule alone ends this run".
+_ELAPSED_TIME = "time"
+
+
+def _watchable_vis(station: Any) -> list[str]:
+    """Return every VI whose ramp read-back an end condition can watch.
+
+    Role discovery (GLOSSARY.md): the watchable channels are whatever this
+    setup configured — its magnets and its temperature controllers — not a
+    hardcoded pair of instrument names. Each is read through
+    ``RampableVI.ramp_value()``, the read-back in the VI's own setpoint units
+    that the ramp tracker already uses, so the condition sees exactly the
+    value the operator sees on the monitor panel.
+
+    Args:
+        station: The active Station.
+
+    Returns:
+        The candidate VI names, in config order.
+    """
+    return [*station.magnet_vi_names(), *station.temperature_vi_names()]
 
 
 class TimeSeries(SweepMeasureProcedure):
@@ -47,8 +60,9 @@ class TimeSeries(SweepMeasureProcedure):
 
     End conditions:
         ``elapsed time`` — stop after ``max_duration_s``.
-        A watched channel (VTI temperature, sample temperature, magnet Z
-        field) — stop when it reaches ``end_value``. The approach direction
+        A watched channel — any magnet or temperature controller this setup
+        configures, discovered at construction (the role-discovery standard)
+        — stop when it reaches ``end_value``. The approach direction
         is taken from the channel's value at ``initiate()``: starting below
         the threshold stops on the way up, starting above stops on the way
         down, so there is no separate rising/falling parameter to get wrong.
@@ -109,15 +123,11 @@ class TimeSeries(SweepMeasureProcedure):
         ),
         "end_condition": ParamSpec(
             type=str,
-            default="time",
-            choices={
-                "Elapsed time only": "time",
-                "VTI temperature (K)": "temperature_vti",
-                "Field, magnet Z (T)": "magnet_z",
-            },
+            default=_ELAPSED_TIME,
             description=(
                 "What ends the run: the maximum duration alone, or a channel "
-                "reaching the end value below"
+                "reaching the end value below. The channel choices are this "
+                "station's own ramped instruments (see get_param_groups)"
             ),
         ),
         "end_value": ParamSpec(
@@ -159,24 +169,74 @@ class TimeSeries(SweepMeasureProcedure):
         self._t0: float | None = None
         self._approach_sign: float = 1.0
 
-        channel = str(self._params["end_condition"])
-        if channel not in _END_CHANNELS:
-            return  # "time": no channel to resolve
-        vi_name, _reader, unit = _END_CHANNELS[channel]
-        if not self._station.has_vi(vi_name):
+        channel = str(self._params["end_condition"] or _ELAPSED_TIME)
+        if channel == _ELAPSED_TIME:
+            return  # no channel to resolve
+        watchable = _watchable_vis(self._station)
+        if channel not in watchable:
             raise CryoSoftConfigError(
-                f"end_condition={channel!r} watches '{vi_name}', but this "
-                f"station has no such VI. Choose another end condition, or "
-                f"configure that instrument."
+                f"end_condition={channel!r} watches an instrument this station "
+                f"does not configure (watchable: {watchable or 'none'}). Choose "
+                f"another end condition, or configure that instrument."
             )
+        _label, unit = self._station.system_setpoint_meta(channel)
         logger.info(
             "TimeSeries: watching %s until it reaches %g %s (tolerance %g %s)",
-            vi_name,
+            channel,
             float(self._params["end_value"]),
             unit,
             float(self._params["end_tolerance"]),
             unit,
         )
+
+    # ------------------------------------------------------------------
+    # The form: the end-condition channels come from the station
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def get_param_groups(
+        cls, station: Any, selections: Mapping[str, Any] | None = None
+    ) -> list[ParamGroup]:
+        """Return the standard groups with ``end_condition``'s real choices.
+
+        The watchable channels are whatever this setup ramps (role
+        discovery), so the drop-down is built here, against the live
+        Station, rather than frozen into the class. Each entry is labelled
+        with the VI's own declared setpoint label and unit, so the operator
+        reads "magnet_z — field (T)" rather than a bare instrument name.
+
+        Args:
+            station: The active Station, which supplies the channels.
+            selections: Current structural-parameter values (unused here —
+                nothing in this form is structural).
+
+        Returns:
+            The ordered ``ParamGroup`` list, with the sweep group's
+            ``end_condition`` spec replaced by the station-derived one.
+        """
+        groups = super().get_param_groups(station, selections)
+        choices: dict[str, str] = {"Elapsed time only": _ELAPSED_TIME}
+        for vi_name in _watchable_vis(station):
+            label, unit = station.system_setpoint_meta(vi_name)
+            display = f"{vi_name} — {label} ({unit})" if unit else f"{vi_name} — {label}"
+            choices[display] = vi_name
+        rendered: list[ParamGroup] = []
+        for group in groups:
+            if "end_condition" not in group.params:
+                rendered.append(group)
+                continue
+            params = dict(group.params)
+            spec = params["end_condition"]
+            params["end_condition"] = ParamSpec(
+                type=str,
+                default=_ELAPSED_TIME,
+                choices=choices,
+                description=spec.description,
+            )
+            rendered.append(
+                ParamGroup(key=group.key, title=group.title, params=params)
+            )
+        return rendered
 
     # ------------------------------------------------------------------
     # The axis: scheduled elapsed time
@@ -227,8 +287,8 @@ class TimeSeries(SweepMeasureProcedure):
         """
         plan = super().initiate()
         self._t0 = time.monotonic()
-        channel = str(self._params["end_condition"])
-        if channel in _END_CHANNELS:
+        channel = str(self._params["end_condition"] or _ELAPSED_TIME)
+        if channel != _ELAPSED_TIME:
             start_value = self._read_end_channel()
             end_value = float(self._params["end_value"])
             # Direction is inferred once, from where the channel sits at the
@@ -264,9 +324,13 @@ class TimeSeries(SweepMeasureProcedure):
     # ------------------------------------------------------------------
 
     def _read_end_channel(self) -> float:
-        """Read the watched channel's current value through its own VI method."""
-        vi_name, reader, _unit = _END_CHANNELS[str(self._params["end_condition"])]
-        return float(getattr(self._station.get_vi(vi_name), reader)())
+        """Read the watched channel through its own ramp read-back.
+
+        Returns:
+            The VI's ``ramp_value()`` in its declared setpoint unit.
+        """
+        vi = self._station.get_vi(str(self._params["end_condition"]))
+        return float(vi.ramp_value())
 
     def _end_condition_met(self) -> bool:
         """Return whether the watched channel has reached its threshold.
@@ -278,7 +342,7 @@ class TimeSeries(SweepMeasureProcedure):
             ``True`` when the channel has reached ``end_value`` (within
             ``end_tolerance``) from the direction it started out on.
         """
-        if str(self._params["end_condition"]) not in _END_CHANNELS:
+        if str(self._params["end_condition"] or _ELAPSED_TIME) == _ELAPSED_TIME:
             return False
         value = self._read_end_channel()
         end_value = float(self._params["end_value"])

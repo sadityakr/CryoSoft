@@ -547,7 +547,7 @@ def test_find_crossings_missing_dir_returns_empty(tmp_path: Path) -> None:
 # short synthetic "key_0" style: file size (and therefore I/O cost) scales
 # with key-name length too, and a short-name fixture understated it.
 _REALISTIC_KEY_NAMES = [
-    "temperature_sample_temperature", "temperature_vti_temperature",
+    "temperature_sample_temperature", "temperature_temperature",
     "magnet_z_get_field", "magnet_z_magnet_current", "magnet_z_persistent_switch_state",
     "coolant_monitor_reservoir_level", "coolant_monitor_secondary_level",
     "pressure_gauge_still_pressure", "pressure_gauge_condenser_pressure",

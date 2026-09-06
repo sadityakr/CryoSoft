@@ -70,7 +70,7 @@ def _arm(station, proc):
 
 def _fix_temperature(station, value: float):
     """Pin the VTI's monitored temperature so an end condition is deterministic."""
-    station.temperature_vti.temperature = lambda: value
+    station.temperature.temperature = lambda: value
 
 
 # ── The schedule ─────────────────────────────────────────────────────────────
@@ -115,7 +115,7 @@ def test_initiate_commands_no_system_hardware(station, tmp_path, meas):
         assert plan.commands[0].method == "initiate_measurement"
         # Narrowed claim (see test_claims_only_the_reading_path below): only
         # the measurement VI gets claim-initiated, never magnet_z or
-        # temperature_vti, which stay exactly as the operator left them.
+        # temperature, which stay exactly as the operator left them.
         assert [c.vi_name for c in plan.claim_commands] == [meas["measurement_vi"]]
         assert plan.claim_commands[0].method == "initiate"
     finally:
@@ -136,7 +136,7 @@ def test_claims_only_the_reading_path(station, tmp_path):
     proc = _proc(station, tmp_path, DC)
     claimed = proc.claimed_vi_names()
     assert claimed == {"dc_measurement"}
-    for vi_name in ("magnet_z", "temperature_vti"):
+    for vi_name in ("magnet_z", "temperature"):
         assert vi_name not in claimed
 
 
@@ -158,7 +158,7 @@ def test_elapsed_time_run_stops_at_the_end_of_the_schedule(station, tmp_path):
 def test_watched_channel_stops_the_run_on_the_way_up(station, tmp_path):
     """Starting below the threshold, the run ends when the channel rises to it."""
     _fix_temperature(station, 10.0)
-    proc = _proc(station, tmp_path, end_condition="temperature_vti", end_value=50.0)
+    proc = _proc(station, tmp_path, end_condition="temperature", end_value=50.0)
     proc.initiate()
 
     assert proc.change_sweep_step() is not None    # still cold
@@ -172,7 +172,7 @@ def test_watched_channel_stops_the_run_on_the_way_up(station, tmp_path):
 def test_watched_channel_stops_the_run_on_the_way_down(station, tmp_path):
     """Direction comes from the baseline read at initiate(), with no extra parameter."""
     _fix_temperature(station, 300.0)
-    proc = _proc(station, tmp_path, end_condition="temperature_vti", end_value=100.0)
+    proc = _proc(station, tmp_path, end_condition="temperature", end_value=100.0)
     proc.initiate()
     assert proc._approach_sign == pytest.approx(-1.0)
 
@@ -189,7 +189,7 @@ def test_tolerance_stops_an_asymptotic_approach(station, tmp_path):
     proc = _proc(
         station,
         tmp_path,
-        end_condition="temperature_vti",
+        end_condition="temperature",
         end_value=300.0,
         end_tolerance=0.5,
     )
@@ -205,7 +205,7 @@ def test_tolerance_stops_an_asymptotic_approach(station, tmp_path):
 def test_channel_already_past_the_threshold_yields_one_point(station, tmp_path):
     """Documented behaviour: one measurement, then the condition is already met."""
     _fix_temperature(station, 300.0)
-    proc = _proc(station, tmp_path, end_condition="temperature_vti", end_value=300.0)
+    proc = _proc(station, tmp_path, end_condition="temperature", end_value=300.0)
     proc.initiate()
     assert proc.change_sweep_step() is None
     proc.standby()
@@ -219,7 +219,7 @@ def test_max_duration_caps_a_watched_run(station, tmp_path):
         tmp_path,
         step_time_s=1.0,
         max_duration_s=2.0,
-        end_condition="temperature_vti",
+        end_condition="temperature",
         end_value=300.0,
     )
     proc.initiate()
@@ -231,10 +231,10 @@ def test_max_duration_caps_a_watched_run(station, tmp_path):
 
 def test_watched_channel_without_a_vi_is_refused_at_construction(station, tmp_path):
     """A station missing the watched instrument fails now, not silently mid-run."""
-    station._virtual_instruments.pop("temperature_vti")
-    station._vi_registry.pop("temperature_vti")
-    with pytest.raises(CryoSoftConfigError, match="temperature_vti"):
-        _proc(station, tmp_path, end_condition="temperature_vti", end_value=4.0)
+    station._virtual_instruments.pop("temperature")
+    station._vi_registry.pop("temperature")
+    with pytest.raises(CryoSoftConfigError, match="temperature"):
+        _proc(station, tmp_path, end_condition="temperature", end_value=4.0)
 
 
 # ── Cadence ──────────────────────────────────────────────────────────────────

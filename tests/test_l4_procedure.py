@@ -89,11 +89,11 @@ def test_claim_initiate_commands_honours_narrowed_claim(station):
     """A narrowed claimed_vi_names() claim-initiates only the named VIs."""
     class NarrowProc(BaseProcedure):
         def claimed_vi_names(self):
-            return {"magnet_z", "temperature_vti"}
+            return {"magnet_z", "temperature"}
 
     proc = NarrowProc(station=station, sample_info={}, data_directory="/tmp")
     commands = proc._claim_initiate_commands()
-    assert {c.vi_name for c in commands} == {"magnet_z", "temperature_vti"}
+    assert {c.vi_name for c in commands} == {"magnet_z", "temperature"}
     assert all(c.method == "initiate" and c.kwargs == {} for c in commands)
 
 
@@ -291,8 +291,8 @@ def test_initiate_returns_correct_structure(procedure, tmp_path):
     assert isinstance(plan.targets["magnet_z"], Target)
     assert plan.targets["magnet_z"].target == pytest.approx(-0.1)
 
-    assert "temperature_vti" in plan.targets
-    assert plan.targets["temperature_vti"].target == pytest.approx(300.0)
+    assert "temperature" in plan.targets
+    assert plan.targets["temperature"].target == pytest.approx(300.0)
 
     arm = next(c for c in plan.commands if c.vi_name == "dc_measurement")
     assert arm.method == "initiate_measurement"
@@ -306,9 +306,9 @@ def test_initiate_full_phaseplan_content_and_command_order(procedure, tmp_path):
     procedure.standby()  # Close file
 
     # Exactly the two system targets, both plain field/temperature targets.
-    assert set(plan.targets) == {"magnet_z", "temperature_vti"}
+    assert set(plan.targets) == {"magnet_z", "temperature"}
     assert plan.targets["magnet_z"] == Target(-0.1)
-    assert plan.targets["temperature_vti"] == Target(300.0)
+    assert plan.targets["temperature"] == Target(300.0)
 
     # Exactly one command: arm the DC measurement, first in order.
     assert len(plan.commands) == 1
@@ -502,7 +502,7 @@ def test_full_orchestrator_loop(station, tmp_path, qtbot):
     # Fast ramp rates so the test completes quickly
     station.magnet_z._default_ramp_rate = 6000.0
     station.magnet_z._ramp_segments = []
-    # temperature_vti starts at 300 K; target is also 300 K → instant settle
+    # temperature starts at 300 K; target is also 300 K → instant settle
 
     procedure = FieldSweep(
         station=station,

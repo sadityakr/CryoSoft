@@ -978,6 +978,51 @@ def test_procedure_declaration(proc_cls: type) -> None:
 
 
 @pytest.mark.parametrize("proc_cls", _all_procedure_classes(), ids=lambda c: c.__name__)
+def test_procedure_has_description(proc_cls: type) -> None:
+    """Every procedure declares a non-empty ``description`` class attribute.
+
+    The one-line description is what the procedure selector, the run record
+    and the agent's procedure listing show beside the name; a procedure
+    without one renders as a bare title that says nothing about what the
+    run does. ``name`` is checked in ``test_procedure_declaration``.
+    """
+    description = getattr(proc_cls, "description", "")
+    assert isinstance(description, str) and description.strip(), (
+        f"{proc_cls.__name__} must set a non-empty 'description' class attribute"
+    )
+
+
+@pytest.mark.parametrize("proc_cls", _all_procedure_classes(), ids=lambda c: c.__name__)
+def test_procedure_roles_resolve_on_the_sim_station(proc_cls: type) -> None:
+    """Every declared role is a ``RoleParam`` whose candidates come from the station.
+
+    The role-discovery standard: a procedure names roles, never configured
+    instrument names, so each role's ``candidates`` must be answerable by a
+    Station and each becomes a parameter carrying a description. On the
+    shipped sim station every candidate list is a subset of the registered
+    VIs.
+    """
+    from cryosoft.core.procedure import RoleParam
+
+    station = build_station("cryosoft/configs/sim_cryostat")
+    for param_name, role in proc_cls.role_parameters.items():
+        assert isinstance(role, RoleParam), (
+            f"{proc_cls.__name__}.role_parameters[{param_name!r}] must be a RoleParam"
+        )
+        assert role.description.strip(), (
+            f"{proc_cls.__name__}.role_parameters[{param_name!r}] lacks a description"
+        )
+        names = role.candidates(station)
+        assert set(names) <= set(station.get_vi_names()), (
+            f"{proc_cls.__name__}.{param_name} candidates {names} are not all "
+            f"registered VIs"
+        )
+        assert param_name in proc_cls.parameters, (
+            f"{proc_cls.__name__}.{param_name} is a role but not a parameter"
+        )
+
+
+@pytest.mark.parametrize("proc_cls", _all_procedure_classes(), ids=lambda c: c.__name__)
 def test_procedure_parameter_has_description(proc_cls: type) -> None:
     """Every procedure parameter declares a non-empty 'description'.
 
@@ -2951,7 +2996,7 @@ def _contract_specimens() -> dict[str, object]:
             held_vi_names=("magnet_z",),
             active_ramps=({"vi_name": "magnet_z", "label": "field", "unit": "T"},),
             availabilities={"magnet_z": {"state": "live", "tags": []}},
-            vi_faults={"temperature_vti": {"kind": "stale", "acknowledged": False}},
+            vi_faults={"temperature": {"kind": "stale", "acknowledged": False}},
             offline_reason={"dc_measurement": "no response at GPIB0::12::INSTR"},
             envelope_variables={
                 "magnet_z": {"param_name": "target_T", "config_max": 9.0}
@@ -3112,7 +3157,7 @@ def _contract_specimens() -> dict[str, object]:
             ts=1_700_000_004.0,
         ),
         "Readings": Readings(
-            values={"magnet_z": {"field_T": 0.5}, "temperature_vti": {"temperature": 4.2}},
+            values={"magnet_z": {"field_T": 0.5}, "temperature": {"temperature": 4.2}},
             seq=11,
             ts=1_700_000_005.0,
         ),
