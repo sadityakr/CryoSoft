@@ -2941,7 +2941,7 @@ def test_monitor_persistence_roundtrip_splitters_and_trends(
 def test_monitor_default_layout_when_settings_empty(monitor_win, station):
     """With no saved splitter state (fresh isolated settings), the DEFAULT layout stands."""
     assert len(monitor_win._trends._trend_panels) == 2
-    # One card per VI — system/level plus measurement and switch cards.
+    # One card per VI — system and measurement cards alike.
     assert len(monitor_win._panels) == len(station.get_vi_names())
     # setSizes([600, 600]) is a proportional hint, not exact pixels once shown
     # at the real window width — check the default is an even 50/50 split.
@@ -3888,7 +3888,7 @@ def _sim_monitor(qtbot):
 def test_every_live_instrument_card_has_a_disconnect_button(qtbot):
     """The standard is only a standard if EVERY card carries it.
 
-    System, level, measurement and switch cards alike — the whole point of
+    System and measurement cards alike — the whole point of
     the connection-lifecycle standard is that no instrument category is a
     special case.
     """

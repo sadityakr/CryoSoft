@@ -64,7 +64,7 @@ def test_continuous_initiation_is_not_pinned_at_construction():
 def test_ping_is_true_for_every_reachable_vi(station: Station):
     """The inherited ping() answers for every VI category, not just measurement.
 
-    Before the standard, only measurement and switch VIs implemented ping()
+    Before the standard, only measurement VIs implemented ping()
     and the base returned False, so the front panel's "Check connection"
     button reported "Not reachable" for every magnet and thermometer.
     """
@@ -116,7 +116,7 @@ def test_detach_when_idle_is_false_by_default():
 def test_declared_vi_is_born_attached():
     """Declaring detach_when_idle alone does not imply born-detached.
 
-    Born-detached (RTM2's __init__ calling self._detach()) is each VI's own
+    Born-detached (a VI whose __init__ calls self._detach()) is each VI's own
     choice; the base only guarantees the release on standby().
     """
     vi = _DetachWhenIdleNoOverrideVI({"main": _DetachableDriver("SIM::TEST")})

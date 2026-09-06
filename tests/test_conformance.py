@@ -151,13 +151,17 @@ from cryosoft.virtual_instruments.base import (
 )
 from cryosoft.virtual_instruments.rampable import RampableVI
 
-CONFIGS_DIR = Path(cryosoft.__file__).parent / "configs"
+#: The package under test, derived once. Every module prefix, config path and
+#: source-tree scan in this file comes from these, so a package rename is a
+#: no-op here.
+PACKAGE = cryosoft.__name__
+PACKAGE_DIR = Path(cryosoft.__file__).parent
+CONFIGS_DIR = PACKAGE_DIR / "configs"
+#: The example station every station-dependent contract is checked on.
+SIM_STATION_CONFIG = str(CONFIGS_DIR / "sim_cryostat")
 
 # Modules in virtual_instruments/ that hold base classes, not concrete VIs.
-VI_BASE_MODULES = {
-    "cryosoft.virtual_instruments.base",
-    "cryosoft.virtual_instruments.rampable",
-}
+VI_BASE_MODULES = {BaseVirtualInstrument.__module__, RampableVI.__module__}
 
 # Registry types accepted by Station.register_vi via config (distinct from a VI
 # class's own vi_type like "magnet" — see GLOSSARY.md).
@@ -198,7 +202,7 @@ def _all_vi_classes() -> list[type]:
     """Every concrete VI class in cryosoft.virtual_instruments."""
     classes: list[type] = []
     for mod_info in pkgutil.walk_packages(
-        cryosoft.virtual_instruments.__path__, prefix="cryosoft.virtual_instruments."
+        cryosoft.virtual_instruments.__path__, prefix=f"{PACKAGE}.virtual_instruments."
     ):
         if mod_info.name in VI_BASE_MODULES:
             continue
@@ -212,7 +216,7 @@ def _all_vi_classes() -> list[type]:
 def _all_procedure_classes() -> list[type]:
     classes: list[type] = []
     for mod_info in pkgutil.iter_modules(cryosoft.procedures.__path__):
-        module = importlib.import_module(f"cryosoft.procedures.{mod_info.name}")
+        module = importlib.import_module(f"{PACKAGE}.procedures.{mod_info.name}")
         for cls in _public_classes(module):
             if issubclass(cls, BaseProcedure) and cls is not BaseProcedure:
                 classes.append(cls)
@@ -234,10 +238,10 @@ def _load_yaml(path: Path) -> dict:
 @pytest.mark.parametrize("module_name", _driver_module_names())
 def test_driver_module_contract(module_name: str) -> None:
     """Every driver module holds exactly one public class taking one required arg."""
-    module = importlib.import_module(f"cryosoft.drivers.{module_name}")
+    module = importlib.import_module(f"{PACKAGE}.drivers.{module_name}")
     classes = _public_classes(module)
     assert len(classes) == 1, (
-        f"cryosoft.drivers.{module_name} must define exactly one public class, "
+        f"{PACKAGE}.drivers.{module_name} must define exactly one public class, "
         f"found {[c.__name__ for c in classes]}"
     )
     init_params = [
@@ -266,7 +270,7 @@ def test_driver_has_get_idn(module_name: str) -> None:
     instruments that do not answer ``*IDN?`` (the Oxford ISOBUS family)
     implement it with their native identify command (``V``) instead.
     """
-    module = importlib.import_module(f"cryosoft.drivers.{module_name}")
+    module = importlib.import_module(f"{PACKAGE}.drivers.{module_name}")
     (cls,) = _public_classes(module)
     method = getattr(cls, "get_idn", None)
     assert callable(method), (
@@ -298,7 +302,7 @@ def test_driver_has_close(module_name: str) -> None:
     without one would silently leak a session that keeps the instrument
     locked to CryoSoft.
     """
-    module = importlib.import_module(f"cryosoft.drivers.{module_name}")
+    module = importlib.import_module(f"{PACKAGE}.drivers.{module_name}")
     (cls,) = _public_classes(module)
     method = getattr(cls, "close", None)
     assert callable(method), (
@@ -330,7 +334,7 @@ def test_driver_has_safe_shutdown(module_name: str) -> None:
     ``get_idn()``/``close()``: there is no DriverBase, so this test is the
     contract.
     """
-    module = importlib.import_module(f"cryosoft.drivers.{module_name}")
+    module = importlib.import_module(f"{PACKAGE}.drivers.{module_name}")
     (cls,) = _public_classes(module)
     method = getattr(cls, "safe_shutdown", None)
     assert callable(method), (
@@ -374,7 +378,7 @@ def test_sim_driver_safe_shutdown_reaches_a_declared_safe_state(module_name: str
     as-constructed state, it leaves the instrument in that declared state,
     and calling it a second time changes nothing at all.
     """
-    module = importlib.import_module(f"cryosoft.drivers.{module_name}")
+    module = importlib.import_module(f"{PACKAGE}.drivers.{module_name}")
     (cls,) = _public_classes(module)
     driver = cls("SIM::CONFORMANCE")
 
@@ -411,7 +415,7 @@ def test_sim_driver_safe_shutdown_reaches_a_declared_safe_state(module_name: str
 )
 def test_sim_driver_constructs_without_hardware(module_name: str) -> None:
     """Sim drivers must be constructible with a dummy resource string."""
-    module = importlib.import_module(f"cryosoft.drivers.{module_name}")
+    module = importlib.import_module(f"{PACKAGE}.drivers.{module_name}")
     (cls,) = _public_classes(module)
     cls("SIM::CONFORMANCE")
 
@@ -429,7 +433,7 @@ def test_sim_driver_is_dead_after_close(module_name: str) -> None:
     use-after-disconnect bug fails here instead of on hardware. ``close()``
     itself must stay idempotent and silent: a disconnect always succeeds.
     """
-    module = importlib.import_module(f"cryosoft.drivers.{module_name}")
+    module = importlib.import_module(f"{PACKAGE}.drivers.{module_name}")
     (cls,) = _public_classes(module)
     driver = cls("SIM::CONFORMANCE")
     driver.get_idn()  # reachable before the close
@@ -454,8 +458,8 @@ def test_sim_real_driver_api_parity(real_name: str) -> None:
     touching any VI or procedure: code written against the sim works on the
     real instrument. Method names AND signatures must match exactly.
     """
-    real_mod = importlib.import_module(f"cryosoft.drivers.{real_name}")
-    sim_mod = importlib.import_module(f"cryosoft.drivers.sim_{real_name}")
+    real_mod = importlib.import_module(f"{PACKAGE}.drivers.{real_name}")
+    sim_mod = importlib.import_module(f"{PACKAGE}.drivers.sim_{real_name}")
     (real_cls,) = _public_classes(real_mod)
     (sim_cls,) = _public_classes(sim_mod)
 
@@ -918,8 +922,8 @@ def test_safety_concerns_are_consumer_side_and_hold_only(vi_cls: type) -> None:
     A bare (``__init__``-less) instance is enough: every existing
     ``safety_concerns()`` override is a pure function of the class, never
     of instance state populated by ``__init__`` (see
-    ``tests/test_l0_keithley_6221_error_queue.py`` for the same
-    ``object.__new__`` idiom used to probe a class without constructing it).
+    ``tests/test_l0_driver_errors.py`` for the same ``object.__new__`` idiom
+    used to probe a class without constructing it).
     """
     severities = _all_manifest_severities()
     concerns = object.__new__(vi_cls).safety_concerns()
@@ -1005,7 +1009,7 @@ def test_procedure_roles_resolve_on_the_sim_station(proc_cls: type) -> None:
     """
     from cryosoft.core.procedure import RoleParam
 
-    station = build_station("cryosoft/configs/sim_cryostat")
+    station = build_station(SIM_STATION_CONFIG)
     for param_name, role in proc_cls.role_parameters.items():
         assert isinstance(role, RoleParam), (
             f"{proc_cls.__name__}.role_parameters[{param_name!r}] must be a RoleParam"
@@ -1088,7 +1092,7 @@ def test_procedure_constructs_from_defaults(proc_cls: type, tmp_path) -> None:
     station-dependent procedure legitimately needs.
     """
     if getattr(proc_cls, "requires_measurement_vi", False):
-        station = build_station("cryosoft/configs/sim_cryostat")
+        station = build_station(SIM_STATION_CONFIG)
     else:
         station = Station()
     proc = proc_cls(
@@ -1111,7 +1115,7 @@ def test_procedure_claimed_vi_names_contract(proc_cls: type, tmp_path) -> None:
     typo in a narrowed claim can never silently under-claim.
     """
     if getattr(proc_cls, "requires_measurement_vi", False):
-        station = build_station("cryosoft/configs/sim_cryostat")
+        station = build_station(SIM_STATION_CONFIG)
     else:
         station = Station()
     proc = proc_cls(
@@ -1738,8 +1742,6 @@ CONTROL_LIMIT_EXEMPTIONS: dict[tuple[str, str, str], str] = {
     ("DCMeasurementBase", "initiate_measurement", "readings_per_point"): (
         "Dimensionless sample count; it costs time, not energy in the sample."
     ),
-    # -- Timing: dwell and integration times change how long a measurement
-    #    takes, never how hard it drives the sample.
     # -- Compliance ceilings: these are themselves protective limits. With the
     #    excitation current already bounded, they only decide how much voltage
     #    headroom the source may use to deliver that bounded current.
@@ -1915,11 +1917,11 @@ def test_rampable_vi_declares_exactly_one_setpoint_control(vi_cls: type) -> None
 # ── The excitation ceiling reaches every shipped setup ───────────────────────
 
 #: ``control_limits`` limit names a config's ``max_source_current_A`` populates
-#: — directly (``EXCITATION_CURRENT_LIMIT``, the current-sourcing VIs) or
-#: derived (the lock-in's amplitude bound, ``I_max x R_series``). Discovered
+#: (``EXCITATION_CURRENT_LIMIT``, the current-sourcing VIs). Discovered
 #: through ``control_limits`` rather than by naming VI classes, so a new VI
-#: reusing either limit is covered the moment its config entry exists.
-MAX_SOURCE_CURRENT_LIMITS = frozenset({EXCITATION_CURRENT_LIMIT, "oscillator_amplitude_V"})
+#: reusing the limit is covered the moment its config entry exists; a VI that
+#: derives a second limit from the same ceiling adds its name here.
+MAX_SOURCE_CURRENT_LIMITS = frozenset({EXCITATION_CURRENT_LIMIT})
 
 
 def _declared_limit_names(vi_cls: type) -> set[str]:
@@ -2103,9 +2105,9 @@ def test_execute_vi_action_refuses_non_control_names(config_dir: Path) -> None:
 # rest, so one dict builds every measurement VI without per-class knowledge. Add
 # a role here when a new measurement VI introduces a new instrument.
 _SIM_MEASUREMENT_DRIVER_CLASSES = {
-    "source": "cryosoft.drivers.sim_keithley_6221.SimKeithley6221",
-    "meter": "cryosoft.drivers.sim_keithley_2182a.SimKeithley2182A",
-    "main": "cryosoft.drivers.sim_camera.SimCamera",
+    "source": f"{PACKAGE}.drivers.sim_keithley_6221.SimKeithley6221",
+    "meter": f"{PACKAGE}.drivers.sim_keithley_2182a.SimKeithley2182A",
+    "main": f"{PACKAGE}.drivers.sim_camera.SimCamera",
 }
 
 
@@ -2372,9 +2374,11 @@ def test_measurement_vi_arms_after_a_shared_instrument_was_left_in_another_mode(
 
     The **shared-instrument mode discipline** standard (see
     ``virtual_instruments/measurement/README.md``): two measurement VIs can
-    be wired to the same physical instrument — the two 6221 DC methods and
-    delta mode all are — so the second one to arm meets whatever the first
-    left behind. This test arms the first VI and then, with **no**
+    be wired to the same physical instrument — two measurement methods over
+    one source, say — so the second one to arm meets whatever the first
+    left behind. No shipped pair shares an instrument today, so the
+    parametrisation is empty until a setup's VIs do; the check arrives with
+    them. This test arms the first VI and then, with **no**
     ``standby()`` in between (the abandoned run: a crash, a kill, an agent
     that stopped answering), arms the second on the same driver objects.
 
@@ -2539,7 +2543,7 @@ def _eln_adapter_classes() -> list[type]:
 
     classes: list[type] = []
     for mod_info in pkgutil.iter_modules(eln_pkg.__path__):
-        module = importlib.import_module(f"cryosoft.session.eln.{mod_info.name}")
+        module = importlib.import_module(f"{PACKAGE}.session.eln.{mod_info.name}")
         for cls in _public_classes(module):
             if (
                 issubclass(cls, ElnAdapter)
@@ -2556,7 +2560,7 @@ def _eln_dict_dataclasses() -> list[type]:
 
     classes: list[type] = []
     for mod_info in pkgutil.iter_modules(eln_pkg.__path__):
-        module = importlib.import_module(f"cryosoft.session.eln.{mod_info.name}")
+        module = importlib.import_module(f"{PACKAGE}.session.eln.{mod_info.name}")
         for name, obj in vars(module).items():
             if name.startswith("_") or not isinstance(obj, type):
                 continue
@@ -2796,9 +2800,9 @@ def test_measurement_vi_reading_setter_round_trip(vi_cls: type) -> None:
 
 
 # ── Reading-loop standard (BaseVirtualInstrument level, all VI roles) ────────
-# reading_setters is a VI-level standard: the switch VI's route and a
-# measurement VI's current are the same loopable-parameter concept. Check
-# every VI the sim station builds, whatever its role.
+# reading_setters is a VI-level standard: a measurement VI's sourced current
+# and any other VI's per-reading setting are the same loopable-parameter
+# concept. Check every VI the sim station builds, whatever its role.
 
 def test_reading_loop_standard_on_sim_station() -> None:
     """Every sim-station VI with reading_setters honours the loop standard.
@@ -2808,7 +2812,7 @@ def test_reading_loop_standard_on_sim_station() -> None:
     name; and a non-measurement participant's reading_safe_off (if declared)
     names a real method.
     """
-    station = build_station("cryosoft/configs/sim_cryostat")
+    station = build_station(SIM_STATION_CONFIG)
     checked = 0
     for vi_name in station.get_vi_names():
         vi = station.get_vi(vi_name)
@@ -3725,9 +3729,7 @@ def test_manifest_group_index_matches_the_vis_ui_groups(vi_cls: type) -> None:
 # Repository hygiene: the code-reference standard and the responsive-GUI rule
 # ---------------------------------------------------------------------------
 
-PACKAGE_DIR = Path(cryosoft.__file__).parent
-
-# Files under cryosoft/ exempted from the code-reference standard.
+# Files under the package exempted from the code-reference standard.
 #
 # Empty by construction, and kept empty by
 # ``test_plan_citation_allowlist_is_empty``. A plan document is a dated
@@ -3990,7 +3992,7 @@ _ENGINE_SIGNALS = frozenset({
 #: Non-command engine attributes a named GUI module may still touch, each with
 #: the reason. Anything not listed is a violation, including a private one.
 _GUI_ENGINE_EXEMPTIONS: dict[str, dict[str, str]] = {
-    "cryosoft/gui/queue_panel.py": {
+    f"{PACKAGE}/gui/queue_panel.py": {
         "publish_queue": (
             "the queue seam, not a command: the queue is data this panel "
             "owns when no session layer is wired, so the engine cannot see a "
@@ -4238,7 +4240,7 @@ def test_gui_imports_the_station_only_for_typing_or_config_helpers() -> None:
         for node in ast.walk(tree):
             if not isinstance(node, ast.ImportFrom):
                 continue
-            if node.module != "cryosoft.core.station":
+            if node.module != f"{PACKAGE}.core.station":
                 continue
             if node in guarded:
                 continue
@@ -4284,7 +4286,7 @@ def _run_source_classes() -> list[type]:
 
     found: list[type] = []
     for mod_info in pkgutil.iter_modules(cryosoft.core.__path__):
-        module = importlib.import_module(f"cryosoft.core.{mod_info.name}")
+        module = importlib.import_module(f"{PACKAGE}.core.{mod_info.name}")
         found.extend(
             cls
             for cls in _public_classes(module)
@@ -4882,7 +4884,7 @@ README_SECTIONS: tuple[str, ...] = (
 
 def _folder_readmes() -> list[Path]:
     """Every folder README under cryosoft/."""
-    return sorted(Path(cryosoft.__file__).parent.rglob("README.md"))
+    return sorted(PACKAGE_DIR.rglob("README.md"))
 
 
 @pytest.mark.parametrize(
@@ -4901,12 +4903,12 @@ def test_folder_readme_has_the_seven_sections(readme: Path) -> None:
             index for index, heading in enumerate(headings) if heading.startswith(section)
         ]
         assert matches, (
-            f"{readme.relative_to(Path(cryosoft.__file__).parent.parent)} has no "
+            f"{readme.relative_to(PACKAGE_DIR.parent)} has no "
             f"'## {section}…' section; the folder README standard (CLAUDE.md) "
             f"asks for {list(README_SECTIONS)}, found {headings}"
         )
         assert matches[0] > position, (
-            f"{readme.relative_to(Path(cryosoft.__file__).parent.parent)}: "
+            f"{readme.relative_to(PACKAGE_DIR.parent)}: "
             f"'{section}' must come after the section before it in "
             f"{list(README_SECTIONS)}"
         )
@@ -4915,6 +4917,6 @@ def test_folder_readme_has_the_seven_sections(readme: Path) -> None:
 
 def test_analysis_package_has_a_folder_readme() -> None:
     """The analysis stage is a functional folder, so it carries a README."""
-    readme = Path(cryosoft.__file__).parent / "analysis" / "README.md"
-    assert readme.is_file(), "cryosoft/analysis/ must have a folder README"
+    readme = PACKAGE_DIR / "analysis" / "README.md"
+    assert readme.is_file(), f"{PACKAGE}/analysis/ must have a folder README"
     assert readme in _folder_readmes()

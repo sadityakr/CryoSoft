@@ -633,7 +633,7 @@ def test_every_shipped_procedure_has_a_recipe():
     assert by_name["field_image_stack"].procedures == ("FieldImaging",)
 
     for module_info in pkgutil.iter_modules(cryosoft.procedures.__path__):
-        module = importlib.import_module(f"cryosoft.procedures.{module_info.name}")
+        module = importlib.import_module(f"{cryosoft.procedures.__name__}.{module_info.name}")
         for cls in vars(module).values():
             if not (isinstance(cls, type) and issubclass(cls, BaseProcedure)):
                 continue
