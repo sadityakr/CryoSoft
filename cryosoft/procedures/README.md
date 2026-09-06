@@ -56,8 +56,7 @@ standard operating state (see **Claim** below) when this plan's own
 targets/commands reach it; a `StepPlan` carries the next point's `targets` and
 its `wait_s` (no `claim_commands` — only `initiate()`'s plan claim-initiates).
 A `Target` carries an optional `rate` (forwarded to the VI's `start_ramp()`
-only when set) and a `persistent` flag; `Command` order is meaningful and
-never reordered. Every plan object validates at construction, so a malformed
+only when set); `Command` order is meaningful and never reordered. Every plan object validates at construction, so a malformed
 plan fails at the procedure boundary, not in the tick loop.
 
 ## Interface contract

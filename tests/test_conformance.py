@@ -1850,6 +1850,28 @@ def test_no_stale_control_limit_exemptions() -> None:
     [cls for cls in _all_vi_classes() if issubclass(cls, RampableVI)],
     ids=lambda c: c.__name__,
 )
+def test_rampable_vi_declares_no_motion_phases_as_a_frozenset(vi_cls: type) -> None:
+    """Every rampable VI's ``no_motion_phases`` is a frozenset of phase names.
+
+    The no-motion phase declaration is read off the ramp-status snapshot by
+    the stall detector every tick, so it must be an immutable set of strings
+    on the class — a list or a bare string would be iterated as characters
+    or mutated from a shared default.
+    """
+    phases = vi_cls.no_motion_phases
+    assert isinstance(phases, frozenset), (
+        f"{vi_cls.__name__}.no_motion_phases must be a frozenset, got {type(phases).__name__}"
+    )
+    assert all(isinstance(phase, str) and phase for phase in phases), (
+        f"{vi_cls.__name__}.no_motion_phases must contain non-empty strings: {phases!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "vi_cls",
+    [cls for cls in _all_vi_classes() if issubclass(cls, RampableVI)],
+    ids=lambda c: c.__name__,
+)
 def test_rampable_vi_declares_exactly_one_setpoint_control(vi_cls: type) -> None:
     """Every rampable VI names its enveloped quantity ``target_*`` on one @control.
 

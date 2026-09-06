@@ -278,18 +278,6 @@ def test_last_state_flat_coerces_bool_to_float_unlike_monitor_history(sim_statio
     assert isinstance(flat[key], float)
 
 
-def test_process_system_targets_forwards_persistent_key(sim_station: Station):
-    """An optional 'persistent' key in a target dict is forwarded to start_ramp().
-
-    sim_cryostat's magnet_z is a plain SuperconductingMagnetVI, which accepts
-    persistent= as a no-op — this must not raise, so any procedure can include
-    'persistent' in a magnet target regardless of which magnet VI flavor a
-    config wires up.
-    """
-    sim_station.process_system_targets({"magnet_z": Target(1.0, persistent=False)})
-    assert sim_station.magnet_z.ramp_status() == "RAMPING"
-
-
 def test_process_system_targets_dispatch(sim_station: Station):
     """process_system_targets dispatches to correct VIs only."""
     targets = {
@@ -376,7 +364,7 @@ def test_get_ramp_status_carries_the_full_introspection_snapshot(sim_station: St
     """
     status = sim_station.get_ramp_status()
     assert status, "expected at least one rampable system VI"
-    keys = {"value", "setpoint", "target", "rate", "ramp_status", "phase"}
+    keys = {"value", "setpoint", "target", "rate", "ramp_status", "phase", "no_motion_phases"}
     for vi_name, entry in status.items():
         assert keys <= set(entry), f"{vi_name} missing {keys - set(entry)}"
         assert entry["ramp_status"] == "IDLE"

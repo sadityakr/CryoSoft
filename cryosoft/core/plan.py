@@ -108,20 +108,16 @@ class Target:
             ``start_ramp()`` — its unit is whatever that VI's ramp-rate unit
             is (e.g. K/min for the temperature controllers). If given it must
             be a finite real number strictly greater than zero.
-        persistent: Optional flag (magnet persistent-mode request). If given it
-            must be a ``bool``.
     """
 
     target: float
     rate: float | None = None
-    persistent: bool | None = None
 
     def __post_init__(self) -> None:
         """Validate and normalise the fields.
 
         Raises:
-            TypeError: If ``target``/``rate`` is not a real number, or
-                ``persistent`` is not a bool.
+            TypeError: If ``target``/``rate`` is not a real number.
             ValueError: If ``target`` is non-finite, or ``rate`` is non-finite
                 or not strictly positive.
         """
@@ -139,11 +135,6 @@ class Target:
             if self.rate <= 0:
                 raise ValueError(f"Target.rate must be > 0, got {self.rate!r}")
             object.__setattr__(self, "rate", float(self.rate))
-
-        if self.persistent is not None and not isinstance(self.persistent, bool):
-            raise TypeError(
-                f"Target.persistent must be a bool, got {self.persistent!r}"
-            )
 
 
 @dataclass(frozen=True)

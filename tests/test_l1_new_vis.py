@@ -110,13 +110,6 @@ class TestSuperConductingMagnetVI:
         vi.set_field(2.0)
         assert vi.ramp_status() == "RAMPING"
 
-    def test_start_ramp_accepts_persistent_kwarg_as_noop(self, ips_driver):
-        """persistent= is accepted (ignored) so Station can forward it uniformly
-        to either magnet VI flavor without special-casing which one is configured."""
-        vi = self._make_vi(ips_driver)
-        vi.start_ramp(1.0, persistent=False)
-        assert vi.ramp_status() == "RAMPING"
-
     def test_standby_ramps_to_zero(self, ips_driver):
         vi = self._make_vi(ips_driver)
         ips_driver._current = 50.0

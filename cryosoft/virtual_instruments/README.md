@@ -306,7 +306,9 @@ Shared contracts at the root; concrete classes live in the subfolders.
   that `Station.get_ramp_status()` aggregates once per tick for the ramp
   tracker and the operational-status record — `ramp_setpoint()` is the NEXT
   setpoint (the intermediate value the hardware is driving to), distinct
-  from `ramp_target()`'s END setpoint. Mixed into the magnet and temperature
+  from `ramp_target()`'s END setpoint — and the `no_motion_phases` class
+  declaration (the `ramp_phase()` values in which the value is meant to hold
+  still), carried in the same snapshot for the stall detector. Mixed into the magnet and temperature
   VIs. tests: `tests/test_l1_virtual_instruments.py`,
   `tests/test_l1_new_vis.py` (via the concrete rampable VIs).
 - `__init__.py` — package marker (docstring only). tests: none.

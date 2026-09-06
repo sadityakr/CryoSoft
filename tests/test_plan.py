@@ -27,11 +27,9 @@ def test_target_happy_and_defaults():
     t = Target(1.5)
     assert t.target == 1.5
     assert t.rate is None
-    assert t.persistent is None
-    t2 = Target(2, rate=0.1, persistent=True)
+    t2 = Target(2, rate=0.1)
     assert t2.target == 2.0 and isinstance(t2.target, float)
     assert t2.rate == 0.1
-    assert t2.persistent is True
 
 
 def test_target_bool_rejected():
@@ -56,11 +54,6 @@ def test_target_rate_must_be_positive():
 def test_target_rate_nonfinite_rejected():
     with pytest.raises(ValueError, match="Target.rate"):
         Target(1.0, rate=float("inf"))
-
-
-def test_target_persistent_type():
-    with pytest.raises(TypeError, match="Target.persistent"):
-        Target(1.0, persistent=1)
 
 
 def test_target_frozen():

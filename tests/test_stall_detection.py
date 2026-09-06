@@ -3,15 +3,25 @@
 from __future__ import annotations
 
 from cryosoft.core.operational_status import build_operational_status
-from cryosoft.core.stall_detection import StallConfig, StallState, apply_stall_verdict
+from cryosoft.core.stall_detection import (
+    StallConfig,
+    StallState,
+    apply_stall_verdict,
+    no_motion_phases_from,
+)
 
 
-def _run_ticks(values, target, rate, *, phase=None, ramp_status="RAMPING", config=None):
+def _run_ticks(
+    values, target, rate, *, phase=None, ramp_status="RAMPING", config=None,
+    no_motion_phases=frozenset(),
+):
     """Feed measured values through build + stall detection; return the per-tick records.
 
     One system VI "m" ramping toward *target*; each entry in *values* is its
     measured value on that tick. prev_gaps and StallState are threaded across
-    ticks exactly as the Orchestrator does.
+    ticks exactly as the Orchestrator does, and the VI's ``no_motion_phases``
+    declaration rides in the ramp snapshot exactly as
+    ``Station.get_ramp_status()`` carries it.
     """
     prev_gaps: dict[str, float] = {}
     stall_state = StallState()
@@ -19,13 +29,16 @@ def _run_ticks(values, target, rate, *, phase=None, ramp_status="RAMPING", confi
     for v in values:
         ramp_info = {
             "m": {"value": v, "target": target, "rate": rate,
-                  "ramp_status": ramp_status, "phase": phase},
+                  "ramp_status": ramp_status, "phase": phase,
+                  "no_motion_phases": no_motion_phases},
         }
         record, prev_gaps = build_operational_status(
             orch_state="RAMPING", elapsed_in_state_s=1.0, state={"m": {}},
             ramp_info=ramp_info, prev_gaps=prev_gaps,
         )
-        record, stall_state = apply_stall_verdict(record, stall_state, config)
+        record, stall_state = apply_stall_verdict(
+            record, stall_state, config, no_motion_phases=no_motion_phases_from(ramp_info)
+        )
         records.append(record)
     return records
 
@@ -52,11 +65,36 @@ def test_flat_ramp_stalls_after_threshold():
     assert any("stalled" in a for a in records[-1]["alerts"])
 
 
-def test_warmup_phase_never_stalls():
-    values = [5.0] * 12  # frozen gap, but the field is meant to hold during warmup
-    records = _run_ticks(values, target=10.0, rate=1.0, phase="warmup")
+def test_declared_no_motion_phase_never_stalls():
+    """A phase the VI declares in ``no_motion_phases`` is an expected pause."""
+    values = [5.0] * 12  # frozen gap, but the value is meant to hold in this phase
+    records = _run_ticks(
+        values, target=10.0, rate=1.0, phase="warmup", no_motion_phases=frozenset({"warmup"})
+    )
     assert all(r["verdict"] == "OK" for r in records)
     assert all(not r["alerts"] for r in records)
+
+
+def test_undeclared_phase_is_judged_like_any_other():
+    """The same phase name with no declaration behind it is a stall.
+
+    The detector knows no instrument: "warmup" means nothing until a VI
+    declares it, so a VI that did not declare it is judged on progress.
+    """
+    values = [5.0] * 12
+    records = _run_ticks(values, target=10.0, rate=1.0, phase="warmup")
+    assert records[-1]["verdict"] == "RAMP_STALLED"
+
+
+def test_no_motion_phases_from_reads_the_snapshot():
+    snapshot = {
+        "a": {"no_motion_phases": frozenset({"warmup"})},
+        "b": {"no_motion_phases": ()},
+        "c": {},
+    }
+    assert no_motion_phases_from(snapshot) == {
+        "a": frozenset({"warmup"}), "b": frozenset(), "c": frozenset(),
+    }
 
 
 def test_reached_ramp_not_flagged():

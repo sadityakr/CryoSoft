@@ -44,7 +44,12 @@ from cryosoft.core.plan import (
 from cryosoft.core.ramps import RampRecord, build_ramp_records
 from cryosoft.core.request_spool import RequestSpool
 from cryosoft.core.run_builder import build_procedure
-from cryosoft.core.stall_detection import StallConfig, StallState, apply_stall_verdict
+from cryosoft.core.stall_detection import (
+    StallConfig,
+    StallState,
+    apply_stall_verdict,
+    no_motion_phases_from,
+)
 from cryosoft.core.station import FaultRecord, Station
 from cryosoft.core.tiered_trend_logger import TieredTrendLogger
 # Procedures will be imported/type-checked but for now we expect a BaseProcedure mock.
@@ -3247,7 +3252,10 @@ class Orchestrator(QObject):
                 ),
             )
             record, self._stall_state = apply_stall_verdict(
-                record, self._stall_state, self._stall_config
+                record,
+                self._stall_state,
+                self._stall_config,
+                no_motion_phases=no_motion_phases_from(ramp_info),
             )
             self._operational_status = record
             self.operational_status.emit(dict(record))  # the signal payload rule
@@ -4021,8 +4029,8 @@ class Orchestrator(QObject):
         """One-shot emergency entry: clean up the run, then safe shutdown.
 
         The shutdown runs exactly once here (not every tick): repeating it
-        each tick would, for a persistent magnet, restart the full
-        switch-heater warmup/cooldown cycle every few seconds.
+        each tick would, for a VI whose shutdown is itself a multi-tick
+        sequence, restart that sequence every few seconds.
 
         **The single EMERGENCY-entry record.** This is the one path into
         EMERGENCY — a tripped critical condition observed by the tick and an

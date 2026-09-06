@@ -1511,9 +1511,9 @@ class Station:
         """Dispatch ramp targets to system VIs.
 
         Only VIs whose ``vi_type == "system"`` are valid ramp targets. Each
-        value is a ``Target``; its ``rate`` and ``persistent`` attributes are
-        forwarded to ``start_ramp()`` only when not ``None``, so VIs that do
-        not accept them (most VIs do not) are unaffected.
+        value is a ``Target``; its ``rate`` is forwarded to ``start_ramp()``
+        only when not ``None``, so VIs that do not accept one (most VIs do
+        not) are unaffected.
 
         Args:
             system_targets: Mapping of VI name → ``Target``.
@@ -1538,8 +1538,6 @@ class Station:
             kwargs: dict[str, Any] = {}
             if tgt.rate is not None:
                 kwargs["rate"] = tgt.rate
-            if tgt.persistent is not None:
-                kwargs["persistent"] = bool(tgt.persistent)
             logger.info("Starting ramp on '%s' to target=%s", vi_name, target)
             vi.start_ramp(target, **kwargs)  # type: ignore[call-arg]
 
@@ -1636,17 +1634,20 @@ class Station:
         system VI implementing ``RampableVI``, collects ``ramp_value()`` /
         ``ramp_setpoint()`` / ``ramp_target()`` / ``ramp_rate()`` (user units —
         tesla, kelvin, degrees; ``None`` if the VI does not expose them), its
-        ``ramp_phase()``, and its ``ramp_status()`` string. Each VI is guarded
-        individually: a communication error on one instrument yields a stale
-        entry rather than breaking the whole snapshot.
+        ``ramp_phase()``, its ``ramp_status()`` string, and the class's
+        ``no_motion_phases`` declaration (the phases in which a still value
+        is expected, which the stall detector reads from this snapshot). Each
+        VI is guarded individually: a communication error on one instrument
+        yields a stale entry rather than breaking the whole snapshot.
 
         Returns:
             ``{vi_name: {"value": float|None, "setpoint": float|None,
             "target": float|None, "rate": float|None, "ramp_status": str,
-            "phase": str|None}}`` for every system VI. ``setpoint`` is the
-            NEXT setpoint the hardware is driving to (an intermediate ramp
-            step), ``target`` the END setpoint the ramp finishes at. A VI that
-            raised on read also carries ``"_stale": True``.
+            "phase": str|None, "no_motion_phases": frozenset[str]}}`` for
+            every system VI. ``setpoint`` is the NEXT setpoint the hardware
+            is driving to (an intermediate ramp step), ``target`` the END
+            setpoint the ramp finishes at. A VI that raised on read also
+            carries ``"_stale": True``.
         """
         result: dict[str, dict] = {}
         for vi_name, vi_type in self._vi_registry.items():
@@ -1663,6 +1664,7 @@ class Station:
                     "rate": vi.ramp_rate(),
                     "ramp_status": vi.ramp_status(),
                     "phase": vi.ramp_phase(),
+                    "no_motion_phases": vi.no_motion_phases,
                 }
             except CryoSoftCommunicationError:
                 result[vi_name] = {
@@ -1672,6 +1674,7 @@ class Station:
                     "rate": None,
                     "ramp_status": "IDLE",
                     "phase": None,
+                    "no_motion_phases": vi.no_motion_phases,
                     "_stale": True,
                 }
         return result
