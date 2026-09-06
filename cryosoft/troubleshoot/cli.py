@@ -30,7 +30,7 @@ from typing import Any
 
 import cryosoft
 from cryosoft.core.logging_config import setup_logging
-from cryosoft.core.paths import log_directory, measurement_root
+from cryosoft.core.paths import log_directory, measurement_root, user_config_dir
 from cryosoft.core.config import read_tick_interval_ms, read_trends_config
 from cryosoft.core.trend_checks import CheckResult, declared_checks, run_checks
 from cryosoft.troubleshoot import engine, session_report, status_reader
@@ -78,10 +78,13 @@ def _shipped_config_dir() -> Path:
 
 
 def _user_config_dir() -> Path:
-    import os
+    """The user's editable config copies: ``configs/`` under the per-user config root.
 
-    appdata = os.environ.get("APPDATA", str(Path.home()))
-    return Path(appdata) / "CryoSoft" / "configs"
+    Delegates to ``cryosoft.core.paths.user_config_dir()`` (the per-user
+    path standard) so this CLI and the application resolve the same
+    directory.
+    """
+    return user_config_dir() / "configs"
 
 
 def _read_active_config() -> str | None:

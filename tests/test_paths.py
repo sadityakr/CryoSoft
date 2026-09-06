@@ -16,6 +16,9 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every test starts with a clean slate for the resolver's env inputs."""
     monkeypatch.delenv("CRYOSOFT_LOG_DIR", raising=False)
     monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    monkeypatch.delenv("APPDATA", raising=False)
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
     monkeypatch.delenv("CRYOSOFT_MEASUREMENT_ROOT", raising=False)
 
 
@@ -67,13 +70,16 @@ def test_log_directory_windows_uses_localappdata(
     assert result == tmp_path / "AppData" / "Local" / "CryoSoft" / "logs"
 
 
-def test_log_directory_windows_without_localappdata_falls_back_to_packaged(
-    monkeypatch: pytest.MonkeyPatch,
+def test_log_directory_windows_without_localappdata_falls_back_to_xdg_shape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """No LOCALAPPDATA: the XDG shape under home, the same as every other platform."""
+    fake_home = tmp_path / "home" / "fakeuser"
+    monkeypatch.setattr(paths.Path, "home", staticmethod(lambda: fake_home))
     _pretend_platform(monkeypatch, "nt")
     monkeypatch.delenv("LOCALAPPDATA", raising=False)
     result = paths.log_directory()
-    assert result == Path(paths.__file__).parent.parent / "logs"
+    assert result == fake_home / ".local" / "state" / "cryosoft" / "logs"
 
 
 def test_log_directory_posix_uses_xdg_style_state_dir(
@@ -86,6 +92,88 @@ def test_log_directory_posix_uses_xdg_style_state_dir(
     _pretend_platform(monkeypatch, "posix")
     result = paths.log_directory()
     assert result == fake_home / ".local" / "state" / "cryosoft" / "logs"
+
+
+def test_log_directory_is_the_state_root_plus_logs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    _pretend_platform(monkeypatch, "posix")
+    assert paths.log_directory() == paths.user_state_dir() / "logs"
+
+
+# ── the per-user path standard: user_config_dir() / user_state_dir() ──────────
+
+
+def test_user_config_dir_windows_uses_appdata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _pretend_platform(monkeypatch, "nt")
+    monkeypatch.setenv("APPDATA", str(tmp_path / "AppData" / "Roaming"))
+    assert paths.user_config_dir() == tmp_path / "AppData" / "Roaming" / "CryoSoft"
+
+
+def test_user_config_dir_windows_without_appdata_falls_back_to_xdg_shape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_home = tmp_path / "home" / "fakeuser"
+    monkeypatch.setattr(paths.Path, "home", staticmethod(lambda: fake_home))
+    _pretend_platform(monkeypatch, "nt")
+    assert paths.user_config_dir() == fake_home / ".config" / "cryosoft"
+
+
+def test_user_config_dir_posix_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_home = tmp_path / "home" / "fakeuser"
+    monkeypatch.setattr(paths.Path, "home", staticmethod(lambda: fake_home))
+    _pretend_platform(monkeypatch, "posix")
+    assert paths.user_config_dir() == fake_home / ".config" / "cryosoft"
+
+
+def test_user_config_dir_posix_honours_xdg_config_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _pretend_platform(monkeypatch, "posix")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
+    assert paths.user_config_dir() == tmp_path / "xdg-config" / "cryosoft"
+
+
+def test_user_config_dir_empty_xdg_var_is_treated_as_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_home = tmp_path / "home" / "fakeuser"
+    monkeypatch.setattr(paths.Path, "home", staticmethod(lambda: fake_home))
+    _pretend_platform(monkeypatch, "posix")
+    monkeypatch.setenv("XDG_CONFIG_HOME", "")
+    assert paths.user_config_dir() == fake_home / ".config" / "cryosoft"
+
+
+def test_user_state_dir_windows_uses_localappdata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _pretend_platform(monkeypatch, "nt")
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "AppData" / "Local"))
+    assert paths.user_state_dir() == tmp_path / "AppData" / "Local" / "CryoSoft"
+
+
+def test_user_state_dir_posix_default_and_xdg_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_home = tmp_path / "home" / "fakeuser"
+    monkeypatch.setattr(paths.Path, "home", staticmethod(lambda: fake_home))
+    _pretend_platform(monkeypatch, "posix")
+    assert paths.user_state_dir() == fake_home / ".local" / "state" / "cryosoft"
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))
+    assert paths.user_state_dir() == tmp_path / "xdg-state" / "cryosoft"
+
+
+def test_user_dirs_create_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "c"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "s"))
+    _pretend_platform(monkeypatch, "posix")
+    assert not paths.user_config_dir().exists()
+    assert not paths.user_state_dir().exists()
 
 
 def test_log_directory_creates_nothing(

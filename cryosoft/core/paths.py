@@ -1,10 +1,28 @@
 """CryoSoft installation-path resolution.
 
-Machine-local directories — where logs go on *this* installation — are a
-deployment property, not a source-tree one, and resolving them is neither
-logging's job nor any single caller's. Keeping every such rule here means a
-caller asks for a directory instead of reimplementing the precedence, and
-the rules stay readable side by side.
+Machine-local directories — where logs go on *this* installation, where a
+user's own settings live — are a deployment property, not a source-tree one,
+and resolving them is neither logging's job nor any single caller's. Keeping
+every such rule here means a caller asks for a directory instead of
+reimplementing the precedence, and the rules stay readable side by side.
+
+The **per-user path standard**: exactly two per-user roots exist, and every
+per-user file in CryoSoft hangs off one of them —
+
+* ``user_config_dir()`` — what the user CHOOSES and would carry to another
+  machine: editable config copies, ELN settings.
+  ``%APPDATA%\\CryoSoft`` on Windows; ``$XDG_CONFIG_HOME/cryosoft``, else
+  ``~/.config/cryosoft``, elsewhere.
+* ``user_state_dir()`` — what the application ACCUMULATES on this machine and
+  the user would not miss: logs, the trend-history store, the gateway
+  descriptor. ``%LOCALAPPDATA%\\CryoSoft`` on Windows;
+  ``$XDG_STATE_HOME/cryosoft``, else ``~/.local/state/cryosoft``, elsewhere.
+
+On Windows with the platform variable unset, both fall back to the XDG shape
+under the home directory rather than inventing a third location. A module
+that cannot import this one (``cryosoft.mcp.client``, held to stdlib and
+``core.events`` by contract C21) carries a copy of the state-dir rule and
+says so beside it.
 
 This module is import-linter contract C1 foundation: it must import nothing
 else from the ``cryosoft`` package, stdlib only.
@@ -15,6 +33,66 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+_APP_DIR_WINDOWS = "CryoSoft"
+_APP_DIR_XDG = "cryosoft"
+
+
+def _xdg_dir(env_var: str, *default_parts: str) -> Path:
+    """Resolve one XDG base directory for this application.
+
+    Args:
+        env_var: The XDG variable to honour, e.g. ``"XDG_CONFIG_HOME"``.
+        default_parts: The path under the home directory the specification
+            names as that variable's default, e.g. ``(".config",)``.
+
+    Returns:
+        ``$<env_var>/cryosoft`` when the variable is set and non-empty, else
+        ``~/<default_parts>/cryosoft``.
+    """
+    base = os.environ.get(env_var)
+    if base:
+        return Path(base) / _APP_DIR_XDG
+    return Path.home().joinpath(*default_parts) / _APP_DIR_XDG
+
+
+def user_config_dir() -> Path:
+    """Resolve the per-user CONFIG root without creating it.
+
+    The home of what the user chooses and would carry to another machine —
+    editable config copies, ELN settings. See the module docstring's
+    per-user path standard.
+
+    Returns:
+        ``%APPDATA%\\CryoSoft`` on Windows (``os.name == "nt"``) when
+        ``APPDATA`` is set; otherwise ``$XDG_CONFIG_HOME/cryosoft``, else
+        ``~/.config/cryosoft``. Not guaranteed to exist; nothing is created.
+    """
+    if os.name == "nt":
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            return Path(appdata) / _APP_DIR_WINDOWS
+    return _xdg_dir("XDG_CONFIG_HOME", ".config")
+
+
+def user_state_dir() -> Path:
+    """Resolve the per-user STATE root without creating it.
+
+    The home of what the application accumulates on this machine — logs,
+    the trend-history store, the gateway descriptor. See the module
+    docstring's per-user path standard.
+
+    Returns:
+        ``%LOCALAPPDATA%\\CryoSoft`` on Windows (``os.name == "nt"``) when
+        ``LOCALAPPDATA`` is set; otherwise ``$XDG_STATE_HOME/cryosoft``, else
+        ``~/.local/state/cryosoft``. Not guaranteed to exist; nothing is
+        created.
+    """
+    if os.name == "nt":
+        local_appdata = os.environ.get("LOCALAPPDATA")
+        if local_appdata:
+            return Path(local_appdata) / _APP_DIR_WINDOWS
+    return _xdg_dir("XDG_STATE_HOME", ".local", "state")
+
 
 def log_directory() -> Path:
     """Resolve the CryoSoft log directory without creating it.
@@ -22,11 +100,9 @@ def log_directory() -> Path:
     Precedence:
 
     1. ``CRYOSOFT_LOG_DIR`` environment variable, if set and non-empty.
-    2. ``%LOCALAPPDATA%\\CryoSoft\\logs`` on Windows (``os.name == "nt"``),
-       or ``~/.local/state/cryosoft/logs`` on other platforms — provided the
-       relevant platform variable (``LOCALAPPDATA`` on Windows) is set.
-    3. ``cryosoft/logs/`` (next to this package) as the final fallback, used
-       when the platform-specific location above is unavailable.
+    2. ``user_state_dir() / "logs"`` — ``%LOCALAPPDATA%\\CryoSoft\\logs`` on
+       Windows, ``~/.local/state/cryosoft/logs`` (or its ``XDG_STATE_HOME``
+       form) elsewhere and as the Windows fallback.
 
     This is a pure function: it only resolves and returns a path, it never
     creates the directory or any file in it. ``setup_logging()`` is
@@ -44,15 +120,7 @@ def log_directory() -> Path:
     env_dir = os.environ.get("CRYOSOFT_LOG_DIR")
     if env_dir:
         return Path(env_dir)
-
-    if os.name == "nt":
-        local_appdata = os.environ.get("LOCALAPPDATA")
-        if local_appdata:
-            return Path(local_appdata) / "CryoSoft" / "logs"
-    else:
-        return Path.home() / ".local" / "state" / "cryosoft" / "logs"
-
-    return Path(__file__).parent.parent / "logs"
+    return user_state_dir() / "logs"
 
 
 def _app_config_path() -> Path:

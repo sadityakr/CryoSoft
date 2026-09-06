@@ -32,8 +32,9 @@ GUI-side drain, never from `core/`.
 ## Entry (what comes in)
 
 - **Settings**: the user-level JSON file resolved by `eln_settings_path()`
-  (`$CRYOSOFT_ELN_SETTINGS`, else `%APPDATA%\CryoSoft\eln-settings.json` on
-  Windows, else `~/.config/cryosoft/eln-settings.json`), plus the
+  (`$CRYOSOFT_ELN_SETTINGS`, else `eln-settings.json` under
+  `core.paths.user_config_dir()` — `%APPDATA%\CryoSoft` on Windows,
+  `~/.config/cryosoft` elsewhere), plus the
   `CRYOSOFT_ELAB_APIKEY` environment variable which overrides its `api_key`.
   Never a shipped config, never git-tracked.
 - **Run manifests** (the Orchestrator's `run_finished` payload: `run_id`,

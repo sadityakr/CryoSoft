@@ -30,7 +30,7 @@ from cryosoft.mcp.adapter import (
     RESOURCE_NOT_FOUND,
     McpAdapter,
 )
-from cryosoft.mcp.client import GatewayError, read_descriptor
+from cryosoft.mcp.client import GatewayError, default_descriptor_path, read_descriptor
 from cryosoft.mcp.sdk import sdk_unavailable_reason, serve_with_sdk
 from cryosoft.procedures.field_sweep import FieldSweep
 from cryosoft.session.gateway import GatewayServer, Role, ToolContext
@@ -39,6 +39,40 @@ from cryosoft.session.models import User
 from cryosoft.session.store import ExperimentStore, UserRoster
 
 CONFIG_PATH = "cryosoft/configs/sim_cryostat"
+
+
+# ── the descriptor's default location tracks core.paths ───────────────────────
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {},
+        {"XDG_STATE_HOME": "xdg-state"},
+        {"CRYOSOFT_LOG_DIR": "explicit-logs"},
+    ],
+    ids=["home-default", "xdg-state-home", "cryosoft-log-dir"],
+)
+def test_default_descriptor_path_matches_the_log_directory_rule(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, env: dict[str, str]
+) -> None:
+    """The adapter's copy of the per-user state rule stays in step with core.paths.
+
+    Contract C21 keeps ``cryosoft.mcp.client`` from importing ``paths.py``,
+    so it carries a copy of ``user_state_dir()``; this pins the copy to the
+    original for every branch a POSIX host can take (the Windows branch is
+    the same three lines in both, read side by side).
+    """
+    from cryosoft.core import paths
+
+    for name in ("CRYOSOFT_GATEWAY_DESCRIPTOR", "CRYOSOFT_LOG_DIR", "XDG_STATE_HOME"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, str(tmp_path / value))
+    fake_home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+
+    assert default_descriptor_path() == paths.log_directory() / "gateway.json"
 
 TOKEN = "test-token-not-a-secret"
 

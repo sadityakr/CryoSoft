@@ -47,6 +47,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from cryosoft.core.paths import user_config_dir
+
 logger = logging.getLogger(__name__)
 
 #: Environment variable holding the elabFTW API key, overriding the file.
@@ -97,13 +99,12 @@ DEFAULT_MODEL_PRICES: dict[str, dict[str, float]] = {
 def eln_settings_path() -> Path:
     """Resolve the user-level ELN settings file without creating it.
 
-    Precedence, mirroring ``cryosoft.core.paths``:
+    Precedence:
 
     1. ``CRYOSOFT_ELN_SETTINGS``, if set and non-empty.
-    2. ``%APPDATA%\\CryoSoft\\eln-settings.json`` on Windows
-       (``os.name == "nt"``), when ``APPDATA`` is set.
-    3. ``~/.config/cryosoft/eln-settings.json`` on other platforms, and as
-       the Windows fallback when ``APPDATA`` is unset.
+    2. ``eln-settings.json`` under ``cryosoft.core.paths.user_config_dir()``
+       (the per-user path standard: ``%APPDATA%\\CryoSoft`` on Windows,
+       ``~/.config/cryosoft`` or its ``XDG_CONFIG_HOME`` form elsewhere).
 
     Returns:
         The resolved path (not guaranteed to exist). Pure — this never
@@ -112,11 +113,7 @@ def eln_settings_path() -> Path:
     env_path = os.environ.get(SETTINGS_PATH_ENV_VAR)
     if env_path:
         return Path(env_path)
-    if os.name == "nt":
-        appdata = os.environ.get("APPDATA")
-        if appdata:
-            return Path(appdata) / "CryoSoft" / _SETTINGS_FILENAME
-    return Path.home() / ".config" / "cryosoft" / _SETTINGS_FILENAME
+    return user_config_dir() / _SETTINGS_FILENAME
 
 
 def _as_bool(value: object, default: bool) -> bool:
