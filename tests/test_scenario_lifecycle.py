@@ -53,7 +53,7 @@ FIELD_SWEEP_PARAMS: dict[str, Any] = {
 }
 
 #: A three-point TemperatureSweep that never actually has to ramp (start ==
-#: end == the sim VTI's resting value), measured with the DC source/meter.
+#: end == the sim temperature controller's resting value), measured with the DC source/meter.
 TEMPERATURE_SWEEP_PARAMS: dict[str, Any] = {
     "measurement_vi": "dc_measurement",
     "temperature_start": 300.0,

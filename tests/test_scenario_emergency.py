@@ -44,7 +44,7 @@ FIELD_SWEEP_PARAMS = {
     "field_start": -0.1,
     "field_end": 0.1,
     "field_steps": 3,
-    "temperature": 300.0,  # sim VTI starts at 300 K -> instant settle
+    "temperature": 300.0,  # the sim temperature controller starts at 300 K -> instant settle
     "current_A": 1e-6,
     "readings_per_point": 3,
     "init_wait": 0.0,
