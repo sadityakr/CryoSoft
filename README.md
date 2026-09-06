@@ -147,11 +147,11 @@ instead, mark it active once:
 python -c "from i2as.gui import app_settings; app_settings.set_config_active('sim_imaging', 'shipped')"
 ```
 
-Two windows open: the Monitor window (instrument cards, trends, the
-experiment header, the ramp tracker and the agent panel with the kill
-switch and attendance controls) and the Procedure window (parameter form,
-run queue, two live plots, and the eLab tab where an analysed entry is
-previewed and published).
+The Monitor window opens (instrument cards, trends, the experiment
+header, the ramp tracker and the agent panel with the kill switch and
+attendance controls); the Procedures menu opens the Procedure window
+(parameter form, run queue, two live plots, and the eLab tab where an
+analysed entry is previewed and published).
 
 **The MCP server**, for an agent session driving a *running* application:
 
