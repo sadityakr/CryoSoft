@@ -28,7 +28,8 @@ from cryosoft.core.capability_manifest import (
     validate_manifest,
 )
 from cryosoft.core.events import StationInfo
-from cryosoft.core.station import Station, build_station, read_tick_interval_ms
+from cryosoft.core.config import read_tick_interval_ms
+from cryosoft.core.station import Station, build_station
 
 SIM_CONFIG = str(Path(cryosoft.__file__).parent / "configs" / "sim_cryostat")
 

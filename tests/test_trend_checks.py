@@ -198,7 +198,7 @@ def test_conditions_for_only_includes_failures(tmp_path: Path):
 
 # ── declared_checks: built from the config's trends.checks list ──────────────
 
-# A fully-merged trends: config, mirroring what Station.read_trends_config()
+# A fully-merged trends: config, mirroring what config.read_trends_config()
 # actually hands declared_checks() at runtime.
 _BAND_ENTRY = {"key": "temperature_temperature", "low": 1.0, "high": 320.0, "window_s": 3600.0}
 _FULL_TRENDS_CONFIG: dict[str, object] = {

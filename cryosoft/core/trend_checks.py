@@ -16,7 +16,7 @@ the one adapter that turns a failing check into the `Condition` currency the
 rest of CryoSoft's System-Condition standard (`core/conditions.py`) already
 understands. The checks a setup runs are DECLARED IN ITS CONFIG: `declared_checks()`
 builds one `TrendCheck` per entry of the `trends.checks:` list that
-`Station.read_trends_config()` hands it, each through a builder such as
+`cryosoft.core.config.read_trends_config()` hands it, each through a builder such as
 `channel_within_band()` — so which channel is watched and where its band
 lies are setup facts in `devices.yaml`, never constants in this module. A
 new kind of judgement is one builder function plus one `CHECK_KINDS` row.
@@ -465,7 +465,7 @@ def declared_checks(config: Mapping[str, object]) -> tuple[TrendCheck, ...]:
 
     Args:
         config: This setup's ``trends:`` block as merged by
-            `cryosoft.core.station.read_trends_config()`; its ``"checks"``
+            `cryosoft.core.config.read_trends_config()`; its ``"checks"``
             entry is the list above (``[]`` when the setup declares none).
 
     Returns:

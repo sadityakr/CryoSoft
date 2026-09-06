@@ -66,7 +66,7 @@ def test_build_station_passes_address_to_driver(tmp_path):
 
 def test_read_panels_config_well_formed(tmp_path):
     """read_panels_config returns per-VI control allowlists from monitor.yaml."""
-    from cryosoft.core.station import read_panels_config
+    from cryosoft.core.config import read_panels_config
 
     (tmp_path / "monitor.yaml").write_text(
         "monitor:\n  tick_interval_ms: 1000\n"
@@ -84,7 +84,7 @@ def test_read_panels_config_well_formed(tmp_path):
 
 def test_read_panels_config_tolerates_absent_or_malformed(tmp_path):
     """Absent block, malformed entries, or a missing file yield {} / skip, never raise."""
-    from cryosoft.core.station import read_panels_config
+    from cryosoft.core.config import read_panels_config
 
     # No monitor.yaml at all.
     assert read_panels_config(str(tmp_path / "nowhere")) == {}
@@ -105,14 +105,14 @@ def test_read_panels_config_tolerates_absent_or_malformed(tmp_path):
 
 
 def test_read_tick_interval_ms_reads_the_configured_value(tmp_path):
-    from cryosoft.core.station import read_tick_interval_ms
+    from cryosoft.core.config import read_tick_interval_ms
 
     (tmp_path / "monitor.yaml").write_text("monitor:\n  tick_interval_ms: 1000\n")
     assert read_tick_interval_ms(str(tmp_path)) == 1000
 
 
 def test_read_tick_interval_ms_defaults_when_absent_or_missing(tmp_path):
-    from cryosoft.core.station import read_tick_interval_ms
+    from cryosoft.core.config import read_tick_interval_ms
 
     # No monitor.yaml at all.
     assert read_tick_interval_ms(str(tmp_path / "nowhere")) == 3000
@@ -1254,7 +1254,7 @@ def test_availability_failed_reconnect_of_operator_disconnected_vi_adds_connect_
 
 def test_read_gateway_config_reads_the_declared_values(tmp_path):
     """A setup that opens itself to agents says so in its own monitor.yaml."""
-    from cryosoft.core.station import read_gateway_config
+    from cryosoft.core.config import read_gateway_config
 
     (tmp_path / "monitor.yaml").write_text(
         "monitor:\n"
@@ -1274,7 +1274,7 @@ def test_read_gateway_config_reads_the_declared_values(tmp_path):
 
 def test_read_gateway_config_defaults_to_the_closed_door(tmp_path):
     """Absent, malformed or unreadable all mean off — never raises."""
-    from cryosoft.core.station import read_gateway_config
+    from cryosoft.core.config import read_gateway_config
 
     closed = {"gateway_server": False, "gateway_max_role": "observer"}
     assert read_gateway_config(str(tmp_path / "nowhere")) == closed
@@ -1290,7 +1290,7 @@ def test_read_instrument_thread_defaults_to_the_thread(tmp_path):
     Absent, malformed or unreadable all inherit it too — the fallback of a
     file nobody can read must be the shape every other setup runs in.
     """
-    from cryosoft.core.station import read_instrument_thread
+    from cryosoft.core.config import read_instrument_thread
 
     assert read_instrument_thread(str(tmp_path / "nowhere")) is True
     (tmp_path / "monitor.yaml").write_text("monitor:\n  tick_interval_ms: 1000\n")
@@ -1301,7 +1301,7 @@ def test_read_instrument_thread_defaults_to_the_thread(tmp_path):
 
 def test_read_instrument_thread_honours_a_deliberate_refusal(tmp_path):
     """A setup that wants the temporary inline mode back says so explicitly."""
-    from cryosoft.core.station import read_instrument_thread
+    from cryosoft.core.config import read_instrument_thread
 
     (tmp_path / "monitor.yaml").write_text(
         "monitor:\n  tick_interval_ms: 1000\n  instrument_thread: false\n"

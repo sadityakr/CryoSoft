@@ -828,7 +828,7 @@ def check_trend_store_live(
             considered stale. Computed by the caller from this setup's
             `trends.store_live_stale_ticks` config value times its
             `monitor.tick_interval_ms` (see
-            `cryosoft.core.station.read_tick_interval_ms()`), never
+            `cryosoft.core.config.read_tick_interval_ms()`), never
             hardcoded here.
         now: Reference "now" timestamp; defaults to `time.time()`.
 

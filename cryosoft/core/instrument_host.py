@@ -107,7 +107,7 @@ def resolve_mode(configured: bool | None = None) -> str:
 
     The **instrument-thread flag**: ``monitor.yaml``'s ``instrument_thread``
     is the setup's own choice (read with
-    ``cryosoft.core.station.read_instrument_thread()``), and
+    ``cryosoft.core.config.read_instrument_thread()``), and
     ``CRYOSOFT_INSTRUMENT_THREAD`` overrides it for one launch — which is how
     CI runs the same suite in both modes without editing a config.
 

@@ -1186,7 +1186,7 @@ def test_panels_config_names_real_vis_and_controls(config_dir: Path) -> None:
     A typo'd VI or control name would otherwise fail silently — the card
     would just render without the control the operator expected.
     """
-    from cryosoft.core.station import read_panels_config
+    from cryosoft.core.config import read_panels_config
 
     panels = read_panels_config(str(config_dir))
     if not panels:
@@ -2837,7 +2837,7 @@ def test_declared_trend_checks_name_real_state_keys(config_dir: Path) -> None:
     below covers every shipped config, including any real-hardware setup,
     via the static derivation this test's own key set is verified against.
     """
-    from cryosoft.core.station import read_trends_config
+    from cryosoft.core.config import read_trends_config
     from cryosoft.core.trend_checks import declared_checks
 
     station = build_station(str(config_dir))
@@ -2925,7 +2925,7 @@ def test_declared_trend_checks_name_derivable_state_keys(config_dir: Path) -> No
     `test_panels_config_names_real_vis_and_controls` already use to cover
     all four configs.
     """
-    from cryosoft.core.station import read_trends_config
+    from cryosoft.core.config import read_trends_config
     from cryosoft.core.trend_checks import declared_checks
 
     derivable_keys = _static_flat_keys(config_dir)
@@ -4180,20 +4180,20 @@ def test_the_proxy_re_exposes_every_engine_signal() -> None:
 #: the matching ``ignore_imports`` entries.
 _RUNTIME_STATION_IMPORTS: dict[str, set[str]] = {
     "cryosoft/gui/config_editor.py": {"validate_config_dir"},
-    "cryosoft/gui/monitor_window.py": {"read_instrument_metadata"},
 }
 
 
 def test_gui_imports_the_station_only_for_typing_or_config_helpers() -> None:
     """C19's other half: a ``cryosoft.core.station`` import under ``gui/`` is
-    type-only, or one of the two named config-file helpers.
+    type-only, or the one named config-validation helper.
 
     Import contract C19 forbids the dependency outright and lists the
     existing modules in ``ignore_imports`` — import-linter counts an import
     inside ``if TYPE_CHECKING:`` like any other, so the contract alone cannot
     express "types are fine". This is the half that can: every ignored import
-    must be inside a type-checking guard, unless it is one of the two config
-    helpers named above.
+    must be inside a type-checking guard, unless it is the config helper
+    named above (the YAML-only readers live in ``cryosoft.core.config``,
+    which the GUI may import freely).
     """
     offenders: list[str] = []
     for path in sorted((PACKAGE_DIR / "gui").rglob("*.py")):

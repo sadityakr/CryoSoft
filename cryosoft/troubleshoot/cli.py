@@ -31,7 +31,7 @@ from typing import Any
 import cryosoft
 from cryosoft.core.logging_config import setup_logging
 from cryosoft.core.paths import log_directory, measurement_root
-from cryosoft.core.station import read_tick_interval_ms, read_trends_config
+from cryosoft.core.config import read_tick_interval_ms, read_trends_config
 from cryosoft.core.trend_checks import CheckResult, declared_checks, run_checks
 from cryosoft.troubleshoot import engine, session_report, status_reader
 from cryosoft.troubleshoot.engine import (

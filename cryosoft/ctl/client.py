@@ -49,12 +49,8 @@ from cryosoft.core import events as ev
 from cryosoft.core.instrument_host import InstrumentHost
 from cryosoft.core.paths import measurement_root
 from cryosoft.core.request_spool import RequestSpool, spool_directory
-from cryosoft.core.station import (
-    Station,
-    build_station,
-    read_safety_config,
-    read_tick_interval_ms,
-)
+from cryosoft.core.config import read_safety_config, read_tick_interval_ms
+from cryosoft.core.station import Station, build_station
 from cryosoft.ctl.discovery import discover_run_catalog
 from cryosoft.session.agent_feed import AgentFeed
 from cryosoft.session.gateway import Gateway, Role, ToolContext

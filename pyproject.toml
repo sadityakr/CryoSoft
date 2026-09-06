@@ -412,10 +412,10 @@ allow_indirect_imports = "True"
 # below is therefore paired with the conformance test
 # `test_gui_imports_the_station_only_for_typing_or_config_helpers`, which is
 # what actually enforces the distinction: each ignored import must be inside a
-# type-checking guard, or be one of the two pure config-FILE helpers named
-# there (`validate_config_dir`, `read_instrument_metadata` — neither takes a
-# Station nor touches an instrument; they live in that module for historical
-# reasons and moving them is a separate change). A gui module NOT listed here
+# type-checking guard, or be the one pure config-FILE helper named there
+# (`validate_config_dir` — it takes no Station and touches no instrument, but
+# needs the classes the Station wires, so it lives beside it; the YAML-only
+# readers live in cryosoft.core.config, C24). A gui module NOT listed here
 # cannot import the Station at all, which is the property this contract keeps.
 ignore_imports = [
     "cryosoft.gui.config_editor -> cryosoft.core.station",
@@ -554,3 +554,34 @@ source_modules = [
     "cryosoft.mcp",
 ]
 forbidden_modules = ["cryosoft.analysis"]
+
+[[tool.importlinter.contracts]]
+name = "C24: cryosoft.core.config is the YAML-only config surface — it imports the foundation, the events vocabulary and the request-spool role ladder, never the Station, the engine, drivers, VIs, procedures, GUI or any client"
+type = "forbidden"
+# The one module a user reads to learn the config schema, and the one the
+# GUI, the troubleshoot CLI and the reference client may ask a config
+# question of before any Station exists — so it must pull none of them in.
+source_modules = ["cryosoft.core.config"]
+forbidden_modules = [
+    "cryosoft.drivers",
+    "cryosoft.virtual_instruments",
+    "cryosoft.procedures",
+    "cryosoft.gui",
+    "cryosoft.main",
+    "cryosoft.session",
+    "cryosoft.troubleshoot",
+    "cryosoft.ctl",
+    "cryosoft.mcp",
+    "cryosoft.analysis",
+    "cryosoft.core.station",
+    "cryosoft.core.orchestrator",
+    "cryosoft.core.orchestrator_proxy",
+    "cryosoft.core.instrument_host",
+    "cryosoft.core.procedure",
+    "cryosoft.core.data_manager",
+    "cryosoft.core.data_reader",
+    "cryosoft.core.plan",
+    "cryosoft.core.trend_checks",
+    "cryosoft.core.trend_check_runner",
+    "cryosoft.core.capability_manifest",
+]

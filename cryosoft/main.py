@@ -17,9 +17,7 @@ from cryosoft.core.instrument_host import InstrumentHost, resolve_mode
 from cryosoft.core.logging_config import setup_logging
 from cryosoft.core.paths import measurement_root
 from cryosoft.core.request_spool import RequestSpool
-from cryosoft.core.station import (
-    Station,
-    build_station_with_fallback,
+from cryosoft.core.config import (
     read_gateway_config,
     read_instrument_thread,
     read_panels_config,
@@ -27,6 +25,7 @@ from cryosoft.core.station import (
     read_safety_config,
     read_trends_config,
 )
+from cryosoft.core.station import Station, build_station_with_fallback
 from cryosoft.core.trend_check_runner import TrendCheckRunner
 from cryosoft.core.trend_checks import declared_checks
 from cryosoft.gui import app_settings

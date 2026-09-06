@@ -21,7 +21,8 @@ from cryosoft.core.request_spool import (
     RequestSpool,
     spool_directory,
 )
-from cryosoft.core.station import build_station, read_request_spool_config
+from cryosoft.core.config import read_request_spool_config
+from cryosoft.core.station import build_station
 from cryosoft.session.gateway import Role, authorize_spooled
 
 CONFIG_PATH = "cryosoft/configs/sim_cryostat"
