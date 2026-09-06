@@ -36,13 +36,16 @@ a sweep column               ``(N,)``                                ``sweep_axi
 a measurement scalar         ``(N, n_loop1, n_loop2)``               ``measurement``
 a measurement array          ``(N, n_loop1, n_loop2, length)``       ``measurement``
 a raw diagnostic block       ``(N, [n_loop1, n_loop2,] rows, cols)`` ``raw_block``
+an image block               ``(N, [n_loop1, n_loop2,] rows, cols)`` ``image``
 ===========================  ======================================  ==============
 
 The leading axis is always the sweep point; a block carries the loop axes
 only when a reading loop is configured, and describes itself with ``axes``
-and ``channel_names`` attributes. Which name is which role is declared in
-``/metadata``'s ``data_config``; the shape and the ``axes`` attribute are the
-fallback when it is absent. The **reading loop**'s own axes are not datasets
+and ``block_kind`` attributes — plus ``channel_names`` for a raw block, or
+``unit``/``description`` for an image (the image-block standard, whose one
+frame per point ``read_image()`` serves). Which name is which role is
+declared in ``/metadata``'s ``data_config``; the ``block_kind``/``axes``
+attributes and then the shape are the fallback when it is absent. The **reading loop**'s own axes are not datasets
 at all — index -> physical value lives in
 ``procedure_params["loop1_values"]`` / ``["loop2_values"]`` — so this module
 surfaces them as the two ``loop_axis`` columns ``loop1`` and ``loop2``,
@@ -103,17 +106,25 @@ TIMESTAMP_COLUMN = "timestamp"
 
 #: What a column *is*, independent of how it is stored. A consumer plots a
 #: ``measurement`` against a ``sweep_axis``, labels a measurement's inner axes
-#: from the ``loop_axis`` columns, and leaves a ``raw_block`` to diagnostics.
+#: from the ``loop_axis`` columns, leaves a ``raw_block`` to diagnostics, and
+#: reads an ``image`` frame by frame through ``read_image()``.
 ROLE_SWEEP_AXIS = "sweep_axis"
 ROLE_LOOP_AXIS = "loop_axis"
 ROLE_MEASUREMENT = "measurement"
 ROLE_RAW_BLOCK = "raw_block"
+ROLE_IMAGE = "image"
 COLUMN_ROLES: tuple[str, ...] = (
     ROLE_SWEEP_AXIS,
     ROLE_LOOP_AXIS,
     ROLE_MEASUREMENT,
     ROLE_RAW_BLOCK,
+    ROLE_IMAGE,
 )
+
+#: The dataset attribute a block writes to say what kind it is, and the value
+#: that marks a frame (``DataManager._allocate_datasets``).
+BLOCK_KIND_ATTR = "block_kind"
+BLOCK_KIND_IMAGE = "image"
 
 #: The reading loop's two slots, as the metadata key holding a slot's ordered
 #: physical values mapped to the ``loop_axis`` column name this module gives
@@ -181,6 +192,9 @@ _CONFIG_SECTION_ROLES: dict[str, str] = {
     "measurement_scalars": ROLE_MEASUREMENT,
     "measurement_arrays": ROLE_MEASUREMENT,
     "measurement_blocks": ROLE_RAW_BLOCK,
+    # Listed AFTER measurement_blocks on purpose: an image block appears in
+    # both (the shape there, the kind here), and the later section wins.
+    "measurement_image_blocks": ROLE_IMAGE,
 }
 
 
@@ -402,6 +416,12 @@ class RunSource(Protocol):
         """Return the run's metadata under ``RUN_METADATA_KEYS``."""
         ...
 
+    def read_image(
+        self, column: str, index: int, loop1: int = 0, loop2: int = 0
+    ) -> np.ndarray:
+        """Return one ``(height, width)`` frame of an ``image`` column."""
+        ...
+
 
 def _dtype_name(dtype: np.dtype) -> str:
     """Return the canonical element-type name for an HDF5 dataset dtype.
@@ -510,6 +530,43 @@ def roles_from_data_config(config: Mapping[str, Any]) -> dict[str, str]:
             for name in names:
                 roles[str(name)] = role
     return roles
+
+
+def select_frame(frames: np.ndarray, loop1: int = 0, loop2: int = 0) -> np.ndarray:
+    """Pick one frame out of a single sweep point's image-block value.
+
+    The image-block standard stores a point's frames as ``(rows, cols)``
+    with no reading loop, or ``(n_loop1, n_loop2, rows, cols)`` with one —
+    the same loop-axis rule a raw block follows — so both ``RunSource``
+    implementations share this one selection.
+
+    Args:
+        frames: The point's value, 2-D or 4-D.
+        loop1: Reading-loop slot-1 index; must be ``0`` for a 2-D value.
+        loop2: Reading-loop slot-2 index; must be ``0`` for a 2-D value.
+
+    Returns:
+        The ``(rows, cols)`` frame as a float64 array.
+
+    Raises:
+        IndexError: If a loop index is out of range, or non-zero for a value
+            that carries no loop axis.
+        ValueError: If the value is neither 2-D nor 4-D.
+    """
+    array = np.asarray(frames, dtype=np.float64)
+    if array.ndim == 2:
+        if loop1 or loop2:
+            raise IndexError(
+                f"image block carries no reading-loop axis, but loop1={loop1}, "
+                f"loop2={loop2} were asked for"
+            )
+        return array
+    if array.ndim == 4:
+        return array[loop1, loop2]
+    raise ValueError(
+        f"an image block value must be (rows, cols) or (n_loop1, n_loop2, rows, cols), "
+        f"got shape {array.shape}"
+    )
 
 
 def _decode_attr(value: Any) -> Any:
@@ -758,6 +815,42 @@ class RunHandle:
             return np.asarray(dataset.asstr()[selection])
         return np.asarray(dataset[selection])
 
+    def read_image(
+        self, column: str, index: int, loop1: int = 0, loop2: int = 0
+    ) -> np.ndarray:
+        """Return one frame of an image block (the image-block standard).
+
+        Args:
+            column: The image column's name, as ``list_columns()`` reports it
+                with role ``image``.
+            index: The sweep point, within the written prefix.
+            loop1: Reading-loop slot-1 index, when the run looped.
+            loop2: Reading-loop slot-2 index, when the run looped.
+
+        Returns:
+            The ``(height_px, width_px)`` frame as a float64 array.
+
+        Raises:
+            KeyError: If the run has no such column.
+            ValueError: If the column is not an image block, or the handle is
+                closed.
+            IndexError: If ``index`` is outside the written prefix, or a
+                loop index does not fit the column.
+        """
+        dataset = self._dataset(column)
+        metadata = self.read_metadata()
+        roles = roles_from_data_config(metadata["raw"].get("data_config") or {})
+        if self._role_for(column, dataset, roles) != ROLE_IMAGE:
+            raise ValueError(f"{column!r} is not an image block")
+        self._refresh(dataset)
+        length = min(self.n_points, int(dataset.shape[0]) if dataset.shape else 0)
+        if not 0 <= index < length:
+            raise IndexError(
+                f"sweep point {index} is outside the written prefix of {column!r} "
+                f"({length} point(s))"
+            )
+        return select_frame(np.asarray(dataset[index]), loop1, loop2)
+
     def summary_stats(self, column: str) -> Stats:
         """Return the NaN-aware summary of one numeric column.
 
@@ -890,8 +983,8 @@ class RunHandle:
 
         The writer's ``data_config`` declaration decides; a column it does not
         mention falls back to the dataset's own self-description — the
-        ``axes`` attribute a raw diagnostic block carries — and then to its
-        shape.
+        ``block_kind`` attribute every block carries, then the ``axes``
+        attribute a raw diagnostic block carries — and then to its shape.
 
         Args:
             name: The column name.
@@ -904,6 +997,8 @@ class RunHandle:
         declared = roles.get(name)
         if declared is not None:
             return declared
+        if _decode_attr(dataset.attrs.get(BLOCK_KIND_ATTR, "")) == BLOCK_KIND_IMAGE:
+            return ROLE_IMAGE
         axes = _decode_attr(dataset.attrs.get("axes", ""))
         if isinstance(axes, str) and "channel" in axes:
             return ROLE_RAW_BLOCK

@@ -712,6 +712,64 @@ def _nested_shape_leaves(value: Any, shape: tuple[int, ...]) -> list[Any] | None
 
 
 @dataclass(frozen=True)
+class ImageBlock:
+    """One declared image block of a measurement VI — a frame per reading.
+
+    The **image-block standard** (the sibling of the raw diagnostic block on
+    ``MeasurementInstrumentBase``): a camera frame has the same
+    ``(rows, cols)`` storage shape as a raw block but no channel per column
+    — every element is one pixel in one unit — so it is declared with its
+    pixel dimensions and unit instead of a channel-label list, stored
+    through the same dataset path with ``block_kind = "image"`` and
+    ``unit`` attributes and no ``channel_names``, and read back by
+    ``data_reader.read_image()``. A frame is never reduced to a scalar: the
+    sweep's plottable columns are the VI's scalars, the frames are the
+    image stack an analysis recipe reads.
+
+    Attributes:
+        height_px: Frame height in pixels (rows); an ``int`` > 0.
+        width_px: Frame width in pixels (columns); an ``int`` > 0.
+        unit: The unit of every pixel value (``"counts"``, ``"V"``, …); a
+            non-empty string, written to the dataset's ``unit`` attribute.
+        description: One sentence naming what the frame shows; written to
+            the dataset's ``description`` attribute.
+    """
+
+    height_px: int
+    width_px: int
+    unit: str
+    description: str = ""
+
+    def __post_init__(self) -> None:
+        """Validate the declaration.
+
+        Raises:
+            TypeError: If a pixel dimension is not an ``int`` (``bool`` is
+                rejected), or ``unit``/``description`` is not a string.
+            ValueError: If a pixel dimension is not > 0, or ``unit`` is empty.
+        """
+        for name in ("height_px", "width_px"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"ImageBlock.{name} must be an int, got {value!r}")
+            if value <= 0:
+                raise ValueError(f"ImageBlock.{name} must be > 0, got {value!r}")
+        if not isinstance(self.unit, str):
+            raise TypeError(f"ImageBlock.unit must be a str, got {self.unit!r}")
+        if not self.unit:
+            raise ValueError("ImageBlock.unit must be a non-empty str")
+        if not isinstance(self.description, str):
+            raise TypeError(
+                f"ImageBlock.description must be a str, got {self.description!r}"
+            )
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        """Return the frame's ``(height_px, width_px)`` — its ``(rows, cols)`` block shape."""
+        return (self.height_px, self.width_px)
+
+
+@dataclass(frozen=True)
 class DataSchema:
     """The declared HDF5 layout of one measurement run.
 
@@ -742,7 +800,9 @@ class DataSchema:
             length)`` grid of raw samples per sweep point.
         measurement_blocks: Mapping of raw diagnostic block name (see
             ``MeasurementInstrumentBase``'s "Raw diagnostic blocks" standard)
-            to its ``(rows, cols)`` shape, both ``> 0``. UNLIKE
+            — or image block name (the image-block standard, ``ImageBlock``;
+            its ``(height_px, width_px)`` is its block shape) — to its
+            ``(rows, cols)`` shape, both ``> 0``. UNLIKE
             ``measurement_scalars``/``measurement_arrays``, a block carries
             the ``(n_loop1, n_loop2)`` reading-loop axis only when
             ``loop_shape != (1, 1)`` (an active reading loop) — with no

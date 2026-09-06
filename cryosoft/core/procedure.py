@@ -1722,6 +1722,9 @@ class SweepMeasureProcedure(BaseProcedure):
         "Raw diagnostic blocks" standard): the VI's ``measurement_raw_blocks``
         label lists (channel-axis length) combined with
         ``raw_block_row_counts()`` (row-axis length) for the same params.
+        Image blocks (the image-block standard, ``measurement_image_blocks``)
+        take the same ``measurement_blocks`` slot with their declared
+        ``(height_px, width_px)``; no scalar column is derived from a frame.
 
         Args:
             vi: The selected measurement VI instance.
@@ -1738,6 +1741,13 @@ class SweepMeasureProcedure(BaseProcedure):
             name: (row_counts[name], len(labels))
             for name, labels in vi.measurement_raw_blocks.items()
         }
+        for name, image in vi.measurement_image_blocks.items():
+            if name in measurement_blocks or name in sweep_columns:
+                raise CryoSoftConfigError(
+                    f"{type(self).name!r}: image block {name!r} collides with a "
+                    f"raw block or sweep column of the same name."
+                )
+            measurement_blocks[name] = image.shape
         measurement_scalars = {
             **dict(vi.measurement_scalar_columns),
             **self._raw_block_channel_columns(vi, sweep_columns),
@@ -1962,6 +1972,10 @@ class SweepMeasureProcedure(BaseProcedure):
             "measurement_arrays": dict(self._data_schema.measurement_arrays),
             "measurement_blocks": dict(self._data_schema.measurement_blocks),
             "measurement_block_labels": dict(vi.measurement_raw_blocks),
+            "measurement_image_blocks": {
+                name: {"unit": image.unit, "description": image.description}
+                for name, image in vi.measurement_image_blocks.items()
+            },
             "loop_shape": list(self._data_schema.loop_shape),
         }
 
@@ -2038,6 +2052,9 @@ class SweepMeasureProcedure(BaseProcedure):
         reduced scalar per channel (see ``_raw_block_channel_columns``) —
         those are ordinary scalar columns and always keep their real
         ``(n_loop1, n_loop2)`` grid, never squeezed like the block itself.
+        An image block (``vi.measurement_image_blocks``, the image-block
+        standard) is stored exactly like a raw block — same grid, same
+        squeeze — but no scalar is ever derived from a frame.
 
         Raises:
             RuntimeError: If called before ``initiate()``.
@@ -2062,10 +2079,11 @@ class SweepMeasureProcedure(BaseProcedure):
 
         n_loop1, n_loop2 = self._loop_shape
         channel_labels = self._raw_block_channel_labels(vi)
+        block_keys = list(vi.measurement_raw_blocks) + list(vi.measurement_image_blocks)
         keys = (
             list(vi.measurement_data_keys)
             + list(vi.measurement_scalar_columns)
-            + list(vi.measurement_raw_blocks)
+            + block_keys
             + channel_labels
         )
         grids: dict[str, list[list[Any]]] = {
@@ -2098,10 +2116,10 @@ class SweepMeasureProcedure(BaseProcedure):
 
         measured_data: dict[str, Any] = dict(grids)
         if (n_loop1, n_loop2) == (1, 1):
-            # No reading loop configured: a raw block skips the trivial
-            # (1, 1) axis entirely rather than carrying it like a scalar/
-            # array column does (see DataSchema.measurement_blocks).
-            for block_key in vi.measurement_raw_blocks:
+            # No reading loop configured: a raw or image block skips the
+            # trivial (1, 1) axis entirely rather than carrying it like a
+            # scalar/array column does (see DataSchema.measurement_blocks).
+            for block_key in block_keys:
                 measured_data[block_key] = grids[block_key][0][0]
         measured_data[type(self).axis_data_key()] = self._axis_readback()
         self._save_datapoint(measured_data)

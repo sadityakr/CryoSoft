@@ -23,7 +23,7 @@ from cryosoft.core.exceptions import (
     CryoSoftConfigError,
     CryoSoftSafetyError,
 )
-from cryosoft.core.plan import ParamSpec, UIGroup
+from cryosoft.core.plan import ImageBlock, ParamSpec, UIGroup
 from cryosoft.virtual_instruments.rampable import RampableVI
 
 logger = logging.getLogger(__name__)
@@ -1624,6 +1624,31 @@ class MeasurementInstrumentBase(BaseVirtualInstrument):
     VI's own ``take_reading()`` always returns the block as a flat ``rows x
     channels`` list regardless of any loop, exactly as described above.
 
+    **Image blocks** — the **image-block standard**, the raw block's sibling
+    for a frame. A camera frame has a raw block's ``(rows, cols)`` shape but
+    no channel per column: every element is one pixel in one unit, and no
+    per-column scalar makes sense. A VI with this need declares:
+
+    * ``measurement_image_blocks: ClassVar[dict[str, ImageBlock]]`` — block
+      name -> ``ImageBlock(height_px, width_px, unit, description)``
+      (``core/plan.py``). The declared pixel dimensions fix the frame's
+      shape for every reading; ``raw_block_row_counts()`` plays no part.
+      Empty (the default) means the VI takes no frames.
+    * ``take_reading()`` returns the frame under the block name as a
+      ``(height_px, width_px)`` numpy array (or an equivalently nested
+      list), alongside whatever scalars and arrays it already returns.
+
+    An image block travels the raw block's dataset path (``DataSchema.
+    measurement_blocks``, the same loop-axis rule, the same NaN fill) but is
+    written with ``block_kind = "image"`` and ``unit``/``description``
+    attributes and no ``channel_names``, and ``data_reader`` reports it
+    with role ``image`` and serves one frame through ``read_image()``. No
+    scalar column is ever derived from a frame — the live plot and the
+    generic sweep recipe use the VI's scalar columns, the image-stack
+    recipe reads the frames. Conformance requires each declared block's
+    ``height_px``/``width_px`` to match what the sim's ``take_reading()``
+    actually returns.
+
     Externally configured instruments
     ----------------------------------
     Some instruments expose far more configuration surface than a VI wraps
@@ -1766,6 +1791,10 @@ class MeasurementInstrumentBase(BaseVirtualInstrument):
     # blocks" section): block name -> ordered channel-label list. Empty
     # (the default) means no raw block.
     measurement_raw_blocks: ClassVar[dict[str, list[str]]] = {}
+    # Image blocks (see the class docstring's "Image blocks" section, the
+    # image-block standard): block name -> ImageBlock declaration. Empty
+    # (the default) means the VI takes no frames.
+    measurement_image_blocks: ClassVar[dict[str, ImageBlock]] = {}
     # Reading-loop declaration: parameter name -> per-reading setter method.
     # Empty (the default) means no parameter of this VI can be looped.
     reading_setters: ClassVar[dict[str, str]] = {}

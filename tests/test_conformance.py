@@ -69,6 +69,7 @@ import typing
 from enum import Enum
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 import cryosoft.core
@@ -125,7 +126,7 @@ from cryosoft.core.exceptions import (
     CryoSoftSafetyError,
     CryoSoftUndeclaredActionError,
 )
-from cryosoft.core.plan import SETPOINT_PARAM_PREFIX, ParamSpec, UIGroup
+from cryosoft.core.plan import SETPOINT_PARAM_PREFIX, ImageBlock, ParamSpec, UIGroup
 from cryosoft.core.procedure import BaseProcedure
 from cryosoft.core.capability_manifest import (
     _instrument_json,
@@ -2252,11 +2253,21 @@ def test_measurement_vi_round_trip(vi_cls: type) -> None:
         set(vi_cls.measurement_data_keys)
         | set(vi_cls.measurement_scalar_columns)
         | set(vi_cls.measurement_raw_blocks)
+        | set(vi_cls.measurement_image_blocks)
     )
     assert set(data) == expected_keys, (
         f"{vi_cls.__name__}.take_reading() returned keys {sorted(data)}, "
         f"expected {sorted(expected_keys)}"
     )
+
+    # The image-block standard: a declared frame comes back at exactly the
+    # declared (height_px, width_px) — passes vacuously for a VI with none.
+    for name, image in vi_cls.measurement_image_blocks.items():
+        frame = np.asarray(data[name], dtype=np.float64)
+        assert frame.shape == image.shape, (
+            f"{vi_cls.__name__}.take_reading()[{name!r}] has shape {frame.shape}, "
+            f"but measurement_image_blocks declared {image.shape}"
+        )
 
     arrays = vi.data_arrays(defaults)
     assert set(arrays) == set(vi_cls.measurement_data_keys), (
@@ -2436,6 +2447,15 @@ def test_measurement_vi_raw_block_names_dont_collide(vi_cls: type) -> None:
         assert labels, (
             f"{vi_cls.__name__}.measurement_raw_blocks[{block_name!r}] must "
             f"be a non-empty channel-label list"
+        )
+    for block_name, image in vi_cls.measurement_image_blocks.items():
+        assert isinstance(image, ImageBlock), (
+            f"{vi_cls.__name__}.measurement_image_blocks[{block_name!r}] must be "
+            f"an ImageBlock, got {image!r}"
+        )
+        assert block_name not in other_names and block_name not in vi_cls.measurement_raw_blocks, (
+            f"{vi_cls.__name__}.measurement_image_blocks name {block_name!r} "
+            f"collides with another declared column or block"
         )
 
 

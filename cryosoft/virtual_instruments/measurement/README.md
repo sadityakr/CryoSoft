@@ -145,6 +145,48 @@ contract — `DataManager` writes it to disk as the block dataset's own
 directly (h5py, HDFView) sees both attached to `/data/<block_name>` itself,
 with no need to parse the `/metadata` group's JSON `data_config` blob.
 
+## Image blocks: a frame is a 2D block, not a row of channels
+
+The **image-block standard** is the raw block's sibling for a camera or any
+instrument whose reading is a frame. A frame has a raw block's `(rows, cols)`
+storage shape, but no channel per column: every element is one pixel in one
+unit, and no per-column scalar makes sense. A VI declares it with its pixel
+dimensions and unit instead of a channel-label list:
+
+```python
+from cryosoft.core.plan import ImageBlock
+
+measurement_image_blocks: ClassVar[dict[str, ImageBlock]] = {
+    "frame": ImageBlock(height_px=256, width_px=256, unit="counts",
+                        description="Widefield frame at the sample"),
+}
+```
+
+- `measurement_image_blocks: ClassVar[dict[str, ImageBlock]]` — block name →
+  declaration. The declared `height_px`/`width_px` fix the frame's shape for
+  every reading (`raw_block_row_counts()` plays no part). Empty (the default)
+  means the VI takes no frames.
+- `take_reading()` returns the frame under the block name as a
+  `(height_px, width_px)` numpy array (or an equivalently nested list),
+  alongside the scalars and arrays it already returns.
+
+Storage and reading reuse the raw block's path with one difference in what
+the dataset says about itself: `SweepMeasureProcedure` puts the block into
+`DataSchema.measurement_blocks` with its declared shape (same loop-axis rule
+— bare `(rows, cols)` with no reading loop, `(n_loop1, n_loop2, rows, cols)`
+with one), and `DataManager` writes `block_kind = "image"`, `unit` and
+`description` attributes with `axes` ending in `row, col` and NO
+`channel_names`. `data_reader` reports the column with role `image` (from the
+`data_config`'s `measurement_image_blocks` section, or from the dataset's own
+`block_kind` when the declaration is missing) and serves one frame through
+`read_image(name, index, loop1=0, loop2=0)`, on a file and on the live
+`RunBuffer` alike. No scalar column is ever derived from a frame: the live
+plot and the generic sweep recipe use the VI's scalar columns
+(`measurement_scalar_columns` — a mean intensity, say), the image-stack recipe
+reads the frames. Conformance requires each declared block's
+`height_px`/`width_px` to match what the sim's `take_reading()` actually
+returns, and that no image block name collides with another column.
+
 ## Under-delivery: the n_valid standard
 A VI whose `take_reading()` can deliver fewer raw samples than `data_arrays()`
 declared for a quantity MUST report an `n_valid` scalar column (dtype `"int"`,

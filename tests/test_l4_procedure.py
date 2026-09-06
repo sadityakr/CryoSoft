@@ -12,9 +12,20 @@ import h5py
 import numpy as np
 import pytest
 
-from cryosoft.core.plan import Command, ParamGroup, ParamSpec, PhasePlan, StepPlan, Target
+from cryosoft.core import data_reader as dr
+from cryosoft.core.decorators import control
+from cryosoft.core.plan import (
+    Command,
+    ImageBlock,
+    ParamGroup,
+    ParamSpec,
+    PhasePlan,
+    StepPlan,
+    Target,
+)
 from cryosoft.core.procedure import BaseProcedure
-from cryosoft.core.station import build_station
+from cryosoft.core.station import Station, build_station
+from cryosoft.virtual_instruments.base import MeasurementInstrumentBase
 from cryosoft.core.sweep_builder import SweepAxis, SweepSegment
 from cryosoft.procedures.field_sweep import FieldSweep
 
@@ -643,3 +654,90 @@ def test_full_orchestrator_loop_emits_run_manifests(station, tmp_path, qtbot):
     # The file path survives into the finished manifest even though the
     # procedure closed (and forgot) its DataManager in standby().
     assert end["data_file"] == manifest["data_file"]
+
+
+# ── Image blocks: one round trip through the generic sweep ────────────────────
+# A test-local measurement VI declaring one image block (the image-block
+# standard, MeasurementInstrumentBase) runs FieldSweep's initiate/measure/
+# standby directly; the frame lands in the file with role "image" and comes
+# back through read_image(), and no scalar column is derived from it.
+
+IMAGE_H, IMAGE_W = 3, 5
+
+
+class _CameraVI(MeasurementInstrumentBase):
+    """A measurement VI whose reading is one frame plus one scalar."""
+
+    measurement_parameters = {
+        "exposure_s": ParamSpec(type=float, default=0.1, unit="s", description="Exposure"),
+    }
+    measurement_data_keys: list[str] = []
+    measurement_scalar_columns = {"intensity_counts": "float"}
+    measurement_image_blocks = {
+        "frame": ImageBlock(IMAGE_H, IMAGE_W, "counts", "test frame"),
+    }
+
+    def __init__(self, drivers, **init_params):
+        super().__init__(drivers, **init_params)
+        self._shots = 0
+
+    def data_arrays(self, params):
+        return {}
+
+    @control(panel=False, action_class="run_control")
+    def initiate_measurement(self, exposure_s: float = 0.1) -> None:
+        self._exposure_s = exposure_s
+
+    def take_reading(self):
+        self._shots += 1
+        frame = np.full((IMAGE_H, IMAGE_W), float(self._shots))
+        return {"intensity_counts": float(frame.mean()), "frame": frame}
+
+    def standby(self) -> None:
+        pass
+
+
+def _camera_station():
+    full = build_station(CONFIG_PATH)
+    station = Station()
+    for name in ("magnet_z", "temperature"):
+        station.register_vi(name, full.get_vi(name), full.get_vi_type(name))
+    station.register_vi("camera", _CameraVI({}), "measurement")
+    return station
+
+
+def test_image_block_round_trip_through_field_sweep(tmp_path):
+    station = _camera_station()
+    proc = FieldSweep(
+        station=station,
+        sample_info=SAMPLE_INFO,
+        data_directory=str(tmp_path),
+        **{**FAST_PARAMS, "measurement_vi": "camera"},
+    )
+    proc.initiate()
+    proc.measure()
+    proc.change_sweep_step()
+    proc.measure()
+    proc.standby()
+
+    (path,) = tmp_path.glob("*.h5")
+    with dr.open_run(path) as run:
+        columns = {info.name: info for info in run.list_columns()}
+        assert columns["frame"].role == dr.ROLE_IMAGE
+        assert columns["frame"].shape[1:] == (IMAGE_H, IMAGE_W)
+        assert columns["intensity_counts"].role == dr.ROLE_MEASUREMENT
+        np.testing.assert_allclose(run.read_image("frame", 0), 1.0)
+        np.testing.assert_allclose(run.read_image("frame", 1), 2.0)
+        # No per-pixel or per-column scalar is derived from a frame.
+        assert not any(name.startswith("frame") and name != "frame" for name in columns)
+        config = run.read_metadata()["raw"]["data_config"]
+        assert config["measurement_image_blocks"] == {
+            "frame": {"unit": "counts", "description": "test frame"}
+        }
+
+
+def test_image_block_is_not_a_live_plot_key():
+    station = _camera_station()
+    keys = FieldSweep.live_plot_measurement_keys(station, {"measurement_vi": "camera"})
+    assert "intensity_counts" in keys
+    assert "frame" not in keys
