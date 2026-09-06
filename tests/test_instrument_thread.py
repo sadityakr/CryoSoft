@@ -782,3 +782,9 @@ def test_the_gui_builds_and_drives_through_the_proxy_across_the_thread(
     qtbot.waitUntil(
         lambda: monitor._monitoring_btn.text() == "Stop Monitoring", timeout=WAIT_MS
     )
+
+
+def test_the_instrument_thread_carries_the_application_name(host):
+    """The QThread is named so a debugger or a thread dump can find it."""
+    assert host.thread_object is not None
+    assert host.thread_object.objectName() == "i2as-instrument"

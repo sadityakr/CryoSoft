@@ -6,6 +6,7 @@ import logging
 
 from PyQt6.QtWidgets import QSizePolicy, QTextEdit
 
+from i2as.core.logging_config import LOGGER_ROOT, VI_LOGGER_PREFIX
 from i2as.gui.theme import (
     LOG_CRITICAL,
     LOG_DEBUG,
@@ -43,7 +44,7 @@ class QtLogHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         # Per-method VI polling noise is written to the file log only.
-        if record.name.startswith("i2as.vi.") and record.levelno < logging.WARNING:
+        if record.name.startswith(VI_LOGGER_PREFIX) and record.levelno < logging.WARNING:
             return
         try:
             widget = self._widget
@@ -86,16 +87,16 @@ class LogPanel(QTextEdit):
         self.handler.setLevel(logging.DEBUG)
 
     def attach(self) -> None:
-        """Add the handler to the shared "i2as" logger.
+        """Add the handler to the shared ``LOGGER_ROOT`` logger.
 
         Guards against a duplicate in case the hosting window is ever
         reconstructed within the same process (handlers live on the shared
         logger, so a leak would accumulate).
         """
-        i2as_logger = logging.getLogger("i2as")
-        if self.handler not in i2as_logger.handlers:
-            i2as_logger.addHandler(self.handler)
+        root_logger = logging.getLogger(LOGGER_ROOT)
+        if self.handler not in root_logger.handlers:
+            root_logger.addHandler(self.handler)
 
     def detach(self) -> None:
-        """Remove the handler from the shared "i2as" logger."""
-        logging.getLogger("i2as").removeHandler(self.handler)
+        """Remove the handler from the shared ``LOGGER_ROOT`` logger."""
+        logging.getLogger(LOGGER_ROOT).removeHandler(self.handler)

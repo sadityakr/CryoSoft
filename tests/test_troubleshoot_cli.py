@@ -406,3 +406,20 @@ def test_transcript_dir_resolves_through_log_directory(
 
     assert (tmp_path / "troubleshoot.jsonl").exists()
     assert cli._transcript_dir() == tmp_path
+
+
+def test_qsettings_scope_matches_the_gui_and_the_application_name():
+    """Three modules spell the settings scope; they must agree, and be I2AS.
+
+    ``troubleshoot.cli`` mirrors ``gui.app_settings`` because contract C10
+    keeps it out of the GUI, and ``main`` names the process the same way so
+    the desktop and the settings store show one application.
+    """
+    from i2as import main as app_main
+    from i2as.gui import app_settings
+
+    assert (cli._QSETTINGS_ORG, cli._QSETTINGS_APP) == (
+        app_settings._ORGANISATION,
+        app_settings._APPLICATION,
+    ) == ("I2AS", "I2AS")
+    assert app_main.APPLICATION_NAME == app_settings._APPLICATION

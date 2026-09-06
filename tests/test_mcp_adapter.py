@@ -801,3 +801,13 @@ def test_a_role_above_the_ceiling_is_refused_before_the_session_opens(app, qtbot
 
     assert process.process.returncode == 1
     assert b"observer" in stderr
+
+
+def test_the_server_name_and_resource_uris_are_the_application_name():
+    """The identifiers an MCP client matches on are spelled once, in translate."""
+    assert translate.SERVER_NAME == "i2as"
+    assert translate.STATUS_URI == "i2as://status"
+    assert translate.STATION_URI == "i2as://station"
+    assert translate.MANIFEST_URI == "i2as://manifest"
+    assert translate.STATUS_URI in translate.INSTRUCTIONS
+    assert translate.STATION_URI in translate.INSTRUCTIONS

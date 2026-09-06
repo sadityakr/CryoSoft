@@ -35,6 +35,8 @@ from i2as.session.gateway.local_server import (
     PARSE_ERROR,
     ROLE_REFUSED,
     SCHEMA_VERSION,
+    SOCKET_FILENAME,
+    default_socket_name,
 )
 from i2as.session.manager import ExperimentManager
 from i2as.session.models import User
@@ -773,3 +775,18 @@ def test_a_setup_that_does_not_ask_for_a_server_gets_none(tmp_path):
         )
         is None
     )
+
+
+def test_default_socket_name_is_a_file_on_posix_and_a_named_pipe_on_windows(
+    monkeypatch, tmp_path
+):
+    """The socket lives in the log directory, or is a per-process pipe name."""
+    import os
+
+    from i2as.session.gateway import local_server
+
+    monkeypatch.setenv("I2AS_LOG_DIR", str(tmp_path))
+    monkeypatch.setattr(local_server.os, "name", "posix")
+    assert default_socket_name() == str(tmp_path / SOCKET_FILENAME)
+    monkeypatch.setattr(local_server.os, "name", "nt")
+    assert default_socket_name() == f"i2as-gateway-{os.getpid()}"

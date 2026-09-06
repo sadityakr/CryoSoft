@@ -3065,6 +3065,30 @@ def test_log_handler_removed_on_close(station, orchestrator, qtbot):
     assert handler not in i2as_logger.handlers
 
 
+def test_log_panel_keeps_vi_bus_traffic_out_of_the_window(qtbot):
+    """Sub-WARNING records from the per-VI loggers go to the file only.
+
+    The panel recognises them by ``VI_LOGGER_PREFIX``; anything else under
+    the root logger, and a VI warning, is shown.
+    """
+    from i2as.core.logging_config import LOGGER_ROOT, VI_LOGGER_PREFIX
+    from i2as.gui.log_panel import LogPanel
+
+    panel = LogPanel()
+    qtbot.addWidget(panel)
+    panel.show()
+
+    def record(name: str, level: int, message: str) -> logging.LogRecord:
+        return logging.LogRecord(name, level, __file__, 0, message, None, None)
+
+    panel.handler.emit(record(f"{VI_LOGGER_PREFIX}magnet_z", logging.DEBUG, "polled-field"))
+    assert "polled-field" not in panel.toPlainText()
+    panel.handler.emit(record(f"{VI_LOGGER_PREFIX}magnet_z", logging.WARNING, "refused-set"))
+    assert "refused-set" in panel.toPlainText()
+    panel.handler.emit(record(f"{LOGGER_ROOT}.core.orchestrator", logging.DEBUG, "tick-42"))
+    assert "tick-42" in panel.toPlainText()
+
+
 def test_closing_window_persists_to_isolated_ini_not_real_scope(
     station, orchestrator, qtbot, isolated_settings
 ):

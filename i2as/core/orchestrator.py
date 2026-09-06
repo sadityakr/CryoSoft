@@ -33,6 +33,7 @@ from i2as.core.availability import TAG_POLICY, Availability
 from i2as.core.conditions import Condition, Verdict, decide, envelope_conditions
 from i2as.core.events import ErrorEvent
 from i2as.core.exceptions import I2ASActionScopeError, I2ASSafetyError
+from i2as.core.logging_config import LOGGER_ROOT, STATUS_LOGGER
 from i2as.core.operational_status import build_operational_status
 from i2as.core.plan import (
     Command,
@@ -608,7 +609,7 @@ class Orchestrator(QObject):
         self._state_entered_at = time.time()
         self._prev_gaps: dict[str, float] = {}
         self._operational_status: dict = {}
-        self._status_logger = logging.getLogger("i2as.status")
+        self._status_logger = logging.getLogger(STATUS_LOGGER)
         self._stall_state = StallState()
         # stall_seconds is converted to a tick count exactly once here, using
         # this Orchestrator's own tick_interval_ms — see StallConfig's
@@ -3330,7 +3331,7 @@ class Orchestrator(QObject):
         operational-status stream and must stay pure JSON.
         """
         try:
-            logging.getLogger("i2as.procedure_status").info(text)
+            logging.getLogger(f"{LOGGER_ROOT}.procedure_status").info(text)
             self.status_message.emit(text)
         except Exception:  # noqa: BLE001 — status must never disrupt the run
             logger.exception("status emit failed")

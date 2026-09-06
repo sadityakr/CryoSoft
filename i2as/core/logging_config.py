@@ -14,6 +14,28 @@ from pathlib import Path
 
 from i2as.core.paths import log_directory
 
+#: The root of every logger the application owns — the package name, so that
+#: ``logging.getLogger(__name__)`` in any module hangs off it and the one
+#: ``setup_logging()`` configures reaches them all. The named streams below
+#: are the only loggers spelled out by hand anywhere; a client that must not
+#: import this module (the MCP adapter, held to stdlib and the events
+#: vocabulary) spells the same root itself and is pinned to it by test.
+LOGGER_ROOT = "i2as"
+
+#: The human-readable rotating log file ``setup_logging()`` writes.
+LOG_FILENAME = f"{LOGGER_ROOT}.log"
+
+#: The four ``propagate=False`` JSONL streams (see ``setup_logging``).
+STATUS_LOGGER = f"{LOGGER_ROOT}.status"
+TREND_RAW_LOGGER = f"{LOGGER_ROOT}.trend_raw"
+TREND_3MIN_LOGGER = f"{LOGGER_ROOT}.trend_3min"
+TREND_HOURLY_LOGGER = f"{LOGGER_ROOT}.trend_hourly"
+
+#: The prefix of the per-VI bus-traffic loggers ``BaseVirtualInstrument``
+#: writes to (``<prefix><vi_name>``); the GUI log panel keeps their
+#: sub-WARNING records out of the window and in the file.
+VI_LOGGER_PREFIX = f"{LOGGER_ROOT}.vi."
+
 
 def _add_jsonl_handler(
     name: str, path: Path, *, when: str, backup_count: int
@@ -94,32 +116,32 @@ def setup_logging(log_dir: str | Path | None = None, level: int = logging.DEBUG)
     log_dir = Path(log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    log_file = log_dir / "i2as.log"
+    log_file = log_dir / LOG_FILENAME
 
     _add_jsonl_handler(
-        "i2as.status", log_dir / "status.jsonl", when="midnight", backup_count=7
+        STATUS_LOGGER, log_dir / "status.jsonl", when="midnight", backup_count=7
     )
     _add_jsonl_handler(
-        "i2as.trend_raw",
+        TREND_RAW_LOGGER,
         log_dir / "trend_history_raw.jsonl",
         when="midnight",
         backup_count=2,
     )
     _add_jsonl_handler(
-        "i2as.trend_3min",
+        TREND_3MIN_LOGGER,
         log_dir / "trend_history_3min.jsonl",
         when="midnight",
         backup_count=8,
     )
     _add_jsonl_handler(
-        "i2as.trend_hourly",
+        TREND_HOURLY_LOGGER,
         log_dir / "trend_history_hourly.jsonl",
         when="W0",
         backup_count=53,
     )
 
     # Root logger
-    root = logging.getLogger("i2as")
+    root = logging.getLogger(LOGGER_ROOT)
     root.setLevel(level)
 
     # Avoid duplicate handlers on repeated calls

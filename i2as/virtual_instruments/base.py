@@ -18,6 +18,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any, ClassVar
 
 from i2as.core.events import LifecycleState
+from i2as.core.logging_config import VI_LOGGER_PREFIX
 from i2as.core.exceptions import (
     I2ASCommunicationError,
     I2ASConfigError,
@@ -800,7 +801,7 @@ class BaseVirtualInstrument:
 
         @functools.wraps(method)
         def wrapper(self, *args, **kwargs):
-            log = logging.getLogger(f"i2as.vi.{self.vi_name}")
+            log = logging.getLogger(f"{VI_LOGGER_PREFIX}{self.vi_name}")
             log.debug("%s.%s(%s, %s)", self.vi_name, method_name, args, kwargs)
             try:
                 result = method(self, *args, **kwargs)
@@ -1013,7 +1014,7 @@ class BaseVirtualInstrument:
             try:
                 ensure_connected()
             except Exception:  # noqa: BLE001 — a failed reattach must not raise
-                logging.getLogger(f"i2as.vi.{self.vi_name}").warning(
+                logging.getLogger(f"{VI_LOGGER_PREFIX}{self.vi_name}").warning(
                     "%s: ensure_connected() failed while reattaching",
                     self.vi_name or type(self).__name__,
                     exc_info=True,
@@ -1034,7 +1035,7 @@ class BaseVirtualInstrument:
             try:
                 driver.close()  # type: ignore[attr-defined]
             except Exception:  # noqa: BLE001 — a failing release must not raise
-                logging.getLogger(f"i2as.vi.{self.vi_name}").warning(
+                logging.getLogger(f"{VI_LOGGER_PREFIX}{self.vi_name}").warning(
                     "%s: close() failed while detaching",
                     self.vi_name or type(self).__name__,
                     exc_info=True,
@@ -1098,7 +1099,7 @@ class BaseVirtualInstrument:
         try:
             observed = self.observe_lifecycle_state()
         except Exception:  # noqa: BLE001 — an observation must not fail a poll
-            logging.getLogger(f"i2as.vi.{self.vi_name}").warning(
+            logging.getLogger(f"{VI_LOGGER_PREFIX}{self.vi_name}").warning(
                 "%s: observe_lifecycle_state() raised — keeping the "
                 "commanded lifecycle state",
                 self.vi_name or type(self).__name__,
@@ -1110,7 +1111,7 @@ class BaseVirtualInstrument:
         try:
             self._lifecycle_state = LifecycleState(observed).value
         except ValueError:
-            logging.getLogger(f"i2as.vi.{self.vi_name}").warning(
+            logging.getLogger(f"{VI_LOGGER_PREFIX}{self.vi_name}").warning(
                 "%s: observe_lifecycle_state() returned %r, which is not a "
                 "LifecycleState — keeping the commanded lifecycle state",
                 self.vi_name or type(self).__name__,

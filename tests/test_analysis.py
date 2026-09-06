@@ -307,6 +307,11 @@ def test_discover_recipes_loads_experiment_scripts(tmp_path):
     assert local[0].origin == ORIGIN_EXPERIMENT
     assert local[0].procedures == ("FieldSweep",)
     assert local[0].source_path == str(tmp_path / "local_overview.py")
+    # The synthetic module name marks the recipe as loaded from a script, not
+    # the package, and cannot collide with any importable i2as module.
+    assert type(load_recipe(local[0])).__module__.startswith(
+        "i2as_analysis_experiment_recipe"
+    )
 
 
 def test_an_experiment_recipe_overrides_the_package_one_of_the_same_name(tmp_path):

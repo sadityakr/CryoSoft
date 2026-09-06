@@ -42,6 +42,11 @@ from i2as.session.store import ExperimentStore, SessionStore, UserRoster
 
 logger = logging.getLogger(__name__)
 
+#: The name Qt reports for this process, and the one the desktop shows. The
+#: QSettings scope (``gui/app_settings.py``) spells the same name on its own,
+#: because it must stay stable across launches; a test pins the two together.
+APPLICATION_NAME = "I2AS"
+
 
 def _startup_candidates() -> list[str]:
     """Return the ordered config candidates for startup, safest last.
@@ -233,7 +238,7 @@ def main(*, on_station_built: Callable[[Station], None] | None = None) -> None:
     setup_logging()
 
     app = QApplication(sys.argv)
-    app.setApplicationName("I2AS")
+    app.setApplicationName(APPLICATION_NAME)
     app.setApplicationVersion("0.1.0")
     app.setStyleSheet(build_stylesheet())
     pg.setConfigOptions(background=PLOT_BG, foreground=PLOT_AXIS, antialias=True)

@@ -1696,3 +1696,9 @@ def test_discarding_a_pending_entry_leaves_the_run_and_publishes_nothing(publish
 
     assert manager.discard_pending_eln_draft("run-0001") is False, "nothing left to drop"
     assert manager.discard_pending_eln_draft("no-such-run") is False
+
+
+def test_default_settings_tag_and_metadata_source_carry_the_application_name():
+    """Every entry the app creates is tagged and sourced as I2AS's."""
+    assert ElnSettings().tags == ("i2as",)
+    assert render_run_metadata(MANIFEST)["source"] == "i2as"

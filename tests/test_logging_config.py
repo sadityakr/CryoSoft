@@ -170,3 +170,28 @@ def test_foreign_handler_does_not_suppress_the_jsonl_writer(
     assert len(_jsonl_handlers("i2as.status")) == 1
     # The foreign handler is left alone, not evicted.
     assert foreign in logging.getLogger("i2as.status").handlers
+
+
+def test_logger_root_is_the_package_name_and_prefixes_every_named_stream() -> None:
+    """``LOGGER_ROOT`` is the one place the logger namespace is spelled.
+
+    Every module logs under ``logging.getLogger(__name__)``, so the root must
+    BE the package name for ``setup_logging()``'s handlers to reach them; the
+    named streams and the per-VI prefix hang off the same root; and the MCP
+    adapter, which may not import this module, spells the same root by hand.
+    """
+    import i2as
+    from i2as.mcp import __main__ as mcp_main
+
+    assert logging_config.LOGGER_ROOT == i2as.__name__ == "i2as"
+    assert logging_config.LOG_FILENAME == "i2as.log"
+    assert logging_config.VI_LOGGER_PREFIX == "i2as.vi."
+    assert {
+        logging_config.STATUS_LOGGER,
+        logging_config.TREND_RAW_LOGGER,
+        logging_config.TREND_3MIN_LOGGER,
+        logging_config.TREND_HOURLY_LOGGER,
+    } == set(_JSONL_LOGGER_NAMES)
+    for name in _JSONL_LOGGER_NAMES:
+        assert name.startswith(logging_config.LOGGER_ROOT + ".")
+    assert mcp_main.logger.name == f"{logging_config.LOGGER_ROOT}.mcp"

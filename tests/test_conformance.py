@@ -4920,3 +4920,39 @@ def test_analysis_package_has_a_folder_readme() -> None:
     readme = PACKAGE_DIR / "analysis" / "README.md"
     assert readme.is_file(), f"{PACKAGE}/analysis/ must have a folder README"
     assert readme in _folder_readmes()
+
+
+def test_console_scripts_name_callable_entry_points() -> None:
+    """Each ``[project.scripts]`` entry resolves to a function callable with no arguments.
+
+    The installed commands (``i2as``, ``i2as-ctl``, ``i2as-doctor``,
+    ``i2as-mcp``) are the module entry points under other names, so the
+    target must import, be callable, and take no required positional
+    argument — a console script is called bare and reads ``sys.argv``.
+    """
+    import tomllib
+
+    pyproject = tomllib.loads(
+        (PACKAGE_DIR.parent / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    scripts = pyproject["project"]["scripts"]
+    assert set(scripts) == {"i2as", "i2as-ctl", "i2as-doctor", "i2as-mcp"}
+    assert pyproject["project"]["name"] == PACKAGE
+    assert pyproject["tool"]["importlinter"]["root_package"] == PACKAGE
+    for command, target in scripts.items():
+        module_name, function_name = target.split(":")
+        assert module_name.split(".")[0] == PACKAGE, command
+        function = getattr(importlib.import_module(module_name), function_name)
+        assert callable(function), command
+        required = [
+            name
+            for name, parameter in inspect.signature(function).parameters.items()
+            if parameter.default is inspect.Parameter.empty
+            and parameter.kind
+            in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            )
+        ]
+        assert required == [], f"{command} -> {target} needs {required}"

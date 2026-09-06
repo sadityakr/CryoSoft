@@ -283,6 +283,8 @@ def test_enumerated_control_renders_its_choice_map(station: Station) -> None:
 def test_manifest_header_names_its_schema_and_setup(manifest: dict) -> None:
     """The manifest identifies its own shape, so a consumer can version-check it."""
     assert manifest["schema"] == MANIFEST_SCHEMA_ID
+    # The wire identifier a consumer matches on; renaming it is a schema change.
+    assert MANIFEST_SCHEMA_ID == "i2as.capability_manifest/1"
     assert manifest["setup"] == "sim_cryostat"
     assert manifest["tick_interval_s"] == pytest.approx(
         read_tick_interval_ms(SIM_CONFIG) / 1000.0

@@ -23,6 +23,12 @@ dependencies = [
     "pyserial>=3.5",
 ]
 
+[project.scripts]
+i2as = "i2as.main:main"
+i2as-ctl = "i2as.ctl.cli:main"
+i2as-doctor = "i2as.troubleshoot.cli:main"
+i2as-mcp = "i2as.mcp.__main__:main"
+
 [project.optional-dependencies]
 # LLM drafting of ELN entries (i2as/session/eln/drafting.py). Deliberately
 # OPTIONAL: the whole feature is off by default, the package is imported lazily

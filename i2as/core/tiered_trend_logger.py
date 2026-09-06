@@ -13,6 +13,12 @@ import json
 import logging
 import math
 
+from i2as.core.logging_config import (
+    TREND_3MIN_LOGGER,
+    TREND_HOURLY_LOGGER,
+    TREND_RAW_LOGGER,
+)
+
 logger = logging.getLogger(__name__)
 
 # Bucket interval, in seconds, for each aggregate tier.
@@ -176,21 +182,21 @@ class TieredTrendLogger:
                 raw write skips only the raw line; the aggregate
                 accumulators still see it. Defaults to 1.0 s.
             raw_logger: Logger for raw-tier lines. Defaults to
-                ``logging.getLogger("i2as.trend_raw")``. Injectable so
+                ``logging.getLogger(TREND_RAW_LOGGER)``. Injectable so
                 tests can pass a throwaway logger wired to a tmp file
                 instead of the real one, which ``setup_logging()``'s
                 idempotency guard makes impractical to re-point.
             bucket_3min_logger: Logger for flushed 3-min buckets. Defaults
-                to ``logging.getLogger("i2as.trend_3min")``.
+                to ``logging.getLogger(TREND_3MIN_LOGGER)``.
             hourly_logger: Logger for flushed 1-hour buckets. Defaults to
-                ``logging.getLogger("i2as.trend_hourly")``.
+                ``logging.getLogger(TREND_HOURLY_LOGGER)``.
         """
         self.min_raw_interval_s = min_raw_interval_s
-        self._raw_logger = raw_logger or logging.getLogger("i2as.trend_raw")
+        self._raw_logger = raw_logger or logging.getLogger(TREND_RAW_LOGGER)
         self._bucket_3min_logger = bucket_3min_logger or logging.getLogger(
-            "i2as.trend_3min"
+            TREND_3MIN_LOGGER
         )
-        self._hourly_logger = hourly_logger or logging.getLogger("i2as.trend_hourly")
+        self._hourly_logger = hourly_logger or logging.getLogger(TREND_HOURLY_LOGGER)
 
         self._last_raw_write_t: float | None = None
         self._bucket_3min = _BucketAccumulator(_BUCKET_3MIN_S)

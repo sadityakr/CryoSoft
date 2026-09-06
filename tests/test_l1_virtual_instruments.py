@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 import time
 from i2as.core.exceptions import I2ASCommunicationError, I2ASSafetyError
@@ -39,6 +41,23 @@ def test_base_vi_logging_and_state():
     assert "mon_test" in state
     assert state["mon_test"] == "monitored_val"
     assert vi.calls == 1
+
+
+def test_vi_bus_traffic_is_logged_under_the_vi_logger_prefix(caplog):
+    """Every wrapped call logs to ``<VI_LOGGER_PREFIX><vi_name>`` at DEBUG.
+
+    The GUI log panel filters on that prefix to keep polling noise in the
+    file, so the name is a contract between the base class and the panel.
+    """
+    from i2as.core.logging_config import VI_LOGGER_PREFIX
+
+    vi = MockBaseVI()
+    vi.vi_name = "probe"
+    with caplog.at_level(logging.DEBUG, logger=f"{VI_LOGGER_PREFIX}probe"):
+        vi.ctrl_test(3)
+    names = {record.name for record in caplog.records}
+    assert f"{VI_LOGGER_PREFIX}probe" in names
+    assert f"{VI_LOGGER_PREFIX}probe" == "i2as.vi.probe"
 
 def test_control_specs_and_panel_survive_subclass_wrapping():
     """__init_subclass__ must propagate _control_specs/_control_panel onto the
