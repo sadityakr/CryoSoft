@@ -3,7 +3,7 @@
 ## Purpose
 
 Let an external agent session — an editor, an assistant, anything that
-speaks the Model Context Protocol — drive a running CryoSoft application
+speaks the Model Context Protocol — drive a running I2AS application
 without being able to reach an instrument.
 
 The package is a **translator and nothing else**. It speaks MCP over stdio
@@ -16,7 +16,7 @@ no instrument, and decides no authority.
 Three properties are the whole design:
 
 - **It is a separate process, mechanically.** Import contract C21 in
-  `pyproject.toml` allows this package exactly one CryoSoft import,
+  `pyproject.toml` allows this package exactly one I2AS import,
   `cryosoft.core.events` — the pure contract. There is no code path from
   here to a driver, and adding one fails the build rather than a review.
   `tests/test_mcp_adapter.py` checks the same rule by reading the modules'
@@ -124,7 +124,7 @@ envelope.
 
 `logging/setLevel` is accepted and ignored. Every notification this adapter
 sends is one the application itself emitted, and dropping a state change
-because a client asked for less noise would hide the cryostat from the
+because a client asked for less noise would hide the station from the
 session driving it.
 
 ### Two backends, one translation
@@ -150,7 +150,7 @@ fails if it creeps into the test environment.
 ## How to add a new module
 
 1. **Check the one import rule first.** If the module needs anything from
-   CryoSoft but `cryosoft.core.events`, it does not belong in this package —
+   I2AS but `cryosoft.core.events`, it does not belong in this package —
    the thing it wants belongs in the **Tool surface**, where every client
    gets it, and reaches here as a tool.
 2. **Put payloads in `translate.py` and routing in `adapter.py`.** A payload

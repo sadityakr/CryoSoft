@@ -166,7 +166,6 @@ Four rules:
 | Keithley 2182A | Single-shot (`:INIT:CONT OFF`), error queue drained | the measurement range (a setting, not a hazard) |
 | Lakeshore 335 | Heater range `OFF`, manual output 0 % | the setpoint (heats nothing with the range off) |
 | Oxford IPS 120 (sim-only) | `HOLD` — the magnet stays at field | the field: a fast dump is how magnets quench |
-| Oxford ILM 200 | Pulsed refresh rate, front panel handed back | the level reading itself, which is a safety input and must keep arriving |
 | Sim camera (sim-only) | Sensor disarmed — no exposure can be triggered | exposure, binning and ROI: settings, not hazards |
 | Sim XY stage (sim-only) | Both axes stopped where they are | the position: a drive home is a move like any other and can collide with whatever is in the way |
 
@@ -232,7 +231,7 @@ is not an instrument.
    file) and an error-reporting pair to `tests/test_l0_driver_errors.py`; the
    conformance tests cover the contract automatically the moment the files
    exist. A bench test that opens a real resource gets the `hardware` marker
-   and goes in `tests/test_bench_hardware.py`.
+   so `make check` and CI skip it.
 4. Reference the driver from a config `devices.yaml` `real_drivers` block.
 
 ## Files

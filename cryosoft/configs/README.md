@@ -1,7 +1,7 @@
 # configs/
 
 ## Purpose
-The single source of truth for what a given cryostat setup is made of. Each
+The single source of truth for what a given setup is made of. Each
 subdirectory is one **station definition**: which drivers exist, which VIs are
 built on top of them, their bus addresses, and their safety limits. Everything
 above the driver layer (VI, Station, Orchestrator, Procedure, GUI) runs unchanged
@@ -39,7 +39,7 @@ every `configs/<name>/` directory:
   sim configs swap in the `Sim*` class at the same address slot.
 - `virtual_instruments:` — map of VI name → `{class:, drivers: {role: driver_name},
   vi_type:, init_params: {...}}`. `vi_type` is the registry role
-  (`system` / `measurement` / `level`). `init_params` carries the
+  (`system` / `measurement`). `init_params` carries the
   control-validation limits (`min/max_temperature_K`, `max_ramp_rate_K_per_min`,
   `max_current`, field bounds) and instrument-specific setup constants such as
   a magnet's `ramp_segments` or a Lakeshore 335's `initiate_heater_range`.
@@ -50,7 +50,7 @@ every `configs/<name>/` directory:
   current reversal is routine) and, on a voltage-sourcing VI, is converted to
   an amplitude bound through the series resistance it drives. Choose it from
   the SAMPLE WIRING where that figure is documented, and from the source's own
-  maximum output otherwise (105 mA for a Keithley 6220/6221); narrow it when a
+  maximum output otherwise (105 mA for a Keithley 6221); narrow it when a
   sample's safe current is measured. It is a property of the setup, so it
   lives here, never in the VI.
 
@@ -196,7 +196,7 @@ sibling directory with the same two files (plus its `setup.md`).
   - `setup.md` — as above, for the imaging station: the `@imaging` coupling
     is the one wiring fact it records.
 
-**A real setup and its sim twin.** The intended shape for a real cryostat is a
+**A real setup and its sim twin.** The intended shape for a real rack is a
 pair of config directories: one naming the real `cryosoft.drivers.*` classes at
 their PyVISA addresses, and a digital twin with an IDENTICAL VI graph, VI names
 and `init_params`, each real driver swapped for its `Sim*` equivalent. Nothing

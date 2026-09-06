@@ -1,8 +1,8 @@
 # Setup: Simulated transport cryostat  <!-- confirmed by the shipped example, 2026-09-06 -->
 
 ## Identity
-- Cryostat: none — a fully simulated station, the first worked example
-- CryoSoft config: `sim_cryostat`
+- Station: none — a fully simulated transport station, the first worked example
+- Config: `sim_cryostat`
 - Responsible humans: whoever runs the sim; nothing here can be damaged
 
 ## Instruments and their purposes
@@ -38,8 +38,8 @@ Dated, newest first.
   fails in a test rather than on hardware.
 
 ## Safety notes
-None — simulated. A real cryostat records here its quench behaviour and
-cryogen handling contacts.
+None — simulated. A real setup records here what energising each output
+can do, and whom to call.
 
 ## Not commissioned / open TODOs
 Nothing: the sim exists to be run without commissioning. A real setup

@@ -213,8 +213,9 @@ The written standards all live in this root and are enforced by
   lives one layer up, in `Station.send_measurement_commands(commands,
   allowed_scope=...)` (`cryosoft.core.station`) — this folder only declares
   the scope. Give a method `scope="operation"` when automated misuse is
-  dangerous (a magnet's switch heater, a cryogen meter's refresh rate);
-  leave it at the default otherwise. Every
+  dangerous and only a run that declares `command_scope == "operation"`
+  should ever plan it (no shipped VI declares one); leave it at the default
+  otherwise. Every
   `reading_setters` target and the measurement lifecycle
   (`initiate_measurement`/`standby`) must stay measurement-scope —
   conformance-checked.
