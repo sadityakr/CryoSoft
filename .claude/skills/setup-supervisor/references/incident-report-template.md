@@ -1,7 +1,8 @@
 # Incident report template
 
 Written when triage cannot conclude. Save to
-`cryosoft/logs/incidents/YYYY-MM-DD-<short-slug>.md`. A complete report is a
+`incidents/YYYY-MM-DD-<short-slug>.md` under the resolved log directory
+(`cryosoft.core.paths.log_directory()`). A complete report is a
 successful outcome: it lets a stronger model or a human expert start where you
 stopped instead of repeating your work.
 
@@ -10,7 +11,7 @@ stopped instead of repeating your work.
 
 ## Symptom
 What was expected, what happened instead, when it started, what changed
-recently (from the human's words + LOGBOOK).
+recently (from the human's words, recent commits, and `LOGBOOK.md` if kept).
 
 ## Environment
 - Config: <path + name>

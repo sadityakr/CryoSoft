@@ -1,6 +1,6 @@
 ---
 name: write-measurement-vi
-description: Author a new measurement Virtual Instrument (VI) for CryoSoft - the driver contract, the MeasurementInstrumentBase self-description and lifecycle, how @monitored/@control map onto the monitor card and instrument front panel, how to declare a loop1/loop2-loopable parameter (reading_setters), and how to bench-test the real instrument safely. Use when the user asks to add support for a new measurement instrument, write a measurement VI, or wire a new instrument into a procedure's reading loop.
+description: Author a new measurement Virtual Instrument (VI) for I2AS - the driver contract, the MeasurementInstrumentBase self-description and lifecycle, how @monitored/@control map onto the monitor card and instrument front panel, how to declare a loop1/loop2-loopable parameter (reading_setters), and how to bench-test the real instrument safely. Use when the user asks to add support for a new measurement instrument, write a measurement VI, or wire a new instrument into a procedure's reading loop.
 ---
 
 # write-measurement-vi — authoring a measurement Virtual Instrument
@@ -22,12 +22,13 @@ Reference implementations to read alongside this skill:
 - `cryosoft/virtual_instruments/measurement/dc_separate_measurement.py`
   (`DCSeparateMeasurementVI`) — simplest two-driver case, with a working
   `reading_setters` example.
-- `cryosoft/virtual_instruments/measurement/tensormeter_rtm2_measurement.py`
-  (`TensormeterRTM2MeasurementVI`) — single-driver case over a non-VISA (TCP)
-  instrument; richer `control_limits`/config-owned-route handling.
-- `cryosoft/virtual_instruments/switch/switch_matrix.py` (`SwitchMatrixVI`) —
-  not a measurement VI, but the canonical example of a **dynamic**,
-  config-owned loopable parameter (`reading_parameters` built at runtime).
+- `cryosoft/virtual_instruments/measurement/camera.py` (`CameraMeasurementVI`)
+  — single-driver case whose reading is a frame: the shipped example of an
+  **image block** (§2a below), of a `read`-class bench hook (`read_now`) and
+  of scalar columns derived over a config-declared region of interest.
+- `cryosoft/virtual_instruments/temperature/lakeshore_335_sample_temperature_controller.py`
+  — not a measurement VI, but the canonical example of **dynamic** control
+  choices (`control_param_specs()`) under the purity rule.
 
 ## 1. The driver comes first (L0)
 
@@ -39,8 +40,7 @@ contract, mechanically enforced by `tests/test_conformance.py`:
    exactly one required argument. This is a VISA string (`"GPIB0::19::INSTR"`)
    for most instruments; a non-VISA instrument (TCP, USB-serial-with-its-own-
    protocol, ...) may use a different string convention (e.g. `"host:port"`)
-   as long as the driver's module docstring says so explicitly — see
-   `tensormeter_rtm2.py`'s module docstring for the precedent.
+   as long as the driver's module docstring says so explicitly.
 2. `get_idn() -> str` with no required arguments — the universal reachability
    probe used by the troubleshoot preflight and this VI's own `ping()`.
 3. A `sim_<name>.py` twin exposing the **identical public method names and
@@ -68,7 +68,7 @@ so subclass the base directly). Declare, as `ClassVar`s:
 
 ```python
 _ARRAY_KEYS, _SCALAR_COLUMNS = MeasurementInstrumentBase.quantity_columns(
-    "res_a_ohm", "res_b_ohm"          # your quantity names, no "_array"/"_error" suffix
+    "voltage_V", "current_A"          # your quantity names, no "_array"/"_error" suffix
 )
 measurement_data_keys: ClassVar[list[str]] = _ARRAY_KEYS
 measurement_scalar_columns: ClassVar[dict[str, str]] = _SCALAR_COLUMNS
@@ -90,6 +90,34 @@ config passes no `init_params` at all** — conformance's
 `vi_cls(sim_drivers)`, no `init_params`, so give every limit a safe internal
 default (`init_params.get("max_current_A", 0.01)`), never require it.
 
+### 2a. Image blocks — when the reading is a frame
+
+A camera, or any instrument whose datum is a 2-D array in one unit, declares
+it beside the scalar columns rather than forcing it through the
+mean/error/array convention:
+
+```python
+from cryosoft.core.plan import ImageBlock
+
+measurement_image_blocks: ClassVar[dict[str, ImageBlock]] = {
+    "frame": ImageBlock(height_px=128, width_px=128, unit="counts",
+                        description="Widefield frame at the sample"),
+}
+```
+
+`take_reading()` then returns the frame under the block name as a
+`(height_px, width_px)` numpy array — the declared shape for every reading
+of every run (expand a binned readout back onto the sensor grid rather than
+changing the dataset's shape) — alongside the scalars. Keep at least one
+scalar column derived from it (`CameraMeasurementVI`'s `roi_mean` /
+`roi_std` over the config's `roi`) so the live plot and the generic sweep
+recipe have something to show; no scalar is ever derived from a frame by
+the framework. The data manager writes the block with `block_kind = "image"`,
+`data_reader.read_image(name, index)` serves it back, and conformance fails
+a declared `height_px`/`width_px` that does not match what the sim's
+`take_reading()` returns. Full text: `MeasurementInstrumentBase`'s
+docstring, "Image blocks", and `virtual_instruments/measurement/README.md`.
+
 ## 3. Lifecycle methods — what actually runs, when
 
 | Method | Called by | Must NOT do |
@@ -101,9 +129,15 @@ default (`init_params.get("max_current_A", 0.01)`), never require it.
 | `standby() -> None` | End of run, abort, or explicit action | Leave a source energised |
 | `ping() -> bool` | `initiate()`, GUI reachability checks | Poll anything expensive — should be near-instant. Inherited from the base — do not override it (see below) |
 
-`initiate_measurement` is normally `@control(panel=False)` — arming is a
+`initiate_measurement` is normally
+`@control(panel=False, action_class="run_control")` — arming is a
 deliberate act, reachable from the front panel and procedures, never from
-the compact monitor card.
+the compact monitor card, and it commands the instrument, so an agent needs
+the `session` role for it. Every `@control` you write declares its
+`action_class` explicitly (`read` for a bench hook like `read_now()` that
+commands nothing new, `recovery` for housekeeping, `run_control` for
+anything that arms, sources or sets); conformance refuses a shipped control
+that leaves it out.
 
 Do not write your own `ping()`. The base's default already does the plain
 `get_idn()`-on-every-driver check the table above describes; a VI that also
@@ -117,7 +151,7 @@ already gives you for free.
 
 If your instrument exposes far more configuration surface than the VI wraps
 (analysis modes, pulse trains, reference muxing, …) and the operator may
-want to configure it with the vendor's own tool while CryoSoft only arms,
+want to configure it with the vendor's own tool while I2AS only arms,
 triggers, reads, and saves — the `configured_externally` contract already
 exists on `MeasurementInstrumentBase` (its docstring's "Externally
 configured instruments" section, restated in
@@ -141,7 +175,7 @@ def detach_when_idle(self) -> bool:
 ```
 
 — and the base does the rest: born detached (its `__init__` releases the
-session before returning, so starting CryoSoft while the vendor tool is
+session before returning, so starting I2AS while the vendor tool is
 open builds cleanly), `ping()`'s verify-and-release path (no override
 needed), `initiate_measurement()` (re)acquiring the connection via
 `self._attach()`, and `standby()`'s automatic release (via
@@ -182,17 +216,17 @@ Both are driven by the SAME decorator metadata (`cryosoft/gui/instrument_panel.p
   route/channel name from `init_params`, not known at class-definition time),
   do not try to bake them into the decorator — override
   `control_param_specs(method_name)` to inject a dynamic `ParamSpec` with
-  `choices` built from your instance state. See `SwitchMatrixVI.control_param_specs()`
-  for the pattern (`select_route`'s `route` param rendered from
-  `self._routes`).
+  `choices` built from your instance state — a PURE read of config and the
+  monitor cache (`last_monitored()`), never a bus command. See
+  `Lakeshore335SampleTemperatureControllerVI.control_param_specs()` for the
+  pattern (`set_curve`'s choices from the curves the instrument reports).
 - A measurement VI's `measurement_parameters` render the same way in a
   **procedure's** parameter form (see §5) — but that path has no
   `control_param_specs`-style dynamic-choices hook today, so a
   config-dependent measurement parameter (e.g. "which configured channel
   sequence") currently has to be a plain free-text `str` there, matched
-  against your own route table inside `initiate_measurement()` (raise
-  `ValueError` naming the valid options if it doesn't match — see
-  `TensormeterRTM2MeasurementVI.initiate_measurement()`).
+  against your own table inside `initiate_measurement()` (raise
+  `ValueError` naming the valid options if it doesn't match).
 
 ## 5. Selecting the method and looping channels in a procedure
 
@@ -215,10 +249,9 @@ mapping a `measurement_parameters` name to a **dedicated setter method**
 (itself normally `@control`-decorated, with `control_limits` if bounded)
 that reprograms *just* that value between readings, without re-running the
 whole `initiate_measurement()` arm sequence. See
-`DCSeparateMeasurementVI.set_source_current()` for the simple, static-choice
-case, and `SwitchMatrixVI.reading_setters = {"route": "select_route"}` +
-its `reading_parameters` property override for the dynamic, config-owned
-case (route names only exist after `__init__` reads `init_params["routes"]`).
+`DCSeparateMeasurementVI.set_source_current()` for the shipped case; a VI
+whose loopable values only exist after `__init__` reads `init_params`
+overrides the `reading_parameters` property to build the spec at runtime.
 
 Without a `reading_setters` entry, the parameter is **invisible to the
 Reading-loop panel** — the whole run is locked to one value for it. This is
@@ -235,8 +268,8 @@ Contract, machine-enforced by conformance:
   declared, after any setter call.
 
 Optionally declare `reading_safe_off: ClassVar[str] = "method_name"` — a
-safe-off action (e.g. `open_all` on a switch) the procedure dispatches at
-standby/abort if this VI's parameter took part in the loop.
+safe-off action the procedure dispatches at standby/abort if this VI's
+parameter took part in the loop (no shipped VI declares one).
 
 ## 6. Wiring into a config
 
@@ -259,22 +292,21 @@ virtual_instruments:
 **Role-name collision trap** when registering your sim driver in
 `tests/test_conformance.py`'s `_SIM_MEASUREMENT_DRIVER_CLASSES` (needed so
 the generic round-trip conformance test can build your VI): pick a role key
-that isn't already claimed by an unrelated sim class (`source`, `meter`,
-`main`, `lockin`, `tensormeter`, ...) unless your driver is genuinely
+that isn't already claimed by an unrelated sim class (`source` and `meter`
+are the DC pair, `main` is the camera) unless your driver is genuinely
 API-compatible with whatever that existing role maps to. Reusing an
 unrelated role silently hands your VI the wrong sim driver instance —
-`main` is already `SimKeithley2400`, for example.
+`main` is already `SimCamera`, for example.
 
 ## 7. Testing the real instrument — do this before calling it done
 
 A driver/VI that only passes against its own sim twin has not been
 validated against the instrument it claims to support. Live commissioning
-regularly surfaces things no amount of code review catches — see
-`cryosoft/configs/12t-cryo/setup.md`'s Tensormeter RTM2 entry for a worked
-example of six real, non-obvious bugs (a vendor-library command-table typo,
-a hidden precondition, a CV/CC-style stale-setpoint interaction, an
-AC/DC column mismatch, a leftover session mode, and a trigger/averaging
-race) that only live testing found. Follow this order, every time:
+regularly surfaces things no amount of code review catches — a
+vendor-library command-table typo, a hidden precondition, a stale-setpoint
+interaction between two regulation modes, a column mismatch between two
+sourcing modes, a leftover session mode, a trigger/averaging race — every
+one of them found only on hardware. Follow this order, every time:
 
 1. **`make check` green with sim only, first.** Never start live testing
    from a codebase with a known-broken test.
@@ -313,8 +345,8 @@ race) that only live testing found. Follow this order, every time:
    is the only step that catches VI-layer bugs a driver-only test can't see
    (wrong column read for the sourcing mode actually used, a wiring/mode
    mismatch, etc.).
-9. **Record every finding in `setup.md`'s Known Quirks section and in
-   `LOGBOOK.md`**, even ones fixed the same session — these are exactly the
+9. **Record every finding in `setup.md`'s Known Quirks section** (and in
+   `LOGBOOK.md` if you keep one), even ones fixed the same session — these are exactly the
    facts a future agent (or you, next week) cannot re-derive from the code
    alone.
 10. **Never leave a config with a guessed address or setpoint.** Use the
@@ -326,12 +358,13 @@ race) that only live testing found. Follow this order, every time:
 - [ ] `pytest -m "not hardware" tests/test_l0_simulated.py -k <YourSim> -v`
 - [ ] `pytest -m "not hardware" tests/test_conformance.py -v` (driver contract,
       sim/real parity, VI contract, measurement self-description,
-      mean/error/array convention, round-trip, `reading_setters` contract if
-      declared)
+      mean/error/array convention, round-trip, explicit `action_class` on
+      every control, `reading_setters` contract if declared, image-block
+      shape if declared)
 - [ ] `make check` (ruff + import-linter contracts + full non-hardware suite)
       fully green
 - [ ] Live: driver-only test, then VI-level test, both against real hardware,
-      both logged in `setup.md` + `LOGBOOK.md`
+      both logged in `setup.md`
 - [ ] GUI smoke: open the front panel for this VI, confirm every declared
       `@control` renders sensibly (including the ones you expect to be
       hidden from the compact card) and every `@monitored` value updates
