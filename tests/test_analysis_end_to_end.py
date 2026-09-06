@@ -73,25 +73,83 @@ def _write_run_file(directory: Path, n_points: int = 6) -> Path:
     return Path(writer.filepath)
 
 
-@pytest.fixture
-def wired(tmp_path, qtbot, monkeypatch):
-    """The production wiring over a real run file and a sim notebook."""
+_IMAGE_SHAPE = (12, 16)
+
+_IMAGE_DATA_CONFIG = {
+    "sweep_columns": {"unix_time": "float", "field_T": "float"},
+    "measurement_scalars": {"roi_mean": "float", "roi_mean_error": "float", "roi_std": "float"},
+    "measurement_arrays": {"roi_mean_array": 1},
+    "measurement_blocks": {"frame": _IMAGE_SHAPE},
+    "measurement_block_labels": {},
+    "measurement_image_blocks": {"frame": {"unit": "counts", "description": "frame"}},
+    "loop_shape": [1, 1],
+}
+
+
+def _write_imaging_run_file(directory: Path, n_points: int = 9) -> Path:
+    """Write a small closed Field Imaging run file — frames that switch — and return its path."""
+    import numpy as np
+
+    writer = DataManager(
+        data_directory=str(directory),
+        procedure_name="Field Imaging",
+        procedure_params={"field_start": -1.0, "field_end": 1.0, "saturation_field_T": -1.5},
+        sample_info={"sample_name": "D1"},
+        instrument_state={},
+        system_targets={},
+        measurement_commands=[],
+        data_config=_IMAGE_DATA_CONFIG,
+        n_sweep_points=n_points,
+        experiment_info={"setup": {"config_name": "sim_imaging"}, "experiment": {}},
+    )
+    field = np.concatenate([np.linspace(-1.0, 1.0, 5), np.linspace(0.5, -1.0, n_points - 5)])
+    magnetisation = -1.0
+    for index in range(n_points):
+        h = float(field[index])
+        going_up = index == 0 or field[index] >= field[index - 1]
+        if going_up and h > 0.4:
+            magnetisation = 1.0
+        if not going_up and h < -0.4:
+            magnetisation = -1.0
+        frame = np.full(_IMAGE_SHAPE, 100.0 + 50.0 * magnetisation)
+        frame[: _IMAGE_SHAPE[0] // 2] += 5.0 * index
+        writer.save_datapoint(
+            index,
+            {
+                "unix_time": 1_000.0 + index,
+                "field_T": h,
+                "frame": frame,
+                "roi_mean_array": [[[float(frame.mean())]]],
+                "roi_mean": [[float(frame.mean())]],
+                "roi_mean_error": [[0.0]],
+                "roi_std": [[float(frame.std())]],
+            },
+            {},
+        )
+    writer.close()
+    return Path(writer.filepath)
+
+
+def _wire(tmp_path, monkeypatch, *, config_name: str, procedure: str, write_run, params):
+    """The production wiring over one real run file and a sim notebook."""
     monkeypatch.setenv("PYTHONPATH", os.getcwd())
     store = ExperimentStore(tmp_path / "experiments")
     roster = UserRoster(tmp_path / "users.json")
     roster.add(User(user_id="jdoe", name="J. Doe"))
-    orchestrator = Orchestrator(build_station("cryosoft/configs/sim_cryostat"), tick_interval_ms=10)
+    orchestrator = Orchestrator(
+        build_station(f"cryosoft/configs/{config_name}"), tick_interval_ms=10
+    )
     manager = ExperimentManager(
-        store=store, roster=roster, orchestrator=orchestrator, config_name="sim_cryostat"
+        store=store, roster=roster, orchestrator=orchestrator, config_name=config_name
     )
     experiment = manager.start_experiment("Sample A", "jdoe", {"sample_name": "A3"})
-    data_file = _write_run_file(store.data_dir(experiment.experiment_id))
+    data_file = write_run(store.data_dir(experiment.experiment_id))
 
     started = {
         "run_id": "run-0001",
-        "procedure": "Field Sweep",
+        "procedure": procedure,
         "kind": "run",
-        "params": {"field_start": -1.0, "field_end": 1.0},
+        "params": params,
         "data_file": str(data_file),
         "started_utc": "2026-01-01T10:00:00+00:00",
     }
@@ -114,9 +172,39 @@ def wired(tmp_path, qtbot, monkeypatch):
     runner = AnalysisRunner(manager, publisher, lambda: publisher.settings)
     publisher.analysis_requested.connect(runner.start)
 
-    yield manager, publisher, adapter, runner, orchestrator, finished, experiment.experiment_id
-    runner.cancel()
-    publisher.stop()
+    return manager, publisher, adapter, runner, orchestrator, finished, experiment.experiment_id
+
+
+@pytest.fixture
+def wired(tmp_path, qtbot, monkeypatch):
+    """The transport example: a Field Sweep run on the sim cryostat."""
+    parts = _wire(
+        tmp_path,
+        monkeypatch,
+        config_name="sim_cryostat",
+        procedure="Field Sweep",
+        write_run=_write_run_file,
+        params={"field_start": -1.0, "field_end": 1.0},
+    )
+    yield parts
+    parts[3].cancel()
+    parts[1].stop()
+
+
+@pytest.fixture
+def wired_imaging(tmp_path, qtbot, monkeypatch):
+    """The imaging example: a Field Imaging run on the sim imaging station."""
+    parts = _wire(
+        tmp_path,
+        monkeypatch,
+        config_name="sim_imaging",
+        procedure="Field Imaging",
+        write_run=_write_imaging_run_file,
+        params={"field_start": -1.0, "field_end": 1.0, "saturation_field_T": -1.5},
+    )
+    yield parts
+    parts[3].cancel()
+    parts[1].stop()
 
 
 def test_a_finished_run_reaches_the_notebook_as_an_analysed_entry(wired, qtbot):
@@ -184,3 +272,35 @@ def test_a_failing_recipe_parks_a_facts_only_entry(wired, qtbot):
     assert pending["source"] == "facts"
     assert "ZeroDivisionError" in pending["body_html"]
     assert publisher.pending_count() == 0, "nothing publishes without approval"
+
+
+def test_a_finished_imaging_run_reaches_the_notebook_with_its_montage(wired_imaging, qtbot):
+    """The imaging twin: run end → worker → the image-stack report → the montage attached."""
+    manager, publisher, adapter, runner, orchestrator, finished, experiment_id = wired_imaging
+
+    with qtbot.waitSignal(runner.analysis_finished, timeout=90_000) as blocker:
+        orchestrator.run_finished.emit(finished)
+
+    run_id, payload = blocker.args
+    report = AnalysisReport.from_dict(payload)
+    assert report.ok, report.error
+    assert report.recipe == "field_image_stack", "the procedure-specific recipe wins"
+    assert [f.file for f in report.figures] == ["montage.png", "difference.png", "loop.png"]
+    report_dir = manager.store.report_dir(experiment_id, run_id)
+    for figure in report.figures:
+        assert (report_dir / figure.file).stat().st_size > 0
+    assert any(r.name == "Coercive field" for r in report.results)
+
+    pending = manager.pending_eln_draft(run_id)
+    assert pending["source"] == "analysis"
+    assert "reference frame" in pending["body_html"]
+    assert [Path(a["path"]).name for a in pending["attachments"]] == [
+        "montage.png", "difference.png", "loop.png"
+    ]
+
+    job_id = manager.approve_eln_draft(run_id)
+    assert job_id
+    assert publisher.drain_once().state == DRAIN_PUBLISHED
+    assert len(adapter.entries) == 1
+    uploaded = sorted(Path(u["path"]).name for u in adapter.uploads)
+    assert uploaded == ["difference.png", "loop.png", "montage.png"]

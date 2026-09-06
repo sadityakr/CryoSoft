@@ -8,6 +8,7 @@ actually writes.
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import subprocess
@@ -617,10 +618,31 @@ def test_facts_only(tmp_path, run_file):
     assert "FieldSweep" in report.summary[0]
 
 
-def test_every_shipped_recipe_serves_every_procedure():
-    """Both shipped recipes are wildcards, so no run is left unanalysed."""
-    for info in discover_recipes():
-        assert ANY_PROCEDURE in info.procedures
+def test_every_shipped_procedure_has_a_recipe():
+    """The two generic recipes are wildcards, so no run is left unanalysed,
+    and the one procedure-specific recipe wins for its own procedure."""
+    import pkgutil
+
+    import cryosoft.procedures
+    from cryosoft.core.procedure import BaseProcedure
+
+    recipes = discover_recipes()
+    by_name = {info.name: info for info in recipes}
+    assert ANY_PROCEDURE in by_name["generic_sweep"].procedures
+    assert ANY_PROCEDURE in by_name["facts_only"].procedures
+    assert by_name["field_image_stack"].procedures == ("FieldImaging",)
+
+    for module_info in pkgutil.iter_modules(cryosoft.procedures.__path__):
+        module = importlib.import_module(f"cryosoft.procedures.{module_info.name}")
+        for cls in vars(module).values():
+            if not (isinstance(cls, type) and issubclass(cls, BaseProcedure)):
+                continue
+            if cls is BaseProcedure or cls.__module__ != module.__name__:
+                continue
+            chosen = recipe_for(cls.name, recipes)
+            assert chosen is not None, f"{cls.__name__} has no recipe"
+            expected = "field_image_stack" if cls.__name__ == "FieldImaging" else "generic_sweep"
+            assert chosen.name == expected, (cls.__name__, chosen.name)
 
 
 # ── The worker CLI ────────────────────────────────────────────────────────
@@ -718,3 +740,202 @@ def test_report_dict_round_trip_is_json_safe(tmp_path, run_file):
     payload = json.loads(json.dumps(report.to_dict()))
     assert AnalysisReport.from_dict(payload) == report
     assert np.isfinite(report.duration_s)
+
+
+# ── The image-stack recipe (Field Imaging) ───────────────────────────────
+
+
+IMAGE_N_POINTS = 9
+FRAME_SHAPE = (8, 10)
+
+IMAGE_DATA_CONFIG = {
+    "sweep_columns": {"unix_time": "float", "stage_x_position": "float", "field_T": "float"},
+    "measurement_scalars": {"roi_mean": "float", "roi_mean_error": "float", "roi_std": "float"},
+    "measurement_arrays": {"roi_mean_array": 1},
+    "measurement_blocks": {"frame": FRAME_SHAPE},
+    "measurement_block_labels": {},
+    "measurement_image_blocks": {"frame": {"unit": "counts", "description": "test frame"}},
+    "loop_shape": [1, 1],
+}
+
+IMAGE_MANIFEST = {
+    "run_id": "run-img",
+    "procedure": "Field Imaging",
+    "kind": "run",
+    "params": {"field_start": -1.0, "field_end": 1.0, "saturation_field_T": -1.5},
+    "status": "done",
+    "started_utc": "2026-01-01T00:00:00+00:00",
+    "finished_utc": "2026-01-01T00:05:00+00:00",
+}
+
+
+def _image_writer(directory: Path, n_points: int = IMAGE_N_POINTS) -> DataManager:
+    """Return a writer for a Field Imaging-shaped run: frames plus ROI scalars."""
+    return DataManager(
+        data_directory=str(directory),
+        procedure_name="Field Imaging",
+        procedure_params=dict(IMAGE_MANIFEST["params"]),
+        sample_info={"sample_name": "Domain sample"},
+        instrument_state={},
+        system_targets={},
+        measurement_commands=[],
+        data_config=IMAGE_DATA_CONFIG,
+        n_sweep_points=n_points,
+        experiment_info={"setup": {"config_name": "sim_imaging"}, "experiment": {"experiment_id": "E"}},
+    )
+
+
+def _hysteresis(field: np.ndarray, coercive: float = 0.4) -> np.ndarray:
+    """A loop in sweep order: switches up at +coercive on the way up, back at -coercive on the way down."""
+    magnetisation = -1.0
+    out = []
+    for i, h in enumerate(field):
+        going_up = i == 0 or field[i] >= field[i - 1]
+        if going_up and h > coercive:
+            magnetisation = 1.0
+        if not going_up and h < -coercive:
+            magnetisation = -1.0
+        out.append(magnetisation)
+    return np.asarray(out)
+
+
+@pytest.fixture
+def image_run_file(tmp_path) -> Path:
+    """A closed Field Imaging run: -1 → +1 → -1 T, frames that switch, a loop."""
+    writer = _image_writer(tmp_path / "imaging")
+    field = np.concatenate([np.linspace(-1.0, 1.0, 5), np.linspace(0.5, -1.0, 4)])
+    loop = _hysteresis(field)
+    for index in range(IMAGE_N_POINTS):
+        frame = np.full(FRAME_SHAPE, 100.0 + 50.0 * loop[index])
+        frame[:, : FRAME_SHAPE[1] // 2] += 1.0 * index  # something spatial changes too
+        writer.save_datapoint(
+            index,
+            {
+                "unix_time": 1_000.0 + index,
+                "stage_x_position": 0.0,
+                "field_T": float(field[index]),
+                "frame": frame,
+                "roi_mean_array": [[[float(frame.mean())]]],
+                "roi_mean": [[float(frame.mean())]],
+                "roi_mean_error": [[0.0]],
+                "roi_std": [[float(frame.std())]],
+            },
+            {},
+        )
+    writer.close()
+    return Path(writer.filepath)
+
+
+@pytest.fixture
+def empty_image_run_file(tmp_path) -> Path:
+    writer = _image_writer(tmp_path / "empty_imaging")
+    writer.close()
+    return Path(writer.filepath)
+
+
+def _image_spec(run_file: Path, output_dir: Path, **overrides) -> AnalysisSpec:
+    overrides.setdefault("recipe", "field_image_stack")
+    return _spec(run_file, output_dir, manifest=dict(IMAGE_MANIFEST), **overrides)
+
+
+def test_coercive_fields_reads_both_crossings_of_a_loop():
+    from cryosoft.analysis.recipes.field_image_stack import coercive_fields
+
+    field = np.concatenate([np.linspace(-1.0, 1.0, 21), np.linspace(1.0, -1.0, 21)])
+    crossings = coercive_fields(field, _hysteresis(field, coercive=0.45))
+    assert len(crossings) == 2
+    assert 0.4 < crossings[0] <= 0.5
+    assert -0.5 <= crossings[1] < -0.4
+
+
+def test_coercive_fields_needs_a_real_switch():
+    """A constant, noise alone, or a single point yields no crossing."""
+    from cryosoft.analysis.recipes.field_image_stack import coercive_fields
+
+    field = np.linspace(-1.0, 1.0, 11)
+    assert coercive_fields(field, np.full(11, 3.0)) == []
+    noise = 0.1 * np.array([0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0], dtype=float)
+    assert coercive_fields(field, 3.0 + noise) == []
+    assert coercive_fields(field[:1], np.array([1.0])) == []
+    step = np.where(field > 0.25, 1.0, -1.0)
+    assert len(coercive_fields(field, step)) == 1
+
+
+def test_panel_indices_keep_the_ends_under_the_cap():
+    from cryosoft.analysis.recipes.field_image_stack import MAX_PANELS, _panel_indices
+
+    assert _panel_indices(0) == []
+    assert _panel_indices(5) == [0, 1, 2, 3, 4]
+    indices = _panel_indices(101)
+    assert len(indices) == MAX_PANELS
+    assert indices[0] == 0 and indices[-1] == 100
+    assert indices == sorted(set(indices))
+
+
+def test_field_image_stack_on_an_imaging_run(tmp_path, image_run_file):
+    """Three figures, the crossings as results, one paragraph."""
+    report = run_spec(_image_spec(image_run_file, tmp_path / "report"))
+
+    assert report.status == REPORT_OK, report.error
+    assert report.recipe == "field_image_stack"
+    assert [f.file for f in report.figures] == ["montage.png", "difference.png", "loop.png"]
+    for figure in report.figures:
+        assert (tmp_path / "report" / figure.file).stat().st_size > 0
+    names = [r.name for r in report.results]
+    assert names[:2] == ["Coercive field (crossing 1)", "Coercive field (crossing 2)"]
+    assert "Coercive field" in names and "Loop width" in names
+    by_name = {r.name: r for r in report.results}
+    # The fixture switches between the 0 T and ±0.5 T points, so linear
+    # interpolation puts each crossing near ±0.25 T.
+    assert 0.2 < by_name["Coercive field (crossing 1)"].value < 0.3
+    assert -0.3 < by_name["Coercive field (crossing 2)"].value < -0.2
+    assert by_name["Coercive field"].unit == "T"
+    assert by_name["Coercive field"].uncertainty is not None
+    summary = report.summary[0]
+    assert "9 point(s)" in summary
+    assert "montage shows 9" in summary
+    assert "reference frame" in summary
+    assert "crosses zero" in summary
+    assert not report.warnings
+
+
+def test_field_image_stack_is_chosen_for_a_field_imaging_run(tmp_path, image_run_file):
+    """With no recipe named, the procedure-specific recipe wins over the wildcard."""
+    report = run_spec(_image_spec(image_run_file, tmp_path / "report", recipe=""))
+    assert report.status == REPORT_OK, report.error
+    assert report.recipe == "field_image_stack"
+
+
+def test_field_image_stack_without_frames_still_draws_the_loop(tmp_path, run_file):
+    """A run of another measurement method: no montage, a warning, the loop from its scalar."""
+    report = run_spec(_image_spec(run_file, tmp_path / "report"))
+
+    assert report.status == REPORT_OK, report.error
+    assert [f.file for f in report.figures] == ["loop.png"]
+    assert any("no image block" in w for w in report.warnings)
+    assert "holds no frames" in report.summary[0]
+
+
+def test_field_image_stack_on_a_run_with_no_points(tmp_path, empty_image_run_file):
+    report = run_spec(_image_spec(empty_image_run_file, tmp_path / "report"))
+
+    assert report.status == REPORT_OK, report.error
+    assert not report.figures and not report.results
+    assert any("no points" in w for w in report.warnings)
+    assert report.summary
+
+
+def test_field_image_stack_without_matplotlib(tmp_path, image_run_file, monkeypatch):
+    """No matplotlib: an ok report, no figure, the install hint once, results intact."""
+
+    def _refuse() -> None:
+        raise AnalysisError(f"matplotlib is not installed: {MATPLOTLIB_INSTALL_HINT}")
+
+    monkeypatch.setattr("cryosoft.analysis.base._import_pyplot", _refuse)
+
+    report = run_spec(_image_spec(image_run_file, tmp_path / "report"))
+
+    assert report.status == REPORT_OK, report.error
+    assert not report.figures
+    assert sum(MATPLOTLIB_INSTALL_HINT in w for w in report.warnings) == 1
+    assert any(r.name == "Coercive field" for r in report.results)
