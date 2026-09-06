@@ -78,6 +78,7 @@ from cryosoft.session.gateway.tools import (
     ToolError,
     ToolSpec,
     call_session_tool,
+    feed_arguments,
     render_tools,
     validate_tool_args,
 )
@@ -251,10 +252,15 @@ class Gateway:
         self._tools_rendered_from: StationInfo | None = None
         self._awaiting_verdict = False
         self._awaited_verdicts: list[Verdict] = []
+        # The context is this connection's: its own mirrors, and its own
+        # identity, so a session tool that leaves something behind on disk
+        # (an agent-written **Analysis recipe**) can stamp who left it
+        # without being handed the actor call by call.
         self._tool_context = replace(
             tool_context or ToolContext(),
             status_source=self.status,
             station_source=self.station,
+            actor=self.actor,
         )
 
         event_stream(engine).connect(self._observe_event)
@@ -740,7 +746,11 @@ class Gateway:
         agent polls every tick must not drown the trail (see the record
         standard in ``session/agent_feed.py``). The recorded ``detail`` is the
         answer's own, plus the cost line when the call spent model tokens —
-        what an autonomous client spent, beside what it asked for.
+        what an autonomous client spent, beside what it asked for. The
+        arguments are recorded through ``tools.feed_arguments()``, which
+        digests the ones too big to belong in an append-only file (a written
+        recipe's source travels as its byte count and its SHA-256, and the
+        file on disk is the copy).
 
         Args:
             tool: The tool that was called.
@@ -755,7 +765,7 @@ class Gateway:
         self._feed.record_tool_call(
             self.actor,
             tool.name,
-            dict(args),
+            feed_arguments(tool, args),
             detail={**dict(answer.get("detail") or {}), **cost_line(answer.get("result"))},
             verdict={
                 "code": str(answer.get("code", "")),

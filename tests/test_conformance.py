@@ -46,6 +46,13 @@ import-linter, see pyproject.toml [tool.importlinter]):
   and are not flagged.
 * The responsive-GUI rule (see gui/README.md): nothing under ``cryosoft/gui/``
   blocks the Qt event loop with ``time.sleep``.
+* The recipe contract (see analysis/base.py and analysis/README.md): every
+  shipped **analysis recipe** declares a snake_case ``name``, a non-empty
+  ``description`` and a non-empty ``procedures`` tuple, implements
+  ``analyse(self, run, context)`` with the contract's signature, and returns
+  one ``ok`` **analysis report** for a real run file.
+* The folder README standard (see CLAUDE.md): every folder README under
+  ``cryosoft/`` carries the seven canonical sections, in order.
 """
 
 from __future__ import annotations
@@ -5026,3 +5033,209 @@ def test_clients_call_only_pure_declaration_reads_on_the_station() -> None:
         "so read this off the StationInfo declaration or the StatusMirror "
         "instead:\n" + "\n".join(offenders)
     )
+
+
+# ── Analysis recipe standard (cryosoft/analysis/) ────────────────────────────
+# The recipe contract written at the top of cryosoft/analysis/base.py: one
+# class per recipe declaring a snake_case name, a non-empty one-line
+# description and a procedures tuple, implementing analyse(run, context) with
+# the contract's signature, instantiated with no arguments, and returning one
+# ok AnalysisReport for a real run file. A recipe module added to
+# cryosoft/analysis/recipes/ is covered the moment the file exists — that is
+# what discovery buys, exactly as it does for drivers, VIs and procedures.
+
+_ANALYSIS_DATA_CONFIG = {
+    # The writer's own order: the clock, then the system read-backs, then the
+    # procedure's own axis column last.
+    "sweep_columns": {"unix_time": "float", "temperature_K": "float", "field_T": "float"},
+    "measurement_scalars": {"voltage_V": "float"},
+    "measurement_arrays": {},
+    "measurement_blocks": {},
+    "loop_shape": [1, 1],
+}
+
+_ANALYSIS_MANIFEST = {
+    "run_id": "conformance-run",
+    "procedure": "FieldSweep",
+    "kind": "run",
+    "params": {"field_start": -1.0, "field_end": 1.0},
+    "status": "done",
+    "started_utc": "2026-01-01T00:00:00+00:00",
+    "finished_utc": "2026-01-01T00:05:00+00:00",
+}
+
+
+def _package_recipe_infos() -> list:
+    """Every recipe shipped in cryosoft/analysis/recipes/."""
+    from cryosoft.analysis.discovery import ORIGIN_PACKAGE, discover_recipes
+
+    return [info for info in discover_recipes() if info.origin == ORIGIN_PACKAGE]
+
+
+def _synthetic_run_file(directory: Path) -> Path:
+    """Write a small real run file with the production writer.
+
+    Args:
+        directory: Where to create the file.
+
+    Returns:
+        Path of the closed HDF5 file: three sweep points of one axis, one
+        system read-back and one measured scalar.
+    """
+    from cryosoft.core.data_manager import DataManager
+
+    writer = DataManager(
+        data_directory=str(directory),
+        procedure_name="FieldSweep",
+        procedure_params={"field_start": -1.0, "field_end": 1.0},
+        sample_info={"sample_name": "Conformance"},
+        instrument_state={},
+        system_targets={},
+        measurement_commands=[],
+        data_config=_ANALYSIS_DATA_CONFIG,
+        n_sweep_points=3,
+        experiment_info={"setup": {"config_name": "sim"}, "experiment": {"experiment_id": "E"}},
+    )
+    for index in range(3):
+        writer.save_datapoint(
+            index,
+            {
+                "unix_time": 1_000.0 + index,
+                "temperature_K": 4.2,
+                "field_T": -1.0 + index,
+                "voltage_V": [[1.0 + index]],
+            },
+            {},
+        )
+    writer.close()
+    return Path(writer.filepath)
+
+
+@pytest.mark.parametrize("info", _package_recipe_infos(), ids=lambda i: i.name)
+def test_analysis_recipe_declares_the_contract(info) -> None:
+    """name, description and procedures are declared as the contract requires."""
+    assert info.name and info.name == info.name.lower() and info.name.isidentifier(), (
+        f"recipe name {info.name!r} must be a non-empty snake_case identifier — "
+        f"it is the id the panel, the settings file and the agent's tools use"
+    )
+    assert info.description.strip(), (
+        f"recipe {info.name!r} must declare a one-line description; it is what "
+        f"a physicist picks from"
+    )
+    assert isinstance(info.procedures, tuple) and info.procedures, (
+        f"recipe {info.name!r} must declare the procedure class names it serves "
+        f'(or ("*",) for every run), got {info.procedures!r}'
+    )
+    assert all(isinstance(name, str) and name for name in info.procedures), (
+        f"recipe {info.name!r}.procedures must hold procedure CLASS NAMES as "
+        f"strings, got {info.procedures!r}"
+    )
+
+
+@pytest.mark.parametrize("info", _package_recipe_infos(), ids=lambda i: i.name)
+def test_analysis_recipe_analyse_matches_the_contract_signature(info) -> None:
+    """analyse(self, run, context) — no extra argument, none missing."""
+    from cryosoft.analysis.base import AnalysisRecipe
+    from cryosoft.analysis.discovery import load_recipe
+
+    recipe = load_recipe(info)  # constructed with no arguments, per the contract
+    assert isinstance(recipe, AnalysisRecipe)
+    expected = list(inspect.signature(AnalysisRecipe.analyse).parameters)
+    actual = list(inspect.signature(type(recipe).analyse).parameters)
+    assert actual == expected, (
+        f"{type(recipe).__name__}.analyse{inspect.signature(type(recipe).analyse)} "
+        f"does not match the contract AnalysisRecipe.analyse"
+        f"{inspect.signature(AnalysisRecipe.analyse)}"
+    )
+
+
+@pytest.mark.parametrize("info", _package_recipe_infos(), ids=lambda i: i.name)
+def test_analysis_recipe_runs_to_an_ok_report(info, tmp_path) -> None:
+    """Every shipped recipe answers a real run file with an ok report."""
+    from cryosoft.analysis.report import REPORT_OK, AnalysisSpec
+    from cryosoft.analysis.runner import run_spec
+
+    run_file = _synthetic_run_file(tmp_path / "data")
+    report = run_spec(
+        AnalysisSpec(
+            run_id="conformance-run",
+            data_path=str(run_file),
+            manifest=dict(_ANALYSIS_MANIFEST),
+            experiment={"experiment_id": "E"},
+            setup={"config_name": "sim"},
+            recipe=info.name,
+            output_dir=str(tmp_path / "report"),
+        )
+    )
+    assert report.status == REPORT_OK, (
+        f"recipe {info.name!r} failed on a synthetic run:\n{report.error}"
+    )
+    assert report.recipe == info.name
+    assert report.recipe_digest == info.digest
+    assert report.summary, f"recipe {info.name!r} produced no summary paragraph"
+    for figure in report.figures:
+        assert (tmp_path / "report" / figure.file).is_file(), (
+            f"recipe {info.name!r} references figure {figure.file!r}, which it "
+            f"did not save into the output directory"
+        )
+
+
+# ── Folder README standard (CLAUDE.md) ───────────────────────────────────────
+# Every functional folder under cryosoft/ carries a README.md with the seven
+# canonical sections. Auto-discovered, so a NEW package folder is covered the
+# moment its README exists — and a folder that adds a README without the
+# standard's sections fails here rather than drifting.
+
+#: The seven sections, as the heading prefix each must start with. Entry/Exit
+#: and "How to add" carry a parenthetical or an object in the shipped READMEs
+#: ("Entry (what comes in)", "How to add a new magnet VI"), so the standard is
+#: the prefix, not the exact string.
+README_SECTIONS: tuple[str, ...] = (
+    "Purpose",
+    "Architecture layer",
+    "Entry",
+    "Exit",
+    "Interface contract",
+    "How to add",
+    "Files",
+)
+
+
+def _folder_readmes() -> list[Path]:
+    """Every folder README under cryosoft/."""
+    return sorted(Path(cryosoft.__file__).parent.rglob("README.md"))
+
+
+@pytest.mark.parametrize(
+    "readme", _folder_readmes(), ids=lambda p: p.parent.name
+)
+def test_folder_readme_has_the_seven_sections(readme: Path) -> None:
+    """The folder README standard: Purpose … Files, in that order."""
+    headings = [
+        line[3:].strip()
+        for line in readme.read_text(encoding="utf-8").splitlines()
+        if line.startswith("## ")
+    ]
+    position = -1
+    for section in README_SECTIONS:
+        matches = [
+            index for index, heading in enumerate(headings) if heading.startswith(section)
+        ]
+        assert matches, (
+            f"{readme.relative_to(Path(cryosoft.__file__).parent.parent)} has no "
+            f"'## {section}…' section; the folder README standard (CLAUDE.md) "
+            f"asks for {list(README_SECTIONS)}, found {headings}"
+        )
+        assert matches[0] > position, (
+            f"{readme.relative_to(Path(cryosoft.__file__).parent.parent)}: "
+            f"'{section}' must come after the section before it in "
+            f"{list(README_SECTIONS)}"
+        )
+        position = matches[0]
+
+
+def test_analysis_package_has_a_folder_readme() -> None:
+    """The analysis stage is a functional folder, so it carries a README."""
+    readme = Path(cryosoft.__file__).parent / "analysis" / "README.md"
+    assert readme.is_file(), "cryosoft/analysis/ must have a folder README"
+    assert readme in _folder_readmes()

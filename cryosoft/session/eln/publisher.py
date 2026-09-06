@@ -28,6 +28,17 @@ one ordinary outbox job whose title, body and tags come from an approved
 digest into the entry's metadata. It is the same journal, the same
 idempotency, the same drain — the draft is data, and only the text differs.
 
+**With the analysis stage on, a finished run is not queued at all.** It is
+handed to the analysis stage instead — ``on_run_finished()`` emits
+``analysis_requested`` and enqueues nothing — and what comes back is PARKED
+as a **Pending entry** on the run record (``export_report()`` for an analysed
+one, ``park_facts_entry()`` for the facts-only fallback when a recipe failed
+or never ran). Approval is then the only door to the outbox, through
+``ExperimentManager.approve_eln_draft()`` exactly as a model draft's is. That
+is why ``auto_publish`` says nothing on this path: with analysis switched on,
+nothing publishes until a human says so, and a failed analysis still leaves a
+complete, correct entry waiting rather than losing the run.
+
 **Backends are discovered, not listed.** ``discover_backends()`` walks the
 package for ``ElnAdapter`` subclasses and keys them by their declared
 ``backend``, so a new backend module is selectable from the settings file the
@@ -41,12 +52,19 @@ import importlib
 import logging
 import pkgutil
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
+from cryosoft.analysis.report import AnalysisReport
 from cryosoft.session.eln.adapter import ElnAdapter
-from cryosoft.session.eln.drafting import DraftEntry, manifest_from_run
+from cryosoft.session.eln.drafting import (
+    SOURCE_ANALYSIS,
+    SOURCE_FACTS,
+    DraftEntry,
+    manifest_from_run,
+)
 from cryosoft.session.eln.outbox import (
     DRAIN_IDLE,
     DRAIN_PUBLISHED,
@@ -58,6 +76,9 @@ from cryosoft.session.eln.outbox import (
 )
 from cryosoft.session.eln.settings import ElnSettings
 from cryosoft.session.eln.templates import (
+    render_analysed_body,
+    render_analysed_title,
+    render_prose_section,
     render_run_body,
     render_run_metadata,
     render_run_title,
@@ -137,10 +158,16 @@ class ElnPublisher(QObject):
         run_published (dict): ``{"run_id": str, "experiment_id": str,
             "eln_link": {...}}``, emitted once per run when the backend
             confirms its entry.
+        analysis_requested (str, dict, str): ``run_id``, the run manifest and
+            the absolute data path — emitted INSTEAD of queuing when the
+            analysis stage is switched on. Whoever owns the analysis runner
+            connects it; with nothing connected the run simply waits, and a
+            manual export still queues it.
     """
 
     publish_state_changed = pyqtSignal(dict)
     run_published = pyqtSignal(dict)
+    analysis_requested = pyqtSignal(str, dict, str)
 
     def __init__(
         self,
@@ -239,18 +266,83 @@ class ElnPublisher(QObject):
             data_path: Absolute path of the run's data file. ``""`` resolves
                 it from the recorded run through the store.
 
+        With the analysis stage switched on this queues NOTHING: the run is
+        handed to the analysis stage through ``analysis_requested`` and the
+        entry it produces is parked for approval instead. ``auto_publish``
+        says nothing there, because on that path nothing publishes until a
+        human approves it.
+
         Returns:
             The queued job's id, or ``""`` when nothing was queued (publishing
-            off, auto-publish off, no experiment open, or the job was already
-            queued).
+            off, the analysis stage took the run, auto-publish off, no
+            experiment open, or the job was already queued).
         """
         if not self._settings.enabled:
+            return ""
+        payload = manifest if manifest is not None else _manifest_of(event)
+        run_id = str(payload.get("run_id", ""))
+        if self._request_analysis(run_id, payload, data_path):
             return ""
         if not self._settings.auto_publish:
             logger.debug("Auto-publish is off — run left for a manual export")
             return ""
-        payload = manifest if manifest is not None else _manifest_of(event)
-        return self._enqueue_run(str(payload.get("run_id", "")), payload, data_path)
+        return self._enqueue_run(run_id, payload, data_path)
+
+    def _request_analysis(
+        self, run_id: str, manifest: Mapping[str, Any], data_path: str
+    ) -> bool:
+        """Hand one finished run to the analysis stage, or decline to.
+
+        The fork the whole track turns on. Analysing needs three things: the
+        stage switched on, an open experiment to write the results into, and a
+        data file to read. Missing any of them, the run takes today's path and
+        is rendered from its facts.
+
+        Args:
+            run_id: The finished run.
+            manifest: Its run manifest.
+            data_path: The caller's data path, or ``""`` to resolve it.
+
+        Returns:
+            ``True`` when ``analysis_requested`` was emitted and the caller
+            must not queue the run.
+        """
+        if not (run_id and self._settings.analysis.enabled):
+            return False
+        experiment = self._manager.current_experiment()
+        if experiment is None:
+            logger.debug("Run %r belongs to no experiment — not analysed", run_id)
+            return False
+        resolved = data_path or self._data_path_for(
+            experiment.experiment_id, run_id, manifest
+        )
+        if not resolved:
+            logger.warning("Run %s has no data file to analyse", run_id)
+            return False
+        logger.info("Run %s goes to the analysis stage before the notebook", run_id)
+        self.analysis_requested.emit(run_id, dict(manifest), resolved)
+        return True
+
+    def _data_path_for(
+        self, experiment_id: str, run_id: str, manifest: Mapping[str, Any]
+    ) -> str:
+        """Return a run's data path from its manifest, else from its record.
+
+        Args:
+            experiment_id: The owning experiment's store key.
+            run_id: The run.
+            manifest: The run manifest, whose ``data_file`` is preferred
+                because it is what the Orchestrator captured at run start.
+
+        Returns:
+            The absolute path as a string, or ``""`` when the run has none.
+        """
+        data_file = str(manifest.get("data_file") or "")
+        if data_file:
+            return str(self._manager.store.resolve_data_file(experiment_id, data_file))
+        experiment = self._manager.current_experiment()
+        run = experiment.find_run(run_id) if experiment is not None else None
+        return self._resolve_data_path(experiment_id, run)
 
     def export_run(self, run_id: str, data_path: str = "") -> str:
         """Queue one already-recorded run on demand — the manual "Publish now".
@@ -298,6 +390,163 @@ class ElnPublisher(QObject):
         entry = draft if isinstance(draft, DraftEntry) else DraftEntry.from_dict(draft)
         return self._enqueue_run(run_id, None, data_path, draft=entry)
 
+    def park_facts_entry(self, run_id: str, warning: str = "") -> bool:
+        """Park today's facts-only entry on one run, waiting for approval.
+
+        The fallback that loses nothing. When the analysis stage was asked and
+        could not answer — a recipe raised, the worker timed out, no recipe
+        matched — the run still gets a complete, correct entry: exactly the
+        title and body a published run has always had, with the reason the
+        analysis is missing said in the first section. It is PARKED, not
+        queued: with the analysis stage on, approval is the only door to the
+        notebook.
+
+        Args:
+            run_id: The run, in the open experiment.
+            warning: One line saying why there is no analysis, rendered as
+                escaped prose above the facts. ``""`` renders no such section.
+
+        Returns:
+            ``True`` when the entry was parked; ``False`` when there is no
+            open experiment or no such run (logged, never raised).
+        """
+        prepared = self._entry_facts(run_id)
+        if prepared is None:
+            return False
+        experiment, facts, resolved, context = prepared
+        body = render_prose_section("Analysis unavailable", warning) + render_run_body(
+            facts,
+            experiment_id=experiment.experiment_id,
+            experiment_title=experiment.title,
+            setup=context.get("setup"),
+            data_path=resolved,
+            findings=experiment.findings,
+        )
+        entry = DraftEntry(
+            title=render_run_title(facts, experiment.title),
+            body_html=body,
+            source=SOURCE_FACTS,
+            attachments=[],
+        )
+        parked = bool(self._manager.set_pending_eln_draft(run_id, entry.to_dict()))
+        if parked:
+            logger.info("A facts-only entry for run %s is waiting for approval", run_id)
+        return parked
+
+    def export_report(
+        self,
+        run_id: str,
+        report: AnalysisReport | Mapping[str, Any],
+        report_dir: str | Path,
+    ) -> bool:
+        """Park one run's **analysed entry**, waiting for approval.
+
+        The analysis stage's own hand-off. The report is rendered into the
+        entry a physicist wants — prose, results, figures, provenance — its
+        figures become attachments (their files live beside the report), and
+        the raw data file stays attached only when the report asked for it.
+
+        Parked whether the experiment is attended or not: with the analysis
+        stage switched on, approval is the gate this design chose, and an
+        unattended experiment's entry waits for the human who reads it later
+        rather than publishing an unreviewed result.
+
+        Args:
+            run_id: The analysed run, in the open experiment.
+            report: The **Analysis report**, or its ``report.json`` dict.
+            report_dir: The directory the report and its figures were written
+                to; every figure's ``file`` is relative to it.
+
+        Returns:
+            ``True`` when the entry was parked; ``False`` when there is no
+            open experiment or no such run (logged, never raised).
+        """
+        rendered = (
+            report if isinstance(report, AnalysisReport) else AnalysisReport.from_dict(report)
+        )
+        prepared = self._entry_facts(run_id)
+        if prepared is None:
+            return False
+        experiment, facts, resolved, context = prepared
+        directory = Path(report_dir)
+        entry = DraftEntry(
+            title=render_analysed_title(rendered, facts, experiment.title),
+            body_html=render_analysed_body(
+                rendered,
+                facts,
+                experiment_id=experiment.experiment_id,
+                experiment_title=experiment.title,
+                setup=context.get("setup"),
+                data_path=resolved,
+                findings=experiment.findings,
+            ),
+            tags=list(rendered.tags),
+            attachments=[
+                {"path": str(directory / figure.file), "comment": figure.caption or figure.file}
+                for figure in rendered.figures
+                if figure.file
+            ],
+            attach_data_file=rendered.attach_data_file,
+            source=SOURCE_ANALYSIS,
+            metadata={"recipe": rendered.recipe, "recipe_digest": rendered.recipe_digest},
+        )
+        parked = bool(self._manager.set_pending_eln_draft(run_id, entry.to_dict()))
+        if parked:
+            logger.info(
+                "An analysed entry for run %s (recipe %s) is waiting for approval",
+                run_id,
+                rendered.recipe or "unnamed",
+            )
+        return parked
+
+    def _entry_facts(
+        self, run_id: str
+    ) -> tuple[Any, dict[str, Any], str, dict[str, Any]] | None:
+        """Gather what every parked entry is rendered from.
+
+        Args:
+            run_id: The run, in the open experiment.
+
+        Returns:
+            ``(experiment record, manifest-shaped facts, data path, experiment
+            context)``, or ``None`` when no experiment is open or the run is
+            unknown (logged, never raised).
+        """
+        experiment = self._manager.current_experiment()
+        if experiment is None:
+            logger.warning("No experiment is open — no entry can be parked for %r", run_id)
+            return None
+        run = experiment.find_run(run_id)
+        if run is None:
+            logger.warning("No recorded run %r — no entry can be parked", run_id)
+            return None
+        facts = self._manifest_from_record(run)
+        resolved = self._resolve_data_path(experiment.experiment_id, run)
+        return experiment, facts, resolved, self._manager.experiment_context()
+
+    def reload_settings(self, settings: ElnSettings) -> None:
+        """Swap the settings in, rebuild the backend, and re-arm the drain.
+
+        What the **eLab setup** dialog calls after saving. The adapter is
+        resolved afresh, because the URL, the key or the backend itself may
+        have changed, and the drain timer follows the new settings: running
+        while they are usable, stopped while they are not — so switching the
+        track off stops the network the moment Save is pressed.
+
+        Args:
+            settings: The settings just saved.
+        """
+        self._settings = settings
+        self._adapter = None
+        self._timer.setInterval(max(1, round(settings.drain_interval_s * 1000.0)))
+        self._timer.stop()
+        if settings.is_configured:
+            self._resolve_adapter()
+            self.start()
+        else:
+            logger.info("ELN publishing is no longer configured — the drain timer is off")
+        self._publish_state(DRAIN_IDLE)
+
     def _enqueue_run(
         self,
         run_id: str,
@@ -338,14 +587,21 @@ class ElnPublisher(QObject):
         context = self._manager.experiment_context()
         metadata = render_run_metadata(facts, experiment.experiment_id, resolved)
         if draft is not None:
-            # The drafting provenance travels with the entry, so the notebook
-            # itself says which model wrote the prose and from which prompt —
-            # the same accountability the Agent feed keeps locally.
+            # The provenance of the pending entry travels with it, so the
+            # notebook itself says which stage produced the text and — for a
+            # model draft — from which prompt, or — for an analysed entry —
+            # from which recipe source. The same accountability the Agent feed
+            # keeps locally.
             metadata = {
                 **metadata,
                 "draft_model": draft.model,
                 "draft_prompt_digest": draft.prompt_digest,
+                "draft_source": draft.source,
             }
+            for key in ("recipe", "recipe_digest"):
+                value = draft.metadata.get(key)
+                if value:
+                    metadata[key] = value
         job = OutboxJob(
             job_id=f"{JOB_PUBLISH_RUN}:{run_id}",
             kind=JOB_PUBLISH_RUN,
@@ -371,6 +627,8 @@ class ElnPublisher(QObject):
             template_id=self._settings.template_id,
             metadata=metadata,
             data_path=resolved,
+            attach_data_file=draft.attach_data_file if draft is not None else True,
+            attachments=[dict(item) for item in (draft.attachments if draft else [])],
             max_attachment_bytes=self._settings.max_attachment_bytes,
         )
         outbox = self._outbox_for(experiment.experiment_id)
@@ -391,9 +649,10 @@ class ElnPublisher(QObject):
             run: The recorded run.
 
         Returns:
-            The manifest-shaped facts.
+            The manifest-shaped facts, plus the **Params digest** the record
+            keeps, which the analysed entry's provenance block names.
         """
-        return manifest_from_run(run)
+        return {**manifest_from_run(run), "params_digest": getattr(run, "params_digest", "")}
 
     def _resolve_data_path(self, experiment_id: str, run: RunRecord | None) -> str:
         """Return the absolute path of a run's data file, or ``""``.

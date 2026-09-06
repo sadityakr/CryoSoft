@@ -3274,6 +3274,41 @@ def test_procedure_quadrant_splitters_correctly_oriented(procedure_win):
     assert procedure_win._right_splitter.widget(1) is procedure_win._plot2
 
 
+def test_procedure_right_quadrant_has_the_queue_and_elab_tabs(procedure_win):
+    """The top-right quadrant is a two-tab widget, Queue first, eLab second.
+
+    The Queue tab still holds exactly what the quadrant always held (the
+    queue-over-status splitter), so nothing that used to be found by name in
+    that quadrant moved.
+    """
+    from PyQt6.QtWidgets import QTabWidget
+
+    tabs = procedure_win.findChild(QTabWidget, "right_tabs")
+    assert tabs is not None
+    assert [tabs.tabText(i) for i in range(tabs.count())] == ["Queue", "eLab"]
+    assert tabs.widget(0).findChild(QSplitter, "queue_status_splitter") is not None
+    assert tabs.widget(0).findChild(QTextEdit, "status_log") is not None
+    assert tabs.widget(1).objectName() == "analysis_panel"
+
+
+def test_procedure_window_builds_with_no_elab_collaborators(procedure_win):
+    """Built with no session layer, the eLab tab says so and offers nothing."""
+    from cryosoft.gui.analysis_panel import NO_SESSION_TEXT
+
+    panel = procedure_win.findChild(QWidget, "analysis_panel")
+    assert panel is not None
+    assert panel.findChild(QLabel, "analysis_status_label").text() == NO_SESSION_TEXT
+    assert not panel.findChild(QPushButton, "analysis_publish_btn").isEnabled()
+
+
+def test_procedure_run_finished_points_the_elab_tab_at_that_run(procedure_win):
+    """A finished run reaches the eLab tab through the window's own slot."""
+    seen = []
+    procedure_win._analysis_panel.on_run_finished = seen.append
+    procedure_win._orchestrator.run_finished.emit({"run_id": "run_042"})
+    assert seen == [{"run_id": "run_042"}]
+
+
 def test_procedure_param_scroll_has_no_height_cap(procedure_win):
     """The parameter scroll area fills its quadrant instead of being capped at a fixed height."""
     assert procedure_win._params_panel._param_scroll.maximumHeight() >= 16777215  # Qt's QWIDGETSIZE_MAX default (uncapped)

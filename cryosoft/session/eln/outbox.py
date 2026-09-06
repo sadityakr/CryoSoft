@@ -116,6 +116,35 @@ def _as_str_list(value: object) -> list[str]:
     return [str(item) for item in value if item is not None] if isinstance(value, list) else []
 
 
+def _as_bool(value: object, default: bool) -> bool:
+    """Return ``value`` if it is a bool, else ``default`` (defensive parse)."""
+    return value if isinstance(value, bool) else default
+
+
+def _as_attachments(value: object) -> list[dict[str, Any]]:
+    """Return ``value`` as a list of ``{"path", "comment"}`` dicts.
+
+    Args:
+        value: Any parsed JSON value; anything but a mapping carrying a
+            non-empty ``path`` is dropped rather than raised on — one mangled
+            line must never strand the job it belongs to.
+
+    Returns:
+        The attachments, in order.
+    """
+    if not isinstance(value, list):
+        return []
+    attachments: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        path = _as_str(item.get("path"))
+        if not path:
+            continue
+        attachments.append({"path": path, "comment": _as_str(item.get("comment"))})
+    return attachments
+
+
 @dataclass(frozen=True)
 class OutboxJob:
     """One queued publish, rendered in full at enqueue time.
@@ -140,6 +169,14 @@ class OutboxJob:
             backend default.
         metadata: JSON-safe metadata block for the entry.
         data_path: Absolute path of the run's data file, or ``""``.
+        attach_data_file: Whether to attach ``data_path`` at all. ``True``
+            (the default) is today's behaviour; an analysed entry whose report
+            asked for figures alone sets it ``False`` and the data file is
+            then named in the body's provenance block and nowhere else.
+        attachments: Extra files to attach after the data file, in order, as
+            ``{"path": absolute path, "comment": caption}`` — an analysed
+            entry's figures. Each is subject to the same caps and the same
+            link fallback as the data file.
         max_attachment_bytes: The caller's upload cap; a larger file is
             recorded as a link instead. ``0`` means no cap of the caller's own.
         state: ``"pending"`` or ``"done"``.
@@ -163,6 +200,8 @@ class OutboxJob:
     template_id: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
     data_path: str = ""
+    attach_data_file: bool = True
+    attachments: list[dict[str, Any]] = field(default_factory=list)
     max_attachment_bytes: int = 0
     state: str = JOB_STATE_PENDING
     attempts: int = 0
@@ -184,6 +223,8 @@ class OutboxJob:
             "template_id": self.template_id,
             "metadata": dict(self.metadata),
             "data_path": self.data_path,
+            "attach_data_file": self.attach_data_file,
+            "attachments": [dict(item) for item in self.attachments],
             "max_attachment_bytes": self.max_attachment_bytes,
             "state": self.state,
             "attempts": self.attempts,
@@ -217,6 +258,8 @@ class OutboxJob:
             template_id=_as_str(data.get("template_id")),
             metadata=_as_dict(data.get("metadata")),
             data_path=_as_str(data.get("data_path")),
+            attach_data_file=_as_bool(data.get("attach_data_file"), defaults.attach_data_file),
+            attachments=_as_attachments(data.get("attachments")),
             max_attachment_bytes=_as_int(data.get("max_attachment_bytes"), 0),
             state=_as_str(data.get("state"), defaults.state) or defaults.state,
             attempts=_as_int(data.get("attempts"), 0),
@@ -492,12 +535,15 @@ class Outbox:
         return job
 
     def _attach_data(self, adapter: ElnAdapter, ref: ElnEntryRef, job: OutboxJob) -> None:
-        """Attach the run's data file, or record where it lives.
+        """Attach the run's data file (when asked) and then every attachment.
 
-        Upload when the backend accepts attachments, the file is there, and it
-        fits under both the caller's cap and the backend's own. Otherwise fall
-        back to a link, so the entry always says exactly where the data is
-        even when the bytes stay on the measurement machine.
+        The data file comes first, and only when the job says so: an analysed
+        entry whose report asked for figures alone leaves the raw file where
+        it is. Every extra attachment follows in the order the job lists them,
+        under exactly the same caps and the same link fallback — a figure that
+        is missing or oversized is linked with the reason, so the entry always
+        says where the file is even when the bytes stay on the measurement
+        machine.
 
         Args:
             adapter: The backend to publish through.
@@ -505,11 +551,8 @@ class Outbox:
             job: The job being published.
 
         Raises:
-            ElnError: The upload or the link was refused.
+            ElnError: An upload or a link was refused.
         """
-        if not job.data_path:
-            return
-        path = Path(job.data_path)
         capabilities = adapter.capabilities
         caps = [
             limit
@@ -517,17 +560,49 @@ class Outbox:
             if limit > 0
         ]
         limit = min(caps) if caps else 0
+        if job.attach_data_file and job.data_path:
+            self._attach_one(adapter, ref, job, Path(job.data_path), "Run data", limit)
+        for attachment in job.attachments:
+            path = str(attachment.get("path") or "")
+            if not path:
+                continue
+            comment = str(attachment.get("comment") or "") or Path(path).name
+            self._attach_one(adapter, ref, job, Path(path), comment, limit)
+
+    def _attach_one(
+        self,
+        adapter: ElnAdapter,
+        ref: ElnEntryRef,
+        job: OutboxJob,
+        path: Path,
+        comment: str,
+        limit: int,
+    ) -> None:
+        """Upload one file, or record where it lives when it cannot be uploaded.
+
+        Args:
+            adapter: The backend to publish through.
+            ref: The entry to attach to.
+            job: The job being published (for the log line).
+            path: The file to attach.
+            comment: The caption the notebook shows for it.
+            limit: The effective size cap in bytes; ``0`` means uncapped.
+
+        Raises:
+            ElnError: The upload or the link was refused.
+        """
+        capabilities = adapter.capabilities
         size = path.stat().st_size if path.is_file() else -1
         if capabilities.attachments and size >= 0 and (limit == 0 or size <= limit):
-            adapter.attach_file(ref, path, "Run data")
+            adapter.attach_file(ref, path, comment)
             return
         if capabilities.links:
             reason = (
-                "data file not found on the publishing machine"
+                "file not found on the publishing machine"
                 if size < 0
-                else f"data file is {size} bytes, above the {limit}-byte attachment cap"
+                else f"file is {size} bytes, above the {limit}-byte attachment cap"
             )
-            adapter.attach_link(ref, str(path), f"Run data — {reason}")
+            adapter.attach_link(ref, str(path), f"{comment} — {reason}")
             return
         logger.warning(
             "Backend %s can neither attach nor link %s for job %s",

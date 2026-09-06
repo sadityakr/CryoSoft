@@ -19,12 +19,24 @@ context, which is why the publisher can render a job at the moment the run
 finishes and queue the finished text — an outbox job never has to re-render
 later against state that has since moved on.
 
-Two bodies exist, built from the same shared row builders so a run reads
-identically in both: ``render_run_body()`` for a published run, and
+Three bodies exist, built from the same shared row builders so a run reads
+identically in all of them: ``render_run_body()`` for a published run,
 ``render_draft_body()`` for a **draft entry**, which puts a drafted summary
-above the facts it was drafted from. The drafted prose is model output and is
-therefore escaped like any other value — ``render_prose_section()`` is the one
-door untrusted text comes through, and it can introduce no markup at all.
+above the facts it was drafted from, and ``render_analysed_body()`` for an
+**analysed entry**, which puts one recipe's **Analysis report** — its prose,
+its derived values, its figures and its tables — above a compact provenance
+block naming the run, the data file and the recipe that produced the numbers.
+The drafted prose is model output and the analysed prose is user-recipe
+output; both are escaped like any other value — ``render_prose_section()`` is
+the one door untrusted text comes through, and it can introduce no markup at
+all.
+
+An analysed entry names its figures by file name and never embeds one: a
+figure travels as an **Outbox** attachment, so the body stays self-contained
+and renders identically in the notebook, in an export, and in a test
+snapshot. The run's full fact tables are appended only when the report asks
+for them (``include_fact_tables``) — the point of the analysis stage is that
+what reaches the notebook is the result, not the raw facts.
 """
 
 from __future__ import annotations
@@ -33,6 +45,8 @@ import html
 import logging
 from collections.abc import Mapping
 from typing import Any
+
+from cryosoft.analysis.report import AnalysisReport
 
 logger = logging.getLogger(__name__)
 
@@ -407,3 +421,289 @@ def render_run_metadata(
         "data_file": data_path,
         "source": "cryosoft",
     }
+
+
+def _as_report(report: AnalysisReport | Mapping[str, Any]) -> AnalysisReport:
+    """Return *report* as an ``AnalysisReport``, loading a dict tolerantly.
+
+    Args:
+        report: The report, or its ``report.json`` dict as the analysis
+            worker wrote it.
+
+    Returns:
+        The report record; junk degrades to an empty ``ok`` report rather
+        than raising, because a body must always render.
+    """
+    return report if isinstance(report, AnalysisReport) else AnalysisReport.from_dict(report)
+
+
+def _file_name(path: str) -> str:
+    """Return the file name of *path*, tolerating either separator.
+
+    Args:
+        path: A file path written on any platform, or ``""``.
+
+    Returns:
+        The last path segment, or ``""``.
+    """
+    return str(path).replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def _results_table(results: tuple[Any, ...]) -> str:
+    """Render the report's derived values as one table.
+
+    Args:
+        results: The report's ``ResultValue`` rows, in the order they should
+            be listed.
+
+    Returns:
+        The ``<h3>`` + ``<table>`` markup, or ``""`` when there are none.
+    """
+    if not results:
+        return ""
+    header = "".join(
+        f"<th align='left'>{html.escape(name)}</th>"
+        for name in ("Quantity", "Value", "Uncertainty", "Note")
+    )
+    rows = "".join(
+        "<tr>"
+        f"<th align='left'>{_text(result.name)}</th>"
+        f"<td>{_text(_value_with_unit(result.value, result.unit))}</td>"
+        f"<td>{_text('± ' + repr(result.uncertainty) if result.uncertainty is not None else None)}</td>"
+        f"<td>{_text(result.note)}</td>"
+        "</tr>"
+        for result in results
+    )
+    return (
+        "<h3>Results</h3>"
+        "<table border='1' cellpadding='4' cellspacing='0'>"
+        f"<tr>{header}</tr>{rows}</table>"
+    )
+
+
+def _value_with_unit(value: object, unit: str) -> object:
+    """Return one result's value with its unit appended, or the bare value.
+
+    Args:
+        value: The result's value (a JSON scalar).
+        unit: The SI unit symbol, or ``""`` for a dimensionless or textual
+            value.
+
+    Returns:
+        The value ready for ``_text()`` — display scaling (mK, µA) is a GUI
+        concern and never happens here.
+    """
+    if not unit:
+        return value
+    rendered = repr(value) if isinstance(value, float) else str(value)
+    return f"{rendered} {unit}"
+
+
+def _figures_section(figures: tuple[Any, ...]) -> str:
+    """Render the report's figures as a captioned list naming each file.
+
+    Never an ``<img>``: the figure travels as an attachment on the entry, and
+    the body stays self-contained, so it renders identically in the notebook,
+    in an export, and in a test snapshot.
+
+    Args:
+        figures: The report's ``FigureRef`` rows, in order.
+
+    Returns:
+        The ``<h3>`` + ``<ul>`` markup, or ``""`` when there are none.
+    """
+    if not figures:
+        return ""
+    items = "".join(
+        f"<li>{_text(figure.caption or figure.file)} "
+        f"(attached as {_text(figure.file)})</li>"
+        for figure in figures
+    )
+    return f"<h3>Figures</h3><ul>{items}</ul>"
+
+
+def _spec_table(table: Any) -> str:
+    """Render one of the report's ``TableSpec``s.
+
+    Args:
+        table: The ``TableSpec`` — a caption, column headings and bounded
+            rows of JSON scalars.
+
+    Returns:
+        The ``<h3>`` + ``<table>`` markup, or ``""`` when the table is empty.
+    """
+    if not table.columns and not table.rows:
+        return ""
+    header = "".join(f"<th align='left'>{_text(name)}</th>" for name in table.columns)
+    rows = "".join(
+        "<tr>" + "".join(f"<td>{_text(cell)}</td>" for cell in row) + "</tr>"
+        for row in table.rows
+    )
+    truncated = "<p><em>Truncated to the report's row and column caps.</em></p>" if table.truncated else ""
+    return (
+        f"<h3>{_text(table.caption or 'Table')}</h3>"
+        "<table border='1' cellpadding='4' cellspacing='0'>"
+        f"<tr>{header}</tr>{rows}</table>{truncated}"
+    )
+
+
+def _warnings_section(warnings: tuple[str, ...]) -> str:
+    """Render the report's non-fatal warnings as a list.
+
+    Args:
+        warnings: The warnings the recipe or the framework appended.
+
+    Returns:
+        The ``<h3>`` + ``<ul>`` markup, or ``""`` when there are none.
+    """
+    if not warnings:
+        return ""
+    items = "".join(f"<li>{_text(warning)}</li>" for warning in warnings)
+    return f"<h3>Analysis warnings</h3><ul>{items}</ul>"
+
+
+def _provenance_rows(
+    report: AnalysisReport,
+    manifest: Mapping[str, Any],
+    data_path: str,
+    experiment_id: str = "",
+    experiment_title: str = "",
+) -> list[tuple[str, object]]:
+    """Return the compact provenance block's label/value pairs.
+
+    What the notebook needs in order to find this result again: which
+    experiment and run, which procedure, which parameters, which data file,
+    and which recipe (by name and by source digest) turned the one into the
+    other. The experiment rows lead, because an analysed entry that does not
+    carry the fact tables would otherwise never name its experiment.
+
+    Args:
+        report: The analysis report.
+        manifest: The run manifest the analysis ran against.
+        data_path: Where the run's data file lives.
+        experiment_id: The owning experiment's id, or ``""`` to omit the row.
+        experiment_title: The owning experiment's title, or ``""``.
+
+    Returns:
+        The ordered label/value pairs.
+    """
+    return [
+        *_experiment_rows(experiment_id, experiment_title),
+        ("Run id", manifest.get("run_id")),
+        ("Procedure", manifest.get("procedure")),
+        ("Kind", manifest.get("kind")),
+        ("Params digest", manifest.get("params_digest")),
+        ("Started (UTC)", manifest.get("started_utc")),
+        ("Finished (UTC)", manifest.get("finished_utc")),
+        ("Outcome", manifest.get("status")),
+        ("Data file", _file_name(data_path)),
+        ("Recipe", report.recipe),
+        ("Recipe digest", report.recipe_digest),
+    ]
+
+
+def render_analysed_title(
+    report: AnalysisReport | Mapping[str, Any],
+    facts: Mapping[str, Any],
+    experiment_title: str = "",
+) -> str:
+    """Render an **analysed entry**'s title.
+
+    The same index line a published run gets, so the notebook's list reads
+    the same however an entry was produced — with a failed analysis said
+    plainly in the title rather than hidden in the body.
+
+    Args:
+        report: The analysis report, or its ``report.json`` dict.
+        facts: The run manifest (``procedure``, ``started_utc``).
+        experiment_title: The owning experiment's title, prefixed when given.
+
+    Returns:
+        A single-line plain-text title (not HTML — backends set titles as
+        text).
+    """
+    rendered = _as_report(report)
+    stem = render_run_title(facts, experiment_title)
+    return stem if rendered.ok else f"{stem} — analysis failed"
+
+
+def render_analysed_body(
+    report: AnalysisReport | Mapping[str, Any],
+    facts: Mapping[str, Any],
+    *,
+    experiment_id: str = "",
+    experiment_title: str = "",
+    setup: Mapping[str, Any] | None = None,
+    data_path: str = "",
+    findings: str = "",
+) -> str:
+    """Render an **analysed entry**'s body: the result over its provenance.
+
+    The order a physicist reads it in: what the run showed (the recipe's
+    prose), the numbers it derived, the figures it saved, its own tables, any
+    warnings, and last a compact provenance block naming the run, the data
+    file and the recipe. The run's full fact tables follow ONLY when the
+    report asked for them — the point of the analysis stage is that what
+    reaches the notebook is the result, not the raw facts.
+
+    A failed report renders its error under its own heading, so a failure is
+    visible exactly where the result would have been, never silently empty.
+
+    Deterministic, escaped and length-capped like every other body here, and
+    self-contained: a figure is named, never embedded (it travels as an
+    attachment on the entry).
+
+    Args:
+        report: The analysis report, or its ``report.json`` dict.
+        facts: The run manifest — ``run_id``, ``procedure``, ``kind``,
+            ``params``, ``params_digest``, ``started_utc``, ``finished_utc``,
+            ``status``, ``reason``, and optionally ``summary_stats``
+            (``{column: Stats.to_json()}``) for the appended fact tables.
+        experiment_id: The owning experiment's id, or ``""``.
+        experiment_title: The owning experiment's title, or ``""``.
+        setup: The setup tier of ``ExperimentManager.experiment_context()``.
+        data_path: Where the run's data file lives, rendered as plain text.
+        findings: The experiment's free-text science notes, included verbatim
+            (escaped).
+
+    Returns:
+        A self-contained HTML fragment.
+    """
+    rendered = _as_report(report)
+    parts: list[str] = []
+    if not rendered.ok:
+        parts.append(
+            render_prose_section(
+                "Analysis failed", rendered.error or "The analysis produced no result."
+            )
+        )
+    parts.append(render_prose_section("Summary", "\n\n".join(rendered.summary)))
+    parts.append(_results_table(rendered.results))
+    parts.append(_figures_section(rendered.figures))
+    parts.extend(_spec_table(table) for table in rendered.tables)
+    parts.append(_warnings_section(rendered.warnings))
+    if findings:
+        parts.append(f"<h3>Findings</h3><p>{_text(findings)}</p>")
+    parts.append(
+        _table(
+            "Provenance",
+            _provenance_rows(
+                rendered, facts, data_path, experiment_id, experiment_title
+            ),
+        )
+    )
+    if rendered.include_fact_tables:
+        stats = facts.get("summary_stats")
+        parts.extend(
+            [
+                _table("Run", _run_rows(facts, data_path)),
+                _table("Experiment", _experiment_rows(experiment_id, experiment_title)),
+                _table("Parameters", _param_rows(facts)),
+                render_stats_section(dict(stats) if isinstance(stats, Mapping) else {}),
+                _table("Setup", _setup_rows(setup)),
+            ]
+        )
+    parts.append(
+        "<p><em>Analysed by CryoSoft; reviewed by a human before publication.</em></p>"
+    )
+    return "".join(part for part in parts if part)

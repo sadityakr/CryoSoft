@@ -627,6 +627,38 @@ QLabel[class="assistant_chip"][status="refused"] {{
     color: {BANNER_ERROR_TEXT};
 }}
 
+/* ── Publish-state chip (AnalysisPanel's eLab tab) ──────────────────────── */
+/* The four publish states of the ELN track, one selector each, and no new
+   colour: "pending" reuses the banner's validated warning triple, "offline"
+   its error triple, "synced" the verdict badge's existing STATUS_OK
+   foreground, and "disabled" the muted base rule. The base rule reserves the
+   2px transparent border so a filled state never shifts the header row — the
+   same pattern the QGroupBox[status] borders, the verdict badge and the
+   assistant chip follow. The chip's TEXT always names the state too, so it is
+   readable without the colour. */
+QLabel[class="publish_chip"] {{
+    font-weight: bold;
+    font-size: 9pt;
+    padding: 2px 8px;
+    border: 2px solid transparent;
+    border-radius: 4px;
+    color: {TEXT_MUTED};
+    background-color: transparent;
+}}
+QLabel[class="publish_chip"][state="synced"] {{
+    color: {STATUS_OK};
+}}
+QLabel[class="publish_chip"][state="pending"] {{
+    background-color: {BANNER_WARNING_BG};
+    border-color: {BANNER_WARNING_BORDER};
+    color: {BANNER_WARNING_TEXT};
+}}
+QLabel[class="publish_chip"][state="offline"] {{
+    background-color: {BANNER_ERROR_BG};
+    border-color: {BANNER_ERROR_BORDER};
+    color: {BANNER_ERROR_TEXT};
+}}
+
 /* ── Agent panel rows (AgentPanel) ───────────────────────────────────────── */
 /* One rule per outcome, and no new colour: a refusal reuses the banner's
    validated error triple, a pending draft-approval row its warning triple,

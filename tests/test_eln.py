@@ -10,6 +10,7 @@ ever.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -785,9 +786,7 @@ def test_nothing_is_published_without_an_open_experiment(published_setup):
 def test_auto_publish_off_leaves_manual_export_as_the_only_trigger(published_setup):
     """With auto-publish off a finished run waits for an explicit export."""
     manager, publisher, adapter, manifest = published_setup
-    publisher._settings = ElnSettings(
-        **{**publisher.settings.to_dict(include_secret=True), "auto_publish": False}
-    )
+    publisher._settings = replace(publisher.settings, auto_publish=False)
     manager._orchestrator.run_finished.emit(manifest)
     assert publisher.pending_count() == 0
 
@@ -872,9 +871,7 @@ def test_an_unknown_backend_disables_publishing_rather_than_raising(published_se
     """A typo in the settings file switches the track off, loudly, not fatally."""
     manager, publisher, _, manifest = published_setup
     publisher._adapter = None
-    publisher._settings = ElnSettings(
-        **{**publisher.settings.to_dict(include_secret=True), "backend": "not_a_backend"}
-    )
+    publisher._settings = replace(publisher.settings, backend="not_a_backend")
     manager._orchestrator.run_finished.emit(manifest)
     assert publisher.drain_once().state == DRAIN_IDLE
     assert publisher.pending_count() == 1, "the job stays queued for a fixed settings file"
@@ -1303,3 +1300,399 @@ def test_approval_without_a_draft_or_a_publisher_queues_nothing(published_setup)
     manager.attach_eln_publisher(publisher)
     assert manager.approve_eln_draft("no-such-run") == ""
     assert manager.set_pending_eln_draft("no-such-run", {"title": "t"}) is False
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# The analysis stage: settings, pending entries, attachments, routing
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _report(**overrides):
+    """Build an ``ok`` analysis report with one of everything."""
+    from cryosoft.analysis.report import AnalysisReport, FigureRef, ResultValue, TableSpec
+
+    fields = {
+        "run_id": "run-0001",
+        "recipe": "generic_sweep",
+        "recipe_digest": "a" * 64,
+        "summary": ("The field swept cleanly.", "Nothing anomalous."),
+        "results": (
+            ResultValue(name="Critical field", value=1.25, unit="T", uncertainty=0.03, note="fit"),
+        ),
+        "figures": (FigureRef(file="overview.png", caption="Overview"),),
+        "tables": (TableSpec.build("Columns", ["column", "points"], [["B", 100]]),),
+        "tags": ("sweep",),
+        "warnings": ("one column had no finite values",),
+    }
+    fields.update(overrides)
+    return AnalysisReport(**fields)
+
+
+def test_the_analysis_section_round_trips_through_a_saved_file(tmp_path):
+    """The analysis switches live in the same user-level file, saved and read back."""
+    import os
+
+    from cryosoft.session.eln.settings import AnalysisSettings, save_eln_settings
+
+    settings = ElnSettings(
+        enabled=True,
+        base_url="https://elab.example.org",
+        api_key="file-key",
+        analysis=AnalysisSettings(
+            enabled=True,
+            timeout_s=45.0,
+            include_fact_tables=True,
+            attach_data_file=True,
+            recipes={"FieldSweep": "field_sweep_overview"},
+        ),
+    )
+    path = tmp_path / "nested" / "eln-settings.json"
+
+    assert save_eln_settings(settings, path) == path
+    assert path.is_file(), "the parent directory is created"
+    if os.name != "nt":
+        assert path.stat().st_mode & 0o777 == 0o600, "the key is the owner's alone"
+
+    monkey_free = load_eln_settings(path)
+    assert monkey_free == settings
+    assert monkey_free.analysis.recipes == {"FieldSweep": "field_sweep_overview"}
+    assert not path.with_name(path.name + ".tmp").exists(), "written atomically"
+
+
+def test_a_mangled_analysis_section_degrades_to_off(tmp_path):
+    """Junk in the file is "analysis is off", never a broken startup."""
+    from cryosoft.session.eln.settings import AnalysisSettings
+
+    path = tmp_path / "eln-settings.json"
+    path.write_text(
+        json.dumps({"enabled": True, "analysis": {"enabled": "yes", "recipes": {"P": ["a"]}}}),
+        encoding="utf-8",
+    )
+
+    analysis = load_eln_settings(path).analysis
+    assert analysis == AnalysisSettings(), "every junk field falls back to its default"
+    assert ElnSettings.from_dict({"analysis": 7}).analysis == AnalysisSettings()
+
+
+def test_a_pending_entry_carries_its_attachments_and_its_source():
+    """Every pending entry is one shape; the stage that made it is a field on it."""
+    from cryosoft.session.eln.drafting import SOURCE_ANALYSIS, DraftEntry
+
+    entry = DraftEntry(
+        title="Analysed",
+        body_html="<p>x</p>",
+        attachments=[{"path": "/reports/overview.png", "comment": "Overview"}],
+        attach_data_file=False,
+        source=SOURCE_ANALYSIS,
+        metadata={"recipe": "generic_sweep", "recipe_digest": "a" * 64},
+    )
+
+    assert DraftEntry.from_dict(json.loads(json.dumps(entry.to_dict()))) == entry
+    assert DraftEntry().source == "model" and DraftEntry().attach_data_file is True
+    junk = DraftEntry.from_dict(
+        {"attachments": [7, {"comment": "no path"}, {"path": "p"}], "metadata": 3, "source": None}
+    )
+    assert junk.attachments == [{"path": "p", "comment": ""}]
+    assert junk.metadata == {} and junk.source == "model"
+
+
+def test_an_outbox_job_carries_its_attachments_through_the_journal(tmp_path):
+    """The journal is the job: attachments and the attach flag survive a restart."""
+    outbox = Outbox(tmp_path / "outbox.jsonl")
+    outbox.enqueue(
+        _job(
+            tmp_path,
+            attach_data_file=False,
+            attachments=[{"path": "/r/overview.png", "comment": "Overview"}],
+        )
+    )
+
+    (reloaded,) = Outbox(tmp_path / "outbox.jsonl").jobs()
+    assert reloaded.attach_data_file is False
+    assert reloaded.attachments == [{"path": "/r/overview.png", "comment": "Overview"}]
+
+    defaults = OutboxJob.from_dict({"job_id": "j"})
+    assert defaults.attach_data_file is True and defaults.attachments == []
+    junk = OutboxJob.from_dict({"job_id": "j", "attachments": [1, {}], "attach_data_file": "no"})
+    assert junk.attachments == [] and junk.attach_data_file is True
+
+
+def test_outbox_attaches_every_figure_after_the_data_file(tmp_path):
+    """An analysed entry's figures ride the same upload path, in order."""
+    data = _data_file(tmp_path)
+    figure = tmp_path / "overview.png"
+    figure.write_bytes(b"PNG")
+    outbox = Outbox(tmp_path / "outbox.jsonl")
+    outbox.enqueue(
+        _job(tmp_path, attachments=[{"path": str(figure), "comment": "Overview"}])
+    )
+    adapter = SimElnAdapter({})
+
+    assert outbox.drain(adapter).state == DRAIN_PUBLISHED
+    assert [upload["path"] for upload in adapter.uploads] == [str(data), str(figure)]
+    assert adapter.uploads[1]["comment"] == "Overview"
+
+
+def test_outbox_leaves_the_data_file_alone_when_the_job_says_so(tmp_path):
+    """A report that asked for figures alone gets figures alone."""
+    _data_file(tmp_path)
+    figure = tmp_path / "overview.png"
+    figure.write_bytes(b"PNG")
+    outbox = Outbox(tmp_path / "outbox.jsonl")
+    outbox.enqueue(
+        _job(
+            tmp_path,
+            attach_data_file=False,
+            attachments=[{"path": str(figure), "comment": "Overview"}],
+        )
+    )
+    adapter = SimElnAdapter({})
+
+    assert outbox.drain(adapter).state == DRAIN_PUBLISHED
+    assert [upload["path"] for upload in adapter.uploads] == [str(figure)]
+    assert not adapter.links
+
+
+def test_outbox_links_a_figure_that_is_not_there(tmp_path):
+    """A missing figure is recorded where it lives, exactly as a missing data file is."""
+    _data_file(tmp_path)
+    outbox = Outbox(tmp_path / "outbox.jsonl")
+    outbox.enqueue(
+        _job(tmp_path, attachments=[{"path": str(tmp_path / "gone.png"), "comment": "Overview"}])
+    )
+    adapter = SimElnAdapter({})
+
+    assert outbox.drain(adapter).state == DRAIN_PUBLISHED
+    assert adapter.links[0]["url"] == str(tmp_path / "gone.png")
+    assert "not found" in adapter.links[0]["comment"]
+    assert adapter.links[0]["comment"].startswith("Overview")
+
+
+def test_the_analysed_body_leads_with_the_result_and_ends_with_the_provenance():
+    """The order a physicist reads it in, self-contained and deterministic."""
+    from cryosoft.session.eln.templates import render_analysed_body
+
+    report = _report()
+    facts = {**MANIFEST, "params_digest": "digest-1"}
+    body = render_analysed_body(
+        report,
+        facts,
+        experiment_id="exp-1",
+        experiment_title="Sample A",
+        setup={"config_name": "sim_cryostat"},
+        data_path="/data/exp-1/data/run-0001.h5",
+    )
+
+    assert body == render_analysed_body(
+        report.to_dict(),
+        facts,
+        experiment_id="exp-1",
+        experiment_title="Sample A",
+        setup={"config_name": "sim_cryostat"},
+        data_path="/data/exp-1/data/run-0001.h5",
+    ), "the same report renders byte-identical HTML, dict or record"
+
+    assert body.index("The field swept cleanly.") < body.index("Critical field")
+    assert body.index("Critical field") < body.index("Overview")
+    assert body.index("Overview") < body.index("Provenance")
+    assert "1.25 T" in body and "± 0.03" in body
+    assert "(attached as overview.png)" in body, "the figure is named, never embedded"
+    assert "one column had no finite values" in body
+    assert "digest-1" in body and "generic_sweep" in body and "a" * 64 in body
+    assert "run-0001.h5" in body and "/data/exp-1" not in body, "the file name, not the path"
+
+    lowered = body.lower()
+    for forbidden in ("<script", "<link", "<img", "<iframe", "http://", "https://"):
+        assert forbidden not in lowered
+
+
+def test_the_analysed_body_appends_the_fact_tables_only_when_asked():
+    """The point of the stage: the result reaches the notebook, not the raw facts."""
+    from cryosoft.session.eln.templates import render_analysed_body
+
+    facts = {**MANIFEST, "summary_stats": {"B": {"count": 3, "min": 0.0, "max": 1.0}}}
+    lean = render_analysed_body(_report(), facts, data_path="/d/run-0001.h5")
+    assert "Parameters" not in lean and "Column statistics" not in lean
+
+    full = render_analysed_body(
+        _report(include_fact_tables=True), facts, data_path="/d/run-0001.h5"
+    )
+    assert "Parameters" in full and "rate_T_per_s" in full
+    assert "Column statistics" in full
+
+
+def test_a_failed_report_says_so_in_the_title_and_the_body():
+    """A failure is visible exactly where the result would have been."""
+    from cryosoft.analysis.report import REPORT_FAILED
+    from cryosoft.session.eln.templates import render_analysed_body, render_analysed_title
+
+    report = _report(
+        status=REPORT_FAILED, error="ZeroDivisionError: division by zero\nTraceback ..."
+    )
+
+    title = render_analysed_title(report, MANIFEST, "Sample A")
+    assert title.startswith("Sample A — Field Sweep") and title.endswith("analysis failed")
+    assert render_analysed_title(_report(), MANIFEST, "Sample A") == render_run_title(
+        MANIFEST, "Sample A"
+    )
+
+    body = render_analysed_body(report, MANIFEST, data_path="/d/run-0001.h5")
+    assert body.index("Analysis failed") < body.index("Provenance")
+    assert "ZeroDivisionError: division by zero" in body
+
+
+def test_a_finished_run_goes_to_the_analysis_stage_instead_of_the_queue(published_setup):
+    """With the analysis stage on, nothing is queued — the run is analysed first."""
+    from cryosoft.session.eln.settings import AnalysisSettings
+
+    manager, publisher, _adapter, manifest = published_setup
+    publisher._settings = replace(publisher.settings, analysis=AnalysisSettings(enabled=True))
+    asked: list[tuple] = []
+    publisher.analysis_requested.connect(lambda *args: asked.append(args))
+
+    manager._orchestrator.run_finished.emit(manifest)
+
+    assert publisher.pending_count() == 0, "nothing publishes until a human approves"
+    ((run_id, sent_manifest, data_path),) = asked
+    assert run_id == "run-0001"
+    assert sent_manifest["procedure"] == "Field Sweep"
+    assert data_path.endswith("run-0001.h5")
+
+
+def test_auto_publish_says_nothing_once_the_analysis_stage_is_on(published_setup):
+    """The analysis fork is taken before auto-publish is even consulted."""
+    from cryosoft.session.eln.settings import AnalysisSettings
+
+    manager, publisher, _adapter, manifest = published_setup
+    publisher._settings = replace(
+        publisher.settings, auto_publish=False, analysis=AnalysisSettings(enabled=True)
+    )
+    asked: list[tuple] = []
+    publisher.analysis_requested.connect(lambda *args: asked.append(args))
+
+    manager._orchestrator.run_finished.emit(manifest)
+
+    assert len(asked) == 1 and publisher.pending_count() == 0
+
+
+def test_with_the_analysis_stage_off_a_finished_run_is_queued_as_before(published_setup):
+    """The default path is untouched: no analysis is asked for and the job is queued."""
+    manager, publisher, _adapter, manifest = published_setup
+    asked: list[tuple] = []
+    publisher.analysis_requested.connect(lambda *args: asked.append(args))
+
+    manager._orchestrator.run_finished.emit(manifest)
+
+    assert asked == []
+    assert publisher.pending_count() == 1
+
+
+def test_park_facts_entry_parks_the_reason_above_the_facts(published_setup):
+    """A run whose analysis failed still has a complete, correct entry waiting."""
+    manager, publisher, _adapter, _manifest = published_setup
+
+    assert publisher.park_facts_entry("run-0001", warning="the recipe raised") is True
+
+    pending = manager.pending_eln_draft("run-0001")
+    assert pending["source"] == "facts" and pending["attachments"] == []
+    assert "Analysis unavailable" in pending["body_html"]
+    assert "the recipe raised" in pending["body_html"]
+    assert "run-0001" in pending["body_html"], "the facts are all still there"
+    assert pending["title"].startswith("Sample A — Field Sweep")
+    assert publisher.pending_count() == 0, "parking publishes nothing"
+
+    assert publisher.park_facts_entry("no-such-run") is False
+
+
+def test_an_analysed_entry_is_parked_and_its_approval_queues_one_job(
+    published_setup, tmp_path
+):
+    """End to end: report in, entry parked, human approves, one job with the figure."""
+    manager, publisher, adapter, _manifest = published_setup
+    manager.attach_eln_publisher(publisher)
+    report_dir = tmp_path / "analysis" / "run-0001"
+    report_dir.mkdir(parents=True)
+    (report_dir / "overview.png").write_bytes(b"PNG")
+
+    assert publisher.export_report("run-0001", _report(), report_dir) is True
+
+    pending = manager.pending_eln_draft("run-0001")
+    assert pending["source"] == "analysis"
+    assert pending["attach_data_file"] is False, "the report asked for figures alone"
+    assert pending["attachments"] == [
+        {"path": str(report_dir / "overview.png"), "comment": "Overview"}
+    ]
+    assert pending["metadata"] == {"recipe": "generic_sweep", "recipe_digest": "a" * 64}
+    assert publisher.pending_count() == 0, "an analysed entry publishes nothing by itself"
+
+    assert manager.approve_eln_draft("run-0001") == "publish_run:run-0001"
+    assert manager.pending_eln_draft("run-0001") == {}
+    assert publisher.drain_once().state == DRAIN_PUBLISHED
+
+    (entry,) = adapter.entries.values()
+    assert "The field swept cleanly." in entry["body_html"]
+    assert entry["tags"] == ["cryosoft", "sim", "sweep"]
+    assert entry["metadata"]["draft_source"] == "analysis"
+    assert entry["metadata"]["recipe"] == "generic_sweep"
+    assert entry["metadata"]["recipe_digest"] == "a" * 64
+    assert [upload["path"] for upload in adapter.uploads] == [
+        str(report_dir / "overview.png")
+    ], "the figure is attached; the raw data file is not"
+
+
+def test_an_analysed_entry_can_keep_the_data_file_attached(published_setup, tmp_path):
+    """``attach_data_file`` on the report is what decides, not the publisher."""
+    manager, publisher, adapter, _manifest = published_setup
+    manager.attach_eln_publisher(publisher)
+    report_dir = tmp_path / "analysis" / "run-0001"
+    report_dir.mkdir(parents=True)
+
+    publisher.export_report(
+        "run-0001", _report(figures=(), attach_data_file=True), report_dir
+    )
+    manager.approve_eln_draft("run-0001")
+    assert publisher.drain_once().state == DRAIN_PUBLISHED
+
+    assert adapter.uploads[0]["path"].endswith("run-0001.h5")
+
+
+def test_export_report_refuses_an_unknown_run(published_setup, tmp_path):
+    """No run, no entry — logged, never raised."""
+    _manager, publisher, _adapter, _manifest = published_setup
+    assert publisher.export_report("no-such-run", _report(), tmp_path) is False
+
+
+def test_reload_settings_starts_and_stops_the_drain_timer(published_setup):
+    """Save in the eLab setup dialog, and the network follows immediately."""
+    from cryosoft.session.eln.settings import AnalysisSettings
+
+    _manager, publisher, _adapter, _manifest = published_setup
+    publisher.start()
+    assert publisher._timer.isActive()
+
+    publisher.reload_settings(replace(publisher.settings, enabled=False))
+    assert not publisher._timer.isActive(), "switching the track off stops the network"
+    assert publisher.settings.enabled is False
+    assert publisher.status()["state"] == "disabled"
+
+    publisher.reload_settings(
+        replace(publisher.settings, enabled=True, analysis=AnalysisSettings(enabled=True))
+    )
+    assert publisher._timer.isActive()
+    assert publisher.settings.analysis.enabled is True
+
+
+def test_discarding_a_pending_entry_leaves_the_run_and_publishes_nothing(published_setup):
+    """The other half of the gate: the proposal goes, the run stays."""
+    manager, publisher, _adapter, _manifest = published_setup
+
+    assert publisher.park_facts_entry("run-0001") is True
+    assert manager.pending_eln_draft("run-0001")["source"] == "facts"
+
+    assert manager.discard_pending_eln_draft("run-0001") is True
+    assert manager.pending_eln_draft("run-0001") == {}
+    assert manager.current_experiment().find_run("run-0001") is not None
+    assert publisher.pending_count() == 0
+
+    assert manager.discard_pending_eln_draft("run-0001") is False, "nothing left to drop"
+    assert manager.discard_pending_eln_draft("no-such-run") is False

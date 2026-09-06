@@ -12,7 +12,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import sys
+import types
+from dataclasses import dataclass, replace
+from pathlib import Path
 
 import pytest
 
@@ -33,7 +38,7 @@ from cryosoft.session.gateway import (
     validate_tool_args,
 )
 from cryosoft.session.manager import ExperimentManager
-from cryosoft.session.models import User
+from cryosoft.session.models import RunRecord, User
 from cryosoft.session.store import ExperimentStore, UserRoster
 
 CONFIG_PATH = "cryosoft/configs/sim_cryostat"
@@ -775,11 +780,12 @@ def test_the_two_eln_tools_declare_their_class_and_their_recording(tools):
     assert publish.action_class is ActionClass.RUN_CONTROL
     assert draft.recorded is True and publish.recorded is True
     assert draft.session_function == "draft_eln_entry"
-    assert all(
-        tool.recorded is False
-        for tool in tools.values()
-        if tool.name not in {"draft_eln_entry", "publish_eln_entry"}
-    ), "a tool an agent polls must not drown the accountability trail"
+    assert {tool.name for tool in tools.values() if tool.recorded} == {
+        "draft_eln_entry",
+        "publish_eln_entry",
+        "write_analysis_recipe",
+        "run_analysis",
+    }, "a tool an agent polls must not drown the accountability trail"
 
 
 def test_drafting_a_finished_run_returns_the_entry_as_data(eln_gateway):
@@ -989,3 +995,638 @@ def test_a_run_whose_file_cannot_be_read_is_still_drafted(eln_gateway):
 
     assert answer["ok"] is True, answer
     assert "Field Sweep" in answer["result"]["body_html"]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# The five analysis tools: the recipes an experiment is analysed with, the
+# worker that runs them, and the reports it leaves behind
+# ══════════════════════════════════════════════════════════════════════════
+
+
+RUN_ID = "20260101_120000_001_field_sweep"
+
+RECIPE_SOURCE = 'NAME = "drift"\n\n\ndef analyse(run, context):\n    return None\n'
+
+
+@pytest.fixture
+def fake_discovery(tmp_path, monkeypatch):
+    """Stand in for `cryosoft.analysis.discovery`, which another layer owns.
+
+    The gateway imports it lazily inside the tools precisely so this module
+    loads without it; here it is replaced by a module implementing the same
+    four names over one real package recipe file, so the tools are exercised
+    against the interface rather than against an implementation.
+    """
+    package_recipe = tmp_path / "package_recipes" / "generic_sweep.py"
+    package_recipe.parent.mkdir(parents=True, exist_ok=True)
+    package_recipe.write_text("# the shipped recipe\n", encoding="utf-8")
+
+    @dataclass(frozen=True)
+    class RecipeInfo:
+        name: str
+        description: str = ""
+        procedures: tuple = ()
+        source_path: str = ""
+        origin: str = "package"
+        digest: str = ""
+
+        def to_dict(self):
+            return {
+                "name": self.name,
+                "description": self.description,
+                "procedures": list(self.procedures),
+                "source_path": self.source_path,
+                "origin": self.origin,
+                "digest": self.digest,
+            }
+
+    def discover_recipes(extra_dirs=()):
+        found = [
+            RecipeInfo(
+                name="generic_sweep",
+                description="Any sweep at all.",
+                procedures=("*",),
+                source_path=str(package_recipe),
+                origin="package",
+                digest="package-digest",
+            )
+        ]
+        for directory in extra_dirs:
+            for path in sorted(Path(directory).glob("*.py")):
+                if path.name.startswith("_"):
+                    continue
+                text = path.read_text(encoding="utf-8")
+                found.append(
+                    RecipeInfo(
+                        name=path.stem,
+                        description="An experiment's own recipe.",
+                        procedures=("Field Sweep",),
+                        source_path=str(path),
+                        origin="experiment",
+                        digest=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                    )
+                )
+        return tuple(found)
+
+    def recipe_for(procedure, recipes, preferred=""):
+        by_name = {info.name: info for info in recipes}
+        if preferred and preferred in by_name:
+            return by_name[preferred]
+        for info in recipes:
+            if procedure in info.procedures:
+                return info
+        return next((info for info in recipes if "*" in info.procedures), None)
+
+    class AnalysisError(Exception):
+        pass
+
+    def scaffold_recipe(name, directory, procedure="", header=""):
+        path = Path(directory) / f"{name}.py"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(header + "# template\n", encoding="utf-8")
+        return path
+
+    module = types.ModuleType("cryosoft.analysis.discovery")
+    module.RecipeInfo = RecipeInfo
+    module.discover_recipes = discover_recipes
+    module.recipe_for = recipe_for
+    module.scaffold_recipe = scaffold_recipe
+    module.AnalysisError = AnalysisError
+
+    import cryosoft.analysis
+
+    monkeypatch.setitem(sys.modules, "cryosoft.analysis.discovery", module)
+    monkeypatch.setattr(cryosoft.analysis, "discovery", module, raising=False)
+    return types.SimpleNamespace(module=module, package_recipe=package_recipe)
+
+
+class FakeAnalysisRunner:
+    """A stand-in for the **Analysis runner**, duck-typed on its three methods."""
+
+    def __init__(self, report_dir):
+        self._report_dir = report_dir
+        self.calls: list[tuple] = []
+        self.running: set[str] = set()
+        self.refuse = False
+
+    def start(self, run_id, recipe="", options=None):
+        self.calls.append((run_id, recipe, dict(options or {})))
+        return "" if self.refuse else str(self._report_dir(run_id))
+
+    def is_running(self, run_id=""):
+        return run_id in self.running
+
+    def recipe_dirs(self):
+        return []
+
+
+@pytest.fixture
+def analysis_gateway(qtbot, tmp_path, monkeypatch, fake_discovery):
+    """A gateway wired to an experiment with one recorded run and a fake runner.
+
+    The store's ``recipes_dir``/``report_dir`` are stubbed on the instance:
+    they are the ELN track's to add, and this suite tests what the gateway
+    does with them, not where they point.
+    """
+    from cryosoft.session.agent_feed import AgentFeed
+
+    station = build_station(CONFIG_PATH)
+    orch = Orchestrator(
+        station, tick_interval_ms=10, run_catalog={"FieldSweep": FieldSweep}
+    )
+    roster = UserRoster(tmp_path / "users.json")
+    roster.add(User(user_id="jdoe", name="J. Doe"))
+    store = ExperimentStore(tmp_path / "experiments")
+    manager = ExperimentManager(
+        store=store,
+        roster=roster,
+        orchestrator=orch,
+        config_name="sim_cryostat",
+        station=station,
+        run_catalog={"FieldSweep": FieldSweep},
+    )
+    experiment = manager.start_experiment("Analysis", "jdoe", dict(SAMPLE_INFO))
+    experiment_id = experiment.experiment_id
+
+    record = store.load(experiment_id)
+    record.runs.append(
+        RunRecord(
+            run_id=RUN_ID,
+            procedure="Field Sweep",
+            status="done",
+            data_file="data/sweep.h5",
+        )
+    )
+    store.save(record)
+
+    analysis_root = tmp_path / "analysis"
+    recipes_dir = analysis_root / experiment_id / "recipes"
+    monkeypatch.setattr(
+        store, "recipes_dir", lambda exp: analysis_root / exp / "recipes", raising=False
+    )
+    monkeypatch.setattr(
+        store,
+        "report_dir",
+        lambda exp, run_id: analysis_root / exp / run_id,
+        raising=False,
+    )
+    runner = FakeAnalysisRunner(lambda run_id: analysis_root / experiment_id / run_id)
+    feed_path = store.agent_feed_path(experiment_id)
+    feed = AgentFeed(feed_path, experiment_id)
+    context = ToolContext(
+        experiments=manager,
+        run_catalog={"FieldSweep": FieldSweep},
+        status_log_path=tmp_path / "status.jsonl",
+        analysis_runner=runner,
+    )
+
+    def build(role=Role.SESSION, **overrides):
+        return Gateway(
+            orch,
+            role,
+            "runner-1",
+            station_info=station.station_info,
+            tool_context=replace(context, **overrides) if overrides else context,
+            feed=feed,
+        )
+
+    yield types.SimpleNamespace(
+        build=build,
+        orchestrator=orch,
+        manager=manager,
+        store=store,
+        experiment_id=experiment_id,
+        run_id=RUN_ID,
+        runner=runner,
+        recipes_dir=recipes_dir,
+        report_dir=analysis_root / experiment_id / RUN_ID,
+        feed_path=feed_path,
+        package_recipe=fake_discovery.package_recipe,
+    )
+    orch.shutdown()
+
+
+def _preference_publisher(**recipes):
+    """A publisher-shaped stub carrying only the per-procedure recipe preference."""
+    return types.SimpleNamespace(
+        settings=types.SimpleNamespace(
+            analysis=types.SimpleNamespace(recipes=dict(recipes))
+        )
+    )
+
+
+def test_the_five_analysis_tools_are_rendered_with_their_class(tools):
+    """The surface offers them, and says which two put something on the machine."""
+    read_only = {"list_analysis_recipes", "read_analysis_recipe", "read_analysis_report"}
+    controls = {"write_analysis_recipe", "run_analysis"}
+
+    for name in read_only | controls:
+        tool = tools[name]
+        assert tool.session_function == name, name
+        assert tool.input_schema["additionalProperties"] is False, name
+        assert tool.command is None, name
+    assert all(tools[name].action_class is ActionClass.READ for name in read_only)
+    assert all(
+        tools[name].action_class is ActionClass.RUN_CONTROL for name in controls
+    )
+    assert all(tools[name].recorded is True for name in controls)
+    assert all(tools[name].recorded is False for name in read_only)
+
+
+def test_listing_recipes_answers_the_package_and_the_experiments_own(
+    analysis_gateway,
+):
+    """The headline read: what this experiment can be analysed with, and by what."""
+    gateway = analysis_gateway.build()
+    analysis_gateway.recipes_dir.mkdir(parents=True, exist_ok=True)
+    (analysis_gateway.recipes_dir / "drift.py").write_text(
+        RECIPE_SOURCE, encoding="utf-8"
+    )
+
+    answer = gateway.call_tool("list_analysis_recipes")
+
+    assert answer["ok"] is True, answer
+    result = answer["result"]
+    assert [info["name"] for info in result["recipes"]] == ["generic_sweep", "drift"]
+    assert [info["origin"] for info in result["recipes"]] == ["package", "experiment"]
+    assert result["recipes_dir"] == str(analysis_gateway.recipes_dir)
+    # One entry per procedure the experiment has recorded a run of, deduped.
+    assert result["selected"] == {"Field Sweep": "drift"}
+
+
+def test_the_notebook_settings_preference_decides_which_recipe_is_selected(
+    analysis_gateway,
+):
+    """A preference in the eLab settings outranks the recipe's own declaration."""
+    gateway = analysis_gateway.build(
+        publisher=_preference_publisher(**{"Field Sweep": "generic_sweep"})
+    )
+    analysis_gateway.recipes_dir.mkdir(parents=True, exist_ok=True)
+    (analysis_gateway.recipes_dir / "drift.py").write_text(
+        RECIPE_SOURCE, encoding="utf-8"
+    )
+
+    result = gateway.call_tool("list_analysis_recipes")["result"]
+
+    assert result["selected"] == {"Field Sweep": "generic_sweep"}
+
+
+def test_reading_a_recipe_answers_the_source_of_either_origin(analysis_gateway):
+    """An experiment recipe comes from the experiment folder, a shipped one from the package."""
+    gateway = analysis_gateway.build()
+    analysis_gateway.recipes_dir.mkdir(parents=True, exist_ok=True)
+    (analysis_gateway.recipes_dir / "drift.py").write_text(
+        RECIPE_SOURCE, encoding="utf-8"
+    )
+
+    own = gateway.call_tool("read_analysis_recipe", {"name": "drift"})["result"]
+    shipped = gateway.call_tool("read_analysis_recipe", {"name": "generic_sweep"})[
+        "result"
+    ]
+
+    assert own["source"] == RECIPE_SOURCE
+    assert own["origin"] == "experiment"
+    assert own["path"] == str(analysis_gateway.recipes_dir / "drift.py")
+    assert own["digest"] == hashlib.sha256(RECIPE_SOURCE.encode()).hexdigest()
+    assert shipped["origin"] == "package"
+    assert shipped["path"] == str(analysis_gateway.package_recipe)
+    assert shipped["source"] == "# the shipped recipe\n"
+
+
+def test_reading_a_recipe_that_is_not_there_is_refused_by_name(analysis_gateway):
+    """An unknown name is a named refusal, never an empty answer."""
+    answer = analysis_gateway.build().call_tool(
+        "read_analysis_recipe", {"name": "nonesuch"}
+    )
+
+    assert answer["ok"] is False
+    assert answer["detail"]["rule"] == "unknown_recipe"
+    assert answer["detail"]["name"] == "nonesuch"
+
+
+def test_writing_a_recipe_stamps_who_wrote_it_and_when(analysis_gateway):
+    """The headline write: a stamped file in the experiment's own folder."""
+    gateway = analysis_gateway.build()
+
+    answer = gateway.call_tool(
+        "write_analysis_recipe", {"name": "drift", "source": RECIPE_SOURCE}
+    )
+
+    assert answer["ok"] is True, answer
+    result = answer["result"]
+    path = analysis_gateway.recipes_dir / "drift.py"
+    assert result["path"] == str(path)
+    written = path.read_text(encoding="utf-8")
+    assert written.startswith("# Written by agent 'runner-1' via write_analysis_recipe at ")
+    assert written.endswith(RECIPE_SOURCE)
+    assert result["bytes"] == len(written.encode("utf-8"))
+    assert result["digest"] == hashlib.sha256(written.encode("utf-8")).hexdigest()
+    assert result["name"] == "drift"
+
+
+def test_a_written_recipe_is_not_executed(analysis_gateway):
+    """Writing is not running: the worker executes a recipe, this tool never does."""
+    marker = analysis_gateway.recipes_dir.parent / "it-ran"
+    gateway = analysis_gateway.build()
+
+    answer = gateway.call_tool(
+        "write_analysis_recipe",
+        {
+            "name": "sneaky",
+            "source": f"from pathlib import Path\nPath({str(marker)!r}).write_text('x')\n",
+        },
+    )
+
+    assert answer["ok"] is True, answer
+    assert not marker.exists(), "the tool executed the source it was given"
+
+
+def test_a_recipe_name_must_be_a_plain_identifier(analysis_gateway):
+    """The name becomes a module file, so nothing else may be smuggled through it."""
+    gateway = analysis_gateway.build()
+
+    for name in ("_hidden", "not a name", "../escape", ""):
+        answer = gateway.call_tool(
+            "write_analysis_recipe", {"name": name, "source": RECIPE_SOURCE}
+        )
+        assert answer["ok"] is False, name
+        assert answer["detail"]["rule"] == "invalid_name", name
+
+
+def test_a_recipe_that_does_not_compile_is_refused_at_write_time(analysis_gateway):
+    """The agent learns of its syntax error now, not from a failed report later."""
+    answer = analysis_gateway.build().call_tool(
+        "write_analysis_recipe",
+        {"name": "broken", "source": "def analyse(:\n    pass\n"},
+    )
+
+    assert answer["ok"] is False
+    assert answer["detail"]["rule"] == "syntax_error"
+    assert answer["detail"]["line"] == 1
+    assert not (analysis_gateway.recipes_dir / "broken.py").exists()
+
+
+def test_a_recipe_over_the_size_cap_is_refused(analysis_gateway):
+    """A file nobody could review is not a recipe."""
+    from cryosoft.session.gateway.tools import MAX_RECIPE_BYTES
+
+    answer = analysis_gateway.build().call_tool(
+        "write_analysis_recipe",
+        {"name": "huge", "source": "# " + "x" * MAX_RECIPE_BYTES},
+    )
+
+    assert answer["ok"] is False
+    assert answer["detail"]["rule"] == "too_large"
+    assert answer["detail"]["limit"] == MAX_RECIPE_BYTES
+
+
+def test_an_existing_recipe_is_refused_unless_overwrite_is_asked_for(
+    analysis_gateway,
+):
+    """Replacing somebody's recipe is a decision, not a side effect."""
+    gateway = analysis_gateway.build()
+    gateway.call_tool(
+        "write_analysis_recipe", {"name": "drift", "source": RECIPE_SOURCE}
+    )
+
+    refused = gateway.call_tool(
+        "write_analysis_recipe", {"name": "drift", "source": "# second\n"}
+    )
+    replaced = gateway.call_tool(
+        "write_analysis_recipe",
+        {"name": "drift", "source": "# second\n", "overwrite": True},
+    )
+
+    assert refused["ok"] is False
+    assert refused["detail"]["rule"] == "exists"
+    assert replaced["ok"] is True
+    assert (analysis_gateway.recipes_dir / "drift.py").read_text().endswith("# second\n")
+
+
+def test_run_analysis_starts_the_worker_and_says_where_the_report_will_be(
+    analysis_gateway,
+):
+    """The headline run: started now, answered later through read_analysis_report."""
+    gateway = analysis_gateway.build()
+
+    answer = gateway.call_tool(
+        "run_analysis",
+        {"run_id": RUN_ID, "recipe": "drift", "options": {"window": 5}},
+    )
+
+    assert answer["ok"] is True, answer
+    assert answer["result"] == {
+        "run_id": RUN_ID,
+        "started": True,
+        "report_path": str(analysis_gateway.report_dir / "report.json"),
+        "recipe": "drift",
+    }
+    assert analysis_gateway.runner.calls == [(RUN_ID, "drift", {"window": 5})]
+
+
+def test_run_analysis_refuses_a_run_the_worker_is_already_on(analysis_gateway):
+    """One worker per run: a second start would race the first for the report."""
+    gateway = analysis_gateway.build()
+    analysis_gateway.runner.running.add(RUN_ID)
+
+    answer = gateway.call_tool("run_analysis", {"run_id": RUN_ID})
+
+    assert answer["ok"] is False
+    assert answer["detail"] == {"rule": "already_running", "run_id": RUN_ID}
+    assert analysis_gateway.runner.calls == []
+
+
+def test_run_analysis_says_so_when_the_runner_started_nothing(analysis_gateway):
+    """An empty answer from the runner is a named refusal, not a silent success."""
+    gateway = analysis_gateway.build()
+    analysis_gateway.runner.refuse = True
+
+    answer = gateway.call_tool("run_analysis", {"run_id": RUN_ID})
+
+    assert answer["ok"] is False
+    assert answer["detail"]["rule"] == "not_started"
+
+
+def test_run_analysis_refuses_an_unknown_run_and_a_missing_runner(analysis_gateway):
+    """The two collaborators are named separately: the run, and the runner."""
+    gateway = analysis_gateway.build()
+
+    unknown = gateway.call_tool("run_analysis", {"run_id": "no-such-run"})
+    without = analysis_gateway.build(analysis_runner=None).call_tool(
+        "run_analysis", {"run_id": RUN_ID}
+    )
+
+    assert unknown["detail"]["rule"] == "unknown_run"
+    assert without["detail"] == {
+        "rule": "missing_collaborator",
+        "collaborator": "analysis_runner",
+    }
+
+
+def test_reading_a_report_answers_running_then_none_then_the_report(
+    analysis_gateway,
+):
+    """The three states of an analysis, in the order an agent polling meets them."""
+    gateway = analysis_gateway.build()
+    analysis_gateway.runner.running.add(RUN_ID)
+    running = gateway.call_tool("read_analysis_report", {"run_id": RUN_ID})
+
+    analysis_gateway.runner.running.clear()
+    none = gateway.call_tool("read_analysis_report", {"run_id": RUN_ID})
+
+    analysis_gateway.report_dir.mkdir(parents=True, exist_ok=True)
+    (analysis_gateway.report_dir / "report.json").write_text(
+        json.dumps(
+            {
+                "run_id": RUN_ID,
+                "recipe": "drift",
+                "status": "ok",
+                "summary": ["The sweep drifted by 2 mK."],
+                "warnings": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    done = gateway.call_tool("read_analysis_report", {"run_id": RUN_ID})
+
+    assert running["result"] == {"status": "running", "run_id": RUN_ID}
+    assert none["result"] == {"status": "none", "run_id": RUN_ID}
+    assert done["result"]["status"] == "ok"
+    assert done["result"]["recipe"] == "drift"
+    assert done["result"]["summary"] == ["The sweep drifted by 2 mK."]
+    assert done["result"]["report_path"] == str(
+        analysis_gateway.report_dir / "report.json"
+    )
+
+
+def test_reading_a_report_of_an_unknown_run_is_refused_by_name(analysis_gateway):
+    """A report is read through the run record, never through a supplied path."""
+    answer = analysis_gateway.build().call_tool(
+        "read_analysis_report", {"run_id": "no-such-run"}
+    )
+
+    assert answer["detail"]["rule"] == "unknown_run"
+
+
+def test_the_analysis_reads_are_open_to_an_observer(analysis_gateway):
+    """Reading what an experiment can be analysed with changes nothing."""
+    gateway = analysis_gateway.build(Role.OBSERVER)
+
+    for name, args in (
+        ("list_analysis_recipes", {}),
+        ("read_analysis_report", {"run_id": RUN_ID}),
+    ):
+        answer = gateway.call_tool(name, args)
+        assert answer["ok"] is True, (name, answer)
+
+
+def test_writing_and_running_belong_to_the_session_role_alone(analysis_gateway):
+    """Code on the measurement machine is run control, and the matrix says so."""
+    calls = (
+        ("write_analysis_recipe", {"name": "drift", "source": RECIPE_SOURCE}),
+        ("run_analysis", {"run_id": RUN_ID}),
+    )
+
+    for role in (Role.OBSERVER, Role.DEBUG):
+        gateway = analysis_gateway.build(role)
+        for name, args in calls:
+            answer = gateway.call_tool(name, args)
+            assert answer["code"] == "BLOCKED_ROLE", (role, name)
+            assert answer["detail"]["rule"] == "role_matrix", (role, name)
+    assert not (analysis_gateway.recipes_dir / "drift.py").exists()
+
+    session = analysis_gateway.build(Role.SESSION)
+    for name, args in calls:
+        assert session.call_tool(name, args)["ok"] is True, name
+
+
+def test_the_kill_switch_closes_writing_and_running_but_not_reading(
+    analysis_gateway,
+):
+    """`read_only` subtracts exactly the two tools that act."""
+    gateway = analysis_gateway.build()
+    analysis_gateway.orchestrator.set_agent_gate(ev.AgentGate.READ_ONLY)
+
+    refused = [
+        gateway.call_tool("write_analysis_recipe", {"name": "d", "source": "# x\n"}),
+        gateway.call_tool("run_analysis", {"run_id": RUN_ID}),
+    ]
+    still_read = gateway.call_tool("list_analysis_recipes")
+
+    for answer in refused:
+        assert answer["code"] == "BLOCKED_ROLE"
+        assert answer["detail"]["rule"] == "kill_switch"
+        assert answer["detail"]["gate"] == "read_only"
+    assert still_read["ok"] is True
+
+
+def test_the_two_acting_tools_leave_a_trail_without_the_whole_source(
+    analysis_gateway,
+):
+    """The **Agent feed** carries the call and the digest, and the file the text.
+
+    A recipe's source in every feed line would make an append-only record
+    nobody reads; the digest is what proves which text was written, and it is
+    checkable against the file on disk.
+    """
+    from cryosoft.session.agent_feed import read_feed
+
+    gateway = analysis_gateway.build()
+    gateway.call_tool(
+        "write_analysis_recipe", {"name": "drift", "source": RECIPE_SOURCE}
+    )
+    gateway.call_tool("run_analysis", {"run_id": RUN_ID, "recipe": "drift"})
+
+    records = [r for r in read_feed(analysis_gateway.feed_path) if r["record"] == "tool"]
+
+    assert [r["tool"] for r in records] == ["write_analysis_recipe", "run_analysis"]
+    write_args = records[0]["args"]
+    assert "source" not in write_args, "the whole source must not be in the feed"
+    assert write_args["name"] == "drift"
+    assert write_args["source_bytes"] == len(RECIPE_SOURCE.encode("utf-8"))
+    assert (
+        write_args["source_digest"]
+        == hashlib.sha256(RECIPE_SOURCE.encode("utf-8")).hexdigest()
+    )
+    assert records[0]["actor"]["id"] == "runner-1"
+    assert records[0]["verdict"]["code"] == "OK"
+    assert records[1]["args"] == {"run_id": RUN_ID, "recipe": "drift"}
+
+
+def test_a_refused_analysis_call_is_recorded_too(analysis_gateway):
+    """What an agent TRIED is as much of the trail as what it managed."""
+    from cryosoft.session.agent_feed import read_feed
+
+    analysis_gateway.build(Role.OBSERVER).call_tool(
+        "run_analysis", {"run_id": RUN_ID}
+    )
+
+    records = [r for r in read_feed(analysis_gateway.feed_path) if r["record"] == "tool"]
+
+    assert [r["tool"] for r in records] == ["run_analysis"]
+    assert records[0]["verdict"]["code"] == "BLOCKED_ROLE"
+
+
+def test_the_analysis_tools_refuse_by_name_without_the_analysis_package(
+    analysis_gateway, monkeypatch
+):
+    """An installation without the analysis stage says so, rather than failing oddly."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def refuse(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "cryosoft.analysis" and "discovery" in (fromlist or ()):
+            raise ImportError("no analysis stage here")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.delitem(sys.modules, "cryosoft.analysis.discovery", raising=False)
+    monkeypatch.setattr(builtins, "__import__", refuse)
+
+    answer = analysis_gateway.build().call_tool("list_analysis_recipes")
+
+    assert answer["ok"] is False
+    assert answer["detail"] == {
+        "rule": "missing_collaborator",
+        "collaborator": "analysis",
+    }

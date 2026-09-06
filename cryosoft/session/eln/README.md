@@ -10,9 +10,15 @@ renderers** that turn a run manifest into entry text (`templates.py`), an
 offline-first **outbox** that queues what to publish and retries it forever
 (`outbox.py`), a **publisher** deciding what is queued when and draining the
 queue off the tick (`publisher.py`), user-level settings holding the
-backend URL, the API keys and the assistant's price table (`settings.py`),
-and LLM **drafting** that turns one finished run's facts into a **draft
-entry** a human approves (`drafting.py`).
+backend URL, the API keys, the assistant's price table and the analysis
+stage's switches (`settings.py`), and LLM **drafting** that turns one
+finished run's facts into a **draft entry** a human approves (`drafting.py`).
+
+With the analysis stage switched on the publisher does not queue a finished
+run at all: it asks for an analysis (`analysis_requested`), and what comes
+back is parked as a **Pending entry** on the run record — an **analysed
+entry** when the recipe ran, the facts-only entry when it did not. Approval
+is then the only door to the notebook.
 
 ## Architecture layer
 
@@ -39,6 +45,13 @@ GUI-side drain, never from `core/`.
   the experiment folder was copied to.
 - **A drain tick**: `ElnPublisher.drain_once()`, called by the publisher's own
   QTimer, started from `cryosoft.main` once the application has an event loop.
+- **An analysis report** (`cryosoft.analysis.report.AnalysisReport`, or its
+  `report.json` dict): what one **Analysis recipe** made of one finished run
+  — prose, derived values, figures, tables, warnings, and the two flags
+  saying whether the entry should also carry the run's fact tables and its
+  raw data file. Handed in by `ElnPublisher.export_report()` together with
+  the directory its figures were written to. This package reads a report; it
+  never runs one.
 - **A draft request** (`DraftRequest`): one run's manifest-shaped facts, its
   per-column `summary_stats`, the **Station info** snapshot and the latest
   `StatusSnapshot` at run end — assembled by the gateway's `draft_eln_entry`
@@ -70,9 +83,21 @@ GUI-side drain, never from `core/`.
   `prompt_digest`). Data, returned to whoever asked: shown to a human for
   approval, parked on the run record as `pending_eln_draft`, or handed to
   `ElnPublisher.export_draft()`. Drafting itself publishes nothing.
+- **A parked Pending entry**: `export_report()` and `park_facts_entry()` both
+  end at `ExperimentManager.set_pending_eln_draft()` — the single writer of
+  experiment state — and publish nothing. A parked entry carries its
+  `attachments` (an analysed entry's figures, by absolute path and caption),
+  its `attach_data_file` flag and its `source` (`model` / `analysis` /
+  `facts`), all of which travel into the outbox job when a human approves it.
+- **The written settings file**: `save_eln_settings()` is the one place a key
+  reaches a disk file — written atomically, `0o600` on POSIX, and never
+  logged.
 - **Signals for the GUI**: `publish_state_changed(dict)`
-  (`synced` / `pending` / `offline` / `disabled`, plus a pending count) and
-  `run_published(dict)` (run id, experiment id, the `ElnLink`).
+  (`synced` / `pending` / `offline` / `disabled`, plus a pending count),
+  `run_published(dict)` (run id, experiment id, the `ElnLink`), and
+  `analysis_requested(run_id, manifest, data_path)` — emitted INSTEAD of
+  queuing when the analysis stage is on, for whoever owns the analysis
+  runner.
 
 ## Interface contract
 
@@ -94,6 +119,22 @@ GUI-side drain, never from `core/`.
   says which model wrote the prose and from which prompt. Same journal, same
   `job_id`, same idempotency, same drain — the draft is data, and only the
   text differs.
+- **The analysis stage takes precedence over auto-publish.** When
+  `settings.enabled and settings.analysis.enabled`, an experiment is open and
+  the run has a data file, `on_run_finished()` emits `analysis_requested` and
+  queues NOTHING, whatever `auto_publish` says — because on that path nothing
+  publishes until a human approves the entry. With the analysis stage off,
+  the run takes exactly today's path. Whatever the analysis produced is
+  parked, attended or not: an unattended experiment's analysed entry waits
+  for the human who reads it later rather than publishing an unreviewed
+  result.
+- **An analysed entry names its figures; it never embeds one.**
+  `render_analysed_body()` writes the figure's file name into a captioned
+  list and the file travels as an **Outbox** attachment, so the body stays
+  self-contained under the same rule every other body obeys. Attachments are
+  uploaded after the data file, in order, under the same size caps, with the
+  same link fallback when a file is missing or too large — and the data file
+  itself is attached only when the job says so.
 - **Nothing publishes directly.** Work is rendered in full at enqueue time
   and queued; the drain never re-renders against state that has since moved
   on. `Outbox.drain()` attempts at most one job per call and never raises
@@ -112,6 +153,11 @@ GUI-side drain, never from `core/`.
   leaves the machine. `auto_publish: false` leaves the manual export as the
   only trigger. And a run belonging to no experiment is never published —
   an ad-hoc run has no record for an entry to attach to.
+- **Settings are swapped, never rebuilt around.** `reload_settings()` takes
+  the record the **eLab setup** dialog just saved, resolves the backend
+  adapter afresh (the URL, the key or the backend itself may have changed)
+  and re-arms the drain timer according to `is_configured` — so switching the
+  track off stops the network the moment Save is pressed.
 - **The API keys are never logged.** `ElnSettings` and `AssistantSettings`
   redact theirs in `repr()` and in `to_dict()`; only
   `to_dict(include_secret=True)` (writing the file back, building an auth
@@ -202,9 +248,13 @@ edit.
    `drafting.py`, whose vendor SDK is an optional extra imported lazily and
    whose every failure becomes an `ElnError`. Never add a required dependency
    for it, and never let a key reach a log line, a prompt, or an entry.
-5. **Never** put threading, or a network call outside an adapter method or a
+5. **A new pending-entry source** is a renderer in `templates.py` plus one
+   `ElnPublisher` method that builds a `DraftEntry` with its own `source` and
+   parks it through `manager.set_pending_eln_draft()`. Never a second write
+   path: approval and `export_draft()` stay the only way into the outbox.
+6. **Never** put threading, or a network call outside an adapter method or a
    draft client, into this package, and never call either from `core/`.
-6. New behaviour needs its own tests in `tests/test_eln.py`; conformance
+7. New behaviour needs its own tests in `tests/test_eln.py`; conformance
    coverage is necessary but not sufficient.
 
 ## Files
@@ -213,9 +263,9 @@ edit.
 |------|----------------|----------------|-------------|
 | `adapter.py` | The ELN adapter standard: the abstract contract, its value types, and its one exception. | `ElnAdapter`, `ElnEntryRef`, `ElnTemplate`, `ElnCapabilities`, `ElnError` | `tests/test_conformance.py` |
 | `sim_eln.py` | The in-memory twin of the contract — the workhorse of every ELN test; models offline, transient failure, and refused uploads. | `SimElnAdapter` (`entries`, `uploads`, `links`, `calls`, `offline`) | `tests/test_eln.py` |
-| `settings.py` | User-level backend URL/key/policy and the assistant's model, key, token cap and price table: tolerant load, environment overrides, redaction. | `ElnSettings`, `AssistantSettings`, `load_eln_settings`, `eln_settings_path`, `API_KEY_ENV_VAR`, `ASSISTANT_API_KEY_ENV_VAR`, `SETTINGS_PATH_ENV_VAR`, `DEFAULT_ASSISTANT_MODEL`, `DEFAULT_MODEL_PRICES` | `tests/test_eln.py` |
-| `outbox.py` | The offline-first publish journal: append-only JSONL, idempotent by `job_id`, persisted capped backoff, one job per drain, never raises. | `Outbox` (`enqueue`, `jobs`, `get`, `pending`, `drain`), `OutboxJob`, `DrainResult`, `JOB_*`/`DRAIN_*` constants | `tests/test_eln.py` |
+| `settings.py` | User-level backend URL/key/policy, the assistant's model, key, token cap and price table, and the analysis stage's switches: tolerant load, environment overrides, redaction, and the atomic 0o600 write-back. | `ElnSettings`, `AssistantSettings`, `AnalysisSettings`, `load_eln_settings`, `save_eln_settings`, `eln_settings_path`, `API_KEY_ENV_VAR`, `ASSISTANT_API_KEY_ENV_VAR`, `SETTINGS_PATH_ENV_VAR`, `DEFAULT_ASSISTANT_MODEL`, `DEFAULT_MODEL_PRICES` | `tests/test_eln.py` |
+| `outbox.py` | The offline-first publish journal: append-only JSONL, idempotent by `job_id`, persisted capped backoff, one job per drain, never raises. Attaches the data file (when the job asks) and then every attachment, under the same caps and link fallback. | `Outbox` (`enqueue`, `jobs`, `get`, `pending`, `drain`), `OutboxJob`, `DrainResult`, `JOB_*`/`DRAIN_*` constants | `tests/test_eln.py` |
 | `elabftw.py` | The eLabFTW backend: REST API v2 over `/users/me`, `/experiments_templates`, `/experiments`, `/experiments/{id}`, `/experiments/{id}/uploads`; token auth, verified TLS, hand-rolled multipart, every non-2xx mapped to `ElnError` without the key. | `ElabFtwAdapter`, `ElnHttpTransport`, `UrllibTransport`, `HttpResponse` | `tests/test_eln.py` |
-| `publisher.py` | What is queued when (a finished run, a manual export, or an approved **draft entry**), the GUI-side drain timer, backend discovery, and the hand-off of a confirmed link to the manager. | `ElnPublisher` (`on_run_finished`, `export_run`, `export_draft`, `drain_once`, `start`, `stop`, `pending_count`, `status`; signals `publish_state_changed`, `run_published`), `discover_backends`, `PUBLISH_*` constants | `tests/test_eln.py` |
-| `templates.py` | Run manifest → entry title, self-contained HTML body (published or drafted), and flat metadata; shared row builders so a run reads identically in both bodies. | `render_run_title`, `render_run_body`, `render_draft_body`, `render_prose_section`, `render_stats_section`, `render_run_metadata` | `tests/test_eln.py` |
-| `drafting.py` | The draft prompt standard and the **Draft client** contract: render one run's facts into a deterministic prompt, ask one model, parse tolerantly, and return a **draft entry** carrying its prompt digest and cost line. Publishes nothing. | `DraftRequest`, `DraftEntry`, `DraftClient`, `CompletionResult`, `draft_entry`, `render_draft_prompt`, `prompt_digest`, `parse_completion`, `manifest_from_run`, `cost_usd`, `cost_line`, `COST_FIELDS`, `FakeDraftClient`, `AnthropicDraftClient`, `DRAFT_SYSTEM_PROMPT` | `tests/test_eln.py` |
+| `publisher.py` | What is queued when (a finished run, a manual export, or an approved **Pending entry**), what is sent to the analysis stage instead, what is PARKED for approval (an **analysed entry** or the facts fallback), the GUI-side drain timer, backend discovery, and the hand-off of a confirmed link to the manager. | `ElnPublisher` (`on_run_finished`, `export_run`, `export_draft`, `export_report`, `park_facts_entry`, `reload_settings`, `drain_once`, `start`, `stop`, `pending_count`, `status`; signals `publish_state_changed`, `run_published`, `analysis_requested`), `discover_backends`, `PUBLISH_*` constants | `tests/test_eln.py` |
+| `templates.py` | Run manifest (and, for an analysed entry, an **Analysis report**) → entry title, self-contained HTML body (published, drafted or analysed), and flat metadata; shared row builders so a run reads identically in every body. | `render_run_title`, `render_run_body`, `render_draft_body`, `render_analysed_title`, `render_analysed_body`, `render_prose_section`, `render_stats_section`, `render_run_metadata` | `tests/test_eln.py` |
+| `drafting.py` | The draft prompt standard and the **Draft client** contract: render one run's facts into a deterministic prompt, ask one model, parse tolerantly, and return a **draft entry** carrying its prompt digest and cost line. Also owns `DraftEntry`, the shape of EVERY **Pending entry** (its `source`, `attachments`, `attach_data_file` and `metadata`). Publishes nothing. | `DraftRequest`, `DraftEntry`, `SOURCE_MODEL`, `SOURCE_ANALYSIS`, `SOURCE_FACTS`, `DraftClient`, `CompletionResult`, `draft_entry`, `render_draft_prompt`, `prompt_digest`, `parse_completion`, `manifest_from_run`, `cost_usd`, `cost_line`, `COST_FIELDS`, `FakeDraftClient`, `AnthropicDraftClient`, `DRAFT_SYSTEM_PROMPT` | `tests/test_eln.py` |
